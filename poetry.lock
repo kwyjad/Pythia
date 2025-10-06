@@ -1114,7 +1114,7 @@ trio = ["trio (>=0.22.0,<1.0)"]
 name = "httpx"
 version = "0.28.1"
 description = "The next generation HTTP client."
-optional = false
+optional = true
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
@@ -2957,7 +2957,7 @@ windows-terminal = ["colorama (>=0.4.6)"]
 name = "pytest"
 version = "8.4.1"
 description = "pytest: simple powerful testing with Python"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
@@ -4422,4 +4422,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "901ce8de4bfce088c7fb12609ddd6f467071828dcecc7bdd0b9a505a524207cf"
+content-hash = "662f68e8618f00e6a3f49ad84baf9c6ec5b0cee66734afc21d342a145cbfdd18"
