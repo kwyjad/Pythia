@@ -139,6 +139,25 @@ and a corresponding `snapshots` row. Leave `RESOLVER_DB_URL` unset to continue
 operating in file-only mode; all tooling falls back automatically when the
 variable is absent.
 
+### DB backend tests
+
+Install the DuckDB extra and export DB settings before running the contract
+test locally:
+
+```bash
+pip install -e ".[db]"  # or: pip install .[db]
+export RESOLVER_DB_URL='duckdb:///resolver.duckdb'
+export RESOLVER_API_BACKEND='db'
+pytest -q resolver/tests/test_db_query_contract.py
+```
+
+On Windows PowerShell, replace the `export` commands with:
+
+```powershell
+$env:RESOLVER_DB_URL = 'duckdb:///resolver.duckdb'
+$env:RESOLVER_API_BACKEND = 'db'
+```
+
 What Forecaster Does (Pipeline)
 
 Select question(s)
