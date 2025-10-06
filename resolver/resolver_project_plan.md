@@ -40,6 +40,7 @@ Build a reliable, auditable **database-first** pipeline that ingests humanitaria
   - tools/precedence_engine.py → cutoff, lags, dedupe → exports/resolved\*.
   - review/make_review_queue.py → review/review_queue.csv.
   - **Auto-commit**: daily state + month-end snapshot (Istanbul).
+  - **DuckDB dual-write** (feature-flagged via `RESOLVER_DB_URL`): export/freeze scripts append to `resolver/db/resolver.duckdb`; CLI/API can query with `--backend db`/`backend=db` for parity-tested answers.
 - **Idempotence**: reruns are safe; deterministic IDs; append-only outputs with monthly snapshots.
 - **Human-in-the-loop**: manual override YAML/CSV (review decisions) applied via review/apply_review_overrides.py.
 
@@ -86,6 +87,12 @@ schedule_gate.py
 freeze_snapshot.py
 
 write_repo_state.py
+
+db/
+
+duckdb_io.py
+
+schema.sql
 
 exports/
 
@@ -200,20 +207,26 @@ revision, ingested_at
 - C3 UNHCR API (asylum-applications annual; month-aware IDs) ✅
 - C4 **UNHCR ODP** (monthly arrivals discovery) ✅
 
-**D. Priority Additions (next 2-4 weeks)**
+**D. DuckDB Query Layer (Phase 3–5)**
 
-- D1 OCHA/HDX (Operational datasets; PIN where available).
-- D2 IOM DTM (displacement/flow monitoring monthly).
-- D3 WHO (Public Health Emergency cases, standardized units).
-- D4 FEWS NET (IPC/CH phases; food insecurity proxy).
-- D5 Governance docs & reviewer playbook (override policy) + dashboards.
+- D1 Documentation gating complete (`CODEMAP.md`, `SCHEMAS.md` fleshed out). ✅
+- D2 DuckDB schema + dual-write added to export/freeze tools (feature-flagged via `RESOLVER_DB_URL`). ✅
+- D3 CLI/API toggle between file and DB backends with regression tests (`test_db_parity.py`, `test_db_query_contract.py`, `test_monthly_deltas_primary.py`). ✅
 
-**E. Hardening & Scale (rolling)**
+**E. Priority Additions (next 2-4 weeks)**
 
-- E1 Source-level SLAs & alerting (failed/empty sources).
-- E2 Country coverage QA (gaps report).
-- E3 PIN extraction improvements (NER + rules).
-- E4 Backfills (snapshots by month, replayable).
+- E1 OCHA/HDX (Operational datasets; PIN where available).
+- E2 IOM DTM (displacement/flow monitoring monthly).
+- E3 WHO (Public Health Emergency cases, standardized units).
+- E4 FEWS NET (IPC/CH phases; food insecurity proxy).
+- E5 Governance docs & reviewer playbook (override policy) + dashboards.
+
+**F. Hardening & Scale (rolling)**
+
+- F1 Source-level SLAs & alerting (failed/empty sources).
+- F2 Country coverage QA (gaps report).
+- F3 PIN extraction improvements (NER + rules).
+- F4 Backfills (snapshots by month, replayable).
 
 **10) Acceptance Criteria (per release)**
 

@@ -170,6 +170,270 @@ entities:
         type: string
         required: false
         nullable: true
+  db.facts_raw:
+    kind: database
+    allow_extra_columns: false
+    description: Canonical facts written to DuckDB alongside CSV exports.
+    columns:
+      - name: event_id
+        type: string
+        required: true
+      - name: country_name
+        type: string
+        required: true
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: hazard_label
+        type: string
+        required: true
+      - name: hazard_class
+        type: string
+        required: true
+      - name: metric
+        type: enum
+        enum: [in_need, affected, displaced, cases, fatalities, events, participants]
+        required: true
+      - name: series_semantics
+        type: enum
+        enum: [stock, new]
+        required: false
+      - name: value
+        type: number
+        required: true
+      - name: unit
+        type: enum
+        enum: [persons, persons_cases, events]
+        required: true
+      - name: as_of_date
+        type: date
+        required: true
+      - name: publication_date
+        type: date
+        required: true
+      - name: publisher
+        type: string
+        required: true
+      - name: source_type
+        type: string
+        required: true
+      - name: source_url
+        type: string
+        required: false
+      - name: doc_title
+        type: string
+        required: true
+      - name: definition_text
+        type: string
+        required: true
+      - name: method
+        type: string
+        required: true
+      - name: confidence
+        type: string
+        required: true
+      - name: revision
+        type: integer
+        required: true
+      - name: ingested_at
+        type: date
+        required: true
+      - name: value_new
+        type: number
+        required: false
+      - name: value_stock
+        type: number
+        required: false
+      - name: rebase_flag
+        type: integer
+        required: false
+      - name: first_observation
+        type: integer
+        required: false
+      - name: delta_negative_clamped
+        type: integer
+        required: false
+      - name: created_at
+        type: datetime
+        required: false
+  db.facts_resolved:
+    kind: database
+    allow_extra_columns: false
+    description: Resolved precedence outputs stored in DuckDB for querying.
+    columns:
+      - name: ym
+        type: string
+        required: true
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: hazard_label
+        type: string
+        required: true
+      - name: hazard_class
+        type: string
+        required: true
+      - name: metric
+        type: enum
+        enum: [in_need, affected, displaced, cases, fatalities, events, participants]
+        required: true
+      - name: series_semantics
+        type: enum
+        enum: [stock, new]
+        required: false
+      - name: value
+        type: number
+        required: true
+      - name: unit
+        type: enum
+        enum: [persons, persons_cases, events]
+        required: true
+      - name: as_of_date
+        type: date
+        required: true
+      - name: publication_date
+        type: date
+        required: true
+      - name: publisher
+        type: string
+        required: true
+      - name: source_type
+        type: string
+        required: false
+      - name: source_url
+        type: string
+        required: false
+      - name: doc_title
+        type: string
+        required: false
+      - name: definition_text
+        type: string
+        required: false
+      - name: precedence_tier
+        type: string
+        required: false
+      - name: event_id
+        type: string
+        required: false
+      - name: proxy_for
+        type: string
+        required: false
+      - name: confidence
+        type: string
+        required: false
+      - name: created_at
+        type: datetime
+        required: false
+  db.facts_deltas:
+    kind: database
+    allow_extra_columns: false
+    description: Monthly "new" deltas derived from resolved totals.
+    columns:
+      - name: ym
+        type: string
+        required: true
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: metric
+        type: enum
+        enum: [in_need, affected, displaced, cases, fatalities, events, participants]
+        required: true
+      - name: value_new
+        type: number
+        required: true
+      - name: value_stock
+        type: number
+        required: false
+      - name: series_semantics
+        type: enum
+        enum: [new]
+        required: false
+      - name: rebase_flag
+        type: integer
+        required: false
+      - name: first_observation
+        type: integer
+        required: false
+      - name: delta_negative_clamped
+        type: integer
+        required: false
+      - name: as_of
+        type: date
+        required: true
+      - name: source_name
+        type: string
+        required: true
+      - name: source_url
+        type: string
+        required: false
+      - name: definition_text
+        type: string
+        required: false
+      - name: created_at
+        type: datetime
+        required: false
+  db.snapshots:
+    kind: database
+    allow_extra_columns: false
+    description: Snapshot metadata recorded alongside dual-write operations.
+    columns:
+      - name: ym
+        type: string
+        required: true
+      - name: created_at
+        type: datetime
+        required: true
+      - name: git_sha
+        type: string
+        required: false
+      - name: export_version
+        type: string
+        required: false
+      - name: facts_rows
+        type: integer
+        required: false
+      - name: deltas_rows
+        type: integer
+        required: false
+      - name: meta
+        type: string
+        required: false
+  db.manifests:
+    kind: database
+    allow_extra_columns: false
+    description: Snapshot manifest entries mirroring CSV exports.
+    columns:
+      - name: ym
+        type: string
+        required: true
+      - name: name
+        type: string
+        required: true
+      - name: path
+        type: string
+        required: false
+      - name: rows
+        type: integer
+        required: false
+      - name: checksum
+        type: string
+        required: false
+      - name: payload
+        type: string
+        required: false
+      - name: created_at
+        type: datetime
+        required: false
 
 required:
   - event_id
@@ -212,8 +476,5 @@ optional:
     type: integer
     required: false
   first_observation:
-    type: integer
-    required: false
-  delta_negative_clamped:
     type: integer
     required: false

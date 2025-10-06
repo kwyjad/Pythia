@@ -9,6 +9,7 @@ Endpoints:
   GET /resolve?country=Philippines&hazard=Tropical%20Cyclone&cutoff=2025-09-30
 """
 
+import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -17,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from resolver.cli.resolver_cli import (
     current_ym_utc,
     load_registries,
-    load_resolved_for_month,
+    load_series_for_month,
     resolve_country,
     resolve_hazard,
     select_row,
@@ -25,6 +26,7 @@ from resolver.cli.resolver_cli import (
 )
 
 app = FastAPI(title="Resolver API", version="0.1.0")
+DEFAULT_BACKEND = os.environ.get("RESOLVER_API_BACKEND", "auto")
 
 # Allow localhost by default (tweak as you like)
 app.add_middleware(
@@ -54,6 +56,8 @@ def resolve(
     iso3: Optional[str] = Query(None, description="ISO3 code (alternative to country)"),
     hazard: Optional[str] = Query(None, description="Hazard label (alternative to hazard_code)"),
     hazard_code: Optional[str] = Query(None, description="Hazard code (alternative to hazard)"),
+    series: str = Query("stock", description="Series to return: stock totals or new monthly deltas."),
+    backend: Optional[str] = Query(None, description="Override data backend: files, db, or auto."),
 ) -> dict:
     """Resolve the latest figure for the requested country, hazard, and cutoff."""
     try:
@@ -69,15 +73,25 @@ def resolve(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     current_month = ym == current_ym_utc()
-    df, source_dataset = load_resolved_for_month(ym, current_month)
-    if df is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "No data found for "
-                f"{ym}. Expected snapshots/{ym}/facts.parquet or exports/resolved(_reviewed).csv."
-            ),
-        )
+    backend_choice = (backend or DEFAULT_BACKEND).lower()
+
+    df, source_dataset, series_used = load_series_for_month(
+        ym, current_month, series, backend=backend_choice
+    )
+
+    if df is None or df.empty:
+        if series.lower() == "new":
+            df, source_dataset, series_used = load_series_for_month(
+                ym, current_month, "stock", backend=backend_choice
+            )
+        if df is None or df.empty:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No data found for "
+                    f"{ym}. Expected snapshots/{ym}/facts.parquet, exports data, or DuckDB tables."
+                ),
+            )
 
     row = select_row(df, iso3_code, hz_code, cutoff)
     if not row:
@@ -95,8 +109,14 @@ def resolve(
     except Exception:
         pass
 
-    snapshot_used = source_dataset == "snapshot"
-    source_bucket = "snapshot" if snapshot_used else "exports"
+    if source_dataset.startswith("db_"):
+        source_bucket = "db"
+    elif source_dataset in {"snapshot", "snapshot_deltas"}:
+        source_bucket = "snapshot"
+    elif source_dataset == "monthly_deltas":
+        source_bucket = "state"
+    else:
+        source_bucket = "exports"
 
     return {
         "ok": True,
@@ -122,4 +142,6 @@ def resolve(
         "proxy_for": row_data.get("proxy_for", ""),
         "source": source_bucket,
         "source_dataset": source_dataset,
+        "series_requested": series,
+        "series_returned": row_data.get("series_semantics", series_used),
     }

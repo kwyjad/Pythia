@@ -34,6 +34,11 @@ except ImportError:
     print("Please 'pip install pandas pyarrow pyyaml' to run the exporter.", file=sys.stderr)
     sys.exit(2)
 
+try:  # Optional dependency for DB dual-write
+    from resolver.db import duckdb_io
+except Exception:  # pragma: no cover - allow exporter without duckdb installed
+    duckdb_io = None
+
 try:
     import yaml
 except ImportError:
@@ -161,6 +166,37 @@ def _apply_mapping(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
 
     return out
 
+def _maybe_write_to_db(facts: "pd.DataFrame") -> None:
+    """Write exported facts into DuckDB when feature flag is set."""
+
+    if duckdb_io is None:
+        return
+    db_url = os.environ.get("RESOLVER_DB_URL")
+    if not db_url:
+        return
+    try:
+        conn = duckdb_io.get_db(db_url)
+        duckdb_io.init_schema(conn)
+        frame = facts.copy()
+        if "series_semantics" not in frame.columns:
+            frame["series_semantics"] = "stock"
+        duckdb_io.upsert_dataframe(
+            conn,
+            "facts_raw",
+            frame,
+            keys=[
+                "event_id",
+                "iso3",
+                "hazard_code",
+                "metric",
+                "as_of_date",
+                "publication_date",
+            ],
+        )
+    except Exception as exc:  # pragma: no cover - non fatal for exporter
+        print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
@@ -200,6 +236,8 @@ def main():
         facts.to_parquet(pq_path, index=False)
     except Exception as e:
         print(f"Warning: could not write Parquet ({e}). CSV written.", file=sys.stderr)
+
+    _maybe_write_to_db(facts)
 
     print(f"✅ Exported {len(facts)} rows")
     if pq_path.exists():

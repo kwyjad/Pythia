@@ -24,6 +24,7 @@ Behavior:
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
@@ -249,11 +250,22 @@ def prepare_deltas_frame(df: pd.DataFrame, ym: str) -> pd.DataFrame:
 
 
 def load_series_for_month(
-    ym: str, is_current_month: bool, requested_series: str
+    ym: str,
+    is_current_month: bool,
+    requested_series: str,
+    backend: str = "auto",
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     """Load data for the requested series ("new" or "stock")."""
 
     normalized_series = (requested_series or "stock").strip().lower()
+
+    if backend in {"auto", "db"}:
+        db_df, db_dataset_label, db_series = load_series_from_db(ym, normalized_series)
+        if db_df is not None and not db_df.empty:
+            return db_df, db_dataset_label, db_series
+        if backend == "db":
+            return None, "", normalized_series
+
     if normalized_series == "new":
         deltas_df, dataset_label = load_deltas_for_month(ym, is_current_month)
         if deltas_df is None or deltas_df.empty:
@@ -273,6 +285,61 @@ def load_series_for_month(
                 resolved_df["series_semantics"].fillna("").replace("", "stock")
             )
     return resolved_df, dataset_label, "stock"
+
+
+def load_series_from_db(
+    ym: str, normalized_series: str
+) -> Tuple[Optional[pd.DataFrame], str, str]:
+    db_url = os.environ.get("RESOLVER_DB_URL")
+    if not db_url:
+        return None, "", normalized_series
+    try:
+        from resolver.db import duckdb_io
+    except Exception:  # pragma: no cover - optional dependency missing
+        return None, "", normalized_series
+
+    try:
+        conn = duckdb_io.get_db(db_url)
+        duckdb_io.init_schema(conn)
+        if normalized_series == "new":
+            query = (
+                "SELECT ym, iso3, hazard_code, metric, value_new, value_stock, "
+                "series_semantics, rebase_flag, first_observation, "
+                "delta_negative_clamped, as_of, source_name, source_url, definition_text "
+                "FROM facts_deltas WHERE ym = ?"
+            )
+            df = conn.execute(query, [ym]).fetch_df()
+            if df.empty:
+                return None, "", normalized_series
+            df = df.rename(
+                columns={
+                    "value_new": "value",
+                    "as_of": "as_of_date",
+                    "source_name": "publisher",
+                }
+            )
+            df["series_semantics"] = "new"
+            if "publication_date" not in df.columns:
+                df["publication_date"] = df["as_of_date"]
+            df["unit"] = "persons"
+            df["source_type"] = ""
+            df["doc_title"] = df.get("doc_title", "")
+            df["precedence_tier"] = df.get("precedence_tier", "")
+            return df.fillna(""), "db_facts_deltas", "new"
+
+        query = (
+            "SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric, "
+            "series_semantics, value, unit, as_of_date, publication_date, publisher, "
+            "source_type, source_url, doc_title, definition_text, precedence_tier, "
+            "event_id, proxy_for, confidence FROM facts_resolved WHERE ym = ?"
+        )
+        df = conn.execute(query, [ym]).fetch_df()
+        if df.empty:
+            return None, "", normalized_series
+        df["series_semantics"] = df["series_semantics"].fillna("stock").replace("", "stock")
+        return df.fillna(""), "db_facts_resolved", "stock"
+    except Exception:  # pragma: no cover - fallback to files on errors
+        return None, "", normalized_series
 def select_row(df: pd.DataFrame, iso3: str, hazard_code: str, cutoff_iso: str) -> Optional[dict]:
     """Select the single row that best answers the resolver question."""
     candidate = df[
@@ -328,6 +395,12 @@ def main() -> None:
         help="Return monthly NEW deltas (default) or STOCK totals.",
     )
     parser.add_argument("--json_only", action="store_true", help="Print JSON only (no human summary)")
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "files", "db"],
+        default=os.environ.get("RESOLVER_CLI_BACKEND", "auto"),
+        help="Backend to use for data access: files (default exports), db (DuckDB), or auto (prefer db if available).",
+    )
     args = parser.parse_args()
 
     countries, shocks = load_registries()
@@ -337,13 +410,15 @@ def main() -> None:
     ym = ym_from_cutoff(args.cutoff)
     current_month = ym == current_ym_istanbul()
     series_requested = args.series
-    df, source_dataset, series_used = load_series_for_month(ym, current_month, series_requested)
+    df, source_dataset, series_used = load_series_for_month(
+        ym, current_month, series_requested, backend=args.backend
+    )
 
     def fallback_to_stock(reason: str) -> None:
         nonlocal df, source_dataset, series_used
         print(reason, file=sys.stderr)
         df_stock, stock_dataset, stock_series = load_series_for_month(
-            ym, current_month, "stock"
+            ym, current_month, "stock", backend=args.backend
         )
         df = df_stock
         source_dataset = stock_dataset
@@ -411,7 +486,9 @@ def main() -> None:
         sys.exit(1)
 
     snapshot_used = source_dataset in {"snapshot", "snapshot_deltas"}
-    if source_dataset == "monthly_deltas":
+    if source_dataset.startswith("db_"):
+        source_bucket = "db"
+    elif source_dataset == "monthly_deltas":
         source_bucket = "state"
     elif snapshot_used:
         source_bucket = "snapshot"
