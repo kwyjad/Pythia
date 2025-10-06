@@ -1,4 +1,5 @@
 README (updated)
+[![resolver-ci-fast](https://github.com/oughtinc/Pythia/actions/workflows/resolver-ci-fast.yml/badge.svg?branch=main)](https://github.com/oughtinc/Pythia/actions/workflows/resolver-ci-fast.yml)
 
 What is Forecaster?
 
