@@ -104,15 +104,15 @@ jobs:
       - name: Install deps
         run: poetry install --no-interaction --no-ansi
 
-      - name: Run Spagbot (cached)
+      - name: Run Forecaster (cached)
         run: |
-          poetry run python run_spagbot.py --mode test_questions --limit 3
+          poetry run python run_forecaster.py --mode test_questions --limit 3
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spagbot-run-${{ github.run_id }}
+          name: forecaster-run-${{ github.run_id }}
           path: |
             forecast_logs/**
             forecasts.csv

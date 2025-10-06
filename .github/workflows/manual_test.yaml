@@ -60,7 +60,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL:
 
-      # ---- Spagbot behavior ----
+      # ---- Forecaster behavior ----
       SUBMIT_PREDICTION: "0"  # manual tests: don't submit by default
       TOURNAMENT_ID: fall-aib-2025
       TEST_POST_IDS: "578,14333,22427,38195"
@@ -124,15 +124,15 @@ jobs:
       - name: Install deps
         run: poetry install --no-interaction --no-ansi
 
-      - name: Run Spagbot test set
+      - name: Run Forecaster test set
         run: |
-          poetry run python run_spagbot.py --mode test_questions --limit ${{ inputs.limit }}
+          poetry run python run_forecaster.py --mode test_questions --limit ${{ inputs.limit }}
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spagbot-test-run-${{ github.run_id }}
+          name: forecaster-test-run-${{ github.run_id }}
           path: |
             forecast_logs/**
             forecasts.csv

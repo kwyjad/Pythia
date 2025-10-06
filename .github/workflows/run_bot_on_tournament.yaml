@@ -54,7 +54,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL:
 
-      # ---- Spagbot behavior ----
+      # ---- Forecaster behavior ----
       ENABLE_MARKET_SNAPSHOT: "1"
       MARKET_SNAPSHOT_MAX_MATCHES: "10"
       LLM_MAX_CONCURRENCY: "4"
@@ -138,9 +138,9 @@ jobs:
       - name: Install dependencies
         run: poetry sync --no-interaction --no-ansi
 
-      - name: Run Spagbot (AIB Tournament)
+      - name: Run Forecaster (AIB Tournament)
         run: |
-          poetry run python run_spagbot.py --mode tournament --limit 20 --submit --purpose fall_aib_2025
+          poetry run python run_forecaster.py --mode tournament --limit 20 --submit --purpose fall_aib_2025
 
       - name: Commit & push forecasts (only if changed)
         run: |
@@ -177,7 +177,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spagbot-tournament-run-${{ github.run_id }}
+          name: forecaster-tournament-run-${{ github.run_id }}
           path: |
             forecast_logs/**
             forecasts.csv

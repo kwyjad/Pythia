@@ -1,6 +1,6 @@
 # Dashboard/streamlit_app.py
 # =============================================================================
-# Spagbot Performance Dashboard (resilient + cache-clear)
+# Forecaster Performance Dashboard (resilient + cache-clear)
 # - Robust to missing qid/qtitle (derives from question_url when needed)
 # - Keeps data fresh: parquet vs CSV freshness checks + optional local CSV
 # - Data-source banner (path/URL, modified time, row count)
@@ -46,7 +46,7 @@ PARQUET_PATH = REPO_ROOT / "Dashboard" / "data" / "forecasts.parquet"
 # Raw CSV fallback (GitHub). Override if your repo path differs or is private.
 RAW_CSV_URL = os.getenv(
     "SPAGBOT_RAW_CSV_URL",
-    "https://raw.githubusercontent.com/kwyjad/Spagbot_metac-bot/main/forecast_logs/forecasts.csv",
+    "https://raw.githubusercontent.com/kwyjad/Forecaster_metac-bot/main/forecast_logs/forecasts.csv",
 )
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # only needed if repo is private
 
@@ -315,8 +315,8 @@ def _find_human_logs_for_question(dfq: pd.DataFrame, qid: Optional[int]) -> List
 # -----------------------------------------------------------------------------
 # App
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Spagbot Performance", layout="wide")
-st.title("Spagbot Performance Dashboard")
+st.set_page_config(page_title="Forecaster Performance", layout="wide")
+st.title("Forecaster Performance Dashboard")
 
 # Cache clear
 if st.sidebar.button("Clear cache & reload", type="primary"):
@@ -768,13 +768,13 @@ with tab_runs:
 with tab_downloads:
     st.subheader("Download data")
     st.download_button("Download current view as CSV", data=df.to_csv(index=False).encode("utf-8"),
-                       file_name="spagbot_forecasts_view.csv", mime="text/csv")
+                       file_name="forecaster_forecasts_view.csv", mime="text/csv")
     try:
         import pyarrow as pa  # noqa
         import pyarrow.parquet as pq  # noqa
         buf = io.BytesIO(); df.to_parquet(buf, index=False)
         st.download_button("Download current view as Parquet", data=buf.getvalue(),
-                           file_name="spagbot_forecasts_view.parquet", mime="application/octet-stream")
+                           file_name="forecaster_forecasts_view.parquet", mime="application/octet-stream")
     except Exception:
         st.info("Parquet export unavailable (missing pyarrow).")
 
@@ -795,7 +795,7 @@ with tab_downloads:
                         if p.is_file():
                             zf.write(p, p.relative_to(REPO_ROOT).as_posix())
         st.download_button("Download human logs (logs/ & forecast_logs/) as ZIP",
-                           data=bufzip.getvalue(), file_name="spagbot_human_logs.zip", mime="application/zip")
+                           data=bufzip.getvalue(), file_name="forecaster_human_logs.zip", mime="application/zip")
     else:
         st.info("No files found under logs/ or forecast_logs/ to package.")
 

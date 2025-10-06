@@ -1,14 +1,14 @@
 README (updated)
 
-What is Spagbot?
+What is Forecaster?
 
-Spagbot is an AI forecasting assistant. Its job is to read forecasting questions (like those on Metaculus), gather relevant evidence, and combine the judgments of different models into one final forecast. It is designed to run automatically on GitHub, saving its forecasts and learning from past performance over time.
+Forecaster (formerly Spagbot) is an AI forecasting assistant. Its job is to read forecasting questions (like those on Metaculus), gather relevant evidence, and combine the judgments of different models into one final forecast. It is designed to run automatically on GitHub, saving its forecasts and learning from past performance over time.
 
 How it works (conceptually)
 
 Understand the question
 
-Spagbot reads a forecasting question (binary “yes/no,” numeric, or multiple-choice).
+Forecaster reads a forecasting question (binary “yes/no,” numeric, or multiple-choice).
 
 It builds a tailored prompt to guide models toward giving a probability or range.
 
@@ -24,7 +24,7 @@ Several large language models (like GPT-4o, Claude, Gemini, Grok) are asked the 
 
 Each model returns its best estimate (e.g., “There’s a 35% chance…”).
 
-For strategic, political questions, Spagbot can also run a game-theoretic simulation (GTMC1) that models actors, their interests, and possible bargaining outcomes.
+For strategic, political questions, Forecaster can also run a game-theoretic simulation (GTMC1) that models actors, their interests, and possible bargaining outcomes.
 
 Combine forecasts
 
@@ -34,23 +34,23 @@ This ensures the final probability or distribution is mathematically consistent 
 
 Calibrate and improve
 
-Spagbot logs every forecast in a CSV (configurable via FORECASTS_CSV_PATH; default is forecast_logs/forecasts.csv).
+Forecaster logs every forecast in a CSV (configurable via FORECASTS_CSV_PATH; default is forecast_logs/forecasts.csv).
 
 When questions resolve, it compares its predictions to reality.
 
 A calibration script then adjusts the weights of different models, giving more influence to those that proved more accurate in similar situations.
 
-This creates a closed learning loop so Spagbot improves over time.
+This creates a closed learning loop so Forecaster improves over time.
 
 Autonomous operation
 
-In GitHub, Spagbot runs on a schedule (for test questions, the tournament, and the Metaculus Cup).
+In GitHub, Forecaster runs on a schedule (for test questions, the tournament, and the Metaculus Cup).
 
 It automatically commits its logs and calibration updates back to the repository, so no human intervention is needed.
 
 The big picture
 
-Think of Spagbot as a forecasting orchestra conductor:
+Think of Forecaster as a forecasting orchestra conductor:
 
 The models are the musicians, each with their own instrument (style of reasoning).
 
@@ -75,15 +75,15 @@ export METACULUS_TOKEN=your_token_here
 
 Run a single test question (no submit)
 
-poetry run python run_spagbot.py --mode test_questions --limit 1
+poetry run python run_forecaster.py --mode test_questions --limit 1
 
 Run a single question by post ID (no submit)
 
-poetry run python run_spagbot.py --pid 22427
+poetry run python run_forecaster.py --pid 22427
 
 Submit (be careful!)
 
-poetry run python run_spagbot.py --mode test_questions --limit 1 --submit
+poetry run python run_forecaster.py --mode test_questions --limit 1 --submit
 
 Autonomous runs on GitHub
 
@@ -121,7 +121,7 @@ recommended 25 MB / 150 MB thresholds and to fail if the tracked repo contents
 grow beyond ~2 GB. Temporary scratch files (`resolver/tmp/`,
 `resolver/exports/*_working.*`, etc.) stay out of Git history via `.gitignore`.
 
-What Spagbot Does (Pipeline)
+What Forecaster Does (Pipeline)
 
 Select question(s)
 Test set, single PID, tournament, or Metaculus Cup.
@@ -177,8 +177,8 @@ data/calibration_advice.txt (human-readable notes)
 These outputs are committed, so the loop closes autonomously.
 
 Repository Layout (key files)
-spagbot/
-run_spagbot.py # Thin wrapper: calls cli.main()
+forecaster/
+run_forecaster.py # Thin wrapper: calls cli.main()
 cli.py # Orchestrates runs, submission, and final log commit
 research.py # AskNews/Serper search + summarization
 prompts.py # Prompt builders per question type
@@ -256,10 +256,10 @@ Tip: Put non-secret defaults in .env.example and store secrets in GitHub → Set
 Running Modes
 
 Test set (no submit by default):
-poetry run python run_spagbot.py --mode test_questions --limit 4
+poetry run python run_forecaster.py --mode test_questions --limit 4
 
 Single question by PID:
-poetry run python run_spagbot.py --pid 22427
+poetry run python run_forecaster.py --pid 22427
 
 Tournament / Cup (CI workflows call these internally):
 
@@ -298,7 +298,7 @@ calibration_weights.json
 
 data/calibration_advice.txt (friendly notes)
 
-Use: At the start of a run, Spagbot loads calibration_weights.json to weight ensemble members.
+Use: At the start of a run, Forecaster loads calibration_weights.json to weight ensemble members.
 
 Important: Ensure the data/ folder exists in the repo so calibration_advice.txt can be written and committed.
 

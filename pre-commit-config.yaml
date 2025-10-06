@@ -10,4 +10,4 @@ repos:
     stages: [commit]
     # Only run when relevant code/config changes are staged
     files: |
-      ^(spagbot/|resolver/|tools/|schemas/|config/|data/|scripts/|\.github/|pyproject\.toml|poetry\.lock|requirements\.txt|package\.json|tsconfig\.json)
+      ^(forecaster/|resolver/|tools/|schemas/|config/|data/|scripts/|\.github/|pyproject\.toml|poetry\.lock|requirements\.txt|package\.json|tsconfig\.json)
