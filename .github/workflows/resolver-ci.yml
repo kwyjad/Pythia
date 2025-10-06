@@ -99,15 +99,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-db-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-pip-db-${{ hashFiles('resolver/requirements.txt', 'resolver/requirements-dev.txt', 'tools/offline_wheels/constraints-db.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-db-
 
-      - name: Install (project + db extras)
+      - name: Install resolver dependencies (db backend)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[db]" || python -m pip install duckdb
-          python -m pip install pytest
+          python -m pip install -r resolver/requirements.txt
+          python -m pip install -r resolver/requirements-dev.txt
+          python -m pip install "duckdb>=0.10,<1.0"
 
       - name: Show environment
         run: |
