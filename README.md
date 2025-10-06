@@ -141,21 +141,62 @@ variable is absent.
 
 ### DB backend tests
 
-Install the DuckDB extra and export DB settings before running the contract
-test locally:
+You can exercise the DuckDB-backed contract test either completely offline or
+through a corporate proxy.
+
+#### Offline workflow (recommended for blocked networks)
 
 ```bash
-pip install -e ".[db]"  # or: pip install .[db]
+# One-time on a machine with internet access (skip if wheels already tracked)
+python scripts/download_db_wheels.py
+git add tools/offline_wheels/*.whl
+git commit -m "chore: refresh offline duckdb wheels"
+
+# On the offline/proxied machine
+scripts/install_db_extra_offline.sh
 export RESOLVER_DB_URL='duckdb:///resolver.duckdb'
 export RESOLVER_API_BACKEND='db'
 pytest -q resolver/tests/test_db_query_contract.py
 ```
 
-On Windows PowerShell, replace the `export` commands with:
+On Windows PowerShell use the `.ps1` installer and `set`-style environment
+variables:
 
 ```powershell
+# Refresh wheels on a machine with internet (skip if wheels already tracked)
+python scripts/download_db_wheels.py
+git add tools/offline_wheels/*.whl
+git commit -m "chore: refresh offline duckdb wheels"
+
+# Install and run tests offline
+scripts/install_db_extra_offline.ps1
 $env:RESOLVER_DB_URL = 'duckdb:///resolver.duckdb'
 $env:RESOLVER_API_BACKEND = 'db'
+pytest -q resolver/tests/test_db_query_contract.py
+```
+
+#### Proxy-based install (if allowed)
+
+Configure proxy variables before calling pip:
+
+```bash
+export HTTPS_PROXY="http://user:pass@proxy.host:port"
+export HTTP_PROXY="http://user:pass@proxy.host:port"
+python -m pip install duckdb pytest
+```
+
+```powershell
+$env:HTTPS_PROXY = 'http://user:pass@proxy.host:port'
+$env:HTTP_PROXY = 'http://user:pass@proxy.host:port'
+python -m pip install duckdb pytest
+```
+
+You can also persist the proxy settings via pip configuration files, e.g.
+`~/.pip/pip.conf` on Unix-like systems or `%APPDATA%\pip\pip.ini` on Windows:
+
+```
+[global]
+proxy = http://user:pass@proxy.host:port
 ```
 
 What Forecaster Does (Pipeline)

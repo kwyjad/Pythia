@@ -122,7 +122,7 @@ Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (
 
 ## Testing & CI
 - Local smoke tests: `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py` (stubbed ingestion), `pytest -q resolver/tests/test_resolved_and_review.py` (export pipeline), and connector-specific suites under `resolver/tests/ingestion/`.
-- DB backend contract: install the DuckDB extra (`pip install -e ".[db]"` or `poetry install -E db`), export `RESOLVER_DB_URL='duckdb:///resolver.duckdb'` and `RESOLVER_API_BACKEND=db`, then run `pytest -q resolver/tests/test_db_query_contract.py` to ensure identical responses in both modes.
+- DB backend contract: either install via proxy (`python -m pip install duckdb pytest` with `HTTP[S]_PROXY` set) or, for offline setups, refresh the vendored wheels (`python scripts/download_db_wheels.py` on an internet-connected machine, commit the `tools/offline_wheels/*.whl` files) and run `scripts/install_db_extra_offline.(sh|ps1)` before exporting `RESOLVER_DB_URL='duckdb:///resolver.duckdb'` and `RESOLVER_API_BACKEND=db`. Then execute `pytest -q resolver/tests/test_db_query_contract.py` to confirm parity.
 - Schema/documentation guardrails: `pytest -q resolver/tests/test_generate_schemas_md.py` ensures the Markdown generator stays deterministic.
 - Continuous integration: `.github/workflows/resolver-ci.yml` now includes a dedicated `tests (db backend)` job that installs the DuckDB extra and runs the full suite alongside the existing file-mode smoke tests. Nightly workflows mirror this via `.github/workflows/resolver-ci-nightly.yml`.
 
