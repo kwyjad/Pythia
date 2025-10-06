@@ -1,33 +1,24 @@
 {
-  "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye",
+  "name": "Resolver Dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "customizations": {
-    "codespaces": {
-      "openFiles": [
-        "README.md",
-        "Dashboard/streamlit_app.py"
-      ]
-    },
     "vscode": {
-      "settings": {},
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      },
       "extensions": [
         "ms-python.python",
         "ms-python.vscode-pylance"
       ]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
-  "postAttachCommand": {
-    "server": "streamlit run Dashboard/streamlit_app.py --server.enableCORS false --server.enableXsrfProtection false"
+  "remoteEnv": {
+    "RESOLVER_API_BACKEND": "db",
+    "RESOLVER_DB_URL": "duckdb:///workspaces/resolver.dev.duckdb",
+    "PY_BIN": "/usr/local/bin/python",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1"
   },
-  "portsAttributes": {
-    "8501": {
-      "label": "Application",
-      "onAutoForward": "openPreview"
-    }
-  },
-  "forwardPorts": [
-    8501
-  ]
+  "postCreateCommand": "/bin/bash -lc './.devcontainer/postCreate.sh'"
 }

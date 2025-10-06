@@ -224,20 +224,28 @@ All rows in `deltas.csv` are monthly "new" values with provenance. Stock series 
 
 ## DuckDB query layer
 
-The resolver CLI and API can read from either the file-backed exports or the
-DuckDB database. Set `RESOLVER_DB_URL` (or pass `--backend db`) to force database
-reads; leave unset to stay on the historical file workflow.
+The resolver CLI and API read from the historical file-backed exports by
+default. Opt into the DuckDB database by pointing at the database URL and
+selecting the backend explicitly.
 
 ```bash
-# CLI (auto-detect DB when RESOLVER_DB_URL is set)
+# CLI (default files; use --backend db or RESOLVER_CLI_BACKEND=db)
 python resolver/cli/resolver_cli.py \
   --iso3 PHL --hazard_code TC --cutoff 2024-02-29 --series new --backend db --json_only
 
-# API (uvicorn example)
+# API (uvicorn example; override default with RESOLVER_API_BACKEND=db)
 RESOLVER_DB_URL=duckdb:///$(pwd)/resolver/db/resolver.duckdb \
+  RESOLVER_API_BACKEND=db \
   uvicorn resolver.api.app:app --reload
 # GET /resolve?iso3=PHL&hazard_code=TC&cutoff=2024-02-29&series=new&backend=db
 ```
+
+Environment toggles:
+
+- `RESOLVER_CLI_BACKEND`: choose `files`, `db`, or `auto` (prefer DB when
+  available). Defaults to `files` for backwards compatibility.
+- `RESOLVER_API_BACKEND`: same options for the API default backend; the query
+  parameter `backend=` always wins when provided.
 
 When `RESOLVER_DB_URL` is set, exports and freezer scripts remain backwards
 compatible: files continue to be written for downstream consumers while the
