@@ -45,6 +45,19 @@ STATE = ROOT / "state"
 COUNTRIES_CSV = DATA / "countries.csv"
 SHOCKS_CSV = DATA / "shocks.csv"
 
+VALID_BACKENDS = {"files", "db", "auto"}
+
+
+def normalize_backend(value: Optional[str], *, default: str = "files") -> str:
+    """Normalise a backend string, defaulting to ``default`` when invalid."""
+
+    if value is None:
+        return default
+    backend = value.strip().lower()
+    if backend not in VALID_BACKENDS:
+        return default
+    return backend
+
 
 def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load registries used for lookup and add normalized helper columns."""
@@ -253,17 +266,18 @@ def load_series_for_month(
     ym: str,
     is_current_month: bool,
     requested_series: str,
-    backend: str = "auto",
+    backend: str = "files",
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     """Load data for the requested series ("new" or "stock")."""
 
     normalized_series = (requested_series or "stock").strip().lower()
+    backend_choice = normalize_backend(backend, default="files")
 
-    if backend in {"auto", "db"}:
+    if backend_choice in {"auto", "db"}:
         db_df, db_dataset_label, db_series = load_series_from_db(ym, normalized_series)
         if db_df is not None and not db_df.empty:
             return db_df, db_dataset_label, db_series
-        if backend == "db":
+        if backend_choice == "db":
             return None, "", normalized_series
 
     if normalized_series == "new":
@@ -311,21 +325,10 @@ def load_series_from_db(
             df = conn.execute(query, [ym]).fetch_df()
             if df.empty:
                 return None, "", normalized_series
-            df = df.rename(
-                columns={
-                    "value_new": "value",
-                    "as_of": "as_of_date",
-                    "source_name": "publisher",
-                }
-            )
-            df["series_semantics"] = "new"
-            if "publication_date" not in df.columns:
-                df["publication_date"] = df["as_of_date"]
-            df["unit"] = "persons"
-            df["source_type"] = ""
-            df["doc_title"] = df.get("doc_title", "")
-            df["precedence_tier"] = df.get("precedence_tier", "")
-            return df.fillna(""), "db_facts_deltas", "new"
+            prepared = prepare_deltas_frame(df, ym)
+            if prepared.empty:
+                return None, "", normalized_series
+            return prepared, "db_facts_deltas", "new"
 
         query = (
             "SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric, "
@@ -336,10 +339,41 @@ def load_series_from_db(
         df = conn.execute(query, [ym]).fetch_df()
         if df.empty:
             return None, "", normalized_series
-        df["series_semantics"] = df["series_semantics"].fillna("stock").replace("", "stock")
+        df = df.copy()
+        if "ym" not in df.columns:
+            df["ym"] = ym
+        else:
+            df["ym"] = df["ym"].fillna("").replace("", ym)
+        df["series_semantics"] = (
+            df.get("series_semantics", "stock")
+            .astype(str)
+            .str.strip()
+            .replace("", "stock")
+        )
+        defaults = {
+            "unit": "persons",
+            "as_of_date": "",
+            "publication_date": "",
+            "publisher": "",
+            "source_type": "",
+            "source_url": "",
+            "doc_title": "",
+            "definition_text": "",
+            "precedence_tier": "",
+            "event_id": "",
+            "proxy_for": "",
+            "confidence": "",
+        }
+        for column, default in defaults.items():
+            if column not in df.columns:
+                df[column] = default
+            else:
+                df[column] = df[column].fillna(default)
         return df.fillna(""), "db_facts_resolved", "stock"
     except Exception:  # pragma: no cover - fallback to files on errors
         return None, "", normalized_series
+
+
 def select_row(df: pd.DataFrame, iso3: str, hazard_code: str, cutoff_iso: str) -> Optional[dict]:
     """Select the single row that best answers the resolver question."""
     candidate = df[
@@ -395,11 +429,17 @@ def main() -> None:
         help="Return monthly NEW deltas (default) or STOCK totals.",
     )
     parser.add_argument("--json_only", action="store_true", help="Print JSON only (no human summary)")
+    default_backend = normalize_backend(
+        os.environ.get("RESOLVER_CLI_BACKEND"), default="files"
+    )
     parser.add_argument(
         "--backend",
-        choices=["auto", "files", "db"],
-        default=os.environ.get("RESOLVER_CLI_BACKEND", "auto"),
-        help="Backend to use for data access: files (default exports), db (DuckDB), or auto (prefer db if available).",
+        choices=["files", "db", "auto"],
+        default=default_backend,
+        help=(
+            "Backend to use for data access: files (snapshots/exports), db (DuckDB), or auto "
+            "(prefer db when available). Default is files; override with RESOLVER_CLI_BACKEND."
+        ),
     )
     args = parser.parse_args()
 
