@@ -106,3 +106,15 @@ resolver/exports/*_working.parquet
 resolver/exports/cache_*/
 resolver/tmp/
 context/
+
+# === Pythia run artifacts ===
+.env
+
+# Resolver pipeline outputs
+resolver/logs/
+resolver/staging/
+resolver/exports/
+
+# (If present in repo)
+forecast_logs/
+gtmc_logs/
