@@ -32,8 +32,21 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
 4. **Resolve precedence and freeze a snapshot:**
    ```bash
    python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff YYYY-MM-30
-   python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
+   python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --resolved resolver/exports/resolved.csv --month YYYY-MM
    ```
+
+5. **(Optional) Enable DuckDB dual-write + query layer:**
+   ```bash
+   export RESOLVER_DB_URL="duckdb:///$(pwd)/resolver/db/resolver.duckdb"
+   python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
+   python resolver/tools/freeze_snapshot.py \
+     --facts resolver/exports/facts.csv \
+     --resolved resolver/exports/resolved.csv \
+     --deltas resolver/exports/deltas.csv \
+     --month YYYY-MM
+   ```
+   The env var acts as the feature flag. When set, exports dual-write into
+   `resolver/db/resolver.duckdb` while continuing to produce CSV/Parquet files.
 
 Refer to the [operations run book](docs/operations.md) for detailed command variants (including deltas and review tooling).
 
@@ -83,7 +96,7 @@ Create a monthly snapshot (validated, parquet + manifest):
 
 ```bash
 pip install pandas pyarrow pyyaml
-python resolver/tools/freeze_snapshot.py --facts resolver/samples/facts_sample.csv --month 2025-09
+python resolver/tools/freeze_snapshot.py --facts resolver/samples/facts_sample.csv --resolved resolver/exports/resolved.csv --month 2025-09
 ```
 
 PR checklist addition: ✅ If this PR changes facts or resolver logic, ensure a snapshot plan is documented and (when appropriate) a new snapshot was produced with the freezer.
@@ -108,7 +121,11 @@ python resolver/tools/make_deltas.py \
   --out resolver/exports/deltas.csv
 
 # 5) Freeze a monthly snapshot for grading (facts + deltas)
-python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month 2025-09
+python resolver/tools/freeze_snapshot.py \
+  --facts resolver/exports/facts.csv \
+  --resolved resolver/exports/resolved.csv \
+  --deltas resolver/exports/deltas.csv \
+  --month 2025-09
 
 
 If you see validation errors, fix the staging inputs or tweak resolver/tools/export_config.yml.
@@ -140,16 +157,22 @@ python resolver/tools/make_deltas.py \
   --out resolver/exports/deltas.csv
 
 # 6) Freeze a monthly snapshot (facts + deltas)
-python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
+python resolver/tools/freeze_snapshot.py \
+  --facts resolver/exports/facts.csv \
+  --resolved resolver/exports/resolved.csv \
+  --deltas resolver/exports/deltas.csv \
+  --month YYYY-MM
 ```
 
 This will create:
 
 resolver/staging/*.csv (one per source)
 
-resolver/exports/facts.csv (+ optional Parquet)
+resolver/exports/{facts.csv,resolved.csv,deltas.csv}
 
-resolver/snapshots/YYYY-MM/{facts.parquet,manifest.json}
+resolver/snapshots/YYYY-MM/{facts.parquet,manifest.json,deltas.csv}
+
+resolver/db/resolver.duckdb (if `RESOLVER_DB_URL` is set)
 
 
 ## Remote-first state layout
@@ -198,6 +221,28 @@ python resolver/tools/make_deltas.py \
 ```
 
 All rows in `deltas.csv` are monthly "new" values with provenance. Stock series are differenced month over month; detected rebases set `rebase_flag=1` and clamp deltas to zero. Minor negative blips are clamped with `delta_negative_clamped=1`.
+
+## DuckDB query layer
+
+The resolver CLI and API can read from either the file-backed exports or the
+DuckDB database. Set `RESOLVER_DB_URL` (or pass `--backend db`) to force database
+reads; leave unset to stay on the historical file workflow.
+
+```bash
+# CLI (auto-detect DB when RESOLVER_DB_URL is set)
+python resolver/cli/resolver_cli.py \
+  --iso3 PHL --hazard_code TC --cutoff 2024-02-29 --series new --backend db --json_only
+
+# API (uvicorn example)
+RESOLVER_DB_URL=duckdb:///$(pwd)/resolver/db/resolver.duckdb \
+  uvicorn resolver.api.app:app --reload
+# GET /resolve?iso3=PHL&hazard_code=TC&cutoff=2024-02-29&series=new&backend=db
+```
+
+When `RESOLVER_DB_URL` is set, exports and freezer scripts remain backwards
+compatible: files continue to be written for downstream consumers while the
+database maintains parity through regression tests (`test_db_parity.py`,
+`test_db_query_contract.py`, `test_monthly_deltas_primary.py`).
 
 `resolved.csv` now includes a normalized `ym` column derived from the figure's `as_of_date` in the Europe/Istanbul timezone. The precedence engine enforces the configured publication lag when evaluating rows for a cutoff, ensuring deltas align to the month of the figure rather than the publication date.
 

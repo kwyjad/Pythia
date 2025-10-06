@@ -179,6 +179,8 @@ def normalise_columns(payload: Dict[str, Any], context: Dict[str, Any]) -> List[
     for col_name, values in enums.items() if isinstance(enums, dict) else []:
         if not col_name:
             continue
+        if str(col_name) not in columns_map:
+            continue
         col = get_or_create(str(col_name))
         if not col.get("enum"):
             col["enum"] = ensure_list(values)

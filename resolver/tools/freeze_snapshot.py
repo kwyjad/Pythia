@@ -27,6 +27,11 @@ except ImportError:
     print("Please 'pip install pandas pyarrow' to run the freezer.", file=sys.stderr)
     sys.exit(2)
 
+try:
+    from resolver.db import duckdb_io
+except Exception:  # pragma: no cover - optional dependency for db dual-write
+    duckdb_io = None
+
 ROOT = Path(__file__).resolve().parents[1]      # .../resolver
 TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
@@ -69,6 +74,10 @@ def main():
         "--deltas",
         help="Optional path to deltas.csv to include in the snapshot (defaults to sibling of --facts)",
     )
+    ap.add_argument(
+        "--resolved",
+        help="Optional path to resolved.csv for DuckDB dual write (defaults to sibling of --facts)",
+    )
     args = ap.parse_args()
 
     facts_path = Path(args.facts)
@@ -105,6 +114,15 @@ def main():
         default_deltas = facts_path.with_name("deltas.csv")
         deltas_path = default_deltas if default_deltas.exists() else None
 
+    if args.resolved:
+        resolved_path = Path(args.resolved)
+        if not resolved_path.exists():
+            print(f"Resolved file not found: {resolved_path}", file=sys.stderr)
+            sys.exit(2)
+    else:
+        default_resolved = facts_path.with_name("resolved.csv")
+        resolved_path = default_resolved if default_resolved.exists() else None
+
     deltas_out = out_dir / "deltas.csv" if deltas_path else None
 
     existing_targets = [p for p in [facts_out, manifest_out, deltas_out] if p and p.exists()]
@@ -130,8 +148,22 @@ def main():
     with open(manifest_out, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+    deltas_df = None
     if deltas_path:
         shutil.copy2(deltas_path, deltas_out)
+        deltas_df = pd.read_csv(deltas_path)
+
+    resolved_df = pd.read_csv(resolved_path) if resolved_path else None
+
+    _maybe_write_db(
+        ym=ym,
+        facts_df=df,
+        resolved_df=resolved_df,
+        deltas_df=deltas_df,
+        manifest=manifest,
+        facts_out=facts_out,
+        deltas_out=deltas_out,
+    )
 
     print(f"✅ Snapshot written:\n - {facts_out}\n - {manifest_out}")
     if deltas_out:
@@ -139,3 +171,54 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def _maybe_write_db(
+    *,
+    ym: str,
+    facts_df: "pd.DataFrame",
+    resolved_df: "pd.DataFrame | None",
+    deltas_df: "pd.DataFrame | None",
+    manifest: dict,
+    facts_out: Path,
+    deltas_out: Path | None,
+) -> None:
+    if duckdb_io is None:
+        return
+    db_url = os.environ.get("RESOLVER_DB_URL")
+    if not db_url:
+        return
+    try:
+        conn = duckdb_io.get_db(db_url)
+        duckdb_io.init_schema(conn)
+        manifests = [
+            {"name": "facts.parquet", "path": str(facts_out), "rows": len(facts_df)},
+        ]
+        if deltas_out and deltas_df is not None:
+            manifests.append(
+                {"name": "deltas.csv", "path": str(deltas_out), "rows": len(deltas_df)}
+            )
+        # facts_df is the raw export; store as facts_resolved only if a resolved file exists.
+        duckdb_io.write_snapshot(
+            conn,
+            ym=ym,
+            facts_resolved=resolved_df,
+            facts_deltas=deltas_df,
+            manifests=manifests,
+            meta=manifest,
+        )
+        duckdb_io.upsert_dataframe(
+            conn,
+            "facts_raw",
+            facts_df,
+            keys=[
+                "event_id",
+                "iso3",
+                "hazard_code",
+                "metric",
+                "as_of_date",
+                "publication_date",
+            ],
+        )
+    except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
+        print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)

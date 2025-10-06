@@ -27,6 +27,7 @@ flowchart LR
 - [`resolver/cli`](resolver/cli): Command-line interface that answers a single forecast resolution query by combining registries and exported datasets. [`resolver_cli.py`](resolver/cli/resolver_cli.py) encapsulates cutoff selection rules and handles deltas vs. stock series.
 - [`resolver/api`](resolver/api): FastAPI wrapper exposing `/health` and `/resolve` endpoints via [`app.py`](resolver/api/app.py). Designed to share the same loaders as the CLI.
 - [`resolver/tests`](resolver/tests): Pytest suites covering connectors, schema validation, precedence logic, deltas, and documentation generators such as [`test_generate_schemas_md.py`](resolver/tests/test_generate_schemas_md.py).
+- [`resolver/db`](resolver/db): DuckDB schema + helpers. [`duckdb_io.py`](resolver/db/duckdb_io.py) initialises the schema, exposes `get_db()`, and writes `facts_raw`, `facts_resolved`, `facts_deltas`, `snapshots`, and `manifests` tables.
 - [`resolver/docs`](resolver/docs): Extended documentation (pipeline overview, policy, data dictionary, troubleshooting) that complements this codemap for deep dives.
 
 ## Entrypoints & Commands
@@ -38,11 +39,11 @@ flowchart LR
 | `python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv` | Enforce schema, registry, and enum rules before precedence. | Requires registries in `resolver/data/` and schema definition `resolver/tools/schema.yml`. |
 | `python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff 2025-09-30` | Apply precedence tiers to produce `resolved.csv/jsonl` plus diagnostics. | Configuration in `resolver/tools/precedence_config.yml`; uses Istanbul timezone lag logic. |
 | `python resolver/tools/make_deltas.py --resolved resolver/exports/resolved.csv --out resolver/exports/deltas.csv --lookback-months 24` | Compute monthly "new" deltas with rebasing detection. | Reads resolved exports and writes `deltas.csv` with provenance columns. |
-| `python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month 2025-09` | Freeze immutable monthly bundles. | Writes `resolver/snapshots/<YYYY-MM>/facts.parquet` and manifest metadata. |
+| `python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --resolved resolver/exports/resolved.csv --deltas resolver/exports/deltas.csv --month 2025-09` | Freeze immutable monthly bundles. | Writes `resolver/snapshots/<YYYY-MM>/` artifacts and, with `RESOLVER_DB_URL`, upserts DuckDB tables. |
 | `python resolver/tools/write_repo_state.py --mode daily --id 2025-09-30` | Copy exports/review outputs into `resolver/state/daily/...` for archival. | `--retain-days` controls pruning; stages deletions via Git. |
 | `python resolver/tools/check_sizes.py` | Warn/fail when exports or snapshots exceed configured size limits. | Thresholds via `RESOLVER_LIMIT_PARQUET_MB`, `RESOLVER_LIMIT_CSV_MB`, `RESOLVER_LIMIT_REPO_MB`. |
 | `python resolver/tools/generate_schemas_md.py --in resolver/tools/schema.yml --out SCHEMAS.md --sort` | Regenerate schema reference documentation. | Requires `pyyaml`; fails if schema definitions are missing. |
-| `python resolver/cli/resolver_cli.py --country "Philippines" --hazard "Tropical Cyclone" --cutoff 2025-09-30` | Query the latest resolved fact (defaults to monthly "new" series). | Reads exports, snapshots, and registries from `resolver/data/`. Optional `--series stock` for totals. |
+| `python resolver/cli/resolver_cli.py --country "Philippines" --hazard "Tropical Cyclone" --cutoff 2025-09-30 --backend db` | Query the latest resolved fact (defaults to monthly "new" series). | Uses DuckDB when `RESOLVER_DB_URL`/`--backend db` is set; otherwise falls back to snapshots/exports. Optional `--series stock` for totals. |
 | `uvicorn resolver.api.app:app --reload` | Serve the Resolver API locally. | Same data dependencies as the CLI; respects `RESOLVER_DEBUG` for verbose logs. |
 | `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py` | Offline smoke test covering stubbed connectors and schema checks. | Install dependencies from `resolver/requirements*.txt`; other targeted tests live under `resolver/tests/`. |
 
@@ -65,7 +66,7 @@ Schema authority lives in [`resolver/tools/schema.yml`](resolver/tools/schema.ym
 - **Reference & Review:** `resolver/reference/` and `resolver/review/` keep lightweight CSVs and overrides that *are* tracked to preserve auditability.
 
 ## DB Integration Toggle
-The resolver is file-first today. When future dual-write support lands, the pipeline will check `RESOLVER_DB_URL`: if set, exporters and snapshots should also write to a DuckDB/warehouse connection while the CLI/API read from that database. When unset, everything runs against the file-backed exports documented above. Plan config and connection pooling with that toggle in mind; do not embed credentials in source files.
+Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_raw`, `freeze_snapshot.py` writes `facts_resolved`, `facts_deltas`, `snapshots`, and `manifests`, and the CLI/API prefer the database (`--backend db` / `backend=db`). Leave the variable unset to remain file-backed only.
 
 ## Runbooks
 ### First-time setup
@@ -103,7 +104,7 @@ The resolver is file-first today. When future dual-write support lands, the pipe
    python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
    python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff <YYYY-MM-DD>
    python resolver/tools/make_deltas.py --resolved resolver/exports/resolved.csv --out resolver/exports/deltas.csv
-   python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month <YYYY-MM>
+    python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --resolved resolver/exports/resolved.csv --deltas resolver/exports/deltas.csv --month <YYYY-MM>
    ```
 4. Prepare review queue if curators are on call: `python resolver/review/make_review_queue.py`.
 5. Archive outputs and enforce hygiene:

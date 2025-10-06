@@ -114,6 +114,8 @@ context/
 resolver/logs/
 resolver/staging/
 resolver/exports/
+resolver/db/*.duckdb
+resolver/db/*.wal
 
 # (If present in repo)
 forecast_logs/

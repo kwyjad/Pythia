@@ -1,10 +1,16 @@
 from __future__ import annotations
-import math, datetime as dt
+import math, datetime as dt, os
 import pandas as pd
+import pytest
 from resolver.tests.test_utils import (
     load_schema, load_countries, load_shocks, read_csv,
     discover_export_files, today_iso, require_columns
 )
+
+try:
+    from resolver.db import duckdb_io
+except Exception:  # pragma: no cover - optional duckdb dependency
+    duckdb_io = None
 
 def _is_iso_date(s: str) -> bool:
     try:
@@ -100,3 +106,33 @@ def test_remote_first_state_exports_are_valid_if_present():
         assert df["hazard_code"].isin(sset).all(), f"{p}: hazard_code not in registry"
         assert df["metric"].isin(enum_metric).all(), f"{p}: metric enum"
         assert df["unit"].isin(enum_unit).all(), f"{p}: unit enum"
+
+
+def test_duckdb_facts_raw_contract_if_present():
+    if duckdb_io is None:
+        return
+    db_url = os.environ.get("RESOLVER_DB_URL")
+    if not db_url:
+        return
+    try:
+        conn = duckdb_io.get_db(db_url)
+        duckdb_io.init_schema(conn)
+        df = conn.execute(
+            "SELECT event_id, iso3, hazard_code, metric, value, unit, as_of_date, publication_date FROM facts_raw"
+        ).fetch_df()
+    except Exception:
+        pytest.skip("DuckDB not initialised for facts_raw contract check")
+        return
+
+    if df.empty:
+        pytest.skip("facts_raw empty; nothing to validate")
+
+    schema = load_schema()
+    required = set(schema["required"])
+    missing = required - set(df.columns)
+    assert not missing, f"DuckDB facts_raw missing required columns {missing}"
+
+    countries = load_countries()
+    shocks = load_shocks()
+    assert df["iso3"].isin(set(countries["iso3"])).all()
+    assert df["hazard_code"].isin(set(shocks["hazard_code"])).all()
