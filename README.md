@@ -202,9 +202,15 @@ proxy = http://user:pass@proxy.host:port
 #### Run DB parity test in a Dev Container
 
 - Open the repository in VS Code and choose **Reopen in Container** (requires the Dev Containers extension).
-- The container build runs `make dev-setup`, which installs DuckDB using the vendored wheels in [`tools/offline_wheels/`](tools/offline_wheels/README.md) when offline and falls back to an online install if the cache is missing.
+- During container creation, `.devcontainer/postCreate.sh` runs and installs DuckDB with the same interpreter that VS Code uses. It tries the vendored wheels in [`tools/offline_wheels/`](tools/offline_wheels/README.md) first and falls back to the online extras if needed. The setup logs should print `duckdb installed: <version>`.
 - Once the container is ready, run `make test-db` to execute the parity test.
-- Expected outcome: the test runs (not skipped). If it still skips, run `python -c "import duckdb"` inside the container to confirm the installation.
+- Expected outcome: the test runs (not skipped). If it still skips, open a terminal and run:
+  ```
+  make which-python
+  python -c "import sys; print(sys.executable)"
+  python -c "import duckdb; print(duckdb.__version__)"
+  ```
+  Ensure the interpreter path matches `/usr/local/bin/python`. If it does not, update `PY_BIN` in `.devcontainer/devcontainer.json`, rebuild the container, and reopen it.
 
 What Forecaster Does (Pipeline)
 

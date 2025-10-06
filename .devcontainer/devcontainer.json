@@ -14,9 +14,11 @@
       ]
     }
   },
-  "postCreateCommand": "make dev-setup",
   "remoteEnv": {
     "RESOLVER_API_BACKEND": "db",
-    "RESOLVER_DB_URL": "duckdb:///workspaces/resolver.dev.duckdb"
-  }
+    "RESOLVER_DB_URL": "duckdb:///workspaces/resolver.dev.duckdb",
+    "PY_BIN": "/usr/local/bin/python",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1"
+  },
+  "postCreateCommand": "/bin/bash -lc './.devcontainer/postCreate.sh'"
 }
