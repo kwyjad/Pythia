@@ -340,7 +340,7 @@ def make_rows() -> Tuple[List[List[str]], Counter]:
     granularity = str(params_cfg.get("granularity", "year")).strip().lower() or "year"
 
     headers = {
-        "User-Agent": str(cfg.get("user_agent", "spagbot-resolver/1.0")),
+        "User-Agent": str(cfg.get("user_agent", "forecaster-resolver/1.0")),
         "Accept": "application/json",
     }
 

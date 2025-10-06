@@ -29,7 +29,7 @@ Assumptions / Inputs:
 
 If your column names differ, EDIT the “EDIT THESE IF NEEDED” block below.
 
-Author: Spagbot helper, Aug 2025.
+Author: Forecaster helper, Aug 2025.
 """
 from __future__ import annotations
 import os
