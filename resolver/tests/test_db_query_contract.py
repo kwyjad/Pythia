@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from fastapi.testclient import TestClient
 
 pytest.importorskip("duckdb")
+pytest.importorskip("fastapi")
+
+from fastapi.testclient import TestClient
 
 from resolver.db import duckdb_io
 
