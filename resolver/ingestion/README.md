@@ -11,32 +11,98 @@ Later (Epic C) we will replace stubs with real API/scraper clients.
 ## Sources covered
 
 - ReliefWeb — **API connector** (`reliefweb_client.py`) → `staging/reliefweb.csv`
+- ReliefWeb PDFs — **attachment parser** (`reliefweb_client.py`) → `staging/reliefweb_pdf.csv`
 - IFRC GO — **API connector** (`ifrc_go_client.py`) → `staging/ifrc_go.csv`
 - UNHCR ODP — **API connector** (`unhcr_odp_client.py`) → `staging/unhcr_odp.csv`
-- IOM DTM — **API connector** (`dtm_client.py`) → `staging/dtm.csv`
+- IOM DTM — **API connector** (`dtm_client.py`) → `staging/dtm_displacement.csv`
 - WHO Public Health Emergencies — **API connector** (`who_phe_client.py`) → `staging/who_phe.csv`
 - WHO Emergencies — stub (`who_stub.py`)
 - IPC — stub (`ipc_stub.py`)
-- EM-DAT — stub (`emdat_stub.py`)
-- GDACS — stub (`gdacs_stub.py`)
+- EM-DAT — **file connector** (`emdat_client.py`) → `staging/emdat_pa.csv`
+- GDACS — **API connector** (`gdacs_client.py`) → `staging/gdacs_signals.csv`
 - Copernicus EMS — stub (`copernicus_stub.py`)
 - UNOSAT — stub (`unosat_stub.py`)
 - HDX (CKAN) — **API connector** (`hdx_client.py`) → `staging/hdx.csv`
-- ACLED — stub (`acled_stub.py`)
+- ACLED — **API connector** (`acled_client.py`) → `staging/acled.csv`
 - UCDP — stub (`ucdp_stub.py`)
 - FEWS NET — stub (`fews_stub.py`)
-- WFP mVAM — stub (`wfp_mvam_stub.py`)
+- WorldPop — **denominator loader** (`worldpop_client.py`) → `staging/worldpop_denominators.csv`
+- WFP mVAM — **API connector** (`wfp_mvam_client.py`) → `staging/wfp_mvam.csv`
 - Gov NDMA — stub (`gov_ndma_stub.py`)
 
 Each connector:
 - Reads `resolver/data/countries.csv` and `resolver/data/shocks.csv`
 - Produces `resolver/staging/<source>.csv` using the exporter’s expected columns
+- Must write a CSV that matches `resolver/tools/schema.yml`; CI runs schema
+  tests (`pytest -q resolver/tests/test_staging_schema_all.py`) immediately
+  after ingestion to catch regressions
 
-### EM-DAT allocation example
+## Connector toggles & outputs
 
-- Event spans **15 Jan – 10 Mar 2025** with **9,000 Total Affected** → prorata policy yields
-  `2025-01: 2,782`, `2025-02: 4,582`, `2025-03: 1,636` (days-in-month share; last bucket keeps the remainder).
-- Start-month policy instead puts the full **9,000** on `2025-01` and omits later months.
+| Connector | Enabled via | Primary source | Monthly allocation | Dedup strategy | Output |
+| --- | --- | --- | --- | --- | --- |
+| GDACS alerts | `ingestion/config/gdacs.yml` → `enabled` | GDACS public API (`geteventlist`) | Alert start month bucket | `(iso3, hazard, month_start, raw_event_id)` keep latest `as_of` | `resolver/staging/gdacs_signals.csv` |
+| EM-DAT impacts | `ingestion/config/emdat.yml` → `enabled` | Licensed EM-DAT CSV/HDX mirror | Linear days-in-month split for spans >14 days | `(iso3, hazard, month_start, raw_event_id, value_type)` | `resolver/staging/emdat_pa.csv` |
+| IOM DTM displacement | `ingestion/config/dtm.yml` → `enabled` | File/HDX stock tables | Stock→flow (`diff_nonneg`) with optional admin totals | `(iso3, admin1, month_start, source_id)` | `resolver/staging/dtm_displacement.csv` |
+| WorldPop denominators | `ingestion/config/worldpop.yml` → `enabled` | Cached WorldPop national totals | Annual totals (no allocation) | `(iso3, year)` upsert on rerun | `resolver/staging/worldpop_denominators.csv` |
+
+### GDACS severity & EM-DAT allocation rules
+
+- **GDACS alerts**: Green → `0`, Orange → `1`, Red → `2`. Alerts are bucketed to the month of the
+  first alert date. If the same `(iso3, hazard, month, raw_event_id)` appears again the connector
+  keeps the latest `as_of` timestamp.
+- **EM-DAT events**: Events that span more than 14 days are split across months using
+  days-in-month weights (last month keeps the remainder after rounding). Shorter incidents keep the
+  full total on the start month. Deduplication keeps the newest record per `(iso3, hazard,
+  month_start, raw_event_id, value_type)`.
+- **DTM displacement**: Stock tables convert to monthly flows using the non-negative
+  difference rule; flows are preserved as-is. National totals equal the sum of admin1 rows when the
+  config sets `admin_agg: both`.
+  - Deduplication keeps the most recent `as_of` per `(country, admin1, month, source)`; older or equal timestamps are skipped to prevent regressions.
+- **WorldPop denominators**: Upserts replace previously written `(iso3, year)` rows so reruns update
+  `as_of` timestamps without duplicating records.
+
+## Smoke tests (offline)
+
+Run every connector in a disabled/offline configuration to ensure they still exit cleanly
+and write header-only CSVs:
+
+```bash
+pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py
+```
+
+To inspect a single connector locally (example: IFRC GO):
+
+```bash
+python resolver/ingestion/ifrc_go_client.py
+Get-Content resolver/staging/ifrc_go.csv | Select-Object -First 3   # PowerShell
+```
+
+The smoke tests expect each connector to exit `0`, emit a header-only CSV in
+`resolver/staging/`, and log a clear reason that it is disabled/placeholder/header-only.
+
+## ReliefWeb PDF pipeline (tests & toggles)
+
+### Environment flags
+
+- `RELIEFWEB_ENABLE_PDF` — enable the PDF attachment pipeline (default: on in tests).
+- `RELIEFWEB_PDF_ENABLE_OCR` — allow OCR fallback for image-based attachments (default: off in smoke tests).
+- `RELIEFWEB_PDF_ALLOW_NETWORK` — permit live PDF downloads (default: off in CI/tests; smoke writes headers only).
+
+### Outputs
+
+- `resolver/staging/reliefweb_pdf.csv` — PDF-derived tier-2 metrics with monthly deltas.
+- `resolver/staging/reliefweb.csv` — API-derived tier-1 metrics.
+
+### Testing locally
+
+```bash
+# Offline smoke across all connectors (header-only, no network)
+pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py
+
+# ReliefWeb PDF logic with mocked extractors (selection, conversion, deltas, precedence)
+pytest -q resolver/tests/ingestion/test_reliefweb_pdf.py
+```
 
 ## Run all stubs
 
@@ -49,7 +115,33 @@ Then:
 python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
 python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
 python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
+
+After changing `resolver/tools/schema.yml`, regenerate the markdown summary:
+
+```bash
+python resolver/tools/generate_schemas_md.py --in resolver/tools/schema.yml --out SCHEMAS.md --sort
 ```
+```
+
+### Structured logging & retries
+
+`run_all_stubs.py` now emits detailed run metadata and per-connector logs. Each run creates
+plain text and JSONL logs in `resolver/logs/ingestion/` (configurable via `RUNNER_LOG_DIR`).
+A subdirectory per run (named with the UTC start timestamp) contains per-connector logs, so
+`resolver/logs/ingestion/20250101-010203/ifrc_go_stub.log` holds only the IFRC stub output
+for that run.
+
+Key CLI switches:
+
+- `--connector foo --connector bar` — only run the selected connectors/stubs.
+- `--retries N` — retry flaky connectors with exponential backoff (defaults to `2`).
+- `--retry-base`, `--retry-max`, `--retry-no-jitter` — tune the retry backoff curve.
+- `--strict` — exit non-zero if any connector fails (default is soft-fail to keep CI green).
+- `--log-format plain|json`, `--log-level INFO|DEBUG|...` — tweak console verbosity.
+
+The logger also prints an environment summary (git commit, Python version, selected env
+flags) to help debug CI runs. Sensitive values (tokens, secrets, long random strings) are
+redacted automatically in both console and file output.
 
 ## IFRC GO (Admin v2) — real connector
 
@@ -91,13 +183,18 @@ with real pulls in Epic C.
 
 ### ReliefWeb specifics
 
-- Window: last `window_days` (configurable in `ingestion/config/reliefweb.yml`)
-- Filters: English language; report/appeal/update formats
-- Hazards: keyword mapping (conservative)
-- Metrics: PIN preferred (if phrase found), else PA; PHE allows `cases` (unit = persons_cases)
-- No PDF parsing in v1; title/summary only
+- Window: last `window_days` for API text extraction and `since_months` for optional PDF backfills.
+- Filters: English language; report/appeal/update formats.
+- Hazards: keyword mapping (conservative, shared by API + PDF parsing).
+- Metrics: API path prefers PIN > PA > cases; PDF path parses `people_in_need`, `people_affected`, and `idps` with table → infographic → narrative precedence.
+- PDFs: `enable_pdfs` toggles attachment parsing. Text extraction auto-falls back to OCR unless `enable_ocr: false`.
+- Household → people conversions rely on `reference/avg_household_size.csv` + overrides, populating `method_value="derived_from_households"` and `method_details` context.
+- PDF outputs land in `staging/reliefweb_pdf.csv` with `series_semantics="new"` and deterministic `event_id` hashes.
+- Deltas: monthly `value` equals `value_level - previous_level` for the same `(iso3, hazard_code, metric, reliefweb_pdf)` lineage; levels cached in `.cache/reliefweb/levels/`.
 
-Hazards must match resolver/data/shocks.csv (e.g., FL, DR, TC, HW, ACO, ACE, ACC, DI, CU, EC, PHE).
+See `resolver/docs/reliefweb_pdf.md` for the full PDF parser runbook.
+
+Hazards must match resolver/data/shocks.csv (e.g., FL, DR, TC, HW, ACO, ACE, DI, CU, EC, PHE).
 
 Earthquakes are out of scope by policy and are not included in stubs.
 
@@ -166,19 +263,50 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
   (first month dropped unless `DTM_ALLOW_FIRST_MONTH=1`). Negative deltas clip to `0`.
 - **Aggregation:** Subnational rows are summed to national totals before the delta step. Output rows are always monthly and
   carry deterministic `event_id`s derived from `(iso3, hazard_code, metric, as_of_month, value, source_url)`.
+- **Deduplication:** `as_of` aware. Prefer per-row timestamps (e.g. `updated_at`, `report_date`), then a date embedded in the
+  filename, then file modified time, and only lastly the run date. The newest `as_of` wins per `(country, admin1, month,
+  source)` key.
 - **Hazard mapping:** Uses the `shock_keywords` lexicon from `config/dtm.yml`. Ambiguous titles fall back to
   `hazard_code=multi`; pure movement defaults to `displacement_influx` unless overridden by `DTM_DEFAULT_HAZARD`.
 - **Publisher metadata:** `publisher="IOM-DTM"`, `source_type="cluster"`, `method="DTM; HXL-aware; monthly-first; delta-on-cumulative"`.
 
 **Env toggles:**
 
-- `RESOLVER_SKIP_DTM=1` — skip the connector (writes header-only CSV).
+- `RESOLVER_SKIP_DTM=1` — skip the connector (still writes an empty `staging/dtm_displacement.csv` with canonical headers).
 - `RESOLVER_MAX_RESULTS=<int>` — optional cap for emitted rows.
 - `RESOLVER_DEBUG=1` — verbose logging (shared convention across ingestion clients).
 - `DTM_ALLOW_FIRST_MONTH=1` — include the first month from cumulative series as a delta (default 0 → drop it).
 - `DTM_DEFAULT_HAZARD=<key>` — override the fallback hazard keyword (default `displacement_influx`).
 - `DTM_BASE=<url>` — override the base discovery endpoint (defaults to `https://data.humdata.org`).
 - `RELIEFWEB_APPNAME` — reused for User-Agent hints when hitting HDX mirrors.
+
+**Compatibility helpers:** The module continues to expose the historic
+`SERIES_INCIDENT`/`SERIES_CUMULATIVE` constants, `load_registries`,
+`rollup_subnational`, `compute_monthly_deltas`, and `infer_hazard` so legacy
+tests and notebooks can import the same public API while the connector evolves.
+
+**Header guarantees:** Setting `RESOLVER_SKIP_DTM=1` or `RESOLVER_SKIP_EMDAT=1`
+returns immediately but still writes header-only CSVs to
+`resolver/staging/dtm_displacement.csv` and `resolver/staging/emdat_pa.csv`
+respectively so downstream checks never see missing files.
+
+## ACLED — real connector
+
+- **Endpoint:** Configurable via `ingestion/config/acled.yml` (default `https://api.acleddata.com`). Auth requires
+  `ACLED_TOKEN`; override the base with `ACLED_BASE`.
+- **Window & paging:** Pulls the last `window_days` (default 450) so that the previous 12 months of battle fatalities are
+  available for the onset rule. `ACLED_MAX_LIMIT`, `RESOLVER_MAX_PAGES`, and `RESOLVER_MAX_RESULTS` gate pagination.
+- **Conflict fatalities:** All event types are summed per ISO3 × month. Rows emit `metric=fatalities`, `unit=persons`, and
+  default to `hazard_code=ACE` (armed_conflict_escalation).
+- **Onset detection:** When a country’s battle fatalities over the previous 12 months are `< 25` and the current month is
+  `≥ 25`, the hazard switches to `hazard_code=ACO` (armed_conflict_onset). Each row records the inputs in
+  `definition_text`/`method`, e.g. `Onset rule inputs: prev12m=24, current_month=30`.
+- **Civil unrest:** Counts `event_type ∈ {Protests, Riots}` as `metric=events`, `unit=events`. Optional participant totals
+  parse `notes` via a regex when `participants.enabled` or `ACLED_PARSE_PARTICIPANTS=1` (aggregate `sum|median`).
+- **Output contract:** `as_of_date=YYYY-MM`, deterministic IDs (`<ISO3>-ACLED-<hazard>-<metric>-YYYY-MM-<digest>`),
+  `publisher="ACLED"`, `source_type="other"`, `doc_title="ACLED monthly aggregation"`,
+  `method="ACLED; monthly-first; fatality sum across all event types; unrest events=Protests+Riots; onset rule applied"`.
+- **Fail-soft:** `RESOLVER_SKIP_ACLED=1` or any runtime error writes a header-only `staging/acled.csv`, keeping CI green.
 
 ## WHO Public Health Emergencies — real connector
 
@@ -208,6 +336,43 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
   - `RESOLVER_DEBUG=1` — verbose logging for troubleshooting.
   - `HDX_BASE=<url>` — override base URL (default `https://data.humdata.org`).
   - `RELIEFWEB_APPNAME` — optional User-Agent override reused from the ReliefWeb connector.
+  - `HDX_ALLOW_PERCENT=1` + `HDX_DENOMINATOR_FILE` — opt-in percent→people conversion using the shared WorldPop denominators.
+
+## WorldPop population denominators — real connector
+
+- **Endpoint:** Configurable CSV mirrors (default template provided in `ingestion/config/worldpop.yml`) exposing national population totals by ISO3 and year.
+- **Outputs:**
+  - `staging/worldpop.csv` — canonical staging snapshot for auditing the latest fetch.
+  - `data/population.csv` — versioned denominator table (`iso3,year,population,source,product,download_date,source_url,notes`).
+- **Semantics:** Upserts the most recent year per ISO3 (plus `WORLDPOP_YEARS_BACK` historic years) with overwrite-by-key semantics on reruns.
+- **Public API:** `worldpop_client.collect_rows()` (no side effects), `build_rows()`, `write_rows()`, and `CANONICAL_COLUMNS` remain stable for downstream tests and stubs.
+- **Env toggles:**
+  - `RESOLVER_SKIP_WORLDPOP=1` — emit header-only CSVs (no network calls) while
+    touching both `data/population.csv` and `staging/worldpop_denominators.csv` (and the
+    compatibility alias `staging/worldpop.csv`) so header checks remain deterministic even
+    when no data is collected.
+  - `WORLDPOP_PRODUCT` — choose dataset variant (`un_adj_unconstrained` default; `un_adj_constrained` supported).
+  - `WORLDPOP_YEARS_BACK` — fetch additional previous years (default `0`).
+  - `WORLDPOP_URL_TEMPLATE` — override the configured URL pattern (handy for mirrors/tests).
+  - `RESOLVER_DEBUG=1` — verbose logging and fetch diagnostics.
+- **Consumers:** Shared by `WFP mVAM` and (opt-in) `IPC` / `HDX` (via `IPC_ALLOW_PERCENT=1` / `HDX_ALLOW_PERCENT=1`) to turn prevalence into people counts when datasets lack denominators.
+
+## WFP mVAM — real connector
+
+- **Config-driven:** Sources defined in `ingestion/config/wfp_mvam.yml`; supports CSV/XLSX/JSON exports with optional HXL tags.
+- **Monthly-first:** Daily/weekly series are averaged to the month before conversion. Example: two February IFC readings of
+  `10%` and `12%` with a 100,000-person population average to `11%`, yielding `round(0.11 * 100000) = 11,000` people in need.
+- **Percent → people:** Prefer direct people columns. When only prevalence is present, the connector converts the monthly mean (%)
+  using dataset-provided populations or the shared WorldPop denominators (`resolver/data/population.csv`). Fallback notes (e.g.,
+  `WorldPop un_adj_unconstrained year=2023 (fallback for 2024)`) are written into both `definition_text` and `method` for
+  auditability.
+- **Outputs:** Emits national **stock** (`series_semantics=stock`) and optional **incident** (`incident` delta) streams with
+  deterministic IDs per ISO3/hazard/month. Negative deltas are clipped to zero.
+- **Shocks:** Keyword lexicon maps drivers/tags to drought, economic crisis, conflict, flood, or `MULTI` (Multi-driver Food
+  Insecurity) when ambiguous.
+- **Env toggles:** `RESOLVER_SKIP_WFP_MVAM=1`, `WFP_MVAM_ALLOW_PERCENT` (default `1`), `WFP_MVAM_STOCK`, `WFP_MVAM_INCIDENT`,
+  `WFP_MVAM_INCLUDE_FIRST_MONTH_DELTA`, `WFP_MVAM_DENOMINATOR_FILE`, `WFP_MVAM_INDICATOR_PRIORITY`, `WORLDPOP_PRODUCT` (shared
+  denominator label hint).
 
 ## Source notes (what each adds)
 
@@ -215,6 +380,7 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
 - **GDACS** — near-real-time alerts and modeled impact for hydro-meteo hazards.
 - **Copernicus EMS / UNOSAT** — activation footprints, damage/exposure mapping (good PA proxies).
 - **HDX (CKAN)** — dataset discovery hub; many country datasets flow here.
+- **WorldPop** — annual national population denominators to support percent→people conversions.
 - **ACLED / UCDP** — conflict event data (drivers/attribution context; not PIN).
 - **FEWS NET** — early warning analyses; aligns with IPC phases for DR/EC.
 - **WFP mVAM** — market/price/food security indicators (context for EC/DR).

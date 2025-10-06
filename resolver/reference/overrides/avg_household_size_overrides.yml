@@ -1,0 +1,7 @@
+overrides:
+  # Example:
+  # USA:
+  #   people_per_household: 2.60
+  #   source: "Custom Override"
+  #   year: 2024
+  #   notes: "Project specific override"

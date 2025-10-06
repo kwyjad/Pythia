@@ -17,6 +17,8 @@ import pandas as pd
 import requests
 import yaml
 
+from resolver.ingestion._manifest import ensure_manifest_for_csv
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
@@ -58,6 +60,27 @@ HAZARD_CLASS = "health"
 
 DEBUG = os.getenv("RESOLVER_DEBUG", "0") == "1"
 
+DEFAULT_SOURCE_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "cholera_global": {
+        "name": "cholera_global",
+        "kind": "csv",
+        "time_keys": ["week", "year"],
+        "country_keys": ["iso3", "country", "country_code", "#country+code"],
+        "case_keys": ["cases", "new_cases", "#affected+cases"],
+        "disease": "cholera",
+        "series_hint": SERIES_INCIDENT,
+    },
+    "measles_global": {
+        "name": "measles_global",
+        "kind": "csv",
+        "time_keys": ["week", "year"],
+        "country_keys": ["iso3", "country", "country_code", "#country+code"],
+        "case_keys": ["cases", "new_cases", "#affected+cases"],
+        "disease": "measles",
+        "series_hint": SERIES_INCIDENT,
+    },
+}
+
 
 def dbg(message: str) -> None:
     if DEBUG:
@@ -80,10 +103,78 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def load_config() -> Dict[str, Any]:
-    if not CONFIG.exists():
-        return {"sources": []}
-    with open(CONFIG, "r", encoding="utf-8") as fp:
-        return yaml.safe_load(fp) or {"sources": []}
+    raw: Dict[str, Any] = {"enabled": False, "sources": {}, "auth": {}}
+    if CONFIG.exists():
+        with open(CONFIG, "r", encoding="utf-8") as fp:
+            loaded = yaml.safe_load(fp) or {}
+        if isinstance(loaded, dict):
+            raw.update(loaded)
+
+    auth_headers = raw.get("auth") if isinstance(raw.get("auth"), dict) else {}
+
+    raw_sources = raw.get("sources", {})
+    merged: Dict[str, Any] = {}
+    if isinstance(raw_sources, list):
+        for idx, item in enumerate(raw_sources):
+            if isinstance(item, dict):
+                name = str(item.get("name") or f"source_{idx + 1}")
+                merged[name] = dict(item)
+            elif isinstance(item, str):
+                merged[f"source_{idx + 1}"] = {"url": item}
+    elif isinstance(raw_sources, dict):
+        for name, item in raw_sources.items():
+            merged[str(name)] = item
+
+    sources: List[Dict[str, Any]] = []
+    remaining = dict(merged)
+
+    for key, template in DEFAULT_SOURCE_TEMPLATES.items():
+        override = remaining.pop(key, None)
+        if not override:
+            continue
+        url = ""
+        if isinstance(override, str):
+            url = override
+            override = {}
+        elif isinstance(override, dict):
+            url = str(override.get("url", ""))
+        if not url:
+            continue
+        source_cfg = dict(template)
+        source_cfg["url"] = url
+        if isinstance(override, dict):
+            for ok, ov in override.items():
+                if ok == "url":
+                    continue
+                source_cfg[ok] = ov
+        if auth_headers:
+            source_cfg.setdefault("headers", dict(auth_headers))
+        sources.append(source_cfg)
+
+    for name, override in remaining.items():
+        if isinstance(override, str):
+            override = {"url": override}
+        if not isinstance(override, dict):
+            continue
+        source_cfg = dict(override)
+        source_cfg.setdefault("name", name)
+        if auth_headers:
+            source_cfg.setdefault("headers", dict(auth_headers))
+        sources.append(source_cfg)
+
+    enabled = bool(raw.get("enabled", False))
+    if not enabled and sources:
+        enabled = True
+
+    result: Dict[str, Any] = {
+        "enabled": enabled,
+        "sources": sources if enabled else [],
+        "auth": auth_headers,
+        "prefer_hxl": raw.get("prefer_hxl", True),
+        "monthly_first": raw.get("monthly_first", True),
+        "allow_first_month_delta": raw.get("allow_first_month_delta", False),
+    }
+    return result
 
 
 def load_countries() -> Tuple[pd.DataFrame, Dict[str, str], Dict[str, str]]:
@@ -267,12 +358,14 @@ def _detect_time_shape(time_keys: Sequence[str]) -> str:
     return "unknown"
 
 
-def _load_remote(url: str) -> io.BytesIO:
-    headers: Dict[str, str] = {}
+def _load_remote(url: str, *, headers: Optional[Dict[str, str]] = None) -> io.BytesIO:
+    merged_headers: Dict[str, str] = {}
+    if headers:
+        merged_headers.update({k: str(v) for k, v in headers.items()})
     ua = os.getenv("RELIEFWEB_APPNAME")
-    if ua:
-        headers["User-Agent"] = ua
-    resp = requests.get(url, headers=headers, timeout=60)
+    if ua and "User-Agent" not in merged_headers:
+        merged_headers["User-Agent"] = ua
+    resp = requests.get(url, headers=merged_headers or None, timeout=60)
     resp.raise_for_status()
     return io.BytesIO(resp.content)
 
@@ -285,7 +378,7 @@ def _load_frame(source: Dict[str, Any]) -> SourceFrame:
     buf: io.BytesIO | Path
     if url.startswith("http://") or url.startswith("https://"):
         dbg(f"fetching {url}")
-        buf = _load_remote(url)
+        buf = _load_remote(url, headers=source.get("headers"))
     else:
         path = Path(url)
         if not path.is_absolute():
@@ -466,6 +559,7 @@ def build_event_id(
 def _write_header_only(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=CANONICAL_HEADERS).to_csv(path, index=False)
+    ensure_manifest_for_csv(path)
 
 
 def _write_rows(rows: Sequence[Dict[str, Any]], *, path: Path) -> None:
@@ -479,12 +573,18 @@ def _write_rows(rows: Sequence[Dict[str, Any]], *, path: Path) -> None:
     df = df[CANONICAL_HEADERS]
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+    ensure_manifest_for_csv(path)
 
 
 def collect_rows() -> List[Dict[str, Any]]:
     cfg = load_config()
+    if not cfg.get("enabled", False):
+        print("WHO-PHE disabled via config; writing header-only CSV")
+        return []
+
     sources = cfg.get("sources", []) or []
     if not sources:
+        print("WHO-PHE enabled but no sources configured; writing header-only CSV")
         return []
 
     _, iso3_to_name, name_to_iso3 = load_countries()
@@ -525,6 +625,12 @@ def collect_rows() -> List[Dict[str, Any]]:
 
         try:
             frame = _load_frame(source)
+        except requests.HTTPError as exc:
+            print(f"[who_phe] source {name} returned {exc.response.status_code if exc.response else 'HTTPError'}; skipping")
+            continue
+        except requests.RequestException as exc:
+            print(f"[who_phe] source {name} request failed: {exc}")
+            continue
         except Exception as exc:
             dbg(f"source {name} failed to load: {exc}")
             continue

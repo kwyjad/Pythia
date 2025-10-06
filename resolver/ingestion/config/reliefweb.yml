@@ -1,9 +1,28 @@
+enable: false
 appname: "UNICEF-Resolver-P1L1T6"
-user_agent: "spagbot-resolver/1.0 (github.com/kwyjad/Spagbot_metac-bot)"
+user_agent: "UNICEF-Resolver-P1L1T6/1.0 (+https://unicef.org/emops; contact=resolver@unicef.org)"
 base_url: "https://api.reliefweb.int/v2/reports"
 accept_header: "application/json"
-window_days: 45
+enable_pdfs: true
+enable_ocr: true
+min_text_chars_before_ocr: 1500
+since_months: 6
+preferred_pdf_titles:
+  - "situation report"
+  - "sitrep"
+  - "flash report"
+  - "flash update"
+  - "snapshot"
+  - "appeal"
+  - "humanitarian update"
+  - "key figures"
+  - "response update"
+max_retries: 6
+retry_backoff_seconds: 2
+timeout_seconds: 30
+window_days: 30
 page_size: 100
+min_page_pause_seconds: 0.6
 
 source_type_map:
   report: "sitrep"
@@ -17,7 +36,7 @@ hazard_keywords:
   HW: ["heat wave", "heatwave", "extreme heat", "high temperatures"]
   ACO: ["outbreak of fighting", "hostilities broke out"]
   ACE: ["escalation", "intensified clashes", "surge in fighting", "offensive launched"]
-  ACC: ["ceasefire", "cessation of hostilities", "peace agreement"]
+  ACC: ["ceasefire", "halt to hostilities", "peace agreement"]
   DI: ["influx", "cross-border displacement", "refugee influx"]
   CU: ["protest", "civil unrest", "demonstration", "riots"]
   EC: ["economic crisis", "inflation", "price shock", "currency depreciation"]

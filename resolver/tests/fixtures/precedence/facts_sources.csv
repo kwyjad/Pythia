@@ -1,0 +1,15 @@
+country_iso3,hazard_type,month,metric,value,as_of,source,run_id
+SSD,conflict_escalation,2025-01,pin_new,5000,2025-02-05,dtm,runA
+SSD,conflict_escalation,2025-01,pin_new,5200,2025-02-10,acled,runB
+SSD,conflict_escalation,2025-01,pa_new,,2025-02-10,acled,runB
+SSD,conflict_escalation,2025-01,pa_new,7000,2025-02-09,dtm,runA
+ETH,drought,2025-03,pin_new,10000,2025-03-25,ifrc_go,runC
+ETH,drought,2025-03,pin_new,9500,2025-03-26,emdat,runD
+ETH,drought,2025-03,pa_new,11000,2025-03-26,emdat,runD
+ETH,drought,2025-03,pa_new,,2025-03-25,ifrc_go,runC
+NGA,flood,2025-04,pin_new,2000,2025-04-10,hdx,runE
+NGA,flood,2025-04,pin_new,2000,2025-04-10,gdacs,runF
+NGA,flood,2025-04,pin_new,2500,2025-04-08,gdacs,runG
+COL,conflict_escalation,2025-02,pin_new,300,2025-02-10,acled,runH
+COL,conflict_escalation,2025-02,pin_new,280,2025-02-11,acled,runI
+COL,conflict_escalation,2025-02,pin_new,310,2025-02-09,dtm,runJ

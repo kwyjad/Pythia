@@ -29,3 +29,17 @@ shock_map:
   phe: ["Epidemic", "Infectious disease", "Outbreak"]
   other: ["Industrial accident", "Technological", "Transport"]
 default_hazard: other
+enable: false
+enabled: false
+source:
+  type: file
+  path: ""
+allocation:
+  multi_month: linear
+value_types:
+  - affected
+  - deaths
+  - injured
+  - homeless
+hazard_map: {}
+country_aliases: {}

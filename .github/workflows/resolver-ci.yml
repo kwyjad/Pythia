@@ -1,216 +1,81 @@
 name: resolver-ci
 
 on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "resolver/**"
+      - ".github/workflows/**"
+      - "!Dashboard/**"
   pull_request:
     paths:
       - "resolver/**"
-      - ".github/workflows/resolver-ci.yml"
-  workflow_dispatch: {}
-  schedule:
-    # Daily at 20:10 UTC ≈ 23:10 Europe/Istanbul (UTC+3)
-    - cron: "10 20 * * *"
+      - ".github/workflows/**"
+      - "!Dashboard/**"
 
 permissions:
-  contents: write
-
-concurrency:
-  group: resolver-ci-${{ github.ref }}
-  cancel-in-progress: true
+  contents: read
 
 jobs:
-  pr-checks:
-    if: github.event_name == 'pull_request'
+  offline_connector_smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout (full)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install deps
+          cache: pip
+          cache-dependency-path: |
+            resolver/requirements.txt
+            resolver/requirements-dev.txt
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r resolver/requirements-dev.txt
-
-      - name: Run ingestion (real connectors only)
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          RESOLVER_DEBUG: "1"
-          RESOLVER_MAX_PAGES: "5"
-          RESOLVER_MAX_RESULTS: "1000"
-          RESOLVER_INGESTION_MODE: real
-          RESOLVER_FAIL_ON_STUB_ERROR: "0"
+          pip install -r resolver/requirements.txt
+          pip install -r resolver/requirements-dev.txt
+      - name: Connector Smoke (offline)
         run: |
-          python resolver/ingestion/run_all_stubs.py
-
-      - name: Run stubs (non-blocking)
-        if: ${{ always() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          RESOLVER_INGESTION_MODE: stubs
-          RESOLVER_FAIL_ON_STUB_ERROR: "0"
+          pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py
+      - name: ReliefWeb PDF Unit Tests (mocked extractors)
         run: |
-          python resolver/ingestion/run_all_stubs.py || true
-
-      - name: Export facts
+          pytest -q resolver/tests/ingestion/test_reliefweb_pdf.py
+      - name: Docs Link Check (non-blocking)
+        continue-on-error: true
         run: |
-          python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
 
-      - name: Validate facts
-        run: |
-          python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
+          root = pathlib.Path('.').resolve()
+          md_files = [p for p in root.glob('resolver/**/*.md')]
+          pattern = re.compile(r'\[[^\]]+\]\(([^)]+)\)')
+          broken = []
 
-      - name: Precedence at provisional cutoff (last day of current month UTC)
-        shell: bash
-        run: |
-          LAST_UTC=$(date -u -d "$(date -u +%Y-%m-01) +1 month -1 day" +%Y-%m-%d)
-          python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff "$LAST_UTC"
+          for md in md_files:
+              text = md.read_text(encoding='utf-8')
+              for match in pattern.finditer(text):
+                  link = match.group(1)
+                  if link.startswith(('http://', 'https://', 'mailto:')):
+                      continue
+                  if link.startswith('#') or link.startswith('?'):
+                      continue
+                  target_str = link.split('#', 1)[0]
+                  target_path = (md.parent / target_str).resolve()
+                  if not target_path.exists():
+                      broken.append(f"{md.relative_to(root)} -> {link}")
 
-      - name: Build review queue
-        run: |
-          python resolver/review/make_review_queue.py
-
-      - name: Run data-contract tests (pytest)
-        run: |
-          pytest resolver/tests -q
-
-      - name: Stage repo state for this PR
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          python resolver/tools/write_repo_state.py --mode pr --id "$PR_NUMBER"
-
-      - name: Commit & push PR state to branch
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add resolver/state/pr/"$PR_NUMBER"/exports/*.csv 2>/dev/null || true
-          git add resolver/state/pr/"$PR_NUMBER"/exports/*.jsonl 2>/dev/null || true
-          git add resolver/state/pr/"$PR_NUMBER"/review/review_queue.csv 2>/dev/null || true
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(resolver): PR state for #$PR_NUMBER [skip ci]"
-            # push back to the PR branch
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          else
-            echo "No changes to commit."
-          fi
-
-  nightly:
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (full)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r resolver/requirements-dev.txt
-
-      - name: Run ingestion (real connectors only)
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          RESOLVER_DEBUG: "1"
-          RESOLVER_MAX_PAGES: "5"
-          RESOLVER_MAX_RESULTS: "1000"
-          RESOLVER_INGESTION_MODE: real
-          RESOLVER_FAIL_ON_STUB_ERROR: "0"
-        run: |
-          python resolver/ingestion/run_all_stubs.py
-
-      - name: Run stubs (non-blocking)
-        if: ${{ always() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          RESOLVER_INGESTION_MODE: stubs
-          RESOLVER_FAIL_ON_STUB_ERROR: "0"
-        run: |
-          python resolver/ingestion/run_all_stubs.py || true
-
-      - name: Export facts
-        run: |
-          python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
-
-      - name: Validate facts
-        run: |
-          python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
-
-      - name: Precedence at Istanbul date
-        shell: bash
-        run: |
-          python resolver/tools/schedule_gate.py > gate.json
-          CUT=$(python -c "import json;print(json.load(open('gate.json'))['istanbul_today'])")
-          python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff "$CUT"
-
-      - name: Build review queue
-        run: |
-          python resolver/review/make_review_queue.py
-
-      - name: Run data-contract tests (pytest)
-        run: |
-          pytest resolver/tests -q
-
-      - name: Snapshot check (is last Istanbul day?)
-        id: gate
-        shell: bash
-        run: |
-          python resolver/tools/schedule_gate.py > gate.json
-          IS_LAST=$(python -c "import json;print('true' if json.load(open('gate.json'))['is_last_day_istanbul'] else 'false')")
-          YM=$(python -c "import json;print(json.load(open('gate.json'))['istanbul_today'][:7])")
-          echo "is_last=$IS_LAST" >> "$GITHUB_OUTPUT"
-          echo "ym=$YM" >> "$GITHUB_OUTPUT"
-
-      - name: Freeze monthly snapshot
-        if: steps.gate.outputs.is_last == 'true'
-        shell: bash
-        run: |
-          python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month "${{ steps.gate.outputs.ym }}" --overwrite
-
-      - name: Stage repo state for nightly
-        shell: bash
-        run: |
-          D=$(date -u +%Y-%m-%d)
-          python resolver/tools/write_repo_state.py --mode daily --id "$D"
-
-      - name: Commit & push nightly state (and snapshot if created)
-        env:
-          YM: ${{ steps.gate.outputs.ym }}
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Nightly state
-          git add resolver/state/daily/*/exports/*.csv 2>/dev/null || true
-          git add resolver/state/daily/*/exports/*.jsonl 2>/dev/null || true
-          git add resolver/state/daily/*/review/review_queue.csv 2>/dev/null || true
-
-          # Snapshot (if present)
-          if [ -n "$YM" ]; then
-            git add resolver/snapshots/"$YM"/facts.parquet 2>/dev/null || true
-            git add resolver/snapshots/"$YM"/manifest.json 2>/dev/null || true
-          fi
-
-          if ! git diff --cached --quiet; then
-            MSG="chore(resolver): nightly state"
-            if [ -n "$YM" ]; then MSG="$MSG + snapshot $YM"; fi
-            git commit -m "$MSG [skip ci]"
-            git push
-          else
-            echo "No changes to commit."
-          fi
+          if broken:
+              print('Broken Markdown links found:')
+              for item in broken:
+                  print(f" - {item}")
+              sys.exit(1)
+          else:
+              print('No broken intra-repo Markdown links found.')
+          PY

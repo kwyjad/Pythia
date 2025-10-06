@@ -1,0 +1,17 @@
+tiers:
+  - name: Tier 1
+    sources: [ipc, ifrc_go, who_phe]
+  - name: Tier 0
+    sources: [acled, dtm, emdat, gdacs, hdx, unhcr, wfp_mvam]
+tiebreak:
+  - as_of_desc
+  - value_nonnull
+  - source_alpha
+metrics:
+  pin_new:
+    prefer_sources: [ipc, ifrc_go]
+  pa_new:
+    prefer_sources: [ifrc_go, emdat]
+defaults:
+  require_nonnegative: true
+  prefer_full_row_coverage: true

@@ -1,0 +1,20 @@
+enable: false
+enabled: false
+window_days: 365
+retry:
+  tries: 5
+  backoff: 2
+endpoints:
+  event_list: "https://www.gdacs.org/gdacsapi/api/events/geteventlist"
+  event_details: "https://www.gdacs.org/gdacsapi/api/events/getevent"
+hazard_map:
+  EQ: earthquake
+  FL: flood
+  TC: tropical_cyclone
+  VO: volcano
+  WF: wildfire
+severity_map:
+  Green: 0
+  Orange: 1
+  Red: 2
+country_aliases: {}

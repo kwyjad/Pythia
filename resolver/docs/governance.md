@@ -7,18 +7,30 @@
 
 ## Versioning & Snapshots
 - **Append-only** facts: new totals are **new rows** with `revision = previous + 1`.
-- **Monthly freeze**: at **23:59 Europe/Istanbul** on the **last day** of each month:  
+- **Monthly freeze**: at **23:59 Europe/Istanbul** on the **last day** of each month:
   - Write `snapshots/YYYY-MM/facts.parquet` + `manifest.json` (`created_at_utc`, `source_commit_sha`).
   - **Scoring uses snapshots** for that month; live views use current facts.
 
 ## Source Precedence & Conflict
-- Precedence (highest→lowest):  
+- Precedence (highest→lowest):
   `inter_agency_plan > ifrc_or_gov_sitrep > un_cluster_snapshot > reputable_ingo_un > media_discovery_only`
+- ReliefWeb PDF deltas operate in tier-2 and follow the [Resolution Precedence](precedence.md) policy when elevated.
 - **One total only** — never sum across agencies.
 - **Conflict rule**: if eligible figures differ by **>20%** → choose higher precedence; if same tier, use **newest as_of** then **latest publication**. Keep the alternative in `alt_value` + `alt_source_url` and explain in `precedence_decision`.
 
+### How precedence resolves overlaps
+- Source tiers are evaluated first; higher tiers always beat lower tiers when both report the same (country, hazard, month, metric) combination.
+- Within a tier, ties break on **newest `as_of`**, then prefer **non-null** values, and finally fall back to alphabetical source code to keep decisions deterministic.
+- Metric-specific preferences (e.g., PIN preferring IPC / IFRC) are honoured when available, even if another source is marginally more recent.
+- Manual review overrides replace the engine output entirely for the targeted key; the override note must explain the decision.
+
+### ReliefWeb PDF audit trail
+- CSV rows surface `extraction_method`, `pph_used`, and `matched_phrase` so reviewers can trace how the metric was derived.
+- Manifests (`reliefweb_pdf.csv.meta.json`) log attachment provenance (`artifact_sha256`, selector scores, file size) for future audits.
+- Precedence diagnostics capture the chosen row and alternates, keeping PDF-derived values transparent when they resolve a gap.
+
 ## Attribution & Scope
-- A record must **explicitly link** the number to the hazard episode (per policy).  
+- A record must **explicitly link** the number to the hazard episode (per policy).
 - Use country totals; sub-national figures only if they roll up (or are the official national total).
 
 ## Quality Controls
@@ -29,21 +41,21 @@
 - Outliers (e.g., `value` > national population) → flag `confidence=low` and route to review.
 
 ## Roles & Access
-- **Ingestion bot**: append facts + upload artifacts.  
-- **Analyst**: review/override low-confidence records (add a note).  
-- **Resolver**: read-only; returns single number + citation.  
+- **Ingestion bot**: append facts + upload artifacts.
+- **Analyst**: review/override low-confidence records (add a note).
+- **Resolver**: read-only; returns single number + citation.
 - **Public dashboard**: read filtered; no artifacts, no PII.
 
 ## Licensing & Compliance
-- Only official/publicly accessible documents.  
-- Store `publisher` and any license/terms when available.  
+- Only official/publicly accessible documents.
+- Store `publisher` and any license/terms when available.
 - Respect robots.txt for scrapes.
 
 ## Retention
-- Facts: indefinite (trend analysis).  
+- Facts: indefinite (trend analysis).
 - Artifacts: ≥24 months; cold-store after 12 months.
 
 ## Monitoring
-- Source freshness dashboard (last success per source).  
-- Ingestion counts by source/day; error rate; % low-confidence.  
+- Source freshness dashboard (last success per source).
+- Ingestion counts by source/day; error rate; % low-confidence.
 - Alert on missing freezes and on conflict spikes.

@@ -21,7 +21,7 @@ To:
 - Snap:   resolver/snapshots/<YYYY-MM>/*  (if present)
 """
 
-import argparse, csv, shutil
+import argparse, csv, shutil, subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +29,7 @@ EXPORTS = ROOT / "exports"
 REVIEW  = ROOT / "review"
 SNAPS   = ROOT / "snapshots"
 STATE   = ROOT / "state"
+REPO_ROOT = ROOT.parent
 
 def safe_copy(src: Path, dst: Path):
     if src.exists():
@@ -42,10 +43,62 @@ def copy_dir(src_dir: Path, dst_dir: Path, patterns: list[str]):
             if p.is_file():
                 shutil.copy2(p, dst_dir / p.name)
 
+
+def prune_old_daily(retain_days: int) -> int:
+    """Keep only the newest ``retain_days`` daily state folders.
+
+    Returns the number of folders that were removed.
+    """
+    if retain_days < 0:
+        return 0
+    daily_root = STATE / "daily"
+    if not daily_root.exists():
+        return 0
+
+    folders = sorted([d for d in daily_root.iterdir() if d.is_dir()])
+    if len(folders) <= retain_days:
+        return 0
+
+    to_remove = folders[: max(0, len(folders) - retain_days)]
+    for folder in to_remove:
+        try:
+            shutil.rmtree(folder)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print(f"Warning: could not prune {folder}: {exc}")
+    return len(to_remove)
+
+
+def stage_daily_state_for_commit() -> bool:
+    """Stage daily state changes (including deletions) for commit."""
+    daily_path = STATE / "daily"
+    try:
+        rel_path = daily_path.relative_to(REPO_ROOT)
+    except ValueError:
+        rel_path = daily_path
+
+    cmd = ["git", "add", "-A", str(rel_path)]
+    try:
+        subprocess.run(cmd, cwd=REPO_ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError as exc:
+        print(f"Warning: git executable not found when staging daily state: {exc}")
+        return False
+    except subprocess.CalledProcessError as exc:
+        print(f"Warning: failed to stage daily state deletions: {exc}")
+        return False
+    return True
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", required=True, choices=["pr","daily"])
     ap.add_argument("--id", required=True, help="PR number for mode=pr, or YYYY-MM-DD for mode=daily")
+    ap.add_argument(
+        "--retain-days",
+        type=int,
+        default=10,
+        help="When mode=daily, keep only this many most recent daily state folders",
+    )
     args = ap.parse_args()
 
     if args.mode == "pr":
@@ -74,6 +127,14 @@ def main():
                 pass
 
     write_monthly_outputs(EXPORTS / "resolved.csv", EXPORTS / "deltas.csv")
+
+    if args.mode == "daily":
+        pruned = prune_old_daily(args.retain_days)
+        staged = stage_daily_state_for_commit()
+        if staged:
+            print(f"Pruned {pruned} daily folders; staged deletions for commit.")
+        else:
+            print(f"Pruned {pruned} daily folders; unable to stage deletions for commit.")
 
 
 def read_rows_by_month(src: Path) -> tuple[dict[str, list[dict[str, str]]], list[str]]:

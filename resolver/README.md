@@ -1,5 +1,59 @@
 # Resolver Overview (A1)
 
+Resolver ingests humanitarian situation reports from multiple connectors, normalises them into staging CSVs, and exports monthly "new" deltas for downstream analytics. The ReliefWeb PDF branch adds attachment parsing with OCR fallback and household-to-people conversions.
+
+## Documentation map
+
+- [Pipeline overview](docs/pipeline_overview.md)
+- [Connectors catalog](docs/connectors_catalog.md)
+- [Data contracts](docs/data_contracts.md)
+- [Precedence policy](docs/precedence.md)
+- [ReliefWeb PDF pipeline](docs/reliefweb_pdf.md)
+- [Operations run book](docs/operations.md)
+- [Troubleshooting guide](docs/troubleshooting.md)
+- [Governance & audit](docs/governance.md)
+
+## Quick start
+
+1. **Install dependencies** (once):
+   ```bash
+   pip install -r resolver/requirements.txt
+   pip install -r resolver/requirements-dev.txt
+   ```
+2. **Generate staging CSVs (offline stubs):**
+   ```bash
+   python resolver/ingestion/run_all_stubs.py --retries 2
+   ```
+3. **Export and validate facts:**
+   ```bash
+   python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
+   python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
+   ```
+4. **Resolve precedence and freeze a snapshot:**
+   ```bash
+   python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff YYYY-MM-30
+   python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
+   ```
+
+Refer to the [operations run book](docs/operations.md) for detailed command variants (including deltas and review tooling).
+
+## Working with ReliefWeb PDFs
+
+The ReliefWeb PDF branch is disabled by default in CI but can be enabled locally with feature flags:
+
+```bash
+RELIEFWEB_ENABLE_PDF=1 \
+RELIEFWEB_PDF_ALLOW_NETWORK=0 \
+RELIEFWEB_PDF_ENABLE_OCR=0 \
+python resolver/ingestion/reliefweb_client.py
+```
+
+- Toggle OCR with `RELIEFWEB_PDF_ENABLE_OCR=1|0`.
+- Provide custom people-per-household data via `RELIEFWEB_PPH_OVERRIDE_PATH=/path/to/file.csv`.
+- Run mocked extractor tests with `pytest -q resolver/tests/ingestion/test_reliefweb_pdf.py`.
+
+See [ReliefWeb PDF pipeline](docs/reliefweb_pdf.md) for heuristics, file contracts, and troubleshooting.
+
 ## Validation
 
 Run the lightweight validator against any facts CSV/Parquet:

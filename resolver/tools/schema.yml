@@ -1,3 +1,176 @@
+entities:
+  staging.common:
+    kind: staging
+    description: Canonical staging columns for event-centric connectors.
+    allow_extra_columns: false
+    columns:
+      - name: event_id
+        type: string
+        required: true
+      - name: country_name
+        type: string
+        required: true
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: hazard_label
+        type: string
+        required: true
+      - name: hazard_class
+        type: string
+        required: true
+      - name: metric
+        type: enum
+        enum: [in_need, affected, displaced, cases, fatalities, events, participants]
+        required: true
+      - name: series_semantics
+        type: enum
+        enum: [stock, new]
+        required: false
+        nullable: true
+      - name: value
+        type: number
+        required: true
+      - name: unit
+        type: enum
+        enum: [persons, persons_cases, events]
+        required: true
+      - name: as_of_date
+        type: date
+        required: true
+      - name: publication_date
+        type: date
+        required: true
+      - name: publisher
+        type: string
+        required: true
+      - name: source_type
+        type: string
+        required: true
+      - name: source_url
+        type: string
+        required: true
+        nullable: true
+      - name: doc_title
+        type: string
+        required: true
+      - name: definition_text
+        type: string
+        required: true
+      - name: method
+        type: string
+        required: true
+      - name: confidence
+        type: string
+        required: true
+      - name: revision
+        type: integer
+        required: true
+        nullable: true
+      - name: ingested_at
+        type: date
+        required: true
+      - name: value_new
+        type: number
+        required: false
+        nullable: true
+      - name: value_stock
+        type: number
+        required: false
+        nullable: true
+      - name: rebase_flag
+        type: integer
+        required: false
+        nullable: true
+      - name: first_observation
+        type: integer
+        required: false
+        nullable: true
+      - name: delta_negative_clamped
+        type: integer
+        required: false
+        nullable: true
+  staging.unhcr_odp:
+    kind: staging
+    description: UNHCR Operational Data Portal staging output.
+    columns:
+      - name: source
+        type: string
+        required: true
+      - name: source_event_id
+        type: string
+        required: true
+      - name: as_of_date
+        type: date
+        required: true
+      - name: country_iso3
+        type: string
+        required: true
+      - name: country_name
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: hazard_label
+        type: string
+        required: true
+      - name: hazard_class
+        type: string
+        required: true
+      - name: metric_name
+        type: string
+        required: true
+      - name: metric_unit
+        type: string
+        required: true
+      - name: series_semantics
+        type: enum
+        enum: [stock, new]
+        required: false
+        nullable: true
+      - name: value
+        type: number
+        required: true
+      - name: evidence_url
+        type: string
+        required: true
+      - name: evidence_label
+        type: string
+        required: true
+  staging.worldpop:
+    kind: staging
+    description: WorldPop denominators staging output.
+    columns:
+      - name: iso3
+        type: string
+        required: true
+      - name: year
+        type: integer
+        required: true
+      - name: population
+        type: number
+        required: true
+      - name: source
+        type: string
+        required: true
+      - name: product
+        type: string
+        required: true
+      - name: download_date
+        type: date
+        required: true
+      - name: source_url
+        type: string
+        required: true
+      - name: notes
+        type: string
+        required: false
+        nullable: true
+
 required:
   - event_id
   - country_name
@@ -21,8 +194,8 @@ required:
   - ingested_at
 
 enums:
-  metric: [in_need, affected, displaced, cases]
-  unit: [persons, persons_cases]
+  metric: [in_need, affected, displaced, cases, fatalities, events, participants]
+  unit: [persons, persons_cases, events]
 
 optional:
   series_semantics:

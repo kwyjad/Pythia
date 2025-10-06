@@ -7,7 +7,7 @@ OUT = Path(__file__).resolve().parents[1] / "staging" / "ucdp.csv"
 def make_rows():
     countries, shocks = load_registries()
     as_of, pub, ing = now_dates()
-    hz = shocks[shocks["hazard_code"].isin(["ACE", "ACO", "ACC"])]
+    hz = shocks[shocks["hazard_code"].isin(["ACE", "ACO"])]
     rows = []
     for _, c in countries.sample(min(2, len(countries)), random_state=31).iterrows():
         for _, h in hz.head(1).iterrows():

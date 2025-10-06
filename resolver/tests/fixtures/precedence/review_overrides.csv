@@ -1,0 +1,2 @@
+country_iso3,hazard_type,month,metric,override_value,note
+ETH,drought,2025-03,pin_new,9800,"Manual review: harmonized to IPC 3.26 bulletin"

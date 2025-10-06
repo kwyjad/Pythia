@@ -59,6 +59,31 @@ def test_who_phe_header(tmp_path, monkeypatch):
     _assert_header(tmp_out)
 
 
+def test_wfp_mvam_header(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESOLVER_SKIP_WFP_MVAM", "1")
+    mod = importlib.import_module("resolver.ingestion.wfp_mvam_client")
+    tmp_out = Path(tmp_path) / "wfp_mvam.csv"
+    mod.OUT_PATH = tmp_out
+    mod.main()
+    _assert_header(tmp_out)
+
+
+def test_worldpop_header(tmp_path, monkeypatch):
+    from resolver.ingestion import worldpop_client
+
+    data_path = Path(tmp_path) / "population.csv"
+    staging_path = Path(tmp_path) / "worldpop.csv"
+
+    monkeypatch.setenv("RESOLVER_SKIP_WORLDPOP", "1")
+    monkeypatch.setattr(worldpop_client, "OUT_DATA", data_path)
+    monkeypatch.setattr(worldpop_client, "OUT_STAGING", staging_path)
+
+    worldpop_client.main()
+
+    data_df = pd.read_csv(data_path)
+    staging_df = pd.read_csv(staging_path)
+    assert list(data_df.columns) == worldpop_client.CANONICAL_COLUMNS
+    assert list(staging_df.columns) == worldpop_client.CANONICAL_COLUMNS
 def test_dtm_header_written(tmp_path, monkeypatch):
     monkeypatch.setenv("RESOLVER_SKIP_DTM", "1")
     from resolver.ingestion import dtm_client
@@ -72,6 +97,18 @@ def test_dtm_header_written(tmp_path, monkeypatch):
     assert row == dtm_client.CANONICAL_HEADERS
 
 
+def test_acled_header_written(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESOLVER_SKIP_ACLED", "1")
+    from resolver.ingestion import acled_client
+
+    acled_client.OUT_PATH = Path(tmp_path) / "acled.csv"
+    assert acled_client.main() is False
+
+    with open(acled_client.OUT_PATH, newline="", encoding="utf-8") as f:
+        row = next(csv.reader(f))
+    assert row == acled_client.CANONICAL_HEADERS
+
+
 def test_emdat_header_written(tmp_path, monkeypatch):
     monkeypatch.setenv("RESOLVER_SKIP_EMDAT", "1")
     from resolver.ingestion import emdat_client
@@ -83,6 +120,19 @@ def test_emdat_header_written(tmp_path, monkeypatch):
     with open(emdat_client.OUT_PATH, newline="", encoding="utf-8") as f:
         row = next(csv.reader(f))
     assert row == emdat_client.CANONICAL_HEADERS
+
+
+def test_gdacs_header_written(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESOLVER_SKIP_GDACS", "1")
+    from resolver.ingestion import gdacs_client
+
+    gdacs_client.OUT_DIR = Path(tmp_path)
+    gdacs_client.OUT_PATH = Path(tmp_path) / "gdacs.csv"
+    assert gdacs_client.main() is False
+
+    with open(gdacs_client.OUT_PATH, newline="", encoding="utf-8") as f:
+        row = next(csv.reader(f))
+    assert row == gdacs_client.CANONICAL_HEADERS
 
 
 def test_ipc_header_written(tmp_path, monkeypatch):

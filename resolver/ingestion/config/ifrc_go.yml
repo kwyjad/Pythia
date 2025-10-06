@@ -1,3 +1,4 @@
+enable: false
 base_url: "https://goadmin.ifrc.org/api/v2/"
 user_agent: "spagbot-resolver/1.0 (github.com/kwyjad/Spagbot_metac-bot)"
 window_days: 45
@@ -24,7 +25,7 @@ hazard_keywords:
   HW: ["heat wave", "heatwave", "extreme heat", "high temperatures"]
   ACO: ["outbreak of fighting", "hostilities broke out"]
   ACE: ["escalation", "intensified clashes", "surge in fighting", "offensive launched"]
-  ACC: ["ceasefire", "cessation of hostilities", "peace agreement"]
+  ACC: ["ceasefire", "halt to hostilities", "peace agreement"]
   DI: ["influx", "cross-border displacement", "refugee influx"]
   CU: ["protest", "civil unrest", "demonstration", "riots"]
   EC: ["economic crisis", "inflation", "price shock", "currency depreciation"]
