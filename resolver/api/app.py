@@ -19,14 +19,16 @@ from resolver.cli.resolver_cli import (
     current_ym_utc,
     load_registries,
     load_series_for_month,
+    normalize_backend,
     resolve_country,
     resolve_hazard,
     select_row,
+    VALID_BACKENDS,
     ym_from_cutoff,
 )
 
 app = FastAPI(title="Resolver API", version="0.1.0")
-DEFAULT_BACKEND = os.environ.get("RESOLVER_API_BACKEND", "auto")
+DEFAULT_BACKEND = normalize_backend(os.environ.get("RESOLVER_API_BACKEND"), default="files")
 
 # Allow localhost by default (tweak as you like)
 app.add_middleware(
@@ -73,7 +75,16 @@ def resolve(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     current_month = ym == current_ym_utc()
-    backend_choice = (backend or DEFAULT_BACKEND).lower()
+    if backend is not None:
+        backend_clean = backend.strip().lower()
+        if backend_clean not in VALID_BACKENDS:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid backend; choose from files, db, or auto.",
+            )
+        backend_choice = backend_clean
+    else:
+        backend_choice = DEFAULT_BACKEND
 
     df, source_dataset, series_used = load_series_for_month(
         ym, current_month, series, backend=backend_choice

@@ -17,6 +17,16 @@
 > `duckdb:///resolver/db/resolver.duckdb`) to mirror resolver exports and
 > snapshots into the tables documented below. When unset, the tooling remains
 > file-backed only.
+>
+> **Writer behaviour:** the DuckDB loader aliases the staging column
+> `series_semantics_out` to the canonical `series_semantics` field, coerces
+> missing values to the empty string, and ignores unexpected debug columns
+> during upserts so schema drift does not interrupt exports. The canonical
+> semantics for both CSV and DuckDB outputs come from
+> [`resolver.common.series_semantics.compute_series_semantics`](resolver/common/series_semantics.py),
+> which reads [`resolver/config/series_semantics.yml`](resolver/config/series_semantics.yml)
+> to normalise configured metrics (currently `in_need` → `stock`) while leaving
+> all other non-empty values untouched.
 
 ## db.facts_deltas
 
@@ -69,7 +79,7 @@ Canonical facts written to DuckDB alongside CSV exports.
 | delta_negative_clamped | integer | no |  |  |
 | first_observation | integer | no |  |  |
 | rebase_flag | integer | no |  |  |
-| series_semantics | enum | no | stock, new |  |
+| series_semantics | enum | no | new (default), stock | Deltas remain `new` unless staged aliases override them. |
 | source_url | string | no |  |  |
 | value_new | number | no |  |  |
 | value_stock | number | no |  |  |
@@ -98,7 +108,7 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
-| series_semantics | enum | no | stock, new |  |
+| series_semantics | enum | no | "" (default), stock, incident | Derived via the series semantics helper; blank when no configured mapping applies. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
 

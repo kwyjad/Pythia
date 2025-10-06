@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("duckdb")
 
 from resolver.db import duckdb_io
+from resolver.common import compute_series_semantics
 
 
 def _expected_resolved(df: pd.DataFrame) -> pd.DataFrame:
@@ -22,9 +23,12 @@ def _expected_resolved(df: pd.DataFrame) -> pd.DataFrame:
         fallback = pd.to_datetime(expected.loc[mask, "publication_date"], errors="coerce").dt.strftime("%Y-%m")
         expected.loc[mask, "ym"] = fallback.fillna("")
     expected["value"] = pd.to_numeric(expected.get("value", 0), errors="coerce")
-    series = expected.get("series_semantics", "stock")
-    series = pd.Series(series).fillna("").astype(str)
-    expected["series_semantics"] = series.mask(series.str.strip() == "", "stock")
+    expected["series_semantics"] = expected.apply(
+        lambda row: compute_series_semantics(
+            metric=row.get("metric"), existing=row.get("series_semantics")
+        ),
+        axis=1,
+    )
     subset = expected[
         [
             "event_id",
