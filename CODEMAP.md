@@ -43,7 +43,7 @@ flowchart LR
 | `python resolver/tools/write_repo_state.py --mode daily --id 2025-09-30` | Copy exports/review outputs into `resolver/state/daily/...` for archival. | `--retain-days` controls pruning; stages deletions via Git. |
 | `python resolver/tools/check_sizes.py` | Warn/fail when exports or snapshots exceed configured size limits. | Thresholds via `RESOLVER_LIMIT_PARQUET_MB`, `RESOLVER_LIMIT_CSV_MB`, `RESOLVER_LIMIT_REPO_MB`. |
 | `python resolver/tools/generate_schemas_md.py --in resolver/tools/schema.yml --out SCHEMAS.md --sort` | Regenerate schema reference documentation. | Requires `pyyaml`; fails if schema definitions are missing. |
-| `python resolver/cli/resolver_cli.py --country "Philippines" --hazard "Tropical Cyclone" --cutoff 2025-09-30 --backend db` | Query the latest resolved fact (defaults to monthly "new" series). | Uses DuckDB when `RESOLVER_DB_URL`/`--backend db` is set; otherwise falls back to snapshots/exports. Optional `--series stock` for totals. |
+| `python resolver/cli/resolver_cli.py --country "Philippines" --hazard "Tropical Cyclone" --cutoff 2025-09-30 --backend db` | Query the latest resolved fact (defaults to monthly "new" series). | Reads file exports by default; set `--backend db` or `RESOLVER_CLI_BACKEND=db` to use DuckDB. Optional `--series stock` for totals. |
 | `uvicorn resolver.api.app:app --reload` | Serve the Resolver API locally. | Same data dependencies as the CLI; respects `RESOLVER_DEBUG` for verbose logs. |
 | `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py` | Offline smoke test covering stubbed connectors and schema checks. | Install dependencies from `resolver/requirements*.txt`; other targeted tests live under `resolver/tests/`. |
 
@@ -66,7 +66,7 @@ Schema authority lives in [`resolver/tools/schema.yml`](resolver/tools/schema.ym
 - **Reference & Review:** `resolver/reference/` and `resolver/review/` keep lightweight CSVs and overrides that *are* tracked to preserve auditability.
 
 ## DB Integration Toggle
-Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_resolved` (and `facts_deltas` when available), `freeze_snapshot.py` records resolved totals, deltas, manifests, and snapshot metadata transactionally, and the CLI/API prefer the database (`--backend db` / `backend=db`). Leave the variable unset to remain file-backed only.
+Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_resolved` (and `facts_deltas` when available) and `freeze_snapshot.py` records resolved totals, deltas, manifests, and snapshot metadata transactionally. The CLI/API remain file-backed by default; opt into DuckDB with `--backend db`, `RESOLVER_CLI_BACKEND=db`, or `RESOLVER_API_BACKEND=db` (use `auto` to prefer DB when available).
 
 ## Runbooks
 ### First-time setup
