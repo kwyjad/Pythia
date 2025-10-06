@@ -4,7 +4,9 @@ version = "0.1.0"
 description = ""
 authors = ["Vasile Popescu <elisescu@elisescu.com>"]
 readme = "README.md"
-package-mode = false
+packages = [
+    { include = "resolver" }
+]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -15,10 +17,17 @@ numpy = "^2.3.0"
 openai = "^1.57.4"
 python-dotenv = "^1.0.1"
 forecasting-tools = "^0.2.54"
+duckdb = {version = ">=0.10,<1.0", optional = true}
+httpx = {version = ">=0.27,<1.0", optional = true}
+pytest = {version = ">=8.2,<9.0", optional = true}
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.5"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=1.6.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.extras]
+db = ["duckdb"]
+test = ["httpx", "pytest"]
