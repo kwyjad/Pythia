@@ -11,6 +11,40 @@ pytest.importorskip("duckdb")
 from resolver.db import duckdb_io
 
 
+def _expected_resolved(df: pd.DataFrame) -> pd.DataFrame:
+    expected = df.copy()
+    expected["ym"] = ""
+    if "as_of_date" in expected.columns:
+        derived = pd.to_datetime(expected["as_of_date"], errors="coerce").dt.strftime("%Y-%m")
+        expected.loc[expected["ym"].astype(str).str.len() == 0, "ym"] = derived.fillna("")
+    if "publication_date" in expected.columns:
+        mask = expected["ym"].astype(str).str.len() == 0
+        fallback = pd.to_datetime(expected.loc[mask, "publication_date"], errors="coerce").dt.strftime("%Y-%m")
+        expected.loc[mask, "ym"] = fallback.fillna("")
+    expected["value"] = pd.to_numeric(expected.get("value", 0), errors="coerce")
+    series = expected.get("series_semantics", "stock")
+    series = pd.Series(series).fillna("").astype(str)
+    expected["series_semantics"] = series.mask(series.str.strip() == "", "stock")
+    subset = expected[
+        [
+            "event_id",
+            "iso3",
+            "hazard_code",
+            "metric",
+            "value",
+            "unit",
+            "as_of_date",
+            "publication_date",
+            "series_semantics",
+            "ym",
+        ]
+    ].copy()
+    subset["value"] = pd.to_numeric(subset["value"], errors="coerce")
+    subset["series_semantics"] = subset["series_semantics"].fillna("").astype(str)
+    subset["ym"] = subset["ym"].fillna("").astype(str)
+    return subset
+
+
 @pytest.mark.usefixtures("monkeypatch")
 def test_exporter_dual_writes_to_duckdb(tmp_path, monkeypatch):
     staging = tmp_path / "staging.csv"
@@ -96,13 +130,77 @@ def test_exporter_dual_writes_to_duckdb(tmp_path, monkeypatch):
     conn = duckdb_io.get_db(f"duckdb:///{db_path}")
     duckdb_io.init_schema(conn)
     db_rows = conn.execute(
-        "SELECT event_id, iso3, hazard_code, metric, value, unit, as_of_date, publication_date FROM facts_raw ORDER BY event_id"
+        "SELECT event_id, iso3, hazard_code, metric, value, unit, as_of_date, publication_date, series_semantics, ym "
+        "FROM facts_resolved ORDER BY event_id"
     ).fetch_df()
 
-    assert len(db_rows) == len(exported)
+    expected_resolved = _expected_resolved(exported)
+    assert len(db_rows) == len(expected_resolved)
     joined = db_rows.merge(
-        exported,
-        on=["event_id", "iso3", "hazard_code", "metric", "unit", "as_of_date", "publication_date", "value"],
+        expected_resolved,
+        on=[
+            "event_id",
+            "iso3",
+            "hazard_code",
+            "metric",
+            "unit",
+            "as_of_date",
+            "publication_date",
+            "value",
+            "series_semantics",
+            "ym",
+        ],
         how="inner",
     )
-    assert len(joined) == len(exported), "DuckDB facts_raw rows diverge from CSV output"
+    assert len(joined) == len(expected_resolved), "DuckDB facts_resolved rows diverge from CSV output"
+
+    conn.close()
+
+    freeze = __import__("resolver.tools.freeze_snapshot", fromlist=["main"])
+    monkeypatch.setattr(freeze, "run_validator", lambda _path: None)
+    monkeypatch.setattr(freeze, "SNAPSHOTS", tmp_path / "snapshots")
+    argv = [
+        "freeze_snapshot",
+        "--facts",
+        str(csv_path),
+        "--month",
+        "2024-01",
+        "--overwrite",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    freeze.main()
+
+    snapshot_dir = tmp_path / "snapshots" / "2024-01"
+    facts_parquet = snapshot_dir / "facts.parquet"
+    assert facts_parquet.exists(), "Snapshot facts parquet missing"
+    snap_df = pd.read_parquet(facts_parquet)
+    snap_expected = _expected_resolved(snap_df)
+
+    conn = duckdb_io.get_db(f"duckdb:///{db_path}")
+    duckdb_io.init_schema(conn)
+    db_snapshot = conn.execute(
+        "SELECT event_id, iso3, hazard_code, metric, value, unit, as_of_date, publication_date, series_semantics, ym "
+        "FROM facts_resolved WHERE ym = '2024-01' ORDER BY event_id"
+    ).fetch_df()
+    merged_snapshot = db_snapshot.merge(
+        snap_expected,
+        on=[
+            "event_id",
+            "iso3",
+            "hazard_code",
+            "metric",
+            "unit",
+            "as_of_date",
+            "publication_date",
+            "value",
+            "series_semantics",
+            "ym",
+        ],
+        how="inner",
+    )
+    assert len(merged_snapshot) == len(snap_expected)
+
+    snapshots_db = conn.execute("SELECT ym, git_sha, created_at FROM snapshots").fetch_df()
+    assert not snapshots_db.empty
+    assert (snapshots_db["ym"] == "2024-01").any()
+    conn.close()

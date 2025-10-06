@@ -26,7 +26,7 @@ After exporting:
 
 import argparse, os, sys, json, datetime as dt
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 try:
     import pandas as pd
@@ -166,7 +166,162 @@ def _apply_mapping(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
 
     return out
 
-def _maybe_write_to_db(facts: "pd.DataFrame") -> None:
+RESOLVED_DB_COLUMNS = [
+    "ym",
+    "iso3",
+    "hazard_code",
+    "hazard_label",
+    "hazard_class",
+    "metric",
+    "series_semantics",
+    "value",
+    "unit",
+    "as_of_date",
+    "publication_date",
+    "publisher",
+    "source_type",
+    "source_url",
+    "doc_title",
+    "definition_text",
+    "precedence_tier",
+    "event_id",
+    "proxy_for",
+    "confidence",
+]
+
+RESOLVED_DB_NUMERIC = {"value"}
+RESOLVED_DB_DEFAULTS = {"series_semantics": "stock"}
+
+DELTAS_DB_COLUMNS = [
+    "ym",
+    "iso3",
+    "hazard_code",
+    "metric",
+    "value_new",
+    "value_stock",
+    "series_semantics",
+    "rebase_flag",
+    "first_observation",
+    "delta_negative_clamped",
+    "as_of",
+    "source_name",
+    "source_url",
+    "definition_text",
+]
+
+DELTAS_DB_NUMERIC = {
+    "value_new",
+    "value_stock",
+    "rebase_flag",
+    "first_observation",
+    "delta_negative_clamped",
+}
+DELTAS_DB_DEFAULTS = {"series_semantics": "new"}
+
+
+def _to_month(series: "pd.Series") -> "pd.Series":
+    dates = pd.to_datetime(series, errors="coerce")
+    formatted = dates.dt.strftime("%Y-%m")
+    return formatted.fillna("")
+
+
+def _prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if df is None or df.empty:
+        return None
+
+    frame = df.copy()
+
+    if "ym" not in frame.columns:
+        frame["ym"] = ""
+    frame["ym"] = frame["ym"].fillna("").astype(str)
+    mask = frame["ym"].str.len() == 0
+    if mask.any() and "as_of_date" in frame.columns:
+        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "as_of_date"])
+        mask = frame["ym"].str.len() == 0
+    if mask.any() and "publication_date" in frame.columns:
+        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "publication_date"])
+
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = "stock"
+    semantics = frame["series_semantics"].fillna("").astype(str)
+    frame["series_semantics"] = semantics.mask(semantics.str.strip() == "", "stock")
+
+    if "value" in frame.columns:
+        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+
+    prepared = pd.DataFrame(index=frame.index)
+    for column in RESOLVED_DB_COLUMNS:
+        if column in frame.columns:
+            prepared[column] = frame[column]
+        else:
+            default = RESOLVED_DB_DEFAULTS.get(column, "")
+            if column in RESOLVED_DB_NUMERIC:
+                prepared[column] = pd.Series([float("nan")] * len(frame), dtype="float64")
+            else:
+                prepared[column] = default
+
+    for column in RESOLVED_DB_COLUMNS:
+        if column in RESOLVED_DB_NUMERIC:
+            prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+        else:
+            prepared[column] = prepared[column].fillna("").astype(str)
+
+    return prepared
+
+
+def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if df is None or df.empty:
+        return None
+
+    frame = df.copy()
+
+    if "series_semantics" not in frame.columns and "series_semantics_out" in frame.columns:
+        frame = frame.rename(columns={"series_semantics_out": "series_semantics"})
+
+    if "ym" not in frame.columns:
+        frame["ym"] = ""
+    frame["ym"] = frame["ym"].fillna("").astype(str)
+    mask = frame["ym"].str.len() == 0
+    if mask.any():
+        date_sources: List[str] = []
+        if "as_of" in frame.columns:
+            date_sources.append("as_of")
+        for column in date_sources:
+            frame.loc[mask, "ym"] = _to_month(frame.loc[mask, column])
+            mask = frame["ym"].str.len() == 0
+            if not mask.any():
+                break
+
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = "new"
+    semantics = frame["series_semantics"].fillna("").astype(str)
+    frame["series_semantics"] = semantics.mask(semantics.str.strip() == "", "new")
+
+    prepared = pd.DataFrame(index=frame.index)
+    for column in DELTAS_DB_COLUMNS:
+        if column in frame.columns:
+            prepared[column] = frame[column]
+        else:
+            default = DELTAS_DB_DEFAULTS.get(column, "")
+            if column in DELTAS_DB_NUMERIC:
+                prepared[column] = pd.Series([float("nan")] * len(frame), dtype="float64")
+            else:
+                prepared[column] = default
+
+    for column in DELTAS_DB_COLUMNS:
+        if column in DELTAS_DB_NUMERIC:
+            prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+        else:
+            prepared[column] = prepared[column].fillna("").astype(str)
+
+    return prepared
+
+
+def _maybe_write_to_db(
+    *,
+    facts_resolved: "Optional[pd.DataFrame]" = None,
+    facts_deltas: "Optional[pd.DataFrame]" = None,
+) -> None:
     """Write exported facts into DuckDB when feature flag is set."""
 
     if duckdb_io is None:
@@ -174,27 +329,38 @@ def _maybe_write_to_db(facts: "pd.DataFrame") -> None:
     db_url = os.environ.get("RESOLVER_DB_URL")
     if not db_url:
         return
+
+    resolved_prepared = _prepare_resolved_for_db(facts_resolved)
+    deltas_prepared = _prepare_deltas_for_db(facts_deltas)
+    if resolved_prepared is None and deltas_prepared is None:
+        return
+
+    conn = None
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
-        frame = facts.copy()
-        if "series_semantics" not in frame.columns:
-            frame["series_semantics"] = "stock"
-        duckdb_io.upsert_dataframe(
-            conn,
-            "facts_raw",
-            frame,
-            keys=[
-                "event_id",
-                "iso3",
-                "hazard_code",
-                "metric",
-                "as_of_date",
-                "publication_date",
-            ],
-        )
+        if resolved_prepared is not None and not resolved_prepared.empty:
+            duckdb_io.upsert_dataframe(
+                conn,
+                "facts_resolved",
+                resolved_prepared,
+                keys=["ym", "iso3", "hazard_code", "metric", "series_semantics"],
+            )
+        if deltas_prepared is not None and not deltas_prepared.empty:
+            duckdb_io.upsert_dataframe(
+                conn,
+                "facts_deltas",
+                deltas_prepared,
+                keys=["ym", "iso3", "hazard_code", "metric"],
+            )
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
 
 
 def main():
@@ -237,7 +403,7 @@ def main():
     except Exception as e:
         print(f"Warning: could not write Parquet ({e}). CSV written.", file=sys.stderr)
 
-    _maybe_write_to_db(facts)
+    _maybe_write_to_db(facts_resolved=facts)
 
     print(f"✅ Exported {len(facts)} rows")
     if pq_path.exists():
