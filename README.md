@@ -199,6 +199,13 @@ You can also persist the proxy settings via pip configuration files, e.g.
 proxy = http://user:pass@proxy.host:port
 ```
 
+#### Run DB parity test in a Dev Container
+
+- Open the repository in VS Code and choose **Reopen in Container** (requires the Dev Containers extension).
+- The container build runs `make dev-setup`, which installs DuckDB using the vendored wheels in [`tools/offline_wheels/`](tools/offline_wheels/README.md) when offline and falls back to an online install if the cache is missing.
+- Once the container is ready, run `make test-db` to execute the parity test.
+- Expected outcome: the test runs (not skipped). If it still skips, run `python -c "import duckdb"` inside the container to confirm the installation.
+
 What Forecaster Does (Pipeline)
 
 Select question(s)
