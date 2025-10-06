@@ -60,6 +60,10 @@ Bayesian Monte Carlo is the conductor, blending them into harmony.
 
 And the calibration loop is like rehearsals, helping everyone play in tune with reality over time.
 
+## Architecture & How It Works
+
+See [CODEMAP.md](CODEMAP.md) for resolver architecture, data flow diagrams, entrypoints, and runbooks.
+
 Quick Start
 
 Local run (one question / test mode)
