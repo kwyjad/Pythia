@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 import datetime as dt
+import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -23,6 +24,16 @@ SCHEMA_PATH = ROOT / "db" / "schema.sql"
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _normalise_db_url(path_or_url: str | None) -> str:
@@ -78,19 +89,81 @@ def upsert_dataframe(
         return 0
 
     frame = df.copy()
-    for column in frame.columns:
-        if frame[column].dtype == "object":
-            frame[column] = frame[column].astype(str)
+
+    if "series_semantics_out" in frame.columns:
+        semantics_out = frame["series_semantics_out"].where(
+            frame["series_semantics_out"].notna(), ""
+        ).astype(str)
+        if "series_semantics" in frame.columns:
+            semantics_current_raw = frame["series_semantics"]
+            semantics_current = semantics_current_raw.astype(str)
+            prefer_out = semantics_current_raw.isna() | semantics_current.str.strip().eq("")
+            frame.loc[prefer_out, "series_semantics"] = semantics_out.loc[prefer_out]
+        else:
+            frame["series_semantics"] = semantics_out
+        frame = frame.drop(columns=["series_semantics_out"])
+
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = ""
+    else:
+        semantics_series = frame["series_semantics"].where(
+            frame["series_semantics"].notna(), ""
+        )
+        semantics_series = semantics_series.astype(str).str.strip()
+        semantics_series = semantics_series.mask(
+            semantics_series.str.lower().isin({"none", "nan"}), ""
+        )
+        frame["series_semantics"] = semantics_series
+
+    table_info = conn.execute(f"PRAGMA table_info({_quote_literal(table)})").fetchall()
+    if not table_info:
+        raise ValueError(f"Table '{table}' does not exist in DuckDB database")
+    table_columns = [row[1] for row in table_info]
+
+    insert_columns = [col for col in frame.columns if col in table_columns]
+    dropped = [col for col in frame.columns if col not in table_columns]
+    if dropped:
+        LOGGER.debug("Dropping columns not present in %s: %s", table, ", ".join(dropped))
+    if not insert_columns:
+        raise ValueError(f"No matching columns to insert into '{table}'")
+
+    frame = frame.loc[:, insert_columns].copy()
+
+    object_columns = frame.select_dtypes(include=["object"]).columns
+    for column in object_columns:
+        frame[column] = frame[column].astype(str)
+
+    if "series_semantics" in frame.columns:
+        semantics = frame["series_semantics"].astype(str)
+        normalised = semantics.str.strip().str.lower()
+        frame.loc[normalised.str.startswith("new"), "series_semantics"] = "new"
+        frame.loc[normalised.str.startswith("stock"), "series_semantics"] = "stock"
+
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
     try:
         if keys:
+            missing_keys = [k for k in keys if k not in insert_columns]
+            if missing_keys:
+                raise KeyError(
+                    f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+                )
             comparisons = " AND ".join(
-                f"coalesce(t.{k}, '') = coalesce(s.{k}, '')" for k in keys
+                f"coalesce(t.{_quote_identifier(k)}, '') = coalesce(s.{_quote_identifier(k)}, '')"
+                for k in keys
             )
-            delete_sql = f"DELETE FROM {table} t USING {temp_name} s WHERE {comparisons}"
+            table_ident = _quote_identifier(table)
+            temp_ident = _quote_identifier(temp_name)
+            delete_sql = (
+                f"DELETE FROM {table_ident} AS t USING {temp_ident} AS s WHERE {comparisons}"
+            )
             conn.execute(delete_sql)
-        insert_sql = f"INSERT INTO {table} BY NAME SELECT * FROM {temp_name}"
+        cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
+        table_ident = _quote_identifier(table)
+        temp_ident = _quote_identifier(temp_name)
+        insert_sql = (
+            f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
+        )
         conn.execute(insert_sql)
     finally:
         conn.unregister(temp_name)
