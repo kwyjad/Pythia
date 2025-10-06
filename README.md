@@ -139,6 +139,93 @@ and a corresponding `snapshots` row. Leave `RESOLVER_DB_URL` unset to continue
 operating in file-only mode; all tooling falls back automatically when the
 variable is absent.
 
+The exporter writes the very same dataframe that is saved to `facts.csv` into
+DuckDB to guarantee row-for-row parity. During these writes the DuckDB helper
+aliases staging-era columns such as `series_semantics_out` to the canonical
+`series_semantics` field (and lets the alias win whenever the canonical column
+is blank) while silently dropping any unexpected debug columns so upserts stay
+resilient when schemas drift.
+
+Series semantics are normalised by
+[`resolver.common.series_semantics.compute_series_semantics`](resolver/common/series_semantics.py),
+which draws from [`resolver/config/series_semantics.yml`](resolver/config/series_semantics.yml).
+Blank values stay blank, while metrics listed under `stock_metrics` (currently
+`in_need`) resolve to `"stock"`. Any pre-existing non-empty values such as
+`"incident"` remain untouched so CSV and DuckDB outputs agree on joins.
+
+### DB backend tests
+
+You can exercise the DuckDB-backed contract test either completely offline or
+through a corporate proxy.
+
+#### Offline workflow (recommended for blocked networks)
+
+```bash
+# One-time on a machine with internet access (skip if wheels already tracked)
+python scripts/download_db_wheels.py
+git add tools/offline_wheels/*.whl
+git commit -m "chore: refresh offline duckdb wheels"
+
+# On the offline/proxied machine
+scripts/install_db_extra_offline.sh
+export RESOLVER_DB_URL='duckdb:///resolver.duckdb'
+export RESOLVER_API_BACKEND='db'
+pytest -q resolver/tests/test_db_query_contract.py
+```
+
+On Windows PowerShell use the `.ps1` installer and `set`-style environment
+variables:
+
+```powershell
+# Refresh wheels on a machine with internet (skip if wheels already tracked)
+python scripts/download_db_wheels.py
+git add tools/offline_wheels/*.whl
+git commit -m "chore: refresh offline duckdb wheels"
+
+# Install and run tests offline
+scripts/install_db_extra_offline.ps1
+$env:RESOLVER_DB_URL = 'duckdb:///resolver.duckdb'
+$env:RESOLVER_API_BACKEND = 'db'
+pytest -q resolver/tests/test_db_query_contract.py
+```
+
+#### Proxy-based install (if allowed)
+
+Configure proxy variables before calling pip:
+
+```bash
+export HTTPS_PROXY="http://user:pass@proxy.host:port"
+export HTTP_PROXY="http://user:pass@proxy.host:port"
+python -m pip install duckdb pytest
+```
+
+```powershell
+$env:HTTPS_PROXY = 'http://user:pass@proxy.host:port'
+$env:HTTP_PROXY = 'http://user:pass@proxy.host:port'
+python -m pip install duckdb pytest
+```
+
+You can also persist the proxy settings via pip configuration files, e.g.
+`~/.pip/pip.conf` on Unix-like systems or `%APPDATA%\pip\pip.ini` on Windows:
+
+```
+[global]
+proxy = http://user:pass@proxy.host:port
+```
+
+#### Run DB parity test in a Dev Container
+
+- Open the repository in VS Code and choose **Reopen in Container** (requires the Dev Containers extension).
+- During container creation, `.devcontainer/postCreate.sh` runs and installs DuckDB with the same interpreter that VS Code uses. It tries the vendored wheels in [`tools/offline_wheels/`](tools/offline_wheels/README.md) first and falls back to the online extras if needed. The setup logs should print `duckdb installed: <version>`.
+- Once the container is ready, run `make test-db` to execute the parity test.
+- Expected outcome: the test runs (not skipped). If it still skips, open a terminal and run:
+  ```
+  make which-python
+  python -c "import sys; print(sys.executable)"
+  python -c "import duckdb; print(duckdb.__version__)"
+  ```
+  Ensure the interpreter path matches `/usr/local/bin/python`. If it does not, update `PY_BIN` in `.devcontainer/devcontainer.json`, rebuild the container, and reopen it.
+
 What Forecaster Does (Pipeline)
 
 Select question(s)

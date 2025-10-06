@@ -39,6 +39,8 @@ try:  # Optional dependency for DB dual-write
 except Exception:  # pragma: no cover - allow exporter without duckdb installed
     duckdb_io = None
 
+from resolver.common import compute_series_semantics
+
 try:
     import yaml
 except ImportError:
@@ -166,48 +168,7 @@ def _apply_mapping(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
 
     return out
 
-RESOLVED_DB_COLUMNS = [
-    "ym",
-    "iso3",
-    "hazard_code",
-    "hazard_label",
-    "hazard_class",
-    "metric",
-    "series_semantics",
-    "value",
-    "unit",
-    "as_of_date",
-    "publication_date",
-    "publisher",
-    "source_type",
-    "source_url",
-    "doc_title",
-    "definition_text",
-    "precedence_tier",
-    "event_id",
-    "proxy_for",
-    "confidence",
-]
-
 RESOLVED_DB_NUMERIC = {"value"}
-RESOLVED_DB_DEFAULTS = {"series_semantics": "stock"}
-
-DELTAS_DB_COLUMNS = [
-    "ym",
-    "iso3",
-    "hazard_code",
-    "metric",
-    "value_new",
-    "value_stock",
-    "series_semantics",
-    "rebase_flag",
-    "first_observation",
-    "delta_negative_clamped",
-    "as_of",
-    "source_name",
-    "source_url",
-    "definition_text",
-]
 
 DELTAS_DB_NUMERIC = {
     "value_new",
@@ -216,13 +177,24 @@ DELTAS_DB_NUMERIC = {
     "first_observation",
     "delta_negative_clamped",
 }
+
 DELTAS_DB_DEFAULTS = {"series_semantics": "new"}
-
-
 def _to_month(series: "pd.Series") -> "pd.Series":
     dates = pd.to_datetime(series, errors="coerce")
     formatted = dates.dt.strftime("%Y-%m")
     return formatted.fillna("")
+
+
+def _apply_series_semantics(frame: "pd.DataFrame") -> "pd.DataFrame":
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = ""
+    frame["series_semantics"] = frame.apply(
+        lambda row: compute_series_semantics(
+            metric=row.get("metric"), existing=row.get("series_semantics")
+        ),
+        axis=1,
+    )
+    return frame
 
 
 def _prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
@@ -241,32 +213,12 @@ def _prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None"
     if mask.any() and "publication_date" in frame.columns:
         frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "publication_date"])
 
-    if "series_semantics" not in frame.columns:
-        frame["series_semantics"] = "stock"
-    semantics = frame["series_semantics"].fillna("").astype(str)
-    frame["series_semantics"] = semantics.mask(semantics.str.strip() == "", "stock")
+    frame = _apply_series_semantics(frame)
 
     if "value" in frame.columns:
         frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
 
-    prepared = pd.DataFrame(index=frame.index)
-    for column in RESOLVED_DB_COLUMNS:
-        if column in frame.columns:
-            prepared[column] = frame[column]
-        else:
-            default = RESOLVED_DB_DEFAULTS.get(column, "")
-            if column in RESOLVED_DB_NUMERIC:
-                prepared[column] = pd.Series([float("nan")] * len(frame), dtype="float64")
-            else:
-                prepared[column] = default
-
-    for column in RESOLVED_DB_COLUMNS:
-        if column in RESOLVED_DB_NUMERIC:
-            prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
-        else:
-            prepared[column] = prepared[column].fillna("").astype(str)
-
-    return prepared
+    return frame
 
 
 def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
@@ -275,46 +227,39 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
 
     frame = df.copy()
 
-    if "series_semantics" not in frame.columns and "series_semantics_out" in frame.columns:
-        frame = frame.rename(columns={"series_semantics_out": "series_semantics"})
+    if "series_semantics_out" in frame.columns:
+        semantics_out = frame["series_semantics_out"].where(
+            frame["series_semantics_out"].notna(), ""
+        ).astype(str)
+        if "series_semantics" in frame.columns:
+            semantics_current_raw = frame["series_semantics"]
+            semantics_current = semantics_current_raw.astype(str)
+            prefer_out = semantics_current_raw.isna() | semantics_current.str.strip().eq("")
+            frame.loc[prefer_out, "series_semantics"] = semantics_out.loc[prefer_out]
+        else:
+            frame["series_semantics"] = semantics_out
+        frame = frame.drop(columns=["series_semantics_out"])
 
     if "ym" not in frame.columns:
         frame["ym"] = ""
     frame["ym"] = frame["ym"].fillna("").astype(str)
     mask = frame["ym"].str.len() == 0
-    if mask.any():
-        date_sources: List[str] = []
-        if "as_of" in frame.columns:
-            date_sources.append("as_of")
-        for column in date_sources:
-            frame.loc[mask, "ym"] = _to_month(frame.loc[mask, column])
-            mask = frame["ym"].str.len() == 0
-            if not mask.any():
-                break
+    if mask.any() and "as_of" in frame.columns:
+        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "as_of"])
 
     if "series_semantics" not in frame.columns:
-        frame["series_semantics"] = "new"
+        frame["series_semantics"] = DELTAS_DB_DEFAULTS["series_semantics"]
     semantics = frame["series_semantics"].fillna("").astype(str)
-    frame["series_semantics"] = semantics.mask(semantics.str.strip() == "", "new")
+    frame["series_semantics"] = semantics.mask(
+        semantics.str.strip() == "",
+        DELTAS_DB_DEFAULTS["series_semantics"],
+    )
 
-    prepared = pd.DataFrame(index=frame.index)
-    for column in DELTAS_DB_COLUMNS:
+    for column in DELTAS_DB_NUMERIC:
         if column in frame.columns:
-            prepared[column] = frame[column]
-        else:
-            default = DELTAS_DB_DEFAULTS.get(column, "")
-            if column in DELTAS_DB_NUMERIC:
-                prepared[column] = pd.Series([float("nan")] * len(frame), dtype="float64")
-            else:
-                prepared[column] = default
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
-    for column in DELTAS_DB_COLUMNS:
-        if column in DELTAS_DB_NUMERIC:
-            prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
-        else:
-            prepared[column] = prepared[column].fillna("").astype(str)
-
-    return prepared
+    return frame
 
 
 def _maybe_write_to_db(
@@ -392,6 +337,7 @@ def main():
     staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
     facts = _apply_mapping(staging, cfg)
+    facts = _apply_series_semantics(facts)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"

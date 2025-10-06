@@ -8,7 +8,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-pytest.importorskip("duckdb")
+pytest.importorskip(
+    "duckdb",
+    reason=(
+        "duckdb not installed. Install via extras: `pip install .[db]` or offline: "
+        "`scripts/install_db_extra_offline.(sh|ps1)`"
+    ),
+)
 pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
