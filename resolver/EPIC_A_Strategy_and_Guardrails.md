@@ -1,7 +1,7 @@
 # Epic A — Strategy & Guardrails
 
 ## Vision
-Establish a durable strategy for the **resolver** program so that Spagbot can
+Establish a durable strategy for the **resolver** program so that Forecaster can
 confidently update forecast records once questions settle on Metaculus. The epic
 covers the early groundwork: aligning on scope, defining the success metrics,
 setting access guardrails, and mapping the minimum architecture required for
@@ -31,7 +31,7 @@ later engineering sprints.
 - Program charter reviewed with core contributors (forecast ops, calibration,
   infra).
 - Shared glossary describing the lifecycle of a Metaculus question inside
-  Spagbot (from forecast to resolution and scoring).
+  Forecaster (from forecast to resolution and scoring).
 - Documented guardrails ratified in `resolver/` and referenced by future
   engineering epics.
 - Initial milestone plan and acceptance criteria ready for implementation
@@ -42,7 +42,7 @@ later engineering sprints.
   place without append-only backups. All destructive actions require dry-runs.
 - **Credential hygiene**: Tokens and API keys continue to load from environment
   variables or GitHub secrets. No hard-coded credentials or scopes beyond what
-  Spagbot already uses.
+  Forecaster already uses.
 - **Idempotent jobs**: Resolver workflows need to be rerunnable. Duplicate runs
   should not double-count scores or corrupt csv history.
 - **Observability**: Every automation must emit structured logs (JSON or CSV)
@@ -71,7 +71,7 @@ later engineering sprints.
      calibration refresh.
    - Identify required directories/files (e.g., `resolver/jobs/`,
      `resolver/contracts/`).
-   - Outline interfaces with existing modules (`spagbot/cli.py`, calibration
+   - Outline interfaces with existing modules (`forecaster/cli.py`, calibration
      scripts, dashboards).
 
 4. **Program Metrics & KPIs**
@@ -109,7 +109,7 @@ later engineering sprints.
 
 ## Open Questions
 - Should resolver operate as a standalone CLI entry point or integrate into
-  existing `run_spagbot.py` workflows?
+  existing `run_forecaster.py` workflows?
 - Do we need database storage (SQLite/Parquet) beyond CSV for efficient
   backfills?
 - What is the desired cadence (daily, hourly) for resolution syncing during

@@ -1067,7 +1067,7 @@ def make_rows() -> Tuple[List[List[str]], Dict[str, Any]]:
         {
             "User-Agent": cfg.get(
                 "user_agent",
-                "spagbot-resolver/1.0 (+https://github.com/kwyjad/Spagbot_metac-bot)",
+                "forecaster-resolver/1.0 (+https://github.com/kwyjad/Forecaster_metac-bot)",
             ),
             "Content-Type": "application/json",
             "Accept": cfg.get("accept_header", "application/json"),
@@ -1080,7 +1080,7 @@ def make_rows() -> Tuple[List[List[str]], Dict[str, Any]]:
     session.mount("http://", adapter)
 
     base_url = cfg["base_url"]
-    appname_cfg = cfg.get("appname", "spagbot-resolver")
+    appname_cfg = cfg.get("appname", "forecaster-resolver")
     appname = os.getenv("RELIEFWEB_APPNAME", appname_cfg)
     url = f"{base_url}?appname={appname}"
     payload, since = build_payload(cfg)

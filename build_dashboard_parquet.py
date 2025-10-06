@@ -9,7 +9,7 @@ This is safe to run locally anytime. It will create the Dashboard/data/
 folder if it doesn't exist.
 
 Notes for non-coders:
-- By default, Spagbot logs all forecasts to forecast_logs/forecasts.csv (see io_logs.py).
+- By default, Forecaster logs all forecasts to forecast_logs/forecasts.csv (see io_logs.py).
 - If you've changed FORECASTS_CSV_PATH in your environment, we'll honor that.
 """
 
