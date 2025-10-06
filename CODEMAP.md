@@ -27,7 +27,7 @@ flowchart LR
 - [`resolver/cli`](resolver/cli): Command-line interface that answers a single forecast resolution query by combining registries and exported datasets. [`resolver_cli.py`](resolver/cli/resolver_cli.py) encapsulates cutoff selection rules and handles deltas vs. stock series.
 - [`resolver/api`](resolver/api): FastAPI wrapper exposing `/health` and `/resolve` endpoints via [`app.py`](resolver/api/app.py). Designed to share the same loaders as the CLI.
 - [`resolver/tests`](resolver/tests): Pytest suites covering connectors, schema validation, precedence logic, deltas, and documentation generators such as [`test_generate_schemas_md.py`](resolver/tests/test_generate_schemas_md.py).
-- [`resolver/db`](resolver/db): DuckDB schema + helpers. [`duckdb_io.py`](resolver/db/duckdb_io.py) initialises the schema, exposes `get_db()`, and writes `facts_raw`, `facts_resolved`, `facts_deltas`, `snapshots`, and `manifests` tables.
+- [`resolver/db`](resolver/db): DuckDB schema + helpers. [`duckdb_io.py`](resolver/db/duckdb_io.py) initialises the schema, exposes `get_db()`, and writes `facts_resolved`, `facts_deltas`, `snapshots`, and `manifests` tables.
 - [`resolver/docs`](resolver/docs): Extended documentation (pipeline overview, policy, data dictionary, troubleshooting) that complements this codemap for deep dives.
 
 ## Entrypoints & Commands
@@ -66,7 +66,7 @@ Schema authority lives in [`resolver/tools/schema.yml`](resolver/tools/schema.ym
 - **Reference & Review:** `resolver/reference/` and `resolver/review/` keep lightweight CSVs and overrides that *are* tracked to preserve auditability.
 
 ## DB Integration Toggle
-Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_raw`, `freeze_snapshot.py` writes `facts_resolved`, `facts_deltas`, `snapshots`, and `manifests`, and the CLI/API prefer the database (`--backend db` / `backend=db`). Leave the variable unset to remain file-backed only.
+Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_resolved` (and `facts_deltas` when available), `freeze_snapshot.py` records resolved totals, deltas, manifests, and snapshot metadata transactionally, and the CLI/API prefer the database (`--backend db` / `backend=db`). Leave the variable unset to remain file-backed only.
 
 ## Runbooks
 ### First-time setup

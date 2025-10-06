@@ -198,27 +198,20 @@ def _maybe_write_db(
             manifests.append(
                 {"name": "deltas.csv", "path": str(deltas_out), "rows": len(deltas_df)}
             )
-        # facts_df is the raw export; store as facts_resolved only if a resolved file exists.
+        resolved_payload = resolved_df if resolved_df is not None else facts_df
         duckdb_io.write_snapshot(
             conn,
             ym=ym,
-            facts_resolved=resolved_df,
+            facts_resolved=resolved_payload,
             facts_deltas=deltas_df,
             manifests=manifests,
             meta=manifest,
         )
-        duckdb_io.upsert_dataframe(
-            conn,
-            "facts_raw",
-            facts_df,
-            keys=[
-                "event_id",
-                "iso3",
-                "hazard_code",
-                "metric",
-                "as_of_date",
-                "publication_date",
-            ],
-        )
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass

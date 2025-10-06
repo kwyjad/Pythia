@@ -126,6 +126,19 @@ recommended 25 MB / 150 MB thresholds and to fail if the tracked repo contents
 grow beyond ~2 GB. Temporary scratch files (`resolver/tmp/`,
 `resolver/exports/*_working.*`, etc.) stay out of Git history via `.gitignore`.
 
+### Resolver DuckDB dual-write
+
+Set the `RESOLVER_DB_URL` environment variable to enable database-backed parity
+for resolver exports. When the variable is present (for example,
+`RESOLVER_DB_URL=duckdb:///resolver/db/resolver.duckdb`),
+`resolver/tools/export_facts.py` mirrors its CSV/Parquet outputs into the
+`facts_resolved` (and, when supplied, `facts_deltas`) tables inside DuckDB.
+`resolver/tools/freeze_snapshot.py` then wraps snapshot freezes in a single
+transaction, recording the resolved totals, monthly deltas, manifest metadata,
+and a corresponding `snapshots` row. Leave `RESOLVER_DB_URL` unset to continue
+operating in file-only mode; all tooling falls back automatically when the
+variable is absent.
+
 What Forecaster Does (Pipeline)
 
 Select question(s)

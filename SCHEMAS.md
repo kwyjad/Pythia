@@ -13,6 +13,11 @@
 - [staging.unhcr_odp](#stagingunhcrodp)
 - [staging.worldpop](#stagingworldpop)
 
+> **DuckDB dual-write:** set `RESOLVER_DB_URL` (for example,
+> `duckdb:///resolver/db/resolver.duckdb`) to mirror resolver exports and
+> snapshots into the tables documented below. When unset, the tooling remains
+> file-backed only.
+
 ## db.facts_deltas
 
 Monthly "new" deltas derived from resolved totals.
