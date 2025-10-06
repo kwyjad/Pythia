@@ -17,6 +17,11 @@
 > `duckdb:///resolver/db/resolver.duckdb`) to mirror resolver exports and
 > snapshots into the tables documented below. When unset, the tooling remains
 > file-backed only.
+>
+> **Writer behaviour:** the DuckDB loader aliases the staging column
+> `series_semantics_out` to the canonical `series_semantics` field and ignores
+> unexpected debug columns during upserts so schema drift does not interrupt
+> exports.
 
 ## db.facts_deltas
 

@@ -43,27 +43,13 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies (Poetry if available, else pip)
-        shell: bash
+      - name: Install dependencies (pip extras)
         run: |
-          set -eux
-          if [[ -f "pyproject.toml" ]]; then
-            python -m pip install --upgrade pip
-            if grep -q "\[tool.poetry\]" pyproject.toml; then
-              pip install poetry
-              poetry config virtualenvs.create false
-              poetry install --no-interaction --no-ansi
-            else
-              pip install -e .
-            fi
-          elif [[ -f "requirements.txt" ]]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-            pip install -e .
-          else
-            python -m pip install --upgrade pip
-            pip install -e .
-          fi
+          python -m pip install --upgrade pip
+          pip install -r resolver/requirements.txt
+          pip install -r resolver/requirements-dev.txt
+          pip install -e ".[test]"
+          python -m pip install pytest
 
       - name: Run fast tests
         run: |
