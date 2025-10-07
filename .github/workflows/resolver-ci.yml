@@ -39,6 +39,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r resolver/requirements.txt
           pip install -r resolver/requirements-dev.txt
+          pip install duckdb==0.10.3
+
+      - name: Verify DuckDB presence
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.find_spec("duckdb")
+          if spec is None:
+              print("❌ DuckDB not installed — cannot run DB parity tests.")
+              sys.exit(1)
+          import duckdb
+          print("✅ DuckDB installed:", duckdb.__version__)
+          PY
       - name: Connector Smoke (offline)
         run: |
           pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py
@@ -79,3 +92,70 @@ jobs:
           else:
               print('No broken intra-repo Markdown links found.')
           PY
+
+  tests-db:
+    name: tests (db backend)
+    runs-on: ubuntu-latest
+    env:
+      RESOLVER_API_BACKEND: db
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
+      RESOLVER_LOG_LEVEL: DEBUG
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-db-${{ hashFiles('pyproject.toml', 'resolver/requirements.txt', 'resolver/requirements-dev.txt', 'tools/offline_wheels/constraints-db.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-db-
+
+      - name: Install resolver dependencies (db backend)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r resolver/requirements.txt
+          pip install -r resolver/requirements-dev.txt
+          if ! pip install -e ".[db,test]"; then
+            pip install -e .
+            pip install duckdb==0.10.3 httpx pytest
+          fi
+
+      - name: Verify DuckDB presence
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.find_spec("duckdb")
+          if spec is None:
+              print("❌ DuckDB not installed — cannot run DB parity tests.")
+              sys.exit(1)
+          import duckdb
+          print("✅ DuckDB installed:", duckdb.__version__)
+          PY
+
+      - name: Show environment
+        run: |
+          python -V
+          python -c "import duckdb,sys;print('duckdb',duckdb.__version__)"
+          echo "BACKEND=$RESOLVER_API_BACKEND"
+          echo "DB_URL=$RESOLVER_DB_URL"
+
+      - name: Run tests (db)
+        run: |
+          pytest -q
+      - name: Upload DB parity diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-parity-diagnostics
+          path: |
+            **/parity_mismatch_expected.csv
+            **/parity_mismatch_db.csv
+            **/parity_mismatch_cell_diffs.csv
+          if-no-files-found: ignore

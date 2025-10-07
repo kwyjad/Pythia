@@ -43,27 +43,29 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies (Poetry if available, else pip)
-        shell: bash
+      - name: Install dependencies (pip extras)
         run: |
-          set -eux
-          if [[ -f "pyproject.toml" ]]; then
-            python -m pip install --upgrade pip
-            if grep -q "\[tool.poetry\]" pyproject.toml; then
-              pip install poetry
-              poetry config virtualenvs.create false
-              poetry install --no-interaction --no-ansi
-            else
-              pip install -e .
-            fi
-          elif [[ -f "requirements.txt" ]]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install -r resolver/requirements.txt
+          pip install -r resolver/requirements-dev.txt
+          if ! pip install -e ".[test]"; then
             pip install -e .
+            pip install duckdb==0.10.3 httpx pytest
           else
-            python -m pip install --upgrade pip
-            pip install -e .
+            pip install duckdb==0.10.3
           fi
+
+      - name: Verify DuckDB presence
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.find_spec("duckdb")
+          if spec is None:
+              print("❌ DuckDB not installed — cannot run DB parity tests.")
+              sys.exit(1)
+          import duckdb
+          print("✅ DuckDB installed:", duckdb.__version__)
+          PY
 
       - name: Run fast tests
         run: |

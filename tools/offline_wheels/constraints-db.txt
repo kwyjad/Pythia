@@ -1,0 +1,4 @@
+# Pin versions for offline cache; update if CI upgrades dependencies.
+duckdb==0.10.3
+pytest==8.3.2
+httpx==0.28.1

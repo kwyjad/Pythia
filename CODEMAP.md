@@ -43,9 +43,10 @@ flowchart LR
 | `python resolver/tools/write_repo_state.py --mode daily --id 2025-09-30` | Copy exports/review outputs into `resolver/state/daily/...` for archival. | `--retain-days` controls pruning; stages deletions via Git. |
 | `python resolver/tools/check_sizes.py` | Warn/fail when exports or snapshots exceed configured size limits. | Thresholds via `RESOLVER_LIMIT_PARQUET_MB`, `RESOLVER_LIMIT_CSV_MB`, `RESOLVER_LIMIT_REPO_MB`. |
 | `python resolver/tools/generate_schemas_md.py --in resolver/tools/schema.yml --out SCHEMAS.md --sort` | Regenerate schema reference documentation. | Requires `pyyaml`; fails if schema definitions are missing. |
-| `python resolver/cli/resolver_cli.py --country "Philippines" --hazard "Tropical Cyclone" --cutoff 2025-09-30 --backend db` | Query the latest resolved fact (defaults to monthly "new" series). | Uses DuckDB when `RESOLVER_DB_URL`/`--backend db` is set; otherwise falls back to snapshots/exports. Optional `--series stock` for totals. |
+| `python resolver/cli/resolver_cli.py --country "Philippines" --hazard "Tropical Cyclone" --cutoff 2025-09-30 --backend db` | Query the latest resolved fact (defaults to monthly "new" series). | Reads file exports by default; set `--backend db` or `RESOLVER_CLI_BACKEND=db` to use DuckDB. Optional `--series stock` for totals. |
 | `uvicorn resolver.api.app:app --reload` | Serve the Resolver API locally. | Same data dependencies as the CLI; respects `RESOLVER_DEBUG` for verbose logs. |
 | `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py` | Offline smoke test covering stubbed connectors and schema checks. | Install dependencies from `resolver/requirements*.txt`; other targeted tests live under `resolver/tests/`. |
+| `pytest -q resolver/tests/test_db_query_contract.py` | Validate DB vs. file parity for resolver queries. | Install the DB extra with `pip install -e ".[db]"` (or `poetry install -E db`), set `RESOLVER_DB_URL` (e.g., `duckdb:///resolver.duckdb`), and export `RESOLVER_API_BACKEND=db`. |
 
 ## Data Contracts & Schemas
 Schema authority lives in [`resolver/tools/schema.yml`](resolver/tools/schema.yml) and the generated [`SCHEMAS.md`](SCHEMAS.md). Canonical columns for facts, deltas, and staging datasets follow the Resolver data dictionary ([`resolver/docs/data_dictionary.md`](resolver/docs/data_dictionary.md)). PIN/PA exports must include `event_id`, location/hazard tuples, metric/unit pairs, timestamps (`as_of_date`, `publication_date`, `ingested_at`), and citation fields (`publisher`, `source_type`, `source_url`, `doc_title`, `definition_text`). Monthly deltas add lineage columns such as `series_semantics`, `value_new`, `rebase_flag`, and `delta_negative_clamped` to explain adjustments. Regenerate documentation whenever schemas change so downstream teams can rely on `SCHEMAS.md` as the single source of truth.
@@ -66,7 +67,9 @@ Schema authority lives in [`resolver/tools/schema.yml`](resolver/tools/schema.ym
 - **Reference & Review:** `resolver/reference/` and `resolver/review/` keep lightweight CSVs and overrides that *are* tracked to preserve auditability.
 
 ## DB Integration Toggle
-Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_resolved` (and `facts_deltas` when available), `freeze_snapshot.py` records resolved totals, deltas, manifests, and snapshot metadata transactionally, and the CLI/API prefer the database (`--backend db` / `backend=db`). Leave the variable unset to remain file-backed only.
+Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (default `duckdb:///resolver/db/resolver.duckdb`). When present, `export_facts.py` appends to `facts_resolved` (and `facts_deltas` when available) and `freeze_snapshot.py` records resolved totals, deltas, manifests, and snapshot metadata transactionally. The CLI/API remain file-backed by default; opt into DuckDB with `--backend db`, `RESOLVER_CLI_BACKEND=db`, or `RESOLVER_API_BACKEND=db` (use `auto` to prefer DB when available).
+
+Series semantics for both CSV exports and DuckDB writes are derived by [`resolver.common.series_semantics.compute_series_semantics`](resolver/common/series_semantics.py), which consults [`resolver/config/series_semantics.yml`](resolver/config/series_semantics.yml). This keeps joins stable by defaulting missing semantics to the empty string and only marking configured metrics (currently `in_need`) as `stock` while preserving any existing non-empty labels emitted by upstream connectors.
 
 ## Runbooks
 ### First-time setup
@@ -121,8 +124,10 @@ Set `RESOLVER_DB_URL` to enable dual-writing exports and snapshots into DuckDB (
 
 ## Testing & CI
 - Local smoke tests: `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py` (stubbed ingestion), `pytest -q resolver/tests/test_resolved_and_review.py` (export pipeline), and connector-specific suites under `resolver/tests/ingestion/`.
+- DB backend contract: either install via proxy (`python -m pip install duckdb pytest` with `HTTP[S]_PROXY` set) or, for offline setups, refresh the vendored wheels (`python scripts/download_db_wheels.py` on an internet-connected machine, commit the `tools/offline_wheels/*.whl` files) and run `scripts/install_db_extra_offline.(sh|ps1)` before exporting `RESOLVER_DB_URL='duckdb:///resolver.duckdb'` and `RESOLVER_API_BACKEND=db`. Then execute `pytest -q resolver/tests/test_db_query_contract.py` to confirm parity.
+- DB parity diagnostics: set `RESOLVER_LOG_LEVEL=DEBUG` to surface dataframe schemas and `series_semantics` distributions during exports. When `resolver/tests/test_db_parity.py` fails it prints a `DB PARITY DIAGNOSTICS` block and writes CSVs named `parity_mismatch_expected.csv`, `parity_mismatch_db.csv`, and `parity_mismatch_cell_diffs.csv` for download from CI.
 - Schema/documentation guardrails: `pytest -q resolver/tests/test_generate_schemas_md.py` ensures the Markdown generator stays deterministic.
-- Continuous integration: `.github/workflows/resolver-ci.yml` installs resolver requirements, runs offline connector smoke tests, ReliefWeb PDF unit tests, and performs intra-repo Markdown link checking. Nightly workflows extend this with live runs and state archival.
+- Continuous integration: `.github/workflows/resolver-ci.yml` now includes a dedicated `tests (db backend)` job that installs the DuckDB extra and runs the full suite alongside the existing file-mode smoke tests. Nightly workflows mirror this via `.github/workflows/resolver-ci-nightly.yml`.
 
 ## Glossary & Appendix
 - **PIN / PA:** `metric=in_need` (People in Need) and `metric=affected` (People Affected) totals normalised to `unit=persons` or `persons_cases` for outbreaks.
