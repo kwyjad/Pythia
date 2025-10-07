@@ -273,6 +273,10 @@ def write_snapshot(
                 ],
             )
             facts_resolved["ym"] = facts_resolved["ym"].replace("", ym)
+            if "value" in facts_resolved.columns:
+                facts_resolved["value"] = pd.to_numeric(
+                    facts_resolved["value"], errors="coerce"
+                )
             facts_resolved["series_semantics"] = facts_resolved.apply(
                 lambda row: compute_series_semantics(
                     metric=row.get("metric"), existing=row.get("series_semantics")
@@ -303,6 +307,15 @@ def write_snapshot(
                 ],
             )
             facts_deltas["ym"] = facts_deltas["ym"].replace("", ym)
+            numeric_delta_columns = [
+                col
+                for col in ("value_new", "value_stock")
+                if col in facts_deltas.columns
+            ]
+            for column in numeric_delta_columns:
+                facts_deltas[column] = pd.to_numeric(
+                    facts_deltas[column], errors="coerce"
+                )
             facts_deltas["series_semantics"] = facts_deltas.get(
                 "series_semantics", "new"
             ).replace("", "new")
