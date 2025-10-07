@@ -29,14 +29,20 @@ from resolver.common import (
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
 
-FACTS_RESOLVED_KEY_COLUMNS = [
+FACTS_RESOLVED_KEY = [
     "ym",
     "iso3",
     "hazard_code",
     "metric",
     "series_semantics",
 ]
-FACTS_DELTAS_KEY_COLUMNS = ["ym", "iso3", "hazard_code", "metric"]
+FACTS_DELTAS_KEY = [
+    "ym",
+    "iso3",
+    "hazard_code",
+    "metric",
+    "series_semantics",
+]
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
@@ -176,6 +182,22 @@ def upsert_dataframe(
 
     frame = frame.loc[:, insert_columns].copy()
 
+    if keys:
+        missing_keys = [k for k in keys if k not in frame.columns]
+        if missing_keys:
+            raise KeyError(
+                f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+            )
+        before = len(frame)
+        frame = frame.drop_duplicates(subset=list(keys), keep="last").reset_index(drop=True)
+        if LOGGER.isEnabledFor(logging.DEBUG) and before != len(frame):
+            LOGGER.debug(
+                "Dropped %s duplicate rows for %s based on keys %s",
+                before - len(frame),
+                table,
+                keys,
+            )
+
     object_columns = frame.select_dtypes(include=["object"]).columns
     for column in object_columns:
         frame[column] = frame[column].astype(str)
@@ -190,11 +212,6 @@ def upsert_dataframe(
     conn.register(temp_name, frame)
     try:
         if keys:
-            missing_keys = [k for k in keys if k not in insert_columns]
-            if missing_keys:
-                raise KeyError(
-                    f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
-                )
             comparisons = " AND ".join(
                 f"coalesce(t.{_quote_identifier(k)}, '') = coalesce(s.{_quote_identifier(k)}, '')"
                 for k in keys
@@ -204,7 +221,13 @@ def upsert_dataframe(
             delete_sql = (
                 f"DELETE FROM {table_ident} AS t USING {temp_ident} AS s WHERE {comparisons}"
             )
-            conn.execute(delete_sql)
+            delete_count = conn.execute(delete_sql).rowcount
+            LOGGER.debug(
+                "Deleted %s existing rows from %s using keys %s",
+                delete_count,
+                table,
+                keys,
+            )
         cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
@@ -287,7 +310,7 @@ def write_snapshot(
                 conn,
                 "facts_resolved",
                 facts_resolved,
-                keys=FACTS_RESOLVED_KEY_COLUMNS,
+                keys=FACTS_RESOLVED_KEY,
             )
             LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
             LOGGER.debug(
@@ -304,6 +327,7 @@ def write_snapshot(
                     "hazard_code",
                     "metric",
                     "value_new",
+                    "series_semantics",
                 ],
             )
             facts_deltas["ym"] = facts_deltas["ym"].replace("", ym)
@@ -323,7 +347,7 @@ def write_snapshot(
                 conn,
                 "facts_deltas",
                 facts_deltas,
-                keys=FACTS_DELTAS_KEY_COLUMNS,
+                keys=FACTS_DELTAS_KEY,
             )
             LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
             if "series_semantics" in facts_deltas.columns:
