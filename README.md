@@ -3,7 +3,17 @@ README (updated)
 
 What is Forecaster?
 
-Forecaster (formerly Spagbot) is an AI forecasting assistant. Its job is to read forecasting questions (like those on Metaculus), gather relevant evidence, and combine the judgments of different models into one final forecast. It is designed to run automatically on GitHub, saving its forecasts and learning from past performance over time.
+Forecaster is an AI forecasting assistant. Its job is to read forecasting questions (like those on Metaculus), gather relevant evidence, and combine the judgments of different models into one final forecast. It is designed to run automatically on GitHub, saving its forecasts and learning from past performance over time.
+
+## CI guardrails and repo context checks
+
+Our GitHub Actions workflows now include extra safety rails to ensure they always run inside the official [`oughtinc/Pythia`](https://github.com/oughtinc/Pythia) repository:
+
+- Each job prints a **Debug repo context** block so you can see the repository slug, branch, commit SHA, and working directory tree size directly in the logs.
+- An **anti-drift** script in `scripts/ci/` fails fast if any legacy references to the old repository slug sneak back into the tree.
+- Database test jobs are protected with repo guards and file-existence checks so they only execute inside `oughtinc/Pythia` when the relevant tests are present.
+
+If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
 How it works (conceptually)
 

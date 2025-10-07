@@ -41,8 +41,8 @@ jobs:
       FORECASTS_CSV_PATH: forecasts.csv
 
       # ---- Cache toggles ----
-      SPAGBOT_DISABLE_RESEARCH_CACHE: "1"  
-      SPAGBOT_DISABLE_CLASSIFIER_CACHE: "0"
+      PYTHIA_DISABLE_RESEARCH_CACHE: "1"
+      PYTHIA_DISABLE_CLASSIFIER_CACHE: "0"
 
       # ---- Misc knobs used by code (safe defaults) ----
       LLM_MAX_CONCURRENCY: "4"

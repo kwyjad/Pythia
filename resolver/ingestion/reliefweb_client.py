@@ -1067,7 +1067,7 @@ def make_rows() -> Tuple[List[List[str]], Dict[str, Any]]:
         {
             "User-Agent": cfg.get(
                 "user_agent",
-                "forecaster-resolver/1.0 (+https://github.com/kwyjad/Forecaster_metac-bot)",
+                "forecaster-resolver/1.0 (+https://github.com/oughtinc/Pythia)",
             ),
             "Content-Type": "application/json",
             "Accept": cfg.get("accept_header", "application/json"),

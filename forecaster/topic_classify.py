@@ -23,8 +23,8 @@ Integration points
 
 Environment knobs (optional)
 ----------------------------
-- SPAGBOT_USE_LLM_CLASSIFIER=1  (default: on; set 0 to force keyword fallback)
-- SPAGBOT_DISABLE_CLASSIFIER_CACHE=1  (default: cache enabled)
+- PYTHIA_USE_LLM_CLASSIFIER=1  (default: on; set 0 to force keyword fallback)
+- PYTHIA_DISABLE_CLASSIFIER_CACHE=1  (default: cache enabled)
 
 Dependencies
 ------------
@@ -143,7 +143,7 @@ async def classify_topics(
     Uses cache if available. LLM first (if enabled), else keyword fallback.
     """
     # Cache first (accept dict or JSON string)
-    if os.getenv("SPAGBOT_DISABLE_CLASSIFIER_CACHE","0").lower() not in ("1","true","yes"):
+    if os.getenv("PYTHIA_DISABLE_CLASSIFIER_CACHE","0").lower() not in ("1","true","yes"):
         cached = read_cache("topic_classify", slug)
         if isinstance(cached, dict) and cached.get("primary"):
             return cached
@@ -155,7 +155,7 @@ async def classify_topics(
             except Exception:
                 pass
 
-    use_llm = os.getenv("SPAGBOT_USE_LLM_CLASSIFIER","1").lower() in ("1","true","yes")
+    use_llm = os.getenv("PYTHIA_USE_LLM_CLASSIFIER","1").lower() in ("1","true","yes")
     client = _get_or_client() if use_llm else None
 
     if client is None:

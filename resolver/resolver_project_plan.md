@@ -1,6 +1,6 @@
 **Resolver - Project Plan**
 
-**Repository:** Forecaster_metac-bot/resolver  
+**Repository:** oughtinc/Pythia/resolver
 **Owner:** Forecast Ops / Data Eng (Resolver)  
 **Status:** Active (Phase H3: UNHCR connectors)  
 **Primary metrics:** People in Need (**PIN**) preferred; People Affected (**PA**) fallback  

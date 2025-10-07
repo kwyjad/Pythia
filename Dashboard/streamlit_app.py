@@ -45,13 +45,13 @@ PARQUET_PATH = REPO_ROOT / "Dashboard" / "data" / "forecasts.parquet"
 
 # Raw CSV fallback (GitHub). Override if your repo path differs or is private.
 RAW_CSV_URL = os.getenv(
-    "SPAGBOT_RAW_CSV_URL",
-    "https://raw.githubusercontent.com/kwyjad/Forecaster_metac-bot/main/forecast_logs/forecasts.csv",
+    "PYTHIA_RAW_CSV_URL",
+    "https://raw.githubusercontent.com/oughtinc/Pythia/main/forecast_logs/forecasts.csv",
 )
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")  # only needed if repo is private
 
-# Optional explicit local CSV path override (e.g., SPAGBOT_LOCAL_CSV_PATH=forecasts.csv)
-LOCAL_CSV_OVERRIDE = os.getenv("SPAGBOT_LOCAL_CSV_PATH", "").strip()
+# Optional explicit local CSV path override (e.g., PYTHIA_LOCAL_CSV_PATH=forecasts.csv)
+LOCAL_CSV_OVERRIDE = os.getenv("PYTHIA_LOCAL_CSV_PATH", "").strip()
 
 # -----------------------------------------------------------------------------
 # Column mapping + labels
@@ -274,7 +274,7 @@ def load_data() -> Tuple[pd.DataFrame, Dict[str, str]]:
         "No data source available.\n"
         "Place a parquet at 'Dashboard/data/forecasts.parquet' (and set USE_PARQUET=true), "
         "or provide a CSV locally (forecasts.csv / forecast_logs/forecasts.csv), "
-        "or set SPAGBOT_RAW_CSV_URL to a raw CSV URL."
+        "or set PYTHIA_RAW_CSV_URL to a raw CSV URL."
     )
     return pd.DataFrame(), {"source": "none", "path": "—", "mtime": "—", "rows": "0"}
 

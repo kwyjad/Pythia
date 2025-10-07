@@ -54,7 +54,7 @@ def _advise_poetry_lock_if_needed():
     if os.getenv("CI"):
         return  # CI already handles regeneration
     # Lightweight hint only; we don't try to run Poetry here.
-    os.environ.setdefault("SPAGBOT_LOCK_HINT_SHOWN", "0")
+    os.environ.setdefault("PYTHIA_LOCK_HINT_SHOWN", "0")
 
 
 def _safe_json_load(s: str):
@@ -273,10 +273,10 @@ def _sanitize_markdown_chunks(chunks: List[Any]) -> List[str]:
 
 def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: int) -> Optional[str]:
     """
-    If SPAGBOT_DEBUG_RAW=1, write the raw LLM JSON-ish text we received for the
+    If PYTHIA_DEBUG_RAW=1, write the raw LLM JSON-ish text we received for the
     GTMC1 actor table to a file in gtmc_logs/ and return the path. Otherwise None.
     """
-    if os.getenv("SPAGBOT_DEBUG_RAW", "0") != "1":
+    if os.getenv("PYTHIA_DEBUG_RAW", "0") != "1":
         return None
     try:
         os.makedirs("gtmc_logs", exist_ok=True)

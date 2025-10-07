@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "metac-bot-template"
+name = "pythia"
 version = "0.1.0"
 description = ""
 authors = ["Vasile Popescu <elisescu@elisescu.com>"]

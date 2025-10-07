@@ -19,7 +19,7 @@ If you run into trouble, reach out to `ben [at] metaculus [.com]`
 ## Quick start -> Fork and use Github Actions
 The easiest way to use this repo is to fork it, enable github workflow/actions, and then set repository secrets. Then your bot will run every 30min, pick up new questions, and forecast on them. Automation is handled in the `.github/workflows/` folder. The `daily_run_simple_bot.yaml` file runs the simple bot every 30min and will skip questions it has already forecasted on.
 
-1) **Fork the repository**: Go to the [repository](https://github.com/Metaculus/metac-bot-template) and click 'fork'.
+1) **Fork the repository**: Go to the [repository](https://github.com/oughtinc/Pythia) and click 'fork'.
 2) **Set secrets**: Go to `Settings -> Secrets and variables -> Actions -> New repository secret` and set API keys/Tokens as secrets. You will want to set your METACULUS_TOKEN and an OPENROUTER_API_KEY (or whatever LLM/search providers you plan to use). This will be used to post questions to Metaculus. Make sure to copy the name of these variables exactly (including all caps).
    - You can create a METACULUS_TOKEN at https://metaculus.com/aib. If you get confused, please see the instructions on our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#creating-your-bot-account-and-metaculus-token) page.
    - You can get an OPENROUTER_API_KEY with free credits by filling out this [form](https://forms.gle/aQdYMq9Pisrf1v7d8). If you don't want to wait or want to use more models than we provide, you can also make your own API key on OpenRouter's [website](https://openrouter.ai/). First, make an account, then go to your profile, then go to "keys", and then make a key.
@@ -40,7 +40,7 @@ Remember that you can edit a bot non locally by clicking on a file in Github, an
 ## Run/Edit the bot locally
 Clone the repository. Find your terminal and run the following commands:
 ```bash
-git clone https://github.com/Metaculus/metac-bot-template.git
+git clone https://github.com/oughtinc/Pythia.git
 ```
 
 If you forked the repository first, you have to replace the url in the `git clone` command with the url to your fork. Just go to your forked repository and copy the URL from the address bar in the browser.

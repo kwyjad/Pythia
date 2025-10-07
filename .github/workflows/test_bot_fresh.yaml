@@ -53,8 +53,8 @@ jobs:
       TEST_POST_IDS: "578,14333,22427,38195"
 
       # Force fresh research: 1 = disable cache
-      SPAGBOT_DISABLE_RESEARCH_CACHE: "1"
-      SPAGBOT_DISABLE_CLASSIFIER_CACHE: "0"
+      PYTHIA_DISABLE_RESEARCH_CACHE: "1"
+      PYTHIA_DISABLE_CLASSIFIER_CACHE: "0"
 
       # Knobs
       RESEARCH_TEMP: "0.10"

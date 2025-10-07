@@ -1,6 +1,6 @@
 enable: false
 base_url: "https://goadmin.ifrc.org/api/v2/"
-user_agent: "forecaster-resolver/1.0 (github.com/kwyjad/Forecaster_metac-bot)"
+user_agent: "forecaster-resolver/1.0 (github.com/oughtinc/Pythia)"
 window_days: 45
 page_size: 100
 

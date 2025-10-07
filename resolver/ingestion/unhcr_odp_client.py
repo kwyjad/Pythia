@@ -37,7 +37,7 @@ COUNTRIES_CSV = DATA / "countries.csv"
 OUT_PATH = STAGING / "unhcr_odp.csv"
 BASE = "https://data.unhcr.org"
 DEFAULT_SITUATION_PATH = "/en/situations/europe-sea-arrivals"
-UA = "forecaster-resolver/1.0 (github.com/kwyjad/Forecaster_metac-bot)"
+UA = "forecaster-resolver/1.0 (github.com/oughtinc/Pythia)"
 
 CANONICAL_HEADER = [
     "source",
