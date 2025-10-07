@@ -28,6 +28,15 @@ from resolver.common import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
+
+FACTS_RESOLVED_KEY_COLUMNS = [
+    "ym",
+    "iso3",
+    "hazard_code",
+    "metric",
+    "series_semantics",
+]
+FACTS_DELTAS_KEY_COLUMNS = ["ym", "iso3", "hazard_code", "metric"]
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
@@ -274,7 +283,7 @@ def write_snapshot(
                 conn,
                 "facts_resolved",
                 facts_resolved,
-                keys=["ym", "iso3", "hazard_code", "metric", "series_semantics"],
+                keys=FACTS_RESOLVED_KEY_COLUMNS,
             )
             LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
             LOGGER.debug(
@@ -301,7 +310,7 @@ def write_snapshot(
                 conn,
                 "facts_deltas",
                 facts_deltas,
-                keys=["ym", "iso3", "hazard_code", "metric"],
+                keys=FACTS_DELTAS_KEY_COLUMNS,
             )
             LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
             if "series_semantics" in facts_deltas.columns:
@@ -339,6 +348,12 @@ def write_snapshot(
         LOGGER.debug(
             "Snapshot summary: %s",
             snapshot_payload,
+        )
+        LOGGER.info(
+            "Snapshot upsert succeeded for ym=%s (facts_rows=%s, deltas_rows=%s)",
+            ym,
+            facts_rows,
+            deltas_rows,
         )
         conn.execute("COMMIT")
     except Exception:
