@@ -29,20 +29,22 @@ from resolver.common import (
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
 
-FACTS_RESOLVED_KEY = [
+FACTS_RESOLVED_KEY_COLUMNS = [
     "ym",
     "iso3",
     "hazard_code",
     "metric",
     "series_semantics",
 ]
-FACTS_DELTAS_KEY = [
+FACTS_DELTAS_KEY_COLUMNS = [
     "ym",
     "iso3",
     "hazard_code",
     "metric",
     "series_semantics",
 ]
+FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
+FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
@@ -114,11 +116,33 @@ def init_schema(
     schema_path = schema_sql_path or SCHEMA_PATH
     if not schema_path.exists():
         raise FileNotFoundError(f"Schema SQL not found at {schema_path}")
+
+    expected_tables = {
+        "facts_resolved",
+        "facts_deltas",
+        "manifests",
+        "snapshots",
+    }
+    existing_tables = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'main'
+              AND table_name IN ('facts_resolved','facts_deltas','manifests','snapshots')
+            """
+        ).fetchall()
+    }
+
+    if expected_tables.issubset(existing_tables):
+        LOGGER.debug("DuckDB schema already initialised; skipping DDL execution")
+        return
+
     sql = schema_path.read_text(encoding="utf-8")
-    # DuckDB executes multiple statements separated by semicolons.
     for statement in [s.strip() for s in sql.split(";") if s.strip()]:
         conn.execute(statement)
-    LOGGER.info("Ensured DuckDB schema from %s", schema_path)
+    LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
     if LOGGER.isEnabledFor(logging.DEBUG):
         table_details = conn.execute(
             """
@@ -196,7 +220,9 @@ def upsert_dataframe(
         LOGGER.debug("Insert columns: %s", ", ".join(insert_columns))
         if dropped:
             LOGGER.debug(
-                "Dropping columns not present in %s: %s", table, ", ".join(dropped)
+                "Dropping columns not present in %s: %s (expected for staging-only fields)",
+                table,
+                ", ".join(dropped),
             )
     if not insert_columns:
         raise ValueError(f"No matching columns to insert into '{table}'")
@@ -209,6 +235,9 @@ def upsert_dataframe(
             raise KeyError(
                 f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
             )
+        for key in keys:
+            if key in frame.columns:
+                frame[key] = frame[key].astype(str).str.strip()
         before = len(frame)
         frame = frame.drop_duplicates(subset=list(keys), keep="last").reset_index(drop=True)
         if LOGGER.isEnabledFor(logging.DEBUG) and before != len(frame):
@@ -228,6 +257,9 @@ def upsert_dataframe(
         normalised = semantics.str.strip().str.lower()
         frame.loc[normalised.str.startswith("new"), "series_semantics"] = "new"
         frame.loc[normalised.str.startswith("stock"), "series_semantics"] = "stock"
+        cleaned = frame["series_semantics"].astype(str).str.strip().str.lower()
+        frame.loc[~cleaned.isin({"", "new", "stock"}), "series_semantics"] = ""
+        frame["series_semantics"] = frame["series_semantics"].astype(str).str.strip()
 
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
@@ -239,20 +271,22 @@ def upsert_dataframe(
             )
             table_ident = _quote_identifier(table)
             temp_ident = _quote_identifier(temp_name)
+            exists_sql = (
+                f"SELECT COUNT(*) FROM {table_ident} AS t "
+                f"WHERE EXISTS (SELECT 1 FROM {temp_ident} AS s WHERE {comparisons})"
+            )
             delete_sql = (
-                f"DELETE FROM {table_ident} AS t USING {temp_ident} AS s WHERE {comparisons}"
+                f"DELETE FROM {table_ident} AS t "
+                f"WHERE EXISTS (SELECT 1 FROM {temp_ident} AS s WHERE {comparisons})"
             )
-            join_sql = (
-                f"SELECT COUNT(*) FROM {table_ident} AS t JOIN {temp_ident} AS s "
-                f"ON {comparisons}"
-            )
-            delete_count = int(conn.execute(join_sql).fetchone()[0])
-            conn.execute(delete_sql)
-            LOGGER.debug(
+            delete_count = int(conn.execute(exists_sql).fetchone()[0])
+            if delete_count:
+                conn.execute(delete_sql)
+            LOGGER.info(
                 "Deleted %s existing rows from %s using keys %s",
                 delete_count,
                 table,
-                keys,
+                list(keys),
             )
         cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
         table_ident = _quote_identifier(table)
@@ -315,15 +349,15 @@ def write_snapshot(
         if facts_resolved is not None and not facts_resolved.empty:
             facts_resolved = _ensure_columns(
                 facts_resolved,
-                [
-                    "ym",
-                    "iso3",
-                    "hazard_code",
-                    "metric",
-                    "series_semantics",
-                    "value",
-                ],
+                FACTS_RESOLVED_KEY_COLUMNS + ["value"],
             )
+            for key in FACTS_RESOLVED_KEY_COLUMNS:
+                facts_resolved[key] = (
+                    facts_resolved[key]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                )
             facts_resolved["ym"] = facts_resolved["ym"].replace("", ym)
             if "value" in facts_resolved.columns:
                 facts_resolved["value"] = pd.to_numeric(
@@ -335,10 +369,19 @@ def write_snapshot(
                 ),
                 axis=1,
             )
+            facts_resolved["series_semantics"] = (
+                facts_resolved["series_semantics"].fillna("").astype(str).str.strip()
+            )
             facts_resolved = facts_resolved.drop_duplicates(
-                subset=FACTS_RESOLVED_KEY, keep="last"
+                subset=FACTS_RESOLVED_KEY_COLUMNS,
+                keep="last",
             ).reset_index(drop=True)
-            facts_rows = upsert_dataframe(conn, "facts_resolved", facts_resolved)
+            facts_rows = upsert_dataframe(
+                conn,
+                "facts_resolved",
+                facts_resolved,
+                keys=FACTS_RESOLVED_KEY_COLUMNS,
+            )
             LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
             LOGGER.debug(
                 "facts_resolved series_semantics distribution: %s",
@@ -348,15 +391,18 @@ def write_snapshot(
             facts_deltas = facts_deltas.copy()
             facts_deltas = _ensure_columns(
                 facts_deltas,
-                [
-                    "ym",
-                    "iso3",
-                    "hazard_code",
-                    "metric",
-                    "value_new",
-                    "series_semantics",
-                ],
+                FACTS_DELTAS_KEY_COLUMNS + ["value_new", "value_stock"],
             )
+            for key in FACTS_DELTAS_KEY_COLUMNS:
+                series = (
+                    facts_deltas[key]
+                    .fillna("new" if key == "series_semantics" else "")
+                    .astype(str)
+                    .str.strip()
+                )
+                if key == "series_semantics":
+                    series = series.replace("", "new")
+                facts_deltas[key] = series
             facts_deltas["ym"] = facts_deltas["ym"].replace("", ym)
             numeric_delta_columns = [
                 col
@@ -367,13 +413,16 @@ def write_snapshot(
                 facts_deltas[column] = pd.to_numeric(
                     facts_deltas[column], errors="coerce"
                 )
-            facts_deltas["series_semantics"] = facts_deltas.get(
-                "series_semantics", "new"
-            ).replace("", "new")
             facts_deltas = facts_deltas.drop_duplicates(
-                subset=FACTS_DELTAS_KEY, keep="last"
+                subset=FACTS_DELTAS_KEY_COLUMNS,
+                keep="last",
             ).reset_index(drop=True)
-            deltas_rows = upsert_dataframe(conn, "facts_deltas", facts_deltas)
+            deltas_rows = upsert_dataframe(
+                conn,
+                "facts_deltas",
+                facts_deltas,
+                keys=FACTS_DELTAS_KEY_COLUMNS,
+            )
             LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
             if "series_semantics" in facts_deltas.columns:
                 LOGGER.debug(

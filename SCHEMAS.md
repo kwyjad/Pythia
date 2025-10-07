@@ -26,7 +26,16 @@
 > [`resolver.common.series_semantics.compute_series_semantics`](resolver/common/series_semantics.py),
 > which reads [`resolver/config/series_semantics.yml`](resolver/config/series_semantics.yml)
 > to normalise configured metrics (currently `in_need` → `stock`) while leaving
-> all other non-empty values untouched.
+> all other non-empty values untouched. Dual writes delete and reinsert rows by
+> the natural keys listed below so repeating an export or snapshot for the same
+> month yields identical state:
+>
+> - `facts_resolved`: (`ym`, `iso3`, `hazard_code`, `metric`, `series_semantics`)
+> - `facts_deltas`: (`ym`, `iso3`, `hazard_code`, `metric`, `series_semantics`)
+>
+> Staging-only columns such as `country_name`, `method`, `revision`, and
+> `ingested_at` are intentionally omitted from the resolved tables and are only
+> reported at DEBUG level when they are dropped during upserts.
 
 ## db.facts_deltas
 
@@ -108,7 +117,7 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
-| series_semantics | enum | no | "" (default), stock, incident | Derived via the series semantics helper; blank when no configured mapping applies. |
+| series_semantics | enum | no | "" (default), stock | Derived via the series semantics helper; blank when no configured mapping applies. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
 

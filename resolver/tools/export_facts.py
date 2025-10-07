@@ -314,14 +314,14 @@ def _maybe_write_to_db(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
-                keys=["ym", "iso3", "hazard_code", "metric", "series_semantics"],
+                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
         if deltas_prepared is not None and not deltas_prepared.empty:
             duckdb_io.upsert_dataframe(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
-                keys=["ym", "iso3", "hazard_code", "metric"],
+                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
         LOGGER.info("DuckDB write complete")
     except Exception as exc:  # pragma: no cover - non fatal for exporter
