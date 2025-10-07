@@ -50,7 +50,7 @@ RESEARCH_TOP_P = float(os.getenv("RESEARCH_TOP_P", "1.00"))
 
 # --- Concurrency & cache ---
 CONCURRENT_REQUESTS_LIMIT = 5
-DISABLE_RESEARCH_CACHE = os.getenv("SPAGBOT_DISABLE_RESEARCH_CACHE", "0").lower() in ("1","true","yes")
+DISABLE_RESEARCH_CACHE = os.getenv("PYTHIA_DISABLE_RESEARCH_CACHE", "0").lower() in ("1","true","yes")
 
 # --- Markets & tournament ---
 ENABLE_MARKET_SNAPSHOT = os.getenv("ENABLE_MARKET_SNAPSHOT", "1").lower() in ("1","true","yes")

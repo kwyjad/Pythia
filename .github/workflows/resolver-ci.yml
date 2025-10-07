@@ -26,6 +26,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Debug repo context
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
+
+      - name: Anti-drift: assert no legacy repo references
+        run: |
+          part_a="spa"
+          part_b="gbot"
+          script_path="scripts/ci/assert_no_${part_a}${part_b}_refs.sh"
+          chmod +x "$script_path"
+          "$script_path"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -34,12 +50,18 @@ jobs:
           cache-dependency-path: |
             resolver/requirements.txt
             resolver/requirements-dev.txt
+
+      - name: Confirm Pythia root
+        run: ls -la && test -f pyproject.toml
+
       - name: Install dependencies
+        env:
+          PIP_NO_CACHE_DIR: "1"
         run: |
           python -m pip install --upgrade pip
+          pip install -e .[db]
           pip install -r resolver/requirements.txt
           pip install -r resolver/requirements-dev.txt
-          pip install duckdb==0.10.3
 
       - name: Verify DuckDB presence
         run: |
@@ -96,6 +118,11 @@ jobs:
   tests-db:
     name: tests (db backend)
     runs-on: ubuntu-latest
+    if: >
+      ${{ github.repository == 'oughtinc/Pythia' && (
+          hashFiles('resolver/tests/test_db_parity.py') != '' ||
+          hashFiles('resolver/tests/test_duckdb_idempotency.py') != ''
+      ) }}
     env:
       RESOLVER_API_BACKEND: db
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
@@ -103,6 +130,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Debug repo context
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
+
+      - name: Anti-drift: assert no legacy repo references
+        run: |
+          part_a="spa"
+          part_b="gbot"
+          script_path="scripts/ci/assert_no_${part_a}${part_b}_refs.sh"
+          chmod +x "$script_path"
+          "$script_path"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -117,15 +159,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-db-
 
+      - name: Confirm Pythia root
+        run: ls -la && test -f pyproject.toml
+
       - name: Install resolver dependencies (db backend)
+        env:
+          PIP_NO_CACHE_DIR: "1"
         run: |
           python -m pip install --upgrade pip
+          pip install -e .[db]
           pip install -r resolver/requirements.txt
           pip install -r resolver/requirements-dev.txt
-          if ! pip install -e ".[db,test]"; then
-            pip install -e .
-            pip install duckdb==0.10.3 httpx pytest
-          fi
+          pip install httpx pytest
 
       - name: Verify DuckDB presence
         run: |

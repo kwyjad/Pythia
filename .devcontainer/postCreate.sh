@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Guardrail: fail fast if a dev script tries to fetch legacy resolver repos
+legacy_a="spa"
+legacy_b="gbot"
+legacy_c="meta"
+legacy_d="c-bot"
+legacy_pattern="${legacy_a}${legacy_b}|${legacy_c}${legacy_d}"
+if grep -RniE "$legacy_pattern" . >/dev/null 2>&1; then
+  echo "❌ postCreate detected legacy repo references. Please remove them."
+  exit 1
+fi
+
 echo ">> postCreate: Detecting Python interpreter used by VS Code..."
 PY_BIN="${PY_BIN:-/usr/local/bin/python}"
 if ! command -v "$PY_BIN" >/dev/null 2>&1; then

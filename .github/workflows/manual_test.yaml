@@ -87,8 +87,8 @@ jobs:
       LLM_MAX_CONCURRENCY: "4"
       HUMAN_LOG_MODEL_RAW_MAX_CHARS: "5000"
       HUMAN_LOG_RESEARCH_MAX_CHARS: "15000"
-      SPAGBOT_DISABLE_CLASSIFIER_CACHE: "0"
-      SPAGBOT_DISABLE_RESEARCH_CACHE: ${{ inputs.fresh_research && '1' || '0' }}
+      PYTHIA_DISABLE_CLASSIFIER_CACHE: "0"
+      PYTHIA_DISABLE_RESEARCH_CACHE: ${{ inputs.fresh_research && '1' || '0' }}
 
       # ---- CSV output path ----
       FORECASTS_CSV_PATH: forecasts.csv

@@ -59,8 +59,8 @@ jobs:
       ENABLE_MARKET_SNAPSHOT: "1"
       MARKET_SNAPSHOT_MAX_MATCHES: "10"
       LLM_MAX_CONCURRENCY: "4"
-      SPAGBOT_DISABLE_CLASSIFIER_CACHE: "1"
-      SPAGBOT_DISABLE_RESEARCH_CACHE: "1"  
+      PYTHIA_DISABLE_CLASSIFIER_CACHE: "1"
+      PYTHIA_DISABLE_RESEARCH_CACHE: "1"
 
       # ---- Knobs ----
       RESEARCH_TEMP: "0.10"
@@ -96,7 +96,7 @@ jobs:
       HUMAN_LOG_FLAT:
 
       #GTMC1 Debug
-      SPAGBOT_DEBUG_RAW: "1"
+      PYTHIA_DEBUG_RAW: "1"
 
        # ---- Cost table (string JSON) ----
       MODEL_COSTS_JSON: |

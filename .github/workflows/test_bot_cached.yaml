@@ -52,8 +52,8 @@ jobs:
       TEST_POST_IDS: "578,14333,22427,38195"
 
       # Cache enabled (use cache): 0 = allow cache
-      SPAGBOT_DISABLE_RESEARCH_CACHE: "0"
-      SPAGBOT_DISABLE_CLASSIFIER_CACHE: "0"
+      PYTHIA_DISABLE_RESEARCH_CACHE: "0"
+      PYTHIA_DISABLE_CLASSIFIER_CACHE: "0"
 
       # Knobs
       RESEARCH_TEMP: "0.10"
