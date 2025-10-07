@@ -12,6 +12,7 @@ from pathlib import Path
 REQS = [
     "duckdb==0.10.3",
     "pytest==8.3.2",
+    "httpx==0.28.1",
 ]
 
 

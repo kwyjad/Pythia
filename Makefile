@@ -24,9 +24,12 @@ dev-setup-offline:
 	$(PY) -m pip install --no-index --find-links tools/offline_wheels -r tools/offline_wheels/constraints-db.txt
 
 dev-setup-online:
-	@echo ">> Falling back to online install"
-	$(PY) -m pip install --upgrade pip
-	- $(PY) -m pip install -e ".[db]" || $(PY) -m pip install duckdb pytest
+        @echo ">> Falling back to online install"
+        $(PY) -m pip install --upgrade pip
+        @if ! $(PY) -m pip install -e ".[db,test]"; then \
+                $(PY) -m pip install -e .; \
+                $(PY) -m pip install duckdb==0.10.3 httpx pytest; \
+        fi
 
 test-db:
 	RESOLVER_API_BACKEND=db RESOLVER_DB_URL=duckdb:///resolver.dev.duckdb $(PY) -m pytest -q resolver/tests/test_db_query_contract.py

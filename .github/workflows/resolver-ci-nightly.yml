@@ -53,6 +53,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r resolver/requirements.txt
           pip install -r resolver/requirements-dev.txt
+          pip install duckdb==0.10.3
+
+      - name: Verify DuckDB presence
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.find_spec("duckdb")
+          if spec is None:
+              print("❌ DuckDB not installed — cannot run DB parity tests.")
+              sys.exit(1)
+          import duckdb
+          print("✅ DuckDB installed:", duckdb.__version__)
+          PY
       - name: Run ${{ matrix.connector }} (full)
         env:
           RESOLVER_FAIL_ON_STUB_ERROR: "0"
@@ -198,8 +211,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r resolver/requirements.txt
           pip install -r resolver/requirements-dev.txt
-          pip install -e ".[db,test]"
-          python -m pip install pytest
+          if ! pip install -e ".[db,test]"; then
+            pip install -e .
+            pip install duckdb==0.10.3 httpx pytest
+          fi
+
+      - name: Verify DuckDB presence
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+          spec = importlib.util.find_spec("duckdb")
+          if spec is None:
+              print("❌ DuckDB not installed — cannot run DB parity tests.")
+              sys.exit(1)
+          import duckdb
+          print("✅ DuckDB installed:", duckdb.__version__)
+          PY
 
       - name: Show environment
         run: |

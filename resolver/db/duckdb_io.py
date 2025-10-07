@@ -58,6 +58,27 @@ def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _delete_where(
+    conn: "duckdb.DuckDBPyConnection",
+    table: str,
+    where_sql: str,
+    params: Sequence[object],
+) -> int:
+    """Delete rows from ``table`` matching ``where_sql`` and return the count."""
+
+    table_ident = _quote_identifier(table)
+    base_delete = f"DELETE FROM {table_ident} WHERE {where_sql}"
+    try:
+        rows = conn.execute(f"{base_delete} RETURNING 1", params).fetchall()
+        return len(rows)
+    except duckdb.Error:
+        count = conn.execute(
+            f"SELECT COUNT(*) FROM {table_ident} WHERE {where_sql}", params
+        ).fetchone()[0]
+        conn.execute(base_delete, params)
+        return int(count or 0)
+
+
 def _normalise_db_url(path_or_url: str | None) -> str:
     if not path_or_url:
         return DEFAULT_DB_URL
@@ -221,7 +242,12 @@ def upsert_dataframe(
             delete_sql = (
                 f"DELETE FROM {table_ident} AS t USING {temp_ident} AS s WHERE {comparisons}"
             )
-            delete_count = conn.execute(delete_sql).rowcount
+            join_sql = (
+                f"SELECT COUNT(*) FROM {table_ident} AS t JOIN {temp_ident} AS s "
+                f"ON {comparisons}"
+            )
+            delete_count = int(conn.execute(join_sql).fetchone()[0])
+            conn.execute(delete_sql)
             LOGGER.debug(
                 "Deleted %s existing rows from %s using keys %s",
                 delete_count,
@@ -281,6 +307,9 @@ def write_snapshot(
 
     conn.execute("BEGIN")
     try:
+        deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
+        deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
+
         facts_rows = 0
         deltas_rows = 0
         if facts_resolved is not None and not facts_resolved.empty:
@@ -306,12 +335,10 @@ def write_snapshot(
                 ),
                 axis=1,
             )
-            facts_rows = upsert_dataframe(
-                conn,
-                "facts_resolved",
-                facts_resolved,
-                keys=FACTS_RESOLVED_KEY,
-            )
+            facts_resolved = facts_resolved.drop_duplicates(
+                subset=FACTS_RESOLVED_KEY, keep="last"
+            ).reset_index(drop=True)
+            facts_rows = upsert_dataframe(conn, "facts_resolved", facts_resolved)
             LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
             LOGGER.debug(
                 "facts_resolved series_semantics distribution: %s",
@@ -343,12 +370,10 @@ def write_snapshot(
             facts_deltas["series_semantics"] = facts_deltas.get(
                 "series_semantics", "new"
             ).replace("", "new")
-            deltas_rows = upsert_dataframe(
-                conn,
-                "facts_deltas",
-                facts_deltas,
-                keys=FACTS_DELTAS_KEY,
-            )
+            facts_deltas = facts_deltas.drop_duplicates(
+                subset=FACTS_DELTAS_KEY, keep="last"
+            ).reset_index(drop=True)
+            deltas_rows = upsert_dataframe(conn, "facts_deltas", facts_deltas)
             LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
             if "series_semantics" in facts_deltas.columns:
                 LOGGER.debug(
@@ -370,8 +395,10 @@ def write_snapshot(
                         "payload": json.dumps(payload, sort_keys=True),
                     }
                 )
+        deleted_manifests = _delete_where(conn, "manifests", "ym = ?", [ym])
         if manifest_rows:
-            upsert_dataframe(conn, "manifests", pd.DataFrame(manifest_rows), keys=["ym", "name"])
+            upsert_dataframe(conn, "manifests", pd.DataFrame(manifest_rows))
+        LOGGER.debug("Deleted %s manifest rows for ym=%s", deleted_manifests, ym)
         snapshot_payload = {
             "ym": ym,
             "created_at": _default_created_at(meta.get("created_at_utc") if meta else None),
@@ -381,16 +408,37 @@ def write_snapshot(
             "deltas_rows": deltas_rows,
             "meta": json.dumps(dict(meta or {}), sort_keys=True),
         }
-        upsert_dataframe(conn, "snapshots", pd.DataFrame([snapshot_payload]), keys=["ym"])
+        _delete_where(conn, "snapshots", "ym = ?", [ym])
+        conn.execute(
+            """
+            INSERT INTO snapshots
+            (ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                snapshot_payload["ym"],
+                snapshot_payload["created_at"],
+                snapshot_payload["git_sha"],
+                snapshot_payload["export_version"],
+                int(snapshot_payload["facts_rows"] or 0),
+                int(snapshot_payload["deltas_rows"] or 0),
+                snapshot_payload["meta"],
+            ],
+        )
         LOGGER.debug(
             "Snapshot summary: %s",
             snapshot_payload,
         )
         LOGGER.info(
-            "Snapshot upsert succeeded for ym=%s (facts_rows=%s, deltas_rows=%s)",
+            (
+                "DuckDB snapshot write complete: ym=%s facts_resolved=%s deltas=%s "
+                "deleted_resolved=%s deleted_deltas=%s"
+            ),
             ym,
             facts_rows,
             deltas_rows,
+            deleted_resolved,
+            deleted_deltas,
         )
         conn.execute("COMMIT")
     except Exception:

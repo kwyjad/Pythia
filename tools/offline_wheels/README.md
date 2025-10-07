@@ -22,6 +22,6 @@ If corporate policy allows proxy-based access, configure the `HTTP_PROXY` and
 reach PyPI directly. The repository README documents sample commands for Linux,
 macOS, and Windows environments.
 
-Keep this directory small: only DuckDB, pytest, and other DB-contract-test
+Keep this directory small: only DuckDB, pytest, httpx, and other DB-contract-test
 requirements should be cached here. Refresh the wheels whenever versions bump in
 CI to maintain parity between offline installs and automated jobs.

@@ -23,8 +23,9 @@ fi
 
 if [ "$OFFLINE_FAIL" = "1" ]; then
   echo ">> Offline install not available or failed; falling back to online extras..."
-  if ! "$PY_BIN" -m pip install -e ".[db]"; then
-    "$PY_BIN" -m pip install duckdb pytest
+  if ! "$PY_BIN" -m pip install -e ".[db,test]"; then
+    "$PY_BIN" -m pip install -e .
+    "$PY_BIN" -m pip install duckdb==0.10.3 httpx pytest
   fi
 fi
 

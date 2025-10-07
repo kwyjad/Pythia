@@ -129,7 +129,10 @@ def _expected_resolved(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @pytest.mark.usefixtures("monkeypatch")
-@pytest.mark.skipif(duckdb_io is None, reason="duckdb not installed")
+@pytest.mark.skipif(
+    duckdb_io is None,
+    reason="duckdb not installed — run `pip install -e .[db]` or `make dev-setup`",
+)
 def test_exporter_dual_writes_to_duckdb(tmp_path, monkeypatch):
     staging = tmp_path / "staging.csv"
     data = pd.DataFrame(
