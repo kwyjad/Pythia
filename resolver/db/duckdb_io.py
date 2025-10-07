@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 import datetime as dt
+import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -18,11 +19,28 @@ except ImportError as exc:  # pragma: no cover - guidance for operators
         "DuckDB is required for database-backed resolver operations. Install 'duckdb'."
     ) from exc
 
+from resolver.common import (
+    compute_series_semantics,
+    get_logger,
+    dict_counts,
+    df_schema,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
+
+LOGGER = get_logger(__name__)
+
+
+def _quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _normalise_db_url(path_or_url: str | None) -> str:
@@ -64,6 +82,30 @@ def init_schema(
     # DuckDB executes multiple statements separated by semicolons.
     for statement in [s.strip() for s in sql.split(";") if s.strip()]:
         conn.execute(statement)
+    LOGGER.info("Ensured DuckDB schema from %s", schema_path)
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        table_details = conn.execute(
+            """
+            SELECT table_name, column_name, ordinal_position
+            FROM information_schema.columns
+            WHERE table_schema = 'main'
+              AND table_name IN ('facts_resolved','facts_deltas','manifests','snapshots')
+            ORDER BY table_name, ordinal_position
+            """
+        ).fetchall()
+        current_table = None
+        columns: list[str] = []
+        for table_name, column_name, _ in table_details:
+            if table_name != current_table:
+                if current_table is not None:
+                    LOGGER.debug(
+                        "Table %s columns: %s", current_table, ", ".join(columns)
+                    )
+                current_table = table_name
+                columns = []
+            columns.append(column_name)
+        if current_table is not None:
+            LOGGER.debug("Table %s columns: %s", current_table, ", ".join(columns))
 
 
 def upsert_dataframe(
@@ -78,22 +120,102 @@ def upsert_dataframe(
         return 0
 
     frame = df.copy()
-    for column in frame.columns:
-        if frame[column].dtype == "object":
-            frame[column] = frame[column].astype(str)
+    LOGGER.info("Upserting %s rows into %s", len(frame), table)
+    LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
+
+    if "series_semantics_out" in frame.columns:
+        semantics_out = frame["series_semantics_out"].where(
+            frame["series_semantics_out"].notna(), ""
+        ).astype(str)
+        if "series_semantics" in frame.columns:
+            semantics_current_raw = frame["series_semantics"]
+            semantics_current = semantics_current_raw.astype(str)
+            prefer_out = semantics_current_raw.isna() | semantics_current.str.strip().eq("")
+            frame.loc[prefer_out, "series_semantics"] = semantics_out.loc[prefer_out]
+        else:
+            frame["series_semantics"] = semantics_out
+        frame = frame.drop(columns=["series_semantics_out"])
+
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = ""
+    else:
+        semantics_series = frame["series_semantics"].where(
+            frame["series_semantics"].notna(), ""
+        )
+        semantics_series = semantics_series.astype(str).str.strip()
+        semantics_series = semantics_series.mask(
+            semantics_series.str.lower().isin({"none", "nan"}), ""
+        )
+        frame["series_semantics"] = semantics_series
+
+    table_info = conn.execute(f"PRAGMA table_info({_quote_literal(table)})").fetchall()
+    if not table_info:
+        raise ValueError(f"Table '{table}' does not exist in DuckDB database")
+    table_columns = [row[1] for row in table_info]
+
+    insert_columns = [col for col in frame.columns if col in table_columns]
+    dropped = [col for col in frame.columns if col not in table_columns]
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug("Table %s columns: %s", table, ", ".join(table_columns))
+        LOGGER.debug("Insert columns: %s", ", ".join(insert_columns))
+        if dropped:
+            LOGGER.debug(
+                "Dropping columns not present in %s: %s", table, ", ".join(dropped)
+            )
+    if not insert_columns:
+        raise ValueError(f"No matching columns to insert into '{table}'")
+
+    frame = frame.loc[:, insert_columns].copy()
+
+    object_columns = frame.select_dtypes(include=["object"]).columns
+    for column in object_columns:
+        frame[column] = frame[column].astype(str)
+
+    if "series_semantics" in frame.columns:
+        semantics = frame["series_semantics"].astype(str)
+        normalised = semantics.str.strip().str.lower()
+        frame.loc[normalised.str.startswith("new"), "series_semantics"] = "new"
+        frame.loc[normalised.str.startswith("stock"), "series_semantics"] = "stock"
+
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
     try:
         if keys:
+            missing_keys = [k for k in keys if k not in insert_columns]
+            if missing_keys:
+                raise KeyError(
+                    f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+                )
             comparisons = " AND ".join(
-                f"coalesce(t.{k}, '') = coalesce(s.{k}, '')" for k in keys
+                f"coalesce(t.{_quote_identifier(k)}, '') = coalesce(s.{_quote_identifier(k)}, '')"
+                for k in keys
             )
-            delete_sql = f"DELETE FROM {table} t USING {temp_name} s WHERE {comparisons}"
+            table_ident = _quote_identifier(table)
+            temp_ident = _quote_identifier(temp_name)
+            delete_sql = (
+                f"DELETE FROM {table_ident} AS t USING {temp_ident} AS s WHERE {comparisons}"
+            )
             conn.execute(delete_sql)
-        insert_sql = f"INSERT INTO {table} BY NAME SELECT * FROM {temp_name}"
+        cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
+        table_ident = _quote_identifier(table)
+        temp_ident = _quote_identifier(temp_name)
+        insert_sql = (
+            f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
+        )
         conn.execute(insert_sql)
+    except Exception:
+        LOGGER.error(
+            "DuckDB upsert failed for table %s. SQL: %s | schema=%s | first_row=%s",
+            table,
+            insert_sql,
+            table_columns,
+            frame.head(1).to_dict(orient="records"),
+            exc_info=True,
+        )
+        raise
     finally:
         conn.unregister(temp_name)
+    LOGGER.info("Inserted %s rows into %s", len(frame), table)
     return len(frame)
 
 
@@ -142,14 +264,22 @@ def write_snapshot(
                 ],
             )
             facts_resolved["ym"] = facts_resolved["ym"].replace("", ym)
-            facts_resolved["series_semantics"] = facts_resolved.get(
-                "series_semantics", "stock"
-            ).replace("", "stock")
+            facts_resolved["series_semantics"] = facts_resolved.apply(
+                lambda row: compute_series_semantics(
+                    metric=row.get("metric"), existing=row.get("series_semantics")
+                ),
+                axis=1,
+            )
             facts_rows = upsert_dataframe(
                 conn,
                 "facts_resolved",
                 facts_resolved,
                 keys=["ym", "iso3", "hazard_code", "metric", "series_semantics"],
+            )
+            LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
+            LOGGER.debug(
+                "facts_resolved series_semantics distribution: %s",
+                dict_counts(facts_resolved["series_semantics"]),
             )
         if facts_deltas is not None and not facts_deltas.empty:
             facts_deltas = facts_deltas.copy()
@@ -173,6 +303,12 @@ def write_snapshot(
                 facts_deltas,
                 keys=["ym", "iso3", "hazard_code", "metric"],
             )
+            LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
+            if "series_semantics" in facts_deltas.columns:
+                LOGGER.debug(
+                    "facts_deltas series_semantics distribution: %s",
+                    dict_counts(facts_deltas["series_semantics"]),
+                )
         manifest_rows: list[dict] = []
         if manifests:
             for entry in manifests:
@@ -200,6 +336,10 @@ def write_snapshot(
             "meta": json.dumps(dict(meta or {}), sort_keys=True),
         }
         upsert_dataframe(conn, "snapshots", pd.DataFrame([snapshot_payload]), keys=["ym"])
+        LOGGER.debug(
+            "Snapshot summary: %s",
+            snapshot_payload,
+        )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
