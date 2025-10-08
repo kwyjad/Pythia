@@ -95,6 +95,7 @@ jobs:
           path: pytest-junit.xml
 
   db_tests:
+    if: ${{ github.repository == 'oughtinc/Pythia' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

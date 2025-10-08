@@ -116,6 +116,7 @@ jobs:
           PY
 
   tests-db:
+    if: ${{ github.repository == 'oughtinc/Pythia' }}
     name: tests (db backend)
     runs-on: ubuntu-latest
     env:
@@ -147,6 +148,7 @@ jobs:
           fi
 
       - name: "Anti-drift: assert no legacy repo references"
+        if: steps.dbfiles.outputs.present == 'true'
         run: |
           part_a="spa"
           part_b="gbot"
@@ -155,10 +157,10 @@ jobs:
           "$script_path"
 
       - name: Set up Python
+        if: steps.dbfiles.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-        if: steps.dbfiles.outputs.present == 'true'
 
       - name: Confirm Pythia root
         if: steps.dbfiles.outputs.present == 'true'
