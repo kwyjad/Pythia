@@ -200,6 +200,8 @@ def upsert_dataframe(
     """Upsert rows into ``table`` using ``keys`` as the natural key."""
 
     insert_sql = None  # ensure defined for later logging even on errors
+    delete_sql = None  # ensure defined for later logging even on errors
+    diag_join_count_sql = None  # ensure defined for later logging even on errors
 
     # --- DEBUG: start -------------------------------------------------------
     try:
@@ -317,42 +319,66 @@ def upsert_dataframe(
             )
             count_sql = exists_sql
 
-            # --- begin temporary diagnostics ---
+            # ==== DIAG: schema & types for both sides ====
             try:
-                LOGGER.debug("DELETE SQL (preview): %s", delete_sql)
-            except Exception:
-                LOGGER.exception("DIAG: printing delete_sql failed")
+                table_info = conn.execute(
+                    f"PRAGMA table_info({_quote_literal(table)})"
+                ).fetchall()
+                temp_info = conn.execute(
+                    f"PRAGMA table_info({_quote_literal(temp_name)})"
+                ).fetchall()
+                LOGGER.info("DIAG table schema (%s): %s", table, table_info)
+                LOGGER.info("DIAG temp schema  (%s): %s", temp_name, temp_info)
 
+                diag_cols = ", ".join(
+                    [f"typeof({_quote_identifier(k)})" for k in keys]
+                )
+                table_types = conn.execute(
+                    f"SELECT {diag_cols} FROM {table_ident} LIMIT 1"
+                ).fetchall()
+                temp_types = conn.execute(
+                    f"SELECT {diag_cols} FROM {temp_ident} LIMIT 1"
+                ).fetchall()
+                LOGGER.info("DIAG table key typeof(): %s", table_types)
+                LOGGER.info("DIAG temp  key typeof(): %s", temp_types)
+            except Exception:
+                LOGGER.exception("DIAG: schema/type inspection failed")
+
+            # ---- DIAG block (INFO to always print in your test run) ----
             try:
-                join_pred = " AND ".join(
+                LOGGER.info("DIAG DELETE SQL:\n%s", delete_sql)
+                diag_join_pred = " AND ".join(
                     f"COALESCE(t.{_quote_identifier(k)}, '') = COALESCE(s.{_quote_identifier(k)}, '')"
                     for k in keys
                 )
-                diag_join_count_sql = f"""
-                SELECT COUNT(*) AS match_rows
-                FROM {table_ident} t
-                JOIN {temp_ident} s
-                  ON {join_pred}
-                """.strip()
-                LOGGER.debug("DIAG join-count SQL: %s", diag_join_count_sql)
+                diag_join_count_sql = (
+                    "\n".join(
+                        [
+                            "SELECT COUNT(*) AS match_rows",
+                            f"FROM {table_ident} t",
+                            f"JOIN {temp_ident} s",
+                            f"  ON {diag_join_pred}",
+                        ]
+                    )
+                )
+                LOGGER.info("DIAG join-count SQL:\n%s", diag_join_count_sql)
                 match_rows = conn.execute(diag_join_count_sql).fetchone()[0]
-                LOGGER.debug("DIAG join-count result: %s", match_rows)
-            except Exception:
-                LOGGER.exception("DIAG: join-count failed")
+                LOGGER.info("DIAG join-count result: %s", match_rows)
 
-            try:
                 diag_keys_cols = ", ".join([_quote_identifier(k) for k in keys])
+                order_by_indices = ", ".join(str(i + 1) for i in range(len(keys))) or "1"
                 left_keys = conn.execute(
-                    f"SELECT {diag_keys_cols} FROM {table_ident} ORDER BY 1,2,3,4,5 LIMIT 10"
+                    f"SELECT {diag_keys_cols} FROM {table_ident} "
+                    f"ORDER BY {order_by_indices} LIMIT 10"
                 ).fetchall()
                 right_keys = conn.execute(
-                    f"SELECT {diag_keys_cols} FROM {temp_ident} ORDER BY 1,2,3,4,5 LIMIT 10"
+                    f"SELECT {diag_keys_cols} FROM {temp_ident} "
+                    f"ORDER BY {order_by_indices} LIMIT 10"
                 ).fetchall()
-                LOGGER.debug("DIAG table(t) first key tuples: %s", left_keys)
-                LOGGER.debug("DIAG temp(s)  first key tuples: %s", right_keys)
+                LOGGER.info("DIAG table(t) first key tuples: %s", left_keys)
+                LOGGER.info("DIAG temp(s)  first key tuples: %s", right_keys)
             except Exception:
-                LOGGER.exception("DIAG: key dump failed")
-            # --- end temporary diagnostics ---
+                LOGGER.exception("DIAG: delete/join introspection failed")
 
             LOGGER.debug("UPSERT KEYS: %s", list(keys))
             LOGGER.debug("TEMP TABLE NAME: %s", temp_name)
@@ -389,7 +415,6 @@ def upsert_dataframe(
                 LOGGER.debug("Existing-keys snapshot failed: %s", _e)
 
             # --- DEBUG: count + DELETE SQL preview ---------------------------------
-            LOGGER.debug("DELETE SQL:\n%s", delete_sql)
             try:
                 delete_count = int(conn.execute(count_sql).fetchone()[0])
                 LOGGER.debug("COUNT of matching rows before DELETE: %s", delete_count)
@@ -405,12 +430,15 @@ def upsert_dataframe(
                 LOGGER.debug("COUNT of matching rows after DELETE: %s", _c2)
             except Exception as _e:
                 LOGGER.debug("COUNT-after check failed: %s", _e)
-            LOGGER.info(
-                "Deleted %s existing rows from %s using keys %s",
-                delete_count,
-                table,
-                list(keys),
-            )
+            try:
+                LOGGER.info(
+                    "Deleted %s existing rows from %s using keys %s",
+                    delete_count,
+                    table,
+                    list(keys),
+                )
+            except Exception:
+                LOGGER.exception("DIAG: logging delete count failed")
         cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
@@ -426,18 +454,27 @@ def upsert_dataframe(
         except Exception:
             sample = []
         LOGGER.debug("INSERT SAMPLE ROW (first): %s", sample)
-        
+
+        try:
+            LOGGER.info("DIAG INSERT SQL:\n%s", insert_sql)
+        except Exception:
+            LOGGER.exception("DIAG: printing insert_sql failed")
         conn.execute(insert_sql)
-    except Exception:
-        LOGGER.error(
-            "DuckDB upsert failed for table %s. SQL: %s | schema=%s | first_row=%s",
-            table,
-            insert_sql,
-            table_columns,
-            frame.head(1).to_dict(orient="records"),
-            exc_info=True,
-        )
-        raise
+    except Exception as e:
+        try:
+            LOGGER.error(
+                "DuckDB upsert failed for table %s.\nINSERT SQL:\n%s\nDELETE SQL:\n%s\nJOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s",
+                table,
+                insert_sql if insert_sql else "<unset>",
+                delete_sql if delete_sql else "<unset>",
+                diag_join_count_sql if diag_join_count_sql else "<unset>",
+                table_columns,
+                frame.head(1).to_dict(orient="records"),
+                exc_info=True,
+            )
+        except Exception:
+            LOGGER.exception("DIAG: assembling failure log failed")
+        raise e
     finally:
         conn.unregister(temp_name)
     LOGGER.info("Inserted %s rows into %s", len(frame), table)
