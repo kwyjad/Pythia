@@ -12,8 +12,9 @@ CREATE TABLE IF NOT EXISTS facts_resolved (
     value DOUBLE,
     unit TEXT,
     as_of DATE,
-    as_of_date DATE,
-    publication_date DATE,
+    -- String dates kept for parity with CSV exports & Pandas merges
+    as_of_date VARCHAR,
+    publication_date VARCHAR,
     publisher TEXT,
     source_id TEXT,
     source_type TEXT,
@@ -40,7 +41,8 @@ CREATE TABLE IF NOT EXISTS facts_deltas (
     value_new DOUBLE,
     value_stock DOUBLE,
     series_semantics TEXT NOT NULL DEFAULT 'new',
-    as_of DATE,
+    -- String dates kept for parity with CSV exports & Pandas merges
+    as_of VARCHAR,
     source_id TEXT,
     series TEXT,
     rebase_flag INTEGER,

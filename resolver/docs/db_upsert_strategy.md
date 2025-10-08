@@ -13,3 +13,13 @@ primary keys, and supporting indexes for `facts_resolved`, `facts_deltas`,
 validate that the target table exposes a matching primary key or unique
 constraint and raise immediately if it does not. This fail-fast check keeps the
 schema and upsert expectations aligned as the database evolves.
+
+## Date Columns Policy
+
+Resolver exports compare DuckDB rows against CSV files during parity tests. To
+avoid type mismatches when pandas merges on date fields, user-facing columns in
+DuckDB that are also emitted to CSV are stored as `VARCHAR` values containing
+ISO `YYYY-MM-DD` strings. The exporter and database writer normalise
+`as_of_date`, `publication_date`, and delta `as_of` fields to the same string
+format before inserting. Internal audit columns (such as `created_at`) remain
+`TIMESTAMP` because they are not merged against CSV outputs.

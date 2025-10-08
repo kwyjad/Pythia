@@ -365,6 +365,13 @@ def main():
 
     facts = _apply_mapping(staging, cfg)
     facts = _apply_series_semantics(facts)
+    for col in ["as_of_date", "publication_date"]:
+        if col in facts.columns:
+            parsed = pd.to_datetime(facts[col], errors="coerce")
+            iso = parsed.dt.strftime("%Y-%m-%d")
+            fallback = facts[col].fillna("").astype(str)
+            fallback = fallback.replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
+            facts[col] = iso.where(parsed.notna(), fallback).fillna("")
     LOGGER.info("Prepared %s exported rows", len(facts))
     LOGGER.debug("Export dataframe schema: %s", df_schema(facts))
     LOGGER.info(

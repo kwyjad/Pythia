@@ -44,6 +44,10 @@ FACTS_DELTAS_KEY_COLUMNS = [
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
+DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
+    "facts_resolved": ("as_of_date", "publication_date"),
+    "facts_deltas": ("as_of",),
+}
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
@@ -88,6 +92,31 @@ def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
     lowered = semantics.astype(str).str.lower()
     semantics = semantics.mask(~lowered.isin({"", "new", "stock"}), "")
     return semantics.astype(str)
+
+
+def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
+    """Cast ``columns`` to ISO ``YYYY-MM-DD`` strings when present in ``frame``."""
+
+    normalised: list[str] = []
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        series = frame[column]
+        formatted: pd.Series
+        if pd.api.types.is_datetime64_any_dtype(series):
+            formatted = series.dt.strftime("%Y-%m-%d")
+        else:
+            parsed = pd.to_datetime(series, errors="coerce")
+            formatted = parsed.dt.strftime("%Y-%m-%d")
+            # Preserve original strings where parsing failed but coerce missing to empty
+            fallback = series.fillna("").astype(str)
+            fallback = fallback.replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
+            mask = parsed.notna()
+            formatted = formatted.where(mask, fallback)
+        formatted = formatted.fillna("").replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
+        frame[column] = formatted.astype(str)
+        normalised.append(column)
+    return normalised
 
 
 def _constraint_column_sets(
@@ -354,6 +383,17 @@ def upsert_dataframe(
         raise ValueError(f"No matching columns to insert into '{table}'")
 
     frame = frame.loc[:, insert_columns].copy()
+
+    normalised_dates = []
+    if table in DATE_STRING_COLUMNS:
+        normalised_dates = _normalise_iso_date_strings(
+            frame, DATE_STRING_COLUMNS[table]
+        )
+        if normalised_dates and LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug(
+                "Normalized date columns to ISO strings: %s",
+                ", ".join(normalised_dates),
+            )
 
     if keys:
         missing_keys = [k for k in keys if k not in frame.columns]

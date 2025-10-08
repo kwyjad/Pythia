@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import pandas as pd
@@ -214,12 +215,21 @@ def test_exporter_dual_writes_to_duckdb(tmp_path, monkeypatch):
 
     exported = pd.read_csv(csv_path)
 
+    assert pd.api.types.is_object_dtype(exported["as_of_date"])
+    assert pd.api.types.is_object_dtype(exported["publication_date"])
+
     conn = duckdb_io.get_db(f"duckdb:///{db_path}")
     duckdb_io.init_schema(conn)
     db_rows = conn.execute(
         "SELECT event_id, iso3, hazard_code, metric, value, unit, as_of_date, publication_date, series_semantics, ym "
         "FROM facts_resolved ORDER BY event_id"
     ).fetch_df()
+
+    assert pd.api.types.is_object_dtype(db_rows["as_of_date"])
+    assert pd.api.types.is_object_dtype(db_rows["publication_date"])
+    iso_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    assert db_rows["as_of_date"].map(lambda v: bool(iso_pattern.match(str(v)))).all()
+    assert db_rows["publication_date"].map(lambda v: bool(iso_pattern.match(str(v)))).all()
 
     expected_resolved = _expected_resolved(exported)
     assert len(db_rows) == len(expected_resolved)

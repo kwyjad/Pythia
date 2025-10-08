@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from resolver.utils.json_sanitize import json_default
+
 try:
     import pandas as pd
 except ImportError:  # pragma: no cover - guidance for operators
@@ -474,7 +476,9 @@ def main() -> None:
                     "hazard_code": hazard_code,
                     "cutoff": args.cutoff,
                     "series_requested": series_requested,
-                }
+                },
+                default=json_default,
+                ensure_ascii=False,
             ),
             flush=True,
         )
@@ -517,7 +521,9 @@ def main() -> None:
                     "hazard_code": hazard_code,
                     "cutoff": args.cutoff,
                     "series_requested": series_requested,
-                }
+                },
+                default=json_default,
+                ensure_ascii=False,
             ),
             flush=True,
         )
@@ -567,7 +573,7 @@ def main() -> None:
         "ym": row.get("ym", ym),
     }
 
-    print(json.dumps(output, ensure_ascii=False), flush=True)
+    print(json.dumps(output, default=json_default, ensure_ascii=False), flush=True)
 
     if args.json_only:
         return
