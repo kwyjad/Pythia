@@ -39,11 +39,13 @@ entities:
         enum: [persons, persons_cases, events]
         required: true
       - name: as_of_date
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: publication_date
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: publisher
         type: string
         required: true
@@ -209,11 +211,13 @@ entities:
         enum: [persons, persons_cases, events]
         required: true
       - name: as_of_date
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: publication_date
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: publisher
         type: string
         required: true
@@ -295,11 +299,13 @@ entities:
         enum: [persons, persons_cases, events]
         required: true
       - name: as_of_date
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: publication_date
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: publisher
         type: string
         required: true
@@ -368,8 +374,9 @@ entities:
         type: integer
         required: false
       - name: as_of
-        type: date
+        type: string
         required: true
+        description: ISO-8601 date (YYYY-MM-DD)
       - name: source_name
         type: string
         required: true

@@ -64,6 +64,41 @@ def _basic_facts_frame() -> pd.DataFrame:
     )
 
 
+def test_init_schema_creates_all_tables_and_keys(tmp_path: Path) -> None:
+    db_path = tmp_path / "schema.duckdb"
+    conn = duckdb_io.get_db(f"duckdb:///{db_path}")
+    try:
+        duckdb_io.init_schema(conn)
+
+        tables = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'main'
+                """
+            ).fetchall()
+        }
+        expected = {"facts_resolved", "facts_deltas", "manifests", "meta_runs", "snapshots"}
+        assert expected.issubset(tables)
+
+        assert duckdb_io._has_declared_key(
+            conn, "facts_resolved", duckdb_io.FACTS_RESOLVED_KEY_COLUMNS
+        )
+        assert duckdb_io._has_declared_key(
+            conn, "facts_deltas", duckdb_io.FACTS_DELTAS_KEY_COLUMNS
+        )
+        manifest_constraints = duckdb_io._constraint_column_sets(conn, "manifests")
+        assert ["path"] in [[col.lower() for col in cols] for cols in manifest_constraints]
+        meta_constraints = duckdb_io._constraint_column_sets(conn, "meta_runs")
+        assert ["run_id"] in [[col.lower() for col in cols] for cols in meta_constraints]
+
+        duckdb_io.init_schema(conn)
+    finally:
+        conn.close()
+
+
 def test_dual_writes_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "resolver.duckdb"
     monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
