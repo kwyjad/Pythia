@@ -199,16 +199,34 @@ def upsert_dataframe(
 ) -> int:
     """Upsert rows into ``table`` using ``keys`` as the natural key."""
 
-    if df is None or df.empty:
-        return 0
+    # --- DEBUG: start -------------------------------------------------------
+    try:
+        _source_frame = df
+        _sample = (
+            _source_frame.iloc[0].to_dict() if _source_frame is not None and len(_source_frame) else {}
+        )
+        _insert_cols_preview = (
+            list(_source_frame.columns) if _source_frame is not None else None
+        )
+        LOGGER.debug(
+            "UPSERT starting | table=%s | keys=%s | insert_columns=%s | sample_row=%s",
+            table,
+            keys,
+            _insert_cols_preview,
+            json.dumps(_sample, default=str),
+        )
+    except Exception as _e:
+        LOGGER.debug("UPSERT debug prelude failed: %s", _e)
+    # --- DEBUG: end ---------------------------------------------------------
 
     if df is None or df.empty:
         return 0
 
-    # ---- TOP-OF-FUNCTION OPTIONAL LOGGING GOES HERE ----
+    if df is None or df.empty:
+        return 0
+
     import duckdb  # keep inside function to avoid module-top import churn
     LOGGER.debug("DuckDB version: %s", duckdb.__version__)
-    # ----------------------------------------------------
 
     frame = df.copy()
     LOGGER.info("Upserting %s rows into %s", len(frame), table)
@@ -295,18 +313,59 @@ def upsert_dataframe(
                 f"DELETE FROM {table_ident} AS t "
                 f"WHERE EXISTS (SELECT 1 FROM {temp_ident} AS s WHERE {comparisons})"
             )
-            
+            count_sql = exists_sql
+
             LOGGER.debug("UPSERT KEYS: %s", list(keys))
             LOGGER.debug("TEMP TABLE NAME: %s", temp_name)
             LOGGER.debug("DELETE/EXISTS where-clause built from keys")
 
             # If your code uses WHERE EXISTS variant:
             LOGGER.debug("EXISTS SQL:\n%s", exists_sql)
-            LOGGER.debug("DELETE SQL:\n%s", delete_sql)
 
-            delete_count = int(conn.execute(exists_sql).fetchone()[0])
+            try:
+                _ym = None
+                if "ym" in frame.columns and not frame.empty:
+                    _ym = str(frame["ym"].iloc[0])
+                if not _ym:
+                    _ym = "2024-01"  # fallback for tests
+
+                _existing = conn.execute(
+                    f"""
+                    SELECT ym, iso3, hazard_code, metric, series_semantics
+                    FROM "{table}"
+                    WHERE ym = ?
+                    ORDER BY ym, iso3, hazard_code, metric, series_semantics
+                    """,
+                    [_ym],
+                ).fetch_df()
+                if not _existing.empty:
+                    LOGGER.debug(
+                        "Existing key rows for ym=%s before/after DELETE:\n%s",
+                        _ym,
+                        _existing.to_string(index=False),
+                    )
+                else:
+                    LOGGER.debug("No existing key rows for ym=%s", _ym)
+            except Exception as _e:
+                LOGGER.debug("Existing-keys snapshot failed: %s", _e)
+
+            # --- DEBUG: count + DELETE SQL preview ---------------------------------
+            LOGGER.debug("DELETE SQL:\n%s", delete_sql)
+            try:
+                delete_count = int(conn.execute(count_sql).fetchone()[0])
+                LOGGER.debug("COUNT of matching rows before DELETE: %s", delete_count)
+            except Exception as _e:
+                LOGGER.debug("COUNT-before check failed: %s", _e)
+                delete_count = int(conn.execute(exists_sql).fetchone()[0])
+            # -----------------------------------------------------------------------
+
             if delete_count:
                 conn.execute(delete_sql)
+            try:
+                _c2 = conn.execute(count_sql).fetchone()[0]
+                LOGGER.debug("COUNT of matching rows after DELETE: %s", _c2)
+            except Exception as _e:
+                LOGGER.debug("COUNT-after check failed: %s", _e)
             LOGGER.info(
                 "Deleted %s existing rows from %s using keys %s",
                 delete_count,
