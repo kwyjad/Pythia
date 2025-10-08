@@ -359,6 +359,40 @@ def upsert_dataframe(
                 delete_count = int(conn.execute(exists_sql).fetchone()[0])
             # -----------------------------------------------------------------------
 
+            # --- begin temporary diagnostics ---
+            diag_join_count_sql = f"""
+            SELECT COUNT(*) AS match_rows
+            FROM {table_name} t
+            JOIN {temp_ident} s
+            ON { " AND ".join([
+                f"COALESCE(t.{_quote_identifier(k)}, '') = COALESCE(s.{_quote_identifier(k)}, '')"
+                for k in keys
+            ])}
+            """
+            logger.debug("DELETE SQL (preview): %s", delete_sql)
+            logger.debug("DIAG join-count SQL: %s", diag_join_count_sql)
+
+            try:
+                match_rows = conn.execute(diag_join_count_sql).fetchone()[0]
+                logger.debug("DIAG join-count result: %s", match_rows)
+            except Exception as e:
+                logger.exception("DIAG join-count failed: %s", e)
+
+            # show distinct key tuples on each side (limited)
+            diag_keys_cols = ", ".join([_quote_identifier(k) for k in keys])
+            try:
+                left_keys = conn.execute(
+                    f"SELECT {diag_keys_cols} FROM {table_name} ORDER BY 1,2,3,4,5 LIMIT 10"
+                ).fetchall()
+                right_keys = conn.execute(
+                    f"SELECT {diag_keys_cols} FROM {temp_ident} ORDER BY 1,2,3,4,5 LIMIT 10"
+                ).fetchall()
+                logger.debug("DIAG table(t) first key tuples: %s", left_keys)
+                logger.debug("DIAG temp(s)  first key tuples: %s", right_keys)
+            except Exception as e:
+                logger.exception("DIAG key dump failed: %s", e)
+            # --- end temporary diagnostics ---
+
             if delete_count:
                 conn.execute(delete_sql)
             try:
