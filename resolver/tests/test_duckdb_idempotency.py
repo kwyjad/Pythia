@@ -243,8 +243,9 @@ def test_delete_logging(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     )
     conn.close()
 
+    legacy_message = "Deleted 1 existing rows from facts_resolved"
+    merge_message = "Upserted 1 rows into facts_resolved via MERGE"
     assert any(
-        ("Deleted 1 existing rows" in record.message)
-        or ("Matched 1 existing rows in facts_resolved" in record.message)
+        (legacy_message in record.message) or (merge_message in record.message)
         for record in caplog.records
     )
