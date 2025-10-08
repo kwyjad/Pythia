@@ -179,6 +179,13 @@ Blank values stay blank, while metrics listed under `stock_metrics` (currently
 `in_need`) resolve to `"stock"`. Any pre-existing non-empty values such as
 `"incident"` remain untouched so CSV and DuckDB outputs agree on joins.
 
+### DuckDB setup for local development
+
+Follow [resolver/docs/DUCKDB.md](resolver/docs/DUCKDB.md) to install DuckDB and
+run the DuckDB-specific test suite locally. The same commands ensure
+`python -c "import duckdb; print(duckdb.__version__)"` works before running
+`pytest -q resolver/tests -k duckdb`.
+
 ### DB backend tests
 
 You can exercise the DuckDB-backed contract test either completely offline or
