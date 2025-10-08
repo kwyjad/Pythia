@@ -123,6 +123,7 @@ jobs:
       RESOLVER_API_BACKEND: db
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
       RESOLVER_LOG_LEVEL: DEBUG
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

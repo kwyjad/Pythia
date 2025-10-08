@@ -32,6 +32,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: 1
       TZ: Europe/Istanbul
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
 
     steps:
       - name: Checkout
@@ -98,6 +99,8 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
 
     steps:
       - name: Checkout

@@ -35,6 +35,7 @@ jobs:
       RESOLVER_WINDOW_DAYS: ""
       RESOLVER_MAX_PAGES: ""
       RESOLVER_MAX_RESULTS: ""
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
