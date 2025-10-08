@@ -83,6 +83,74 @@ def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
     return semantics.astype(str)
 
 
+def _constraint_column_sets(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> list[list[str]]:
+    """Return column name sets for PK and UNIQUE constraints on ``table``."""
+
+    constraints: list[list[str]] = []
+    try:
+        table_info = conn.execute(
+            f"PRAGMA table_info({_quote_literal(table)})"
+        ).fetchall()
+    except Exception:  # pragma: no cover - defensive logging helper
+        LOGGER.debug("Constraint inspection failed via PRAGMA table_info", exc_info=True)
+        table_info = []
+
+    pk_columns: list[str] = []
+    for row in table_info:
+        try:
+            is_pk = bool(row[5])
+        except IndexError:
+            is_pk = False
+        if is_pk:
+            pk_columns.append(str(row[1]))
+    if pk_columns:
+        constraints.append(pk_columns)
+
+    try:
+        unique_rows = conn.execute(
+            """
+            SELECT LIST(column_name ORDER BY ordinal_position) AS column_names
+            FROM information_schema.key_column_usage
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+              AND constraint_name IN (
+                    SELECT constraint_name
+                    FROM information_schema.table_constraints
+                    WHERE table_schema = current_schema()
+                      AND table_name = ?
+                      AND constraint_type = 'UNIQUE'
+              )
+            GROUP BY constraint_name
+            """,
+            [table, table],
+        ).fetchall()
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("Constraint inspection failed via information_schema", exc_info=True)
+        unique_rows = []
+
+    for (columns,) in unique_rows:
+        if not columns:
+            continue
+        constraint_columns = [str(column) for column in columns]
+        if constraint_columns:
+            constraints.append(constraint_columns)
+    return constraints
+
+
+def _has_declared_key(
+    conn: "duckdb.DuckDBPyConnection", table: str, keys: Sequence[str] | None
+) -> bool:
+    if not keys:
+        return False
+    expected = [key.lower() for key in keys]
+    for constraint_columns in _constraint_column_sets(conn, table):
+        if [column.lower() for column in constraint_columns] == expected:
+            return True
+    return False
+
+
 def _delete_where(
     conn: "duckdb.DuckDBPyConnection",
     table: str,
@@ -199,10 +267,11 @@ def upsert_dataframe(
 ) -> int:
     """Upsert rows into ``table`` using ``keys`` as the natural key."""
 
-    merge_sql = None  # ensure defined for later logging even on errors
-    diag_join_count_sql = None  # ensure defined for later logging even on errors
+    merge_sql = ""
+    insert_sql = ""
+    delete_sql = ""
+    diag_join_count_sql = ""
 
-    # --- DEBUG: start -------------------------------------------------------
     try:
         _source_frame = df
         _sample = (
@@ -218,18 +287,13 @@ def upsert_dataframe(
             _insert_cols_preview,
             json.dumps(_sample, default=str),
         )
-    except Exception as _e:
+    except Exception as _e:  # pragma: no cover - logging helper only
         LOGGER.debug("UPSERT debug prelude failed: %s", _e)
-    # --- DEBUG: end ---------------------------------------------------------
-
-    if df is None or df.empty:
-        return 0
 
     if df is None or df.empty:
         return 0
 
     import duckdb  # keep inside function to avoid module-top import churn
-    LOGGER.debug("DuckDB version: %s", duckdb.__version__)
 
     frame = df.copy()
     LOGGER.info("Upserting %s rows into %s", len(frame), table)
@@ -303,75 +367,37 @@ def upsert_dataframe(
     try:
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
-        if keys:
-            # ==== DIAG: schema & types for both sides ====
+        has_declared_key = _has_declared_key(conn, table, keys)
+
+        if keys and LOGGER.isEnabledFor(logging.DEBUG):
+            diag_join_pred = " AND ".join(
+                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+            )
+            diag_join_count_sql = (
+                "\n".join(
+                    [
+                        "SELECT COUNT(*) AS match_rows",
+                        f"FROM {table_ident} t",
+                        f"JOIN {temp_ident} s",
+                        f"  ON {diag_join_pred}",
+                    ]
+                )
+            )
+            LOGGER.debug("DIAG join-count SQL:\n%s", diag_join_count_sql)
             try:
-                table_info = conn.execute(
-                    f"PRAGMA table_info({_quote_literal(table)})"
-                ).fetchall()
-                temp_info = conn.execute(
-                    f"PRAGMA table_info({_quote_literal(temp_name)})"
-                ).fetchall()
-                LOGGER.info("DIAG table schema (%s): %s", table, table_info)
-                LOGGER.info("DIAG temp schema  (%s): %s", temp_name, temp_info)
-
-                diag_cols = ", ".join(
-                    [f"typeof({_quote_identifier(k)})" for k in keys]
-                )
-                table_types = conn.execute(
-                    f"SELECT {diag_cols} FROM {table_ident} LIMIT 1"
-                ).fetchall()
-                temp_types = conn.execute(
-                    f"SELECT {diag_cols} FROM {temp_ident} LIMIT 1"
-                ).fetchall()
-                LOGGER.info("DIAG table key typeof(): %s", table_types)
-                LOGGER.info("DIAG temp  key typeof(): %s", temp_types)
-            except Exception:
-                LOGGER.exception("DIAG: schema/type inspection failed")
-
-            # ---- DIAG block (INFO to always print in your test run) ----
-            LOGGER.debug("UPSERT KEYS: %s", list(keys))
-            LOGGER.debug("TEMP TABLE NAME: %s", temp_name)
-
-            try:
-                diag_join_pred = " AND ".join(
-                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
-                )
-                diag_join_count_sql = (
-                    "\n".join(
-                        [
-                            "SELECT COUNT(*) AS match_rows",
-                            f"FROM {table_ident} t",
-                            f"JOIN {temp_ident} s",
-                            f"  ON {diag_join_pred}",
-                        ]
-                    )
-                )
-                LOGGER.info("DIAG join-count SQL:\n%s", diag_join_count_sql)
                 match_rows = conn.execute(diag_join_count_sql).fetchone()[0]
-                LOGGER.info("DIAG join-count result: %s", match_rows)
-                LOGGER.info(
-                    "Matched %d existing rows in %s using keys %s",
+            except Exception:
+                match_rows = None
+                LOGGER.debug("DIAG join-count execution failed", exc_info=True)
+            else:
+                LOGGER.debug(
+                    "DIAG matched %s existing rows in %s using keys %s",
                     match_rows,
                     table,
                     "[" + ", ".join(keys) + "]",
                 )
 
-                diag_keys_cols = ", ".join([_quote_identifier(k) for k in keys])
-                order_by_indices = ", ".join(str(i + 1) for i in range(len(keys))) or "1"
-                left_keys = conn.execute(
-                    f"SELECT {diag_keys_cols} FROM {table_ident} "
-                    f"ORDER BY {order_by_indices} LIMIT 10"
-                ).fetchall()
-                right_keys = conn.execute(
-                    f"SELECT {diag_keys_cols} FROM {temp_ident} "
-                    f"ORDER BY {order_by_indices} LIMIT 10"
-                ).fetchall()
-                LOGGER.info("DIAG table(t) first key tuples: %s", left_keys)
-                LOGGER.info("DIAG temp(s)  first key tuples: %s", right_keys)
-            except Exception:
-                LOGGER.exception("DIAG: merge/join introspection failed")
-
+        if keys and has_declared_key:
             all_columns = insert_columns
             non_key_columns = [c for c in all_columns if c not in keys]
             on_predicate = " AND ".join(
@@ -404,48 +430,85 @@ def upsert_dataframe(
             )
             merge_sql = "\n".join(merge_parts) + ";"
 
-            LOGGER.debug("MERGE SQL (preview): %s", merge_sql)
-            LOGGER.info("DIAG MERGE SQL:\n%s", merge_sql)
+            LOGGER.debug("MERGE SQL:\n%s", merge_sql)
             conn.execute(merge_sql)
-            try:
-                total_changes_attr = getattr(conn, "total_changes", None)
-                total_changes = (
-                    total_changes_attr()
-                    if callable(total_changes_attr)
-                    else total_changes_attr
-                )
-                if total_changes is None:
-                    total_changes = len(frame)
-                LOGGER.info(
-                    "Upserted %s rows into %s via MERGE",
-                    total_changes,
-                    table,
-                )
-            except Exception:
-                LOGGER.debug("total_changes logging failed", exc_info=True)
+            LOGGER.info("Upserted %s rows into %s via MERGE", len(frame), table)
         else:
+            if keys:
+                delete_predicate = " AND ".join(
+                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                )
+                delete_sql = (
+                    "\n".join(
+                        [
+                            f"DELETE FROM {table_ident} AS t",
+                            "WHERE EXISTS (",
+                            f"    SELECT 1 FROM {temp_ident} AS s",
+                            f"    WHERE {delete_predicate}",
+                            ")",
+                        ]
+                    )
+                    + ";"
+                )
+                LOGGER.debug("DELETE SQL:\n%s", delete_sql)
+                try:
+                    deleted_rows = conn.execute(
+                        f"{delete_sql[:-1]} RETURNING 1"
+                    ).fetchall()
+                    deleted_count = len(deleted_rows)
+                except duckdb.Error:
+                    LOGGER.debug("DELETE ... RETURNING failed; retrying without RETURNING", exc_info=True)
+                    count_sql = (
+                        "\n".join(
+                            [
+                                "SELECT COUNT(*)",
+                                f"FROM {table_ident} AS t",
+                                f"JOIN {temp_ident} AS s",
+                                f"  ON {delete_predicate}",
+                            ]
+                        )
+                    )
+                    deleted_count = conn.execute(count_sql).fetchone()[0]
+                    conn.execute(delete_sql)
+                else:
+                    deleted_count = int(deleted_count)
+                LOGGER.info(
+                    "Deleted %s existing rows from %s using keys %s",
+                    int(deleted_count or 0),
+                    table,
+                    "[" + ", ".join(keys or []) + "]",
+                )
+
             cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
             insert_sql = (
                 f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
             )
-            LOGGER.debug("INSERT SQL (no keys provided): %s", insert_sql)
+            LOGGER.debug("INSERT SQL:\n%s", insert_sql)
             conn.execute(insert_sql)
+            LOGGER.info("Inserted %s rows into %s", len(frame), table)
     except Exception as e:
         try:
             LOGGER.error(
-                "DuckDB upsert failed for table %s.\nMERGE SQL:\n%s\nJOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s",
+                (
+                    "DuckDB upsert failed for table %s.\n"
+                    "MERGE SQL:\n%s\nDELETE SQL:\n%s\nINSERT SQL:\n%s\n"
+                    "JOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s"
+                ),
                 table,
-                merge_sql if merge_sql else "<unset>",
-                diag_join_count_sql if diag_join_count_sql else "<unset>",
+                merge_sql or "<unset>",
+                delete_sql or "<unset>",
+                insert_sql or "<unset>",
+                diag_join_count_sql or "<unset>",
                 table_columns,
                 frame.head(1).to_dict(orient="records"),
                 exc_info=True,
             )
-        except Exception:
+        except Exception:  # pragma: no cover - logging failure should not mask error
             LOGGER.exception("DIAG: assembling failure log failed")
         raise e
     finally:
         conn.unregister(temp_name)
+
     LOGGER.info("Processed %s rows for %s", len(frame), table)
     return len(frame)
 
