@@ -202,6 +202,14 @@ def upsert_dataframe(
     if df is None or df.empty:
         return 0
 
+    if df is None or df.empty:
+        return 0
+
+    # ---- TOP-OF-FUNCTION OPTIONAL LOGGING GOES HERE ----
+    import duckdb  # keep inside function to avoid module-top import churn
+    LOGGER.debug("DuckDB version: %s", duckdb.__version__)
+    # ----------------------------------------------------
+
     frame = df.copy()
     LOGGER.info("Upserting %s rows into %s", len(frame), table)
     LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
@@ -287,6 +295,15 @@ def upsert_dataframe(
                 f"DELETE FROM {table_ident} AS t "
                 f"WHERE EXISTS (SELECT 1 FROM {temp_ident} AS s WHERE {comparisons})"
             )
+            
+            LOGGER.debug("UPSERT KEYS: %s", list(keys))
+            LOGGER.debug("TEMP TABLE NAME: %s", temp_name)
+            LOGGER.debug("DELETE/EXISTS where-clause built from keys")
+
+            # If your code uses WHERE EXISTS variant:
+            LOGGER.debug("EXISTS SQL:\n%s", exists_sql)
+            LOGGER.debug("DELETE SQL:\n%s", delete_sql)
+
             delete_count = int(conn.execute(exists_sql).fetchone()[0])
             if delete_count:
                 conn.execute(delete_sql)
@@ -302,6 +319,15 @@ def upsert_dataframe(
         insert_sql = (
             f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
         )
+        
+        LOGGER.debug("INSERT SQL:\n%s", insert_sql)
+        LOGGER.debug("INSERT COLUMNS: %s", insert_columns)
+        try:
+            sample = frame.loc[:, insert_columns].head(1).to_dict(orient="records")
+        except Exception:
+            sample = []
+        LOGGER.debug("INSERT SAMPLE ROW (first): %s", sample)
+        
         conn.execute(insert_sql)
     except Exception:
         LOGGER.error(
