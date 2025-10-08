@@ -220,6 +220,7 @@ def init_schema(
         "facts_resolved",
         "facts_deltas",
         "manifests",
+        "meta_runs",
         "snapshots",
     }
     existing_tables = {
@@ -229,7 +230,7 @@ def init_schema(
             SELECT table_name
             FROM information_schema.tables
             WHERE table_schema = 'main'
-              AND table_name IN ('facts_resolved','facts_deltas','manifests','snapshots')
+              AND table_name IN ('facts_resolved','facts_deltas','manifests','meta_runs','snapshots')
             """
         ).fetchall()
     }
@@ -248,7 +249,7 @@ def init_schema(
             SELECT table_name, column_name, ordinal_position
             FROM information_schema.columns
             WHERE table_schema = 'main'
-              AND table_name IN ('facts_resolved','facts_deltas','manifests','snapshots')
+              AND table_name IN ('facts_resolved','facts_deltas','manifests','meta_runs','snapshots')
             ORDER BY table_name, ordinal_position
             """
         ).fetchall()
@@ -331,6 +332,12 @@ def upsert_dataframe(
     if not table_info:
         raise ValueError(f"Table '{table}' does not exist in DuckDB database")
     table_columns = [row[1] for row in table_info]
+    has_declared_key = _has_declared_key(conn, table, keys) if keys else False
+    if keys and not has_declared_key:
+        raise ValueError(
+            f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
+            "key or unique constraint."
+        )
 
     insert_columns = [col for col in table_columns if col in frame.columns]
     dropped = [col for col in frame.columns if col not in table_columns]
@@ -376,8 +383,6 @@ def upsert_dataframe(
     try:
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
-        has_declared_key = _has_declared_key(conn, table, keys)
-
         if keys and LOGGER.isEnabledFor(logging.DEBUG):
             diag_join_pred = " AND ".join(
                 f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
@@ -702,23 +707,52 @@ def write_snapshot(
                     ym,
                 )
         manifest_rows: list[dict] = []
+        manifest_created_at = _default_created_at(meta.get("created_at_utc") if meta else None)
+        meta_schema_version = str(meta.get("schema_version", "")) if meta else ""
+        meta_source_id = str(meta.get("source_id", "")) if meta else ""
+        meta_sha256 = str(meta.get("sha256", "")) if meta else ""
         if manifests:
             for entry in manifests:
                 payload = dict(entry)
                 name = str(payload.get("name") or payload.get("path") or "artifact")
+                raw_path = str(payload.get("path") or "").strip()
+                if not raw_path:
+                    raw_path = f"{ym}/{name}"
                 manifest_rows.append(
                     {
-                        "ym": ym,
-                        "name": name,
-                        "path": str(payload.get("path", "")),
-                        "rows": int(payload.get("rows", 0) or 0),
-                        "checksum": str(payload.get("checksum", "")),
-                        "payload": json.dumps(payload, sort_keys=True),
+                        "path": raw_path,
+                        "sha256": str(
+                            payload.get("checksum")
+                            or payload.get("sha256")
+                            or meta_sha256
+                        ),
+                        "row_count": int(payload.get("rows") or payload.get("row_count") or 0),
+                        "schema_version": str(
+                            payload.get("schema_version")
+                            or meta_schema_version
+                        ),
+                        "source_id": str(payload.get("source_id") or meta_source_id),
+                        "created_at": manifest_created_at,
                     }
                 )
-        deleted_manifests = _delete_where(conn, "manifests", "ym = ?", [ym])
+        patterns = {
+            f"%/{ym}/%",
+            f"%\\{ym}\\%",
+            f"{ym}/%",
+            f"{ym}\\%",
+        }
+        deleted_manifests = 0
+        for pattern in patterns:
+            deleted_manifests += _delete_where(
+                conn, "manifests", "path LIKE ?", [pattern]
+            )
         if manifest_rows:
-            upsert_dataframe(conn, "manifests", pd.DataFrame(manifest_rows))
+            upsert_dataframe(
+                conn,
+                "manifests",
+                pd.DataFrame(manifest_rows),
+                keys=["path"],
+            )
         LOGGER.debug("Deleted %s manifest rows for ym=%s", deleted_manifests, ym)
         snapshot_payload = {
             "ym": ym,

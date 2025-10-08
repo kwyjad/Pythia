@@ -47,6 +47,9 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
    ```
    The env var acts as the feature flag. When set, exports dual-write into
    `resolver/db/resolver.duckdb` while continuing to produce CSV/Parquet files.
+   The first connection calls `duckdb_io.init_schema()` to apply the canonical
+   tables and constraints defined in [`resolver/db/schema.sql`](db/schema.sql),
+   so reruns always observe the same structure.
 
 Refer to the [operations run book](docs/operations.md) for detailed command variants (including deltas and review tooling).
 
