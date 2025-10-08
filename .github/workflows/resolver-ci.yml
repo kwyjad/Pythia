@@ -34,7 +34,7 @@ jobs:
           echo "GITHUB_SHA=$GITHUB_SHA"
           python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
 
-      - name: Anti-drift: assert no legacy repo references
+      - name: "Anti-drift: assert no legacy repo references"
         run: |
           part_a="spa"
           part_b="gbot"
@@ -118,11 +118,7 @@ jobs:
   tests-db:
     name: tests (db backend)
     runs-on: ubuntu-latest
-    if: >
-      ${{ github.repository == 'oughtinc/Pythia' && (
-          hashFiles('resolver/tests/test_db_parity.py') != '' ||
-          hashFiles('resolver/tests/test_duckdb_idempotency.py') != ''
-      ) }}
+    if: ${{ github.repository == 'oughtinc/Pythia' }}
     env:
       RESOLVER_API_BACKEND: db
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
@@ -138,7 +134,20 @@ jobs:
           echo "GITHUB_SHA=$GITHUB_SHA"
           python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
 
-      - name: Anti-drift: assert no legacy repo references
+      - name: Check DB tests present
+        id: dbfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "resolver/tests/test_db_parity.py" ] || [ -f "resolver/tests/test_duckdb_idempotency.py" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Found DB tests."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No DB tests found; will skip DB test steps."
+          fi
+
+      - name: "Anti-drift: assert no legacy repo references"
         run: |
           part_a="spa"
           part_b="gbot"
@@ -150,9 +159,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+        if: steps.dbfiles.outputs.present == 'true'
 
       - name: Cache pip
         uses: actions/cache@v4
+        if: steps.dbfiles.outputs.present == 'true'
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-db-${{ hashFiles('pyproject.toml', 'resolver/requirements.txt', 'resolver/requirements-dev.txt', 'tools/offline_wheels/constraints-db.txt') }}
@@ -160,9 +171,11 @@ jobs:
             ${{ runner.os }}-pip-db-
 
       - name: Confirm Pythia root
+        if: steps.dbfiles.outputs.present == 'true'
         run: ls -la && test -f pyproject.toml
 
       - name: Install resolver dependencies (db backend)
+        if: steps.dbfiles.outputs.present == 'true'
         env:
           PIP_NO_CACHE_DIR: "1"
         run: |
@@ -173,6 +186,7 @@ jobs:
           pip install httpx pytest
 
       - name: Verify DuckDB presence
+        if: steps.dbfiles.outputs.present == 'true'
         run: |
           python - <<'PY'
           import importlib.util, sys
@@ -185,6 +199,7 @@ jobs:
           PY
 
       - name: Show environment
+        if: steps.dbfiles.outputs.present == 'true'
         run: |
           python -V
           python -c "import duckdb,sys;print('duckdb',duckdb.__version__)"
@@ -192,8 +207,13 @@ jobs:
           echo "DB_URL=$RESOLVER_DB_URL"
 
       - name: Run tests (db)
+        if: steps.dbfiles.outputs.present == 'true'
         run: |
           pytest -q
+
+      - name: Skip DB tests (not present)
+        if: steps.dbfiles.outputs.present != 'true'
+        run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
       - name: Upload DB parity diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
