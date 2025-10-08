@@ -116,7 +116,7 @@ jobs:
           PY
 
   tests-db:
-    if: ${{ github.repository == 'oughtinc/Pythia' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     name: tests (db backend)
     runs-on: ubuntu-latest
     env:
@@ -180,7 +180,7 @@ jobs:
           set -euo pipefail
           echo "Attempt A: editable install with preloaded build tooling and DuckDB wheel"
           python -m pip install -U pip wheel setuptools "poetry-core>=1.9"
-          python -m pip install --only-binary=:all: "duckdb==1.1.3" || true
+          python -m pip install --only-binary=:all: "duckdb==1.1.3"
           if python -m pip install -e ".[db]" --no-build-isolation; then
             echo "mode=editable" >>"$GITHUB_OUTPUT"
             exit 0
@@ -192,7 +192,7 @@ jobs:
             exit 0
           fi
           echo "Editable install failed; falling back to requirements with PYTHONPATH"
-          python -m pip install --only-binary=:all: "duckdb==1.1.3" || true
+          python -m pip install --only-binary=:all: "duckdb==1.1.3"
           if [ -f resolver/requirements.txt ]; then python -m pip install -r resolver/requirements.txt || true; fi
           if [ -f resolver/requirements-dev.txt ]; then python -m pip install -r resolver/requirements-dev.txt || true; fi
           if [ -f resolver/requirements-ci.txt ]; then python -m pip install -r resolver/requirements-ci.txt || true; fi
