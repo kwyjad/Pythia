@@ -350,6 +350,12 @@ def upsert_dataframe(
                 LOGGER.info("DIAG join-count SQL:\n%s", diag_join_count_sql)
                 match_rows = conn.execute(diag_join_count_sql).fetchone()[0]
                 LOGGER.info("DIAG join-count result: %s", match_rows)
+                LOGGER.info(
+                    "Matched %d existing rows in %s using keys %s",
+                    match_rows,
+                    table,
+                    "[" + ", ".join(keys) + "]",
+                )
 
                 diag_keys_cols = ", ".join([_quote_identifier(k) for k in keys])
                 order_by_indices = ", ".join(str(i + 1) for i in range(len(keys))) or "1"

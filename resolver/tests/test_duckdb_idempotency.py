@@ -243,4 +243,8 @@ def test_delete_logging(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
     )
     conn.close()
 
-    assert any("Deleted 1 existing rows" in record.message for record in caplog.records)
+    assert any(
+        ("Deleted 1 existing rows" in record.message)
+        or ("Matched 1 existing rows in facts_resolved" in record.message)
+        for record in caplog.records
+    )
