@@ -44,7 +44,7 @@ jobs:
           echo "GITHUB_SHA=$GITHUB_SHA"
           python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
 
-      - name: Anti-drift: assert no legacy repo references
+      - name: "Anti-drift: assert no legacy repo references"
         run: |
           part_a="spa"
           part_b="gbot"
@@ -95,7 +95,6 @@ jobs:
           path: pytest-junit.xml
 
   db_tests:
-    if: ${{ hashFiles('resolver/tests/test_db_parity.py', 'resolver/tests/test_duckdb_idempotency.py') != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -103,19 +102,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
       - name: Debug repo context
         run: |
           echo "Repo=$GITHUB_REPOSITORY Ref=$GITHUB_REF SHA=$GITHUB_SHA"
           python -c "import pathlib; print('CWD=', pathlib.Path().resolve())"
 
+      - name: Check DB tests present
+        id: dbfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "resolver/tests/test_db_parity.py" ] || [ -f "resolver/tests/test_duckdb_idempotency.py" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Found DB tests."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No DB tests found; will skip DB test steps."
+          fi
+
+      - name: Setup Python
+        if: steps.dbfiles.outputs.present == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
       - name: Install (robust, proxy-safe) with fallback
         id: robust_install
+        if: steps.dbfiles.outputs.present == 'true'
         shell: bash
         env:
           PIP_NO_CACHE_DIR: "1"
@@ -126,34 +140,41 @@ jobs:
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
           set -euo pipefail
-          echo "Attempt A: preinstall build backend + duckdb wheel, then editable (no build isolation)"
+          echo "Attempt A: editable install with preloaded build tooling and DuckDB wheel"
           python -m pip install -U pip wheel setuptools "poetry-core>=1.9"
           python -m pip install --only-binary=:all: "duckdb==1.1.3" || true
           if python -m pip install -e ".[db]" --no-build-isolation; then
             echo "mode=editable" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Attempt B: retry editable once more"
+          echo "Attempt B: retry editable install after short backoff"
           sleep 5
           if python -m pip install -e ".[db]" --no-build-isolation; then
             echo "mode=editable" >>"$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Editable install failed; using fallback (requirements + PYTHONPATH)"
-          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt || true; fi
-          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt || true; fi
+          echo "Editable install failed; falling back to requirements with PYTHONPATH"
           python -m pip install --only-binary=:all: "duckdb==1.1.3" || true
+          if [ -f resolver/requirements.txt ]; then python -m pip install -r resolver/requirements.txt || true; fi
+          if [ -f resolver/requirements-dev.txt ]; then python -m pip install -r resolver/requirements-dev.txt || true; fi
+          if [ -f resolver/requirements-ci.txt ]; then python -m pip install -r resolver/requirements-ci.txt || true; fi
+          python -m pip install httpx pytest || true
           echo "mode=fallback" >>"$GITHUB_OUTPUT"
+          exit 0
 
       - name: Run DuckDB tests (editable)
-        if: steps.robust_install.outputs.mode == 'editable'
+        if: steps.dbfiles.outputs.present == 'true' && steps.robust_install.outputs.mode == 'editable'
         env:
           RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
         run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
 
       - name: Run DuckDB tests (fallback, PYTHONPATH)
-        if: steps.robust_install.outputs.mode == 'fallback'
+        if: steps.dbfiles.outputs.present == 'true' && steps.robust_install.outputs.mode == 'fallback'
         env:
           PYTHONPATH: ${{ github.workspace }}
           RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
         run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
+
+      - name: Skip DB tests (not present)
+        if: steps.dbfiles.outputs.present != 'true'
+        run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
