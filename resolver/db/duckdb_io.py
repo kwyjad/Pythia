@@ -199,8 +199,7 @@ def upsert_dataframe(
 ) -> int:
     """Upsert rows into ``table`` using ``keys`` as the natural key."""
 
-    insert_sql = None  # ensure defined for later logging even on errors
-    delete_sql = None  # ensure defined for later logging even on errors
+    merge_sql = None  # ensure defined for later logging even on errors
     diag_join_count_sql = None  # ensure defined for later logging even on errors
 
     # --- DEBUG: start -------------------------------------------------------
@@ -261,7 +260,7 @@ def upsert_dataframe(
         raise ValueError(f"Table '{table}' does not exist in DuckDB database")
     table_columns = [row[1] for row in table_info]
 
-    insert_columns = [col for col in frame.columns if col in table_columns]
+    insert_columns = [col for col in table_columns if col in frame.columns]
     dropped = [col for col in frame.columns if col not in table_columns]
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug("Table %s columns: %s", table, ", ".join(table_columns))
@@ -302,23 +301,9 @@ def upsert_dataframe(
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
     try:
+        table_ident = _quote_identifier(table)
+        temp_ident = _quote_identifier(temp_name)
         if keys:
-            comparisons = " AND ".join(
-                f"coalesce(t.{_quote_identifier(k)}, '') = coalesce(s.{_quote_identifier(k)}, '')"
-                for k in keys
-            )
-            table_ident = _quote_identifier(table)
-            temp_ident = _quote_identifier(temp_name)
-            exists_sql = (
-                f"SELECT COUNT(*) FROM {table_ident} AS t "
-                f"WHERE EXISTS (SELECT 1 FROM {temp_ident} AS s WHERE {comparisons})"
-            )
-            delete_sql = (
-                f"DELETE FROM {table_ident} AS t "
-                f"WHERE EXISTS (SELECT 1 FROM {temp_ident} AS s WHERE {comparisons})"
-            )
-            count_sql = exists_sql
-
             # ==== DIAG: schema & types for both sides ====
             try:
                 table_info = conn.execute(
@@ -345,11 +330,12 @@ def upsert_dataframe(
                 LOGGER.exception("DIAG: schema/type inspection failed")
 
             # ---- DIAG block (INFO to always print in your test run) ----
+            LOGGER.debug("UPSERT KEYS: %s", list(keys))
+            LOGGER.debug("TEMP TABLE NAME: %s", temp_name)
+
             try:
-                LOGGER.info("DIAG DELETE SQL:\n%s", delete_sql)
                 diag_join_pred = " AND ".join(
-                    f"COALESCE(t.{_quote_identifier(k)}, '') = COALESCE(s.{_quote_identifier(k)}, '')"
-                    for k in keys
+                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
                 )
                 diag_join_count_sql = (
                     "\n".join(
@@ -378,95 +364,72 @@ def upsert_dataframe(
                 LOGGER.info("DIAG table(t) first key tuples: %s", left_keys)
                 LOGGER.info("DIAG temp(s)  first key tuples: %s", right_keys)
             except Exception:
-                LOGGER.exception("DIAG: delete/join introspection failed")
+                LOGGER.exception("DIAG: merge/join introspection failed")
 
-            LOGGER.debug("UPSERT KEYS: %s", list(keys))
-            LOGGER.debug("TEMP TABLE NAME: %s", temp_name)
-            LOGGER.debug("DELETE/EXISTS where-clause built from keys")
+            all_columns = insert_columns
+            non_key_columns = [c for c in all_columns if c not in keys]
+            on_predicate = " AND ".join(
+                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+            )
+            update_assignments = (
+                ", ".join(
+                    f"{_quote_identifier(c)} = s.{_quote_identifier(c)}"
+                    for c in non_key_columns
+                )
+                if non_key_columns
+                else ""
+            )
+            insert_cols_sql = ", ".join(_quote_identifier(c) for c in all_columns)
+            select_cols_sql = ", ".join(
+                f"s.{_quote_identifier(c)}" for c in all_columns
+            )
 
-            # If your code uses WHERE EXISTS variant:
-            LOGGER.debug("EXISTS SQL:\n%s", exists_sql)
+            merge_parts = [
+                f"MERGE INTO {table_ident} AS t",
+                f"USING {temp_ident} AS s",
+                f"ON {on_predicate}",
+            ]
+            if update_assignments:
+                merge_parts.append(
+                    f"WHEN MATCHED THEN UPDATE SET {update_assignments}"
+                )
+            merge_parts.append(
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols_sql}) VALUES ({select_cols_sql})"
+            )
+            merge_sql = "\n".join(merge_parts) + ";"
 
+            LOGGER.debug("MERGE SQL (preview): %s", merge_sql)
+            LOGGER.info("DIAG MERGE SQL:\n%s", merge_sql)
+            conn.execute(merge_sql)
             try:
-                _ym = None
-                if "ym" in frame.columns and not frame.empty:
-                    _ym = str(frame["ym"].iloc[0])
-                if not _ym:
-                    _ym = "2024-01"  # fallback for tests
-
-                _existing = conn.execute(
-                    f"""
-                    SELECT ym, iso3, hazard_code, metric, series_semantics
-                    FROM "{table}"
-                    WHERE ym = ?
-                    ORDER BY ym, iso3, hazard_code, metric, series_semantics
-                    """,
-                    [_ym],
-                ).fetch_df()
-                if not _existing.empty:
-                    LOGGER.debug(
-                        "Existing key rows for ym=%s before/after DELETE:\n%s",
-                        _ym,
-                        _existing.to_string(index=False),
-                    )
-                else:
-                    LOGGER.debug("No existing key rows for ym=%s", _ym)
-            except Exception as _e:
-                LOGGER.debug("Existing-keys snapshot failed: %s", _e)
-
-            # --- DEBUG: count + DELETE SQL preview ---------------------------------
-            try:
-                delete_count = int(conn.execute(count_sql).fetchone()[0])
-                LOGGER.debug("COUNT of matching rows before DELETE: %s", delete_count)
-            except Exception as _e:
-                LOGGER.debug("COUNT-before check failed: %s", _e)
-                delete_count = int(conn.execute(exists_sql).fetchone()[0])
-            # -----------------------------------------------------------------------
-
-            if delete_count:
-                conn.execute(delete_sql)
-            try:
-                _c2 = conn.execute(count_sql).fetchone()[0]
-                LOGGER.debug("COUNT of matching rows after DELETE: %s", _c2)
-            except Exception as _e:
-                LOGGER.debug("COUNT-after check failed: %s", _e)
-            try:
+                total_changes_attr = getattr(conn, "total_changes", None)
+                total_changes = (
+                    total_changes_attr()
+                    if callable(total_changes_attr)
+                    else total_changes_attr
+                )
+                if total_changes is None:
+                    total_changes = len(frame)
                 LOGGER.info(
-                    "Deleted %s existing rows from %s using keys %s",
-                    delete_count,
+                    "Upserted %s rows into %s via MERGE",
+                    total_changes,
                     table,
-                    list(keys),
                 )
             except Exception:
-                LOGGER.exception("DIAG: logging delete count failed")
-        cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
-        table_ident = _quote_identifier(table)
-        temp_ident = _quote_identifier(temp_name)
-        insert_sql = (
-            f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
-        )
-
-        LOGGER.debug("INSERT SQL (preview): %s", insert_sql)
-        LOGGER.debug("INSERT SQL:\n%s", insert_sql)
-        LOGGER.debug("INSERT COLUMNS: %s", insert_columns)
-        try:
-            sample = frame.loc[:, insert_columns].head(1).to_dict(orient="records")
-        except Exception:
-            sample = []
-        LOGGER.debug("INSERT SAMPLE ROW (first): %s", sample)
-
-        try:
-            LOGGER.info("DIAG INSERT SQL:\n%s", insert_sql)
-        except Exception:
-            LOGGER.exception("DIAG: printing insert_sql failed")
-        conn.execute(insert_sql)
+                LOGGER.debug("total_changes logging failed", exc_info=True)
+        else:
+            cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
+            insert_sql = (
+                f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
+            )
+            LOGGER.debug("INSERT SQL (no keys provided): %s", insert_sql)
+            conn.execute(insert_sql)
     except Exception as e:
         try:
             LOGGER.error(
-                "DuckDB upsert failed for table %s.\nINSERT SQL:\n%s\nDELETE SQL:\n%s\nJOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s",
+                "DuckDB upsert failed for table %s.\nMERGE SQL:\n%s\nJOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s",
                 table,
-                insert_sql if insert_sql else "<unset>",
-                delete_sql if delete_sql else "<unset>",
+                merge_sql if merge_sql else "<unset>",
                 diag_join_count_sql if diag_join_count_sql else "<unset>",
                 table_columns,
                 frame.head(1).to_dict(orient="records"),
@@ -477,7 +440,7 @@ def upsert_dataframe(
         raise e
     finally:
         conn.unregister(temp_name)
-    LOGGER.info("Inserted %s rows into %s", len(frame), table)
+    LOGGER.info("Processed %s rows for %s", len(frame), table)
     return len(frame)
 
 
