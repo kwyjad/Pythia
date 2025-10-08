@@ -27,7 +27,7 @@ import subprocess
 import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 try:
     import pandas as pd
@@ -40,10 +40,122 @@ try:
 except Exception:  # pragma: no cover - optional dependency for db dual-write
     duckdb_io = None
 
+from resolver.common import get_logger
+
+try:
+    from resolver.tools.export_facts import (
+        _prepare_resolved_for_db as exporter_prepare_resolved_for_db,
+        _prepare_deltas_for_db as exporter_prepare_deltas_for_db,
+    )
+except Exception:  # pragma: no cover - defensive: fall back to local implementations
+    exporter_prepare_resolved_for_db = None  # type: ignore
+    exporter_prepare_deltas_for_db = None  # type: ignore
+
 ROOT = Path(__file__).resolve().parents[1]      # .../resolver
 TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
+
+LOGGER = get_logger(__name__)
+
+
+def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
+    parsed = pd.to_datetime(series, errors="coerce")
+    iso = parsed.dt.strftime("%Y-%m-%d")
+    fallback = series.fillna("").astype(str)
+    fallback = fallback.replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
+    return iso.where(parsed.notna(), fallback).fillna("").astype(str)
+
+
+def _fallback_prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if df is None or df.empty:
+        return None
+
+    frame = df.copy()
+    for column in ("as_of_date", "publication_date"):
+        if column in frame.columns:
+            frame[column] = _isoformat_date_strings(frame[column])
+
+    if "ym" not in frame.columns:
+        frame["ym"] = ""
+    frame["ym"] = frame["ym"].fillna("").astype(str)
+    mask = frame["ym"].str.strip() == ""
+    if mask.any() and "as_of_date" in frame.columns:
+        frame.loc[mask, "ym"] = frame.loc[mask, "as_of_date"].astype(str).str.slice(0, 7)
+        mask = frame["ym"].str.strip() == ""
+    if mask.any() and "publication_date" in frame.columns:
+        frame.loc[mask, "ym"] = frame.loc[mask, "publication_date"].astype(str).str.slice(0, 7)
+
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = ""
+    frame["series_semantics"] = frame["series_semantics"].fillna("").astype(str)
+
+    if "value" in frame.columns:
+        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+
+    return frame
+
+
+def _fallback_prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if df is None or df.empty:
+        return None
+
+    frame = df.copy()
+
+    if "series_semantics_out" in frame.columns:
+        semantics_out = frame["series_semantics_out"].where(
+            frame["series_semantics_out"].notna(), ""
+        ).astype(str)
+        if "series_semantics" in frame.columns:
+            semantics_current_raw = frame["series_semantics"]
+            semantics_current = semantics_current_raw.astype(str)
+            prefer_out = semantics_current_raw.isna() | semantics_current.str.strip().eq("")
+            frame.loc[prefer_out, "series_semantics"] = semantics_out.loc[prefer_out]
+        else:
+            frame["series_semantics"] = semantics_out
+        frame = frame.drop(columns=["series_semantics_out"])
+
+    if "as_of" in frame.columns:
+        frame["as_of"] = _isoformat_date_strings(frame["as_of"])
+
+    if "ym" not in frame.columns:
+        frame["ym"] = ""
+    frame["ym"] = frame["ym"].fillna("").astype(str)
+    mask = frame["ym"].str.strip() == ""
+    if mask.any() and "as_of" in frame.columns:
+        frame.loc[mask, "ym"] = frame.loc[mask, "as_of"].astype(str).str.slice(0, 7)
+
+    if "series_semantics" not in frame.columns:
+        frame["series_semantics"] = "new"
+    semantics = frame["series_semantics"].fillna("").astype(str)
+    frame["series_semantics"] = semantics.mask(
+        semantics.str.strip() == "",
+        "new",
+    )
+
+    for column in [
+        "value_new",
+        "value_stock",
+        "rebase_flag",
+        "first_observation",
+        "delta_negative_clamped",
+    ]:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    return frame
+
+
+def _prepare_resolved_frame_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if callable(exporter_prepare_resolved_for_db):  # type: ignore[arg-type]
+        return exporter_prepare_resolved_for_db(df)
+    return _fallback_prepare_resolved_for_db(df)
+
+
+def _prepare_deltas_frame_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if callable(exporter_prepare_deltas_for_db):  # type: ignore[arg-type]
+        return exporter_prepare_deltas_for_db(df)
+    return _fallback_prepare_deltas_for_db(df)
 
 def run_validator(facts_path: Path) -> None:
     """Invoke the validator script as a subprocess for simplicity."""
@@ -108,7 +220,7 @@ def freeze_snapshot(
     overwrite: bool = False,
     deltas: Optional[Path] = None,
     resolved_csv: Optional[Path] = None,
-    write_db: bool = False,
+    write_db: Optional[bool] = None,
     db_url: Optional[str] = None,
 ) -> SnapshotResult:
     facts_path = Path(facts)
@@ -233,9 +345,9 @@ def main():
     )
     ap.add_argument(
         "--write-db",
-        default="0",
+        default=None,
         choices=["0", "1"],
-        help="Set to 1 to also persist snapshot into DuckDB",
+        help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",
     )
     ap.add_argument(
         "--db-url",
@@ -252,7 +364,7 @@ def main():
             overwrite=args.overwrite,
             deltas=Path(args.deltas) if args.deltas else None,
             resolved_csv=Path(args.resolved) if args.resolved else None,
-            write_db=args.write_db == "1",
+            write_db=None if args.write_db is None else args.write_db == "1",
             db_url=args.db_url,
         )
     except SnapshotError as exc:
@@ -278,39 +390,89 @@ def _maybe_write_db(
     facts_df: "pd.DataFrame",
     resolved_df: "pd.DataFrame | None",
     deltas_df: "pd.DataFrame | None",
-    manifest: dict,
+    manifest: Dict[str, Any],
     facts_out: Path,
     deltas_out: Path | None,
-    write_db: bool,
-    db_url: Optional[str],
+    write_db: Optional[bool] = None,
+    db_url: Optional[str] = None,
 ) -> None:
+    env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
+    if db_url is not None:
+        db_url = db_url.strip()
+    else:
+        db_url = env_url
+    if write_db is None:
+        write_db = bool(db_url)
     if not write_db:
+        LOGGER.debug("DuckDB snapshot write skipped: disabled via flag")
+        return
+    if not db_url:
+        LOGGER.debug("DuckDB snapshot write skipped: no RESOLVER_DB_URL provided")
         return
     if duckdb_io is None:
+        LOGGER.debug("DuckDB snapshot write skipped: duckdb_io unavailable")
         return
-    if not db_url:
-        db_url = os.environ.get("RESOLVER_DB_URL")
-    if not db_url:
-        return
+
+    conn = None
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
-        manifests = [
-            {"name": "facts.parquet", "path": str(facts_out), "rows": len(facts_df)},
-        ]
-        if deltas_out and deltas_df is not None:
-            manifests.append(
-                {"name": "deltas.csv", "path": str(deltas_out), "rows": len(deltas_df)}
-            )
         resolved_payload = resolved_df if resolved_df is not None else facts_df
-        duckdb_io.write_snapshot(
-            conn,
-            ym=ym,
-            facts_resolved=resolved_payload,
-            facts_deltas=deltas_df,
-            manifests=manifests,
-            meta=manifest,
-        )
+        prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
+        prepared_deltas = _prepare_deltas_frame_for_db(deltas_df)
+
+        facts_rows = 0
+        deltas_rows = 0
+
+        if prepared_resolved is not None and not prepared_resolved.empty:
+            facts_rows = duckdb_io.upsert_dataframe(
+                conn,
+                "facts_resolved",
+                prepared_resolved,
+                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
+            )
+            LOGGER.info("DuckDB snapshot facts_resolved rows written: %s", facts_rows)
+        else:
+            LOGGER.debug("DuckDB snapshot facts_resolved skipped: no rows prepared")
+
+        if prepared_deltas is not None and not prepared_deltas.empty:
+            for column in ["as_of", "value_new", "value_stock", "series_semantics"]:
+                if column not in prepared_deltas.columns:
+                    if column == "series_semantics":
+                        prepared_deltas[column] = "new"
+                    elif column == "as_of":
+                        prepared_deltas[column] = ""
+                    else:
+                        prepared_deltas[column] = pd.Series([pd.NA] * len(prepared_deltas))
+            deltas_rows = duckdb_io.upsert_dataframe(
+                conn,
+                "facts_deltas",
+                prepared_deltas,
+                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
+            )
+            LOGGER.info("DuckDB snapshot facts_deltas rows written: %s", deltas_rows)
+        elif deltas_df is not None:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no rows prepared")
+
+        created_at = str(manifest.get("created_at_utc") or dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        git_sha = str(manifest.get("source_commit_sha") or os.environ.get("GITHUB_SHA", ""))
+        export_version = str(manifest.get("export_version") or manifest.get("schema_version", ""))
+        try:
+            conn.execute("DELETE FROM snapshots WHERE ym = ?", [ym])
+            conn.execute(
+                "INSERT INTO snapshots (ym, created_at, git_sha, export_version, facts_rows, deltas_rows) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    ym,
+                    created_at,
+                    git_sha,
+                    export_version,
+                    int(facts_rows),
+                    int(deltas_rows),
+                ],
+            )
+            LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)
+        except Exception:
+            LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
     finally:

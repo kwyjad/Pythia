@@ -17,6 +17,8 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
    python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
    python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
    ```
+   When `RESOLVER_DB_URL` is set (for example `duckdb:///resolver.duckdb`), the exporter automatically dual-writes the
+   normalized facts into DuckDB and creates any missing tables before inserting rows.
 4. **Run precedence & deltas (optional for analytics):**
    ```bash
    python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff YYYY-MM-30
@@ -27,8 +29,10 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
    python -m resolver.cli.snapshot_cli make-monthly --ym YYYY-MM
    ```
 
-   This orchestrates export, validation, precedence, deltas, and snapshot freezing. Use
-   `--write-db 1` when `RESOLVER_DB_URL` is configured and you want DuckDB dual writes.
+   This orchestrates export, validation, precedence, deltas, and snapshot freezing. Dual writes occur automatically when
+   `RESOLVER_DB_URL` is configured; pass `--write-db 1` or `--write-db 0` to force-enable or disable the DuckDB write step.
+   The freezer also respects `RESOLVER_DB_URL`; when present it writes the snapshot tables into DuckDB automatically,
+   ensuring date columns remain ISO-formatted and the schema is created if missing.
 
 ## Monthly snapshots in CI
 

@@ -24,13 +24,17 @@ DEFAULT_EXPORTS = ROOT / "exports"
 DEFAULT_SNAPSHOTS = ROOT / "snapshots"
 
 
-def _parse_bool_flag(value: str | bool | None) -> bool:
+def _parse_bool_flag(value: str | bool | None) -> Optional[bool]:
     if isinstance(value, bool):
         return value
     if value is None:
-        return False
+        return None
     text = str(value).strip().lower()
-    return text in {"1", "true", "yes", "y"}
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n"}:
+        return False
+    return None
 
 
 def _month_cutoff(ym: str) -> str:
@@ -198,9 +202,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     make.add_argument(
         "--write-db",
-        default="0",
+        default=None,
         choices=["0", "1"],
-        help="Set to 1 to also write DuckDB outputs (requires RESOLVER_DB_URL)",
+        help="Set to 1 or 0 to force-enable or disable DuckDB writes (defaults to auto via RESOLVER_DB_URL)",
     )
     make.add_argument(
         "--db-url",

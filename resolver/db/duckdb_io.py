@@ -441,6 +441,12 @@ def upsert_dataframe(
     for column in object_columns:
         frame[column] = frame[column].astype(str)
 
+    if frame.empty:
+        LOGGER.debug(
+            "duckdb.upsert.no_rows | table=%s | keys=%s", table, keys
+        )
+        return 0
+
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
     upsert_completed = False

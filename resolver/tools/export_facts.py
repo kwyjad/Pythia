@@ -210,26 +210,40 @@ def _apply_series_semantics(frame: "pd.DataFrame") -> "pd.DataFrame":
     return frame
 
 
+def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
+    parsed = pd.to_datetime(series, errors="coerce")
+    iso = parsed.dt.strftime("%Y-%m-%d")
+    fallback = series.fillna("").astype(str)
+    fallback = fallback.replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
+    return iso.where(parsed.notna(), fallback).fillna("").astype(str)
+
+
 def _prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     if df is None or df.empty:
         return None
 
     frame = df.copy()
 
+    for column in ("as_of_date", "publication_date"):
+        if column in frame.columns:
+            frame[column] = _isoformat_date_strings(frame[column])
+
     if "ym" not in frame.columns:
         frame["ym"] = ""
     frame["ym"] = frame["ym"].fillna("").astype(str)
-    mask = frame["ym"].str.len() == 0
+    mask = frame["ym"].str.strip() == ""
     if mask.any() and "as_of_date" in frame.columns:
-        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "as_of_date"])
-        mask = frame["ym"].str.len() == 0
+        frame.loc[mask, "ym"] = frame.loc[mask, "as_of_date"].astype(str).str.slice(0, 7)
+        mask = frame["ym"].str.strip() == ""
     if mask.any() and "publication_date" in frame.columns:
-        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "publication_date"])
+        frame.loc[mask, "ym"] = frame.loc[mask, "publication_date"].astype(str).str.slice(0, 7)
 
     frame = _apply_series_semantics(frame)
+    frame["series_semantics"] = frame["series_semantics"].fillna("").astype(str)
 
-    if "value" in frame.columns:
-        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+    for column in RESOLVED_DB_NUMERIC:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
     return frame
 
@@ -253,6 +267,9 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
             frame["series_semantics"] = semantics_out
         frame = frame.drop(columns=["series_semantics_out"])
 
+    if "as_of" in frame.columns:
+        frame["as_of"] = _isoformat_date_strings(frame["as_of"])
+
     if "ym" not in frame.columns:
         frame["ym"] = ""
     frame["ym"] = frame["ym"].fillna("").astype(str)
@@ -275,41 +292,51 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     return frame
 
 
-def _parse_write_db_flag(value: str | bool | None) -> bool:
+def _parse_write_db_flag(value: str | bool | None) -> Optional[bool]:
     if isinstance(value, bool):
         return value
     if value is None:
-        return False
+        return None
     if isinstance(value, str):
-        return value.strip() == "1"
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        if stripped in {"1", "true", "True"}:
+            return True
+        if stripped in {"0", "false", "False"}:
+            return False
     try:
         return bool(int(value))
     except Exception:
-        return False
+        return None
 
 
 def _maybe_write_to_db(
     *,
-    enabled: bool = False,
-    db_url: Optional[str] = None,
     facts_resolved: "Optional[pd.DataFrame]" = None,
     facts_deltas: "Optional[pd.DataFrame]" = None,
+    db_url: Optional[str] = None,
+    write_db: Optional[bool] = None,
 ) -> None:
-    """Write exported facts into DuckDB when feature flag is set."""
+    """Write exported facts into DuckDB when enabled via environment or flag."""
 
-    if not enabled:
-        return
     if duckdb_io is None:
         return
-    if not db_url:
-        db_url = os.environ.get("RESOLVER_DB_URL")
-    if not db_url:
-        LOGGER.debug("DuckDB write skipped: no RESOLVER_DB_URL provided")
+    env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
+    if db_url is not None:
+        db_url = db_url.strip()
+    else:
+        db_url = env_url
+    if write_db is None:
+        write_db = bool(db_url)
+    if not write_db or not db_url:
+        LOGGER.debug("DuckDB write skipped: disabled or missing RESOLVER_DB_URL")
         return
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
     if resolved_prepared is None and deltas_prepared is None:
+        LOGGER.debug("DuckDB write skipped: no prepared frames to persist")
         return
 
     conn = None
@@ -335,19 +362,21 @@ def _maybe_write_to_db(
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
-            duckdb_io.upsert_dataframe(
+            written_resolved = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
                 keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
+            LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved)
         if deltas_prepared is not None and not deltas_prepared.empty:
-            duckdb_io.upsert_dataframe(
+            written_deltas = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
                 keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
+            LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas)
         LOGGER.info("DuckDB write complete")
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
@@ -377,7 +406,7 @@ def export_facts(
     inp: Path,
     config_path: Path = DEFAULT_CONFIG,
     out_dir: Path = EXPORTS,
-    write_db: bool = False,
+    write_db: str | bool | None = None,
     db_url: Optional[str] = None,
 ) -> ExportResult:
     if not config_path.exists():
@@ -423,9 +452,9 @@ def export_facts(
         print(f"Warning: could not write Parquet ({exc}). CSV written.", file=sys.stderr)
 
     _maybe_write_to_db(
-        enabled=_parse_write_db_flag(write_db),
-        db_url=db_url,
         facts_resolved=facts,
+        db_url=db_url,
+        write_db=_parse_write_db_flag(write_db),
     )
 
     return ExportResult(
@@ -443,9 +472,9 @@ def main():
     ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
     ap.add_argument(
         "--write-db",
-        default="0",
+        default=None,
         choices=["0", "1"],
-        help="Set to 1 to also persist exports into DuckDB",
+        help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",
     )
     ap.add_argument(
         "--db-url",
