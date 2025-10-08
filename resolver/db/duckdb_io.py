@@ -96,6 +96,7 @@ def _constraint_column_sets(
     """Return column name sets for PK and UNIQUE constraints on ``table``."""
 
     constraints: list[list[str]] = []
+
     try:
         table_info = conn.execute(
             f"PRAGMA table_info({_quote_literal(table)})"
@@ -371,6 +372,7 @@ def upsert_dataframe(
 
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
+    upsert_completed = False
     try:
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
@@ -459,6 +461,7 @@ def upsert_dataframe(
                 else:
                     LOGGER.info("Upserted %s rows into %s via MERGE", len(frame), table)
                     use_legacy_path = False
+                    upsert_completed = True
 
         if use_legacy_path:
             if keys and has_declared_key and merge_sql:
@@ -525,26 +528,32 @@ def upsert_dataframe(
                 len(frame),
                 table,
             )
+            upsert_completed = True
     except Exception as e:
-        try:
-            LOGGER.error(
-                (
-                    "DuckDB upsert failed for table %s.\n"
-                    "MERGE SQL:\n%s\nDELETE SQL:\n%s\nINSERT SQL:\n%s\n"
-                    "JOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s"
-                ),
-                table,
-                merge_sql or "<unset>",
-                delete_sql or "<unset>",
-                insert_sql or "<unset>",
-                diag_join_count_sql or "<unset>",
-                table_columns,
-                frame.head(1).to_dict(orient="records"),
-                exc_info=True,
+        if upsert_completed:
+            LOGGER.debug(
+                "duckdb.upsert.completed_with_followup_error | table=%s", table, exc_info=True
             )
-        except Exception:  # pragma: no cover - logging failure should not mask error
-            LOGGER.exception("DIAG: assembling failure log failed")
-        raise e
+        else:
+            try:
+                LOGGER.error(
+                    (
+                        "DuckDB upsert failed for table %s.\n"
+                        "MERGE SQL:\n%s\nDELETE SQL:\n%s\nINSERT SQL:\n%s\n"
+                        "JOIN-COUNT SQL:\n%s\nschema=%s | first_row=%s"
+                    ),
+                    table,
+                    merge_sql or "<unset>",
+                    delete_sql or "<unset>",
+                    insert_sql or "<unset>",
+                    diag_join_count_sql or "<unset>",
+                    table_columns,
+                    frame.head(1).to_dict(orient="records"),
+                    exc_info=True,
+                )
+            except Exception:  # pragma: no cover - logging failure should not mask error
+                LOGGER.exception("DIAG: assembling failure log failed")
+            raise e
     finally:
         conn.unregister(temp_name)
 

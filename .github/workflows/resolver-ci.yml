@@ -20,6 +20,8 @@ permissions:
 jobs:
   offline_connector_smoke:
     runs-on: ubuntu-latest
+    env:
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -54,14 +56,10 @@ jobs:
       - name: Confirm Pythia root
         run: ls -la && test -f pyproject.toml
 
-      - name: Install dependencies
-        env:
-          PIP_NO_CACHE_DIR: "1"
+      - name: Install dependencies (project + db + tests)
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .[db]
-          pip install -r resolver/requirements.txt
-          pip install -r resolver/requirements-dev.txt
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -e .[db,test]
 
       - name: Verify DuckDB presence
         run: |
@@ -123,6 +121,7 @@ jobs:
       RESOLVER_API_BACKEND: db
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
       RESOLVER_LOG_LEVEL: DEBUG
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -166,8 +165,7 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: ls -la && test -f pyproject.toml
 
-      - name: Install (robust, proxy-safe) with fallback
-        id: robust_install
+      - name: Install dependencies (project + db + tests)
         if: steps.dbfiles.outputs.present == 'true'
         env:
           PIP_NO_CACHE_DIR: "1"
@@ -178,27 +176,8 @@ jobs:
           HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
           set -euo pipefail
-          echo "Attempt A: editable install with preloaded build tooling and DuckDB wheel"
-          python -m pip install -U pip wheel setuptools "poetry-core>=1.9"
-          python -m pip install --only-binary=:all: "duckdb==1.1.3"
-          if python -m pip install -e ".[db]" --no-build-isolation; then
-            echo "mode=editable" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Attempt B: retry editable install after short backoff"
-          sleep 5
-          if python -m pip install -e ".[db]" --no-build-isolation; then
-            echo "mode=editable" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Editable install failed; falling back to requirements with PYTHONPATH"
-          python -m pip install --only-binary=:all: "duckdb==1.1.3"
-          if [ -f resolver/requirements.txt ]; then python -m pip install -r resolver/requirements.txt || true; fi
-          if [ -f resolver/requirements-dev.txt ]; then python -m pip install -r resolver/requirements-dev.txt || true; fi
-          if [ -f resolver/requirements-ci.txt ]; then python -m pip install -r resolver/requirements-ci.txt || true; fi
-          python -m pip install httpx pytest || true
-          echo "mode=fallback" >>"$GITHUB_OUTPUT"
-          exit 0
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -e .[db,test]
 
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
@@ -221,14 +200,8 @@ jobs:
           echo "BACKEND=$RESOLVER_API_BACKEND"
           echo "DB_URL=$RESOLVER_DB_URL"
 
-      - name: Run tests (db, editable)
-        if: steps.dbfiles.outputs.present == 'true' && steps.robust_install.outputs.mode == 'editable'
-        run: pytest -q
-
-      - name: Run tests (db, fallback)
-        if: steps.dbfiles.outputs.present == 'true' && steps.robust_install.outputs.mode == 'fallback'
-        env:
-          PYTHONPATH: ${{ github.workspace }}
+      - name: Run tests (db)
+        if: steps.dbfiles.outputs.present == 'true'
         run: pytest -q
 
       - name: Skip DB tests (not present)

@@ -161,8 +161,9 @@ variable is absent.
 #### Development tips
 
 - Review [resolver/docs/db_upsert_strategy.md](resolver/docs/db_upsert_strategy.md)
-  for details on the DuckDB MERGE-first upsert strategy and the
-  `RESOLVER_DUCKDB_DISABLE_MERGE` opt-out flag.
+  for details on the DuckDB MERGE-first upsert strategy.
+- Set `RESOLVER_DUCKDB_DISABLE_MERGE=1` to force the legacy delete+insert path,
+  which is useful for CI stability or when diagnosing upserts locally.
 
 The exporter writes the very same dataframe that is saved to `facts.csv` into
 DuckDB to guarantee row-for-row parity. During these writes the DuckDB helper
