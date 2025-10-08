@@ -1,6 +1,6 @@
 {
   "name": "Resolver Dev",
-  "build": { "dockerfile": "Dockerfile" },
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
   "customizations": {
     "vscode": {
       "settings": { "python.defaultInterpreterPath": "/usr/local/bin/python" },
@@ -13,5 +13,5 @@
     "PY_BIN": "/usr/local/bin/python",
     "PIP_DISABLE_PIP_VERSION_CHECK": "1"
   },
-  "postCreateCommand": "/bin/bash -lc './.devcontainer/postCreate.sh'"
+  "postCreateCommand": "/bin/bash .devcontainer/postCreate.sh"
 }
