@@ -67,6 +67,11 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install -e .[db,test]
 
+      - name: Install DuckDB (ensure available for tests)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "duckdb>=1.0,<2"
+
       - name: Verify DuckDB presence
         run: |
           python - <<'PY'
@@ -139,6 +144,12 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
           pip install -e .[db,test]
+
+      - name: Install DuckDB (ensure available for tests)
+        if: steps.dbfiles.outputs.present == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "duckdb>=1.0,<2"
 
       - name: Verify DuckDB is installed
         if: steps.dbfiles.outputs.present == 'true'
