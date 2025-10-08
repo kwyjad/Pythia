@@ -45,3 +45,12 @@ flowchart LR
 - [ReliefWeb PDF branch](reliefweb_pdf.md)
 - [Operations run book](operations.md)
 - [Troubleshooting guide](troubleshooting.md)
+
+## Series routing
+
+Resolver exposes two user-facing series:
+
+- **`series=stock`** queries the `facts_resolved` table and returns the stock value for the cutoff month (latest `as_of_date` on or before the cutoff).
+- **`series=new`** queries the `facts_deltas` table and returns the month-over-month delta (`value_new`) for the cutoff month using the latest qualifying `as_of` timestamp.
+
+If the requested series has no data, Resolver does **not** fall back to the other series unless the operator explicitly opts in by setting `RESOLVER_ALLOW_SERIES_FALLBACK=1`. Both the CLI and API surface the `series_returned` field so clients can verify which series satisfied the request.

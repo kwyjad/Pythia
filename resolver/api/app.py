@@ -16,14 +16,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from resolver.cli.resolver_cli import (
-    current_ym_utc,
     load_registries,
-    load_series_for_month,
-    normalize_backend,
     resolve_country,
     resolve_hazard,
-    select_row,
+)
+from resolver.query.selectors import (
     VALID_BACKENDS,
+    normalize_backend,
+    resolve_point,
     ym_from_cutoff,
 )
 
@@ -74,7 +74,6 @@ def resolve(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    current_month = ym == current_ym_utc()
     if backend is not None:
         backend_clean = backend.strip().lower()
         if backend_clean not in VALID_BACKENDS:
@@ -86,48 +85,33 @@ def resolve(
     else:
         backend_choice = DEFAULT_BACKEND
 
-    df, source_dataset, series_used = load_series_for_month(
-        ym, current_month, series, backend=backend_choice
+    result = resolve_point(
+        iso3=iso3_code,
+        hazard_code=hz_code,
+        cutoff=cutoff,
+        series=series,
+        metric="in_need",
+        backend=backend_choice,
     )
 
-    if df is None or df.empty:
-        if series.lower() == "new":
-            df, source_dataset, series_used = load_series_for_month(
-                ym, current_month, "stock", backend=backend_choice
-            )
-        if df is None or df.empty:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "No data found for "
-                    f"{ym}. Expected snapshots/{ym}/facts.parquet, exports data, or DuckDB tables."
-                ),
-            )
-
-    row = select_row(df, iso3_code, hz_code, cutoff)
-    if not row:
+    if not result:
         raise HTTPException(
             status_code=404,
             detail=(
-                f"No eligible record for iso3={iso3_code}, hazard={hz_code} at cutoff {cutoff}."
+                "No data found for "
+                f"iso3={iso3_code}, hazard={hz_code}, series={series} at cutoff {cutoff} "
+                f"(backend {backend_choice})."
             ),
         )
 
-    row_data = dict(row)
-    value = row_data.get("value", "")
+    row_series = (
+        str(result.get("series_returned", series)).strip().lower() or series
+    )
+    value = result.get("value", "")
     try:
         value = int(float(value))
     except Exception:
         pass
-
-    if source_dataset.startswith("db_"):
-        source_bucket = "db"
-    elif source_dataset in {"snapshot", "snapshot_deltas"}:
-        source_bucket = "snapshot"
-    elif source_dataset == "monthly_deltas":
-        source_bucket = "state"
-    else:
-        source_bucket = "exports"
 
     return {
         "ok": True,
@@ -137,22 +121,24 @@ def resolve(
         "hazard_label": hazard_label,
         "hazard_class": hz_class,
         "cutoff": cutoff,
-        "metric": row_data.get("metric", ""),
-        "unit": row_data.get("unit", "persons"),
+        "metric": result.get("metric", ""),
+        "unit": result.get("unit", "persons"),
         "value": value,
-        "as_of_date": row_data.get("as_of_date", ""),
-        "publication_date": row_data.get("publication_date", ""),
-        "publisher": row_data.get("publisher", ""),
-        "source_type": row_data.get("source_type", ""),
-        "source_url": row_data.get("source_url", ""),
-        "doc_title": row_data.get("doc_title", ""),
-        "definition_text": row_data.get("definition_text", ""),
-        "precedence_tier": row_data.get("precedence_tier", ""),
-        "event_id": row_data.get("event_id", ""),
-        "confidence": row_data.get("confidence", ""),
-        "proxy_for": row_data.get("proxy_for", ""),
-        "source": source_bucket,
-        "source_dataset": source_dataset,
-        "series_requested": series,
-        "series_returned": row_data.get("series_semantics", series_used),
+        "as_of_date": result.get("as_of_date", ""),
+        "publication_date": result.get("publication_date", ""),
+        "publisher": result.get("publisher", ""),
+        "source_type": result.get("source_type", ""),
+        "source_url": result.get("source_url", ""),
+        "doc_title": result.get("doc_title", ""),
+        "definition_text": result.get("definition_text", ""),
+        "precedence_tier": result.get("precedence_tier", ""),
+        "event_id": result.get("event_id", ""),
+        "confidence": result.get("confidence", ""),
+        "proxy_for": result.get("proxy_for", ""),
+        "source": result.get("source", ""),
+        "source_dataset": result.get("source_dataset", ""),
+        "series_requested": result.get("series_requested", series),
+        "series_returned": row_series,
+        "ym": result.get("ym", ym),
+        "source_id": result.get("source_id", ""),
     }

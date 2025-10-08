@@ -17,19 +17,16 @@ Behavior:
     - If snapshot not found, optionally fall back to exports/resolved(_reviewed).csv (warn)
   - If cutoff is current month: prefer exports/resolved_reviewed.csv, else exports/resolved.csv
   - Applies selection rules already enforced upstream (precedence engine & review)
-  - Defaults to monthly NEW deltas when available (`--series new`); use `--series stock` for totals. Missing deltas print a note and fall back to stocks.
+  - Defaults to monthly NEW deltas when available (`--series new`); use `--series stock` for totals. Missing deltas return a no-data error unless `RESOLVER_ALLOW_SERIES_FALLBACK=1` permits fallback to stocks.
   - Returns a single record (value + citation) or explains why none exists
 """
 
 import argparse
-import datetime as dt
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
-from zoneinfo import ZoneInfo
-
 from resolver.utils.json_sanitize import json_default
 
 try:
@@ -38,28 +35,18 @@ except ImportError:  # pragma: no cover - guidance for operators
     print("Please 'pip install pandas pyarrow' to run resolver_cli.", file=sys.stderr)
     sys.exit(2)
 
+from resolver.query.selectors import (
+    VALID_BACKENDS,
+    normalize_backend,
+    resolve_point,
+    ym_from_cutoff,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-SNAPSHOTS = ROOT / "snapshots"
-EXPORTS = ROOT / "exports"
-STATE = ROOT / "state"
 
 COUNTRIES_CSV = DATA / "countries.csv"
 SHOCKS_CSV = DATA / "shocks.csv"
-
-VALID_BACKENDS = {"files", "db", "auto"}
-
-
-def normalize_backend(value: Optional[str], *, default: str = "files") -> str:
-    """Normalise a backend string, defaulting to ``default`` when invalid."""
-
-    if value is None:
-        return default
-    backend = value.strip().lower()
-    if backend not in VALID_BACKENDS:
-        return default
-    return backend
-
 
 def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load registries used for lookup and add normalized helper columns."""
@@ -117,304 +104,6 @@ def resolve_hazard(
     )
 
 
-IST = ZoneInfo("Europe/Istanbul")
-
-
-def current_ym_istanbul() -> str:
-    now = dt.datetime.now(IST)
-    return f"{now.year:04d}-{now.month:02d}"
-
-
-def current_ym_utc() -> str:
-    """Backwards-compatible alias; resolver now tracks Istanbul month boundary."""
-    return current_ym_istanbul()
-
-
-def ym_from_cutoff(cutoff: str) -> str:
-    year, month, _ = cutoff.split("-")
-    return f"{int(year):04d}-{int(month):02d}"
-
-
-def first_day_of_month_from_ym(ym: str) -> str:
-    year_str, month_str = ym.split("-")
-    return dt.date(int(year_str), int(month_str), 1).isoformat()
-
-
-def load_resolved_for_month(ym: str, is_current_month: bool) -> Tuple[Optional[pd.DataFrame], str]:
-    """Load the resolved dataset according to month selection rules."""
-    snapshot_path = SNAPSHOTS / ym / "facts.parquet"
-
-    if not is_current_month:
-        if snapshot_path.exists():
-            return pd.read_parquet(snapshot_path), "snapshot"
-
-        print(
-            f"Warning: snapshot {snapshot_path} not found, falling back to exports.",
-            file=sys.stderr,
-        )
-
-    reviewed = EXPORTS / "resolved_reviewed.csv"
-    if reviewed.exists():
-        return pd.read_csv(reviewed, dtype=str).fillna(""), "resolved_reviewed"
-
-    base = EXPORTS / "resolved.csv"
-    if base.exists():
-        return pd.read_csv(base, dtype=str).fillna(""), "resolved"
-
-    if snapshot_path.exists():
-        return pd.read_parquet(snapshot_path), "snapshot"
-
-    return None, ""
-
-
-def load_deltas_for_month(ym: str, is_current_month: bool) -> Tuple[Optional[pd.DataFrame], str]:
-    """Load monthly deltas for a given month if available."""
-    candidates: list[Tuple[Path, str]] = []
-
-    if not is_current_month:
-        monthly_path = STATE / "monthly" / ym / "deltas.csv"
-        candidates.append((monthly_path, "monthly_deltas"))
-        snapshot_deltas = SNAPSHOTS / ym / "deltas.csv"
-        candidates.append((snapshot_deltas, "snapshot_deltas"))
-
-    exports_deltas = EXPORTS / "deltas.csv"
-    candidates.append((exports_deltas, "deltas"))
-
-    for path, label in candidates:
-        if not path.exists():
-            continue
-        try:
-            df = pd.read_csv(path, dtype=str).fillna("")
-        except Exception:  # pragma: no cover - defensive
-            continue
-        if "ym" in df.columns:
-            df = df[df["ym"].astype(str) == ym]
-        if df.empty:
-            continue
-        return df, label
-
-    return None, ""
-
-
-def prepare_deltas_frame(df: pd.DataFrame, ym: str) -> pd.DataFrame:
-    filtered = df.copy()
-    if "ym" in filtered.columns:
-        filtered = filtered[filtered["ym"].astype(str) == ym]
-    if filtered.empty:
-        return filtered
-
-    filtered = filtered.copy()
-    default_as_of = first_day_of_month_from_ym(ym)
-
-    if "as_of_date" in filtered.columns:
-        filtered["as_of_date"] = filtered["as_of_date"].astype(str)
-    elif "as_of" in filtered.columns:
-        filtered["as_of_date"] = filtered["as_of"].astype(str)
-    else:
-        filtered["as_of_date"] = default_as_of
-    filtered["as_of_date"] = filtered["as_of_date"].fillna("")
-    filtered.loc[filtered["as_of_date"].str.strip() == "", "as_of_date"] = default_as_of
-
-    if "publication_date" in filtered.columns:
-        filtered["publication_date"] = filtered["publication_date"].astype(str).fillna("")
-        pub_blank = filtered["publication_date"].str.strip() == ""
-        filtered.loc[pub_blank, "publication_date"] = filtered.loc[pub_blank, "as_of_date"]
-    else:
-        filtered["publication_date"] = filtered["as_of_date"]
-
-    if "value_new" in filtered.columns:
-        filtered["value"] = filtered["value_new"]
-    elif "value" not in filtered.columns:
-        filtered["value"] = ""
-    filtered["value"] = filtered["value"].astype(str).fillna("")
-
-    if "metric" in filtered.columns:
-        filtered["metric"] = filtered["metric"].astype(str).fillna("")
-    else:
-        filtered["metric"] = ""
-
-    if "unit" in filtered.columns:
-        filtered["unit"] = filtered["unit"].astype(str).fillna("")
-        filtered.loc[filtered["unit"].str.strip() == "", "unit"] = "persons"
-    else:
-        filtered["unit"] = "persons"
-
-    if "publisher" in filtered.columns:
-        filtered["publisher"] = filtered["publisher"].astype(str).fillna("")
-    else:
-        filtered["publisher"] = ""
-    if "source_name" in filtered.columns:
-        source_series = filtered["source_name"].astype(str).fillna("")
-        blank_pub = filtered["publisher"].str.strip() == ""
-        filtered.loc[blank_pub, "publisher"] = source_series[blank_pub]
-
-    for col in ["source_type", "source_url", "doc_title", "definition_text"]:
-        if col in filtered.columns:
-            filtered[col] = filtered[col].astype(str).fillna("")
-        else:
-            filtered[col] = ""
-
-    filtered["series_semantics"] = "new"
-    filtered["ym"] = ym
-
-    # Normalize common placeholder strings
-    for column in filtered.columns:
-        filtered[column] = filtered[column].replace({"nan": "", "NaT": ""})
-
-    return filtered.fillna("")
-
-
-def load_series_for_month(
-    ym: str,
-    is_current_month: bool,
-    requested_series: str,
-    backend: str = "files",
-) -> Tuple[Optional[pd.DataFrame], str, str]:
-    """Load data for the requested series ("new" or "stock")."""
-
-    normalized_series = (requested_series or "stock").strip().lower()
-    backend_choice = normalize_backend(backend, default="files")
-
-    if backend_choice in {"auto", "db"}:
-        db_df, db_dataset_label, db_series = load_series_from_db(ym, normalized_series)
-        if db_df is not None and not db_df.empty:
-            return db_df, db_dataset_label, db_series
-        if backend_choice == "db":
-            return None, "", normalized_series
-
-    if normalized_series == "new":
-        deltas_df, dataset_label = load_deltas_for_month(ym, is_current_month)
-        if deltas_df is None or deltas_df.empty:
-            return None, "", "new"
-        prepared = prepare_deltas_frame(deltas_df, ym)
-        if prepared.empty:
-            return None, "", "new"
-        return prepared, dataset_label, "new"
-
-    resolved_df, dataset_label = load_resolved_for_month(ym, is_current_month)
-    if resolved_df is not None:
-        resolved_df = resolved_df.copy()
-        if "series_semantics" not in resolved_df.columns:
-            resolved_df["series_semantics"] = "stock"
-        else:
-            resolved_df["series_semantics"] = (
-                resolved_df["series_semantics"].fillna("").replace("", "stock")
-            )
-    return resolved_df, dataset_label, "stock"
-
-
-def load_series_from_db(
-    ym: str, normalized_series: str
-) -> Tuple[Optional[pd.DataFrame], str, str]:
-    db_url = os.environ.get("RESOLVER_DB_URL")
-    if not db_url:
-        return None, "", normalized_series
-    try:
-        from resolver.db import duckdb_io
-    except Exception:  # pragma: no cover - optional dependency missing
-        return None, "", normalized_series
-
-    try:
-        conn = duckdb_io.get_db(db_url)
-        duckdb_io.init_schema(conn)
-        if normalized_series == "new":
-            query = (
-                "SELECT ym, iso3, hazard_code, metric, value_new, value_stock, "
-                "series_semantics, rebase_flag, first_observation, "
-                "delta_negative_clamped, as_of, source_name, source_url, definition_text "
-                "FROM facts_deltas WHERE ym = ?"
-            )
-            df = conn.execute(query, [ym]).fetch_df()
-            if df.empty:
-                return None, "", normalized_series
-            prepared = prepare_deltas_frame(df, ym)
-            if prepared.empty:
-                return None, "", normalized_series
-            return prepared, "db_facts_deltas", "new"
-
-        query = (
-            "SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric, "
-            "series_semantics, value, unit, as_of_date, publication_date, publisher, "
-            "source_type, source_url, doc_title, definition_text, precedence_tier, "
-            "event_id, proxy_for, confidence FROM facts_resolved WHERE ym = ?"
-        )
-        df = conn.execute(query, [ym]).fetch_df()
-        if df.empty:
-            return None, "", normalized_series
-        df = df.copy()
-        if "ym" not in df.columns:
-            df["ym"] = ym
-        else:
-            df["ym"] = df["ym"].fillna("").replace("", ym)
-        df["series_semantics"] = (
-            df.get("series_semantics", "stock")
-            .astype(str)
-            .str.strip()
-            .replace("", "stock")
-        )
-        defaults = {
-            "unit": "persons",
-            "as_of_date": "",
-            "publication_date": "",
-            "publisher": "",
-            "source_type": "",
-            "source_url": "",
-            "doc_title": "",
-            "definition_text": "",
-            "precedence_tier": "",
-            "event_id": "",
-            "proxy_for": "",
-            "confidence": "",
-        }
-        for column, default in defaults.items():
-            if column not in df.columns:
-                df[column] = default
-            else:
-                df[column] = df[column].fillna(default)
-        return df.fillna(""), "db_facts_resolved", "stock"
-    except Exception:  # pragma: no cover - fallback to files on errors
-        return None, "", normalized_series
-
-
-def select_row(df: pd.DataFrame, iso3: str, hazard_code: str, cutoff_iso: str) -> Optional[dict]:
-    """Select the single row that best answers the resolver question."""
-    candidate = df[
-        (df["iso3"].astype(str) == iso3) & (df["hazard_code"].astype(str) == hazard_code)
-    ].copy()
-
-    if candidate.empty:
-        return None
-
-    if "metric" in candidate.columns:
-        candidate["metric"] = candidate["metric"].fillna("")
-        candidate["metric_ord"] = pd.Categorical(
-            candidate["metric"], categories=["in_need", "affected"], ordered=True
-        )
-
-        if "as_of_date" in candidate.columns:
-            candidate = candidate[candidate["as_of_date"] <= cutoff_iso]
-            if candidate.empty:
-                return None
-
-        sort_cols = ["metric_ord"]
-        extra_cols = [col for col in ["as_of_date", "publication_date"] if col in candidate.columns]
-        sort_cols.extend(extra_cols)
-        candidate = candidate.sort_values(by=sort_cols, ascending=[True] + [False] * len(extra_cols))
-        candidate = candidate.drop(columns=["metric_ord"], errors="ignore")
-    else:
-        sort_cols = [col for col in ["as_of_date", "publication_date"] if col in candidate.columns]
-        if sort_cols:
-            candidate = candidate.sort_values(by=sort_cols, ascending=[False] * len(sort_cols))
-
-    top = candidate.iloc[0].to_dict()
-
-    raw_value = top.get("value", "")
-    try:
-        top["value"] = int(float(raw_value))
-    except Exception:
-        top["value"] = raw_value
-
-    return top
 
 
 def main() -> None:
@@ -449,100 +138,47 @@ def main() -> None:
     country_name, iso3 = resolve_country(countries, args.country, args.iso3)
     hazard_label, hazard_code, hazard_class = resolve_hazard(shocks, args.hazard, args.hazard_code)
 
-    ym = ym_from_cutoff(args.cutoff)
-    current_month = ym == current_ym_istanbul()
     series_requested = args.series
-    df, source_dataset, series_used = load_series_for_month(
-        ym, current_month, series_requested, backend=args.backend
-    )
-
-    def fallback_to_stock(reason: str) -> None:
-        nonlocal df, source_dataset, series_used
-        print(reason, file=sys.stderr)
-        df_stock, stock_dataset, stock_series = load_series_for_month(
-            ym, current_month, "stock", backend=args.backend
-        )
-        df = df_stock
-        source_dataset = stock_dataset
-        series_used = stock_series
+    backend_choice = args.backend
 
     def emit_no_data(message: str) -> None:
+        payload = {
+            "ok": False,
+            "reason": message,
+            "iso3": iso3,
+            "hazard_code": hazard_code,
+            "cutoff": args.cutoff,
+            "series_requested": series_requested,
+        }
         print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "reason": message,
-                    "iso3": iso3,
-                    "hazard_code": hazard_code,
-                    "cutoff": args.cutoff,
-                    "series_requested": series_requested,
-                },
-                default=json_default,
-                ensure_ascii=False,
-            ),
+            json.dumps(payload, default=json_default, ensure_ascii=False),
             flush=True,
         )
         if not args.json_only:
             print("\n" + message, file=sys.stderr)
         sys.exit(1)
 
-    if df is None and series_requested == "new":
-        fallback_to_stock(f"Note: No deltas for {ym}; returning stock totals.")
+    result = resolve_point(
+        iso3=iso3,
+        hazard_code=hazard_code,
+        cutoff=args.cutoff,
+        series=series_requested,
+        metric="in_need",
+        backend=backend_choice,
+    )
 
-    if df is None:
+    if not result:
         message = (
-            "No data found. Expected snapshot at snapshots/"
-            f"{ym}/facts.parquet, exports/resolved(_reviewed).csv, or exports/deltas.csv."
+            "No data found for "
+            f"iso3={iso3}, hazard={hazard_code}, series={series_requested} at cutoff {args.cutoff} "
+            f"(backend {backend_choice})."
         )
         emit_no_data(message)
 
-    row = select_row(df, iso3, hazard_code, args.cutoff)
-    if not row and series_requested == "new" and series_used == "new":
-        fallback_to_stock(
-            f"Note: No delta record for iso3={iso3}, hazard={hazard_code} at {ym}; returning stock totals."
-        )
-        if df is None:
-            message = (
-                "No data found. Expected snapshot at snapshots/"
-                f"{ym}/facts.parquet, exports/resolved(_reviewed).csv, or exports/deltas.csv."
-            )
-            emit_no_data(message)
-        row = select_row(df, iso3, hazard_code, args.cutoff)
-    if not row:
-        message = (
-            f"No eligible record for iso3={iso3}, hazard={hazard_code} at cutoff {args.cutoff}."
-        )
-        print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "reason": message,
-                    "iso3": iso3,
-                    "hazard_code": hazard_code,
-                    "cutoff": args.cutoff,
-                    "series_requested": series_requested,
-                },
-                default=json_default,
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        if not args.json_only:
-            print("\n" + message, file=sys.stderr)
-        sys.exit(1)
-
-    snapshot_used = source_dataset in {"snapshot", "snapshot_deltas"}
-    if source_dataset.startswith("db_"):
-        source_bucket = "db"
-    elif source_dataset == "monthly_deltas":
-        source_bucket = "state"
-    elif snapshot_used:
-        source_bucket = "snapshot"
-    else:
-        source_bucket = "exports"
-
-    row_series = str(row.get("series_semantics", "")).strip().lower() or series_used
-
+    row_series = (
+        str(result.get("series_returned", series_requested)).strip().lower() or series_requested
+    )
+    ym_value = result.get("ym", ym_from_cutoff(args.cutoff))
     output = {
         "ok": True,
         "iso3": iso3,
@@ -551,27 +187,30 @@ def main() -> None:
         "hazard_label": hazard_label,
         "hazard_class": hazard_class,
         "cutoff": args.cutoff,
-        "metric": row.get("metric", ""),
-        "unit": row.get("unit", "persons"),
-        "value": row.get("value", ""),
-        "as_of_date": row.get("as_of_date", ""),
-        "publication_date": row.get("publication_date", ""),
-        "publisher": row.get("publisher", ""),
-        "source_type": row.get("source_type", ""),
-        "source_url": row.get("source_url", ""),
-        "doc_title": row.get("doc_title", ""),
-        "definition_text": row.get("definition_text", ""),
-        "precedence_tier": row.get("precedence_tier", ""),
-        "event_id": row.get("event_id", ""),
-        "confidence": row.get("confidence", ""),
-        "proxy_for": row.get("proxy_for", ""),
-        "source": source_bucket,
-        "source_dataset": source_dataset,
+        "metric": result.get("metric", ""),
+        "unit": result.get("unit", "persons"),
+        "value": result.get("value", ""),
+        "as_of_date": result.get("as_of_date", ""),
+        "publication_date": result.get("publication_date", ""),
+        "publisher": result.get("publisher", ""),
+        "source_type": result.get("source_type", ""),
+        "source_url": result.get("source_url", ""),
+        "doc_title": result.get("doc_title", ""),
+        "definition_text": result.get("definition_text", ""),
+        "precedence_tier": result.get("precedence_tier", ""),
+        "event_id": result.get("event_id", ""),
+        "confidence": result.get("confidence", ""),
+        "proxy_for": result.get("proxy_for", ""),
+        "source": result.get("source", ""),
+        "source_dataset": result.get("source_dataset", ""),
+        "source_id": result.get("source_id", ""),
         "series_semantics": row_series,
-        "series_requested": series_requested,
+        "series_requested": result.get("series_requested", series_requested),
         "series_returned": row_series,
-        "ym": row.get("ym", ym),
+        "ym": ym_value,
     }
+    if result.get("fallback_used"):
+        output["fallback_used"] = True
 
     print(json.dumps(output, default=json_default, ensure_ascii=False), flush=True)
 
