@@ -61,6 +61,13 @@ if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tes
     LOGGER.addHandler(logging.NullHandler())
 
 
+def _merge_enabled() -> bool:
+    """Return ``True`` when DuckDB MERGE statements should be attempted."""
+
+    flag = os.getenv("RESOLVER_DUCKDB_DISABLE_MERGE", "").strip()
+    return flag not in {"1", "true", "True"}
+
+
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
@@ -397,43 +404,68 @@ def upsert_dataframe(
                     "[" + ", ".join(keys) + "]",
                 )
 
+        use_legacy_path = True
         if keys and has_declared_key:
-            all_columns = insert_columns
-            non_key_columns = [c for c in all_columns if c not in keys]
-            on_predicate = " AND ".join(
-                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
-            )
-            update_assignments = (
-                ", ".join(
-                    f"{_quote_identifier(c)} = s.{_quote_identifier(c)}"
-                    for c in non_key_columns
+            if not _merge_enabled():
+                LOGGER.debug(
+                    "MERGE disabled via RESOLVER_DUCKDB_DISABLE_MERGE for table %s",
+                    table,
                 )
-                if non_key_columns
-                else ""
-            )
-            insert_cols_sql = ", ".join(_quote_identifier(c) for c in all_columns)
-            select_cols_sql = ", ".join(
-                f"s.{_quote_identifier(c)}" for c in all_columns
-            )
+            else:
+                all_columns = insert_columns
+                non_key_columns = [c for c in all_columns if c not in keys]
+                on_predicate = " AND ".join(
+                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                )
+                update_assignments = (
+                    ", ".join(
+                        f"{_quote_identifier(c)} = s.{_quote_identifier(c)}"
+                        for c in non_key_columns
+                    )
+                    if non_key_columns
+                    else ""
+                )
+                insert_cols_sql = ", ".join(_quote_identifier(c) for c in all_columns)
+                select_cols_sql = ", ".join(
+                    f"s.{_quote_identifier(c)}" for c in all_columns
+                )
 
-            merge_parts = [
-                f"MERGE INTO {table_ident} AS t",
-                f"USING {temp_ident} AS s",
-                f"ON {on_predicate}",
-            ]
-            if update_assignments:
+                merge_parts = [
+                    f"MERGE INTO {table_ident} AS t",
+                    f"USING {temp_ident} AS s",
+                    f"ON {on_predicate}",
+                ]
+                if update_assignments:
+                    merge_parts.append(
+                        f"WHEN MATCHED THEN UPDATE SET {update_assignments}"
+                    )
                 merge_parts.append(
-                    f"WHEN MATCHED THEN UPDATE SET {update_assignments}"
+                    f"WHEN NOT MATCHED THEN INSERT ({insert_cols_sql}) VALUES ({select_cols_sql})"
                 )
-            merge_parts.append(
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols_sql}) VALUES ({select_cols_sql})"
-            )
-            merge_sql = "\n".join(merge_parts) + ";"
+                merge_sql = "\n".join(merge_parts) + ";"
 
-            LOGGER.debug("MERGE SQL:\n%s", merge_sql)
-            conn.execute(merge_sql)
-            LOGGER.info("Upserted %s rows into %s via MERGE", len(frame), table)
-        else:
+                LOGGER.debug("MERGE SQL:\n%s", merge_sql)
+                try:
+                    conn.execute(merge_sql)
+                except duckdb.Error as exc:
+                    use_legacy_path = True
+                    LOGGER.warning(
+                        "duckdb.merge_failed | table=%s | rows=%s | error=%s",
+                        table,
+                        len(frame),
+                        exc,
+                        exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+                    )
+                else:
+                    LOGGER.info("Upserted %s rows into %s via MERGE", len(frame), table)
+                    use_legacy_path = False
+
+        if use_legacy_path:
+            if keys and has_declared_key and merge_sql:
+                LOGGER.debug(
+                    "Falling back to legacy delete+insert after MERGE failure for table %s",
+                    table,
+                )
             if keys:
                 delete_predicate = " AND ".join(
                     f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
@@ -457,7 +489,10 @@ def upsert_dataframe(
                     ).fetchall()
                     deleted_count = len(deleted_rows)
                 except duckdb.Error:
-                    LOGGER.debug("DELETE ... RETURNING failed; retrying without RETURNING", exc_info=True)
+                    LOGGER.debug(
+                        "DELETE ... RETURNING failed; retrying without RETURNING",
+                        exc_info=True,
+                    )
                     count_sql = (
                         "\n".join(
                             [
@@ -473,7 +508,7 @@ def upsert_dataframe(
                 else:
                     deleted_count = int(deleted_count)
                 LOGGER.info(
-                    "Deleted %s existing rows from %s using keys %s",
+                    "duckdb.upsert.legacy_delete | Deleted %s existing rows from %s using keys %s",
                     int(deleted_count or 0),
                     table,
                     "[" + ", ".join(keys or []) + "]",
@@ -485,7 +520,11 @@ def upsert_dataframe(
             )
             LOGGER.debug("INSERT SQL:\n%s", insert_sql)
             conn.execute(insert_sql)
-            LOGGER.info("Inserted %s rows into %s", len(frame), table)
+            LOGGER.info(
+                "duckdb.upsert.legacy_insert | Inserted %s rows into %s",
+                len(frame),
+                table,
+            )
     except Exception as e:
         try:
             LOGGER.error(

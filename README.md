@@ -158,6 +158,12 @@ and a corresponding `snapshots` row. Leave `RESOLVER_DB_URL` unset to continue
 operating in file-only mode; all tooling falls back automatically when the
 variable is absent.
 
+#### Development tips
+
+- Review [resolver/docs/db_upsert_strategy.md](resolver/docs/db_upsert_strategy.md)
+  for details on the DuckDB MERGE-first upsert strategy and the
+  `RESOLVER_DUCKDB_DISABLE_MERGE` opt-out flag.
+
 The exporter writes the very same dataframe that is saved to `facts.csv` into
 DuckDB to guarantee row-for-row parity. During these writes the DuckDB helper
 aliases staging-era columns such as `series_semantics_out` to the canonical
