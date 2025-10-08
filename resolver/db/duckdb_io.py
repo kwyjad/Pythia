@@ -303,7 +303,31 @@ def upsert_dataframe(
     df: pd.DataFrame,
     keys: Sequence[str] | None = None,
 ) -> int:
-    """Upsert rows into ``table`` using ``keys`` as the natural key."""
+    """Upsert rows into ``table`` using ``keys`` as the natural key.
+
+    Preferred call signature::
+
+        upsert_dataframe(conn, table: str, df: pd.DataFrame, keys=...)
+
+    For backwards compatibility, the legacy order with the dataframe and
+    table name swapped is also accepted::
+
+        upsert_dataframe(conn, df: pd.DataFrame, table: str, keys=...)
+
+    Any other argument ordering will raise ``TypeError``.
+    """
+
+    if isinstance(table, pd.DataFrame) and isinstance(df, str):
+        LOGGER.debug(
+            "duckdb.upsert.argorder_swapped | accepted call signature (conn, df, table, keys)"
+        )
+        table, df = df, table
+
+    if not isinstance(table, str) or not isinstance(df, pd.DataFrame):
+        raise TypeError(
+            "upsert_dataframe expects (conn, table: str, df: pandas.DataFrame, keys=...) or "
+            "(conn, df: pandas.DataFrame, table: str, keys=...)"
+        )
 
     merge_sql = ""
     insert_sql = ""

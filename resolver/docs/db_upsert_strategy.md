@@ -23,3 +23,13 @@ ISO `YYYY-MM-DD` strings. The exporter and database writer normalise
 `as_of_date`, `publication_date`, and delta `as_of` fields to the same string
 format before inserting. Internal audit columns (such as `created_at`) remain
 `TIMESTAMP` because they are not merged against CSV outputs.
+
+## Function Call Signatures
+
+`duckdb_io.upsert_dataframe` historically accepted both `(conn, table, df,
+keys=...)` and `(conn, df, table, keys=...)` argument orders. The resolver
+codebase now standardises on the former `(conn, table: str, df: pandas.DataFrame,
+keys=...)` ordering, but the function still recognises the legacy signature and
+swaps the arguments when it detects them. Any other order results in a
+`TypeError`, helping older tests continue to run while flagging genuinely
+invalid calls.
