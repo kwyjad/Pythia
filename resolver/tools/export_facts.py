@@ -24,7 +24,13 @@ After exporting:
   - Freeze:     python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
 """
 
-import argparse, os, sys, json, datetime as dt, logging
+import argparse
+import os
+import sys
+import json
+import datetime as dt
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -269,17 +275,36 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     return frame
 
 
+def _parse_write_db_flag(value: str | bool | None) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() == "1"
+    try:
+        return bool(int(value))
+    except Exception:
+        return False
+
+
 def _maybe_write_to_db(
     *,
+    enabled: bool = False,
+    db_url: Optional[str] = None,
     facts_resolved: "Optional[pd.DataFrame]" = None,
     facts_deltas: "Optional[pd.DataFrame]" = None,
 ) -> None:
     """Write exported facts into DuckDB when feature flag is set."""
 
+    if not enabled:
+        return
     if duckdb_io is None:
         return
-    db_url = os.environ.get("RESOLVER_DB_URL")
     if not db_url:
+        db_url = os.environ.get("RESOLVER_DB_URL")
+    if not db_url:
+        LOGGER.debug("DuckDB write skipped: no RESOLVER_DB_URL provided")
         return
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
@@ -335,32 +360,36 @@ def _maybe_write_to_db(
                 pass
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
-    ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to export_config.yml")
-    ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
-    args = ap.parse_args()
+@dataclass
+class ExportResult:
+    rows: int
+    csv_path: Path
+    parquet_path: Optional[Path]
+    dataframe: "pd.DataFrame"
 
-    inp = Path(args.inp)
-    cfg_path = Path(args.config)
-    out_dir = Path(args.out)
 
-    if not cfg_path.exists():
-        print(f"Config not found: {cfg_path}", file=sys.stderr)
-        sys.exit(2)
+class ExportError(RuntimeError):
+    pass
+
+
+def export_facts(
+    *,
+    inp: Path,
+    config_path: Path = DEFAULT_CONFIG,
+    out_dir: Path = EXPORTS,
+    write_db: bool = False,
+    db_url: Optional[str] = None,
+) -> ExportResult:
+    if not config_path.exists():
+        raise ExportError(f"Config not found: {config_path}")
 
     files = _collect_inputs(inp)
     if not files:
-        print(f"No supported files found under {inp}", file=sys.stderr)
-        sys.exit(1)
+        raise ExportError(f"No supported files found under {inp}")
 
-    cfg = _load_config(cfg_path)
+    cfg = _load_config(config_path)
 
-    frames = []
-    for f in files:
-        df = _read_one(f)
-        frames.append(df)
+    frames = [_read_one(f) for f in files]
     staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
     facts = _apply_mapping(staging, cfg)
@@ -383,20 +412,64 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
-    pq_path  = out_dir / "facts.parquet"
+    pq_path = out_dir / "facts.parquet"
     facts.to_csv(csv_path, index=False)
+
+    parquet_written: Optional[Path] = None
     try:
-        # Parquet writes use snappy compression by default which keeps artifacts lean
         facts.to_parquet(pq_path, index=False)
-    except Exception as e:
-        print(f"Warning: could not write Parquet ({e}). CSV written.", file=sys.stderr)
+        parquet_written = pq_path
+    except Exception as exc:
+        print(f"Warning: could not write Parquet ({exc}). CSV written.", file=sys.stderr)
 
-    _maybe_write_to_db(facts_resolved=facts)
+    _maybe_write_to_db(
+        enabled=_parse_write_db_flag(write_db),
+        db_url=db_url,
+        facts_resolved=facts,
+    )
 
-    print(f"✅ Exported {len(facts)} rows")
-    if pq_path.exists():
-        print(f" - parquet: {pq_path}")
-    print(f" - csv (diagnostic): {csv_path}")
+    return ExportResult(
+        rows=len(facts),
+        csv_path=csv_path,
+        parquet_path=parquet_written,
+        dataframe=facts,
+    )
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to export_config.yml")
+    ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
+    ap.add_argument(
+        "--write-db",
+        default="0",
+        choices=["0", "1"],
+        help="Set to 1 to also persist exports into DuckDB",
+    )
+    ap.add_argument(
+        "--db-url",
+        default=None,
+        help="Optional DuckDB URL override (defaults to RESOLVER_DB_URL)",
+    )
+    args = ap.parse_args()
+
+    try:
+        result = export_facts(
+            inp=Path(args.inp),
+            config_path=Path(args.config),
+            out_dir=Path(args.out),
+            write_db=args.write_db,
+            db_url=args.db_url,
+        )
+    except ExportError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"✅ Exported {result.rows} rows")
+    if result.parquet_path and result.parquet_path.exists():
+        print(f" - parquet: {result.parquet_path}")
+    print(f" - csv (diagnostic): {result.csv_path}")
 
 if __name__ == "__main__":
     main()

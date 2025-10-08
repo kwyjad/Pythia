@@ -22,6 +22,23 @@ python resolver/cli/resolver_cli.py --iso3 PHL --hazard_code TC --cutoff 2025-09
 python resolver/cli/resolver_cli.py --iso3 ETH --hazard_code DR --cutoff 2025-08-31 --json_only
 ```
 
+### Monthly snapshots
+
+```bash
+# end-to-end export → validate → freeze for January 2025
+python -m resolver.cli.snapshot_cli make-monthly --ym 2025-01
+
+# list available snapshot folders
+python -m resolver.cli.snapshot_cli list-snapshots
+```
+
+The monthly command performs the following steps:
+
+1. Runs `resolver/tools/export_facts.py` with the configured staging inputs.
+2. Validates the export via `resolver/tools/validate_facts.py`.
+3. Resolves precedence and builds monthly deltas.
+4. Calls `resolver/tools/freeze_snapshot.py` to write `resolver/snapshots/YYYY-MM/` artifacts and, when `--write-db 1` is provided, persists them into DuckDB.
+
 ### Data selection rules
 
 - **Past months** → uses `snapshots/YYYY-MM/facts.parquet` (preferred)
