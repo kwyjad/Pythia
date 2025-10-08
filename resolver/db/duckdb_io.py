@@ -50,6 +50,16 @@ DEFAULT_DB_URL = os.environ.get(
 
 LOGGER = get_logger(__name__)
 
+# Ensure logs propagate so pytest's caplog handler can observe debug messages emitted
+# from this module, while still remaining quiet when logging is not configured.
+try:  # pragma: no cover - defensive; logging.Logger may reject attribute writes
+    LOGGER.propagate = True
+except Exception:  # pragma: no cover - propagate setting best-effort only
+    pass
+
+if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tests
+    LOGGER.addHandler(logging.NullHandler())
+
 
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
