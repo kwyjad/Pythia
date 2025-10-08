@@ -44,7 +44,7 @@ jobs:
           echo "GITHUB_SHA=$GITHUB_SHA"
           python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
 
-      - name: Anti-drift: assert no legacy repo references
+      - name: "Anti-drift: assert no legacy repo references"
         run: |
           part_a="spa"
           part_b="gbot"
