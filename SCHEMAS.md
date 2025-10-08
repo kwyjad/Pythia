@@ -26,12 +26,19 @@
 > [`resolver.common.series_semantics.compute_series_semantics`](resolver/common/series_semantics.py),
 > which reads [`resolver/config/series_semantics.yml`](resolver/config/series_semantics.yml)
 > to normalise configured metrics (currently `in_need` → `stock`) while leaving
-> all other non-empty values untouched. Dual writes delete and reinsert rows by
-> the natural keys listed below so repeating an export or snapshot for the same
-> month yields identical state:
+> all other non-empty values untouched. Before deduplication the writer
+> canonicalises `series_semantics` into `{ "", "new", "stock" }` so mixed-case
+> or "none" values collapse to the same primary key. Dual writes delete and
+> reinsert rows by the natural keys listed below so repeating an export or
+> snapshot for the same month yields identical state:
 >
 > - `facts_resolved`: (`ym`, `iso3`, `hazard_code`, `metric`, `series_semantics`)
-> - `facts_deltas`: (`ym`, `iso3`, `hazard_code`, `metric`, `series_semantics`)
+> - `facts_deltas`: (`ym`, `iso3`, `hazard_code`, `metric`)
+>
+> Snapshot writes delete the target month from `facts_resolved`, `facts_deltas`,
+> and manifests before upserting the fresh data and recording a single row in
+> `snapshots`. Inserts always specify the explicit column list (no `SELECT *`)
+> to ensure column order drift never misaligns values.
 >
 > Staging-only columns such as `country_name`, `method`, `revision`, and
 > `ingested_at` are intentionally omitted from the resolved tables and are only

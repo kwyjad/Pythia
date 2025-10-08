@@ -15,6 +15,15 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
+### Working behind a proxy
+
+GitHub Actions and the devcontainer bootstrap understand constrained networks. The `resolver-ci-fast` workflow’s DuckDB job first
+tries an editable install with `poetry-core` preloaded and build isolation disabled so that proxy-friendly indexes (surfaced via
+`PIP_INDEX_URL`/`PIP_EXTRA_INDEX_URL` or `HTTP_PROXY`/`HTTPS_PROXY` secrets) are respected. If that still fails, the job falls
+back to `requirements*.txt` dependencies, adds the repo to `PYTHONPATH`, and continues running the database tests. Locally, the
+`.devcontainer/postCreate.sh` script mirrors the same two-phase approach and automatically appends the workspace path to
+`PYTHONPATH` whenever an editable install is blocked.
+
 How it works (conceptually)
 
 Understand the question

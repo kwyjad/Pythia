@@ -41,7 +41,6 @@ FACTS_DELTAS_KEY_COLUMNS = [
     "iso3",
     "hazard_code",
     "metric",
-    "series_semantics",
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
@@ -58,6 +57,20 @@ def _quote_identifier(identifier: str) -> str:
 
 def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
+    """Return ``series`` mapped into the canonical {"", "new", "stock"}."""
+
+    semantics = series.where(series.notna(), "")
+    semantics = semantics.astype(str).str.strip()
+    lowered = semantics.str.lower()
+    semantics = semantics.mask(lowered.isin({"none", "nan"}), "")
+    semantics = semantics.mask(lowered.str.startswith("new"), "new")
+    semantics = semantics.mask(lowered.str.startswith("stock"), "stock")
+    lowered = semantics.astype(str).str.lower()
+    semantics = semantics.mask(~lowered.isin({"", "new", "stock"}), "")
+    return semantics.astype(str)
 
 
 def _delete_where(
@@ -198,15 +211,10 @@ def upsert_dataframe(
 
     if "series_semantics" not in frame.columns:
         frame["series_semantics"] = ""
-    else:
-        semantics_series = frame["series_semantics"].where(
-            frame["series_semantics"].notna(), ""
-        )
-        semantics_series = semantics_series.astype(str).str.strip()
-        semantics_series = semantics_series.mask(
-            semantics_series.str.lower().isin({"none", "nan"}), ""
-        )
-        frame["series_semantics"] = semantics_series
+
+    frame["series_semantics"] = _canonicalise_series_semantics(
+        frame["series_semantics"]
+    )
 
     table_info = conn.execute(f"PRAGMA table_info({_quote_literal(table)})").fetchall()
     if not table_info:
@@ -236,8 +244,7 @@ def upsert_dataframe(
                 f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
             )
         for key in keys:
-            if key in frame.columns:
-                frame[key] = frame[key].astype(str).str.strip()
+            frame[key] = frame[key].where(frame[key].notna(), "").astype(str).str.strip()
         before = len(frame)
         frame = frame.drop_duplicates(subset=list(keys), keep="last").reset_index(drop=True)
         if LOGGER.isEnabledFor(logging.DEBUG) and before != len(frame):
@@ -251,15 +258,6 @@ def upsert_dataframe(
     object_columns = frame.select_dtypes(include=["object"]).columns
     for column in object_columns:
         frame[column] = frame[column].astype(str)
-
-    if "series_semantics" in frame.columns:
-        semantics = frame["series_semantics"].astype(str)
-        normalised = semantics.str.strip().str.lower()
-        frame.loc[normalised.str.startswith("new"), "series_semantics"] = "new"
-        frame.loc[normalised.str.startswith("stock"), "series_semantics"] = "stock"
-        cleaned = frame["series_semantics"].astype(str).str.strip().str.lower()
-        frame.loc[~cleaned.isin({"", "new", "stock"}), "series_semantics"] = ""
-        frame["series_semantics"] = frame["series_semantics"].astype(str).str.strip()
 
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
@@ -341,36 +339,39 @@ def write_snapshot(
 
     conn.execute("BEGIN")
     try:
-        deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
-        deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
-
         facts_rows = 0
         deltas_rows = 0
+
+        deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
+        LOGGER.debug("Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym)
+
         if facts_resolved is not None and not facts_resolved.empty:
             facts_resolved = _ensure_columns(
                 facts_resolved,
                 FACTS_RESOLVED_KEY_COLUMNS + ["value"],
             )
             for key in FACTS_RESOLVED_KEY_COLUMNS:
-                facts_resolved[key] = (
+                series = (
                     facts_resolved[key]
-                    .fillna("")
+                    .where(facts_resolved[key].notna(), "")
                     .astype(str)
                     .str.strip()
                 )
-            facts_resolved["ym"] = facts_resolved["ym"].replace("", ym)
+                if key == "ym":
+                    series = series.replace("", ym)
+                facts_resolved[key] = series
             if "value" in facts_resolved.columns:
                 facts_resolved["value"] = pd.to_numeric(
                     facts_resolved["value"], errors="coerce"
                 )
-            facts_resolved["series_semantics"] = facts_resolved.apply(
+            computed_semantics = facts_resolved.apply(
                 lambda row: compute_series_semantics(
                     metric=row.get("metric"), existing=row.get("series_semantics")
                 ),
                 axis=1,
             )
-            facts_resolved["series_semantics"] = (
-                facts_resolved["series_semantics"].fillna("").astype(str).str.strip()
+            facts_resolved["series_semantics"] = _canonicalise_series_semantics(
+                computed_semantics
             )
             facts_resolved = facts_resolved.drop_duplicates(
                 subset=FACTS_RESOLVED_KEY_COLUMNS,
@@ -387,23 +388,35 @@ def write_snapshot(
                 "facts_resolved series_semantics distribution: %s",
                 dict_counts(facts_resolved["series_semantics"]),
             )
+
+        deleted_deltas = 0
         if facts_deltas is not None and not facts_deltas.empty:
-            facts_deltas = facts_deltas.copy()
+            deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
+            LOGGER.debug("Deleted %s facts_deltas rows for ym=%s", deleted_deltas, ym)
             facts_deltas = _ensure_columns(
                 facts_deltas,
-                FACTS_DELTAS_KEY_COLUMNS + ["value_new", "value_stock"],
+                FACTS_DELTAS_KEY_COLUMNS
+                + ["series_semantics", "value_new", "value_stock"],
             )
             for key in FACTS_DELTAS_KEY_COLUMNS:
                 series = (
                     facts_deltas[key]
-                    .fillna("new" if key == "series_semantics" else "")
+                    .where(facts_deltas[key].notna(), "")
                     .astype(str)
                     .str.strip()
                 )
-                if key == "series_semantics":
-                    series = series.replace("", "new")
+                if key == "ym":
+                    series = series.replace("", ym)
                 facts_deltas[key] = series
-            facts_deltas["ym"] = facts_deltas["ym"].replace("", ym)
+            if "series_semantics" in facts_deltas.columns:
+                semantics = _canonicalise_series_semantics(
+                    facts_deltas["series_semantics"]
+                )
+                facts_deltas["series_semantics"] = semantics.mask(
+                    semantics.eq(""), "new"
+                )
+            else:
+                facts_deltas["series_semantics"] = "new"
             numeric_delta_columns = [
                 col
                 for col in ("value_new", "value_stock")
@@ -424,10 +437,17 @@ def write_snapshot(
                 keys=FACTS_DELTAS_KEY_COLUMNS,
             )
             LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
-            if "series_semantics" in facts_deltas.columns:
+            LOGGER.debug(
+                "facts_deltas series_semantics distribution: %s",
+                dict_counts(facts_deltas["series_semantics"]),
+            )
+        else:
+            deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
+            if deleted_deltas:
                 LOGGER.debug(
-                    "facts_deltas series_semantics distribution: %s",
-                    dict_counts(facts_deltas["series_semantics"]),
+                    "Deleted %s facts_deltas rows for ym=%s (no deltas frame provided)",
+                    deleted_deltas,
+                    ym,
                 )
         manifest_rows: list[dict] = []
         if manifests:

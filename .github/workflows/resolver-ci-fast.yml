@@ -93,3 +93,67 @@ jobs:
         with:
           name: fast-pytest-results
           path: pytest-junit.xml
+
+  db_tests:
+    if: ${{ hashFiles('resolver/tests/test_db_parity.py', 'resolver/tests/test_duckdb_idempotency.py') != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Debug repo context
+        run: |
+          echo "Repo=$GITHUB_REPOSITORY Ref=$GITHUB_REF SHA=$GITHUB_SHA"
+          python -c "import pathlib; print('CWD=', pathlib.Path().resolve())"
+
+      - name: Install (robust, proxy-safe) with fallback
+        id: robust_install
+        shell: bash
+        env:
+          PIP_NO_CACHE_DIR: "1"
+          PIP_DEFAULT_TIMEOUT: "60"
+          PIP_INDEX_URL: ${{ secrets.PIP_INDEX_URL }}
+          PIP_EXTRA_INDEX_URL: ${{ secrets.PIP_EXTRA_INDEX_URL }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          set -euo pipefail
+          echo "Attempt A: preinstall build backend + duckdb wheel, then editable (no build isolation)"
+          python -m pip install -U pip wheel setuptools "poetry-core>=1.9"
+          python -m pip install --only-binary=:all: "duckdb==1.1.3" || true
+          if python -m pip install -e ".[db]" --no-build-isolation; then
+            echo "mode=editable" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Attempt B: retry editable once more"
+          sleep 5
+          if python -m pip install -e ".[db]" --no-build-isolation; then
+            echo "mode=editable" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Editable install failed; using fallback (requirements + PYTHONPATH)"
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt || true; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt || true; fi
+          python -m pip install --only-binary=:all: "duckdb==1.1.3" || true
+          echo "mode=fallback" >>"$GITHUB_OUTPUT"
+
+      - name: Run DuckDB tests (editable)
+        if: steps.robust_install.outputs.mode == 'editable'
+        env:
+          RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
+        run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
+
+      - name: Run DuckDB tests (fallback, PYTHONPATH)
+        if: steps.robust_install.outputs.mode == 'fallback'
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
+        run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py

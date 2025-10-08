@@ -19,24 +19,18 @@ if ! command -v "$PY_BIN" >/dev/null 2>&1; then
 fi
 echo ">> Using PY_BIN=$PY_BIN"
 
-echo ">> Upgrading pip and installing DB deps (offline-first)..."
-"$PY_BIN" -m pip install --upgrade pip
-
-OFFLINE_FAIL=0
-if [ -f "tools/offline_wheels/constraints-db.txt" ]; then
-  echo ">> Attempting offline install from tools/offline_wheels ..."
-  if ! "$PY_BIN" -m pip install --no-index --find-links tools/offline_wheels -r tools/offline_wheels/constraints-db.txt; then
-    OFFLINE_FAIL=1
-  fi
+echo "[postCreate] Robust install start"
+"$PY_BIN" -m pip install -U pip wheel setuptools "poetry-core>=1.9"
+if [ -f requirements-dev.txt ]; then "$PY_BIN" -m pip install -r requirements-dev.txt || true; fi
+if [ -f requirements.txt ]; then "$PY_BIN" -m pip install -r requirements.txt || true; fi
+"$PY_BIN" -m pip install --only-binary=:all: "duckdb==1.1.3" || true
+if "$PY_BIN" -m pip install -e ".[db]" --no-build-isolation; then
+  echo "[postCreate] Editable install OK"
 else
-  OFFLINE_FAIL=1
-fi
-
-if [ "$OFFLINE_FAIL" = "1" ]; then
-  echo ">> Offline install not available or failed; falling back to online extras..."
-  if ! "$PY_BIN" -m pip install -e ".[db,test]"; then
-    "$PY_BIN" -m pip install -e .
-    "$PY_BIN" -m pip install duckdb==0.10.3 httpx pytest
+  echo "[postCreate] Editable install failed; falling back to PYTHONPATH mode"
+  workspace_name="$(basename "$PWD")"
+  if ! grep -q "PYTHONPATH" ~/.bashrc 2>/dev/null; then
+    echo "export PYTHONPATH=\"\$PYTHONPATH:/workspaces/${workspace_name}\"" >> ~/.bashrc
   fi
 fi
 
