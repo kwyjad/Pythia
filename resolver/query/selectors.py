@@ -13,19 +13,15 @@ import pandas as pd
 
 from resolver.db import duckdb_io
 
-try:  # pragma: no cover - optional dependency in fast tests
+# --- begin duckdb import guard ---
+try:
     import duckdb  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover - duckdb extras disabled
+    # Some test shims provide a minimal 'duckdb' without the Error attribute.
+    DuckDBError = getattr(duckdb, "Error", Exception)
+except Exception:
     duckdb = None  # type: ignore
-
-if duckdb is not None:  # pragma: no branch - executed when duckdb present
-    DuckDBError = duckdb.Error  # type: ignore[attr-defined]
-else:  # pragma: no cover - fallback when duckdb missing
-    class DuckDBError(Exception):
-        """Placeholder error type when DuckDB is unavailable."""
-
-        pass
-
+    DuckDBError = Exception
+# --- end duckdb import guard ---
 
 LOGGER = logging.getLogger(__name__)
 
