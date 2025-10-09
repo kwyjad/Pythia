@@ -465,6 +465,7 @@ def _resolve_from_db(
         return None
 
     if series == "new":
+        print(f"DBG selectors using DB deltas: ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff}", flush=True)
         row = db_reader.fetch_deltas_point(
             conn, ym=ym, iso3=iso3, hazard_code=hazard_code, cutoff=cutoff, preferred_metric=preferred_metric
         )
