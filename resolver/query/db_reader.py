@@ -17,7 +17,6 @@ def _metric_case_sql() -> str:
 
 
 def fetch_deltas_point(
-    print(f"DBG fetch_deltas_point CALLED ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff} pref={preferred_metric}", flush=True)
     conn,
     *,
     ym: str,
@@ -26,6 +25,10 @@ def fetch_deltas_point(
     cutoff: str,
     preferred_metric: str,
 ) -> Optional[dict]:
+    print(
+        f"DBG fetch_deltas_point CALLED ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff} pref={preferred_metric}",
+        flush=True,
+    )
     """Return the latest delta row at or before ``cutoff`` for the request."""
 
     metric_case = _metric_case_sql()
