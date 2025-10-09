@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from typing import Optional
 
+import pathlib, sys  # DEBUG
+
+print(
+    "DBG db_reader path:",
+    pathlib.Path(__file__).resolve(),
+    file=sys.stderr,
+    flush=True,
+)  # DEBUG
+
 print("DBG db_reader import marker v1", flush=True)
 
 def _metric_case_sql() -> str:
@@ -27,8 +36,9 @@ def fetch_deltas_point(
 ) -> Optional[dict]:
     print(
         f"DBG fetch_deltas_point CALLED ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff} pref={preferred_metric}",
+        file=sys.stderr,
         flush=True,
-    )
+    )  # DEBUG
     """Return the latest delta row at or before ``cutoff`` for the request."""
 
     metric_case = _metric_case_sql()

@@ -77,6 +77,14 @@ jobs:
           import duckdb
           print("✅ DuckDB installed:", duckdb.__version__)
           PY
+      - name: Show resolver import location & DuckDB version
+        run: |
+          python - <<'PY'
+          import sys, pathlib, resolver, duckdb
+          print("Python executable:", sys.executable)
+          print("resolver module path:", pathlib.Path(resolver.__file__).resolve())
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
+          PY
       - name: Connector Smoke (offline)
         run: |
           pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py
@@ -201,6 +209,16 @@ jobs:
               sys.exit(1)
           import duckdb
           print("✅ DuckDB installed:", duckdb.__version__)
+          PY
+
+      - name: Show resolver import location & DuckDB version
+        if: steps.dbfiles.outputs.present == 'true'
+        run: |
+          python - <<'PY'
+          import sys, pathlib, resolver, duckdb
+          print("Python executable:", sys.executable)
+          print("resolver module path:", pathlib.Path(resolver.__file__).resolve())
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
           PY
 
       - name: Show environment

@@ -198,6 +198,13 @@ def prepare_deltas_frame(df: pd.DataFrame, ym: str) -> pd.DataFrame:
 def load_series_from_db(
     ym: str, normalized_series: str
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
+    import sys  # DEBUG
+
+    print(
+        f"DBG load_series_from_db called ym={ym} series={normalized_series}",
+        file=sys.stderr,
+        flush=True,
+    )  # DEBUG
     db_url = os.environ.get("RESOLVER_DB_URL")
     if not db_url:
         return None, "", normalized_series
@@ -206,6 +213,11 @@ def load_series_from_db(
     duckdb_io.init_schema(conn)
 
     if normalized_series == "new":
+        print(
+            f"DBG load_series_from_db SQL (new) ym={ym}",
+            file=sys.stderr,
+            flush=True,
+        )  # DEBUG
         query = (
             "SELECT "
             "ym, "
