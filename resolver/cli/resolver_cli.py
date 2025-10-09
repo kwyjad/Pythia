@@ -25,8 +25,13 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
+
+from pydantic import ValidationError
+
+from resolver.api.batch_models import ResolveQuery, ResolveResponseRow
 from resolver.utils.json_sanitize import json_default
 
 try:
@@ -104,9 +109,130 @@ def resolve_hazard(
     )
 
 
+def _map_backend(value: Optional[str], *, default: str) -> str:
+    if not value:
+        return default
+    backend = str(value).strip().lower()
+    if backend == "csv":
+        backend = "files"
+    if backend not in VALID_BACKENDS:
+        return default
+    return backend
 
 
-def main() -> None:
+def _read_batch_queries(path: Path) -> List[dict]:
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(path, dtype=str).fillna("")
+        return df.to_dict(orient="records")
+    if suffix in {".json", ".jsonl"}:
+        with path.open("r", encoding="utf-8") as handle:
+            if suffix == ".jsonl":
+                return [json.loads(line) for line in handle if line.strip()]
+            payload = json.load(handle)
+        if isinstance(payload, list):
+            return payload
+        raise ValueError("JSON batch input must be a list of query objects")
+    raise ValueError("Batch input must be .csv, .json, or .jsonl")
+
+
+def _write_batch_output(rows: Iterable[dict], path: Path) -> None:
+    records = list(rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        pd.DataFrame(records).to_csv(path, index=False)
+        return
+    if suffix in {".json", ".jsonl"}:
+        with path.open("w", encoding="utf-8") as handle:
+            if suffix == ".json":
+                json.dump(records, handle, default=json_default, ensure_ascii=False, indent=2)
+            else:
+                for row in records:
+                    handle.write(json.dumps(row, default=json_default, ensure_ascii=False) + "\n")
+        return
+    raise ValueError("Batch output must be .csv, .json, or .jsonl")
+
+
+def _resolve_batch_query(
+    raw_query: dict,
+    *,
+    countries: pd.DataFrame,
+    shocks: pd.DataFrame,
+    default_backend: str,
+    default_series: Optional[str],
+) -> Optional[dict]:
+    payload = dict(raw_query)
+    if default_series and not payload.get("series"):
+        payload["series"] = default_series
+    payload["backend"] = _map_backend(payload.get("backend"), default=default_backend)
+
+    try:
+        query = ResolveQuery.parse_obj(payload)
+    except ValidationError:
+        return None
+
+    try:
+        country_name, iso3_code = resolve_country(countries, query.country, query.iso3)
+        hazard_label, hazard_code, hazard_class = resolve_hazard(
+            shocks, query.hazard, query.hazard_code
+        )
+    except SystemExit:
+        return None
+
+    result = resolve_point(
+        iso3=iso3_code,
+        hazard_code=hazard_code,
+        cutoff=query.cutoff,
+        series=query.series,
+        metric="in_need",
+        backend=query.backend or default_backend,
+    )
+
+    if not result:
+        return None
+
+    result.setdefault("country_name", country_name)
+    result.setdefault("hazard_label", hazard_label)
+    result.setdefault("hazard_class", hazard_class)
+    result.setdefault("cutoff", query.cutoff)
+    result.setdefault("series_requested", query.series)
+
+    return ResolveResponseRow.parse_obj(result).dict()
+
+
+def run_batch_resolve(
+    input_path: Path,
+    output_path: Path,
+    *,
+    backend: str,
+    series: Optional[str],
+    max_workers: int,
+) -> None:
+    queries = _read_batch_queries(input_path)
+    if not queries:
+        _write_batch_output([], output_path)
+        return
+
+    countries, shocks = load_registries()
+    backend_choice = _map_backend(backend, default=normalize_backend(None, default="files"))
+
+    def worker(query: dict) -> Optional[dict]:
+        return _resolve_batch_query(
+            query,
+            countries=countries,
+            shocks=shocks,
+            default_backend=backend_choice,
+            default_series=series,
+        )
+
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(queries)))) as executor:
+        results = list(filter(None, executor.map(worker, queries)))
+
+    _write_batch_output(results, output_path)
+
+
+def _run_single(args: List[str]) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--country", help="Country name (as in countries.csv)")
     parser.add_argument("--iso3", help="Country ISO3 code")
@@ -132,7 +258,7 @@ def main() -> None:
             "(prefer db when available). Default is files; override with RESOLVER_CLI_BACKEND."
         ),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(args)
 
     countries, shocks = load_registries()
     country_name, iso3 = resolve_country(countries, args.country, args.iso3)
@@ -252,5 +378,48 @@ def main() -> None:
     print(f"[source bucket: {output['source']}{detail}]")
 
 
+def main() -> None:
+    _run_single(sys.argv[1:])
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "batch-resolve":
+        batch_parser = argparse.ArgumentParser(prog="resolver_cli.py batch-resolve")
+        batch_parser.add_argument("--in", dest="input_path", required=True, help="Input file (.csv/.json/.jsonl)")
+        batch_parser.add_argument(
+            "--out",
+            dest="output_path",
+            required=True,
+            help="Output file (.csv/.json/.jsonl)",
+        )
+        default_backend = normalize_backend(
+            os.environ.get("RESOLVER_CLI_BACKEND"), default="files"
+        )
+        batch_parser.add_argument(
+            "--backend",
+            choices=["db", "csv", "files", "auto"],
+            default=default_backend,
+            help="Backend to use: db, csv/files, or auto.",
+        )
+        batch_parser.add_argument(
+            "--series",
+            choices=["new", "stock"],
+            default=None,
+            help="Default series when a query omits the column.",
+        )
+        batch_parser.add_argument(
+            "--workers",
+            type=int,
+            default=os.cpu_count() or 4,
+            help="Maximum worker threads for resolving queries.",
+        )
+        batch_args = batch_parser.parse_args(sys.argv[2:])
+        run_batch_resolve(
+            Path(batch_args.input_path),
+            Path(batch_args.output_path),
+            backend=batch_args.backend,
+            series=batch_args.series,
+            max_workers=batch_args.workers,
+        )
+    else:
+        main()
