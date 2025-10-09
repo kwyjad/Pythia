@@ -212,8 +212,9 @@ def load_series_from_db(
             "iso3, "
             "hazard_code, "
             "metric, "
-            "value_new AS value, "
-            "value_new AS value_new, "
+            "CAST(value_new AS DOUBLE)    AS value, "
+            "CAST(value_new AS DOUBLE)    AS value_new, "
+            "CAST(value_stock AS DOUBLE)  AS value_stock, "
             "'new' AS series_returned, "
             "COALESCE(NULLIF(series_semantics, ''), 'new') AS series_semantics, "
             "as_of, "
@@ -224,17 +225,12 @@ def load_series_from_db(
             "'' AS definition_text "
             "FROM facts_deltas WHERE ym = ?"
         )
-        try:
-            df = conn.execute(query, [ym]).fetch_df()
-        except DuckDBError as exc:  # pragma: no cover - execution errors bubbled up
-            LOGGER.exception("DuckDB query failed for facts_deltas at ym=%s", ym)
-            raise
-        if df.empty:
-            return None, "facts_deltas", "new"
-        prepared = prepare_deltas_frame(df, ym)
-        if prepared.empty:
-            return None, "facts_deltas", "new"
-        return prepared, "db_facts_deltas", "new"
+        df = conn.execute(query, [ym]).df()
+        for col in ("value", "value_new", "value_stock"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        dataset_label = "db_facts_deltas"
+        return df, dataset_label, "new"
 
     query = (
         "SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric, "
