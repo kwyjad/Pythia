@@ -294,10 +294,13 @@ def _run_single(args: List[str]) -> None:
     )
 
     if not result:
+        dataset_hint = (
+            "facts_deltas.value_new" if series_requested == "new" else "facts_resolved.value"
+        )
         message = (
             "No data found for "
             f"iso3={iso3}, hazard={hazard_code}, series={series_requested} at cutoff {args.cutoff} "
-            f"(backend {backend_choice})."
+            f"(backend {backend_choice}; checked {dataset_hint})."
         )
         emit_no_data(message)
 
