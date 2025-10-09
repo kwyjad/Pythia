@@ -57,6 +57,15 @@ def fetch_deltas_point(
         ORDER BY metric_rank, as_of_parsed DESC NULLS LAST, created_at DESC
         LIMIT 1
     """
+    import logging, duckdb as _duckdb
+    _log = logging.getLogger(__name__)
+    _log.warning("DBG fetch_deltas_point: ym=%s iso3=%s hazard=%s cutoff=%s pref=%s", ym, iso3, hazard_code, cutoff, preferred_metric)
+    _log.warning("DBG duckdb version: %s", getattr(_duckdb, "__version__", "n/a"))
+    c1 = conn.execute("SELECT COUNT(*) FROM facts_deltas WHERE ym=? AND iso3=? AND hazard_code=?", [ym, iso3, hazard_code]).fetchone()[0]
+    c2 = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+    c3 = conn.execute("SELECT COUNT(*) FROM (SELECT TRY_CAST(as_of AS DATE) as as_of_parsed FROM facts_deltas WHERE ym=? AND iso3=? AND hazard_code=?) WHERE as_of_parsed IS NULL OR as_of_parsed <= TRY_CAST(? AS DATE)", [ym, iso3, hazard_code, cutoff]).fetchone()[0]
+    _log.warning("DBG facts_deltas counts: match_keys=%s, total=%s, match_with_cutoff=%s", c1, c2, c3)
+
     df = conn.execute(
         query,
         [preferred_metric, ym, iso3, hazard_code, cutoff],
