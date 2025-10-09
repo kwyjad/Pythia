@@ -17,15 +17,39 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
    python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
    python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
    ```
+   When `RESOLVER_DB_URL` is set (for example `duckdb:///resolver.duckdb`), the exporter automatically dual-writes the
+   normalized facts into DuckDB and creates any missing tables before inserting rows.
 4. **Run precedence & deltas (optional for analytics):**
    ```bash
    python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff YYYY-MM-30
    python resolver/tools/make_deltas.py --resolved resolver/exports/resolved.csv --out resolver/exports/deltas.csv
    ```
-5. **Freeze a snapshot:**
+5. **One-command monthly snapshot (exports + freeze):**
    ```bash
-   python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
+   python -m resolver.cli.snapshot_cli make-monthly --ym YYYY-MM
    ```
+
+   This orchestrates export, validation, precedence, deltas, and snapshot freezing. Dual writes occur automatically when
+   `RESOLVER_DB_URL` is configured; pass `--write-db 1` or `--write-db 0` to force-enable or disable the DuckDB write step.
+   The freezer also respects `RESOLVER_DB_URL`; when present it writes the snapshot tables into DuckDB automatically,
+   ensuring date columns remain ISO-formatted and the schema is created if missing.
+
+## Monthly snapshots in CI
+
+- Workflow: `.github/workflows/publish_snapshot.yml`
+- Triggers: manual dispatch (`workflow_dispatch`) and the 1st of each month at 02:00 Europe/Istanbul.
+- Command executed: `python -m resolver.cli.snapshot_cli make-monthly --ym <year-month> --write-db 1`
+- Artifacts: `resolver/snapshots/YYYY-MM/` uploaded to the run for download. When `SNAPSHOT_PUBLISH_TOKEN` is set the job pushes the snapshot directory back to the repository.
+
+### Required GitHub secrets/vars
+
+| Name | Purpose |
+| --- | --- |
+| `RESOLVER_DB_URL` | DuckDB connection string used for dual-writes (`duckdb:///...`). |
+| `SNAPSHOT_PUBLISH_TOKEN` (optional) | Personal access token with repo write access to push snapshot folders. |
+| `RESOLVER_SNAPSHOT_ENV` (optional) | Additional environment flags (e.g., feature toggles) exported before the CLI runs. |
+
+Set repository variables for non-sensitive defaults such as `SNAPSHOT_EXPORT_CONFIG` or staging paths if they differ from repo defaults.
 
 ## ReliefWeb PDF local runs
 

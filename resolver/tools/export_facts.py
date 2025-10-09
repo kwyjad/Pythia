@@ -24,7 +24,13 @@ After exporting:
   - Freeze:     python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --month YYYY-MM
 """
 
-import argparse, os, sys, json, datetime as dt, logging
+import argparse
+import os
+import sys
+import json
+import datetime as dt
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -204,26 +210,40 @@ def _apply_series_semantics(frame: "pd.DataFrame") -> "pd.DataFrame":
     return frame
 
 
+def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
+    parsed = pd.to_datetime(series, errors="coerce")
+    iso = parsed.dt.strftime("%Y-%m-%d")
+    fallback = series.fillna("").astype(str)
+    fallback = fallback.replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
+    return iso.where(parsed.notna(), fallback).fillna("").astype(str)
+
+
 def _prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     if df is None or df.empty:
         return None
 
     frame = df.copy()
 
+    for column in ("as_of_date", "publication_date"):
+        if column in frame.columns:
+            frame[column] = _isoformat_date_strings(frame[column])
+
     if "ym" not in frame.columns:
         frame["ym"] = ""
     frame["ym"] = frame["ym"].fillna("").astype(str)
-    mask = frame["ym"].str.len() == 0
+    mask = frame["ym"].str.strip() == ""
     if mask.any() and "as_of_date" in frame.columns:
-        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "as_of_date"])
-        mask = frame["ym"].str.len() == 0
+        frame.loc[mask, "ym"] = frame.loc[mask, "as_of_date"].astype(str).str.slice(0, 7)
+        mask = frame["ym"].str.strip() == ""
     if mask.any() and "publication_date" in frame.columns:
-        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "publication_date"])
+        frame.loc[mask, "ym"] = frame.loc[mask, "publication_date"].astype(str).str.slice(0, 7)
 
     frame = _apply_series_semantics(frame)
+    frame["series_semantics"] = frame["series_semantics"].fillna("").astype(str)
 
-    if "value" in frame.columns:
-        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+    for column in RESOLVED_DB_NUMERIC:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
     return frame
 
@@ -247,6 +267,9 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
             frame["series_semantics"] = semantics_out
         frame = frame.drop(columns=["series_semantics_out"])
 
+    if "as_of" in frame.columns:
+        frame["as_of"] = _isoformat_date_strings(frame["as_of"])
+
     if "ym" not in frame.columns:
         frame["ym"] = ""
     frame["ym"] = frame["ym"].fillna("").astype(str)
@@ -269,22 +292,51 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     return frame
 
 
+def _parse_write_db_flag(value: str | bool | None) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        if stripped in {"1", "true", "True"}:
+            return True
+        if stripped in {"0", "false", "False"}:
+            return False
+    try:
+        return bool(int(value))
+    except Exception:
+        return None
+
+
 def _maybe_write_to_db(
     *,
     facts_resolved: "Optional[pd.DataFrame]" = None,
     facts_deltas: "Optional[pd.DataFrame]" = None,
+    db_url: Optional[str] = None,
+    write_db: Optional[bool] = None,
 ) -> None:
-    """Write exported facts into DuckDB when feature flag is set."""
+    """Write exported facts into DuckDB when enabled via environment or flag."""
 
     if duckdb_io is None:
         return
-    db_url = os.environ.get("RESOLVER_DB_URL")
-    if not db_url:
+    env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
+    if db_url is not None:
+        db_url = db_url.strip()
+    else:
+        db_url = env_url
+    if write_db is None:
+        write_db = bool(db_url)
+    if not write_db or not db_url:
+        LOGGER.debug("DuckDB write skipped: disabled or missing RESOLVER_DB_URL")
         return
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
     if resolved_prepared is None and deltas_prepared is None:
+        LOGGER.debug("DuckDB write skipped: no prepared frames to persist")
         return
 
     conn = None
@@ -310,19 +362,21 @@ def _maybe_write_to_db(
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
-            duckdb_io.upsert_dataframe(
+            written_resolved = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
                 keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
+            LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved)
         if deltas_prepared is not None and not deltas_prepared.empty:
-            duckdb_io.upsert_dataframe(
+            written_deltas = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
                 keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
+            LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas)
         LOGGER.info("DuckDB write complete")
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
@@ -335,32 +389,36 @@ def _maybe_write_to_db(
                 pass
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
-    ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to export_config.yml")
-    ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
-    args = ap.parse_args()
+@dataclass
+class ExportResult:
+    rows: int
+    csv_path: Path
+    parquet_path: Optional[Path]
+    dataframe: "pd.DataFrame"
 
-    inp = Path(args.inp)
-    cfg_path = Path(args.config)
-    out_dir = Path(args.out)
 
-    if not cfg_path.exists():
-        print(f"Config not found: {cfg_path}", file=sys.stderr)
-        sys.exit(2)
+class ExportError(RuntimeError):
+    pass
+
+
+def export_facts(
+    *,
+    inp: Path,
+    config_path: Path = DEFAULT_CONFIG,
+    out_dir: Path = EXPORTS,
+    write_db: str | bool | None = None,
+    db_url: Optional[str] = None,
+) -> ExportResult:
+    if not config_path.exists():
+        raise ExportError(f"Config not found: {config_path}")
 
     files = _collect_inputs(inp)
     if not files:
-        print(f"No supported files found under {inp}", file=sys.stderr)
-        sys.exit(1)
+        raise ExportError(f"No supported files found under {inp}")
 
-    cfg = _load_config(cfg_path)
+    cfg = _load_config(config_path)
 
-    frames = []
-    for f in files:
-        df = _read_one(f)
-        frames.append(df)
+    frames = [_read_one(f) for f in files]
     staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 
     facts = _apply_mapping(staging, cfg)
@@ -383,20 +441,64 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
-    pq_path  = out_dir / "facts.parquet"
+    pq_path = out_dir / "facts.parquet"
     facts.to_csv(csv_path, index=False)
+
+    parquet_written: Optional[Path] = None
     try:
-        # Parquet writes use snappy compression by default which keeps artifacts lean
         facts.to_parquet(pq_path, index=False)
-    except Exception as e:
-        print(f"Warning: could not write Parquet ({e}). CSV written.", file=sys.stderr)
+        parquet_written = pq_path
+    except Exception as exc:
+        print(f"Warning: could not write Parquet ({exc}). CSV written.", file=sys.stderr)
 
-    _maybe_write_to_db(facts_resolved=facts)
+    _maybe_write_to_db(
+        facts_resolved=facts,
+        db_url=db_url,
+        write_db=_parse_write_db_flag(write_db),
+    )
 
-    print(f"✅ Exported {len(facts)} rows")
-    if pq_path.exists():
-        print(f" - parquet: {pq_path}")
-    print(f" - csv (diagnostic): {csv_path}")
+    return ExportResult(
+        rows=len(facts),
+        csv_path=csv_path,
+        parquet_path=parquet_written,
+        dataframe=facts,
+    )
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
+    ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to export_config.yml")
+    ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
+    ap.add_argument(
+        "--write-db",
+        default=None,
+        choices=["0", "1"],
+        help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",
+    )
+    ap.add_argument(
+        "--db-url",
+        default=None,
+        help="Optional DuckDB URL override (defaults to RESOLVER_DB_URL)",
+    )
+    args = ap.parse_args()
+
+    try:
+        result = export_facts(
+            inp=Path(args.inp),
+            config_path=Path(args.config),
+            out_dir=Path(args.out),
+            write_db=args.write_db,
+            db_url=args.db_url,
+        )
+    except ExportError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"✅ Exported {result.rows} rows")
+    if result.parquet_path and result.parquet_path.exists():
+        print(f" - parquet: {result.parquet_path}")
+    print(f" - csv (diagnostic): {result.csv_path}")
 
 if __name__ == "__main__":
     main()
