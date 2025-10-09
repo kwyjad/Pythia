@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import os
+
 import pathlib, sys  # DEBUG
 
 print(
@@ -14,6 +16,32 @@ print(
 )  # DEBUG
 
 print("DBG db_reader import marker v1", flush=True)
+
+_DUCKDB_CONN_CACHE: dict[str, "duckdb.DuckDBPyConnection"] = {}
+
+
+def get_shared_duckdb_conn(db_url: str | None):
+    """Return a cached duckdb connection for the given file path."""
+    import duckdb
+
+    if not db_url:
+        return None
+
+    db_path = db_url.replace("duckdb:///", "", 1).strip()
+    if not db_path:
+        return None
+
+    if db_path not in _DUCKDB_CONN_CACHE:
+        _DUCKDB_CONN_CACHE[db_path] = duckdb.connect(database=db_path)
+
+    conn = _DUCKDB_CONN_CACHE[db_path]
+    print(
+        f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return conn
+
 
 def _metric_case_sql() -> str:
     return (
@@ -40,6 +68,22 @@ def fetch_deltas_point(
         flush=True,
     )  # DEBUG
     """Return the latest delta row at or before ``cutoff`` for the request."""
+
+    if conn is None:
+        conn = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+    else:
+        shared_conn = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+        if shared_conn is not None:
+            conn = shared_conn
+
+    if conn is None:
+        return None
+
+    print(
+        f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     metric_case = _metric_case_sql()
     query = f"""

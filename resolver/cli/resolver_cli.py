@@ -40,13 +40,13 @@ except ImportError:  # pragma: no cover - guidance for operators
     print("Please 'pip install pandas pyarrow' to run resolver_cli.", file=sys.stderr)
     sys.exit(2)
 
-from resolver.db import duckdb_io  # DEBUG
 from resolver.query.selectors import (
     VALID_BACKENDS,
     normalize_backend,
     resolve_point,
     ym_from_cutoff,
 )
+from resolver.query.db_reader import get_shared_duckdb_conn
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -310,7 +310,13 @@ def _run_single(args: List[str]) -> None:
     if not result:
         if backend_choice in {"db", "auto"}:
             db_url = os.environ.get("RESOLVER_DB_URL")
-            conn = duckdb_io.get_db(db_url) if db_url else None
+            conn = get_shared_duckdb_conn(db_url)
+            if conn is not None:
+                print(
+                    f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             ym = ym_from_cutoff(args.cutoff)
 
             # --- DEBUG: no-data diagnostics (DuckDB visibility check) ---
@@ -318,7 +324,13 @@ def _run_single(args: List[str]) -> None:
             try:
                 import duckdb  # ensure we have the real module, not a shadowed symbol
                 if conn is None:
-                    conn = duckdb.connect(database=db_url.replace("duckdb:///", "")) if db_url else None
+                    conn = get_shared_duckdb_conn(db_url)
+                    if conn is not None:
+                        print(
+                            f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
                 if conn is not None:
                     c_all = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
