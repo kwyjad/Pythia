@@ -35,4 +35,4 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.extras]
 db = ["duckdb"]
-test = ["httpx", "pytest"]
+test = ["duckdb", "httpx", "pytest"]
