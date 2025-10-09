@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field, root_validator, validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 from resolver.query.selectors import VALID_BACKENDS, normalize_backend
 
@@ -37,14 +37,14 @@ class ResolveQuery(BaseModel):
         description="Optional backend override: files/csv, db, or auto.",
     )
 
-    @validator("series", pre=True, always=True)
+    @field_validator("series", mode="before")
     def _normalise_series(cls, value: Optional[str]) -> str:
         if not value:
             return "stock"
         candidate = str(value).strip().lower()
         return candidate if candidate in {"new", "stock"} else "stock"
 
-    @validator("backend", pre=True, always=True)
+    @field_validator("backend", mode="before")
     def _normalise_backend(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
@@ -56,15 +56,13 @@ class ResolveQuery(BaseModel):
             raise ValueError("backend must be one of files, db, or auto")
         return normalize_backend(backend, default="files")
 
-    @root_validator
-    def _check_identifiers(cls, values: dict) -> dict:
-        country, iso3 = values.get("country"), values.get("iso3")
-        hazard, hazard_code = values.get("hazard"), values.get("hazard_code")
-        if not (country or iso3):
+    @model_validator(mode="after")
+    def _check_identifiers(self) -> "ResolveQuery":
+        if not (self.country or self.iso3):
             raise ValueError("provide either country or iso3 for each query")
-        if not (hazard or hazard_code):
+        if not (self.hazard or self.hazard_code):
             raise ValueError("provide either hazard or hazard_code for each query")
-        return values
+        return self
 
 
 class ResolveResponseRow(BaseModel):
@@ -100,7 +98,5 @@ class ResolveResponseRow(BaseModel):
     ym: Optional[str] = ""
     fallback_used: Optional[bool] = None
 
-    class Config:
-        orm_mode = True
-        allow_population_by_field_name = True
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 

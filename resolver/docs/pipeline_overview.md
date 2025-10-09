@@ -45,7 +45,7 @@ flowchart LR
 - [ReliefWeb PDF branch](reliefweb_pdf.md)
 - [Operations run book](operations.md)
 - [Troubleshooting guide](troubleshooting.md)
-- **Batch resolution** — Use `POST /resolve_batch` or `resolver/cli/resolver_cli.py batch-resolve --in queries.csv --out results.jsonl` to resolve multiple `(country, hazard, month, series)` questions in one call. The resolver automatically balances between DuckDB and CSV/Parquet backends based on availability.
+- **Batch resolution** — Use `POST /resolve_batch` or `resolver/cli/resolver_cli.py batch-resolve --in queries.csv --out results.jsonl` to resolve multiple `(country, hazard, month, series)` questions in one call. The resolver automatically balances between DuckDB and CSV/Parquet backends based on availability. Batch input validation is handled by Pydantic v2 models so the CLI and API enforce identical rules.
 
 ## Series routing
 
