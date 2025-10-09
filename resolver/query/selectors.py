@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,22 @@ from typing import Iterable, Optional, Tuple
 import pandas as pd
 
 from resolver.db import duckdb_io
+
+try:  # pragma: no cover - optional dependency in fast tests
+    import duckdb  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - duckdb extras disabled
+    duckdb = None  # type: ignore
+
+if duckdb is not None:  # pragma: no branch - executed when duckdb present
+    DuckDBError = duckdb.Error  # type: ignore[attr-defined]
+else:  # pragma: no cover - fallback when duckdb missing
+    class DuckDBError(Exception):
+        """Placeholder error type when DuckDB is unavailable."""
+
+        pass
+
+
+LOGGER = logging.getLogger(__name__)
 
 try:  # pragma: no cover - zoneinfo available on 3.9+
     from zoneinfo import ZoneInfo
@@ -188,67 +205,86 @@ def load_series_from_db(
     db_url = os.environ.get("RESOLVER_DB_URL")
     if not db_url:
         return None, "", normalized_series
-    try:
-        conn = duckdb_io.get_db(db_url)
-        duckdb_io.init_schema(conn)
-        if normalized_series == "new":
-            query = (
-                "SELECT ym, iso3, hazard_code, metric, value_new, value_stock, "
-                "series_semantics, rebase_flag, first_observation, "
-                "delta_negative_clamped, as_of, source_id, source_url, source_type, "
-                "doc_title, definition_text FROM facts_deltas WHERE ym = ?"
-            )
-            df = conn.execute(query, [ym]).fetch_df()
-            if df.empty:
-                return None, "", normalized_series
-            prepared = prepare_deltas_frame(df, ym)
-            if prepared.empty:
-                return None, "", normalized_series
-            return prepared, "db_facts_deltas", "new"
 
+    conn = duckdb_io.get_db(db_url)
+    duckdb_io.init_schema(conn)
+
+    if normalized_series == "new":
         query = (
-            "SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric, "
-            "series_semantics, value, unit, as_of_date, publication_date, publisher, "
-            "source_id, source_type, source_url, doc_title, definition_text, precedence_tier, "
-            "event_id, proxy_for, confidence FROM facts_resolved WHERE ym = ?"
+            "SELECT "
+            "ym, "
+            "iso3, "
+            "hazard_code, "
+            "metric, "
+            "value_new AS value, "
+            "value_new AS value_new, "
+            "'new' AS series_returned, "
+            "COALESCE(NULLIF(series_semantics, ''), 'new') AS series_semantics, "
+            "as_of, "
+            "source_id, "
+            "'' AS source_url, "
+            "'' AS source_type, "
+            "'' AS doc_title, "
+            "'' AS definition_text "
+            "FROM facts_deltas WHERE ym = ?"
         )
-        df = conn.execute(query, [ym]).fetch_df()
+        try:
+            df = conn.execute(query, [ym]).fetch_df()
+        except DuckDBError as exc:  # pragma: no cover - execution errors bubbled up
+            LOGGER.exception("DuckDB query failed for facts_deltas at ym=%s", ym)
+            raise
         if df.empty:
-            return None, "", normalized_series
-        df = df.copy()
-        if "ym" not in df.columns:
-            df["ym"] = ym
+            return None, "facts_deltas", "new"
+        prepared = prepare_deltas_frame(df, ym)
+        if prepared.empty:
+            return None, "facts_deltas", "new"
+        return prepared, "db_facts_deltas", "new"
+
+    query = (
+        "SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric, "
+        "series_semantics, value, unit, as_of_date, publication_date, publisher, "
+        "source_id, source_type, source_url, doc_title, definition_text, precedence_tier, "
+        "event_id, proxy_for, confidence FROM facts_resolved WHERE ym = ?"
+    )
+    try:
+        df = conn.execute(query, [ym]).fetch_df()
+    except DuckDBError as exc:  # pragma: no cover - execution errors bubbled up
+        LOGGER.exception("DuckDB query failed for facts_resolved at ym=%s", ym)
+        raise
+    if df.empty:
+        return None, "facts_resolved", "stock"
+    df = df.copy()
+    if "ym" not in df.columns:
+        df["ym"] = ym
+    else:
+        df["ym"] = df["ym"].fillna("").replace("", ym)
+    df["series_semantics"] = (
+        df.get("series_semantics", "stock")
+        .astype(str)
+        .str.strip()
+        .replace("", "stock")
+    )
+    defaults = {
+        "unit": "persons",
+        "as_of_date": "",
+        "publication_date": "",
+        "publisher": "",
+        "source_id": "",
+        "source_type": "",
+        "source_url": "",
+        "doc_title": "",
+        "definition_text": "",
+        "precedence_tier": "",
+        "event_id": "",
+        "proxy_for": "",
+        "confidence": "",
+    }
+    for column, default in defaults.items():
+        if column not in df.columns:
+            df[column] = default
         else:
-            df["ym"] = df["ym"].fillna("").replace("", ym)
-        df["series_semantics"] = (
-            df.get("series_semantics", "stock")
-            .astype(str)
-            .str.strip()
-            .replace("", "stock")
-        )
-        defaults = {
-            "unit": "persons",
-            "as_of_date": "",
-            "publication_date": "",
-            "publisher": "",
-            "source_id": "",
-            "source_type": "",
-            "source_url": "",
-            "doc_title": "",
-            "definition_text": "",
-            "precedence_tier": "",
-            "event_id": "",
-            "proxy_for": "",
-            "confidence": "",
-        }
-        for column, default in defaults.items():
-            if column not in df.columns:
-                df[column] = default
-            else:
-                df[column] = df[column].fillna(default)
-        return df.fillna(""), "db_facts_resolved", "stock"
-    except Exception:  # pragma: no cover - fallback to files on errors
-        return None, "", normalized_series
+            df[column] = df[column].fillna(default)
+    return df.fillna(""), "db_facts_resolved", "stock"
 
 
 def load_series_for_month(
@@ -444,8 +480,13 @@ def _resolve_from_db(
             return None
         row = dict(row)
         value = row.get("value_new")
-        if value is not None:
-            row["value"] = value
+        if value is None:
+            return None
+        row["value"] = value
+        row.setdefault("series_semantics", row.get("series_semantics_out", "new"))
+        row["series_semantics"] = (
+            str(row.get("series_semantics", "")).strip().lower() or "new"
+        )
         row.setdefault("as_of_date", row.get("as_of", ""))
         row.setdefault("publication_date", row.get("as_of_date", ""))
         row.setdefault("metric", row.get("metric", preferred_metric))
@@ -464,6 +505,10 @@ def _resolve_from_db(
     if not row:
         return None
     row = dict(row)
+    row.setdefault("series_semantics", "stock")
+    row["series_semantics"] = (
+        str(row.get("series_semantics", "")).strip().lower() or "stock"
+    )
     payload = _standardise_payload(
         row,
         series="stock",
