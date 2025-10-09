@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+print("DBG db_reader import marker v1", flush=True)
 
 def _metric_case_sql() -> str:
     return (
