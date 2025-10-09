@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover - guidance for operators
     print("Please 'pip install pandas pyarrow' to run resolver_cli.", file=sys.stderr)
     sys.exit(2)
 
+from resolver.db import duckdb_io  # DEBUG
 from resolver.query.selectors import (
     VALID_BACKENDS,
     normalize_backend,
@@ -307,6 +308,34 @@ def _run_single(args: List[str]) -> None:
     )
 
     if not result:
+        try:  # DEBUG
+            if backend_choice in {"db", "auto"}:
+                db_url = os.environ.get("RESOLVER_DB_URL")
+                if db_url:
+                    conn = duckdb_io.get_db(db_url)
+                    ym = ym_from_cutoff(args.cutoff)
+                    c_all = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+                    c_ym = conn.execute(
+                        "SELECT COUNT(*) FROM facts_deltas WHERE ym = ?",
+                        [ym],
+                    ).fetchone()[0]
+                    c_key = conn.execute(
+                        "SELECT COUNT(*) FROM facts_deltas WHERE ym = ? AND iso3 = ? AND hazard_code = ?",
+                        [ym, iso3, hazard_code],
+                    ).fetchone()[0]
+                    print(
+                        "DBG resolver_cli no-data diag: "
+                        f"ym={ym} iso3={iso3} hazard={hazard_code} "
+                        f"counts total={c_all} ym={c_ym} ym+keys={c_key}",
+                        file=sys.stderr,
+                        flush=True,
+                    )  # DEBUG
+        except Exception as exc:  # DEBUG
+            print(
+                f"DBG resolver_cli no-data diag ERROR: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )  # DEBUG
         dataset_hint = (
             "DuckDB table facts_deltas (value_new)"
             if series_requested == "new"

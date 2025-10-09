@@ -13,6 +13,13 @@ import pandas as pd
 
 from resolver.db import duckdb_io
 
+# DEBUG markers for CI path verification
+import pathlib, sys  # DEBUG
+
+print(
+    "DBG selectors path:", pathlib.Path(__file__).resolve(), file=sys.stderr, flush=True
+)  # DEBUG
+
 # --- begin duckdb import guard ---
 try:
     import duckdb  # type: ignore
@@ -198,8 +205,6 @@ def prepare_deltas_frame(df: pd.DataFrame, ym: str) -> pd.DataFrame:
 def load_series_from_db(
     ym: str, normalized_series: str
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
-    import sys  # DEBUG
-
     print(
         f"DBG load_series_from_db called ym={ym} series={normalized_series}",
         file=sys.stderr,
@@ -218,6 +223,22 @@ def load_series_from_db(
             file=sys.stderr,
             flush=True,
         )  # DEBUG
+        try:  # DEBUG
+            total = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+            by_ym = conn.execute(
+                "SELECT COUNT(*) FROM facts_deltas WHERE ym = ?", [ym]
+            ).fetchone()[0]
+            print(
+                f"DBG facts_deltas counts: total={total} for_ym={by_ym}",
+                file=sys.stderr,
+                flush=True,
+            )  # DEBUG
+        except Exception as exc:  # DEBUG
+            print(
+                f"DBG facts_deltas counts ERROR: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )  # DEBUG
         query = (
             "SELECT "
             "ym, iso3, hazard_code, metric, "
