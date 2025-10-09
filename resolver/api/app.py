@@ -10,11 +10,12 @@ Endpoints:
 """
 
 import os
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from resolver.api.batch_models import ResolveQuery, ResolveResponseRow
 from resolver.cli.resolver_cli import (
     load_registries,
     resolve_country,
@@ -40,7 +41,7 @@ app.add_middleware(
         "*",
     ],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -142,3 +143,51 @@ def resolve(
         "ym": result.get("ym", ym),
         "source_id": result.get("source_id", ""),
     }
+
+
+@app.post("/resolve_batch", response_model=List[ResolveResponseRow])
+def resolve_batch(queries: List[ResolveQuery]) -> List[ResolveResponseRow]:
+    """Resolve multiple queries in a single request."""
+
+    if not queries:
+        return []
+
+    try:
+        countries, shocks = load_registries()
+    except SystemExit as exc:  # pragma: no cover - registries missing is an operator error
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    responses: List[ResolveResponseRow] = []
+
+    for query in queries:
+        try:
+            country_name, iso3_code = resolve_country(countries, query.country, query.iso3)
+            hazard_label, hz_code, hz_class = resolve_hazard(
+                shocks, query.hazard, query.hazard_code
+            )
+        except SystemExit:
+            continue
+
+        backend_choice = query.backend or DEFAULT_BACKEND
+
+        result = resolve_point(
+            iso3=iso3_code,
+            hazard_code=hz_code,
+            cutoff=query.cutoff,
+            series=query.series,
+            metric="in_need",
+            backend=backend_choice,
+        )
+
+        if not result:
+            continue
+
+        result.setdefault("country_name", country_name)
+        result.setdefault("hazard_label", hazard_label)
+        result.setdefault("hazard_class", hz_class)
+        result.setdefault("cutoff", query.cutoff)
+        result.setdefault("series_requested", query.series)
+
+        responses.append(ResolveResponseRow.parse_obj(result))
+
+    return responses

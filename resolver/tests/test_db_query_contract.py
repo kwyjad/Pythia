@@ -192,3 +192,104 @@ def test_api_matches_between_backends(resolver_fixture):
     assert db_resp.status_code == 200
     assert files_resp.json()["value"] == db_resp.json()["value"]
     assert db_resp.json()["source"] == "db"
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def test_api_batch_matches_cli(resolver_fixture, tmp_path):
+    cli = resolver_fixture["cli"]
+    api_module = resolver_fixture["api"]
+    client = TestClient(api_module.app)
+
+    queries = [
+        {
+            "iso3": "PHL",
+            "hazard_code": "TC",
+            "cutoff": "2024-01-31",
+            "series": "new",
+            "backend": "db",
+        }
+    ]
+
+    resp = client.post("/resolve_batch", json=queries)
+    assert resp.status_code == 200
+    api_rows = resp.json()
+    assert len(api_rows) == 1
+
+    input_path = tmp_path / "queries.json"
+    output_path = tmp_path / "results.jsonl"
+    with input_path.open("w", encoding="utf-8") as handle:
+        json.dump([{k: v for k, v in queries[0].items() if k != "backend"}], handle)
+
+    cli.run_batch_resolve(
+        input_path,
+        output_path,
+        backend="db",
+        series=None,
+        max_workers=1,
+    )
+
+    cli_rows = _read_jsonl(output_path)
+    assert len(cli_rows) == 1
+    assert cli_rows[0]["value"] == api_rows[0]["value"]
+    assert cli_rows[0]["source"] == api_rows[0]["source"]
+    assert cli_rows[0]["series_returned"] == api_rows[0]["series_returned"]
+
+
+def test_batch_backend_parity(resolver_fixture, tmp_path):
+    cli = resolver_fixture["cli"]
+    api_module = resolver_fixture["api"]
+    client = TestClient(api_module.app)
+
+    base_query = {
+        "iso3": "PHL",
+        "hazard_code": "TC",
+        "cutoff": "2024-01-31",
+        "series": "new",
+    }
+
+    input_path = tmp_path / "batch.json"
+    with input_path.open("w", encoding="utf-8") as handle:
+        json.dump([base_query], handle)
+
+    db_output = tmp_path / "db.jsonl"
+    csv_output = tmp_path / "csv.jsonl"
+
+    cli.run_batch_resolve(
+        input_path,
+        db_output,
+        backend="db",
+        series=None,
+        max_workers=1,
+    )
+    cli.run_batch_resolve(
+        input_path,
+        csv_output,
+        backend="csv",
+        series=None,
+        max_workers=1,
+    )
+
+    rows_db = _read_jsonl(db_output)
+    rows_csv = _read_jsonl(csv_output)
+
+    assert len(rows_db) == len(rows_csv) == 1
+    assert rows_db[0]["value"] == rows_csv[0]["value"]
+    assert rows_db[0]["series_returned"] == rows_csv[0]["series_returned"]
+    assert rows_db[0]["source"] == "db"
+
+    resp_db = client.post("/resolve_batch", json=[{**base_query, "backend": "db"}])
+    resp_files = client.post("/resolve_batch", json=[{**base_query, "backend": "files"}])
+
+    assert resp_db.status_code == 200
+    assert resp_files.status_code == 200
+    api_db = resp_db.json()
+    api_files = resp_files.json()
+
+    assert len(api_db) == len(api_files) == 1
+    assert api_db[0]["value"] == api_files[0]["value"]
+    assert api_db[0]["series_returned"] == api_files[0]["series_returned"]
+    assert api_db[0]["source"] == "db"

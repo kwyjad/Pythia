@@ -444,8 +444,13 @@ def _resolve_from_db(
             return None
         row = dict(row)
         value = row.get("value_new")
-        if value is not None:
-            row["value"] = value
+        if value is None:
+            return None
+        row["value"] = value
+        row.setdefault("series_semantics", row.get("series_semantics_out", "new"))
+        row["series_semantics"] = (
+            str(row.get("series_semantics", "")).strip().lower() or "new"
+        )
         row.setdefault("as_of_date", row.get("as_of", ""))
         row.setdefault("publication_date", row.get("as_of_date", ""))
         row.setdefault("metric", row.get("metric", preferred_metric))
@@ -464,6 +469,10 @@ def _resolve_from_db(
     if not row:
         return None
     row = dict(row)
+    row.setdefault("series_semantics", "stock")
+    row["series_semantics"] = (
+        str(row.get("series_semantics", "")).strip().lower() or "stock"
+    )
     payload = _standardise_payload(
         row,
         series="stock",
