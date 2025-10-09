@@ -267,6 +267,19 @@ def _run_single(args: List[str]) -> None:
     series_requested = args.series
     backend_choice = args.backend
 
+    print(
+        f"DBG resolver_cli backend={backend_choice} series={series_requested} cutoff={args.cutoff}",
+        file=sys.stderr,
+        flush=True,
+    )  # DEBUG
+
+    if series_requested == "new" and backend_choice in {"db", "auto"}:
+        print(
+            "DBG resolver_cli path: load_series_from_db(new, db)",
+            file=sys.stderr,
+            flush=True,
+        )  # DEBUG
+
     def emit_no_data(message: str) -> None:
         payload = {
             "ok": False,

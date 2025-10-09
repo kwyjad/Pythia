@@ -107,6 +107,15 @@ jobs:
           import duckdb
           print("✅ DuckDB installed:", duckdb.__version__)
           PY
+      - name: Show resolver import location & DuckDB version
+        if: steps.dbfiles.outputs.present == 'true'
+        run: |
+          python - <<'PY'
+          import sys, pathlib, resolver, duckdb
+          print("Python executable:", sys.executable)
+          print("resolver module path:", pathlib.Path(resolver.__file__).resolve())
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
+          PY
       - name: Run ${{ matrix.connector }} (full)
         if: steps.dbfiles.outputs.present == 'true'
         env:

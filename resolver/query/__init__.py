@@ -1,3 +1,5 @@
+import pathlib, sys  # DEBUG
+print("DBG resolver.query package path:", pathlib.Path(__file__).resolve(), file=sys.stderr, flush=True)  # DEBUG
 """Query helpers shared between the Resolver CLI and API."""
 
 from .selectors import (  # noqa: F401
