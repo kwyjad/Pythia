@@ -13,10 +13,7 @@ which-python:
 	@$(PY) -c "import sys; print('sys.executable', sys.executable)"
 
 dev-setup:
-	@echo ">> Installing DB test deps (offline-first) with $(PY)"
-	@$(MAKE) which-python
-	@$(MAKE) dev-setup-offline || $(MAKE) dev-setup-online
-	@$(PY) -c "import duckdb, sys; print('duckdb installed:', duckdb.__version__, 'via', sys.executable)"
+        @./scripts/codex_bootstrap_db.sh
 
 dev-setup-offline:
 	@echo ">> Attempting offline wheel install from tools/offline_wheels"

@@ -51,6 +51,20 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
    tables and constraints defined in [`resolver/db/schema.sql`](db/schema.sql),
    so reruns always observe the same structure.
 
+## Codex / CI setup
+
+When running resolver tests in the Codex environment (or any fresh CI runner),
+install the optional DuckDB dependencies before invoking `pytest`:
+
+```bash
+make dev-setup
+pytest -q resolver/tests
+```
+
+The `dev-setup` target executes `scripts/codex_bootstrap_db.sh`, which installs
+the project with the `db` extra and verifies that `duckdb` can be imported so
+database-backed tests are executed instead of being skipped.
+
 Refer to the [operations run book](docs/operations.md) for detailed command variants (including deltas and review tooling).
 
 ## Working with ReliefWeb PDFs
