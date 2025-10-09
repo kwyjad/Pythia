@@ -17,6 +17,7 @@ def _metric_case_sql() -> str:
 
 
 def fetch_deltas_point(
+    print(f"DBG fetch_deltas_point CALLED ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff} pref={preferred_metric}", flush=True)
     conn,
     *,
     ym: str,
