@@ -38,12 +38,10 @@ def fetch_deltas_point(
     """Return the latest delta row at or before ``cutoff`` for the request."""
 
     resolved_path: str | None = None
-    reused_label: str | bool | None = None
+    reused_label: str | None = None
     if conn is None:
-        conn, resolved_path, reused = get_shared_duckdb_conn(
-            os.environ.get("RESOLVER_DB_URL")
-        )
-        reused_label = reused
+        conn, resolved_path = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+        reused_label = "shared"
     else:
         resolved_path = getattr(conn, "database", None) or normalize_duckdb_url(
             os.environ.get("RESOLVER_DB_URL", "")
@@ -149,12 +147,10 @@ def fetch_resolved_point(
     """Return the latest resolved row at or before ``cutoff`` for the request."""
 
     resolved_path: str | None = None
-    reused_label: str | bool | None = None
+    reused_label: str | None = None
     if conn is None:
-        conn, resolved_path, reused = get_shared_duckdb_conn(
-            os.environ.get("RESOLVER_DB_URL")
-        )
-        reused_label = reused
+        conn, resolved_path = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+        reused_label = "shared"
     else:
         resolved_path = getattr(conn, "database", None) or normalize_duckdb_url(
             os.environ.get("RESOLVER_DB_URL", "")

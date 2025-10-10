@@ -310,32 +310,28 @@ def _run_single(args: List[str]) -> None:
     if not result:
         if backend_choice in {"db", "auto"}:
             db_url = os.environ.get("RESOLVER_DB_URL")
-            conn, resolved_path, reused = get_shared_duckdb_conn(db_url)
+            conn, resolved_path = get_shared_duckdb_conn(db_url)
             if conn is not None:
                 LOGGER.debug(
                     "duckdb shared conn id=%s db=%s",
                     id(conn),
                     getattr(conn, "database", "n/a"),
                 )
-                LOGGER.debug(
-                    "duckdb shared conn path=%s reused=%s", resolved_path, reused
-                )
+                LOGGER.debug("duckdb shared conn path=%s", resolved_path)
             ym = ym_from_cutoff(args.cutoff)
 
             # --- DEBUG: no-data diagnostics (DuckDB visibility check) ---
             try:
                 import duckdb  # ensure we have the real module, not a shadowed symbol
                 if conn is None:
-                    conn, resolved_path, reused = get_shared_duckdb_conn(db_url)
+                    conn, resolved_path = get_shared_duckdb_conn(db_url)
                     if conn is not None:
                         LOGGER.debug(
                             "duckdb shared conn id=%s db=%s",
                             id(conn),
                             getattr(conn, "database", "n/a"),
                         )
-                        LOGGER.debug(
-                            "duckdb shared conn path=%s reused=%s", resolved_path, reused
-                        )
+                        LOGGER.debug("duckdb shared conn path=%s", resolved_path)
 
                 if conn is not None:
                     c_all = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]

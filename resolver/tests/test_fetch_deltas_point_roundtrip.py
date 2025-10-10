@@ -19,7 +19,9 @@ def test_fetch_deltas_point_finds_row(tmp_path, monkeypatch):
     url = f"duckdb:///{db_path}"
     monkeypatch.setenv("RESOLVER_DB_URL", url)
 
-    conn, _, _ = get_shared_duckdb_conn(url)
+    conn, _ = get_shared_duckdb_conn(url)
+    # quick liveness check — ensures we didn't get a closed/stale handle
+    conn.execute("SELECT 1").fetchone()
     conn.execute("DROP TABLE IF EXISTS facts_deltas")
     conn.execute(
         """
