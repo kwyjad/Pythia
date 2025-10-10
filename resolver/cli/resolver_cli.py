@@ -23,6 +23,7 @@ Behavior:
 
 import argparse
 import json
+import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +47,9 @@ from resolver.query.selectors import (
     resolve_point,
     ym_from_cutoff,
 )
+from resolver.db.conn_shared import get_shared_duckdb_conn
+
+LOGGER = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -267,18 +271,15 @@ def _run_single(args: List[str]) -> None:
     series_requested = args.series
     backend_choice = args.backend
 
-    print(
-        f"DBG resolver_cli backend={backend_choice} series={series_requested} cutoff={args.cutoff}",
-        file=sys.stderr,
-        flush=True,
-    )  # DEBUG
+    LOGGER.debug(
+        "resolver_cli backend=%s series=%s cutoff=%s",
+        backend_choice,
+        series_requested,
+        args.cutoff,
+    )
 
     if series_requested == "new" and backend_choice in {"db", "auto"}:
-        print(
-            "DBG resolver_cli path: load_series_from_db(new, db)",
-            file=sys.stderr,
-            flush=True,
-        )  # DEBUG
+        LOGGER.debug("resolver_cli path: load_series_from_db(new, db)")
 
     def emit_no_data(message: str) -> None:
         payload = {
@@ -307,6 +308,56 @@ def _run_single(args: List[str]) -> None:
     )
 
     if not result:
+        if backend_choice in {"db", "auto"}:
+            db_url = os.environ.get("RESOLVER_DB_URL")
+            conn, resolved_path = get_shared_duckdb_conn(db_url)
+            if conn is not None:
+                LOGGER.debug(
+                    "duckdb shared conn id=%s db=%s",
+                    id(conn),
+                    getattr(conn, "database", "n/a"),
+                )
+                LOGGER.debug("duckdb shared conn path=%s", resolved_path)
+            ym = ym_from_cutoff(args.cutoff)
+
+            # --- DEBUG: no-data diagnostics (DuckDB visibility check) ---
+            try:
+                import duckdb  # ensure we have the real module, not a shadowed symbol
+                if conn is None:
+                    conn, resolved_path = get_shared_duckdb_conn(db_url)
+                    if conn is not None:
+                        LOGGER.debug(
+                            "duckdb shared conn id=%s db=%s",
+                            id(conn),
+                            getattr(conn, "database", "n/a"),
+                        )
+                        LOGGER.debug("duckdb shared conn path=%s", resolved_path)
+
+                if conn is not None:
+                    c_all = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+                    c_ym = conn.execute("SELECT COUNT(*) FROM facts_deltas WHERE ym = ?", [ym]).fetchone()[0]
+                    c_key = conn.execute(
+                        "SELECT COUNT(*) FROM facts_deltas WHERE ym = ? AND iso3 = ? AND hazard_code = ?",
+                        [ym, iso3, hazard_code],
+                    ).fetchone()[0]
+                    LOGGER.debug(
+                        "resolver_cli no-data diag OK: ym=%s iso3=%s hazard=%s counts total=%s ym=%s ym+keys=%s",
+                        ym,
+                        iso3,
+                        hazard_code,
+                        c_all,
+                        c_ym,
+                        c_key,
+                    )
+                else:
+                    LOGGER.debug("resolver_cli no-data diag: conn unavailable")
+            except Exception as e:
+                LOGGER.debug(
+                    "resolver_cli no-data diag ERROR (catch): %s: %s",
+                    type(e).__name__,
+                    e,
+                )
+            # --- END DEBUG ---
         dataset_hint = (
             "DuckDB table facts_deltas (value_new)"
             if series_requested == "new"

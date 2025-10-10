@@ -13,6 +13,8 @@
 - [staging.unhcr_odp](#stagingunhcrodp)
 - [staging.worldpop](#stagingworldpop)
 
+> **DuckDB URL note:** All resolver components open DuckDB databases through a shared connection cache. URLs such as `duckdb:///tmp/db.duckdb`, `duckdb:////abs/db.duckdb`, relative file paths, and `:memory:` are canonicalised to a single filesystem target so writers and readers share the same database session. Enable `RESOLVER_DEBUG=1` to log the resolved path during tests.
+
 ## db.facts_deltas
 
 Monthly "new" deltas derived from resolved totals.

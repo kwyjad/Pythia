@@ -20,6 +20,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from resolver.db import duckdb_io
+from resolver.query import db_reader
 
 
 @pytest.fixture()
@@ -293,3 +294,139 @@ def test_batch_backend_parity(resolver_fixture, tmp_path):
     assert api_db[0]["value"] == api_files[0]["value"]
     assert api_db[0]["series_returned"] == api_files[0]["series_returned"]
     assert api_db[0]["source"] == "db"
+
+
+def test_fetch_resolved_point_basic(tmp_path, monkeypatch):
+    db_path = tmp_path / "resolved_basic.duckdb"
+    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
+    conn = duckdb_io.get_db(f"duckdb:///{db_path}")
+    duckdb_io.init_schema(conn)
+
+    resolved_df = pd.DataFrame(
+        [
+            {
+                "ym": "2024-02",
+                "iso3": "PHL",
+                "hazard_code": "TC",
+                "hazard_label": "Tropical Cyclone",
+                "hazard_class": "Cyclone",
+                "metric": "in_need",
+                "value": 1500,
+                "unit": "persons",
+                "as_of_date": "2024-02-28",
+                "publication_date": "2024-03-01",
+                "publisher": "OCHA",
+                "source_id": "SR-001",
+                "source_type": "situation_report",
+                "source_url": "https://example.org/resolved",
+                "doc_title": "SitRep",
+                "definition_text": "People in need",
+                "precedence_tier": "tier1",
+                "event_id": "EVT-1",
+                "proxy_for": "",
+                "confidence": "medium",
+                "series_semantics": "stock",
+            }
+        ]
+    )
+
+    duckdb_io.write_snapshot(
+        conn,
+        ym="2024-02",
+        facts_resolved=resolved_df,
+        facts_deltas=None,
+        manifests=[{"name": "2024-02", "rows": 1}],
+        meta={"created_at_utc": "2024-03-01T00:00:00Z"},
+    )
+
+    row = db_reader.fetch_resolved_point(
+        conn,
+        ym="2024-02",
+        iso3="PHL",
+        hazard_code="TC",
+        cutoff="2024-02-28",
+        preferred_metric="in_need",
+    )
+
+    assert row is not None
+    assert row["metric"] == "in_need"
+    assert pytest.approx(float(row["value"])) == 1500.0
+    assert (row.get("series_semantics") or "stock").strip().lower() == "stock"
+
+
+def test_fetch_resolved_point_respects_cutoff_and_metric_preference(tmp_path, monkeypatch):
+    db_path = tmp_path / "resolved_preference.duckdb"
+    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
+    conn = duckdb_io.get_db(f"duckdb:///{db_path}")
+    duckdb_io.init_schema(conn)
+
+    resolved_df = pd.DataFrame(
+        [
+            {
+                "ym": "2024-02",
+                "iso3": "PHL",
+                "hazard_code": "TC",
+                "metric": "in_need",
+                "value": 2000,
+                "as_of_date": "2024-02-26",
+                "publication_date": "2024-02-27",
+                "series_semantics": "stock",
+            },
+            {
+                "ym": "2024-02",
+                "iso3": "PHL",
+                "hazard_code": "TC",
+                "metric": "affected",
+                "value": 1200,
+                "as_of_date": "2024-02-20",
+                "publication_date": "2024-02-21",
+                "series_semantics": "stock",
+            },
+        ]
+    )
+
+    duckdb_io.write_snapshot(
+        conn,
+        ym="2024-02",
+        facts_resolved=resolved_df,
+        facts_deltas=None,
+        manifests=[{"name": "2024-02", "rows": len(resolved_df)}],
+        meta={"created_at_utc": "2024-03-06T00:00:00Z"},
+    )
+
+    # Preferred metric defaults to the requested metric when available before cutoff
+    row_in_need = db_reader.fetch_resolved_point(
+        conn,
+        ym="2024-02",
+        iso3="PHL",
+        hazard_code="TC",
+        cutoff="2024-02-28",
+        preferred_metric="in_need",
+    )
+    assert row_in_need is not None
+    assert row_in_need["metric"].lower() == "in_need"
+    assert pytest.approx(float(row_in_need["value"])) == 2000.0
+
+    # When preferred metric is "affected", that row should win if inside cutoff
+    row_affected = db_reader.fetch_resolved_point(
+        conn,
+        ym="2024-02",
+        iso3="PHL",
+        hazard_code="TC",
+        cutoff="2024-02-28",
+        preferred_metric="affected",
+    )
+    assert row_affected is not None
+    assert row_affected["metric"].lower() == "affected"
+
+    # Tighten the cutoff so the later row is excluded
+    row_cutoff = db_reader.fetch_resolved_point(
+        conn,
+        ym="2024-02",
+        iso3="PHL",
+        hazard_code="TC",
+        cutoff="2024-02-21",
+        preferred_metric="in_need",
+    )
+    assert row_cutoff is not None
+    assert row_cutoff["metric"].lower() == "affected"

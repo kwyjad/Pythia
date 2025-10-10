@@ -77,7 +77,7 @@ def test_db_series_new_select_aliases_provenance(tmp_path, monkeypatch):
     assert df is not None and not df.empty
 
     row = df[(df["iso3"] == "PHL") & (df["hazard_code"] == "TC")].iloc[0]
-    assert int(row["value"]) == 500
+    assert float(row["value"]) == 500.0
     assert row["series_semantics"] == "new"
     for field in ["source_url", "source_type", "doc_title", "definition_text"]:
         assert field in row
@@ -99,5 +99,20 @@ def test_db_series_new_missing_month_returns_none(tmp_path, monkeypatch):
     df, dataset_label, series_used = selectors.load_series_from_db("2024-03", "new")
 
     assert df is None or df.empty
-    assert dataset_label == "facts_deltas"
+    assert dataset_label == "db_facts_deltas"
     assert series_used == "new"
+
+
+def test_db_series_new_returns_numeric_value(tmp_path, monkeypatch):
+    _, db_path = _seed_duckdb(tmp_path)
+    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
+
+    df, dataset_label, series_used = selectors.load_series_from_db("2024-02", "new")
+
+    assert series_used == "new"
+    assert dataset_label == "db_facts_deltas"
+    assert df is not None and not df.empty
+
+    row = df[(df["iso3"] == "PHL") & (df["hazard_code"] == "TC")].iloc[0]
+    assert pytest.approx(float(row["value"])) == 500.0
+    assert pytest.approx(float(row["value_new"])) == 500.0

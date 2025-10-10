@@ -25,6 +25,7 @@ from resolver.common import (
     dict_counts,
     df_schema,
 )
+from resolver.db.conn_shared import get_shared_duckdb_conn
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
@@ -224,16 +225,26 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     """Return a DuckDB connection for the given path or URL."""
 
     url = _normalise_db_url(path_or_url or os.environ.get("RESOLVER_DB_URL"))
-    if url.startswith("duckdb:///"):
-        db_path = Path(url.replace("duckdb:///", "", 1))
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = duckdb.connect(database=str(db_path), read_only=False)
-    elif url.startswith("duckdb://"):
-        conn = duckdb.connect(url.replace("duckdb://", "", 1))
-    else:
-        conn = duckdb.connect(url or None)
-    conn.execute("PRAGMA enable_progress_bar=false")
-    return conn
+    conn, resolved_path = get_shared_duckdb_conn(url)
+    if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",
+            resolved_path,
+            url,
+            os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+        )
+    try:
+        conn.execute("PRAGMA threads=4")
+        conn.execute("PRAGMA enable_progress_bar=false")
+        return conn
+    except duckdb.ConnectionException as exc:
+        LOGGER.debug(
+            "DuckDB connection unhealthy for %s (%s); forcing reopen", resolved_path, exc
+        )
+        conn, resolved_path = get_shared_duckdb_conn(url, force_reopen=True)
+        conn.execute("PRAGMA threads=4")
+        conn.execute("PRAGMA enable_progress_bar=false")
+        return conn
 
 
 def init_schema(
