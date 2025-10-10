@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
@@ -24,6 +25,12 @@ except Exception:
 # --- end duckdb import guard ---
 
 LOGGER = logging.getLogger(__name__)
+if os.getenv("RESOLVER_DEBUG") == "1":
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
 try:  # pragma: no cover - zoneinfo available on 3.9+
     from zoneinfo import ZoneInfo
@@ -220,6 +227,7 @@ def load_series_from_db(
             "FROM facts_deltas WHERE ym = ?"
         )
         df = conn.execute(query, [ym]).df()
+        LOGGER.debug("facts_deltas rows for ym=%s: %s", ym, len(df.index))
         for col in ("value", "value_new", "value_stock"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -289,6 +297,12 @@ def load_series_from_db(
                         df[col] = pd.to_numeric(df[col], errors="coerce")
 
         dataset_label = "db_facts_deltas"
+        LOGGER.debug(
+            "load_series_from_db result ym=%s series=%s rows=%s",
+            ym,
+            normalized_series,
+            len(df.index) if df is not None else 0,
+        )
         return df, dataset_label, "new"
 
     query = (
@@ -303,6 +317,7 @@ def load_series_from_db(
         LOGGER.exception("DuckDB query failed for facts_resolved at ym=%s", ym)
         raise
     if df.empty:
+        LOGGER.debug("facts_resolved query returned 0 rows for ym=%s", ym)
         return None, "facts_resolved", "stock"
     df = df.copy()
     if "ym" not in df.columns:
@@ -335,6 +350,12 @@ def load_series_from_db(
             df[column] = default
         else:
             df[column] = df[column].fillna(default)
+    LOGGER.debug(
+        "load_series_from_db result ym=%s series=%s rows=%s",
+        ym,
+        normalized_series,
+        len(df.index),
+    )
     return df.fillna(""), "db_facts_resolved", "stock"
 
 
@@ -517,6 +538,15 @@ def _resolve_from_db(
     if not db_url:
         return None
 
+    LOGGER.debug(
+        "DB resolve request series=%s ym=%s iso3=%s hazard=%s cutoff=%s metric_pref=%s",
+        series,
+        ym,
+        iso3,
+        hazard_code,
+        cutoff,
+        preferred_metric,
+    )
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
@@ -555,12 +585,17 @@ def _resolve_from_db(
             dataset_label="db_facts_deltas",
             source_bucket="db",
         )
+        LOGGER.debug(
+            "DB resolve result series=new found=True keys=%s",
+            sorted(payload.keys()),
+        )
         return ResolveAttempt("new", "db_facts_deltas", "db", payload)
 
     row = db_reader.fetch_resolved_point(
         conn, ym=ym, iso3=iso3, hazard_code=hazard_code, cutoff=cutoff, preferred_metric=preferred_metric
     )
     if not row:
+        LOGGER.debug("DB resolve result series=stock found=False")
         return None
     row = dict(row)
     row.setdefault("series_semantics", "stock")
@@ -573,6 +608,10 @@ def _resolve_from_db(
         ym=ym,
         dataset_label="db_facts_resolved",
         source_bucket="db",
+    )
+    LOGGER.debug(
+        "DB resolve result series=stock found=True keys=%s",
+        sorted(payload.keys()),
     )
     return ResolveAttempt("stock", "db_facts_resolved", "db", payload)
 
@@ -628,8 +667,24 @@ def resolve_point(
     backend_choice = normalize_backend(backend, default="db")
     ym = ym_from_cutoff(cutoff)
 
+    LOGGER.debug(
+        "resolve_point entry series=%s backend=%s ym=%s cutoff=%s iso3=%s hazard=%s metric_pref=%s",
+        normalized_series,
+        backend_choice,
+        ym,
+        cutoff,
+        iso3,
+        hazard_code,
+        preferred_metric,
+    )
+
     def attempt(series_choice: str) -> Optional[dict]:
         for backend_option in _backend_order(backend_choice):
+            LOGGER.debug(
+                "resolve_point attempting series=%s backend=%s",
+                series_choice,
+                backend_option,
+            )
             if backend_option == "db":
                 resolved = _resolve_from_db(
                     series=series_choice,
@@ -653,6 +708,11 @@ def resolve_point(
                 payload["series_requested"] = normalized_series
                 payload["series_returned"] = payload.get("series_returned", resolved.series)
                 payload["ok"] = True
+                LOGGER.debug(
+                    "resolve_point success series_requested=%s backend=%s",
+                    normalized_series,
+                    backend_option,
+                )
                 return payload
         return None
 

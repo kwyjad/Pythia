@@ -12,6 +12,8 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Each job prints a **Debug repo context** block so you can see the repository slug, branch, commit SHA, and working directory tree size directly in the logs.
 - An **anti-drift** script in `scripts/ci/` fails fast if any legacy references to the old repository slug sneak back into the tree.
 - Database test jobs are protected with repo guards and file-existence checks so they only execute inside `oughtinc/Pythia` when the relevant tests are present.
+- When you need to guard a step on the presence of a secret, assign it to an environment variable first (for example, `env.MY_TOKEN: ${{ secrets.MY_TOKEN }}`) and reference `env.MY_TOKEN` inside the `if:` expression. GitHub blocks direct `secrets.*` lookups in `if:` conditions at workflow-parse time.
+- Resolver-specific diagnostics can be enabled in CI by exporting `RESOLVER_DEBUG=1`. When set, the resolver’s DuckDB selectors emit concise debug lines that show the backend, cutoff, `ym`, `iso3`, `hazard_code`, and row-count summaries during DB reads.
 
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
