@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 try:  # pragma: no cover - import guard for optional dependency
@@ -159,20 +160,34 @@ def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
         )
 
 
-def _to_float_or_none(value: object) -> float | None:
-    """Return ``value`` coerced to ``float`` or ``None`` when not numeric."""
+def _coerce_numeric_cols(
+    frame: pd.DataFrame | None, cols: Sequence[str], table_name: str
+) -> pd.DataFrame | None:
+    """Coerce known numeric columns to floats, mapping placeholder strings to NULL."""
 
-    if value is None:
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        value = stripped
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    if frame is None or frame.empty:
+        return frame
+
+    coerced = frame.copy()
+    for col in cols:
+        if col not in coerced.columns:
+            continue
+        series = coerced[col]
+        if pd.api.types.is_numeric_dtype(series):
+            coerced[col] = pd.to_numeric(series, errors="coerce")
+            continue
+        stringified = series.astype(str).str.strip()
+        lowered = stringified.str.lower()
+        stringified = stringified.mask(
+            lowered.isin({"", "none", "null", "nan"}), np.nan
+        )
+        coerced[col] = pd.to_numeric(stringified, errors="coerce")
+    if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
+        present = [col for col in cols if col in coerced.columns]
+        LOGGER.debug(
+            "duckdb.numeric_coercion | table=%s columns=%s", table_name, present
+        )
+    return coerced
 
 
 def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
@@ -449,6 +464,14 @@ def upsert_dataframe(
     import duckdb  # keep inside function to avoid module-top import churn
 
     frame = df.copy()
+    if table == "facts_resolved":
+        coerced = _coerce_numeric_cols(frame, ["value"], table)
+        if coerced is not None:
+            frame = coerced
+    elif table == "facts_deltas":
+        coerced = _coerce_numeric_cols(frame, ["value_new", "value_stock"], table)
+        if coerced is not None:
+            frame = coerced
     LOGGER.info("Upserting %s rows into %s", len(frame), table)
     LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
 
@@ -781,10 +804,6 @@ def write_snapshot(
                 if key == "ym":
                     series = series.replace("", ym)
                 facts_resolved[key] = series
-            if "value" in facts_resolved.columns:
-                facts_resolved["value"] = facts_resolved["value"].apply(
-                    _to_float_or_none
-                )
             computed_semantics = facts_resolved.apply(
                 lambda row: compute_series_semantics(
                     metric=row.get("metric"), existing=row.get("series_semantics")
@@ -798,6 +817,9 @@ def write_snapshot(
                 default_target="stock",
             )
             _assert_semantics_required(facts_resolved, "facts_resolved")
+            facts_resolved = _coerce_numeric_cols(
+                facts_resolved, ["value"], "facts_resolved"
+            )
             facts_resolved = facts_resolved.drop_duplicates(
                 subset=FACTS_RESOLVED_KEY_COLUMNS,
                 keep="last",
@@ -841,15 +863,9 @@ def write_snapshot(
                 default_target="new",
             )
             _assert_semantics_required(facts_deltas, "facts_deltas")
-            numeric_delta_columns = [
-                col
-                for col in ("value_new", "value_stock")
-                if col in facts_deltas.columns
-            ]
-            for column in numeric_delta_columns:
-                facts_deltas[column] = facts_deltas[column].apply(
-                    _to_float_or_none
-                )
+            facts_deltas = _coerce_numeric_cols(
+                facts_deltas, ["value_new", "value_stock"], "facts_deltas"
+            )
             facts_deltas = facts_deltas.drop_duplicates(
                 subset=FACTS_DELTAS_KEY_COLUMNS,
                 keep="last",
