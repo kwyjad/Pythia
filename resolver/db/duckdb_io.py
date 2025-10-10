@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 import uuid
 import datetime as dt
 import logging
@@ -54,6 +56,17 @@ DEFAULT_DB_URL = os.environ.get(
 )
 
 LOGGER = get_logger(__name__)
+DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
+if DEBUG_ENABLED:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    try:
+        LOGGER.setLevel(logging.DEBUG)
+    except Exception:  # pragma: no cover - defensive
+        pass
 
 # Ensure logs propagate so pytest's caplog handler can observe debug messages emitted
 # from this module, while still remaining quiet when logging is not configured.
@@ -81,6 +94,67 @@ def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+_YM_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+_SEM_MAP_STOCK = {"stock", "stock estimate", "snapshot", "inventory"}
+_SEM_MAP_NEW = {"new", "delta", "deltas", "increment", "change"}
+
+
+def _normalize_keys_df(frame: pd.DataFrame | None, table_name: str) -> pd.DataFrame | None:
+    """Normalize key columns prior to persistence."""
+
+    if frame is None or frame.empty:
+        return frame
+    normalised = frame.copy()
+    if "ym" in normalised.columns:
+        normalised["ym"] = normalised["ym"].astype(str).str.strip()
+        bad = ~normalised["ym"].fillna("").str.match(_YM_RE)
+        if bad.any():
+            raise ValueError(
+                f"{table_name}: invalid ym format; expected YYYY-MM, got {sorted(normalised.loc[bad, 'ym'].unique())[:3]}"
+            )
+    if "iso3" in normalised.columns:
+        normalised["iso3"] = normalised["iso3"].astype(str).str.strip().str.upper()
+    if "hazard_code" in normalised.columns:
+        normalised["hazard_code"] = (
+            normalised["hazard_code"].astype(str).str.strip().str.upper()
+        )
+    return normalised
+
+
+def _canonicalize_semantics(
+    frame: pd.DataFrame | None, table_name: str, default_target: str
+) -> tuple[pd.DataFrame | None, dict[str, dict[str, int]]]:
+    """Canonicalize ``series_semantics`` values to ``{'new', 'stock'}``."""
+
+    if frame is None or frame.empty or "series_semantics" not in frame.columns:
+        return frame, {}
+    canonical = frame.copy()
+    raw = canonical["series_semantics"].astype(str).fillna("").str.strip()
+    lowered = raw.str.lower()
+    out: list[str] = []
+    before_counts = raw.value_counts(dropna=False).to_dict()
+    for value in lowered:
+        if value in _SEM_MAP_STOCK:
+            out.append("stock")
+        elif value in _SEM_MAP_NEW:
+            out.append("new")
+        elif value in {"", "none", "null", "nan"}:
+            out.append(default_target)
+        else:
+            out.append(default_target)
+    canonical["series_semantics"] = out
+    after_counts = canonical["series_semantics"].value_counts(dropna=False).to_dict()
+    if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "canonicalized semantics (%s): %s -> %s",
+            table_name,
+            before_counts,
+            after_counts,
+        )
+    return canonical, {"before": before_counts, "after": after_counts}
+
+
 def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
     """Return ``series`` mapped into the canonical {"", "new", "stock"}."""
 
@@ -88,11 +162,23 @@ def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
     semantics = semantics.astype(str).str.strip()
     lowered = semantics.str.lower()
     semantics = semantics.mask(lowered.isin({"none", "nan"}), "")
-    semantics = semantics.mask(lowered.str.startswith("new"), "new")
-    semantics = semantics.mask(lowered.str.startswith("stock"), "stock")
+    semantics = semantics.mask(lowered.isin(_SEM_MAP_NEW), "new")
+    semantics = semantics.mask(lowered.isin(_SEM_MAP_STOCK), "stock")
     lowered = semantics.astype(str).str.lower()
     semantics = semantics.mask(~lowered.isin({"", "new", "stock"}), "")
     return semantics.astype(str)
+
+
+def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
+    if frame is None or frame.empty or "series_semantics" not in frame.columns:
+        return
+    values = (
+        frame["series_semantics"].astype(str).str.strip().str.lower().unique().tolist()
+    )
+    if not set(values).issubset({"new", "stock"}):
+        raise ValueError(
+            f"{table}: series_semantics must be 'new' or 'stock', got {sorted(set(values))}"
+        )
 
 
 def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
@@ -675,6 +761,9 @@ def write_snapshot(
     facts_resolved = facts_resolved.copy() if facts_resolved is not None else None
     facts_deltas = facts_deltas.copy() if facts_deltas is not None else None
 
+    facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
+    facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
+
     conn.execute("BEGIN")
     try:
         facts_rows = 0
@@ -708,9 +797,13 @@ def write_snapshot(
                 ),
                 axis=1,
             )
-            facts_resolved["series_semantics"] = _canonicalise_series_semantics(
-                computed_semantics
+            facts_resolved["series_semantics"] = computed_semantics
+            facts_resolved, _ = _canonicalize_semantics(
+                facts_resolved,
+                "facts_resolved",
+                default_target="stock",
             )
+            _assert_semantics_required(facts_resolved, "facts_resolved")
             facts_resolved = facts_resolved.drop_duplicates(
                 subset=FACTS_RESOLVED_KEY_COLUMNS,
                 keep="last",
@@ -746,15 +839,14 @@ def write_snapshot(
                 if key == "ym":
                     series = series.replace("", ym)
                 facts_deltas[key] = series
-            if "series_semantics" in facts_deltas.columns:
-                semantics = _canonicalise_series_semantics(
-                    facts_deltas["series_semantics"]
-                )
-                facts_deltas["series_semantics"] = semantics.mask(
-                    semantics.eq(""), "new"
-                )
-            else:
+            if "series_semantics" not in facts_deltas.columns:
                 facts_deltas["series_semantics"] = "new"
+            facts_deltas, _ = _canonicalize_semantics(
+                facts_deltas,
+                "facts_deltas",
+                default_target="new",
+            )
+            _assert_semantics_required(facts_deltas, "facts_deltas")
             numeric_delta_columns = [
                 col
                 for col in ("value_new", "value_stock")

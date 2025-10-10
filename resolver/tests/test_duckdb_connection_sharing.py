@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from resolver.db import duckdb_io
+from concurrent.futures import ThreadPoolExecutor
+
+from resolver.db import conn_shared, duckdb_io
 
 pytest.importorskip(
     "duckdb",
@@ -17,6 +21,7 @@ def test_same_url_returns_same_connection(tmp_path, monkeypatch):
     db_path = tmp_path / "shared.duckdb"
     url = f"duckdb:///{db_path}"
     monkeypatch.setenv("RESOLVER_DB_URL", url)
+    monkeypatch.delenv("RESOLVER_DISABLE_CONN_CACHE", raising=False)
 
     conn_w = duckdb_io.get_db(url)
     conn_w.execute(
@@ -38,7 +43,11 @@ def test_same_url_returns_same_connection(tmp_path, monkeypatch):
 
     conn_r = duckdb_io.get_db(url)
 
-    assert conn_w is conn_r
+    cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
+    if cache_disabled:
+        assert conn_w is not conn_r
+    else:
+        assert conn_w is conn_r
     count = conn_r.execute(
         "SELECT COUNT(*) FROM facts_deltas WHERE ym = ? AND iso3 = ? AND hazard_code = ?",
         ["2024-02", "PHL", "TC"],
@@ -68,8 +77,7 @@ def test_healthcheck_reopen(tmp_path, monkeypatch):
 
     conn = duckdb_io.get_db(url)
     conn.execute("CREATE TABLE IF NOT EXISTS h (x INTEGER)")
-    from resolver.db import conn_shared
-    wrapper = conn_shared._CACHE[conn_shared.normalize_duckdb_url(url)]
+    wrapper, _ = conn_shared.get_shared_duckdb_conn(url)
     wrapper._raw.close()  # type: ignore[attr-defined]
     wrapper._closed = False  # ensure wrapper looks open for the cache
 
@@ -78,7 +86,7 @@ def test_healthcheck_reopen(tmp_path, monkeypatch):
     assert conn2.execute("SELECT COUNT(*) FROM h").fetchone()[0] == 1
 
 
-def test_disable_cache_optout(tmp_path, monkeypatch):
+def test_nocache_returns_fresh_handles(tmp_path, monkeypatch):
     db_path = tmp_path / "nocache.duckdb"
     url = f"duckdb:///{db_path}"
     monkeypatch.setenv("RESOLVER_DB_URL", url)
@@ -88,5 +96,28 @@ def test_disable_cache_optout(tmp_path, monkeypatch):
         c1 = duckdb_io.get_db(url)
         c2 = duckdb_io.get_db(url)
         assert c1 is not c2
+        c1.execute("SELECT 1").fetchone()
+        c2.execute("SELECT 1").fetchone()
     finally:
         monkeypatch.delenv("RESOLVER_DISABLE_CONN_CACHE", raising=False)
+
+
+def test_thread_local_mode_isolated_connections(tmp_path, monkeypatch):
+    db_path = tmp_path / "threadcache.duckdb"
+    url = f"duckdb:///{db_path}"
+    monkeypatch.setenv("RESOLVER_DB_URL", url)
+    monkeypatch.setenv("RESOLVER_CONN_CACHE_MODE", "thread")
+
+    def _connect_and_ident() -> int:
+        conn = duckdb_io.get_db(url)
+        conn.execute("SELECT 42")
+        return id(conn)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(_connect_and_ident) for _ in range(2)]
+            conn_ids = [future.result() for future in futures]
+    finally:
+        monkeypatch.delenv("RESOLVER_CONN_CACHE_MODE", raising=False)
+
+    assert len(set(conn_ids)) == 2

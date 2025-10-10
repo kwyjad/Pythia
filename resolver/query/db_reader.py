@@ -16,6 +16,34 @@ if DEBUG_ENABLED:
     LOGGER.setLevel(logging.DEBUG)
 
 
+def _series_kind_expr() -> str:
+    return (
+        "COALESCE("  # canonical semantics first, trimming blanks
+        "NULLIF(TRIM(series_semantics), ''), "
+        "NULLIF(TRIM(series), ''), "
+        "series_semantics, "
+        "series)"
+    )
+
+
+def _strip_timezone_expr(column: str) -> str:
+    pattern = r"([+-]\d\d:?\d\d)$"
+    return f"REGEXP_REPLACE(CAST({column} AS VARCHAR), '{pattern}', '')"
+
+
+def _as_of_parsed_expr(*columns: str) -> str:
+    if not columns:
+        columns = ("as_of_date", "publication_date", "as_of")
+    coalesce_columns = ", ".join(
+        f"NULLIF({_strip_timezone_expr(column)}, '')" for column in columns
+    )
+    return (
+        "TRY_CAST(\n"
+        "  COALESCE(" + coalesce_columns + ") AS DATE\n"
+        ")"
+    )
+
+
 def _metric_case_sql() -> str:
     return (
         "CASE "
@@ -51,6 +79,9 @@ def fetch_deltas_point(
     if conn is None:
         return None
 
+    semantics_expr = _series_kind_expr()
+    as_of_expr = _as_of_parsed_expr("as_of")
+
     if DEBUG_ENABLED:
         LOGGER.debug(
             "DuckDB fetch_deltas_point path=%s reused=%s ym=%s iso3=%s hazard=%s cutoff=%s preferred_metric=%s",
@@ -65,19 +96,20 @@ def fetch_deltas_point(
         try:
             total = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
             triple = conn.execute(
-                "SELECT COUNT(*) FROM facts_deltas WHERE ym = ? AND iso3 = ? AND hazard_code = ?",
-                [ym, iso3, hazard_code],
+                f"SELECT COUNT(*) FROM facts_deltas WHERE ym = ? AND iso3 = ? AND hazard_code = ? AND {semantics_expr} = ?",
+                [ym, iso3, hazard_code, "new"],
             ).fetchone()[0]
             cutoff_count = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*)
                 FROM facts_deltas
                 WHERE ym = ?
                   AND iso3 = ?
                   AND hazard_code = ?
-                  AND (TRY_CAST(as_of AS DATE) IS NULL OR TRY_CAST(as_of AS DATE) <= TRY_CAST(? AS DATE))
+                  AND {semantics_expr} = ?
+                  AND ({as_of_expr} IS NULL OR {as_of_expr} <= TRY_CAST(? AS DATE))
                 """,
-                [ym, iso3, hazard_code, cutoff],
+                [ym, iso3, hazard_code, "new", cutoff],
             ).fetchone()[0]
             LOGGER.debug(
                 "DuckDB fetch_deltas_point counts path=%s total=%s triple=%s cutoff=%s",
@@ -100,19 +132,21 @@ def fetch_deltas_point(
                 value_new,
                 value_stock,
                 series_semantics,
+                series,
+                {semantics_expr} AS series_kind,
                 as_of,
                 source_id,
-                series,
                 rebase_flag,
                 first_observation,
                 delta_negative_clamped,
                 created_at,
-                TRY_CAST(as_of AS DATE) AS as_of_parsed,
+                {as_of_expr} AS as_of_parsed,
                 {metric_case} AS metric_rank
             FROM facts_deltas
             WHERE ym = ?
               AND iso3 = ?
               AND hazard_code = ?
+              AND {semantics_expr} = ?
         )
         SELECT *
         FROM ranked
@@ -121,8 +155,7 @@ def fetch_deltas_point(
         LIMIT 1
     """
 
-
-    params = [preferred_metric, ym, iso3, hazard_code, cutoff]
+    params = [preferred_metric, ym, iso3, hazard_code, "new", cutoff]
     if DEBUG_ENABLED:
         LOGGER.debug(
             "DuckDB fetch_deltas_point executing with params=%s path=%s",
@@ -132,6 +165,14 @@ def fetch_deltas_point(
     df = conn.execute(query, params).fetch_df()
     if df.empty:
         return None
+    if "series_kind" in df.columns:
+        if "series_semantics" in df.columns:
+            series = df["series_semantics"].astype(str)
+            df.loc[series.str.strip() == "", "series_semantics"] = df.loc[
+                series.str.strip() == "", "series_kind"
+            ]
+        else:
+            df["series_semantics"] = df["series_kind"]
     return df.iloc[0].to_dict()
 
 
@@ -160,6 +201,9 @@ def fetch_resolved_point(
     if conn is None:
         return None
 
+    semantics_expr = _series_kind_expr()
+    as_of_expr = _as_of_parsed_expr()
+
     if DEBUG_ENABLED:
         LOGGER.debug(
             "DuckDB fetch_resolved_point path=%s reused=%s ym=%s iso3=%s hazard=%s cutoff=%s preferred_metric=%s",
@@ -174,30 +218,20 @@ def fetch_resolved_point(
         try:
             total = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
             triple = conn.execute(
-                "SELECT COUNT(*) FROM facts_resolved WHERE ym = ? AND iso3 = ? AND hazard_code = ?",
-                [ym, iso3, hazard_code],
+                f"SELECT COUNT(*) FROM facts_resolved WHERE ym = ? AND iso3 = ? AND hazard_code = ? AND {semantics_expr} = ?",
+                [ym, iso3, hazard_code, "stock"],
             ).fetchone()[0]
             cutoff_count = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*)
                 FROM facts_resolved
                 WHERE ym = ?
                   AND iso3 = ?
                   AND hazard_code = ?
-                  AND (
-                        COALESCE(
-                            TRY_CAST(NULLIF(as_of_date, '') AS DATE),
-                            TRY_CAST(NULLIF(publication_date, '') AS DATE),
-                            TRY_CAST(as_of AS DATE)
-                        ) IS NULL
-                        OR COALESCE(
-                            TRY_CAST(NULLIF(as_of_date, '') AS DATE),
-                            TRY_CAST(NULLIF(publication_date, '') AS DATE),
-                            TRY_CAST(as_of AS DATE)
-                        ) <= TRY_CAST(? AS DATE)
-                  )
+                  AND {semantics_expr} = ?
+                  AND ({as_of_expr} IS NULL OR {as_of_expr} <= TRY_CAST(? AS DATE))
                 """,
-                [ym, iso3, hazard_code, cutoff],
+                [ym, iso3, hazard_code, "stock", cutoff],
             ).fetchone()[0]
             LOGGER.debug(
                 "DuckDB fetch_resolved_point counts path=%s total=%s triple=%s cutoff=%s",
@@ -221,6 +255,8 @@ def fetch_resolved_point(
                 unit,
                 as_of,
                 series_semantics,
+                series,
+                {semantics_expr} AS series_kind,
                 as_of_date,
                 publication_date,
                 publisher,
@@ -234,16 +270,13 @@ def fetch_resolved_point(
                 proxy_for,
                 confidence,
                 created_at,
-                COALESCE(
-                    TRY_CAST(NULLIF(as_of_date, '') AS DATE),
-                    TRY_CAST(NULLIF(publication_date, '') AS DATE),
-                    as_of
-                ) AS as_of_parsed,
+                {as_of_expr} AS as_of_parsed,
                 {metric_case} AS metric_rank
             FROM facts_resolved
             WHERE ym = ?
               AND iso3 = ?
               AND hazard_code = ?
+              AND {semantics_expr} = ?
         )
         SELECT *
         FROM ranked
@@ -252,7 +285,7 @@ def fetch_resolved_point(
         LIMIT 1
     """
 
-    params = [preferred_metric, ym, iso3, hazard_code, cutoff]
+    params = [preferred_metric, ym, iso3, hazard_code, "stock", cutoff]
     if DEBUG_ENABLED:
         LOGGER.debug(
             "DuckDB fetch_resolved_point executing with params=%s path=%s",
@@ -262,4 +295,12 @@ def fetch_resolved_point(
     df = conn.execute(query, params).fetch_df()
     if df.empty:
         return None
+    if "series_kind" in df.columns:
+        if "series_semantics" in df.columns:
+            series = df["series_semantics"].astype(str)
+            df.loc[series.str.strip() == "", "series_semantics"] = df.loc[
+                series.str.strip() == "", "series_kind"
+            ]
+        else:
+            df["series_semantics"] = df["series_kind"]
     return df.iloc[0].to_dict()

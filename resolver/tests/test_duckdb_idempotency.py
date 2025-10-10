@@ -215,22 +215,23 @@ def test_semantics_canonicalisation(tmp_path: Path) -> None:
         meta={},
     )
 
-    semantics_resolved = {
-        row[0]
-        for row in conn.execute(
-            "SELECT DISTINCT series_semantics FROM facts_resolved WHERE ym = '2024-02'"
-        ).fetchall()
-    }
-    semantics_deltas = {
-        row[0]
-        for row in conn.execute(
-            "SELECT DISTINCT series_semantics FROM facts_deltas WHERE ym = '2024-02'"
-        ).fetchall()
-    }
+    resolved_rows = conn.execute(
+        "SELECT hazard_code, series_semantics FROM facts_resolved WHERE ym = '2024-02'"
+    ).fetchall()
+    deltas_rows = conn.execute(
+        "SELECT hazard_code, series_semantics FROM facts_deltas WHERE ym = '2024-02'"
+    ).fetchall()
     conn.close()
 
-    assert semantics_resolved == {"stock", ""}
-    assert semantics_deltas == {"new"}
+    assert resolved_rows
+    assert deltas_rows
+    assert {value for _, value in resolved_rows} == {"stock"}
+    assert {value for _, value in deltas_rows} == {"new"}
+    deltas_by_hazard = {hazard: value for hazard, value in deltas_rows}
+    resolved_by_hazard = {hazard: value for hazard, value in resolved_rows}
+    assert resolved_by_hazard.get("TC") == "stock"
+    assert resolved_by_hazard.get("EQ") == "stock"
+    assert deltas_by_hazard.get("EQ") == "new"
 
 
 def test_init_schema_fastpath(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
