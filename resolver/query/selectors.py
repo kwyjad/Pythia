@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
@@ -26,12 +25,10 @@ except Exception:
 # --- end duckdb import guard ---
 
 LOGGER = logging.getLogger(__name__)
+if not LOGGER.handlers:  # pragma: no cover - silence library default
+    LOGGER.addHandler(logging.NullHandler())
 if os.getenv("RESOLVER_DEBUG") == "1":
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    LOGGER.setLevel(logging.DEBUG)
 DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
 
 try:  # pragma: no cover - zoneinfo available on 3.9+

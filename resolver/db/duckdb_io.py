@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 import uuid
 import datetime as dt
 import logging
@@ -21,12 +20,7 @@ except ImportError as exc:  # pragma: no cover - guidance for operators
         "DuckDB is required for database-backed resolver operations. Install 'duckdb'."
     ) from exc
 
-from resolver.common import (
-    compute_series_semantics,
-    get_logger,
-    dict_counts,
-    df_schema,
-)
+from resolver.common import compute_series_semantics, dict_counts, df_schema
 from resolver.db.conn_shared import get_shared_duckdb_conn
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,28 +49,12 @@ DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
 
-LOGGER = get_logger(__name__)
-DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
-if DEBUG_ENABLED:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    try:
-        LOGGER.setLevel(logging.DEBUG)
-    except Exception:  # pragma: no cover - defensive
-        pass
-
-# Ensure logs propagate so pytest's caplog handler can observe debug messages emitted
-# from this module, while still remaining quiet when logging is not configured.
-try:  # pragma: no cover - defensive; logging.Logger may reject attribute writes
-    LOGGER.propagate = True
-except Exception:  # pragma: no cover - propagate setting best-effort only
-    pass
-
+LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tests
     LOGGER.addHandler(logging.NullHandler())
+DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
+if DEBUG_ENABLED:
+    LOGGER.setLevel(logging.DEBUG)
 
 
 def _merge_enabled() -> bool:
@@ -179,6 +157,22 @@ def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
         raise ValueError(
             f"{table}: series_semantics must be 'new' or 'stock', got {sorted(set(values))}"
         )
+
+
+def _to_float_or_none(value: object) -> float | None:
+    """Return ``value`` coerced to ``float`` or ``None`` when not numeric."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        value = stripped
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
@@ -764,7 +758,7 @@ def write_snapshot(
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
 
-    conn.execute("BEGIN")
+    conn.execute("BEGIN TRANSACTION")
     try:
         facts_rows = 0
         deltas_rows = 0
@@ -788,8 +782,8 @@ def write_snapshot(
                     series = series.replace("", ym)
                 facts_resolved[key] = series
             if "value" in facts_resolved.columns:
-                facts_resolved["value"] = pd.to_numeric(
-                    facts_resolved["value"], errors="coerce"
+                facts_resolved["value"] = facts_resolved["value"].apply(
+                    _to_float_or_none
                 )
             computed_semantics = facts_resolved.apply(
                 lambda row: compute_series_semantics(
@@ -853,8 +847,8 @@ def write_snapshot(
                 if col in facts_deltas.columns
             ]
             for column in numeric_delta_columns:
-                facts_deltas[column] = pd.to_numeric(
-                    facts_deltas[column], errors="coerce"
+                facts_deltas[column] = facts_deltas[column].apply(
+                    _to_float_or_none
                 )
             facts_deltas = facts_deltas.drop_duplicates(
                 subset=FACTS_DELTAS_KEY_COLUMNS,

@@ -7,10 +7,11 @@ from typing import Optional
 import logging
 import os
 
-from resolver.common import get_logger
 from resolver.db.conn_shared import get_shared_duckdb_conn, normalize_duckdb_url
 
-LOGGER = get_logger(__name__)
+LOGGER = logging.getLogger(__name__)
+if not LOGGER.handlers:  # pragma: no cover - silence library default
+    LOGGER.addHandler(logging.NullHandler())
 DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
 if DEBUG_ENABLED:
     LOGGER.setLevel(logging.DEBUG)

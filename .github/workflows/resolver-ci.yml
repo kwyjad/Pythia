@@ -17,8 +17,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   offline_connector_smoke:
+    name: offline-connector-smoke (duckdb=${{ matrix.duckdb }})
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["0.10.*", "latest"]
     runs-on: ubuntu-latest
     env:
       RESOLVER_DUCKDB_DISABLE_MERGE: "1"
@@ -64,7 +73,11 @@ jobs:
       - name: Install DuckDB (ensure available for tests)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "duckdb>=1.0,<2"
+          if [ "${{ matrix.duckdb }}" = "latest" ]; then
+            python -m pip install duckdb
+          else
+            python -m pip install "duckdb==${{ matrix.duckdb }}"
+          fi
 
       - name: Verify DuckDB presence
         run: |
@@ -126,9 +139,24 @@ jobs:
               print('No broken intra-repo Markdown links found.')
           PY
 
+      - name: Upload debug artifacts on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-debug-${{ matrix.duckdb }}
+          path: |
+            **/*.duckdb
+            pytest-junit.xml
+            ./**/resolver_debug.log
+          if-no-files-found: ignore
+
   tests-db:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
-    name: tests (db backend)
+    name: tests (db backend, duckdb=${{ matrix.duckdb }})
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["0.10.*", "latest"]
     runs-on: ubuntu-latest
     env:
       RESOLVER_API_BACKEND: db
@@ -196,7 +224,11 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "duckdb>=1.0,<2"
+          if [ "${{ matrix.duckdb }}" = "latest" ]; then
+            python -m pip install duckdb
+          else
+            python -m pip install "duckdb==${{ matrix.duckdb }}"
+          fi
 
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
@@ -240,17 +272,24 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics
+          name: db-parity-diagnostics-${{ matrix.duckdb }}
           path: |
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv
             **/parity_mismatch_cell_diffs.csv
+            **/*.duckdb
+            pytest-junit.xml
+            ./**/resolver_debug.log
           if-no-files-found: ignore
 
   tests-db-nocache:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     needs: tests-db
-    name: tests (db backend, cache disabled)
+    name: tests (db backend, cache disabled, duckdb=${{ matrix.duckdb }})
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["0.10.*", "latest"]
     runs-on: ubuntu-latest
     env:
       RESOLVER_API_BACKEND: db
@@ -319,7 +358,11 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "duckdb>=1.0,<2"
+          if [ "${{ matrix.duckdb }}" = "latest" ]; then
+            python -m pip install duckdb
+          else
+            python -m pip install "duckdb==${{ matrix.duckdb }}"
+          fi
 
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
@@ -356,6 +399,20 @@ jobs:
       - name: Run tests (db cache disabled)
         if: steps.dbfiles.outputs.present == 'true'
         run: pytest -q
+
+      - name: Upload DB cache-disabled diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-cache-disabled-${{ matrix.duckdb }}
+          path: |
+            **/parity_mismatch_expected.csv
+            **/parity_mismatch_db.csv
+            **/parity_mismatch_cell_diffs.csv
+            **/*.duckdb
+            pytest-junit.xml
+            ./**/resolver_debug.log
+          if-no-files-found: ignore
 
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'

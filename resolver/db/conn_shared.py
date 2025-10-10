@@ -7,17 +7,14 @@ import logging
 import os
 import pathlib
 import re
-import sys
 import threading
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+if not logger.handlers:  # pragma: no cover - silence library default
+    logger.addHandler(logging.NullHandler())
 if os.getenv("RESOLVER_DEBUG") == "1":
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    logger.setLevel(logging.DEBUG)
 
 _PROCESS_CACHE: Dict[str, "ConnectionWrapper"] = {}
 _LOCK = threading.RLock()

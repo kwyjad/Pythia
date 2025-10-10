@@ -24,6 +24,7 @@ Behavior:
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +51,10 @@ from resolver.query.selectors import (
 from resolver.db.conn_shared import get_shared_duckdb_conn
 
 LOGGER = logging.getLogger(__name__)
+if not LOGGER.handlers:  # pragma: no cover - silence library default
+    LOGGER.addHandler(logging.NullHandler())
+if os.getenv("RESOLVER_DEBUG") == "1":
+    LOGGER.setLevel(logging.DEBUG)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -122,6 +127,21 @@ def _map_backend(value: Optional[str], *, default: str) -> str:
     if backend not in VALID_BACKENDS:
         return default
     return backend
+
+
+def _round_if_persons(value: object, unit: object) -> object:
+    """Round ``value`` when ``unit`` denotes whole persons."""
+
+    unit_label = str(unit or "").strip().lower()
+    if unit_label != "persons":
+        return value
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if not math.isfinite(numeric):
+        return value
+    return round(numeric)
 
 
 def _read_batch_queries(path: Path) -> List[dict]:
@@ -374,6 +394,8 @@ def _run_single(args: List[str]) -> None:
         str(result.get("series_returned", series_requested)).strip().lower() or series_requested
     )
     ym_value = result.get("ym", ym_from_cutoff(args.cutoff))
+    unit = str(result.get("unit", "persons") or "persons")
+    rounded_value = _round_if_persons(result.get("value", ""), unit)
     output = {
         "ok": True,
         "iso3": iso3,
@@ -383,8 +405,8 @@ def _run_single(args: List[str]) -> None:
         "hazard_class": hazard_class,
         "cutoff": args.cutoff,
         "metric": result.get("metric", ""),
-        "unit": result.get("unit", "persons"),
-        "value": result.get("value", ""),
+        "unit": unit,
+        "value": rounded_value,
         "as_of_date": result.get("as_of_date", ""),
         "publication_date": result.get("publication_date", ""),
         "publisher": result.get("publisher", ""),

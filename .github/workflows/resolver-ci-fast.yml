@@ -18,7 +18,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: fast-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -27,6 +27,11 @@ permissions:
 jobs:
   fast-tests:
     if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
+    name: fast-tests (duckdb=${{ matrix.duckdb }})
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["0.10.*", "latest"]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -70,7 +75,11 @@ jobs:
       - name: Install DuckDB (ensure available for tests)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "duckdb>=1.0,<2"
+          if [ "${{ matrix.duckdb }}" = "latest" ]; then
+            python -m pip install duckdb
+          else
+            python -m pip install "duckdb==${{ matrix.duckdb }}"
+          fi
 
       - name: Verify DuckDB presence
         run: |
@@ -104,8 +113,24 @@ jobs:
           name: fast-pytest-results
           path: pytest-junit.xml
 
+      - name: Upload debug artifacts on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-db-${{ matrix.duckdb }}
+          path: |
+            **/*.duckdb
+            pytest-junit.xml
+            ./**/resolver_debug.log
+          if-no-files-found: ignore
+
   db_tests:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    name: db-tests (duckdb=${{ matrix.duckdb }})
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["0.10.*", "latest"]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -158,7 +183,11 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "duckdb>=1.0,<2"
+          if [ "${{ matrix.duckdb }}" = "latest" ]; then
+            python -m pip install duckdb
+          else
+            python -m pip install "duckdb==${{ matrix.duckdb }}"
+          fi
 
       - name: Verify DuckDB is installed
         if: steps.dbfiles.outputs.present == 'true'
@@ -189,6 +218,17 @@ jobs:
           RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
         run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
 
+      - name: Upload debug artifacts on failure
+        if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-tests-debug-${{ matrix.duckdb }}
+          path: |
+            **/*.duckdb
+            pytest-junit.xml
+            ./**/resolver_debug.log
+          if-no-files-found: ignore
+
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'
         run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
@@ -196,6 +236,11 @@ jobs:
   db_tests_nocache:
     if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
     needs: db_tests
+    name: db-tests-nocache (duckdb=${{ matrix.duckdb }})
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb: ["0.10.*", "latest"]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -249,7 +294,11 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "duckdb>=1.0,<2"
+          if [ "${{ matrix.duckdb }}" = "latest" ]; then
+            python -m pip install duckdb
+          else
+            python -m pip install "duckdb==${{ matrix.duckdb }}"
+          fi
 
       - name: Verify DuckDB is installed
         if: steps.dbfiles.outputs.present == 'true'
@@ -279,6 +328,17 @@ jobs:
         env:
           RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
         run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
+
+      - name: Upload debug artifacts on failure
+        if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-tests-nocache-debug-${{ matrix.duckdb }}
+          path: |
+            **/*.duckdb
+            pytest-junit.xml
+            ./**/resolver_debug.log
+          if-no-files-found: ignore
 
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'
