@@ -215,9 +215,10 @@ def load_series_from_db(
     conn = duckdb_io.get_db(db_url)
     if DEBUG_ENABLED:
         LOGGER.debug(
-            "DuckDB resolved path=%s for db_url=%s",
+            "DuckDB resolved path=%s for db_url=%s cache_disabled=%s",
             normalize_duckdb_url(db_url),
             db_url,
+            os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
         )
     duckdb_io.init_schema(conn)
 

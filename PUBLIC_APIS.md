@@ -8,7 +8,8 @@
 ## resolver.db.conn_shared
 
 - `normalize_duckdb_url(db_url)`
-- `get_shared_duckdb_conn(db_url)`
+- `get_shared_duckdb_conn(db_url, *, force_reopen=False)`
+- `clear_cached_connection(db_url)`
 
 ## TypeScript / JavaScript
 

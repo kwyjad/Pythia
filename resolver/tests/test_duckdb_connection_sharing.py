@@ -44,3 +44,49 @@ def test_same_url_returns_same_connection(tmp_path, monkeypatch):
         ["2024-02", "PHL", "TC"],
     ).fetchone()[0]
     assert count == 1
+
+
+def test_eviction_on_close(tmp_path, monkeypatch):
+    db_path = tmp_path / "evict.duckdb"
+    url = f"duckdb:///{db_path}"
+    monkeypatch.setenv("RESOLVER_DB_URL", url)
+
+    conn1 = duckdb_io.get_db(url)
+    conn1.execute("CREATE TABLE IF NOT EXISTS t (x INTEGER)")
+    conn1.close()
+
+    conn2 = duckdb_io.get_db(url)
+    assert conn1 is not conn2
+    conn2.execute("INSERT INTO t VALUES (1)")
+    assert conn2.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 1
+
+
+def test_healthcheck_reopen(tmp_path, monkeypatch):
+    db_path = tmp_path / "health.duckdb"
+    url = f"duckdb:///{db_path}"
+    monkeypatch.setenv("RESOLVER_DB_URL", url)
+
+    conn = duckdb_io.get_db(url)
+    conn.execute("CREATE TABLE IF NOT EXISTS h (x INTEGER)")
+    from resolver.db import conn_shared
+    wrapper = conn_shared._CACHE[conn_shared.normalize_duckdb_url(url)]
+    wrapper._raw.close()  # type: ignore[attr-defined]
+    wrapper._closed = False  # ensure wrapper looks open for the cache
+
+    conn2 = duckdb_io.get_db(url)
+    conn2.execute("INSERT INTO h VALUES (1)")
+    assert conn2.execute("SELECT COUNT(*) FROM h").fetchone()[0] == 1
+
+
+def test_disable_cache_optout(tmp_path, monkeypatch):
+    db_path = tmp_path / "nocache.duckdb"
+    url = f"duckdb:///{db_path}"
+    monkeypatch.setenv("RESOLVER_DB_URL", url)
+
+    monkeypatch.setenv("RESOLVER_DISABLE_CONN_CACHE", "1")
+    try:
+        c1 = duckdb_io.get_db(url)
+        c2 = duckdb_io.get_db(url)
+        assert c1 is not c2
+    finally:
+        monkeypatch.delenv("RESOLVER_DISABLE_CONN_CACHE", raising=False)
