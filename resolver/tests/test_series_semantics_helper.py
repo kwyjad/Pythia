@@ -22,33 +22,102 @@ def test_blank_metric_defaults_to_empty_string():
     assert compute_series_semantics("", "  ") == ""
 
 
-def test_writer_rejects_blank_semantics(tmp_path):
-    db_path = tmp_path / "blank_semantics.duckdb"
+def test_writer_normalizes_keys(tmp_path):
+    db_path = tmp_path / "normalize_keys.duckdb"
+    conn = duckdb_io.get_db(f"duckdb:///{db_path}")
+    duckdb_io.init_schema(conn)
+
+    invalid = pd.DataFrame(
+        [
+            {
+                "ym": "2024-2",
+                "iso3": "phl",
+                "hazard_code": "tc",
+                "metric": "custom_metric",
+                "series_semantics": "stock",
+                "value": 10,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="invalid ym format"):
+        duckdb_io.write_snapshot(
+            conn,
+            ym="2024-02",
+            facts_resolved=invalid,
+            facts_deltas=None,
+            manifests=None,
+            meta=None,
+        )
+
+    valid = invalid.assign(ym="2024-02")
+    duckdb_io.write_snapshot(
+        conn,
+        ym="2024-02",
+        facts_resolved=valid,
+        facts_deltas=None,
+        manifests=None,
+        meta=None,
+    )
+
+    stored = conn.execute(
+        "SELECT ym, iso3, hazard_code FROM facts_resolved WHERE ym = '2024-02'"
+    ).fetchall()
+    conn.close()
+
+    assert stored == [("2024-02", "PHL", "TC")]
+
+
+def test_writer_uppercases_codes(tmp_path):
+    db_path = tmp_path / "uppercase_codes.duckdb"
     conn = duckdb_io.get_db(f"duckdb:///{db_path}")
     duckdb_io.init_schema(conn)
 
     resolved = pd.DataFrame(
         [
             {
-                "ym": "2024-01",
-                "iso3": "PHL",
-                "hazard_code": "TC",
-                "metric": "custom_metric",
+                "ym": "2024-03",
+                "iso3": "phl",
+                "hazard_code": "tc",
+                "metric": "in_need",
                 "series_semantics": "",
-                "value": 10,
+                "value": 25,
+            }
+        ]
+    )
+    deltas = pd.DataFrame(
+        [
+            {
+                "ym": "2024-03",
+                "iso3": "Phl",
+                "hazard_code": "tC",
+                "metric": "in_need",
+                "value_new": 5,
+                "value_stock": 30,
+                "series_semantics": "",
             }
         ]
     )
 
-    with pytest.raises(ValueError, match="series_semantics must be 'new' or 'stock'"):
-        duckdb_io.write_snapshot(
-            conn,
-            ym="2024-01",
-            facts_resolved=resolved,
-            facts_deltas=None,
-            manifests=None,
-            meta=None,
-        )
+    duckdb_io.write_snapshot(
+        conn,
+        ym="2024-03",
+        facts_resolved=resolved,
+        facts_deltas=deltas,
+        manifests=None,
+        meta=None,
+    )
+
+    resolved_codes = conn.execute(
+        "SELECT iso3, hazard_code, series_semantics FROM facts_resolved WHERE ym = '2024-03'"
+    ).fetchone()
+    deltas_codes = conn.execute(
+        "SELECT iso3, hazard_code, series_semantics FROM facts_deltas WHERE ym = '2024-03'"
+    ).fetchone()
+    conn.close()
+
+    assert resolved_codes == ("PHL", "TC", "stock")
+    assert deltas_codes == ("PHL", "TC", "new")
 
 
 def test_reader_coalesces_series_semantics_and_series(tmp_path):

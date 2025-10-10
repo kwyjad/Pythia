@@ -22,7 +22,7 @@ Monthly "new" deltas derived from resolved totals.
 | Name | Type | Required | Enum/Format | Description |
 | --- | --- | --- | --- | --- |
 | as_of | string | yes |  | ISO-8601 date (YYYY-MM-DD) |
-| hazard_code | string | yes |  | Resolver hazard taxonomy slug (lowercase snake_case). |
+| hazard_code | string | yes |  | Resolver hazard taxonomy slug (uppercased). |
 | iso3 | string | yes |  | ISO-3166 alpha-3 code (uppercase). |
 | metric | enum | yes | in_need, affected, displaced, cases, fatalities<br>events, participants |  |
 | source_name | string | yes |  |  |
@@ -50,7 +50,7 @@ Canonical facts written to DuckDB alongside CSV exports.
 | doc_title | string | yes |  |  |
 | event_id | string | yes |  |  |
 | hazard_class | string | yes |  |  |
-| hazard_code | string | yes |  | Resolver hazard taxonomy slug (lowercase snake_case). |
+| hazard_code | string | yes |  | Resolver hazard taxonomy slug (uppercased). |
 | hazard_label | string | yes |  |  |
 | ingested_at | date | yes |  |  |
 | iso3 | string | yes |  | ISO-3166 alpha-3 code (uppercase). |
@@ -79,7 +79,7 @@ Resolved precedence outputs stored in DuckDB for querying.
 | --- | --- | --- | --- | --- |
 | as_of_date | string | yes |  | ISO-8601 date (YYYY-MM-DD) |
 | hazard_class | string | yes |  |  |
-| hazard_code | string | yes |  | Resolver hazard taxonomy slug (lowercase snake_case). |
+| hazard_code | string | yes |  | Resolver hazard taxonomy slug (uppercased). |
 | hazard_label | string | yes |  |  |
 | iso3 | string | yes |  | ISO-3166 alpha-3 code (uppercase). |
 | metric | enum | yes | in_need, affected, displaced, cases, fatalities<br>events, participants |  |
@@ -99,8 +99,9 @@ Resolved precedence outputs stored in DuckDB for querying.
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
 
-> **Note:** `series_semantics` is the canonical indicator for Resolver series (`'new'` or `'stock'`). Legacy rows may still populate
-> the historical `series` column, but writers must emit `series_semantics` going forward.
+> **Note:** `series_semantics` is the canonical indicator for Resolver series (`'new'` or `'stock'`). Writers canonicalise
+> semantics inputs, enforce `ym` keys in `YYYY-MM`, and uppercase `iso3`/`hazard_code` before persistence. Legacy rows may still
+> populate the historical `series` column, but readers coalesce `series_semantics` with `series` during the migration window.
 
 ## db.manifests
 
