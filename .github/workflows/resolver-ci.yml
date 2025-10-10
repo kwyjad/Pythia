@@ -29,7 +29,7 @@ jobs:
       matrix:
         include:
           - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10"
+            duckdb_label: "0_10_x"
           - duckdb_spec: "duckdb"
             duckdb_label: "latest"
     runs-on: ubuntu-latest
@@ -139,11 +139,11 @@ jobs:
               print('No broken intra-repo Markdown links found.')
           PY
 
-      - name: Upload debug artifacts on failure
+      - name: Upload diagnostics on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: offline-debug-${{ matrix.duckdb_label }}-${{ github.run_attempt }}
+          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -159,7 +159,7 @@ jobs:
       matrix:
         include:
           - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10"
+            duckdb_label: "0_10_x"
           - duckdb_spec: "duckdb"
             duckdb_label: "latest"
     runs-on: ubuntu-latest
@@ -269,11 +269,11 @@ jobs:
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'
         run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
-      - name: Upload DB parity diagnostics
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ matrix.duckdb_label }}-${{ github.run_attempt }}
+          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
           path: |
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv
@@ -293,7 +293,7 @@ jobs:
       matrix:
         include:
           - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10"
+            duckdb_label: "0_10_x"
           - duckdb_spec: "duckdb"
             duckdb_label: "latest"
     runs-on: ubuntu-latest
@@ -402,11 +402,11 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: pytest -q
 
-      - name: Upload DB cache-disabled diagnostics
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: db-cache-disabled-${{ matrix.duckdb_label }}-${{ github.run_attempt }}
+          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
           path: |
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv

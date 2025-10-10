@@ -33,7 +33,7 @@ jobs:
       matrix:
         include:
           - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10"
+            duckdb_label: "0_10_x"
           - duckdb_spec: "duckdb"
             duckdb_label: "latest"
     runs-on: ubuntu-latest
@@ -113,11 +113,11 @@ jobs:
           name: fast-pytest-results
           path: pytest-junit.xml
 
-      - name: Upload debug artifacts on failure
+      - name: Upload diagnostics on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: fast-tests-diagnostics-${{ matrix.duckdb_label }}-${{ github.run_attempt }}
+          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -133,7 +133,7 @@ jobs:
       matrix:
         include:
           - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10"
+            duckdb_label: "0_10_x"
           - duckdb_spec: "duckdb"
             duckdb_label: "latest"
     runs-on: ubuntu-latest
@@ -219,11 +219,11 @@ jobs:
           RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
         run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
 
-      - name: Upload debug artifacts on failure
+      - name: Upload diagnostics on failure
         if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-tests-diagnostics-${{ matrix.duckdb_label }}-${{ github.run_attempt }}
+          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -244,7 +244,7 @@ jobs:
       matrix:
         include:
           - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10"
+            duckdb_label: "0_10_x"
           - duckdb_spec: "duckdb"
             duckdb_label: "latest"
     runs-on: ubuntu-latest
@@ -331,11 +331,11 @@ jobs:
           RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
         run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
 
-      - name: Upload debug artifacts on failure
+      - name: Upload diagnostics on failure
         if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-tests-nocache-diagnostics-${{ matrix.duckdb_label }}-${{ github.run_attempt }}
+          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml

@@ -99,6 +99,9 @@ Refer to the [operations run book](docs/operations.md) for detailed command vari
 - When tests fail, the workflow uploads small debug artifacts (pytest JUnit XML,
   any `*.duckdb` files produced during the run, and resolver debug logs) to help
   diagnose flaky or version-specific issues.
+- Artifact names use a sanitized DuckDB label (for example, `0_10_x`) combined
+  with the job name and `github.run_attempt`, and enable `overwrite: true` so
+  reruns replace earlier diagnostics without 409 conflicts.
 
 ## Working with ReliefWeb PDFs
 

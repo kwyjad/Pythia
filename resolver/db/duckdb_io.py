@@ -42,6 +42,18 @@ FACTS_DELTAS_KEY_COLUMNS = [
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
+TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
+    "facts_resolved": {
+        "columns": FACTS_RESOLVED_KEY_COLUMNS,
+        "primary": "pk_facts_resolved",
+        "unique": "u_facts_resolved_key",
+    },
+    "facts_deltas": {
+        "columns": FACTS_DELTAS_KEY_COLUMNS,
+        "primary": "pk_facts_deltas",
+        "unique": "u_facts_deltas_key",
+    },
+}
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
     "facts_resolved": ("as_of_date", "publication_date"),
     "facts_deltas": ("as_of",),
@@ -56,6 +68,8 @@ if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tes
 DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
 if DEBUG_ENABLED:
     LOGGER.setLevel(logging.DEBUG)
+
+_HEALING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
 
 
 def _merge_enabled() -> bool:
@@ -284,6 +298,105 @@ def _has_declared_key(
     return False
 
 
+def _ensure_primary_key(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], constraint_name: str
+) -> None:
+    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    table_ident = _quote_identifier(table)
+    constraint_ident = _quote_identifier(constraint_name)
+    try:
+        conn.execute(
+            f"ALTER TABLE {table_ident} ADD CONSTRAINT {constraint_ident} PRIMARY KEY ({column_list})"
+        )
+        LOGGER.debug(
+            "duckdb.schema.primary_key_added | table=%s constraint=%s columns=%s",
+            table,
+            constraint_name,
+            columns,
+        )
+    except (duckdb.CatalogException, duckdb.DependencyException) as exc:  # pragma: no cover - idempotent path
+        message = str(exc)
+        if "already has a primary key" in message or "Constraint with name" in message:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_exists | table=%s constraint=%s", table, constraint_name
+            )
+        elif "Cannot alter entry" in message:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_conflict | table=%s constraint=%s message=%s",
+                table,
+                constraint_name,
+                message,
+            )
+        else:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_failed | table=%s constraint=%s error=%s",
+                table,
+                constraint_name,
+                message,
+            )
+
+
+def _ensure_unique_index(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], index_name: str
+) -> None:
+    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    table_ident = _quote_identifier(table)
+    index_ident = _quote_identifier(index_name)
+    conn.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {index_ident} ON {table_ident} ({column_list})"
+    )
+    LOGGER.debug(
+        "duckdb.schema.unique_index_ensured | table=%s index=%s columns=%s",
+        table,
+        index_name,
+        columns,
+    )
+
+
+def _attempt_heal_missing_key(
+    conn: "duckdb.DuckDBPyConnection", table: str, keys: Sequence[str] | None
+) -> bool:
+    if not keys:
+        return False
+    spec = TABLE_KEY_SPECS.get(table)
+    if not spec:
+        return False
+    expected_columns = [col.lower() for col in spec["columns"]]
+    provided = [key.lower() for key in keys]
+    if expected_columns != provided:
+        return False
+    healing_key = (table, tuple(provided))
+    if healing_key not in _HEALING_WARNED:
+        LOGGER.warning(
+            "duckdb.upsert.heal_missing_index | table=%s keys=%s -- attempting to create indexes",
+            table,
+            list(keys),
+        )
+        _HEALING_WARNED.add(healing_key)
+    _ensure_primary_key(
+        conn,
+        table,
+        spec["columns"],
+        str(spec["primary"]),
+    )
+    _ensure_unique_index(
+        conn,
+        table,
+        spec["columns"],
+        str(spec["unique"]),
+    )
+    healed = _has_declared_key(conn, table, keys)
+    if healed:
+        LOGGER.debug(
+            "duckdb.upsert.heal_missing_index.success | table=%s keys=%s", table, list(keys)
+        )
+    else:
+        LOGGER.debug(
+            "duckdb.upsert.heal_missing_index.failed | table=%s keys=%s", table, list(keys)
+        )
+    return healed
+
+
 def _delete_where(
     conn: "duckdb.DuckDBPyConnection",
     table: str,
@@ -370,14 +483,76 @@ def init_schema(
         ).fetchall()
     }
 
-    if expected_tables.issubset(existing_tables):
-        LOGGER.debug("DuckDB schema already initialised; skipping DDL execution")
-        return
+    if "facts_resolved" not in existing_tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS facts_resolved (
+                ym TEXT NOT NULL,
+                iso3 TEXT NOT NULL,
+                hazard_code TEXT NOT NULL,
+                hazard_label TEXT,
+                hazard_class TEXT,
+                metric TEXT NOT NULL,
+                series_semantics TEXT NOT NULL DEFAULT '',
+                value DOUBLE,
+                unit TEXT,
+                as_of DATE,
+                as_of_date VARCHAR,
+                publication_date VARCHAR,
+                publisher TEXT,
+                source_id TEXT,
+                source_type TEXT,
+                source_url TEXT,
+                doc_title TEXT,
+                definition_text TEXT,
+                precedence_tier TEXT,
+                event_id TEXT,
+                proxy_for TEXT,
+                confidence TEXT,
+                series TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ym, iso3, hazard_code, metric, series_semantics)
+            )
+            """
+        )
+    if "facts_deltas" not in existing_tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS facts_deltas (
+                ym TEXT NOT NULL,
+                iso3 TEXT NOT NULL,
+                hazard_code TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value_new DOUBLE,
+                value_stock DOUBLE,
+                series_semantics TEXT NOT NULL DEFAULT 'new',
+                as_of VARCHAR,
+                source_id TEXT,
+                series TEXT,
+                rebase_flag INTEGER,
+                first_observation INTEGER,
+                delta_negative_clamped INTEGER,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ym, iso3, hazard_code, metric)
+            )
+            """
+        )
 
-    sql = schema_path.read_text(encoding="utf-8")
-    for statement in [s.strip() for s in sql.split(";") if s.strip()]:
-        conn.execute(statement)
-    LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
+    if not expected_tables.issubset(existing_tables):
+        sql = schema_path.read_text(encoding="utf-8")
+        for statement in [s.strip() for s in sql.split(";") if s.strip()]:
+            conn.execute(statement)
+        LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
+    else:
+        LOGGER.debug("DuckDB schema already initialised; ensuring key/index metadata")
+
+    for table_name, spec in TABLE_KEY_SPECS.items():
+        columns = spec["columns"]
+        primary = spec["primary"]
+        unique = spec["unique"]
+        _ensure_primary_key(conn, table_name, columns, str(primary))
+        _ensure_unique_index(conn, table_name, columns, str(unique))
+
     if LOGGER.isEnabledFor(logging.DEBUG):
         table_details = conn.execute(
             """
@@ -501,10 +676,13 @@ def upsert_dataframe(
     table_columns = [row[1] for row in table_info]
     has_declared_key = _has_declared_key(conn, table, keys) if keys else False
     if keys and not has_declared_key:
-        raise ValueError(
-            f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
-            "key or unique constraint."
-        )
+        if _attempt_heal_missing_key(conn, table, keys):
+            has_declared_key = True
+        else:
+            raise ValueError(
+                f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
+                "key or unique constraint."
+            )
 
     insert_columns = [col for col in table_columns if col in frame.columns]
     dropped = [col for col in frame.columns if col not in table_columns]
