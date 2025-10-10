@@ -6,16 +6,6 @@ from typing import Optional
 
 import os
 
-import pathlib, sys  # DEBUG
-
-print(
-    "DBG db_reader path:",
-    pathlib.Path(__file__).resolve(),
-    file=sys.stderr,
-    flush=True,
-)  # DEBUG
-
-print("DBG db_reader import marker v1", flush=True)
 
 _DUCKDB_CONN_CACHE: dict[str, "duckdb.DuckDBPyConnection"] = {}
 
@@ -34,13 +24,7 @@ def get_shared_duckdb_conn(db_url: str | None):
     if db_path not in _DUCKDB_CONN_CACHE:
         _DUCKDB_CONN_CACHE[db_path] = duckdb.connect(database=db_path)
 
-    conn = _DUCKDB_CONN_CACHE[db_path]
-    print(
-        f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
-        file=sys.stderr,
-        flush=True,
-    )
-    return conn
+    return _DUCKDB_CONN_CACHE[db_path]
 
 
 def _metric_case_sql() -> str:
@@ -62,28 +46,13 @@ def fetch_deltas_point(
     cutoff: str,
     preferred_metric: str,
 ) -> Optional[dict]:
-    print(
-        f"DBG fetch_deltas_point CALLED ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff} pref={preferred_metric}",
-        file=sys.stderr,
-        flush=True,
-    )  # DEBUG
     """Return the latest delta row at or before ``cutoff`` for the request."""
 
     if conn is None:
         conn = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
-    else:
-        shared_conn = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
-        if shared_conn is not None:
-            conn = shared_conn
 
     if conn is None:
         return None
-
-    print(
-        f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
-        file=sys.stderr,
-        flush=True,
-    )
 
     metric_case = _metric_case_sql()
     query = f"""
@@ -117,56 +86,75 @@ def fetch_deltas_point(
         LIMIT 1
     """
 
-    # --- DEBUG START (temporary) ---
-    print(f"DBG fetch_deltas_point: ym={ym} iso3={iso3} hazard={hazard_code} cutoff={cutoff} pref={preferred_metric}")
-    try:
-        import duckdb as _duckdb
-        print("DBG duckdb version:", getattr(_duckdb, "__version__", "n/a"))
-    except Exception as _e:
-        print("DBG duckdb import failed:", _e)
 
-    # counts
-    c_total = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
-    c_keys  = conn.execute(
-        "SELECT COUNT(*) FROM facts_deltas WHERE ym=? AND iso3=? AND hazard_code=?",
-        [ym, iso3, hazard_code]
-    ).fetchone()[0]
-    c_cut   = conn.execute(
-        """
-        SELECT COUNT(*) FROM (
-        SELECT TRY_CAST(as_of AS DATE) AS as_of_parsed
-        FROM facts_deltas
-        WHERE ym=? AND iso3=? AND hazard_code=?
-        ) WHERE as_of_parsed IS NULL OR as_of_parsed <= TRY_CAST(? AS DATE)
-        """,
-        [ym, iso3, hazard_code, cutoff]
-    ).fetchone()[0]
-    print(f"DBG facts_deltas counts: total={c_total} match_keys={c_keys} match_with_cutoff={c_cut}")
+    df = conn.execute(
+        query,
+        [preferred_metric, ym, iso3, hazard_code, cutoff],
+    ).fetch_df()
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()
 
-    # peek rows at each step
-    rows_keys = conn.execute(
-        "SELECT ym, iso3, hazard_code, metric, value_new, as_of FROM facts_deltas WHERE ym=? AND iso3=? AND hazard_code=?",
-        [ym, iso3, hazard_code]
-    ).fetchall()
-    print("DBG rows(match_keys):", rows_keys)
 
-    rows_cut = conn.execute(
-        """
-        SELECT ym, iso3, hazard_code, metric, value_new, as_of
-        FROM (
-        SELECT ym, iso3, hazard_code, metric, value_new, as_of, TRY_CAST(as_of AS DATE) AS as_of_parsed
-        FROM facts_deltas
-        WHERE ym=? AND iso3=? AND hazard_code=?
+def fetch_resolved_point(
+    conn,
+    *,
+    ym: str,
+    iso3: str,
+    hazard_code: str,
+    cutoff: str,
+    preferred_metric: str,
+) -> Optional[dict]:
+    """Return the latest resolved row at or before ``cutoff`` for the request."""
+
+    if conn is None:
+        conn = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+
+    if conn is None:
+        return None
+
+    metric_case = _metric_case_sql()
+    query = f"""
+        WITH ranked AS (
+            SELECT
+                ym,
+                iso3,
+                hazard_code,
+                metric,
+                value,
+                unit,
+                as_of,
+                series_semantics,
+                as_of_date,
+                publication_date,
+                publisher,
+                source_id,
+                source_type,
+                source_url,
+                doc_title,
+                definition_text,
+                precedence_tier,
+                event_id,
+                proxy_for,
+                confidence,
+                created_at,
+                COALESCE(
+                    TRY_CAST(NULLIF(as_of_date, '') AS DATE),
+                    TRY_CAST(NULLIF(publication_date, '') AS DATE),
+                    as_of
+                ) AS as_of_parsed,
+                {metric_case} AS metric_rank
+            FROM facts_resolved
+            WHERE ym = ?
+              AND iso3 = ?
+              AND hazard_code = ?
         )
+        SELECT *
+        FROM ranked
         WHERE as_of_parsed IS NULL OR as_of_parsed <= TRY_CAST(? AS DATE)
-        """,
-        [ym, iso3, hazard_code, cutoff]
-    ).fetchall()
-    print("DBG rows(match_with_cutoff):", rows_cut)
-
-    # show the params for the main query (order matters)
-    print("DBG main params:", [preferred_metric, ym, iso3, hazard_code, cutoff])
-    # --- DEBUG END ---
+        ORDER BY metric_rank, as_of_parsed DESC NULLS LAST, created_at DESC
+        LIMIT 1
+    """
 
     df = conn.execute(
         query,

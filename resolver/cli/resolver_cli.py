@@ -23,6 +23,7 @@ Behavior:
 
 import argparse
 import json
+import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +48,8 @@ from resolver.query.selectors import (
     ym_from_cutoff,
 )
 from resolver.query.db_reader import get_shared_duckdb_conn
+
+LOGGER = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -268,18 +271,15 @@ def _run_single(args: List[str]) -> None:
     series_requested = args.series
     backend_choice = args.backend
 
-    print(
-        f"DBG resolver_cli backend={backend_choice} series={series_requested} cutoff={args.cutoff}",
-        file=sys.stderr,
-        flush=True,
-    )  # DEBUG
+    LOGGER.debug(
+        "resolver_cli backend=%s series=%s cutoff=%s",
+        backend_choice,
+        series_requested,
+        args.cutoff,
+    )
 
     if series_requested == "new" and backend_choice in {"db", "auto"}:
-        print(
-            "DBG resolver_cli path: load_series_from_db(new, db)",
-            file=sys.stderr,
-            flush=True,
-        )  # DEBUG
+        LOGGER.debug("resolver_cli path: load_series_from_db(new, db)")
 
     def emit_no_data(message: str) -> None:
         payload = {
@@ -312,24 +312,23 @@ def _run_single(args: List[str]) -> None:
             db_url = os.environ.get("RESOLVER_DB_URL")
             conn = get_shared_duckdb_conn(db_url)
             if conn is not None:
-                print(
-                    f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
-                    file=sys.stderr,
-                    flush=True,
+                LOGGER.debug(
+                    "duckdb shared conn id=%s db=%s",
+                    id(conn),
+                    getattr(conn, "database", "n/a"),
                 )
             ym = ym_from_cutoff(args.cutoff)
 
             # --- DEBUG: no-data diagnostics (DuckDB visibility check) ---
-            import sys
             try:
                 import duckdb  # ensure we have the real module, not a shadowed symbol
                 if conn is None:
                     conn = get_shared_duckdb_conn(db_url)
                     if conn is not None:
-                        print(
-                            f"DBG duckdb shared conn id={id(conn)} db={getattr(conn, 'database', 'n/a')}",
-                            file=sys.stderr,
-                            flush=True,
+                        LOGGER.debug(
+                            "duckdb shared conn id=%s db=%s",
+                            id(conn),
+                            getattr(conn, "database", "n/a"),
                         )
 
                 if conn is not None:
@@ -339,19 +338,22 @@ def _run_single(args: List[str]) -> None:
                         "SELECT COUNT(*) FROM facts_deltas WHERE ym = ? AND iso3 = ? AND hazard_code = ?",
                         [ym, iso3, hazard_code],
                     ).fetchone()[0]
-                    print(
-                        f"DBG resolver_cli no-data diag OK: ym={ym} iso3={iso3} hazard={hazard_code} "
-                        f"counts total={c_all} ym={c_ym} ym+keys={c_key}",
-                        file=sys.stderr,
-                        flush=True,
+                    LOGGER.debug(
+                        "resolver_cli no-data diag OK: ym=%s iso3=%s hazard=%s counts total=%s ym=%s ym+keys=%s",
+                        ym,
+                        iso3,
+                        hazard_code,
+                        c_all,
+                        c_ym,
+                        c_key,
                     )
                 else:
-                    print("DBG resolver_cli no-data diag: conn unavailable", file=sys.stderr, flush=True)
+                    LOGGER.debug("resolver_cli no-data diag: conn unavailable")
             except Exception as e:
-                print(
-                    f"DBG resolver_cli no-data diag ERROR (catch): {type(e).__name__}: {e}",
-                    file=sys.stderr,
-                    flush=True,
+                LOGGER.debug(
+                    "resolver_cli no-data diag ERROR (catch): %s: %s",
+                    type(e).__name__,
+                    e,
                 )
             # --- END DEBUG ---
         dataset_hint = (

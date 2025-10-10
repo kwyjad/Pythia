@@ -162,6 +162,7 @@ def test_db_resolve_stock_returns_value_for_cutoff(tmp_path, monkeypatch):
 
     assert result is not None
     assert result["ok"] is True
+    assert isinstance(result["value"], (int, float))
     assert result["value"] == 1500
     assert result["series_returned"] == "stock"
     assert result["series_semantics"] == "stock"
