@@ -22,18 +22,18 @@ Monthly "new" deltas derived from resolved totals.
 | Name | Type | Required | Enum/Format | Description |
 | --- | --- | --- | --- | --- |
 | as_of | string | yes |  | ISO-8601 date (YYYY-MM-DD) |
-| hazard_code | string | yes |  |  |
-| iso3 | string | yes |  |  |
+| hazard_code | string | yes |  | Resolver hazard taxonomy slug (lowercase snake_case). |
+| iso3 | string | yes |  | ISO-3166 alpha-3 code (uppercase). |
 | metric | enum | yes | in_need, affected, displaced, cases, fatalities<br>events, participants |  |
 | source_name | string | yes |  |  |
 | value_new | number | yes |  |  |
-| ym | string | yes |  |  |
+| ym | string | yes | YYYY-MM | Resolver month key (Istanbul timezone). |
 | created_at | datetime | no |  |  |
 | definition_text | string | no |  |  |
 | delta_negative_clamped | integer | no |  |  |
 | first_observation | integer | no |  |  |
 | rebase_flag | integer | no |  |  |
-| series_semantics | enum | no | new |  |
+| series_semantics | enum | yes | new | Canonical semantics flag ('new'); legacy `series` tolerated for migration only. |
 | source_url | string | no |  |  |
 | value_stock | number | no |  |  |
 
@@ -50,10 +50,10 @@ Canonical facts written to DuckDB alongside CSV exports.
 | doc_title | string | yes |  |  |
 | event_id | string | yes |  |  |
 | hazard_class | string | yes |  |  |
-| hazard_code | string | yes |  |  |
+| hazard_code | string | yes |  | Resolver hazard taxonomy slug (lowercase snake_case). |
 | hazard_label | string | yes |  |  |
 | ingested_at | date | yes |  |  |
-| iso3 | string | yes |  |  |
+| iso3 | string | yes |  | ISO-3166 alpha-3 code (uppercase). |
 | method | string | yes |  |  |
 | metric | enum | yes | in_need, affected, displaced, cases, fatalities<br>events, participants |  |
 | publication_date | string | yes |  | ISO-8601 date (YYYY-MM-DD) |
@@ -66,7 +66,7 @@ Canonical facts written to DuckDB alongside CSV exports.
 | delta_negative_clamped | integer | no |  |  |
 | first_observation | integer | no |  |  |
 | rebase_flag | integer | no |  |  |
-| series_semantics | enum | no | stock, new |  |
+| series_semantics | enum | yes | stock, new | Canonical semantics flag; `series` is deprecated and only used for backward compatibility. |
 | source_url | string | no |  |  |
 | value_new | number | no |  |  |
 | value_stock | number | no |  |  |
@@ -79,15 +79,15 @@ Resolved precedence outputs stored in DuckDB for querying.
 | --- | --- | --- | --- | --- |
 | as_of_date | string | yes |  | ISO-8601 date (YYYY-MM-DD) |
 | hazard_class | string | yes |  |  |
-| hazard_code | string | yes |  |  |
+| hazard_code | string | yes |  | Resolver hazard taxonomy slug (lowercase snake_case). |
 | hazard_label | string | yes |  |  |
-| iso3 | string | yes |  |  |
+| iso3 | string | yes |  | ISO-3166 alpha-3 code (uppercase). |
 | metric | enum | yes | in_need, affected, displaced, cases, fatalities<br>events, participants |  |
 | publication_date | string | yes |  | ISO-8601 date (YYYY-MM-DD) |
 | publisher | string | yes |  |  |
 | unit | enum | yes | persons, persons_cases, events |  |
 | value | number | yes |  |  |
-| ym | string | yes |  |  |
+| ym | string | yes | YYYY-MM | Resolver month key (Istanbul timezone). |
 | confidence | string | no |  |  |
 | created_at | datetime | no |  |  |
 | definition_text | string | no |  |  |
@@ -95,9 +95,12 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
-| series_semantics | enum | no | stock, new |  |
+| series_semantics | enum | yes | stock, new | Canonical semantics flag; `series` is deprecated and only used for backward compatibility. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
+
+> **Note:** `series_semantics` is the canonical indicator for Resolver series (`'new'` or `'stock'`). Legacy rows may still populate
+> the historical `series` column, but writers must emit `series_semantics` going forward.
 
 ## db.manifests
 

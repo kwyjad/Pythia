@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import pathlib
 import re
 import sys
 import threading
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 if os.getenv("RESOLVER_DEBUG") == "1":
@@ -18,8 +19,35 @@ if os.getenv("RESOLVER_DEBUG") == "1":
         stream=sys.stderr,
     )
 
-_CACHE: dict[str, "ConnectionWrapper"] = {}
+_PROCESS_CACHE: Dict[str, "ConnectionWrapper"] = {}
 _LOCK = threading.RLock()
+_TLS = threading.local()
+_ALL_PATHS: set[str] = set()
+
+
+def _cache_mode() -> str:
+    mode = os.getenv("RESOLVER_CONN_CACHE_MODE", "process").strip().lower()
+    if mode not in {"process", "thread"}:
+        return "process"
+    return mode
+
+
+def _get_cache() -> Dict[str, "ConnectionWrapper"]:
+    if _cache_mode() == "thread":
+        cache = getattr(_TLS, "cache", None)
+        if cache is None:
+            cache = {}
+            _TLS.cache = cache
+        return cache
+    return _PROCESS_CACHE
+
+
+def _iter_current_caches() -> tuple[Dict[str, "ConnectionWrapper"], ...]:
+    caches: list[Dict[str, "ConnectionWrapper"]] = [_PROCESS_CACHE]
+    tls_cache = getattr(_TLS, "cache", None)
+    if isinstance(tls_cache, dict):
+        caches.append(tls_cache)
+    return tuple(caches)
 
 
 def normalize_duckdb_url(db_url: str) -> str:
@@ -69,16 +97,19 @@ class ConnectionWrapper:
                     self._raw.close()
                 finally:
                     self._closed = True
-                    if _CACHE.get(self._path) is self:
-                        _CACHE.pop(self._path, None)
-                        logger.debug("DuckDB cache evicted on close: %s", self._path)
+                    cache = _get_cache()
+                    if cache.get(self._path) is self:
+                        cache.pop(self._path, None)
+                    logger.debug("DuckDB cache evicted on close: %s", self._path)
 
 
 def _open_new(path: str) -> ConnectionWrapper:
     import duckdb
 
     raw = duckdb.connect(database=path, read_only=False)
-    return ConnectionWrapper(path, raw)
+    wrapper = ConnectionWrapper(path, raw)
+    _ALL_PATHS.add(path)
+    return wrapper
 
 
 def get_shared_duckdb_conn(
@@ -93,7 +124,8 @@ def get_shared_duckdb_conn(
         return wrapper, path
 
     with _LOCK:
-        wrapper = _CACHE.get(path)
+        cache = _get_cache()
+        wrapper = cache.get(path)
         if (
             force_reopen
             or wrapper is None
@@ -101,7 +133,7 @@ def get_shared_duckdb_conn(
             or not wrapper._healthcheck()
         ):
             wrapper = _open_new(path)
-            _CACHE[path] = wrapper
+            cache[path] = wrapper
             logger.debug("DuckDB opened (force=%s): %s", force_reopen, path)
         else:
             logger.debug("DuckDB cache hit: %s", path)
@@ -113,10 +145,33 @@ def clear_cached_connection(db_url: str) -> None:
 
     path = normalize_duckdb_url(db_url)
     with _LOCK:
-        wrapper = _CACHE.pop(path, None)
+        cache = _get_cache()
+        wrapper = cache.pop(path, None)
         if wrapper and not wrapper._closed:
             try:
                 wrapper.close()
             except Exception:  # pragma: no cover - best effort cleanup
                 pass
         logger.debug("DuckDB cache cleared: %s", path)
+
+
+def clear_all_cached_connections() -> None:
+    """Close and evict all cached DuckDB connections for the current context."""
+
+    to_close: list[ConnectionWrapper] = []
+    with _LOCK:
+        for cache in _iter_current_caches():
+            for path, wrapper in list(cache.items()):
+                to_close.append(wrapper)
+                cache.pop(path, None)
+        _ALL_PATHS.clear()
+
+    for wrapper in to_close:
+        try:
+            wrapper.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+
+
+atexit.register(clear_all_cached_connections)
+

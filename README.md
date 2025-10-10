@@ -13,8 +13,8 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - An **anti-drift** script in `scripts/ci/` fails fast if any legacy references to the old repository slug sneak back into the tree.
 - Database test jobs are protected with repo guards and file-existence checks so they only execute inside `oughtinc/Pythia` when the relevant tests are present.
 - When you need to guard a step on the presence of a secret, assign it to an environment variable first (for example, `env.MY_TOKEN: ${{ secrets.MY_TOKEN }}`) and reference `env.MY_TOKEN` inside the `if:` expression. GitHub blocks direct `secrets.*` lookups in `if:` conditions at workflow-parse time.
-- Resolver-specific diagnostics can be enabled in CI by exporting `RESOLVER_DEBUG=1`. When set, the resolver’s DuckDB selectors emit concise debug lines that show the backend, cutoff, `ym`, `iso3`, `hazard_code`, and row-count summaries during DB reads. The shared DuckDB connector also logs the canonicalised database path (for URLs like `duckdb:///tmp/db.duckdb`, `duckdb:////abs/path.duckdb`, relative file paths, or `:memory:`) so you can confirm reads and writes are pointed at the same file. The connector now self-heals cached handles: cache entries are evicted when `.close()` is called, stale connections are re-opened automatically, and setting `RESOLVER_DISABLE_CONN_CACHE=1` forces every `get_db` call to return a fresh handle when tests need complete isolation.
-`get_shared_duckdb_conn(db_url)` returns `(conn, resolved_path)` so tests can both use the live connection and assert which canonical DuckDB file is active.
+- Resolver-specific diagnostics can be enabled in CI by exporting `RESOLVER_DEBUG=1`. When set, the resolver’s DuckDB selectors emit concise debug lines that show the backend, cutoff, `ym`, `iso3`, `hazard_code`, and row-count summaries during DB reads. The shared DuckDB connector also logs the canonicalised database path (for URLs like `duckdb:///tmp/db.duckdb`, `duckdb:////abs/path.duckdb`, relative file paths, or `:memory:`) so you can confirm reads and writes are pointed at the same file. The connector now self-heals cached handles: cache entries are evicted when `.close()` is called, stale connections are re-opened automatically, and cache hygiene is enforced at test boundaries as well as process exit. Set `RESOLVER_DISABLE_CONN_CACHE=1` to bypass caching entirely, or `RESOLVER_CONN_CACHE_MODE=thread` to scope caches to the current thread when running multithreaded diagnostics. `get_shared_duckdb_conn(db_url)` returns `(conn, resolved_path)` so tests can both use the live connection and assert which canonical DuckDB file is active.
+- Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
 
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
@@ -178,9 +178,12 @@ resilient when schemas drift.
 Series semantics are normalised by
 [`resolver.common.series_semantics.compute_series_semantics`](resolver/common/series_semantics.py),
 which draws from [`resolver/config/series_semantics.yml`](resolver/config/series_semantics.yml).
-Blank values stay blank, while metrics listed under `stock_metrics` (currently
-`in_need`) resolve to `"stock"`. Any pre-existing non-empty values such as
-`"incident"` remain untouched so CSV and DuckDB outputs agree on joins.
+Writers now require the canonical `series_semantics` column to resolve to either
+`"new"` or `"stock"`; attempts to emit blank semantics raise a `ValueError` so
+upstream pipelines surface mistakes early. Legacy exports may still populate the
+historical `series` column, and DuckDB readers automatically coalesce
+`series_semantics` with `series` so backfilled rows remain queryable during the
+migration window.
 
 ### DuckDB setup for local development
 

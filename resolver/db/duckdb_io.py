@@ -88,11 +88,21 @@ def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
     semantics = semantics.astype(str).str.strip()
     lowered = semantics.str.lower()
     semantics = semantics.mask(lowered.isin({"none", "nan"}), "")
+    semantics = semantics.mask(lowered.eq("delta"), "new")
     semantics = semantics.mask(lowered.str.startswith("new"), "new")
     semantics = semantics.mask(lowered.str.startswith("stock"), "stock")
     lowered = semantics.astype(str).str.lower()
     semantics = semantics.mask(~lowered.isin({"", "new", "stock"}), "")
     return semantics.astype(str)
+
+
+def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
+    if frame is None or frame.empty or "series_semantics" not in frame.columns:
+        return
+    column = frame["series_semantics"].astype(str)
+    blanks = column.str.strip() == ""
+    if blanks.any():
+        raise ValueError("series_semantics must be 'new' or 'stock'")
 
 
 def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
@@ -711,6 +721,7 @@ def write_snapshot(
             facts_resolved["series_semantics"] = _canonicalise_series_semantics(
                 computed_semantics
             )
+            _assert_semantics_required(facts_resolved, "facts_resolved")
             facts_resolved = facts_resolved.drop_duplicates(
                 subset=FACTS_RESOLVED_KEY_COLUMNS,
                 keep="last",
@@ -755,6 +766,7 @@ def write_snapshot(
                 )
             else:
                 facts_deltas["series_semantics"] = "new"
+            _assert_semantics_required(facts_deltas, "facts_deltas")
             numeric_delta_columns = [
                 col
                 for col in ("value_new", "value_stock")

@@ -9,6 +9,7 @@ import pytest
 pytest.importorskip("duckdb")
 
 from resolver.db import duckdb_io
+from resolver.query import db_reader
 
 
 def _setup_duckdb(tmp_path):
@@ -27,8 +28,9 @@ def _setup_duckdb(tmp_path):
                 "metric": "in_need",
                 "value": 1000,
                 "unit": "persons",
-                "as_of_date": "2024-01-31",
-                "publication_date": "2024-02-02",
+                "as_of": "2024-01-31",
+                "as_of_date": "2024-01-31+00:00",
+                "publication_date": "",
                 "publisher": "OCHA",
                 "source_type": "situation_report",
                 "source_url": "https://example.org/resolved",
@@ -49,8 +51,9 @@ def _setup_duckdb(tmp_path):
                 "metric": "in_need",
                 "value": 1500,
                 "unit": "persons",
-                "as_of_date": "2024-02-28",
-                "publication_date": "2024-03-02",
+                "as_of": "2024-02-28",
+                "as_of_date": "",
+                "publication_date": "2024-02-28+03:00",
                 "publisher": "OCHA",
                 "source_type": "situation_report",
                 "source_url": "https://example.org/resolved",
@@ -94,7 +97,7 @@ def _setup_duckdb(tmp_path):
                 "rebase_flag": 0,
                 "first_observation": 0,
                 "delta_negative_clamped": 0,
-                "as_of": "2024-02-28",
+                "as_of": "2024-02-28+00:00",
                 "source_name": "OCHA",
                 "source_url": "https://example.org/resolved",
                 "definition_text": "",
@@ -117,6 +120,18 @@ def _setup_duckdb(tmp_path):
         facts_deltas=deltas[deltas["ym"] == "2024-02"],
         manifests=[{"name": "2024-02", "rows": 1}],
         meta={"created_at_utc": "2024-03-02T00:00:00Z"},
+    )
+    conn.execute(
+        "UPDATE facts_resolved SET as_of_date = '', publication_date = ? WHERE ym = '2024-02'",
+        ["2024-02-28+03:00"],
+    )
+    conn.execute(
+        "UPDATE facts_resolved SET publication_date = '', as_of_date = ? WHERE ym = '2024-01'",
+        ["2024-01-31+00:00"],
+    )
+    conn.execute(
+        "UPDATE facts_deltas SET as_of = ? WHERE ym = '2024-02'",
+        ["2024-02-28+00:00"],
     )
     return conn, db_path
 
@@ -155,3 +170,27 @@ def test_monthly_deltas_cumulative_equals_stock(tmp_path, capsys, monkeypatch):
         "SELECT value FROM facts_resolved WHERE ym = '2024-02'"
     ).fetchone()[0]
     assert int(total_deltas) == int(stock_value)
+
+    latest_stock = db_reader.fetch_resolved_point(
+        conn,
+        ym="2024-02",
+        iso3="PHL",
+        hazard_code="TC",
+        cutoff="2024-02-28",
+        preferred_metric="in_need",
+    )
+    assert latest_stock is not None
+    assert latest_stock["series_semantics"] == "stock"
+    assert int(latest_stock["value"]) == int(stock_value)
+
+    latest_delta = db_reader.fetch_deltas_point(
+        conn,
+        ym="2024-02",
+        iso3="PHL",
+        hazard_code="TC",
+        cutoff="2024-02-28",
+        preferred_metric="in_need",
+    )
+    assert latest_delta is not None
+    assert latest_delta["series_semantics"] == "new"
+    assert int(latest_delta["value_stock"]) == int(stock_value)
