@@ -13,6 +13,7 @@ from typing import Iterable, Optional, Tuple
 import pandas as pd
 
 from resolver.db import duckdb_io
+from resolver.db.conn_shared import normalize_duckdb_url
 
 # --- begin duckdb import guard ---
 try:
@@ -31,6 +32,7 @@ if os.getenv("RESOLVER_DEBUG") == "1":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
 
 try:  # pragma: no cover - zoneinfo available on 3.9+
     from zoneinfo import ZoneInfo
@@ -211,6 +213,12 @@ def load_series_from_db(
         return None, "", normalized_series
 
     conn = duckdb_io.get_db(db_url)
+    if DEBUG_ENABLED:
+        LOGGER.debug(
+            "DuckDB resolved path=%s for db_url=%s",
+            normalize_duckdb_url(db_url),
+            db_url,
+        )
     duckdb_io.init_schema(conn)
 
     if normalized_series == "new":
@@ -552,6 +560,12 @@ def _resolve_from_db(
         duckdb_io.init_schema(conn)
     except Exception:  # pragma: no cover - optional dependency misconfigured
         return None
+    if DEBUG_ENABLED:
+        LOGGER.debug(
+            "DuckDB resolved path=%s for db_url=%s",
+            normalize_duckdb_url(db_url),
+            db_url,
+        )
 
     if series == "new":
         LOGGER.debug(

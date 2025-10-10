@@ -47,7 +47,7 @@ from resolver.query.selectors import (
     resolve_point,
     ym_from_cutoff,
 )
-from resolver.query.db_reader import get_shared_duckdb_conn
+from resolver.db.conn_shared import get_shared_duckdb_conn
 
 LOGGER = logging.getLogger(__name__)
 
@@ -310,12 +310,15 @@ def _run_single(args: List[str]) -> None:
     if not result:
         if backend_choice in {"db", "auto"}:
             db_url = os.environ.get("RESOLVER_DB_URL")
-            conn = get_shared_duckdb_conn(db_url)
+            conn, resolved_path, reused = get_shared_duckdb_conn(db_url)
             if conn is not None:
                 LOGGER.debug(
                     "duckdb shared conn id=%s db=%s",
                     id(conn),
                     getattr(conn, "database", "n/a"),
+                )
+                LOGGER.debug(
+                    "duckdb shared conn path=%s reused=%s", resolved_path, reused
                 )
             ym = ym_from_cutoff(args.cutoff)
 
@@ -323,12 +326,15 @@ def _run_single(args: List[str]) -> None:
             try:
                 import duckdb  # ensure we have the real module, not a shadowed symbol
                 if conn is None:
-                    conn = get_shared_duckdb_conn(db_url)
+                    conn, resolved_path, reused = get_shared_duckdb_conn(db_url)
                     if conn is not None:
                         LOGGER.debug(
                             "duckdb shared conn id=%s db=%s",
                             id(conn),
                             getattr(conn, "database", "n/a"),
+                        )
+                        LOGGER.debug(
+                            "duckdb shared conn path=%s reused=%s", resolved_path, reused
                         )
 
                 if conn is not None:
