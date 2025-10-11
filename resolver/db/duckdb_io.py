@@ -67,12 +67,12 @@ FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
 TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
     "facts_resolved": {
         "columns": FACTS_RESOLVED_KEY_COLUMNS,
-        "primary": "pk_facts_resolved",
+        "primary": "pk_facts_resolved_series",
         "unique": "ux_facts_resolved_series",
     },
     "facts_deltas": {
         "columns": FACTS_DELTAS_KEY_COLUMNS,
-        "primary": "pk_facts_deltas",
+        "primary": "pk_facts_deltas_series",
         "unique": "ux_facts_deltas_series",
     },
 }
@@ -551,14 +551,7 @@ def init_schema(
     }
     existing_tables = {
         row[0]
-        for row in conn.execute(
-            """
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = 'main'
-              AND table_name IN ('facts_resolved','facts_deltas','manifests','meta_runs','snapshots')
-            """
-        ).fetchall()
+        for row in conn.execute("PRAGMA show_tables").fetchall()
     }
 
     core_tables = {"facts_resolved", "facts_deltas"}
@@ -601,11 +594,11 @@ def init_schema(
                 proxy_for TEXT,
                 confidence TEXT,
                 series TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (ym, iso3, hazard_code, metric, series_semantics)
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing_tables.add("facts_resolved")
     if "facts_deltas" not in existing_tables:
         conn.execute(
             """
@@ -623,11 +616,11 @@ def init_schema(
                 rebase_flag INTEGER,
                 first_observation INTEGER,
                 delta_negative_clamped INTEGER,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (ym, iso3, hazard_code, metric)
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing_tables.add("facts_deltas")
 
     if not expected_tables.issubset(existing_tables):
         sql = schema_path.read_text(encoding="utf-8")

@@ -383,6 +383,33 @@ def _run_single(args: List[str]) -> None:
                     resolved_path=resolved_path,
                     reason="no_connection",
                 )
+        if os.getenv("RESOLVER_DIAG") == "1" and conn is not None:
+            try:
+                total = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+                key_count = conn.execute(
+                    "SELECT COUNT(*) FROM facts_deltas WHERE ym=? AND iso3=? AND hazard_code=?",
+                    [ym, iso3, hazard_code],
+                ).fetchone()[0]
+                cutoff_count = conn.execute(
+                    """
+                    WITH a AS (
+                      SELECT TRY_CAST(as_of AS DATE) AS as_of_date
+                      FROM facts_deltas
+                      WHERE ym=? AND iso3=? AND hazard_code=?
+                    )
+                    SELECT COUNT(*) FROM a WHERE as_of_date IS NULL OR as_of_date <= TRY_CAST(? AS DATE)
+                    """,
+                    [ym, iso3, hazard_code, args.cutoff],
+                ).fetchone()[0]
+                LOGGER.debug(
+                    "db_read_no_data_diagnostics: facts_deltas_total=%s key_count=%s cutoff_count=%s",
+                    total,
+                    key_count,
+                    cutoff_count,
+                )
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                LOGGER.debug("db_read_no_data_diag_error: %r", exc)
+
         dataset_hint = (
             "DuckDB table facts_deltas (value_new)"
             if series_requested == "new"

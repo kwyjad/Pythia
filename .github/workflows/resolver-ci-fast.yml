@@ -42,6 +42,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: 1
       TZ: Europe/Istanbul
       RESOLVER_DUCKDB_DISABLE_MERGE: "1"
+      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
 
     steps:
       - name: Checkout
@@ -117,36 +118,37 @@ jobs:
           print("✅ DuckDB installed:", duckdb.__version__)
           PY
 
-      - name: Prove import path & file hash
+      - name: Show resolver import location & DuckDB version
         run: |
           python - <<'PY'
-          import hashlib, inspect, pathlib
+          import hashlib, inspect, pathlib, sys
           import duckdb, resolver
           import resolver.db.duckdb_io as duckdb_io
 
-          resolver_path = pathlib.Path(inspect.getfile(resolver)).resolve()
+          print("Python executable:", sys.executable)
+          resolver_path = pathlib.Path(resolver.__file__).resolve()
           duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
 
-          print("resolver imported from:", resolver_path)
+          print("resolver module path:", resolver_path)
           print("duckdb_io.py path:", duckdb_io_path)
           print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "unknown"))
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
           PY
 
       - name: Upload duckdb_io.py used by CI
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: duckdb_io-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
           path: resolver/db/duckdb_io.py
           overwrite: true
 
       - name: Upload schema.sql used by CI
-        if: ${{ always() && hashFiles('schema.sql') != '' }}
+        if: ${{ always() && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-sql-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
-          path: schema.sql
+          name: schema-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          path: resolver/db/schema.sql
           overwrite: true
 
       - name: Run fast tests
@@ -187,6 +189,7 @@ jobs:
     timeout-minutes: 20
     env:
       RESOLVER_DUCKDB_DISABLE_MERGE: "1"
+      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
 
     steps:
       - name: Checkout
@@ -274,37 +277,38 @@ jobs:
           print("duckdb", duckdb.__version__)
           PY
 
-      - name: Prove import path & file hash
+      - name: Show resolver import location & DuckDB version
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python - <<'PY'
-          import hashlib, inspect, pathlib
+          import hashlib, inspect, pathlib, sys
           import duckdb, resolver
           import resolver.db.duckdb_io as duckdb_io
 
-          resolver_path = pathlib.Path(inspect.getfile(resolver)).resolve()
+          print("Python executable:", sys.executable)
+          resolver_path = pathlib.Path(resolver.__file__).resolve()
           duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
 
-          print("resolver imported from:", resolver_path)
+          print("resolver module path:", resolver_path)
           print("duckdb_io.py path:", duckdb_io_path)
           print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "unknown"))
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
           PY
 
       - name: Upload duckdb_io.py used by CI
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: duckdb_io-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
           path: resolver/db/duckdb_io.py
           overwrite: true
 
       - name: Upload schema.sql used by CI
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('schema.sql') != '' }}
+        if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-sql-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
-          path: schema.sql
+          name: schema-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          path: resolver/db/schema.sql
           overwrite: true
 
       - name: Run DuckDB tests
@@ -346,6 +350,7 @@ jobs:
     env:
       RESOLVER_DUCKDB_DISABLE_MERGE: "1"
       RESOLVER_DISABLE_CONN_CACHE: "1"
+      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
 
     steps:
       - name: Checkout
@@ -433,37 +438,38 @@ jobs:
           print("duckdb", duckdb.__version__)
           PY
 
-      - name: Prove import path & file hash
+      - name: Show resolver import location & DuckDB version
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python - <<'PY'
-          import hashlib, inspect, pathlib
+          import hashlib, inspect, pathlib, sys
           import duckdb, resolver
           import resolver.db.duckdb_io as duckdb_io
 
-          resolver_path = pathlib.Path(inspect.getfile(resolver)).resolve()
+          print("Python executable:", sys.executable)
+          resolver_path = pathlib.Path(resolver.__file__).resolve()
           duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
 
-          print("resolver imported from:", resolver_path)
+          print("resolver module path:", resolver_path)
           print("duckdb_io.py path:", duckdb_io_path)
           print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "unknown"))
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
           PY
 
       - name: Upload duckdb_io.py used by CI
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: duckdb_io-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
           path: resolver/db/duckdb_io.py
           overwrite: true
 
       - name: Upload schema.sql used by CI
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('schema.sql') != '' }}
+        if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-sql-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
-          path: schema.sql
+          name: schema-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          path: resolver/db/schema.sql
           overwrite: true
 
       - name: Run DuckDB tests (cache disabled)
