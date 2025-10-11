@@ -13,7 +13,6 @@ import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-import numpy as np
 import pandas as pd
 
 try:  # pragma: no cover - import guard for optional dependency
@@ -67,14 +66,18 @@ FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
 TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
     "facts_resolved": {
         "columns": FACTS_RESOLVED_KEY_COLUMNS,
-        "primary": "pk_facts_resolved",
+        "primary": "pk_facts_resolved_series",
         "unique": "ux_facts_resolved_series",
     },
     "facts_deltas": {
         "columns": FACTS_DELTAS_KEY_COLUMNS,
-        "primary": "pk_facts_deltas",
+        "primary": "pk_facts_deltas_series",
         "unique": "ux_facts_deltas_series",
     },
+}
+_COERCE_NUMERIC_COLUMNS: dict[str, list[str]] = {
+    "facts_resolved": ["value"],
+    "facts_deltas": ["value_new", "value_stock"],
 }
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
     "facts_resolved": ("as_of_date", "publication_date"),
@@ -233,9 +236,8 @@ def _coerce_numeric_cols(
             continue
         stringified = series.astype(str).str.strip()
         lowered = stringified.str.lower()
-        stringified = stringified.mask(
-            lowered.isin({"", "none", "null", "nan"}), np.nan
-        )
+        placeholder_values = {"", "none", "null", "nan", "<na>"}
+        stringified = stringified.mask(lowered.isin(placeholder_values), pd.NA)
         coerced[col] = pd.to_numeric(stringified, errors="coerce")
     if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
         present = [col for col in cols if col in coerced.columns]
@@ -243,6 +245,15 @@ def _coerce_numeric_cols(
             "duckdb.numeric_coercion | table=%s columns=%s", table_name, present
         )
     return coerced
+
+
+def _coerce_numeric(
+    frame: pd.DataFrame | None, table_name: str
+) -> pd.DataFrame | None:
+    columns = _COERCE_NUMERIC_COLUMNS.get(table_name)
+    if not columns:
+        return frame
+    return _coerce_numeric_cols(frame, columns, table_name)
 
 
 def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
@@ -327,15 +338,81 @@ def _constraint_column_sets(
     return constraints
 
 
+def _unique_index_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> dict[str, list[str]]:
+    """Return mapping of unique index name to ordered column list for ``table``."""
+
+    indexes: dict[str, list[str]] = {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT index_name, expressions, sql
+            FROM duckdb_indexes()
+            WHERE table_name = ? AND is_unique
+            """,
+            [table],
+        ).fetchall()
+    except Exception:  # pragma: no cover - optional diagnostic path
+        LOGGER.debug(
+            "duckdb.index_inspection_failed | table=%s", table, exc_info=True
+        )
+        rows = []
+
+    for name, expressions, sql in rows or []:
+        if not sql or "CREATE UNIQUE INDEX" not in str(sql).upper():
+            continue
+        expr_text = str(expressions or "").strip()
+        if expr_text.startswith("[") and expr_text.endswith("]"):
+            expr_text = expr_text[1:-1]
+        ordered_columns = [
+            part.strip().strip("\"")
+            for part in expr_text.split(",")
+            if part.strip()
+        ]
+        if ordered_columns:
+            indexes[str(name)] = ordered_columns
+    return indexes
+
+
+def _canonicalize_columns(columns: Sequence[str] | None) -> list[str]:
+    return [str(column).strip().lower() for column in columns or []]
+
+
+def _has_constraint_key(
+    conn: "duckdb.DuckDBPyConnection", table: str, canon_keys: Sequence[str]
+) -> bool:
+    for constraint_columns in _constraint_column_sets(conn, table):
+        if _canonicalize_columns(constraint_columns) == list(canon_keys):
+            return True
+    return False
+
+
 def _has_declared_key(
     conn: "duckdb.DuckDBPyConnection", table: str, keys: Sequence[str] | None
 ) -> bool:
     if not keys:
         return False
-    expected = [key.lower() for key in keys]
-    for constraint_columns in _constraint_column_sets(conn, table):
-        if [column.lower() for column in constraint_columns] == expected:
+
+    canonical = _canonicalize_columns(keys)
+    try:
+        if _has_constraint_key(conn, table, canonical):
             return True
+    except Exception:  # pragma: no cover - diagnostic aid only
+        LOGGER.debug(
+            "duckdb.constraint_detection_failed | table=%s", table, exc_info=True
+        )
+
+    try:
+        unique_indexes = _unique_index_columns(conn, table)
+        for columns in unique_indexes.values():
+            if _canonicalize_columns(columns) == canonical:
+                return True
+    except Exception:  # pragma: no cover - diagnostic aid only
+        LOGGER.debug(
+            "duckdb.unique_index_detection_failed | table=%s", table, exc_info=True
+        )
+
     return False
 
 
@@ -551,14 +628,7 @@ def init_schema(
     }
     existing_tables = {
         row[0]
-        for row in conn.execute(
-            """
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = 'main'
-              AND table_name IN ('facts_resolved','facts_deltas','manifests','meta_runs','snapshots')
-            """
-        ).fetchall()
+        for row in conn.execute("PRAGMA show_tables").fetchall()
     }
 
     core_tables = {"facts_resolved", "facts_deltas"}
@@ -601,11 +671,11 @@ def init_schema(
                 proxy_for TEXT,
                 confidence TEXT,
                 series TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (ym, iso3, hazard_code, metric, series_semantics)
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing_tables.add("facts_resolved")
     if "facts_deltas" not in existing_tables:
         conn.execute(
             """
@@ -623,11 +693,11 @@ def init_schema(
                 rebase_flag INTEGER,
                 first_observation INTEGER,
                 delta_negative_clamped INTEGER,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (ym, iso3, hazard_code, metric)
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing_tables.add("facts_deltas")
 
     if not expected_tables.issubset(existing_tables):
         sql = schema_path.read_text(encoding="utf-8")
@@ -728,14 +798,9 @@ def upsert_dataframe(
     import duckdb  # keep inside function to avoid module-top import churn
 
     frame = df.copy()
-    if table == "facts_resolved":
-        coerced = _coerce_numeric_cols(frame, ["value"], table)
-        if coerced is not None:
-            frame = coerced
-    elif table == "facts_deltas":
-        coerced = _coerce_numeric_cols(frame, ["value_new", "value_stock"], table)
-        if coerced is not None:
-            frame = coerced
+    coerced = _coerce_numeric(frame, table)
+    if coerced is not None:
+        frame = coerced
     LOGGER.info("Upserting %s rows into %s", len(frame), table)
     LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
 
@@ -761,48 +826,77 @@ def upsert_dataframe(
 
     table_info = conn.execute(f"PRAGMA table_info({_quote_literal(table)})").fetchall()
     if not table_info:
-        raise ValueError(f"Table '{table}' does not exist in DuckDB database")
+        init_schema(conn)
+        table_info = conn.execute(
+            f"PRAGMA table_info({_quote_literal(table)})"
+        ).fetchall()
+        if not table_info:
+            raise ValueError(f"Table '{table}' does not exist in DuckDB database")
     table_columns = [row[1] for row in table_info]
     has_declared_key = _has_declared_key(conn, table, keys) if keys else False
+    fallback_missing_key = False
     if keys and not has_declared_key:
-        if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
-            try:
-                LOGGER.debug(
-                    "duckdb.upsert.key_mismatch | table=%s keys=%s table_info=%s",
-                    table,
-                    list(keys),
-                    [(row[1], row[2], row[3], row[4], row[5]) for row in table_info],
-                )
-                tables = conn.execute("PRAGMA show_tables").fetchall()
-                LOGGER.debug(
-                    "duckdb.upsert.key_mismatch.tables | entries=%s", tables
-                )
-                constraints = _constraint_column_sets(conn, table)
-                LOGGER.debug(
-                    "duckdb.upsert.key_mismatch.constraints | table=%s sets=%s",
-                    table,
-                    constraints,
-                )
-                index_rows = conn.execute(
-                    "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?",
-                    [table],
-                ).fetchall()
-                LOGGER.debug(
-                    "duckdb.upsert.key_mismatch.indexes | table=%s indexes=%s",
-                    table,
-                    index_rows,
-                )
-            except Exception:  # pragma: no cover - diagnostics only
-                LOGGER.debug(
-                    "duckdb.upsert.key_mismatch.diag_failed | table=%s", table, exc_info=True
-                )
-        if _attempt_heal_missing_key(conn, table, keys):
-            has_declared_key = True
-        else:
-            raise ValueError(
-                f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
-                "key or unique constraint."
-            )
+        init_schema(conn)
+        table_info = conn.execute(
+            f"PRAGMA table_info({_quote_literal(table)})"
+        ).fetchall()
+        if table_info:
+            table_columns = [row[1] for row in table_info]
+        has_declared_key = _has_declared_key(conn, table, keys)
+        if not has_declared_key:
+            if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
+                try:
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch | table=%s keys=%s table_info=%s",
+                        table,
+                        list(keys),
+                        [
+                            (row[1], row[2], row[3], row[4], row[5])
+                            for row in table_info
+                        ],
+                    )
+                    tables = conn.execute("PRAGMA show_tables").fetchall()
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch.tables | entries=%s", tables
+                    )
+                    constraints = _constraint_column_sets(conn, table)
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch.constraints | table=%s sets=%s",
+                        table,
+                        constraints,
+                    )
+                    index_rows = conn.execute(
+                        "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?",
+                        [table],
+                    ).fetchall()
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch.indexes | table=%s indexes=%s",
+                        table,
+                        index_rows,
+                    )
+                except Exception:  # pragma: no cover - diagnostics only
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch.diag_failed | table=%s",
+                        table,
+                        exc_info=True,
+                    )
+            if _attempt_heal_missing_key(conn, table, keys):
+                has_declared_key = True
+            else:
+                fallback_missing_key = True
+                if os.getenv("RESOLVER_DIAG") == "1":
+                    try:
+                        LOGGER.debug(
+                            "duckdb.upsert.key_mismatch.indexes | table=%s discovered=%s",
+                            table,
+                            json.dumps(_unique_index_columns(conn, table)),
+                        )
+                    except Exception:  # pragma: no cover - diagnostics only
+                        LOGGER.debug(
+                            "duckdb.upsert.key_mismatch.indexes_failed | table=%s",
+                            table,
+                            exc_info=True,
+                        )
 
     insert_columns = [col for col in table_columns if col in frame.columns]
     dropped = [col for col in frame.columns if col not in table_columns]
@@ -951,71 +1045,116 @@ def upsert_dataframe(
                     upsert_completed = True
 
         if use_legacy_path:
-            if keys and has_declared_key and merge_sql:
-                LOGGER.debug(
-                    "Falling back to legacy delete+insert after MERGE failure for table %s",
-                    table,
-                )
-            if keys:
-                delete_predicate = " AND ".join(
-                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
-                )
-                delete_sql = (
-                    "\n".join(
-                        [
-                            f"DELETE FROM {table_ident} AS t",
-                            "WHERE EXISTS (",
-                            f"    SELECT 1 FROM {temp_ident} AS s",
-                            f"    WHERE {delete_predicate}",
-                            ")",
-                        ]
-                    )
-                    + ";"
-                )
-                LOGGER.debug("DELETE SQL:\n%s", delete_sql)
-                try:
-                    deleted_rows = conn.execute(
-                        f"{delete_sql[:-1]} RETURNING 1"
-                    ).fetchall()
-                    deleted_count = len(deleted_rows)
-                except duckdb.Error:
+            transaction_started = False
+            try:
+                if fallback_missing_key:
+                    try:
+                        conn.execute("BEGIN TRANSACTION")
+                    except duckdb.Error:
+                        LOGGER.debug(
+                            "duckdb.upsert.fallback.begin_failed | table=%s",
+                            table,
+                            exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+                        )
+                    else:
+                        transaction_started = True
+                        if os.getenv("RESOLVER_DIAG") == "1":
+                            LOGGER.debug(
+                                "duckdb.upsert.fallback.start | table=%s keys=%s rows=%s",
+                                table,
+                                list(keys or []),
+                                len(frame),
+                            )
+                if keys and has_declared_key and merge_sql:
                     LOGGER.debug(
-                        "DELETE ... RETURNING failed; retrying without RETURNING",
-                        exc_info=True,
+                        "Falling back to legacy delete+insert after MERGE failure for table %s",
+                        table,
                     )
-                    count_sql = (
+                if keys:
+                    delete_predicate = " AND ".join(
+                        f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                    )
+                    delete_sql = (
                         "\n".join(
                             [
-                                "SELECT COUNT(*)",
-                                f"FROM {table_ident} AS t",
-                                f"JOIN {temp_ident} AS s",
-                                f"  ON {delete_predicate}",
+                                f"DELETE FROM {table_ident} AS t",
+                                "WHERE EXISTS (",
+                                f"    SELECT 1 FROM {temp_ident} AS s",
+                                f"    WHERE {delete_predicate}",
+                                ")",
                             ]
                         )
+                        + ";"
                     )
-                    deleted_count = conn.execute(count_sql).fetchone()[0]
-                    conn.execute(delete_sql)
-                else:
-                    deleted_count = int(deleted_count)
-                LOGGER.info(
-                    "duckdb.upsert.legacy_delete | Deleted %s existing rows from %s using keys %s",
-                    int(deleted_count or 0),
-                    table,
-                    "[" + ", ".join(keys or []) + "]",
-                )
+                    LOGGER.debug("DELETE SQL:\n%s", delete_sql)
+                    try:
+                        deleted_rows = conn.execute(
+                            f"{delete_sql[:-1]} RETURNING 1"
+                        ).fetchall()
+                        deleted_count = len(deleted_rows)
+                    except duckdb.Error:
+                        LOGGER.debug(
+                            "DELETE ... RETURNING failed; retrying without RETURNING",
+                            exc_info=True,
+                        )
+                        count_sql = (
+                            "\n".join(
+                                [
+                                    "SELECT COUNT(*)",
+                                    f"FROM {table_ident} AS t",
+                                    f"JOIN {temp_ident} AS s",
+                                    f"  ON {delete_predicate}",
+                                ]
+                            )
+                        )
+                        deleted_count = conn.execute(count_sql).fetchone()[0]
+                        conn.execute(delete_sql)
+                    else:
+                        deleted_count = int(deleted_count)
+                    LOGGER.info(
+                        "duckdb.upsert.legacy_delete | Deleted %s existing rows from %s using keys %s",
+                        int(deleted_count or 0),
+                        table,
+                        "[" + ", ".join(keys or []) + "]",
+                    )
 
-            cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
-            insert_sql = (
-                f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
-            )
-            LOGGER.debug("INSERT SQL:\n%s", insert_sql)
-            conn.execute(insert_sql)
-            LOGGER.info(
-                "duckdb.upsert.legacy_insert | Inserted %s rows into %s",
-                len(frame),
-                table,
-            )
-            upsert_completed = True
+                cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
+                insert_sql = (
+                    f"INSERT INTO {table_ident} ({cols_csv}) SELECT {cols_csv} FROM {temp_ident}"
+                )
+                LOGGER.debug("INSERT SQL:\n%s", insert_sql)
+                conn.execute(insert_sql)
+                LOGGER.info(
+                    "duckdb.upsert.legacy_insert | Inserted %s rows into %s",
+                    len(frame),
+                    table,
+                )
+                if transaction_started:
+                    conn.execute("COMMIT")
+                if fallback_missing_key and os.getenv("RESOLVER_DIAG") == "1":
+                    LOGGER.debug(
+                        "duckdb.upsert.fallback.complete | table=%s keys=%s rows=%s",
+                        table,
+                        list(keys or []),
+                        len(frame),
+                    )
+            except Exception as exc:
+                if transaction_started:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:  # pragma: no cover - diagnostics only
+                        LOGGER.debug(
+                            "duckdb.upsert.fallback.rollback_failed | table=%s",
+                            table,
+                            exc_info=True,
+                        )
+                if fallback_missing_key:
+                    raise ValueError(
+                        f"Fallback upsert failed for table '{table}' with keys {list(keys or [])}"
+                    ) from exc
+                raise
+            else:
+                upsert_completed = True
     except Exception as e:
         if upsert_completed:
             LOGGER.debug(
@@ -1144,8 +1283,8 @@ def write_snapshot(
                 default_target="stock",
             )
             _assert_semantics_required(facts_resolved, "facts_resolved")
-            facts_resolved = _coerce_numeric_cols(
-                facts_resolved, ["value"], "facts_resolved"
+            facts_resolved = _coerce_numeric(
+                facts_resolved, "facts_resolved"
             )
             facts_resolved = facts_resolved.drop_duplicates(
                 subset=FACTS_RESOLVED_KEY_COLUMNS,
@@ -1190,8 +1329,8 @@ def write_snapshot(
                 default_target="new",
             )
             _assert_semantics_required(facts_deltas, "facts_deltas")
-            facts_deltas = _coerce_numeric_cols(
-                facts_deltas, ["value_new", "value_stock"], "facts_deltas"
+            facts_deltas = _coerce_numeric(
+                facts_deltas, "facts_deltas"
             )
             facts_deltas = facts_deltas.drop_duplicates(
                 subset=FACTS_DELTAS_KEY_COLUMNS,

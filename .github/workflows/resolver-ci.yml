@@ -35,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESOLVER_DUCKDB_DISABLE_MERGE: "1"
+      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -114,36 +115,37 @@ jobs:
           import duckdb
           print("✅ DuckDB installed:", duckdb.__version__)
           PY
-      - name: Prove import path & file hash
+      - name: Show resolver import location & DuckDB version
         run: |
           python - <<'PY'
-          import hashlib, inspect, pathlib
+          import hashlib, inspect, pathlib, sys
           import duckdb, resolver
           import resolver.db.duckdb_io as duckdb_io
 
-          resolver_path = pathlib.Path(inspect.getfile(resolver)).resolve()
+          print("Python executable:", sys.executable)
+          resolver_path = pathlib.Path(resolver.__file__).resolve()
           duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
 
-          print("resolver imported from:", resolver_path)
+          print("resolver module path:", resolver_path)
           print("duckdb_io.py path:", duckdb_io_path)
           print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "unknown"))
+          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
           PY
 
       - name: Upload duckdb_io.py used by CI
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
           path: resolver/db/duckdb_io.py
           overwrite: true
 
       - name: Upload schema.sql used by CI
-        if: ${{ always() && hashFiles('schema.sql') != '' }}
+        if: ${{ always() && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-sql-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
-          path: schema.sql
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
+          path: resolver/db/schema.sql
           overwrite: true
       - name: Connector Smoke (offline)
         run: |
@@ -190,7 +192,7 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -336,7 +338,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
           path: resolver/db/duckdb_io.py
           overwrite: true
 
@@ -344,7 +346,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-sql-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
           path: schema.sql
           overwrite: true
 
@@ -367,7 +369,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
           path: |
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv
@@ -518,7 +520,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
           path: resolver/db/duckdb_io.py
           overwrite: true
 
@@ -526,7 +528,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-sql-at-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
           path: schema.sql
           overwrite: true
 
@@ -547,7 +549,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
           path: |
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv
