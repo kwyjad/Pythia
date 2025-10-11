@@ -139,7 +139,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
           path: resolver/db/duckdb_io.py
           overwrite: true
 
@@ -147,7 +147,7 @@ jobs:
         if: ${{ always() && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
           path: resolver/db/schema.sql
           overwrite: true
 
@@ -159,14 +159,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fast-pytest-results
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-pytest
           path: pytest-junit.xml
 
       - name: Upload diagnostics on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -299,7 +299,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
           path: resolver/db/duckdb_io.py
           overwrite: true
 
@@ -307,7 +307,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
           path: resolver/db/schema.sql
           overwrite: true
 
@@ -321,7 +321,7 @@ jobs:
         if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -460,7 +460,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: duckdb_io-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
           path: resolver/db/duckdb_io.py
           overwrite: true
 
@@ -468,7 +468,7 @@ jobs:
         if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/db/schema.sql') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: schema-${{ github.sha }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
           path: resolver/db/schema.sql
           overwrite: true
 
@@ -482,7 +482,7 @@ jobs:
         if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
           path: |
             **/*.duckdb
             pytest-junit.xml
