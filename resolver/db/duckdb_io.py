@@ -46,12 +46,12 @@ TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
     "facts_resolved": {
         "columns": FACTS_RESOLVED_KEY_COLUMNS,
         "primary": "pk_facts_resolved",
-        "unique": "u_facts_resolved_key",
+        "unique": "ux_facts_resolved_series",
     },
     "facts_deltas": {
         "columns": FACTS_DELTAS_KEY_COLUMNS,
         "primary": "pk_facts_deltas",
-        "unique": "u_facts_deltas_key",
+        "unique": "ux_facts_deltas_series",
     },
 }
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -676,6 +676,37 @@ def upsert_dataframe(
     table_columns = [row[1] for row in table_info]
     has_declared_key = _has_declared_key(conn, table, keys) if keys else False
     if keys and not has_declared_key:
+        if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
+            try:
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch | table=%s keys=%s table_info=%s",
+                    table,
+                    list(keys),
+                    [(row[1], row[2], row[3], row[4], row[5]) for row in table_info],
+                )
+                tables = conn.execute("PRAGMA show_tables").fetchall()
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.tables | entries=%s", tables
+                )
+                constraints = _constraint_column_sets(conn, table)
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.constraints | table=%s sets=%s",
+                    table,
+                    constraints,
+                )
+                index_rows = conn.execute(
+                    "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?",
+                    [table],
+                ).fetchall()
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.indexes | table=%s indexes=%s",
+                    table,
+                    index_rows,
+                )
+            except Exception:  # pragma: no cover - diagnostics only
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.diag_failed | table=%s", table, exc_info=True
+                )
         if _attempt_heal_missing_key(conn, table, keys):
             has_declared_key = True
         else:

@@ -249,6 +249,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Derive sanitized artifact suffix
+        if: always()
+        run: |
+          raw="nightly"
+          if [ -z "${raw}" ]; then
+            raw="${{ matrix.duckdb_label }}"
+          fi
+          if [ -z "${raw}" ]; then
+            raw="${{ matrix.duckdb }}"
+          fi
+          if [ -z "${raw}" ]; then
+            raw="latest"
+          fi
+          SAFE_SUFFIX="${raw}"
+          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
+          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
+          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
+          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
+
       - name: Debug repo context
         run: |
           echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
@@ -360,9 +379,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-diagnostics
+          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
           path: |
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv
             **/parity_mismatch_cell_diffs.csv
           if-no-files-found: ignore
+          overwrite: true

@@ -198,6 +198,28 @@ def _to_month(series: "pd.Series") -> "pd.Series":
     return formatted.fillna("")
 
 
+def _warn_on_non_canonical_semantics(label: str, frame: "pd.DataFrame | None") -> None:
+    if frame is None or frame.empty or "series_semantics" not in frame.columns:
+        return
+    values = (
+        frame["series_semantics"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .unique()
+        .tolist()
+    )
+    invalid = sorted(
+        value for value in values if value not in {"", "new", "stock"}
+    )
+    if invalid:
+        LOGGER.warning(
+            "DuckDB write: %s frame has non-canonical series_semantics values: %s",
+            label,
+            invalid,
+        )
+
+
 def _apply_series_semantics(frame: "pd.DataFrame") -> "pd.DataFrame":
     if "series_semantics" not in frame.columns:
         frame["series_semantics"] = ""
@@ -359,6 +381,8 @@ def _maybe_write_to_db(
                 "Deltas frame schema: %s",
                 df_schema(deltas_prepared),
             )
+        _warn_on_non_canonical_semantics("facts_resolved", resolved_prepared)
+        _warn_on_non_canonical_semantics("facts_deltas", deltas_prepared)
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:

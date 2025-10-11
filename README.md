@@ -271,6 +271,7 @@ proxy = http://user:pass@proxy.host:port
 
 - Set `RESOLVER_LOG_LEVEL=DEBUG` before running the exporter or tests to surface structured logs. The exporter and DuckDB writer print dataframe schemas, dropped columns, and `series_semantics` distributions.
 - When `resolver/tests/test_db_parity.py` fails, it emits a `DB PARITY DIAGNOSTICS` block showing schema summaries and anti-join counts. The test also writes CSV artifacts (`parity_mismatch_expected.csv`, `parity_mismatch_db.csv`, and `parity_mismatch_cell_diffs.csv` when applicable) that CI uploads automatically under the `db-parity-diagnostics` artifact.
+- CI sanitises DuckDB matrix labels (replacing `*`, spaces, and other punctuation with underscores) before naming debug artifacts and appends the job name plus `run_attempt`. Uploads run with `overwrite: true`, so retries replace prior diagnostics instead of failing with a 409 conflict.
 - Inspect those CSVs locally or download them from the GitHub Actions job to understand which rows or columns diverged between the CSV export and DuckDB snapshot.
 
 What Forecaster Does (Pipeline)

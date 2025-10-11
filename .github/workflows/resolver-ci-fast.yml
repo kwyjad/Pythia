@@ -47,6 +47,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Derive sanitized artifact suffix
+        if: always()
+        run: |
+          raw="${{ matrix.duckdb_label }}"
+          if [ -z "${raw}" ]; then
+            raw="${{ matrix.duckdb }}"
+          fi
+          if [ -z "${raw}" ]; then
+            raw="latest"
+          fi
+          SAFE_SUFFIX="${raw}"
+          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
+          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
+          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
+          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
+
       - name: Debug repo context
         run: |
           echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
@@ -117,7 +133,7 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -144,6 +160,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Derive sanitized artifact suffix
+        if: always()
+        run: |
+          raw="${{ matrix.duckdb_label }}"
+          if [ -z "${raw}" ]; then
+            raw="${{ matrix.duckdb }}"
+          fi
+          if [ -z "${raw}" ]; then
+            raw="latest"
+          fi
+          SAFE_SUFFIX="${raw}"
+          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
+          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
+          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
+          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
 
       - name: Debug repo context
         run: |
@@ -223,7 +255,7 @@ jobs:
         if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml
@@ -256,6 +288,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Derive sanitized artifact suffix
+        if: always()
+        run: |
+          raw="${{ matrix.duckdb_label }}"
+          if [ -z "${raw}" ]; then
+            raw="${{ matrix.duckdb }}"
+          fi
+          if [ -z "${raw}" ]; then
+            raw="latest"
+          fi
+          SAFE_SUFFIX="${raw}"
+          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
+          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
+          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
+          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
 
       - name: Debug repo context
         run: |
@@ -335,7 +383,7 @@ jobs:
         if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: db-parity-${{ matrix.duckdb_label }}-${{ github.job }}-run${{ github.run_attempt }}
+          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
           path: |
             **/*.duckdb
             pytest-junit.xml

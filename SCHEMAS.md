@@ -17,7 +17,7 @@
 
 > **Numeric precision:** Snapshot writers coerce `value`, `value_new`, and `value_stock` to floats before persistence so CSV inputs such as `'1,200'` or `'150.0'` are normalised. Placeholder strings like `''`, `'None'`, or `'null'` are coerced to `NULL` during writes to keep DuckDB columns numeric. Downstream CLIs round values to the nearest integer only when `unit = 'persons'`; the stored floats retain fractional precision for auditing and non-person metrics.
 
-> **Keys & indexes:** Resolver expects `facts_resolved` rows to be unique on `(ym, iso3, hazard_code, metric, series_semantics)` and `facts_deltas` rows to be unique on `(ym, iso3, hazard_code, metric)`. `init_schema` enforces these natural keys with primary keys and creates `u_facts_resolved_key` / `u_facts_deltas_key` unique indexes. When legacy databases are opened, the writer self-heals by creating the missing indexes before running `MERGE` upserts.
+> **Keys & indexes:** Resolver expects `facts_resolved` rows to be unique on `(ym, iso3, hazard_code, metric, series_semantics)` and `facts_deltas` rows to be unique on `(ym, iso3, hazard_code, metric)`. `init_schema` enforces these natural keys with primary keys and creates `ux_facts_resolved_series` / `ux_facts_deltas_series` unique indexes. When legacy databases are opened, the writer self-heals by creating the missing indexes before running `MERGE` upserts.
 
 ## db.facts_deltas
 
