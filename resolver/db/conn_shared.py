@@ -7,22 +7,23 @@ import logging
 import os
 import pathlib
 import re
-import sys
 import threading
 from typing import Dict, Optional, Tuple
 
+from resolver.diag.diagnostics import get_logger as get_diag_logger, log_json
+
 logger = logging.getLogger(__name__)
+if not logger.handlers:  # pragma: no cover - silence library default
+    logger.addHandler(logging.NullHandler())
 if os.getenv("RESOLVER_DEBUG") == "1":
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    logger.setLevel(logging.DEBUG)
 
 _PROCESS_CACHE: Dict[str, "ConnectionWrapper"] = {}
 _LOCK = threading.RLock()
 _TLS = threading.local()
 _ALL_PATHS: set[str] = set()
+
+_DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
 
 
 def _cache_mode() -> str:
@@ -78,6 +79,7 @@ class ConnectionWrapper:
         self._path = path
         self._raw = raw
         self._closed = False
+        self._last_event = "miss"
 
     def __getattr__(self, name: str):  # pragma: no cover - thin proxy
         return getattr(self._raw, name)
@@ -118,25 +120,39 @@ def get_shared_duckdb_conn(
     """Return a shared DuckDB connection wrapper and its canonical path."""
 
     path = normalize_duckdb_url(db_url or "")
-    if os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1":
+    cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
+    if cache_disabled:
         wrapper = _open_new(path)
+        wrapper._last_event = "miss"
         logger.debug("DuckDB opened (cache disabled): %s", path)
+        log_json(
+            _DIAG_LOGGER,
+            "db_cache_event",
+            cache_event="miss",
+            cache_disabled=True,
+            path=path,
+        )
         return wrapper, path
 
     with _LOCK:
         cache = _get_cache()
         wrapper = cache.get(path)
-        if (
-            force_reopen
-            or wrapper is None
-            or wrapper._closed
-            or not wrapper._healthcheck()
-        ):
+        event = "hit"
+        if force_reopen or wrapper is None or wrapper._closed or not wrapper._healthcheck():
+            event = "reopen" if wrapper is not None else "miss"
             wrapper = _open_new(path)
             cache[path] = wrapper
             logger.debug("DuckDB opened (force=%s): %s", force_reopen, path)
         else:
             logger.debug("DuckDB cache hit: %s", path)
+        wrapper._last_event = event
+        log_json(
+            _DIAG_LOGGER,
+            "db_cache_event",
+            cache_event=event,
+            cache_disabled=False,
+            path=path,
+        )
         return wrapper, path
 
 

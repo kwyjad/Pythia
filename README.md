@@ -12,12 +12,17 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Each job prints a **Debug repo context** block so you can see the repository slug, branch, commit SHA, and working directory tree size directly in the logs.
 - An **anti-drift** script in `scripts/ci/` fails fast if any legacy references to the old repository slug sneak back into the tree.
 - Database test jobs are protected with repo guards and file-existence checks so they only execute inside `oughtinc/Pythia` when the relevant tests are present.
+- Every resolver workflow prints the merge commit SHA, PR head (when applicable), confirms that `resolver` and `duckdb_io.py` are being imported from the workspace copy, and uploads those sources (plus `schema.sql` when available) as artifacts so operators can prove which code path CI executed.
 - When you need to guard a step on the presence of a secret, assign it to an environment variable first (for example, `env.MY_TOKEN: ${{ secrets.MY_TOKEN }}`) and reference `env.MY_TOKEN` inside the `if:` expression. GitHub blocks direct `secrets.*` lookups in `if:` conditions at workflow-parse time.
 - Resolver-specific diagnostics can be enabled in CI by exporting `RESOLVER_DEBUG=1`. When set, the resolver’s DuckDB selectors emit concise debug lines that show the backend, cutoff, `ym`, `iso3`, `hazard_code`, and row-count summaries during DB reads. The shared DuckDB connector also logs the canonicalised database path (for URLs like `duckdb:///tmp/db.duckdb`, `duckdb:////abs/path.duckdb`, relative file paths, or `:memory:`) so you can confirm reads and writes are pointed at the same file. The connector now self-heals cached handles: cache entries are evicted when `.close()` is called, stale connections are re-opened automatically, and cache hygiene is enforced at test boundaries as well as process exit. Set `RESOLVER_DISABLE_CONN_CACHE=1` to bypass caching entirely, or `RESOLVER_CONN_CACHE_MODE=thread` to scope caches to the current thread when running multithreaded diagnostics. `get_shared_duckdb_conn(db_url)` returns `(conn, resolved_path)` so tests can both use the live connection and assert which canonical DuckDB file is active. Snapshot writes also emit a one-line canonicalisation summary per table when `RESOLVER_DEBUG=1`, showing how messy semantics inputs were normalised before persistence.
 - Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
   - Cache-enabled runs expect repeated `duckdb_io.get_db(url)` calls to return the same connection object; cache-disabled runs (`RESOLVER_DISABLE_CONN_CACHE=1`) intentionally return fresh handles, and tests should branch accordingly.
 
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
+
+### Resolver diagnostics
+
+Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and writes. When enabled, the resolver logs the source file path, Python/DuckDB versions, cache resolution events, schema/index snapshots, input column samples, and post-write row counts before each upsert. CLI reads that fail to find data record the resolved database path and row-count summaries (total rows, keyed rows, and cutoff-filtered rows) to stderr so you can distinguish empty writes from URL mismatches. The flag leaves default logging untouched when unset, making it safe to toggle on only for triage runs or CI retries.
 
 ### Working behind a proxy
 
@@ -271,6 +276,9 @@ proxy = http://user:pass@proxy.host:port
 
 - Set `RESOLVER_LOG_LEVEL=DEBUG` before running the exporter or tests to surface structured logs. The exporter and DuckDB writer print dataframe schemas, dropped columns, and `series_semantics` distributions.
 - When `resolver/tests/test_db_parity.py` fails, it emits a `DB PARITY DIAGNOSTICS` block showing schema summaries and anti-join counts. The test also writes CSV artifacts (`parity_mismatch_expected.csv`, `parity_mismatch_db.csv`, and `parity_mismatch_cell_diffs.csv` when applicable) that CI uploads automatically under the `db-parity-diagnostics` artifact.
+- CI sanitises DuckDB matrix labels (replacing `*`, spaces, and other punctuation with underscores) before naming debug artifacts and appends the job name plus `run_attempt`. Uploads run with `overwrite: true`, so retries replace prior diagnostics instead of failing with a 409 conflict.
+- Each workflow prints the merge commit SHA, PR head SHA (when available), and the repo file that `resolver.db.duckdb_io` was imported from. CI uploads the exact `duckdb_io.py` used for the run and records its SHA-256 hash so any drift between checkout and execution is visible in the logs.
+- DuckDB 0.10.x and later are both supported in CI; `init_schema` first attempts to add primary-key constraints and gracefully falls back to creating unique indexes when older engines lack `ALTER TABLE ... ADD PRIMARY KEY` support.
 - Inspect those CSVs locally or download them from the GitHub Actions job to understand which rows or columns diverged between the CSV export and DuckDB snapshot.
 
 What Forecaster Does (Pipeline)

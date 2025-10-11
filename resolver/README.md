@@ -67,6 +67,42 @@ database-backed tests are executed instead of being skipped.
 
 Refer to the [operations run book](docs/operations.md) for detailed command variants (including deltas and review tooling).
 
+## Logging
+
+- Resolver modules never call `logging.basicConfig()` or install global
+  handlers. Each package-level module registers a `logging.NullHandler()` so
+  imports stay silent until an application configures logging.
+- Set `RESOLVER_DEBUG=1` to raise resolver loggers to DEBUG without touching
+  other libraries. CLI entry points remain responsible for configuring handlers
+  (for example, `python -m resolver.cli.resolver_cli` can add `logging.basicConfig`
+  before importing resolver modules if desired).
+- DuckDB helpers reuse the environment flag to emit row-count diagnostics and
+  canonicalised paths when debugging.
+
+## Numeric precision
+
+- `resolver.db.duckdb_io.write_snapshot()` normalises all numeric payloads to
+  floats before writing to DuckDB so string inputs such as `'1,200'` or `'150'`
+  are consistently stored.
+- CLI responses keep these floats for machine-readable output, but when the
+  `unit` is `persons` the user-facing value is rounded to the nearest integer to
+  avoid cumulative drift while preserving fractional precision for auditing.
+- Other units (for example, `events` or `persons_cases`) are returned untouched.
+
+## Continuous integration matrix & artifacts
+
+- `resolver-ci` workflows exercise a DuckDB version matrix (currently
+  `0.10.x` and `latest`) so regressions in newer releases surface quickly while
+  keeping coverage for the pinned production version.
+- Workflow runs cancel superseded executions on the same branch via a
+  `${{ github.workflow }}-${{ github.ref }}` concurrency group.
+- When tests fail, the workflow uploads small debug artifacts (pytest JUnit XML,
+  any `*.duckdb` files produced during the run, and resolver debug logs) to help
+  diagnose flaky or version-specific issues.
+- Artifact names use a sanitized DuckDB label (for example, `0_10_x`) combined
+  with the job name and `github.run_attempt`, and enable `overwrite: true` so
+  reruns replace earlier diagnostics without 409 conflicts.
+
 ## Working with ReliefWeb PDFs
 
 The ReliefWeb PDF branch is disabled by default in CI but can be enabled locally with feature flags:

@@ -15,6 +15,10 @@
 
 > **DuckDB URL note:** All resolver components open DuckDB databases through a shared connection cache. URLs such as `duckdb:///tmp/db.duckdb`, `duckdb:////abs/db.duckdb`, relative file paths, and `:memory:` are canonicalised to a single filesystem target so writers and readers share the same database session. Enable `RESOLVER_DEBUG=1` to log the resolved path during tests.
 
+> **Numeric precision:** Snapshot writers coerce `value`, `value_new`, and `value_stock` to floats before persistence so CSV inputs such as `'1,200'` or `'150.0'` are normalised. Placeholder strings like `''`, `'None'`, or `'null'` are coerced to `NULL` during writes to keep DuckDB columns numeric. Downstream CLIs round values to the nearest integer only when `unit = 'persons'`; the stored floats retain fractional precision for auditing and non-person metrics.
+
+> **Keys & indexes:** Resolver expects `facts_resolved` rows to be unique on `(ym, iso3, hazard_code, metric, series_semantics)` and `facts_deltas` rows to be unique on `(ym, iso3, hazard_code, metric)`. `init_schema` enforces these natural keys with primary keys when the DuckDB build supports `ALTER TABLE ... ADD PRIMARY KEY` and otherwise falls back to `CREATE UNIQUE INDEX IF NOT EXISTS` on the same columns. When legacy databases are opened, the writer self-heals by creating the missing indexes before running `MERGE` upserts, keeping 0.10.x and newer DuckDB releases aligned.
+
 ## db.facts_deltas
 
 Monthly "new" deltas derived from resolved totals.

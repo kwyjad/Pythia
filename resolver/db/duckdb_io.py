@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import sys
 import uuid
@@ -12,6 +13,7 @@ import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 try:  # pragma: no cover - import guard for optional dependency
@@ -21,13 +23,28 @@ except ImportError as exc:  # pragma: no cover - guidance for operators
         "DuckDB is required for database-backed resolver operations. Install 'duckdb'."
     ) from exc
 
-from resolver.common import (
-    compute_series_semantics,
-    get_logger,
-    dict_counts,
-    df_schema,
+_DUCKDB_ERROR = getattr(duckdb, "Error", Exception)
+_CATALOG_EXC = getattr(duckdb, "CatalogException", _DUCKDB_ERROR)
+_DEPEND_EXC = getattr(duckdb, "DependencyException", _DUCKDB_ERROR)
+_CONN_EXC = getattr(duckdb, "ConnectionException", _DUCKDB_ERROR)
+_NOTIMPL_EXC = getattr(duckdb, "NotImplementedException", _DUCKDB_ERROR)
+_SCHEMA_EXC_TUPLE = (
+    _DUCKDB_ERROR,
+    _CATALOG_EXC,
+    _DEPEND_EXC,
+    _CONN_EXC,
+    _NOTIMPL_EXC,
 )
+
+from resolver.common import compute_series_semantics, dict_counts, df_schema
 from resolver.db.conn_shared import get_shared_duckdb_conn
+from resolver.diag.diagnostics import (
+    diag_enabled,
+    dump_counts,
+    dump_table_meta,
+    get_logger as get_diag_logger,
+    log_json,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
@@ -47,6 +64,18 @@ FACTS_DELTAS_KEY_COLUMNS = [
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
+TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
+    "facts_resolved": {
+        "columns": FACTS_RESOLVED_KEY_COLUMNS,
+        "primary": "pk_facts_resolved",
+        "unique": "ux_facts_resolved_series",
+    },
+    "facts_deltas": {
+        "columns": FACTS_DELTAS_KEY_COLUMNS,
+        "primary": "pk_facts_deltas",
+        "unique": "ux_facts_deltas_series",
+    },
+}
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
     "facts_resolved": ("as_of_date", "publication_date"),
     "facts_deltas": ("as_of",),
@@ -55,28 +84,33 @@ DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
 
-LOGGER = get_logger(__name__)
-DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
-if DEBUG_ENABLED:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    try:
-        LOGGER.setLevel(logging.DEBUG)
-    except Exception:  # pragma: no cover - defensive
-        pass
-
-# Ensure logs propagate so pytest's caplog handler can observe debug messages emitted
-# from this module, while still remaining quiet when logging is not configured.
-try:  # pragma: no cover - defensive; logging.Logger may reject attribute writes
-    LOGGER.propagate = True
-except Exception:  # pragma: no cover - propagate setting best-effort only
-    pass
-
+LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tests
     LOGGER.addHandler(logging.NullHandler())
+DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
+if DEBUG_ENABLED:
+    LOGGER.setLevel(logging.DEBUG)
+
+DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
+if diag_enabled():
+    try:
+        log_json(
+            DIAG_LOGGER,
+            "module_import",
+            file=__file__,
+            python=sys.version.split()[0],
+            platform=platform.platform(),
+            duckdb_version=getattr(duckdb, "__version__", "unknown"),
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        log_json(
+            DIAG_LOGGER,
+            "module_import_error",
+            file=__file__,
+            error=repr(exc),
+        )
+
+_HEALING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
 
 
 def _merge_enabled() -> bool:
@@ -181,6 +215,36 @@ def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
         )
 
 
+def _coerce_numeric_cols(
+    frame: pd.DataFrame | None, cols: Sequence[str], table_name: str
+) -> pd.DataFrame | None:
+    """Coerce known numeric columns to floats, mapping placeholder strings to NULL."""
+
+    if frame is None or frame.empty:
+        return frame
+
+    coerced = frame.copy()
+    for col in cols:
+        if col not in coerced.columns:
+            continue
+        series = coerced[col]
+        if pd.api.types.is_numeric_dtype(series):
+            coerced[col] = pd.to_numeric(series, errors="coerce")
+            continue
+        stringified = series.astype(str).str.strip()
+        lowered = stringified.str.lower()
+        stringified = stringified.mask(
+            lowered.isin({"", "none", "null", "nan"}), np.nan
+        )
+        coerced[col] = pd.to_numeric(stringified, errors="coerce")
+    if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
+        present = [col for col in cols if col in coerced.columns]
+        LOGGER.debug(
+            "duckdb.numeric_coercion | table=%s columns=%s", table_name, present
+        )
+    return coerced
+
+
 def _normalise_iso_date_strings(frame: pd.DataFrame, columns: Sequence[str]) -> list[str]:
     """Cast ``columns`` to ISO ``YYYY-MM-DD`` strings when present in ``frame``."""
 
@@ -275,6 +339,121 @@ def _has_declared_key(
     return False
 
 
+def _ensure_unique_index(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], index_name: str
+) -> None:
+    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    table_ident = _quote_identifier(table)
+    index_ident = _quote_identifier(index_name)
+    conn.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {index_ident} ON {table_ident} ({column_list})"
+    )
+    LOGGER.debug(
+        "duckdb.schema.unique_index_ensured | table=%s index=%s columns=%s",
+        table,
+        index_name,
+        columns,
+    )
+
+
+def _ensure_primary_key_or_unique(
+    conn: "duckdb.DuckDBPyConnection",
+    table: str,
+    columns: Sequence[str],
+    constraint_name: str,
+    index_name: str,
+) -> None:
+    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    table_ident = _quote_identifier(table)
+    constraint_ident = _quote_identifier(constraint_name)
+    try:
+        conn.execute(
+            f"ALTER TABLE {table_ident} ADD CONSTRAINT {constraint_ident} PRIMARY KEY ({column_list})"
+        )
+        LOGGER.debug(
+            "duckdb.schema.primary_key_added | table=%s constraint=%s columns=%s",
+            table,
+            constraint_name,
+            columns,
+        )
+    except _NOTIMPL_EXC as exc:  # pragma: no cover - version-specific fallback
+        LOGGER.debug(
+            "duckdb.schema.primary_key_not_supported | table=%s constraint=%s error=%s",
+            table,
+            constraint_name,
+            exc,
+        )
+        _ensure_unique_index(conn, table, columns, index_name)
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - idempotent path
+        message = str(exc)
+        if "already has a primary key" in message or "Constraint with name" in message:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_exists | table=%s constraint=%s",
+                table,
+                constraint_name,
+            )
+        elif "Cannot alter entry" in message:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_conflict | table=%s constraint=%s message=%s",
+                table,
+                constraint_name,
+                message,
+            )
+        else:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_failed | table=%s constraint=%s error=%s",
+                table,
+                constraint_name,
+                message,
+            )
+        _ensure_unique_index(conn, table, columns, index_name)
+
+
+def _attempt_heal_missing_key(
+    conn: "duckdb.DuckDBPyConnection", table: str, keys: Sequence[str] | None
+) -> bool:
+    if not keys:
+        return False
+    spec = TABLE_KEY_SPECS.get(table)
+    if not spec:
+        return False
+    expected_columns = [col.lower() for col in spec["columns"]]
+    provided = [key.lower() for key in keys]
+    if expected_columns != provided:
+        return False
+    healing_key = (table, tuple(provided))
+    if healing_key not in _HEALING_WARNED:
+        LOGGER.warning(
+            "duckdb.upsert.heal_missing_index | table=%s keys=%s -- attempting to create indexes",
+            table,
+            list(keys),
+        )
+        _HEALING_WARNED.add(healing_key)
+    _ensure_primary_key_or_unique(
+        conn,
+        table,
+        spec["columns"],
+        str(spec["primary"]),
+        str(spec["unique"]),
+    )
+    _ensure_unique_index(
+        conn,
+        table,
+        spec["columns"],
+        str(spec["unique"]),
+    )
+    healed = _has_declared_key(conn, table, keys)
+    if healed:
+        LOGGER.debug(
+            "duckdb.upsert.heal_missing_index.success | table=%s keys=%s", table, list(keys)
+        )
+    else:
+        LOGGER.debug(
+            "duckdb.upsert.heal_missing_index.failed | table=%s keys=%s", table, list(keys)
+        )
+    return healed
+
+
 def _delete_where(
     conn: "duckdb.DuckDBPyConnection",
     table: str,
@@ -312,6 +491,16 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
 
     url = _normalise_db_url(path_or_url or os.environ.get("RESOLVER_DB_URL"))
     conn, resolved_path = get_shared_duckdb_conn(url)
+    cache_event = getattr(conn, "_last_event", None)
+    log_json(
+        DIAG_LOGGER,
+        "db_open",
+        db_url=url,
+        resolved_path=resolved_path,
+        cache_disabled=os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+        cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
+        cache_event=cache_event,
+    )
     if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",
@@ -323,11 +512,22 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
         conn.execute("PRAGMA threads=4")
         conn.execute("PRAGMA enable_progress_bar=false")
         return conn
-    except duckdb.ConnectionException as exc:
+    except _CONN_EXC as exc:
         LOGGER.debug(
             "DuckDB connection unhealthy for %s (%s); forcing reopen", resolved_path, exc
         )
         conn, resolved_path = get_shared_duckdb_conn(url, force_reopen=True)
+        cache_event = getattr(conn, "_last_event", None)
+        log_json(
+            DIAG_LOGGER,
+            "db_open",
+            db_url=url,
+            resolved_path=resolved_path,
+            cache_disabled=os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+            cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
+            cache_event=cache_event,
+            forced=True,
+        )
         conn.execute("PRAGMA threads=4")
         conn.execute("PRAGMA enable_progress_bar=false")
         return conn
@@ -361,14 +561,87 @@ def init_schema(
         ).fetchall()
     }
 
-    if expected_tables.issubset(existing_tables):
+    core_tables = {"facts_resolved", "facts_deltas"}
+    if core_tables.issubset(existing_tables):
         LOGGER.debug("DuckDB schema already initialised; skipping DDL execution")
+        for table_name, spec in TABLE_KEY_SPECS.items():
+            columns = spec["columns"]
+            primary = spec["primary"]
+            unique = spec["unique"]
+            _ensure_primary_key_or_unique(
+                conn, table_name, columns, str(primary), str(unique)
+            )
+            _ensure_unique_index(conn, table_name, columns, str(unique))
         return
 
-    sql = schema_path.read_text(encoding="utf-8")
-    for statement in [s.strip() for s in sql.split(";") if s.strip()]:
-        conn.execute(statement)
-    LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
+    if "facts_resolved" not in existing_tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS facts_resolved (
+                ym TEXT NOT NULL,
+                iso3 TEXT NOT NULL,
+                hazard_code TEXT NOT NULL,
+                hazard_label TEXT,
+                hazard_class TEXT,
+                metric TEXT NOT NULL,
+                series_semantics TEXT NOT NULL DEFAULT '',
+                value DOUBLE,
+                unit TEXT,
+                as_of DATE,
+                as_of_date VARCHAR,
+                publication_date VARCHAR,
+                publisher TEXT,
+                source_id TEXT,
+                source_type TEXT,
+                source_url TEXT,
+                doc_title TEXT,
+                definition_text TEXT,
+                precedence_tier TEXT,
+                event_id TEXT,
+                proxy_for TEXT,
+                confidence TEXT,
+                series TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ym, iso3, hazard_code, metric, series_semantics)
+            )
+            """
+        )
+    if "facts_deltas" not in existing_tables:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS facts_deltas (
+                ym TEXT NOT NULL,
+                iso3 TEXT NOT NULL,
+                hazard_code TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value_new DOUBLE,
+                value_stock DOUBLE,
+                series_semantics TEXT NOT NULL DEFAULT 'new',
+                as_of VARCHAR,
+                source_id TEXT,
+                series TEXT,
+                rebase_flag INTEGER,
+                first_observation INTEGER,
+                delta_negative_clamped INTEGER,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (ym, iso3, hazard_code, metric)
+            )
+            """
+        )
+
+    if not expected_tables.issubset(existing_tables):
+        sql = schema_path.read_text(encoding="utf-8")
+        for statement in [s.strip() for s in sql.split(";") if s.strip()]:
+            conn.execute(statement)
+        LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
+
+    for table_name, spec in TABLE_KEY_SPECS.items():
+        columns = spec["columns"]
+        primary = spec["primary"]
+        unique = spec["unique"]
+        _ensure_primary_key_or_unique(conn, table_name, columns, str(primary), str(unique))
+        _ensure_unique_index(conn, table_name, columns, str(unique))
+
     if LOGGER.isEnabledFor(logging.DEBUG):
         table_details = conn.execute(
             """
@@ -455,6 +728,14 @@ def upsert_dataframe(
     import duckdb  # keep inside function to avoid module-top import churn
 
     frame = df.copy()
+    if table == "facts_resolved":
+        coerced = _coerce_numeric_cols(frame, ["value"], table)
+        if coerced is not None:
+            frame = coerced
+    elif table == "facts_deltas":
+        coerced = _coerce_numeric_cols(frame, ["value_new", "value_stock"], table)
+        if coerced is not None:
+            frame = coerced
     LOGGER.info("Upserting %s rows into %s", len(frame), table)
     LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
 
@@ -484,10 +765,44 @@ def upsert_dataframe(
     table_columns = [row[1] for row in table_info]
     has_declared_key = _has_declared_key(conn, table, keys) if keys else False
     if keys and not has_declared_key:
-        raise ValueError(
-            f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
-            "key or unique constraint."
-        )
+        if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
+            try:
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch | table=%s keys=%s table_info=%s",
+                    table,
+                    list(keys),
+                    [(row[1], row[2], row[3], row[4], row[5]) for row in table_info],
+                )
+                tables = conn.execute("PRAGMA show_tables").fetchall()
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.tables | entries=%s", tables
+                )
+                constraints = _constraint_column_sets(conn, table)
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.constraints | table=%s sets=%s",
+                    table,
+                    constraints,
+                )
+                index_rows = conn.execute(
+                    "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?",
+                    [table],
+                ).fetchall()
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.indexes | table=%s indexes=%s",
+                    table,
+                    index_rows,
+                )
+            except Exception:  # pragma: no cover - diagnostics only
+                LOGGER.debug(
+                    "duckdb.upsert.key_mismatch.diag_failed | table=%s", table, exc_info=True
+                )
+        if _attempt_heal_missing_key(conn, table, keys):
+            has_declared_key = True
+        else:
+            raise ValueError(
+                f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
+                "key or unique constraint."
+            )
 
     insert_columns = [col for col in table_columns if col in frame.columns]
     dropped = [col for col in frame.columns if col not in table_columns]
@@ -761,10 +1076,39 @@ def write_snapshot(
     facts_resolved = facts_resolved.copy() if facts_resolved is not None else None
     facts_deltas = facts_deltas.copy() if facts_deltas is not None else None
 
+    if diag_enabled():
+        if facts_resolved is not None:
+            log_json(
+                DIAG_LOGGER,
+                "write_inputs_resolved",
+                columns=list(facts_resolved.columns),
+                n=int(len(facts_resolved)),
+                sample=facts_resolved.head(2).to_dict(orient="records"),
+            )
+            log_json(
+                DIAG_LOGGER,
+                "table_meta_resolved",
+                **dump_table_meta(conn, "facts_resolved"),
+            )
+        if facts_deltas is not None:
+            log_json(
+                DIAG_LOGGER,
+                "write_inputs_deltas",
+                columns=list(facts_deltas.columns),
+                n=int(len(facts_deltas)),
+                has_as_of="as_of" in facts_deltas.columns,
+                sample=facts_deltas.head(2).to_dict(orient="records"),
+            )
+            log_json(
+                DIAG_LOGGER,
+                "table_meta_deltas",
+                **dump_table_meta(conn, "facts_deltas"),
+            )
+
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
 
-    conn.execute("BEGIN")
+    conn.execute("BEGIN TRANSACTION")
     try:
         facts_rows = 0
         deltas_rows = 0
@@ -787,10 +1131,6 @@ def write_snapshot(
                 if key == "ym":
                     series = series.replace("", ym)
                 facts_resolved[key] = series
-            if "value" in facts_resolved.columns:
-                facts_resolved["value"] = pd.to_numeric(
-                    facts_resolved["value"], errors="coerce"
-                )
             computed_semantics = facts_resolved.apply(
                 lambda row: compute_series_semantics(
                     metric=row.get("metric"), existing=row.get("series_semantics")
@@ -804,6 +1144,9 @@ def write_snapshot(
                 default_target="stock",
             )
             _assert_semantics_required(facts_resolved, "facts_resolved")
+            facts_resolved = _coerce_numeric_cols(
+                facts_resolved, ["value"], "facts_resolved"
+            )
             facts_resolved = facts_resolved.drop_duplicates(
                 subset=FACTS_RESOLVED_KEY_COLUMNS,
                 keep="last",
@@ -847,15 +1190,9 @@ def write_snapshot(
                 default_target="new",
             )
             _assert_semantics_required(facts_deltas, "facts_deltas")
-            numeric_delta_columns = [
-                col
-                for col in ("value_new", "value_stock")
-                if col in facts_deltas.columns
-            ]
-            for column in numeric_delta_columns:
-                facts_deltas[column] = pd.to_numeric(
-                    facts_deltas[column], errors="coerce"
-                )
+            facts_deltas = _coerce_numeric_cols(
+                facts_deltas, ["value_new", "value_stock"], "facts_deltas"
+            )
             facts_deltas = facts_deltas.drop_duplicates(
                 subset=FACTS_DELTAS_KEY_COLUMNS,
                 keep="last",
@@ -968,7 +1305,22 @@ def write_snapshot(
             deleted_resolved,
             deleted_deltas,
         )
+        if diag_enabled():
+            counts = dump_counts(conn, ym=ym)
+            log_json(
+                DIAG_LOGGER,
+                "post_upsert_counts",
+                ym=ym,
+                **counts,
+            )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "write_snapshot_error",
+                ym=ym,
+                error=repr(sys.exc_info()[1]),
+            )
         raise
