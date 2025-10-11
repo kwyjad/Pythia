@@ -19,6 +19,10 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
+### Resolver diagnostics
+
+Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and writes. When enabled, the resolver logs the source file path, Python/DuckDB versions, cache resolution events, schema/index snapshots, input column samples, and post-write row counts before each upsert. CLI reads that fail to find data record the resolved database path and row-count summaries (total rows, keyed rows, and cutoff-filtered rows) to stderr so you can distinguish empty writes from URL mismatches. The flag leaves default logging untouched when unset, making it safe to toggle on only for triage runs or CI retries.
+
 ### Working behind a proxy
 
 GitHub Actions and the devcontainer bootstrap understand constrained networks. The `resolver-ci-fast` workflow’s DuckDB job first

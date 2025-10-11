@@ -13,6 +13,10 @@ import pandas as pd
 
 from resolver.db import duckdb_io
 from resolver.db.conn_shared import normalize_duckdb_url
+from resolver.diag.diagnostics import (
+    get_logger as get_diag_logger,
+    log_json,
+)
 
 # --- begin duckdb import guard ---
 try:
@@ -30,6 +34,8 @@ if not LOGGER.handlers:  # pragma: no cover - silence library default
 if os.getenv("RESOLVER_DEBUG") == "1":
     LOGGER.setLevel(logging.DEBUG)
 DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
+
+DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
 
 try:  # pragma: no cover - zoneinfo available on 3.9+
     from zoneinfo import ZoneInfo
@@ -541,7 +547,28 @@ def _resolve_from_db(
     preferred_metric: str,
 ) -> Optional[ResolveAttempt]:
     db_url = os.environ.get("RESOLVER_DB_URL")
+    log_json(
+        DIAG_LOGGER,
+        "db_read_request",
+        series=series,
+        ym=ym,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        cutoff=cutoff,
+        preferred_metric=preferred_metric,
+    )
     if not db_url:
+        log_json(
+            DIAG_LOGGER,
+            "db_read_result",
+            series=series,
+            ym=ym,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            cutoff=cutoff,
+            found=False,
+            reason="no_db_url",
+        )
         return None
 
     LOGGER.debug(
@@ -557,6 +584,17 @@ def _resolve_from_db(
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
     except Exception:  # pragma: no cover - optional dependency misconfigured
+        log_json(
+            DIAG_LOGGER,
+            "db_read_result",
+            series=series,
+            ym=ym,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            cutoff=cutoff,
+            found=False,
+            reason="init_failed",
+        )
         return None
     if DEBUG_ENABLED:
         LOGGER.debug(
@@ -577,10 +615,32 @@ def _resolve_from_db(
             conn, ym=ym, iso3=iso3, hazard_code=hazard_code, cutoff=cutoff, preferred_metric=preferred_metric
         )
         if not row:
+            log_json(
+                DIAG_LOGGER,
+                "db_read_result",
+                series=series,
+                ym=ym,
+                iso3=iso3,
+                hazard_code=hazard_code,
+                cutoff=cutoff,
+                found=False,
+                reason="no_row",
+            )
             return None
         row = dict(row)
         value = row.get("value_new")
         if value is None:
+            log_json(
+                DIAG_LOGGER,
+                "db_read_result",
+                series=series,
+                ym=ym,
+                iso3=iso3,
+                hazard_code=hazard_code,
+                cutoff=cutoff,
+                found=False,
+                reason="value_new_null",
+            )
             return None
         row["value"] = value
         row.setdefault("series_semantics", row.get("series_semantics_out", "new"))
@@ -597,6 +657,18 @@ def _resolve_from_db(
             dataset_label="db_facts_deltas",
             source_bucket="db",
         )
+        log_json(
+            DIAG_LOGGER,
+            "db_read_result",
+            series=series,
+            ym=ym,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            cutoff=cutoff,
+            found=True,
+            keys=sorted(payload.keys()),
+            dataset="facts_deltas",
+        )
         LOGGER.debug(
             "DB resolve result series=new found=True keys=%s",
             sorted(payload.keys()),
@@ -608,6 +680,17 @@ def _resolve_from_db(
     )
     if not row:
         LOGGER.debug("DB resolve result series=stock found=False")
+        log_json(
+            DIAG_LOGGER,
+            "db_read_result",
+            series=series,
+            ym=ym,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            cutoff=cutoff,
+            found=False,
+            reason="no_row",
+        )
         return None
     row = dict(row)
     row.setdefault("series_semantics", "stock")
@@ -620,6 +703,18 @@ def _resolve_from_db(
         ym=ym,
         dataset_label="db_facts_resolved",
         source_bucket="db",
+    )
+    log_json(
+        DIAG_LOGGER,
+        "db_read_result",
+        series=series,
+        ym=ym,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        cutoff=cutoff,
+        found=True,
+        keys=sorted(payload.keys()),
+        dataset="facts_resolved",
     )
     LOGGER.debug(
         "DB resolve result series=stock found=True keys=%s",

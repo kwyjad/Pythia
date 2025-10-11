@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
+import sys
 import uuid
 import datetime as dt
 import logging
@@ -23,6 +25,13 @@ except ImportError as exc:  # pragma: no cover - guidance for operators
 
 from resolver.common import compute_series_semantics, dict_counts, df_schema
 from resolver.db.conn_shared import get_shared_duckdb_conn
+from resolver.diag.diagnostics import (
+    diag_enabled,
+    dump_counts,
+    dump_table_meta,
+    get_logger as get_diag_logger,
+    log_json,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
@@ -68,6 +77,25 @@ if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tes
 DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
 if DEBUG_ENABLED:
     LOGGER.setLevel(logging.DEBUG)
+
+DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
+if diag_enabled():
+    try:
+        log_json(
+            DIAG_LOGGER,
+            "module_import",
+            file=__file__,
+            python=sys.version.split()[0],
+            platform=platform.platform(),
+            duckdb_version=getattr(duckdb, "__version__", "unknown"),
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        log_json(
+            DIAG_LOGGER,
+            "module_import_error",
+            file=__file__,
+            error=repr(exc),
+        )
 
 _HEALING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
 
@@ -434,6 +462,16 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
 
     url = _normalise_db_url(path_or_url or os.environ.get("RESOLVER_DB_URL"))
     conn, resolved_path = get_shared_duckdb_conn(url)
+    cache_event = getattr(conn, "_last_event", None)
+    log_json(
+        DIAG_LOGGER,
+        "db_open",
+        db_url=url,
+        resolved_path=resolved_path,
+        cache_disabled=os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+        cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
+        cache_event=cache_event,
+    )
     if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",
@@ -450,6 +488,17 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
             "DuckDB connection unhealthy for %s (%s); forcing reopen", resolved_path, exc
         )
         conn, resolved_path = get_shared_duckdb_conn(url, force_reopen=True)
+        cache_event = getattr(conn, "_last_event", None)
+        log_json(
+            DIAG_LOGGER,
+            "db_open",
+            db_url=url,
+            resolved_path=resolved_path,
+            cache_disabled=os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+            cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
+            cache_event=cache_event,
+            forced=True,
+        )
         conn.execute("PRAGMA threads=4")
         conn.execute("PRAGMA enable_progress_bar=false")
         return conn
@@ -987,6 +1036,35 @@ def write_snapshot(
     facts_resolved = facts_resolved.copy() if facts_resolved is not None else None
     facts_deltas = facts_deltas.copy() if facts_deltas is not None else None
 
+    if diag_enabled():
+        if facts_resolved is not None:
+            log_json(
+                DIAG_LOGGER,
+                "write_inputs_resolved",
+                columns=list(facts_resolved.columns),
+                n=int(len(facts_resolved)),
+                sample=facts_resolved.head(2).to_dict(orient="records"),
+            )
+            log_json(
+                DIAG_LOGGER,
+                "table_meta_resolved",
+                **dump_table_meta(conn, "facts_resolved"),
+            )
+        if facts_deltas is not None:
+            log_json(
+                DIAG_LOGGER,
+                "write_inputs_deltas",
+                columns=list(facts_deltas.columns),
+                n=int(len(facts_deltas)),
+                has_as_of="as_of" in facts_deltas.columns,
+                sample=facts_deltas.head(2).to_dict(orient="records"),
+            )
+            log_json(
+                DIAG_LOGGER,
+                "table_meta_deltas",
+                **dump_table_meta(conn, "facts_deltas"),
+            )
+
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
 
@@ -1187,7 +1265,22 @@ def write_snapshot(
             deleted_resolved,
             deleted_deltas,
         )
+        if diag_enabled():
+            counts = dump_counts(conn, ym=ym)
+            log_json(
+                DIAG_LOGGER,
+                "post_upsert_counts",
+                ym=ym,
+                **counts,
+            )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "write_snapshot_error",
+                ym=ym,
+                error=repr(sys.exc_info()[1]),
+            )
         raise
