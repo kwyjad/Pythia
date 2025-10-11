@@ -327,15 +327,81 @@ def _constraint_column_sets(
     return constraints
 
 
+def _unique_index_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> dict[str, list[str]]:
+    """Return mapping of unique index name to ordered column list for ``table``."""
+
+    indexes: dict[str, list[str]] = {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT index_name, expressions, sql
+            FROM duckdb_indexes()
+            WHERE table_name = ? AND is_unique
+            """,
+            [table],
+        ).fetchall()
+    except Exception:  # pragma: no cover - optional diagnostic path
+        LOGGER.debug(
+            "duckdb.index_inspection_failed | table=%s", table, exc_info=True
+        )
+        rows = []
+
+    for name, expressions, sql in rows or []:
+        if not sql or "CREATE UNIQUE INDEX" not in str(sql).upper():
+            continue
+        expr_text = str(expressions or "").strip()
+        if expr_text.startswith("[") and expr_text.endswith("]"):
+            expr_text = expr_text[1:-1]
+        ordered_columns = [
+            part.strip().strip("\"")
+            for part in expr_text.split(",")
+            if part.strip()
+        ]
+        if ordered_columns:
+            indexes[str(name)] = ordered_columns
+    return indexes
+
+
+def _canonicalize_columns(columns: Sequence[str] | None) -> list[str]:
+    return [str(column).strip().lower() for column in columns or []]
+
+
+def _has_constraint_key(
+    conn: "duckdb.DuckDBPyConnection", table: str, canon_keys: Sequence[str]
+) -> bool:
+    for constraint_columns in _constraint_column_sets(conn, table):
+        if _canonicalize_columns(constraint_columns) == list(canon_keys):
+            return True
+    return False
+
+
 def _has_declared_key(
     conn: "duckdb.DuckDBPyConnection", table: str, keys: Sequence[str] | None
 ) -> bool:
     if not keys:
         return False
-    expected = [key.lower() for key in keys]
-    for constraint_columns in _constraint_column_sets(conn, table):
-        if [column.lower() for column in constraint_columns] == expected:
+
+    canonical = _canonicalize_columns(keys)
+    try:
+        if _has_constraint_key(conn, table, canonical):
             return True
+    except Exception:  # pragma: no cover - diagnostic aid only
+        LOGGER.debug(
+            "duckdb.constraint_detection_failed | table=%s", table, exc_info=True
+        )
+
+    try:
+        unique_indexes = _unique_index_columns(conn, table)
+        for columns in unique_indexes.values():
+            if _canonicalize_columns(columns) == canonical:
+                return True
+    except Exception:  # pragma: no cover - diagnostic aid only
+        LOGGER.debug(
+            "duckdb.unique_index_detection_failed | table=%s", table, exc_info=True
+        )
+
     return False
 
 
@@ -792,6 +858,19 @@ def upsert_dataframe(
         if _attempt_heal_missing_key(conn, table, keys):
             has_declared_key = True
         else:
+            if os.getenv("RESOLVER_DIAG") == "1":
+                try:
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch.indexes | table=%s discovered=%s",
+                        table,
+                        json.dumps(_unique_index_columns(conn, table)),
+                    )
+                except Exception:  # pragma: no cover - diagnostics only
+                    LOGGER.debug(
+                        "duckdb.upsert.key_mismatch.indexes_failed | table=%s",
+                        table,
+                        exc_info=True,
+                    )
             raise ValueError(
                 f"Declared upsert keys {list(keys)} for table '{table}' do not match a primary "
                 "key or unique constraint."
