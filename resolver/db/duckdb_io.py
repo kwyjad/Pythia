@@ -36,7 +36,10 @@ _SCHEMA_EXC_TUPLE = (
 )
 
 from resolver.common import compute_series_semantics, dict_counts, df_schema
-from resolver.db.conn_shared import get_shared_duckdb_conn
+from resolver.db.conn_shared import (
+    get_shared_duckdb_conn,
+    normalize_duckdb_url as _shared_normalize_duckdb_url,
+)
 from resolver.diag.diagnostics import (
     diag_enabled,
     dump_counts,
@@ -86,6 +89,8 @@ DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
+
+_DB_CACHE: dict[str, "duckdb.DuckDBPyConnection"] = {}
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tests
@@ -552,62 +557,105 @@ def _delete_where(
         return int(count or 0)
 
 
-def _normalise_db_url(path_or_url: str | None) -> str:
-    if not path_or_url:
-        return DEFAULT_DB_URL
-    if path_or_url.startswith("duckdb://"):
-        return path_or_url
-    if path_or_url.startswith(":memory:"):
-        return f"duckdb:///{path_or_url}"
-    path = Path(path_or_url)
-    return f"duckdb:///{path}" if not path_or_url.startswith("duckdb:") else path_or_url
+def _normalize_duckdb_url(path_or_url: str | None) -> str:
+    """Return a normalised DuckDB URL using absolute filesystem paths."""
+
+    candidate = path_or_url or os.environ.get("RESOLVER_DB_URL") or DEFAULT_DB_URL
+    raw = str(candidate).strip()
+    if not raw:
+        raw = DEFAULT_DB_URL
+
+    memory_aliases = {
+        ":memory:",
+        "duckdb:///:memory:",
+        "duckdb://memory",
+        "duckdb://:memory:",
+        "duckdb:memory",
+    }
+    if raw in memory_aliases:
+        return "duckdb:///:memory:"
+
+    normalised_path = _shared_normalize_duckdb_url(raw)
+    if normalised_path == ":memory:":
+        return "duckdb:///:memory:"
+
+    # ``normalize_duckdb_url`` returns an absolute filesystem path.
+    return f"duckdb:///{normalised_path}"
 
 
 def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     """Return a DuckDB connection for the given path or URL."""
 
-    url = _normalise_db_url(path_or_url or os.environ.get("RESOLVER_DB_URL"))
-    conn, resolved_path = get_shared_duckdb_conn(url)
+    url = _normalize_duckdb_url(path_or_url)
+    cached = _DB_CACHE.get(url)
+    cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
+
+    force_reopen = False
+
+    if cached is not None:
+        if getattr(cached, "_closed", False):
+            _DB_CACHE.pop(url, None)
+            cached = None
+            force_reopen = True
+        else:
+            healthcheck = getattr(cached, "_healthcheck", None)
+            if callable(healthcheck) and not healthcheck():
+                cached = None
+                _DB_CACHE.pop(url, None)
+                force_reopen = True
+            else:
+                resolved_path = getattr(cached, "_path", None) or getattr(
+                    cached, "database", None
+                )
+                log_json(
+                    DIAG_LOGGER,
+                    "db_open",
+                    db_url=url,
+                    resolved_path=resolved_path,
+                    cache_disabled=cache_disabled,
+                    cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
+                    cache_event="hit",
+                )
+                if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(
+                    logging.DEBUG
+                ):
+                    LOGGER.debug(
+                        "DuckDB connection cache hit: path=%s from=%s cache_disabled=%s",
+                        resolved_path,
+                        url,
+                        cache_disabled,
+                    )
+                return cached
+
+    if cache_disabled:
+        force_reopen = True
+
+    conn, resolved_path = get_shared_duckdb_conn(url, force_reopen=force_reopen)
     cache_event = getattr(conn, "_last_event", None)
+    if cache_disabled:
+        cache_event = "miss"
+    else:
+        _DB_CACHE[url] = conn
     log_json(
         DIAG_LOGGER,
         "db_open",
         db_url=url,
         resolved_path=resolved_path,
-        cache_disabled=os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+        cache_disabled=cache_disabled,
         cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
         cache_event=cache_event,
+        forced=force_reopen if force_reopen else None,
     )
     if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
-            "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",
+            "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",  # pragma: no cover - logging only
             resolved_path,
             url,
-            os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
+            cache_disabled,
         )
-    try:
-        conn.execute("PRAGMA threads=4")
-        conn.execute("PRAGMA enable_progress_bar=false")
-        return conn
-    except _CONN_EXC as exc:
-        LOGGER.debug(
-            "DuckDB connection unhealthy for %s (%s); forcing reopen", resolved_path, exc
-        )
-        conn, resolved_path = get_shared_duckdb_conn(url, force_reopen=True)
-        cache_event = getattr(conn, "_last_event", None)
-        log_json(
-            DIAG_LOGGER,
-            "db_open",
-            db_url=url,
-            resolved_path=resolved_path,
-            cache_disabled=os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1",
-            cache_mode=os.getenv("RESOLVER_CONN_CACHE_MODE", "process"),
-            cache_event=cache_event,
-            forced=True,
-        )
-        conn.execute("PRAGMA threads=4")
-        conn.execute("PRAGMA enable_progress_bar=false")
-        return conn
+    conn.execute("PRAGMA threads=4")
+    conn.execute("PRAGMA enable_progress_bar=false")
+    return conn
 
 
 def init_schema(
@@ -1211,6 +1259,8 @@ def write_snapshot(
     meta: Mapping[str, object] | None,
 ) -> None:
     """Write a snapshot bundle transactionally into the database."""
+
+    init_schema(conn)
 
     facts_resolved = facts_resolved.copy() if facts_resolved is not None else None
     facts_deltas = facts_deltas.copy() if facts_deltas is not None else None

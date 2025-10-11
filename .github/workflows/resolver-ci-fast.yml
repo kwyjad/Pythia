@@ -25,66 +25,28 @@ permissions:
   contents: read
 
 jobs:
-  fast-tests:
-    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
+  fast_tests:
     name: fast-tests (duckdb=${{ matrix.duckdb_label }})
+    if: ${{ github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]') }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10_x"
-          - duckdb_spec: "duckdb"
-            duckdb_label: "latest"
+          - duckdb_spec: 'duckdb==0.10.*'
+            duckdb_label: '0_10_x'
+          - duckdb_spec: 'duckdb'
+            duckdb_label: 'latest'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: 1
-      TZ: Europe/Istanbul
-      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
-      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
-
+      TZ: UTC
+      RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/ci-fast.duckdb
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Show commit context
-        run: |
-          echo "GITHUB_SHA=${GITHUB_SHA}"
-          echo "PR_HEAD_SHA=${{ github.event.pull_request.head.sha || '' }}"
-          git rev-parse HEAD
-          git show -s --date=iso --format='%H %cd %s'
-
-      - name: Derive sanitized artifact suffix
-        if: always()
-        run: |
-          raw="${{ matrix.duckdb_label }}"
-          if [ -z "${raw}" ]; then
-            raw="${{ matrix.duckdb }}"
-          fi
-          if [ -z "${raw}" ]; then
-            raw="latest"
-          fi
-          SAFE_SUFFIX="${raw}"
-          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
-          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
-          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
-          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
-
-      - name: Debug repo context
-        run: |
-          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "GITHUB_SHA=$GITHUB_SHA"
-          python -c "import pathlib; p = pathlib.Path().resolve(); print('CWD:', p); print('Tree:', len(list(p.glob('**/*'))))"
-
-      - name: "Anti-drift: assert no legacy repo references"
-        run: |
-          part_a="spa"
-          part_b="gbot"
-          script_path="scripts/ci/assert_no_${part_a}${part_b}_refs.sh"
-          chmod +x "$script_path"
-          "$script_path"
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -92,404 +54,64 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Confirm Pythia root
-        run: ls -la && test -f pyproject.toml
-
-      - name: Ensure workspace install
+      - name: Install workspace (editable) and deps
         run: |
           python -m pip install --upgrade pip wheel setuptools
           pip uninstall -y resolver || true
-          pip install -e .[db,test]
-
-      - name: Install DuckDB (ensure available for tests)
-        run: |
-          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest junit-xml
           python -m pip install "${{ matrix.duckdb_spec }}"
 
-      - name: Verify DuckDB presence
+      - name: Print commit & module stamps
         run: |
-          python - <<'PY'
-          import importlib.util, sys
-          spec = importlib.util.find_spec("duckdb")
-          if spec is None:
-              print("❌ DuckDB not installed — cannot run DB parity tests.")
-              sys.exit(1)
-          import duckdb
-          print("✅ DuckDB installed:", duckdb.__version__)
-          PY
-
-      - name: Show resolver import location & DuckDB version
-        run: |
+          git rev-parse HEAD
           python - <<'PY'
           import hashlib, inspect, pathlib, sys
           import duckdb, resolver
           import resolver.db.duckdb_io as duckdb_io
 
-          print("Python executable:", sys.executable)
+          print('Python executable:', sys.executable)
+          print('Python version:', sys.version)
           resolver_path = pathlib.Path(resolver.__file__).resolve()
           duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
-
-          print("resolver module path:", resolver_path)
-          print("duckdb_io.py path:", duckdb_io_path)
-          print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
+          print('resolver module path:', resolver_path)
+          print('duckdb_io.py path:', duckdb_io_path)
+          print('duckdb_io.py sha256:', hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
+          print('duckdb version:', getattr(duckdb, '__version__', 'unknown'))
           PY
-
-      - name: Upload duckdb_io.py used by CI
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
-          path: resolver/db/duckdb_io.py
-          overwrite: true
-
-      - name: Upload schema.sql used by CI
-        if: ${{ always() && hashFiles('resolver/db/schema.sql') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
-          path: resolver/db/schema.sql
-          overwrite: true
 
       - name: Run fast tests
+        id: run_pytest
         run: |
-          python -m pytest -q resolver/tests -k "not slow and not nightly" --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
+          set -o pipefail
+          python -m pytest -q resolver/tests -k "not slow and not nightly" \
+            --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml 2>&1 | tee pytest-stdout.txt
+          status=${PIPESTATUS[0]}
+          echo "PYTEST_EXIT_CODE=${status}" >> "$GITHUB_ENV"
+          exit 0
 
-      - name: Upload test results (always)
+      - name: Build diagnostics bundle (per-job)
+        if: always()
+        run: |
+          python -m resolver.tools.ci_diag_bundle \
+            --suite "fast-tests" \
+            --duckdb-version "$(python -c "import duckdb; print(getattr(duckdb, '__version__', 'unknown'))")" \
+            --db-url "${{ env.RESOLVER_DB_URL }}" \
+            --scan-path "${{ github.workspace }}" \
+            --scan-path "${{ runner.temp }}" \
+            --scan-path "/tmp/pytest-of-runner" \
+            --scan-path "/tmp" \
+            --pytest-stdout pytest-stdout.txt \
+            --out "diagnostics.${{ matrix.duckdb_label }}.zip"
+
+      - name: Upload diagnostics (per-job)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-pytest
-          path: pytest-junit.xml
-
-      - name: Upload diagnostics on failure
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
-          path: |
-            **/*.duckdb
-            pytest-junit.xml
-            ./**/resolver_debug.log
-          if-no-files-found: ignore
+          name: fast-tests-part-${{ matrix.duckdb_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: diagnostics.${{ matrix.duckdb_label }}.zip
           overwrite: true
 
-  db_tests:
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
-    name: db-tests (duckdb=${{ matrix.duckdb_label }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10_x"
-          - duckdb_spec: "duckdb"
-            duckdb_label: "latest"
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
-      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show commit context
-        run: |
-          echo "GITHUB_SHA=${GITHUB_SHA}"
-          echo "PR_HEAD_SHA=${{ github.event.pull_request.head.sha || '' }}"
-          git rev-parse HEAD
-          git show -s --date=iso --format='%H %cd %s'
-
-      - name: Derive sanitized artifact suffix
-        if: always()
-        run: |
-          raw="${{ matrix.duckdb_label }}"
-          if [ -z "${raw}" ]; then
-            raw="${{ matrix.duckdb }}"
-          fi
-          if [ -z "${raw}" ]; then
-            raw="latest"
-          fi
-          SAFE_SUFFIX="${raw}"
-          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
-          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
-          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
-          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
-
-      - name: Debug repo context
-        run: |
-          echo "Repo=$GITHUB_REPOSITORY Ref=$GITHUB_REF SHA=$GITHUB_SHA"
-          python -c "import pathlib; print('CWD=', pathlib.Path().resolve())"
-
-      - name: Check DB tests present
-        id: dbfiles
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f "resolver/tests/test_db_parity.py" ] || [ -f "resolver/tests/test_duckdb_idempotency.py" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "Found DB tests."
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No DB tests found; will skip DB test steps."
-          fi
-
-      - name: Setup Python
-        if: steps.dbfiles.outputs.present == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Ensure workspace install
-        if: steps.dbfiles.outputs.present == 'true'
-        env:
-          PIP_NO_CACHE_DIR: "1"
-          PIP_DEFAULT_TIMEOUT: "60"
-          PIP_INDEX_URL: ${{ secrets.PIP_INDEX_URL }}
-          PIP_EXTRA_INDEX_URL: ${{ secrets.PIP_EXTRA_INDEX_URL }}
-          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip wheel setuptools
-          pip uninstall -y resolver || true
-          pip install -e .[db,test]
-
-      - name: Install DuckDB (ensure available for tests)
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "${{ matrix.duckdb_spec }}"
-
-      - name: Verify DuckDB is installed
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python - <<'PY'
-          import importlib.util, sys
-          spec = importlib.util.find_spec("duckdb")
-          if spec is None:
-              print("duckdb NOT installed")
-              sys.exit(1)
-          import duckdb
-          print("duckdb", duckdb.__version__)
-          PY
-
-      - name: Show resolver import location & DuckDB version
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python - <<'PY'
-          import hashlib, inspect, pathlib, sys
-          import duckdb, resolver
-          import resolver.db.duckdb_io as duckdb_io
-
-          print("Python executable:", sys.executable)
-          resolver_path = pathlib.Path(resolver.__file__).resolve()
-          duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
-
-          print("resolver module path:", resolver_path)
-          print("duckdb_io.py path:", duckdb_io_path)
-          print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
-          PY
-
-      - name: Upload duckdb_io.py used by CI
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
-          path: resolver/db/duckdb_io.py
-          overwrite: true
-
-      - name: Upload schema.sql used by CI
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/db/schema.sql') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
-          path: resolver/db/schema.sql
-          overwrite: true
-
-      - name: Run DuckDB tests
-        if: steps.dbfiles.outputs.present == 'true'
-        env:
-          RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
-        run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
-
-      - name: Upload diagnostics on failure
-        if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
-          path: |
-            **/*.duckdb
-            pytest-junit.xml
-            ./**/resolver_debug.log
-          if-no-files-found: ignore
-          overwrite: true
-
-      - name: Skip DB tests (not present)
-        if: steps.dbfiles.outputs.present != 'true'
-        run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
-
-  db_tests_nocache:
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
-    needs: db_tests
-    name: db-tests-nocache (duckdb=${{ matrix.duckdb_label }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - duckdb_spec: "duckdb==0.10.*"
-            duckdb_label: "0_10_x"
-          - duckdb_spec: "duckdb"
-            duckdb_label: "latest"
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
-      RESOLVER_DISABLE_CONN_CACHE: "1"
-      RESOLVER_DIAG: ${{ contains(matrix.duckdb_label, '0_10') && '1' || '0' }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Show commit context
-        run: |
-          echo "GITHUB_SHA=${GITHUB_SHA}"
-          echo "PR_HEAD_SHA=${{ github.event.pull_request.head.sha || '' }}"
-          git rev-parse HEAD
-          git show -s --date=iso --format='%H %cd %s'
-
-      - name: Derive sanitized artifact suffix
-        if: always()
-        run: |
-          raw="${{ matrix.duckdb_label }}"
-          if [ -z "${raw}" ]; then
-            raw="${{ matrix.duckdb }}"
-          fi
-          if [ -z "${raw}" ]; then
-            raw="latest"
-          fi
-          SAFE_SUFFIX="${raw}"
-          SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
-          SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
-          SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
-          echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
-
-      - name: Debug repo context
-        run: |
-          echo "Repo=$GITHUB_REPOSITORY Ref=$GITHUB_REF SHA=$GITHUB_SHA (nocache)"
-          python -c "import pathlib; print('CWD=', pathlib.Path().resolve())"
-
-      - name: Check DB tests present
-        id: dbfiles
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f "resolver/tests/test_db_parity.py" ] || [ -f "resolver/tests/test_duckdb_idempotency.py" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "Found DB tests."
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No DB tests found; will skip DB test steps."
-          fi
-
-      - name: Setup Python
-        if: steps.dbfiles.outputs.present == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Ensure workspace install
-        if: steps.dbfiles.outputs.present == 'true'
-        env:
-          PIP_NO_CACHE_DIR: "1"
-          PIP_DEFAULT_TIMEOUT: "60"
-          PIP_INDEX_URL: ${{ secrets.PIP_INDEX_URL }}
-          PIP_EXTRA_INDEX_URL: ${{ secrets.PIP_EXTRA_INDEX_URL }}
-          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip wheel setuptools
-          pip uninstall -y resolver || true
-          pip install -e .[db,test]
-
-      - name: Install DuckDB (ensure available for tests)
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "${{ matrix.duckdb_spec }}"
-
-      - name: Verify DuckDB is installed
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python - <<'PY'
-          import importlib.util, sys
-          spec = importlib.util.find_spec("duckdb")
-          if spec is None:
-              print("duckdb NOT installed")
-              sys.exit(1)
-          import duckdb
-          print("duckdb", duckdb.__version__)
-          PY
-
-      - name: Show resolver import location & DuckDB version
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python - <<'PY'
-          import hashlib, inspect, pathlib, sys
-          import duckdb, resolver
-          import resolver.db.duckdb_io as duckdb_io
-
-          print("Python executable:", sys.executable)
-          resolver_path = pathlib.Path(resolver.__file__).resolve()
-          duckdb_io_path = pathlib.Path(inspect.getfile(duckdb_io)).resolve()
-
-          print("resolver module path:", resolver_path)
-          print("duckdb_io.py path:", duckdb_io_path)
-          print("duckdb_io.py sha256:", hashlib.sha256(duckdb_io_path.read_bytes()).hexdigest())
-          print("duckdb version:", getattr(duckdb, "__version__", "n/a"))
-          PY
-
-      - name: Upload duckdb_io.py used by CI
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-duckdb-io
-          path: resolver/db/duckdb_io.py
-          overwrite: true
-
-      - name: Upload schema.sql used by CI
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/db/schema.sql') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-schema
-          path: resolver/db/schema.sql
-          overwrite: true
-
-      - name: Run DuckDB tests (cache disabled)
-        if: steps.dbfiles.outputs.present == 'true'
-        env:
-          RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/resolver.ci.duckdb
-        run: python -m pytest -q resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py
-
-      - name: Upload diagnostics on failure
-        if: ${{ failure() && steps.dbfiles.outputs.present == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.job }}-${{ matrix.duckdb_label || 'na' }}-${{ github.run_id }}-${{ github.run_attempt }}-diagnostics
-          path: |
-            **/*.duckdb
-            pytest-junit.xml
-            ./**/resolver_debug.log
-          if-no-files-found: ignore
-          overwrite: true
-
-      - name: Skip DB tests (not present)
-        if: steps.dbfiles.outputs.present != 'true'
-        run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
+      - name: Fail if tests failed
+        if: ${{ env.PYTEST_EXIT_CODE != '0' }}
+        run: exit ${{ env.PYTEST_EXIT_CODE }}

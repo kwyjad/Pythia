@@ -7,7 +7,7 @@ from typing import Optional
 import logging
 import os
 
-from resolver.db.conn_shared import get_shared_duckdb_conn, normalize_duckdb_url
+from resolver.db import duckdb_io
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
@@ -69,12 +69,11 @@ def fetch_deltas_point(
     resolved_path: str | None = None
     reused_label: str | None = None
     if conn is None:
-        conn, resolved_path = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+        conn = duckdb_io.get_db(os.environ.get("RESOLVER_DB_URL"))
+        resolved_path = getattr(conn, "_path", None) or getattr(conn, "database", None)
         reused_label = "shared"
     else:
-        resolved_path = getattr(conn, "database", None) or normalize_duckdb_url(
-            os.environ.get("RESOLVER_DB_URL", "")
-        )
+        resolved_path = getattr(conn, "_path", None) or getattr(conn, "database", None)
         reused_label = "external"
 
     if conn is None:
@@ -191,12 +190,11 @@ def fetch_resolved_point(
     resolved_path: str | None = None
     reused_label: str | None = None
     if conn is None:
-        conn, resolved_path = get_shared_duckdb_conn(os.environ.get("RESOLVER_DB_URL"))
+        conn = duckdb_io.get_db(os.environ.get("RESOLVER_DB_URL"))
+        resolved_path = getattr(conn, "_path", None) or getattr(conn, "database", None)
         reused_label = "shared"
     else:
-        resolved_path = getattr(conn, "database", None) or normalize_duckdb_url(
-            os.environ.get("RESOLVER_DB_URL", "")
-        )
+        resolved_path = getattr(conn, "_path", None) or getattr(conn, "database", None)
         reused_label = "external"
 
     if conn is None:
