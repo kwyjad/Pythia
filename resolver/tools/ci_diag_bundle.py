@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import hashlib
+import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, MutableMapping
 from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,11 +62,29 @@ def _pip_duckdb_listing() -> str | None:
     return "\n".join(lines).strip() or None
 
 
-def _stamp_file(path: Path) -> Mapping[str, str | int]:
-    payload = {
+def _resolve_import_path(import_path: str) -> str | None:
+    if not import_path or import_path == "schema":
+        return None
+    try:
+        module = importlib.import_module(import_path)
+    except Exception:  # pragma: no cover - diagnostics only
+        return None
+    file_path = getattr(module, "__file__", None)
+    if not file_path:
+        return None
+    return str(Path(file_path).resolve())
+
+
+def _stamp_file(rel_path: str, import_path: str) -> Mapping[str, object]:
+    path = ROOT / rel_path
+    payload: MutableMapping[str, object] = {
         "path": str(path),
         "exists": path.exists(),
+        "import_path": import_path,
     }
+    resolved = _resolve_import_path(import_path)
+    if resolved:
+        payload["import_resolved_path"] = resolved
     if path.exists():
         payload.update(
             {
@@ -82,34 +102,41 @@ def _write_json(zip_file: ZipFile, arcname: str, payload: Mapping[str, object]) 
     )
 
 
-def _record_db_section(zip_file: ZipFile, db_url: str | None, duckdb_version: str | None) -> None:
+def _parse_index_columns(sql: str | None) -> list[str] | None:
+    if not sql:
+        return None
+    match = re.search(r"\((.*)\)", sql)
+    if not match:
+        return None
+    columns = [part.strip().strip('"') for part in match.group(1).split(",")]
+    return [column for column in columns if column]
+
+
+def _record_db_section(
+    zip_file: ZipFile, db_url: str | None, duckdb_version: str | None
+) -> Mapping[str, object]:
+    summary: MutableMapping[str, object] = {"tables": []}
     if not db_url:
-        _write_json(
-            zip_file,
-            "diagnostics/db/db.json",
-            {"error": "db_url not provided"},
-        )
-        return
+        message = {"error": "db_url not provided"}
+        _write_json(zip_file, "diagnostics/db/db.json", message)
+        summary["error"] = message["error"]
+        return summary
 
     try:
         from resolver.db import duckdb_io
     except Exception as exc:  # pragma: no cover - diagnostics only
-        _write_json(
-            zip_file,
-            "diagnostics/db/db.json",
-            {"error": f"duckdb import failed: {exc}"},
-        )
-        return
+        message = {"error": f"duckdb import failed: {exc}"}
+        _write_json(zip_file, "diagnostics/db/db.json", message)
+        summary["error"] = message["error"]
+        return summary
 
     try:
         conn = duckdb_io.get_db(db_url)
     except Exception as exc:  # pragma: no cover - diagnostics only
-        _write_json(
-            zip_file,
-            "diagnostics/db/db.json",
-            {"error": f"get_db failed: {exc}"},
-        )
-        return
+        message = {"error": f"get_db failed: {exc}"}
+        _write_json(zip_file, "diagnostics/db/db.json", message)
+        summary["error"] = message["error"]
+        return summary
 
     resolved_path = getattr(conn, "_path", None) or getattr(conn, "database", None)
     meta = {
@@ -120,72 +147,76 @@ def _record_db_section(zip_file: ZipFile, db_url: str | None, duckdb_version: st
 
     db_root = "diagnostics/db"
     _write_json(zip_file, f"{db_root}/meta.json", meta)
+    summary["resolved_path"] = resolved_path
 
     try:
         show_tables = conn.execute("PRAGMA show_tables").fetchall()
     except Exception as exc:  # pragma: no cover - diagnostics only
-        _write_json(
-            zip_file,
-            f"{db_root}/show_tables.json",
-            {"error": f"show_tables failed: {exc}"},
-        )
-        return
+        message = {"error": f"show_tables failed: {exc}"}
+        _write_json(zip_file, f"{db_root}/show_tables.json", message)
+        summary["error"] = message["error"]
+        return summary
 
-    _write_json(
-        zip_file,
-        f"{db_root}/show_tables.json",
-        {"tables": show_tables},
-    )
+    _write_json(zip_file, f"{db_root}/show_tables.json", {"tables": show_tables})
 
     tables = [row[0] for row in show_tables if row]
     focus_tables = [t for t in ("facts_resolved", "facts_deltas") if t in tables]
+    ym_env = next(
+        (os.environ[key] for key in ("RESOLVER_TARGET_YM", "RESOLVER_SNAPSHOT_YM", "TARGET_YM") if os.environ.get(key)),
+        None,
+    )
+
     for table in focus_tables:
         prefix = f"{db_root}/{table}"
+        table_summary: MutableMapping[str, object] = {"name": table}
         try:
             table_info = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
         except Exception as exc:  # pragma: no cover - diagnostics only
-            _write_json(zip_file, f"{prefix}.table_info.json", {"error": repr(exc)})
+            payload = {"error": repr(exc)}
+            _write_json(zip_file, f"{prefix}.table_info.json", payload)
+            table_summary["table_info_error"] = payload["error"]
         else:
-            _write_json(
-                zip_file,
-                f"{prefix}.table_info.json",
-                {"columns": table_info},
-            )
+            _write_json(zip_file, f"{prefix}.table_info.json", {"columns": table_info})
+            table_summary["columns"] = [row[1] for row in table_info]
+
         try:
             indexes = conn.execute(f"PRAGMA indexes('{table}')").fetchall()
         except Exception as exc:  # pragma: no cover - diagnostics only
-            _write_json(zip_file, f"{prefix}.indexes.json", {"error": repr(exc)})
+            payload = {"error": repr(exc)}
+            _write_json(zip_file, f"{prefix}.indexes.json", payload)
+            table_summary["indexes_error"] = payload["error"]
+            indexes = []
         else:
             _write_json(zip_file, f"{prefix}.indexes.json", {"indexes": indexes})
+
         try:
             duckdb_indexes = conn.execute(
                 "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?",
                 [table],
             ).fetchall()
         except Exception as exc:  # pragma: no cover - diagnostics only
-            _write_json(
-                zip_file,
-                f"{prefix}.duckdb_indexes.json",
-                {"error": repr(exc)},
-            )
+            payload = {"error": repr(exc)}
+            _write_json(zip_file, f"{prefix}.duckdb_indexes.json", payload)
+            table_summary["duckdb_indexes_error"] = payload["error"]
+            duckdb_indexes = []
         else:
             _write_json(
                 zip_file,
                 f"{prefix}.duckdb_indexes.json",
                 {"indexes": duckdb_indexes},
             )
+
         try:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         except Exception as exc:  # pragma: no cover - diagnostics only
-            _write_json(zip_file, f"{prefix}.count.json", {"error": repr(exc)})
+            payload = {"error": repr(exc)}
+            _write_json(zip_file, f"{prefix}.count.json", payload)
+            table_summary["row_count_error"] = payload["error"]
         else:
-            _write_json(zip_file, f"{prefix}.count.json", {"count": int(count)})
+            count_int = int(count)
+            _write_json(zip_file, f"{prefix}.count.json", {"count": count_int})
+            table_summary["row_count"] = count_int
 
-        ym_env = None
-        for key in ("RESOLVER_TARGET_YM", "RESOLVER_SNAPSHOT_YM", "TARGET_YM"):
-            if key in os.environ and os.environ[key]:
-                ym_env = os.environ[key]
-                break
         if ym_env:
             try:
                 filtered = conn.execute(
@@ -193,55 +224,95 @@ def _record_db_section(zip_file: ZipFile, db_url: str | None, duckdb_version: st
                     [ym_env],
                 ).fetchone()[0]
             except Exception as exc:  # pragma: no cover - diagnostics only
-                _write_json(
-                    zip_file,
-                    f"{prefix}.count_ym.json",
-                    {"ym": ym_env, "error": repr(exc)},
-                )
+                payload = {"ym": ym_env, "error": repr(exc)}
+                _write_json(zip_file, f"{prefix}.count_ym.json", payload)
+                table_summary["row_count_ym_error"] = payload["error"]
             else:
+                filtered_int = int(filtered)
                 _write_json(
                     zip_file,
                     f"{prefix}.count_ym.json",
-                    {"ym": ym_env, "count": int(filtered)},
+                    {"ym": ym_env, "count": filtered_int},
                 )
+                table_summary.setdefault("filters", {})["ym"] = {
+                    "value": ym_env,
+                    "count": filtered_int,
+                }
+
+        if duckdb_indexes:
+            formatted = []
+            for index_name, sql in duckdb_indexes:
+                formatted.append(
+                    {
+                        "index_name": index_name,
+                        "sql": sql,
+                        "columns": _parse_index_columns(sql),
+                    }
+                )
+            table_summary["indexes"] = formatted
+        elif indexes:
+            table_summary["indexes"] = [list(row) for row in indexes]
+
+        summary["tables"].append(table_summary)
+
+    if not summary["tables"]:
+        summary.pop("tables")
+    return summary
 
 
-def _record_tests(zip_file: ZipFile) -> None:
+def _record_tests(zip_file: ZipFile) -> Mapping[str, object]:
     junit_path = ROOT / "pytest-junit.xml"
+    summary: MutableMapping[str, object] = {"failures": []}
     if not junit_path.exists():
-        return
+        return summary
 
     zip_file.write(junit_path, arcname="diagnostics/tests/junit.xml")
 
     try:
         tree = ET.parse(junit_path)
     except ET.ParseError as exc:  # pragma: no cover - diagnostics only
-        _write_json(
-            zip_file,
-            "diagnostics/tests/failures.json",
-            {"error": f"parse error: {exc}"},
-        )
-        return
+        payload = {"error": f"parse error: {exc}"}
+        _write_json(zip_file, "diagnostics/tests/failures.json", payload)
+        summary["error"] = payload["error"]
+        return summary
 
-    failures: dict[str, str] = {}
+    failures: list[Mapping[str, object]] = []
     for case in tree.iterfind(".//testcase"):
-        nodeid = case.get("classname", "") + "::" + case.get("name", "")
         failure = case.find("failure") or case.find("error")
         if failure is None:
             continue
+        nodeid = "::".join(
+            part for part in (case.get("classname", ""), case.get("name", "")) if part
+        )
         text = (failure.text or failure.get("message") or "").strip()
         first_line = text.splitlines()[0] if text else "(no message)"
-        failures[nodeid] = first_line
-
-    if failures:
-        _write_json(
-            zip_file,
-            "diagnostics/tests/failures.json",
-            failures,
+        failures.append(
+            {
+                "nodeid": nodeid,
+                "message": first_line,
+                "file": case.get("file"),
+                "line": case.get("line"),
+            }
         )
 
+    if failures:
+        _write_json(zip_file, "diagnostics/tests/failures.json", failures)
+    else:
+        _write_json(zip_file, "diagnostics/tests/failures.json", [])
 
-def _build_env_snapshot(duckdb_version: str | None, suite: str | None) -> Mapping[str, object]:
+    summary["failures"] = failures
+
+    stdout_candidate = ROOT / "pytest-stdout.txt"
+    if stdout_candidate.exists():
+        zip_file.write(stdout_candidate, arcname="diagnostics/tests/pytest-stdout.txt")
+        summary["pytest_stdout"] = str(stdout_candidate)
+
+    return summary
+
+
+def _build_env_snapshot(
+    duckdb_version: str | None, suite: str | None, timestamp: str
+) -> Mapping[str, object]:
     env_subset = {
         key: value
         for key, value in os.environ.items()
@@ -254,10 +325,105 @@ def _build_env_snapshot(duckdb_version: str | None, suite: str | None) -> Mappin
     env_subset["PYTHON_VERSION"] = sys.version
     env_subset["DUCKDB_VERSION"] = duckdb_version
     env_subset["SUITE"] = suite
+    env_subset["TIMESTAMP_UTC"] = timestamp
     pip_listing = _pip_duckdb_listing()
     if pip_listing:
         env_subset["PIP_DUCKDB"] = pip_listing
     return env_subset
+
+
+def _render_summary(
+    *,
+    suite: str | None,
+    duckdb_version: str | None,
+    timestamp: str,
+    git_meta: Mapping[str, object],
+    files_info: Mapping[str, Mapping[str, object]],
+    db_summary: Mapping[str, object],
+    test_summary: Mapping[str, object],
+) -> str:
+    lines: list[str] = []
+    lines.append("# Resolver CI Diagnostics Summary")
+    lines.append("")
+    lines.append(f"* Generated: {timestamp}")
+    lines.append(f"* Suite: {suite or '(unknown suite)'}")
+    lines.append(f"* DuckDB version: {duckdb_version or 'unknown'}")
+    for key in ("git_head", "pr_head_sha", "github_sha"):
+        value = git_meta.get(key)
+        if value:
+            lines.append(f"* {key}: {value}")
+
+    duckdb_stamp = files_info.get("duckdb_io.py")
+    if duckdb_stamp:
+        resolved = duckdb_stamp.get("import_resolved_path") or duckdb_stamp.get("path")
+        sha = duckdb_stamp.get("sha256", "missing")
+        lines.append("")
+        lines.append("## resolver.db.duckdb_io")
+        lines.append(f"- Path: {resolved}")
+        lines.append(f"- SHA256: {sha}")
+
+    if db_summary.get("error"):
+        lines.append("")
+        lines.append("## Database Snapshot")
+        lines.append(f"- Error: {db_summary['error']}")
+    elif db_summary.get("tables"):
+        lines.append("")
+        lines.append("## Database Snapshot")
+        resolved_path = db_summary.get("resolved_path")
+        if resolved_path:
+            lines.append(f"- Resolved path: {resolved_path}")
+        for table in db_summary["tables"]:
+            lines.append("")
+            lines.append(f"### Table `{table['name']}`")
+            if table.get("row_count") is not None:
+                lines.append(f"- Row count: {table['row_count']}")
+            if table.get("filters"):
+                for key, payload in table["filters"].items():
+                    lines.append(
+                        f"- {key}={payload['value']} count={payload['count']}"
+                    )
+            if table.get("columns"):
+                joined = ", ".join(table["columns"])
+                lines.append(f"- Columns: {joined}")
+            if table.get("indexes"):
+                lines.append("- Indexes:")
+                for index in table["indexes"]:
+                    if isinstance(index, dict):
+                        cols = ", ".join(index.get("columns") or [])
+                        sql = index.get("sql")
+                        lines.append(
+                            f"  - {index.get('index_name')}: ({cols}) :: {sql}"
+                        )
+                    else:
+                        lines.append(f"  - {index}")
+            for key in (
+                "table_info_error",
+                "indexes_error",
+                "duckdb_indexes_error",
+                "row_count_error",
+                "row_count_ym_error",
+            ):
+                if table.get(key):
+                    lines.append(f"- {key.replace('_', ' ')}: {table[key]}")
+    else:
+        lines.append("")
+        lines.append("## Database Snapshot")
+        lines.append("- No focus tables present")
+
+    failures = test_summary.get("failures") or []
+    lines.append("")
+    lines.append("## Test Failures")
+    if failures:
+        for entry in failures:
+            nodeid = entry.get("nodeid", "<unknown>")
+            message = entry.get("message", "")
+            lines.append(f"- {nodeid}: {message}")
+    elif test_summary.get("error"):
+        lines.append(f"- Error: {test_summary['error']}")
+    else:
+        lines.append("- None")
+
+    return "\n".join(lines) + "\n"
 
 
 def build_bundle(
@@ -270,9 +436,11 @@ def build_bundle(
     out_path = out_path.resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    git_meta = _gather_git_meta()
-    env_snapshot = _build_env_snapshot(duckdb_version, suite)
     timestamp = _dt.datetime.utcnow().isoformat() + "Z"
+    git_meta = _gather_git_meta()
+    env_snapshot = _build_env_snapshot(duckdb_version, suite, timestamp)
+
+    files_info: dict[str, Mapping[str, object]] = {}
 
     with ZipFile(out_path, "w", ZIP_DEFLATED) as zip_file:
         meta_lines = [
@@ -291,14 +459,24 @@ def build_bundle(
 
         files_root = "diagnostics/files"
         for rel_path, import_path in FILES_TO_STAMP:
-            path = ROOT / rel_path
-            payload = _stamp_file(path)
-            payload["import_path"] = import_path
-            arcname = f"{files_root}/{Path(rel_path).name}.sha256"
+            payload = _stamp_file(rel_path, import_path)
+            files_info[Path(rel_path).name] = payload
+            arcname = f"{files_root}/{Path(rel_path).name}.json"
             _write_json(zip_file, arcname, payload)
 
-        _record_db_section(zip_file, db_url, duckdb_version)
-        _record_tests(zip_file)
+        db_summary = _record_db_section(zip_file, db_url, duckdb_version)
+        test_summary = _record_tests(zip_file)
+
+        summary_text = _render_summary(
+            suite=suite,
+            duckdb_version=duckdb_version,
+            timestamp=timestamp,
+            git_meta=git_meta,
+            files_info=files_info,
+            db_summary=db_summary,
+            test_summary=test_summary,
+        )
+        zip_file.writestr("diagnostics/SUMMARY.md", summary_text)
 
     return out_path
 

@@ -13,6 +13,9 @@ on:
       - "resolver/**"
       - ".github/workflows/**"
       - "!Dashboard/**"
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -152,7 +155,7 @@ jobs:
           path: diagnostics.zip
           overwrite: true
   tests-db:
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     name: tests (db backend, duckdb=${{ matrix.duckdb_label }})
     strategy:
       fail-fast: false
@@ -249,7 +252,7 @@ jobs:
           path: diagnostics.zip
           overwrite: true
   tests-db-nocache:
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     needs: tests-db
     name: tests (db backend, cache disabled, duckdb=${{ matrix.duckdb_label }})
     strategy:
