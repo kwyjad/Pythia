@@ -23,6 +23,19 @@ except ImportError as exc:  # pragma: no cover - guidance for operators
         "DuckDB is required for database-backed resolver operations. Install 'duckdb'."
     ) from exc
 
+_DUCKDB_ERROR = getattr(duckdb, "Error", Exception)
+_CATALOG_EXC = getattr(duckdb, "CatalogException", _DUCKDB_ERROR)
+_DEPEND_EXC = getattr(duckdb, "DependencyException", _DUCKDB_ERROR)
+_CONN_EXC = getattr(duckdb, "ConnectionException", _DUCKDB_ERROR)
+_NOTIMPL_EXC = getattr(duckdb, "NotImplementedException", _DUCKDB_ERROR)
+_SCHEMA_EXC_TUPLE = (
+    _DUCKDB_ERROR,
+    _CATALOG_EXC,
+    _DEPEND_EXC,
+    _CONN_EXC,
+    _NOTIMPL_EXC,
+)
+
 from resolver.common import compute_series_semantics, dict_counts, df_schema
 from resolver.db.conn_shared import get_shared_duckdb_conn
 from resolver.diag.diagnostics import (
@@ -326,44 +339,6 @@ def _has_declared_key(
     return False
 
 
-def _ensure_primary_key(
-    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], constraint_name: str
-) -> None:
-    column_list = ", ".join(_quote_identifier(col) for col in columns)
-    table_ident = _quote_identifier(table)
-    constraint_ident = _quote_identifier(constraint_name)
-    try:
-        conn.execute(
-            f"ALTER TABLE {table_ident} ADD CONSTRAINT {constraint_ident} PRIMARY KEY ({column_list})"
-        )
-        LOGGER.debug(
-            "duckdb.schema.primary_key_added | table=%s constraint=%s columns=%s",
-            table,
-            constraint_name,
-            columns,
-        )
-    except (duckdb.CatalogException, duckdb.DependencyException) as exc:  # pragma: no cover - idempotent path
-        message = str(exc)
-        if "already has a primary key" in message or "Constraint with name" in message:
-            LOGGER.debug(
-                "duckdb.schema.primary_key_exists | table=%s constraint=%s", table, constraint_name
-            )
-        elif "Cannot alter entry" in message:
-            LOGGER.debug(
-                "duckdb.schema.primary_key_conflict | table=%s constraint=%s message=%s",
-                table,
-                constraint_name,
-                message,
-            )
-        else:
-            LOGGER.debug(
-                "duckdb.schema.primary_key_failed | table=%s constraint=%s error=%s",
-                table,
-                constraint_name,
-                message,
-            )
-
-
 def _ensure_unique_index(
     conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], index_name: str
 ) -> None:
@@ -379,6 +354,59 @@ def _ensure_unique_index(
         index_name,
         columns,
     )
+
+
+def _ensure_primary_key_or_unique(
+    conn: "duckdb.DuckDBPyConnection",
+    table: str,
+    columns: Sequence[str],
+    constraint_name: str,
+    index_name: str,
+) -> None:
+    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    table_ident = _quote_identifier(table)
+    constraint_ident = _quote_identifier(constraint_name)
+    try:
+        conn.execute(
+            f"ALTER TABLE {table_ident} ADD CONSTRAINT {constraint_ident} PRIMARY KEY ({column_list})"
+        )
+        LOGGER.debug(
+            "duckdb.schema.primary_key_added | table=%s constraint=%s columns=%s",
+            table,
+            constraint_name,
+            columns,
+        )
+    except _NOTIMPL_EXC as exc:  # pragma: no cover - version-specific fallback
+        LOGGER.debug(
+            "duckdb.schema.primary_key_not_supported | table=%s constraint=%s error=%s",
+            table,
+            constraint_name,
+            exc,
+        )
+        _ensure_unique_index(conn, table, columns, index_name)
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - idempotent path
+        message = str(exc)
+        if "already has a primary key" in message or "Constraint with name" in message:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_exists | table=%s constraint=%s",
+                table,
+                constraint_name,
+            )
+        elif "Cannot alter entry" in message:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_conflict | table=%s constraint=%s message=%s",
+                table,
+                constraint_name,
+                message,
+            )
+        else:
+            LOGGER.debug(
+                "duckdb.schema.primary_key_failed | table=%s constraint=%s error=%s",
+                table,
+                constraint_name,
+                message,
+            )
+        _ensure_unique_index(conn, table, columns, index_name)
 
 
 def _attempt_heal_missing_key(
@@ -401,11 +429,12 @@ def _attempt_heal_missing_key(
             list(keys),
         )
         _HEALING_WARNED.add(healing_key)
-    _ensure_primary_key(
+    _ensure_primary_key_or_unique(
         conn,
         table,
         spec["columns"],
         str(spec["primary"]),
+        str(spec["unique"]),
     )
     _ensure_unique_index(
         conn,
@@ -483,7 +512,7 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
         conn.execute("PRAGMA threads=4")
         conn.execute("PRAGMA enable_progress_bar=false")
         return conn
-    except duckdb.ConnectionException as exc:
+    except _CONN_EXC as exc:
         LOGGER.debug(
             "DuckDB connection unhealthy for %s (%s); forcing reopen", resolved_path, exc
         )
@@ -531,6 +560,19 @@ def init_schema(
             """
         ).fetchall()
     }
+
+    core_tables = {"facts_resolved", "facts_deltas"}
+    if core_tables.issubset(existing_tables):
+        LOGGER.debug("DuckDB schema already initialised; skipping DDL execution")
+        for table_name, spec in TABLE_KEY_SPECS.items():
+            columns = spec["columns"]
+            primary = spec["primary"]
+            unique = spec["unique"]
+            _ensure_primary_key_or_unique(
+                conn, table_name, columns, str(primary), str(unique)
+            )
+            _ensure_unique_index(conn, table_name, columns, str(unique))
+        return
 
     if "facts_resolved" not in existing_tables:
         conn.execute(
@@ -592,14 +634,12 @@ def init_schema(
         for statement in [s.strip() for s in sql.split(";") if s.strip()]:
             conn.execute(statement)
         LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
-    else:
-        LOGGER.debug("DuckDB schema already initialised; ensuring key/index metadata")
 
     for table_name, spec in TABLE_KEY_SPECS.items():
         columns = spec["columns"]
         primary = spec["primary"]
         unique = spec["unique"]
-        _ensure_primary_key(conn, table_name, columns, str(primary))
+        _ensure_primary_key_or_unique(conn, table_name, columns, str(primary), str(unique))
         _ensure_unique_index(conn, table_name, columns, str(unique))
 
     if LOGGER.isEnabledFor(logging.DEBUG):
