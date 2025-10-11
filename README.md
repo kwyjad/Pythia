@@ -26,9 +26,9 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 
 ### CI diagnostics & what to share
 
-The fast-test workflow uploads **exactly one** consolidated artifact named `diagnostics-fast-tests-<run_id>-<run_attempt>.zip`. It is assembled from the per-matrix bundles produced by `python -m resolver.tools.ci_diag_bundle` and always contains a human-readable `SUMMARY.md` alongside the raw parts. That summary includes the commit SHAs, suite label, DuckDB version, per-module SHA256 hashes, DuckDB table/index snapshots, row counts, and a compact list of failing tests.
+The fast-test workflow uploads **exactly one** consolidated artifact named `diagnostics-fast-tests-<run_id>-<run_attempt>.zip`. It is assembled from the per-matrix bundles produced by `python -m resolver.tools.ci_diag_bundle` and always contains a human-readable `SUMMARY.md` alongside the raw parts. The “dream” summary captures commit SHAs, suite label, DuckDB and Python versions, per-module SHA256 hashes and import paths, **auto-discovers every `*.duckdb` file created during the run**, records each table’s schema, unique indexes (with canonical column order), row counts, compact previews, declared-key PASS/FAIL verdicts, `ym` rollups, latest `as_of` probes, and a concise test failure digest with traceback snippets.
 
-After each PR run, download `diagnostics-fast-tests-<run_id>-<run_attempt>.zip`, open it locally, and paste the contents of the top-level `SUMMARY.md` into your issue or pull request comment. The maintainers can triage almost every failure from that one page—no extra logs required.
+After each PR run, download `diagnostics-fast-tests-<run_id>-<run_attempt>.zip`, open it locally, and paste the contents of the top-level `SUMMARY.md` into your issue or pull request comment. That single page contains everything maintainers need to diagnose CI failures—no extra logs or screenshots required.
 
 ### Working behind a proxy
 

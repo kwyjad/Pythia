@@ -41,6 +41,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: 1
       TZ: UTC
+      RESOLVER_DB_URL: duckdb:///${{ runner.temp }}/ci-fast.duckdb
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,9 +81,14 @@ jobs:
           PY
 
       - name: Run fast tests
+        id: run_pytest
         run: |
+          set -o pipefail
           python -m pytest -q resolver/tests -k "not slow and not nightly" \
-            --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
+            --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml 2>&1 | tee pytest-stdout.txt
+          status=${PIPESTATUS[0]}
+          echo "PYTEST_EXIT_CODE=${status}" >> "$GITHUB_ENV"
+          exit 0
 
       - name: Build diagnostics bundle (per-job)
         if: always()
@@ -90,7 +96,12 @@ jobs:
           python -m resolver.tools.ci_diag_bundle \
             --suite "fast-tests" \
             --duckdb-version "$(python -c "import duckdb; print(getattr(duckdb, '__version__', 'unknown'))")" \
-            --db-url "${{ env.RESOLVER_DB_URL || '' }}" \
+            --db-url "${{ env.RESOLVER_DB_URL }}" \
+            --scan-path "${{ github.workspace }}" \
+            --scan-path "${{ runner.temp }}" \
+            --scan-path "/tmp/pytest-of-runner" \
+            --scan-path "/tmp" \
+            --pytest-stdout pytest-stdout.txt \
             --out "diagnostics.${{ matrix.duckdb_label }}.zip"
 
       - name: Upload diagnostics (per-job)
@@ -100,6 +111,10 @@ jobs:
           name: fast-tests-part-${{ matrix.duckdb_label }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: diagnostics.${{ matrix.duckdb_label }}.zip
           overwrite: true
+
+      - name: Fail if tests failed
+        if: ${{ env.PYTEST_EXIT_CODE != '0' }}
+        run: exit ${{ env.PYTEST_EXIT_CODE }}
 
   fast_tests_aggregate:
     name: fast-tests aggregate
