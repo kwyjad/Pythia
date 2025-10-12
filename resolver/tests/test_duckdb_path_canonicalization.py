@@ -1,38 +1,39 @@
+"""Tests for canonical DuckDB URL and path handling."""
+
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import pytest
 
+pytest.importorskip("duckdb")
+
 from resolver.db import duckdb_io
-from resolver.db.conn_shared import clear_all_cached_connections
 
 
-@pytest.fixture(autouse=True)
-def _clear_cache():
-    clear_all_cached_connections()
-    yield
-    clear_all_cached_connections()
+def test_duckdb_path_canonicalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
+    db_path = workdir / "resolver.duckdb"
 
+    monkeypatch.chdir(workdir)
+    # Provide an env URL pointing at the same file using DuckDB scheme.
+    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
 
-def test_duckdb_path_canonicalization(tmp_path, monkeypatch):
-    db_file = tmp_path / "canonical" / "state.duckdb"
-    db_file.parent.mkdir(parents=True, exist_ok=True)
+    # Open via a relative filesystem path first to ensure canonicalisation.
+    conn_explicit = duckdb_io.get_db("resolver.duckdb")
+    duckdb_io.init_schema(conn_explicit)
+    conn_explicit.execute(
+        "INSERT INTO manifests(path, sha256) VALUES ('example', 'abc123')"
+    )
 
-    conn = duckdb_io.get_db(str(db_file))
-    conn.execute("CREATE TABLE IF NOT EXISTS t (value INTEGER)")
-    conn.execute("INSERT INTO t VALUES (1), (2)")
-    conn.close()
-
-    assert db_file.exists(), "duckdb should materialise on first write"
-
-    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_file}")
-    reopened = duckdb_io.get_db()
-    count = reopened.execute("SELECT COUNT(*) FROM t").fetchone()[0]
-    assert count == 2
-
-    resolved_path = getattr(reopened, "_path", None)
-    assert resolved_path is not None
-    assert os.path.samefile(resolved_path, db_file)
-
-    reopened.close()
+    # Opening via the environment URL should reuse the same canonical connection.
+    conn_env = duckdb_io.get_db(None)
+    try:
+        assert conn_env is conn_explicit
+        rows = conn_env.execute(
+            "SELECT COUNT(*) FROM manifests WHERE path = 'example'"
+        ).fetchone()[0]
+        assert rows == 1
+    finally:
+        conn_env.close()

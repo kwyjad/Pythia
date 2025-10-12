@@ -153,9 +153,51 @@ def _run_ddl_batch(
 ) -> None:
     if not statements:
         return
+
+    executed: list[str] = []
+
+    def _strip(statement: str) -> str:
+        content_lines = []
+        for line in statement.splitlines():
+            line_stripped = line.strip()
+            if not line_stripped or line_stripped.startswith("--"):
+                continue
+            content_lines.append(line_stripped)
+        stripped = "\n".join(content_lines).rstrip(";").strip()
+        if not stripped:
+            return ""
+        normalized = re.sub(r"\s+", " ", stripped).upper()
+        if normalized in {
+            "BEGIN",
+            "BEGIN TRANSACTION",
+            "BEGIN TRANSACTION;",
+            "END",
+            "END TRANSACTION",
+            "COMMIT",
+        }:
+            return ""
+        return stripped
+
+    cleaned = [_strip(stmt) for stmt in statements]
+    cleaned = [stmt for stmt in cleaned if stmt]
+    if not cleaned:
+        return
+
     with _ddl_transaction(conn, label):
-        for statement in statements:
+        for statement in cleaned:
             conn.execute(statement)
+            executed.append(statement)
+
+    if diag_enabled() and executed:
+        try:
+            log_json(
+                DIAG_LOGGER,
+                "ddl_statements_executed",
+                label=label,
+                statements=executed,
+            )
+        except Exception:  # pragma: no cover - diagnostics only
+            LOGGER.debug("ddl_statements_executed logging failed", exc_info=True)
 
 
 def _merge_enabled() -> bool:
@@ -673,8 +715,8 @@ def _delete_where(
         return int(count or 0)
 
 
-def _normalize_duckdb_url(path_or_url: str | None) -> str:
-    """Return a normalised DuckDB URL using absolute filesystem paths."""
+def _normalize_duckdb_target(path_or_url: str | None) -> tuple[str, str]:
+    """Return a canonical DuckDB URL and filesystem path for ``path_or_url``."""
 
     env_candidate = os.environ.get("RESOLVER_DB_URL", "").strip()
     explicit = (path_or_url or "").strip()
@@ -688,14 +730,14 @@ def _normalize_duckdb_url(path_or_url: str | None) -> str:
     raw = explicit or env_candidate or DEFAULT_DB_URL
     path, url = _shared_canonicalize_duckdb_target(raw)
     if path == ":memory:":
-        return "duckdb:///:memory:"
-    return url
+        return "duckdb:///:memory:", path
+    return url, path
 
 
 def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     """Return a DuckDB connection for the given path or URL."""
 
-    url = _normalize_duckdb_url(path_or_url)
+    url, normalized_path = _normalize_duckdb_target(path_or_url)
     cached = _DB_CACHE.get(url)
     cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
 
@@ -713,8 +755,10 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
                 _DB_CACHE.pop(url, None)
                 force_reopen = True
             else:
-                resolved_path = getattr(cached, "_path", None) or getattr(
-                    cached, "database", None
+                resolved_path = (
+                    getattr(cached, "_path", None)
+                    or getattr(cached, "database", None)
+                    or normalized_path
                 )
                 log_json(
                     DIAG_LOGGER,
