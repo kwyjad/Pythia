@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import calendar
 import datetime as dt
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +16,7 @@ from resolver.tools.export_facts import (
     export_facts,
 )
 from resolver.tools.freeze_snapshot import SnapshotError, freeze_snapshot
+from resolver.tools.verify_snapshot_manifest import verify_manifest as verify_snapshot_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STAGING = ROOT / "staging"
@@ -136,8 +136,12 @@ def make_monthly(args: argparse.Namespace) -> int:
         db_url=db_url,
     )
 
-    manifest_data = json.loads(snapshot.manifest.read_text(encoding="utf-8"))
-    resolved_rows = manifest_data.get("resolved_rows", manifest_data.get("rows", 0))
+    try:
+        manifest_data = verify_snapshot_manifest(snapshot.manifest)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise SnapshotError(f"Snapshot manifest verification failed: {exc}") from exc
+
+    resolved_rows = int(manifest_data.get("resolved_rows", manifest_data.get("rows", 0)))
     print("✅ Monthly snapshot complete")
     print(f"Month: {snapshot.ym}")
     print(f"Exports dir: {exports_dir}")

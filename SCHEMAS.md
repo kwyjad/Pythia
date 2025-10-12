@@ -110,10 +110,19 @@ Resolved precedence outputs stored in DuckDB for querying.
 > coerced to the table default, legacy `series` inputs are tolerated for migration, and `facts_resolved`
 > rows persist as `stock` while `facts_deltas` rows persist as `new`.
 
+> **Composite keys:** Resolver enforces `(ym, iso3, hazard_code, metric, series_semantics)` as the
+> natural key for `facts_resolved` and `(ym, iso3, hazard_code, metric)` for `facts_deltas`.
+> All key fields are required and trimmed before writes, so empty strings or `NULL` values are rejected.
+
 ### Semantics
 
 - `facts_resolved.series_semantics`: always stored as `stock` after canonicalisation.
 - `facts_deltas.series_semantics`: always stored as `new` after canonicalisation.
+
+### Keys
+
+- `facts_resolved`: `(ym, iso3, hazard_code, metric, series_semantics)`.
+- `facts_deltas`: `(ym, iso3, hazard_code, metric)`.
 
 ## db.manifests
 

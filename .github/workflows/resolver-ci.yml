@@ -8,16 +8,18 @@ on:
 
 jobs:
   db_backend_nocache:
-    name: "tests (db backend, cache disabled, duckdb=${{ matrix.duckdb_spec }})"
+    name: "tests (merge=${{ matrix.merge_enabled }}, duckdb=${{ matrix.duckdb_spec }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         duckdb_spec: ["0_10_x", "latest"]
+        merge_enabled: [0, 1]
     env:
       duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
       RESOLVER_CACHE: "0"
       RESOLVER_DIAG: "1"
+      RESOLVER_DUCKDB_DISABLE_MERGE: ${{ matrix.merge_enabled == 0 && '1' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,18 +38,11 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[db, test]" || python -m pip install -e .
-          python -m pip install duckdb pytest || true
+          python -m pip install -e ".[db,test]"
 
-      - name: Verify DuckDB import
+      - name: Verify DuckDB installation
         run: |
-          python - <<'PY'
-          import duckdb
-          import pytest
-
-          print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
-          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
-          PY
+          python -c "import duckdb, sys; print('DuckDB', duckdb.__version__, 'on', sys.version)"
 
       - name: Run tests
         id: tests
@@ -57,6 +52,15 @@ jobs:
         run: |
           set -o pipefail
           python -m pytest -q resolver/tests --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
+
+      - name: Assert DuckDB tests executed
+        if: always()
+        run: |
+          if [ ! -f pytest-junit.xml ]; then
+            echo "pytest-junit.xml missing" >&2
+            exit 1
+          fi
+          python scripts/ci/assert_no_skipped_db_tests.py pytest-junit.xml
 
       - name: Package diagnostics
         if: always()

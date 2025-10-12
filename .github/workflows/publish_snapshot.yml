@@ -57,8 +57,8 @@ jobs:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: |
-            resolver/requirements.txt
-            resolver/requirements-dev.txt
+            pyproject.toml
+            poetry.lock
 
       - name: Install dependencies
         if: ${{ github.event_name != 'schedule' || steps.guard.outputs.run == 'true' }}
@@ -84,6 +84,11 @@ jobs:
         if: ${{ github.event_name != 'schedule' || steps.guard.outputs.run == 'true' }}
         run: |
           python -m resolver.cli.snapshot_cli make-monthly --ym "${YM}" --write-db 1
+
+      - name: Verify snapshot manifest
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.run == 'true' }}
+        run: |
+          python -m resolver.tools.verify_snapshot_manifest "resolver/snapshots/${YM}/manifest.json"
 
       - name: Upload snapshot artifact
         if: ${{ github.event_name != 'schedule' || steps.guard.outputs.run == 'true' }}

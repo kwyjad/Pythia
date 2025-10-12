@@ -20,6 +20,7 @@ Notes:
 """
 
 import argparse
+import hashlib
 import os
 import sys
 import json
@@ -56,6 +57,7 @@ ROOT = Path(__file__).resolve().parents[1]      # .../resolver
 TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
+SNAPSHOT_MANIFEST_SCHEMA = "resolver.snapshot.manifest.v1"
 
 LOGGER = get_logger(__name__)
 
@@ -147,6 +149,32 @@ def _fallback_prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame 
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
     return frame
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _relative_path(path: Path, base: Path) -> str:
+    try:
+        return str(path.relative_to(base))
+    except ValueError:
+        return str(path)
+
+
+def _manifest_entry(name: str, path: Path, rows: int, base: Path) -> dict[str, object]:
+    return {
+        "name": name,
+        "path": _relative_path(path, base),
+        "rows": int(rows),
+        "sha256": _sha256(path),
+    }
 
 
 def _prepare_resolved_frame_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
@@ -285,15 +313,39 @@ def freeze_snapshot(
         deltas_df.to_csv(deltas_csv_out, index=False)
         write_parquet(deltas_df.copy(), deltas_parquet_out)
 
+    resolved_rows = int(len(resolved_df))
+    manifest_files = [
+        _manifest_entry("facts_resolved_csv", resolved_csv_out, resolved_rows, out_dir),
+        _manifest_entry("facts_resolved_parquet", resolved_parquet, resolved_rows, out_dir),
+        _manifest_entry("facts_csv", legacy_csv, resolved_rows, out_dir),
+        _manifest_entry("facts_parquet", legacy_parquet, resolved_rows, out_dir),
+    ]
+
+    timestamp = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = {
-        "created_at_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "schema_version": SNAPSHOT_MANIFEST_SCHEMA,
+        "generated_at": timestamp,
+        "created_at_utc": timestamp,
         "source_file": str(resolved_source),
         "target_month": ym,
         "source_commit_sha": os.environ.get("GITHUB_SHA", ""),
-        "resolved_rows": int(len(resolved_df)),
+        "resolved_rows": resolved_rows,
+        "export_version": SNAPSHOT_MANIFEST_SCHEMA,
+        "files": manifest_files,
     }
     if deltas_df is not None:
-        manifest["deltas_rows"] = int(len(deltas_df))
+        deltas_rows = int(len(deltas_df))
+        manifest["deltas_rows"] = deltas_rows
+        manifest_files.extend(
+            [
+                _manifest_entry(
+                    "facts_deltas_csv", deltas_csv_out, deltas_rows, out_dir
+                ),
+                _manifest_entry(
+                    "facts_deltas_parquet", deltas_parquet_out, deltas_rows, out_dir
+                ),
+            ]
+        )
     manifest["artifacts"] = {
         "facts_resolved_csv": str(resolved_csv_out),
         "facts_resolved_parquet": str(resolved_parquet),
@@ -306,10 +358,7 @@ def freeze_snapshot(
             }
         )
 
-    with open(manifest_out, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-
-    _maybe_write_db(
+    duckdb_target = _maybe_write_db(
         ym=ym,
         facts_df=resolved_df,
         resolved_df=load_table(resolved_path) if resolved_path else resolved_df,
@@ -320,6 +369,12 @@ def freeze_snapshot(
         write_db=write_db,
         db_url=db_url,
     )
+
+    if duckdb_target:
+        manifest["duckdb_target"] = duckdb_target
+
+    with open(manifest_out, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
 
     return SnapshotResult(
         ym=ym,
@@ -398,7 +453,7 @@ def _maybe_write_db(
     deltas_out: Path | None,
     write_db: Optional[bool] = None,
     db_url: Optional[str] = None,
-) -> None:
+) -> Optional[str]:
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
     if db_url is not None:
         db_url = db_url.strip()
@@ -408,17 +463,23 @@ def _maybe_write_db(
         write_db = bool(db_url)
     if not write_db:
         LOGGER.debug("DuckDB snapshot write skipped: disabled via flag")
-        return
+        return None
     if not db_url:
         LOGGER.debug("DuckDB snapshot write skipped: no RESOLVER_DB_URL provided")
-        return
+        return None
     if duckdb_io is None:
         LOGGER.debug("DuckDB snapshot write skipped: duckdb_io unavailable")
-        return
+        return None
 
     conn = None
+    db_target: Optional[str] = None
     try:
         conn = duckdb_io.get_db(db_url)
+        db_target = str(
+            getattr(conn, "_path", None)
+            or getattr(conn, "database", None)
+            or db_url
+        )
         duckdb_io.init_schema(conn)
         resolved_payload = resolved_df if resolved_df is not None else facts_df
         prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
@@ -484,3 +545,4 @@ def _maybe_write_db(
                 conn.close()
             except Exception:  # pragma: no cover - best effort cleanup
                 pass
+    return db_target

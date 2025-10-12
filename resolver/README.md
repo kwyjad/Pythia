@@ -10,6 +10,7 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
 - [Precedence policy](docs/precedence.md)
 - [ReliefWeb PDF pipeline](docs/reliefweb_pdf.md)
 - [Operations run book](docs/operations.md)
+- [Operations runbook (CI & monthly runs)](docs/operations_runbook.md)
 - [Troubleshooting guide](docs/troubleshooting.md)
 - [Governance & audit](docs/governance.md)
 
@@ -17,8 +18,8 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
 
 1. **Install dependencies** (once):
    ```bash
-   pip install -r resolver/requirements.txt
-   pip install -r resolver/requirements-dev.txt
+   python -m pip install --upgrade pip
+   pip install -e .[db]
    ```
 2. **Generate staging CSVs (offline stubs):**
    ```bash
@@ -57,15 +58,16 @@ When running resolver tests in the Codex environment (or any fresh CI runner),
 install the optional DuckDB dependencies before invoking `pytest`:
 
 ```bash
-make dev-setup
+pip install -e .[db,test]
 pytest -q resolver/tests
 ```
 
-The `dev-setup` target executes `scripts/codex_bootstrap_db.sh`, which installs
-the project with the `db` extra and verifies that `duckdb` can be imported so
-database-backed tests are executed instead of being skipped.
+CI runs execute the matrix with `RESOLVER_DUCKDB_DISABLE_MERGE=0/1` to cover
+merge-enabled and merge-disabled DuckDB behaviour. Each job verifies the
+installed DuckDB version and fails fast if any DuckDB-backed tests are skipped.
 
-Refer to the [operations run book](docs/operations.md) for detailed command variants (including deltas and review tooling).
+Refer to the [operations runbook](docs/operations_runbook.md) for detailed
+command variants (including deltas and review tooling).
 
 ## Logging
 
@@ -92,13 +94,16 @@ Refer to the [operations run book](docs/operations.md) for detailed command vari
 ## Continuous integration matrix & artifacts
 
 - `resolver-ci` workflows exercise a DuckDB version matrix (currently
-  `0.10.x` and `latest`) so regressions in newer releases surface quickly while
-  keeping coverage for the pinned production version.
+  `0.10.x` and `latest`) and a merge on/off toggle. The environment variable
+  `RESOLVER_DUCKDB_DISABLE_MERGE` is set via a two-value matrix so CI covers
+  both dual-write modes on every run.
 - Workflow runs cancel superseded executions on the same branch via a
   `${{ github.workflow }}-${{ github.ref }}` concurrency group.
 - When tests fail, the workflow uploads small debug artifacts (pytest JUnit XML,
   any `*.duckdb` files produced during the run, and resolver debug logs) to help
-  diagnose flaky or version-specific issues.
+  diagnose flaky or version-specific issues. The post-test guard
+  `scripts/ci/assert_no_skipped_db_tests.py` ensures DuckDB suites are executed
+  on every job.
 - Artifact names use a sanitized DuckDB label (for example, `0_10_x`) combined
   with the job name and `github.run_attempt`, and enable `overwrite: true` so
   reruns replace earlier diagnostics without 409 conflicts.
