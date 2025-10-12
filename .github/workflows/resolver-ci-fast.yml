@@ -14,7 +14,7 @@ jobs:
       matrix:
         duckdb_spec: ["0_10_x", "latest"]
     env:
-      duckdb_label: ${{ matrix.duckdb_spec }}
+      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
       RESOLVER_DIAG: "1"
     steps:
       - name: Checkout
@@ -34,16 +34,17 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel
-          if ! python -m pip install -e ".[db,test]"; then
-            python -m pip install -e .
-          fi
-          python -m pip install duckdb pytest
+          python -m pip install -e ".[db,test]" || python -m pip install -e .
+          python -m pip install duckdb pytest || true
 
       - name: Verify DuckDB import
         run: |
           python - <<'PY'
           import duckdb
+          import pytest
+
           print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
+          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
           PY
 
       - name: Run tests
@@ -61,13 +62,13 @@ jobs:
           JOB_NAME: ${{ github.job }}
           DUCKDB_LABEL: ${{ env.duckdb_label }}
         run: |
-          bash scripts/ci/package_diagnostics.sh
+          python scripts/ci/make_diagnostics.py
 
       - name: Upload diagnostics bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}
+          name: diagnostics-${{ github.job }}
           path: |
             diagnostics_*.tar.gz
             .ci/diagnostics/**
@@ -85,7 +86,7 @@ jobs:
       matrix:
         duckdb_spec: ["0_10_x", "latest"]
     env:
-      duckdb_label: ${{ matrix.duckdb_spec }}
+      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
       RESOLVER_DIAG: "1"
     steps:
       - name: Checkout
@@ -105,16 +106,17 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel
-          if ! python -m pip install -e ".[db,test]"; then
-            python -m pip install -e .
-          fi
-          python -m pip install duckdb pytest
+          python -m pip install -e ".[db,test]" || python -m pip install -e .
+          python -m pip install duckdb pytest || true
 
       - name: Verify DuckDB import
         run: |
           python - <<'PY'
           import duckdb
+          import pytest
+
           print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
+          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
           PY
 
       - name: Run tests
@@ -132,13 +134,13 @@ jobs:
           JOB_NAME: ${{ github.job }}
           DUCKDB_LABEL: ${{ env.duckdb_label }}
         run: |
-          bash scripts/ci/package_diagnostics.sh
+          python scripts/ci/make_diagnostics.py
 
       - name: Upload diagnostics bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}
+          name: diagnostics-${{ github.job }}
           path: |
             diagnostics_*.tar.gz
             .ci/diagnostics/**
@@ -156,7 +158,7 @@ jobs:
       matrix:
         duckdb_spec: ["0_10_x", "latest"]
     env:
-      duckdb_label: ${{ matrix.duckdb_spec }}
+      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -171,13 +173,16 @@ jobs:
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e .
-          python -m pip install duckdb pytest
+          python -m pip install duckdb pytest || true
 
       - name: Verify DuckDB import
         run: |
           python - <<'PY'
           import duckdb
+          import pytest
+
           print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
+          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
           PY
 
       - name: Run smoke
@@ -193,13 +198,13 @@ jobs:
           JOB_NAME: ${{ github.job }}
           DUCKDB_LABEL: ${{ env.duckdb_label }}
         run: |
-          bash scripts/ci/package_diagnostics.sh
+          python scripts/ci/make_diagnostics.py
 
       - name: Upload diagnostics bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}
+          name: diagnostics-${{ github.job }}
           path: |
             diagnostics_*.tar.gz
             .ci/diagnostics/**
