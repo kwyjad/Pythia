@@ -45,22 +45,25 @@ jobs:
           mkdir -p .ci/diagnostics
           python -m pytest -q resolver/tests -k "not slow and not nightly" --junitxml=pytest-junit.xml
 
+      - name: Write AI SUMMARY.md (always)
+        if: always()
+        run: |
+          python scripts/ci/make_ai_summary.py || true
+
       - name: Package diagnostics (always)
         if: always()
         run: |
           set +e
           mkdir -p .ci/diagnostics
-          # Include JUnit if produced
+          # Ensure SUMMARY.md exists
+          [ -f .ci/diagnostics/SUMMARY.md ] || echo "# AI SUMMARY\n\n(No summary available.)" > .ci/diagnostics/SUMMARY.md
+          # Carry JUnit (useful for AI parsing fallback)
           [ -f pytest-junit.xml ] && cp -f pytest-junit.xml .ci/diagnostics/ || true
-          # Collect logs & small DB files within repo (avoid system dirs)
-          tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" \
-            --exclude-vcs --ignore-failed-read \
-            .ci/diagnostics \
-            $(git ls-files '*.log' 2>/dev/null) \
-            $(git ls-files '*.duckdb' 2>/devnull) 2>/dev/null || true
-          # Fallback: ensure a tarball exists so upload step finds at least one file
-          [ -f "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" ] || \
-            tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" .ci/diagnostics 2>/dev/null || true
+          # Lightly collect logs & small DBs for completeness (not required by AI but handy)
+          mkdir -p .ci/diagnostics/_snippets || true
+          find resolver -maxdepth 6 -type f -name "*.log" -print0 2>/dev/null | xargs -0 -I{} cp --parents "{}" .ci/diagnostics/_snippets 2>/dev/null || true
+          find . -maxdepth 6 -type f -name "*.duckdb" -size -50M -print0 2>/dev/null | xargs -0 -I{} cp --parents "{}" .ci/diagnostics/_snippets 2>/dev/null || true
+          tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" --exclude-vcs --ignore-failed-read .ci/diagnostics 2>/dev/null || true
           set -e
 
       - name: Upload diagnostics bundle (always)
@@ -77,3 +80,28 @@ jobs:
       - name: Respect test outcome
         if: ${{ always() && steps.tests.outcome == 'failure' }}
         run: exit 1
+
+  aggregate:
+    name: "Aggregate AI SUMMARY"
+    runs-on: ubuntu-latest
+    needs: [fast-tests]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./downloads
+
+      - name: Merge per-job AI summaries into one file
+        run: |
+          python scripts/ci/consolidate_summaries.py ./downloads ./consolidated || true
+
+      - name: Upload consolidated AI SUMMARY
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-consolidated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: consolidated/SUMMARY.md
+          if-no-files-found: warn
+          overwrite: true

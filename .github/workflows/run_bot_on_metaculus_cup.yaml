@@ -1,3 +1,4 @@
+---
 name: Forecast on Metaculus Cup (every 2 days @ 00:00 UTC)
 
 on:
@@ -81,17 +82,17 @@ jobs:
 
       # Seen Guard controls
       # set to "48" if you want a 2-day re-forecast cool-down window
-      SEEN_COOLDOWN_HOURS: "48"   
+      SEEN_COOLDOWN_HOURS: "48"
       FORECAST_LOCK_DIR: forecast_logs/locks
       SEEN_GUARD_PATH: forecast_logs/state/seen_forecasts.jsonl
 
-      # Log GitHub Commit config 
+      # Log GitHub Commit config
       HUMAN_LOG_EXT: md
       DISABLE_GIT_LOGS: "false"
-      COMMIT_LOGS: true 
+      COMMIT_LOGS: true
       GIT_LOG_MESSAGE:"chore(logs): append forecasts & run logs"
       GIT_REMOTE_NAME: origin
-      GIT_BRANCH_NAME: main 
+      GIT_BRANCH_NAME: main
       # Optional: one markdown file per run (no subfolder) is 1; blank means one file per question
       HUMAN_LOG_FLAT:
 
@@ -122,7 +123,7 @@ jobs:
           # On Poetry 2.2.x there’s no --check. Keep it simple & deterministic.
           poetry lock --no-interaction
           echo "Regenerated/validated poetry.lock."
-          if [[ "${COMMIT_LOCKFILE:-0}" == "1" ]]; then
+          if [["${COMMIT_LOCKFILE:-0}" == "1"]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add poetry.lock

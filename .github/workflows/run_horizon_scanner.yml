@@ -1,3 +1,4 @@
+---
 # This workflow runs the Pythia Horizon Scanner and generates a risk report.
 
 name: Generate Risk Report

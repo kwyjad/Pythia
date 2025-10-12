@@ -36,7 +36,7 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[db,test]" || python -m pip install -e .
+          python -m pip install -e ".[db, test]" || python -m pip install -e .
           python -m pip install duckdb pytest || true
 
       - name: Verify DuckDB import

@@ -94,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -e .[db,test]
+          pip install -e .[db, test]
 
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
