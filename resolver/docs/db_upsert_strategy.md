@@ -14,6 +14,15 @@ validate that the target table exposes a matching primary key or unique
 constraint and raise immediately if it does not. This fail-fast check keeps the
 schema and upsert expectations aligned as the database evolves.
 
+## Series Semantics Enforcement
+
+Writes normalise incoming `series_semantics` tokens (via
+`resolver.helpers.series_semantics.normalize_series_semantics`) and then apply a
+table-specific collapse in `_canonicalize_semantics`. The final DuckDB records
+always store `stock` for `facts_resolved` rows and `new` for `facts_deltas`
+rows, preventing `stock_estimate` or other variants from leaking into the
+database while retaining diagnostics about any non-canonical inputs upstream.
+
 ## Date Columns Policy
 
 Resolver exports compare DuckDB rows against CSV files during parity tests. To

@@ -366,7 +366,7 @@ def _normalize_keys_df(frame: pd.DataFrame | None, table_name: str) -> pd.DataFr
 def _canonicalize_semantics(
     frame: pd.DataFrame | None, table_name: str, default_target: str
 ) -> tuple[pd.DataFrame | None, dict[str, dict[str, int]]]:
-    """Canonicalize ``series_semantics`` values to ``{'new', 'stock', 'stock_estimate'}``."""
+    """Canonicalize and enforce table-specific ``series_semantics`` values."""
 
     if frame is None or frame.empty or "series_semantics" not in frame.columns:
         return frame, {}
@@ -377,8 +377,19 @@ def _canonicalize_semantics(
     semantics = semantics.str.strip().str.lower()
     semantics = semantics.mask(~semantics.isin(_ALLOWED_SERIES_SEMANTICS), "")
     semantics = semantics.mask(semantics.eq(""), default_target)
-    canonical["series_semantics"] = semantics
-    after_counts = semantics.str.lower().value_counts(dropna=False).to_dict()
+    if table_name == "facts_resolved":
+        semantics = semantics.mask(semantics != "", "stock")
+    elif table_name == "facts_deltas":
+        semantics = pd.Series("new", index=semantics.index, dtype="string")
+    canonical["series_semantics"] = semantics.astype("string")
+    after_counts = (
+        canonical["series_semantics"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .value_counts(dropna=False)
+        .to_dict()
+    )
     if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "canonicalized semantics (%s): %s -> %s",
@@ -405,9 +416,15 @@ def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
     values = (
         frame["series_semantics"].astype(str).str.strip().str.lower().unique().tolist()
     )
-    if not set(values).issubset({"new", "stock", "stock_estimate"}):
+    if table == "facts_resolved":
+        allowed = {"stock"}
+    elif table == "facts_deltas":
+        allowed = {"new"}
+    else:
+        allowed = {"stock", "new"}
+    if not set(values).issubset(allowed):
         raise ValueError(
-            f"{table}: series_semantics must be one of ['new', 'stock', 'stock_estimate'], got {sorted(set(values))}"
+            f"{table}: series_semantics must be subset of {sorted(allowed)}, got {sorted(set(values))}"
         )
 
 

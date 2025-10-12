@@ -1,5 +1,8 @@
 """Utilities for normalising ``series_semantics`` values across the codebase."""
 
+# Final enforcement happens in ``resolver.db.duckdb_io._canonicalize_semantics``,
+# which collapses values to the table-specific policies when writing to DuckDB.
+
 from __future__ import annotations
 
 import logging

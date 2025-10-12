@@ -39,7 +39,7 @@ Monthly "new" deltas derived from resolved totals.
 | delta_negative_clamped | integer | no |  |  |
 | first_observation | integer | no |  |  |
 | rebase_flag | integer | no |  |  |
-| series_semantics | enum | yes | new, stock, stock_estimate | Canonical semantics flag (defaults to `new`); legacy `series` tolerated for migration only. |
+| series_semantics | enum | yes | new | Canonical semantics flag (always stored as `new`); legacy `series` tolerated for migration only. |
 | source_url | string | no |  |  |
 | value_stock | number | no |  |  |
 
@@ -101,15 +101,19 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
-| series_semantics | enum | yes | stock, new, stock_estimate | Canonical semantics flag (defaults to `stock`); `series` is deprecated and only used for backward compatibility. |
+| series_semantics | enum | yes | stock | Canonical semantics flag (always stored as `stock`); `series` is deprecated and only used for backward compatibility. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
 
-> **Note:** `series_semantics` is the canonical indicator for Resolver series and must be one of `new`, `stock`, or
-> `stock_estimate`. Writers canonicalise semantics inputs, enforce `ym` keys in `YYYY-MM`, and uppercase `iso3`/`hazard_code`
-> before persistence. Unknown or blank values are normalised to the table default (`new` for `facts_deltas`, `stock` for
-> `facts_resolved`). Legacy rows may still populate the historical `series` column, but readers coalesce `series_semantics`
-> with `series` during the migration window.
+> **Semantics enforcement:** Database writes canonicalise inputs, normalise key columns, and then collapse
+> `series_semantics` to table-specific values before upserting. Unknown or blank values are
+> coerced to the table default, legacy `series` inputs are tolerated for migration, and `facts_resolved`
+> rows persist as `stock` while `facts_deltas` rows persist as `new`.
+
+### Semantics
+
+- `facts_resolved.series_semantics`: always stored as `stock` after canonicalisation.
+- `facts_deltas.series_semantics`: always stored as `new` after canonicalisation.
 
 ## db.manifests
 

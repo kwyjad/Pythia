@@ -29,13 +29,7 @@ def test_unknowns_become_default_for_deltas(frame_with_unknown_semantics):
         table_name="facts_deltas",
         default_target="new",
     )
-    assert canonical["series_semantics"].tolist() == [
-        "new",
-        "new",
-        "new",
-        "stock_estimate",
-        "stock",
-    ]
+    assert canonical["series_semantics"].tolist() == ["new"] * 5
     duckdb_io._assert_semantics_required(canonical, "facts_deltas")
 
 
@@ -45,13 +39,7 @@ def test_unknowns_become_default_for_snapshots(frame_with_unknown_semantics):
         table_name="facts_resolved",
         default_target="stock",
     )
-    assert canonical["series_semantics"].tolist() == [
-        "new",
-        "stock",
-        "stock",
-        "stock_estimate",
-        "stock",
-    ]
+    assert canonical["series_semantics"].tolist() == ["stock"] * 5
     duckdb_io._assert_semantics_required(canonical, "facts_resolved")
 
 
