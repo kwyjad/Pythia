@@ -51,7 +51,7 @@ def _iter_normalised(values: pd.Series) -> tuple[pd.Series, set[str]]:
             normalised.append(original)
         else:
             normalised.append(canonical)
-    return pd.Series(normalised, dtype="string"), unknown
+    return pd.Series(normalised, index=values.index, dtype="string"), unknown
 
 
 def normalize_series_semantics(

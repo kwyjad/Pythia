@@ -28,6 +28,11 @@ _CATALOG_EXC = getattr(duckdb, "CatalogException", _DUCKDB_ERROR)
 _DEPEND_EXC = getattr(duckdb, "DependencyException", _DUCKDB_ERROR)
 _CONN_EXC = getattr(duckdb, "ConnectionException", _DUCKDB_ERROR)
 _NOTIMPL_EXC = getattr(duckdb, "NotImplementedException", _DUCKDB_ERROR)
+_PARSER_EXC = getattr(duckdb, "ParserException", _DUCKDB_ERROR)
+_TXN_EXC = getattr(duckdb, "TransactionException", _DUCKDB_ERROR)
+
+_SAVEPOINT_PROBED = False
+_SAVEPOINT_WORKS = False
 _SCHEMA_EXC_TUPLE = (
     _DUCKDB_ERROR,
     _CATALOG_EXC,
@@ -124,28 +129,167 @@ _HEALING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
 _WARNED_EXPLICIT_OVERRIDE: set[tuple[str, str]] = set()
 
 
+def _connection_in_transaction(conn: "duckdb.DuckDBPyConnection") -> bool:
+    """Return True if ``conn`` is currently inside an explicit transaction."""
+
+    try:
+        first = conn.execute("SELECT current_transaction_id()").fetchone()[0]
+        second = conn.execute("SELECT current_transaction_id()").fetchone()[0]
+    except Exception:  # pragma: no cover - defensive probe
+        LOGGER.debug("duckdb.ddl.txn_probe_failed", exc_info=True)
+        return False
+    return first == second
+
+
+def _is_savepoint_syntax_error(exc: Exception) -> bool:
+    message = str(exc)
+    return isinstance(exc, _PARSER_EXC) and "SAVEPOINT" in message.upper()
+
+
+def _record_savepoint_support(supported: bool) -> None:
+    global _SAVEPOINT_PROBED, _SAVEPOINT_WORKS
+    _SAVEPOINT_PROBED = True
+    _SAVEPOINT_WORKS = supported
+
+
+def _savepoints_supported() -> bool:
+    return _SAVEPOINT_PROBED and _SAVEPOINT_WORKS
+
+
+def _savepoints_certainly_unsupported() -> bool:
+    return _SAVEPOINT_PROBED and not _SAVEPOINT_WORKS
+
+
 @contextmanager
 def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[None]:
-    """Wrap DuckDB DDL in an explicit transaction with rollback on error."""
+    """Wrap DuckDB DDL in a savepoint or standalone transaction."""
 
-    conn.execute("BEGIN")
+    savepoint = f"ddl_{uuid.uuid4().hex}"
+    in_outer_txn = _connection_in_transaction(conn)
+    mode: str = "savepoint"
+    savepoint_started = False
+    outer_reset = False
+
+    try:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    except Exception as exc:
+        LOGGER.debug(
+            "duckdb.ddl.savepoint_unavailable | label=%s", label, exc_info=True
+        )
+        if _is_savepoint_syntax_error(exc) and in_outer_txn:
+            _record_savepoint_support(False)
+            mode = "passthrough"
+            LOGGER.debug(
+                "duckdb.ddl.passthrough_mode | label=%s | reason=savepoint_unsupported",
+                label,
+            )
+        else:
+            try:
+                conn.execute("BEGIN")
+            except Exception:
+                LOGGER.debug(
+                    "duckdb.ddl.begin_failed | label=%s", label, exc_info=True
+                )
+                raise
+            else:
+                mode = "transaction"
+                LOGGER.debug("duckdb.ddl.begin_started | label=%s", label)
+    else:
+        _record_savepoint_support(True)
+        savepoint_started = True
+        LOGGER.debug(
+            "duckdb.ddl.savepoint_started | label=%s | savepoint=%s", label, savepoint
+        )
+
     try:
         yield
     except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:  # pragma: no cover - defensive logging
-            LOGGER.debug(
-                "duckdb.ddl.rollback_failed | label=%s",
-                label,
-                exc_info=True,
-            )
-        else:
-            LOGGER.debug("duckdb.ddl.rolled_back | label=%s", label)
+        if mode == "savepoint" and savepoint_started:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.debug(
+                    "duckdb.ddl.rollback_to_savepoint_failed | label=%s | savepoint=%s",
+                    label,
+                    savepoint,
+                    exc_info=True,
+                )
+            else:
+                LOGGER.debug(
+                    "duckdb.ddl.rolled_back_to_savepoint | label=%s | savepoint=%s",
+                    label,
+                    savepoint,
+                )
+            finally:
+                try:
+                    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                except Exception:  # pragma: no cover - defensive logging
+                    LOGGER.debug(
+                        "duckdb.ddl.release_savepoint_failed | label=%s | savepoint=%s",
+                        label,
+                        savepoint,
+                        exc_info=True,
+                    )
+        elif mode == "transaction":
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # pragma: no cover - defensive logging
+                LOGGER.debug(
+                    "duckdb.ddl.rollback_failed | label=%s",
+                    label,
+                    exc_info=True,
+                )
+            else:
+                LOGGER.debug("duckdb.ddl.rolled_back | label=%s", label)
+        else:  # passthrough
+            if in_outer_txn:
+                needs_reset = False
+                try:
+                    conn.execute("SELECT 1")
+                except Exception as probe_exc:  # pragma: no cover - defensive logging
+                    LOGGER.debug(
+                        "duckdb.ddl.outer_probe_failed | label=%s", label, exc_info=True
+                    )
+                    message = str(probe_exc).upper()
+                    if isinstance(probe_exc, _TXN_EXC) or "CURRENT TRANSACTION IS ABORTED" in message:
+                        needs_reset = True
+                if needs_reset:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:  # pragma: no cover - defensive logging
+                        LOGGER.debug(
+                            "duckdb.ddl.outer_rollback_failed | label=%s",
+                            label,
+                            exc_info=True,
+                        )
+                    else:
+                        outer_reset = True
+                        LOGGER.debug(
+                            "duckdb.ddl.outer_transaction_rolled_back | label=%s",
+                            label,
+                        )
+                        try:
+                            conn.execute("BEGIN")
+                        except Exception:  # pragma: no cover - defensive logging
+                            LOGGER.debug(
+                                "duckdb.ddl.outer_begin_restore_failed | label=%s",
+                                label,
+                                exc_info=True,
+                            )
         raise
     else:
-        conn.execute("COMMIT")
-        LOGGER.debug("duckdb.ddl.committed | label=%s", label)
+        if mode == "savepoint" and savepoint_started:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            LOGGER.debug(
+                "duckdb.ddl.savepoint_released | label=%s | savepoint=%s",
+                label,
+                savepoint,
+            )
+        elif mode == "transaction":
+            conn.execute("COMMIT")
+            LOGGER.debug("duckdb.ddl.committed | label=%s", label)
+        else:
+            LOGGER.debug("duckdb.ddl.passthrough_completed | label=%s", label)
 
 
 def _run_ddl_batch(
@@ -601,6 +745,23 @@ def _ensure_primary_key_or_unique(
     column_list = ", ".join(_quote_identifier(col) for col in columns)
     table_ident = _quote_identifier(table)
     constraint_ident = _quote_identifier(constraint_name)
+
+    if _savepoints_certainly_unsupported() and _connection_in_transaction(conn):
+        LOGGER.debug(
+            "duckdb.schema.primary_key_skipped_savepoint | table=%s constraint=%s",
+            table,
+            constraint_name,
+        )
+        _ensure_unique_index(conn, table, columns, index_name)
+        return
+
+    if _has_declared_key(conn, table, columns):
+        LOGGER.debug(
+            "duckdb.schema.primary_key_exists | table=%s constraint=%s",
+            table,
+            constraint_name,
+        )
+        return
     try:
         statement = (
             f"ALTER TABLE {table_ident} ADD CONSTRAINT {constraint_ident} PRIMARY KEY ({column_list})"

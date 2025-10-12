@@ -206,6 +206,11 @@ run the DuckDB-specific test suite locally. The same commands ensure
 `python -c "import duckdb; print(duckdb.__version__)"` works before running
 `pytest -q resolver/tests -k duckdb`.
 
+> Running the fast test target inside Codex or on a fresh clone without the
+> large fixture checkout? See
+> [docs/testing-without-fixtures.md](docs/testing-without-fixtures.md) for the
+> synthetic fixture helpers that keep parity/staging suites green locally.
+
 ### DB backend tests
 
 You can exercise the DuckDB-backed contract test either completely offline or
@@ -287,6 +292,7 @@ proxy = http://user:pass@proxy.host:port
 - Each workflow prints the merge commit SHA, PR head SHA (when available), and the repo file that `resolver.db.duckdb_io` was imported from. CI uploads the exact `duckdb_io.py` used for the run and records its SHA-256 hash so any drift between checkout and execution is visible in the logs.
 - DuckDB 0.10.x and later are both supported in CI; `init_schema` first attempts to add primary-key constraints and gracefully falls back to creating unique indexes when older engines lack `ALTER TABLE ... ADD PRIMARY KEY` support.
 - Inspect those CSVs locally or download them from the GitHub Actions job to understand which rows or columns diverged between the CSV export and DuckDB snapshot.
+- DDL helpers wrap operations in nest-safe transactions: they attempt a `SAVEPOINT` when another transaction is already in progress and fall back to `BEGIN/COMMIT` otherwise. On any failure we roll back to the savepoint (or the full transaction) so DuckDB connections never remain in the aborted state after schema updates.
 
 What Forecaster Does (Pipeline)
 
