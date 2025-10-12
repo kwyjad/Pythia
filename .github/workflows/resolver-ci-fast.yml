@@ -2,27 +2,8 @@ name: resolver-ci-fast
 
 on:
   push:
-    branches: ['**']
-    paths:
-      - '**.py'
-      - 'pyproject.toml'
-      - 'poetry.lock'
-      - '.github/workflows/**'
   pull_request:
-    branches: ['**']
-    paths:
-      - '**.py'
-      - 'pyproject.toml'
-      - 'poetry.lock'
-      - '.github/workflows/**'
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
 
 jobs:
   fast_tests:
@@ -31,33 +12,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        duckdb_spec: ['0_10_x', 'latest']
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-      TZ: UTC
+        duckdb_spec: [ "0_10_x", "latest" ]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Prepare workspace cache dir
+      - name: Prepare CI dir
         run: mkdir -p "${{ github.workspace }}/.ci"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
 
       - name: Install workspace (editable)
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip
           pip uninstall -y resolver || true
-          pip install -e .[db,test]
-          if [ "${{ matrix.duckdb_spec }}" = '0_10_x' ]; then
-            python -m pip install 'duckdb==0.10.*'
-          else
-            python -m pip install duckdb
-          fi
-          python -m pip install pytest
+          pip install -e .
+          pip install pytest
 
       - name: Run fast tests
         run: |
@@ -68,17 +36,22 @@ jobs:
           exit ${PIPESTATUS[0]}
 
       - name: Build diagnostics bundle (per-matrix)
-        if: always()
         run: |
-          export RESOLVER_DB_URL="duckdb:///${{ github.workspace }}/.ci/fast-${{ matrix.duckdb_spec }}.duckdb"
+          python - <<'PY'
+import duckdb, sys
+print(getattr(duckdb,'__version__','unknown'))
+PY
+        shell: bash
+
+      - name: Build diagnostics bundle (per-matrix) actual
+        run: |
           python -m resolver.tools.ci_diag_bundle \
             --suite "fast-tests" \
             --duckdb-version "$(python - <<'PY'
-import duckdb
-print(getattr(duckdb, '__version__', 'unknown'))
+import duckdb; print(getattr(duckdb,'__version__','unknown'))
 PY
 )" \
-            --db-url "$RESOLVER_DB_URL" \
+            --db-url "duckdb:///${{ github.workspace }}/.ci/fast-${{ matrix.duckdb_spec }}.duckdb" \
             --scan-path "${{ github.workspace }}/.ci" \
             --scan-path "${{ github.workspace }}" \
             --scan-path "/tmp/pytest-of-runner" \
@@ -87,7 +60,6 @@ PY
             --out "diagnostics.fast-${{ matrix.duckdb_spec }}.zip"
 
       - name: Upload diagnostics (per-matrix)
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fast-tests-part-${{ matrix.duckdb_spec }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -100,34 +72,20 @@ PY
     strategy:
       fail-fast: false
       matrix:
-        duckdb_spec: ['0_10_x', 'latest']
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-      TZ: UTC
-      RESOLVER_API_BACKEND: db
+        duckdb_spec: [ "0_10_x", "latest" ]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Prepare workspace cache dir
+      - name: Prepare CI dir
         run: mkdir -p "${{ github.workspace }}/.ci"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
 
       - name: Install workspace (editable)
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip
           pip uninstall -y resolver || true
-          pip install -e .[db,test]
-          if [ "${{ matrix.duckdb_spec }}" = '0_10_x' ]; then
-            python -m pip install 'duckdb==0.10.*'
-          else
-            python -m pip install duckdb
-          fi
-          python -m pip install pytest
+          pip install -e .
+          pip install pytest
 
       - name: Run db-backend tests
         run: |
@@ -138,17 +96,14 @@ PY
           exit ${PIPESTATUS[0]}
 
       - name: Build diagnostics bundle (per-matrix)
-        if: always()
         run: |
-          export RESOLVER_DB_URL="duckdb:///${{ github.workspace }}/.ci/db-${{ matrix.duckdb_spec }}.duckdb"
           python -m resolver.tools.ci_diag_bundle \
             --suite "db-backend" \
             --duckdb-version "$(python - <<'PY'
-import duckdb
-print(getattr(duckdb, '__version__', 'unknown'))
+import duckdb; print(getattr(duckdb,'__version__','unknown'))
 PY
 )" \
-            --db-url "$RESOLVER_DB_URL" \
+            --db-url "duckdb:///${{ github.workspace }}/.ci/db-${{ matrix.duckdb_spec }}.duckdb" \
             --scan-path "${{ github.workspace }}/.ci" \
             --scan-path "${{ github.workspace }}" \
             --scan-path "/tmp/pytest-of-runner" \
@@ -157,7 +112,6 @@ PY
             --out "diagnostics.db-${{ matrix.duckdb_spec }}.zip"
 
       - name: Upload diagnostics (per-matrix)
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: db-backend-part-${{ matrix.duckdb_spec }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -170,28 +124,16 @@ PY
     strategy:
       fail-fast: true
       matrix:
-        duckdb_spec: ['0_10_x', 'latest']
+        duckdb_spec: [ "0_10_x", "latest" ]
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Install workspace (editable)
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip
           pip uninstall -y resolver || true
-          pip install -e .[db,test]
-          if [ "${{ matrix.duckdb_spec }}" = '0_10_x' ]; then
-            python -m pip install 'duckdb==0.10.*'
-          else
-            python -m pip install duckdb
-          fi
-          python -m pip install pytest
-
+          pip install -e .
+          pip install pytest
       - name: Run smoke
         run: |
           python -m pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py \
@@ -201,47 +143,32 @@ PY
     name: CI aggregate (fast-tests + db-backend)
     runs-on: ubuntu-latest
     needs: [fast_tests, db_backend]
-    if: ${{ always() }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: ./downloads
-
       - name: Consolidate artifacts and SUMMARY.md
         run: |
-          export RUN_ID="${{ github.run_id }}"
-          export RUN_ATTEMPT="${{ github.run_attempt }}"
           python - <<'PY'
-import os
-import pathlib
-import zipfile
-
-run_id = os.environ.get('RUN_ID', 'unknown')
-run_attempt = os.environ.get('RUN_ATTEMPT', '1')
-root = pathlib.Path('downloads')
-part_zips = sorted(root.glob('**/*.zip'))
-out_name = f"diagnostics-consolidated-{run_id}-{run_attempt}.zip"
-with zipfile.ZipFile(out_name, 'w', zipfile.ZIP_DEFLATED) as z:
-    summaries: list[str] = []
-    for part in part_zips:
-        z.write(part, f"parts/{part.name}")
-        try:
-            with zipfile.ZipFile(part, 'r') as partz:
-                candidates = [n for n in partz.namelist() if n.endswith('diagnostics/SUMMARY.md')]
-                if candidates:
-                    text = partz.read(candidates[0]).decode('utf-8', 'ignore')
-                    summaries.append(f"\n\n---\n# From: {part.name}\n\n{text}")
-        except zipfile.BadZipFile:
-            continue
-    master = ["# Resolver — Consolidated SUMMARY", "", f"Run: {run_id} attempt {run_attempt}"]
-    if summaries:
-        master.extend(summaries)
-    else:
-        master.append("\n(No per-part summaries found)")
-    z.writestr('SUMMARY.md', "\n".join(master) + "\n")
-print(f"Wrote {out_name}")
+import os, zipfile, pathlib
+root = pathlib.Path("downloads")
+part_zips = sorted(root.glob("**/*.zip"))
+outzip = pathlib.Path("diagnostics-consolidated-${{ github.run_id }}-${{ github.run_attempt }}.zip")
+with zipfile.ZipFile(outzip, "w", zipfile.ZIP_DEFLATED) as z:
+    summaries = []
+    for p in part_zips:
+        z.write(p, f"parts/{p.name}")
+        with zipfile.ZipFile(p, "r") as partz:
+            cand = [n for n in partz.namelist() if n.endswith("diagnostics/SUMMARY.md")]
+            if cand:
+                text = partz.read(cand[0]).decode("utf-8","ignore")
+                summaries.append(f"\n\n---\n# From: {p.name}\n\n{text}")
+    master = "# Resolver — Consolidated SUMMARY\n"
+    master += f"\nRun: ${{ github.run_id }} attempt ${{ github.run_attempt }}\n"
+    master += "\n".join(summaries) if summaries else "\n(No per-part summaries found)"
+    z.writestr("SUMMARY.md", master)
+print("Wrote", outzip)
 PY
-
       - name: Upload consolidated diagnostics
         uses: actions/upload-artifact@v4
         with:
