@@ -57,8 +57,8 @@ jobs:
             --exclude-vcs --ignore-failed-read \
             .ci/diagnostics \
             $(git ls-files '*.log' 2>/dev/null) \
-            $(git ls-files '*.duckdb' 2>/dev/null) 2>/dev/null || true
-          # Fallback: if no tarball was created, touch an empty one so upload step finds at least one file
+            $(git ls-files '*.duckdb' 2>/devnull) 2>/dev/null || true
+          # Fallback: ensure a tarball exists so upload step finds at least one file
           [ -f "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" ] || \
             tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" .ci/diagnostics 2>/dev/null || true
           set -e
@@ -68,9 +68,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
-          path:
-            - diagnostics_*.tar.gz
-            - .ci/diagnostics/**
+          path: |
+            diagnostics_*.tar.gz
+            .ci/diagnostics/**
           if-no-files-found: warn
           overwrite: true
 
