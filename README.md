@@ -551,3 +551,8 @@ Make sure SEEN_GUARD_PATH is set to a path inside the repo (e.g., forecast_logs/
 
 Metaculus API call hangs for minutes.
 
+DuckDB connection inconsistencies or transaction errors.
+- Always open databases through `resolver.db.duckdb_io.get_db(...)`. The helper canonicalises both filesystem paths and `duckdb:///` URLs (resolving relative paths against the current working directory and collapsing symlinks) so every caller reaches the same on-disk file and the shared connection cache can be reused.
+- When both a `RESOLVER_DB_URL` environment variable and an explicit argument are provided, the explicit path wins. This prevents surprising cross-environment writes; a warning is logged the first time we override the environment value.
+- Schema initialisation is wrapped in a Python-managed transaction. Do not embed `BEGIN`/`COMMIT` in schema snippets you pass to `duckdb_io.init_schema`; the helper strips those statements and handles rollbacks on errors for you.
+
