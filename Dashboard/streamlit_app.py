@@ -42,6 +42,7 @@ APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent  # assumes Dashboard/ at repo root
 USE_PARQUET = os.getenv("USE_PARQUET", "true").lower() == "true"
 PARQUET_PATH = REPO_ROOT / "Dashboard" / "data" / "forecasts.parquet"
+RESOLVER_FEATURES_PATH = REPO_ROOT / "data" / "resolver_features.parquet"
 
 # Raw CSV fallback (GitHub). Override if your repo path differs or is private.
 RAW_CSV_URL = os.getenv(
@@ -278,6 +279,29 @@ def load_data() -> Tuple[pd.DataFrame, Dict[str, str]]:
     )
     return pd.DataFrame(), {"source": "none", "path": "—", "mtime": "—", "rows": "0"}
 
+
+def _resolver_features_status() -> Optional[str]:
+    path = RESOLVER_FEATURES_PATH
+    if not path.exists():
+        return None
+    rows_text = "?"
+    cols_text = "?"
+    try:  # Prefer metadata-only read via pyarrow when available
+        import pyarrow.parquet as pq  # type: ignore
+
+        pf = pq.ParquetFile(path)
+        rows_text = f"{pf.metadata.num_rows:,}"
+        cols_text = str(pf.schema.num_columns)
+    except Exception:
+        try:
+            df = pd.read_parquet(path)
+            rows_text = f"{len(df):,}"
+            cols_text = str(len(df.columns))
+        except Exception:
+            pass
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"Resolver features • {rows_text} rows • {cols_text} columns • updated {mtime}"
+
 # -----------------------------------------------------------------------------
 # Human logs helper
 # -----------------------------------------------------------------------------
@@ -331,6 +355,10 @@ st.info(
     f"**Source:** {meta.get('source','?')}  |  **Path/URL:** {meta.get('path','?')}  |  "
     f"**Modified:** {meta.get('mtime','?')}  |  **Rows:** {meta.get('rows','?')}"
 )
+
+features_status = _resolver_features_status()
+if features_status:
+    st.caption(features_status)
 
 # Normalize created_at
 if "created_at" in df.columns:

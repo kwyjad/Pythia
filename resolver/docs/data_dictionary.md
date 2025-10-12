@@ -45,3 +45,26 @@ All records **must** include both **country_name + iso3** and **hazard_label + h
 - Uniqueness hint (soft): `(iso3, hazard_code, metric, as_of_date, publisher, revision)`.
 - `metric='in_need'` only when source explicitly publishes **PIN**.
 - For outbreaks where only cases exist, use `metric=cases`, `unit=persons_cases` (do **not** coerce to PIN).
+
+## Derived artifact: resolver_features
+
+`data/resolver_features.parquet` materialises resolver deltas into features the Forecaster calibration loop consumes.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| country_iso3 | string | ISO-3166 alpha-3 country code. |
+| hazard_code | string | Resolver hazard taxonomy slug. |
+| metric | enum | `in_need`, `affected`, or `displaced` (configurable). |
+| ym | string | Resolver month key (`YYYY-MM`). |
+| delta_m1 | float | Monthly `value_new` from `facts_deltas` (baseline feature). |
+| delta_m3_sum | float | Rolling 3-month sum of `delta_m1` per `(iso3, hazard, metric)`. |
+| delta_m6_sum | float | Rolling 6-month sum of `delta_m1`. |
+| delta_m12_sum | float | Rolling 12-month sum of `delta_m1`. |
+| delta_zscore_6m | float | Z-score of `delta_m1` against the trailing 6-month mean/std. |
+| sudden_spike_flag | boolean | True when `|delta_zscore_6m| >= 3`. |
+| missing_month_flag | boolean | True when the prior observation is more than 1 month back. |
+| as_of_date | string | ISO date used in precedence output (falls back to delta `as_of`). |
+| as_of_recency_days | integer | Days between `as_of_date` and feature build timestamp. |
+| source_tier | string | Precedence tier recorded in `facts_resolved`. |
+| hazard_class | string | Hazard class from the shocks registry. |
+| generated_at_utc | string | Feature build timestamp (`YYYY-MM-DDTHH:MM:SSZ`). |
