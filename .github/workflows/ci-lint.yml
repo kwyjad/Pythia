@@ -7,17 +7,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  yaml-actionlint:
-    name: "YAML & actionlint"
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "YAML Lint"
-        uses: ibiqlik/action-yamllint@v3
-        with:
-          config_file: .yamllint.yml
-
-      - name: "Actionlint"
-        uses: rhysd/actionlint@v1
+      - name: Actionlint
+        uses: eifinger/actionlint-action@v1
