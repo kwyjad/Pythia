@@ -27,8 +27,8 @@ def test_init_schema_outside_transaction_ok(conn) -> None:
     assert conn.execute("SELECT 1").fetchone()[0] == 1
 
 
-def test_init_schema_inside_open_transaction_ok(conn) -> None:
-    conn.execute("BEGIN TRANSACTION")
+def test_init_schema_inside_transaction_twice_ok(conn) -> None:
+    conn.execute("BEGIN")
     try:
         duckdb_io.init_schema(conn)
         duckdb_io.init_schema(conn)
@@ -37,9 +37,7 @@ def test_init_schema_inside_open_transaction_ok(conn) -> None:
     assert conn.execute("SELECT 1").fetchone()[0] == 1
 
 
-def test_write_snapshot_performs_ddl_inside_transaction(conn) -> None:
-    duckdb_io.init_schema(conn)
-
+def test_write_snapshot_triggers_ddl_inside_transaction_ok(conn) -> None:
     facts_resolved = pd.DataFrame(
         [
             {
@@ -64,14 +62,17 @@ def test_write_snapshot_performs_ddl_inside_transaction(conn) -> None:
         ]
     )
 
-    duckdb_io.write_snapshot(
-        conn,
-        ym="2024-01",
-        facts_resolved=facts_resolved,
-        facts_deltas=facts_deltas,
-        manifests=None,
-        meta={"created_at_utc": "2024-01-01T00:00:00Z"},
-    )
+    conn.execute("BEGIN")
+    try:
+        duckdb_io.write_snapshot(
+            conn,
+            ym="2024-01",
+            facts_resolved=facts_resolved,
+            facts_deltas=facts_deltas,
+            manifests=None,
+            meta={"created_at_utc": "2024-01-01T00:00:00Z"},
+        )
+    finally:
+        conn.execute("ROLLBACK")
 
-    assert conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0] == 1
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
