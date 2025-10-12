@@ -11,6 +11,10 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
+from resolver.tools.build_forecaster_features import (
+    FeatureBuildError,
+    build_features as build_forecaster_features,
+)
 from resolver.tools.export_facts import (
     DEFAULT_CONFIG as DEFAULT_EXPORT_CONFIG,
     ExportError,
@@ -136,6 +140,14 @@ def make_monthly(args: argparse.Namespace) -> int:
         db_url=db_url,
     )
 
+    try:
+        features_frame = build_forecaster_features(
+            snapshots_dir=snapshots_dir,
+            db_url=db_url,
+        )
+    except FeatureBuildError as exc:
+        raise SnapshotError(f"Failed to build resolver features: {exc}") from exc
+
     manifest_data = json.loads(snapshot.manifest.read_text(encoding="utf-8"))
     resolved_rows = manifest_data.get("resolved_rows", manifest_data.get("rows", 0))
     print("✅ Monthly snapshot complete")
@@ -143,6 +155,7 @@ def make_monthly(args: argparse.Namespace) -> int:
     print(f"Exports dir: {exports_dir}")
     print(f"Snapshot dir: {snapshot.out_dir}")
     print(f"Resolved rows: {resolved_rows}")
+    print(f"Resolver features rows: {len(features_frame)}")
     return 0
 
 
