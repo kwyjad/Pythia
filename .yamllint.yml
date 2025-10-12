@@ -1,0 +1,28 @@
+extends: default
+
+rules:
+  indentation:
+    level: error
+  colons:
+    level: error
+  trailing-spaces:
+    level: error
+  new-line-at-end-of-file:
+    level: error
+  document-start:
+    level: warning
+  comments-indentation:
+    level: warning
+  truthy:
+    level: warning
+  line-length: disable
+
+overrides:
+  - files:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+    rules:
+      document-start:
+        level: error
+      truthy:
+        level: error

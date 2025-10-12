@@ -1,3 +1,4 @@
+---
 name: resolver-ci
 
 on:
@@ -7,12 +8,16 @@ on:
 
 jobs:
   db_backend_nocache:
-    name: tests (db backend, cache disabled, duckdb=${{ matrix.duckdb_spec }})
+    name: "tests (db backend, cache disabled, duckdb=${{ matrix.duckdb_spec }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        duckdb_spec: [ "0_10_x", "latest" ]
+        duckdb_spec: ["0_10_x", "latest"]
+    env:
+      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
+      RESOLVER_CACHE: "0"
+      RESOLVER_DIAG: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,49 +25,58 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Prepare CI dir
-        run: mkdir -p "${{ github.workspace }}/.ci"
-
-      - name: Install workspace (editable)
-        run: |
-          python -m pip install --upgrade pip
-          pip uninstall -y resolver || true
-          pip install -e .
-          pip install pytest
-
-      - name: Run db-backend (cache disabled)
-        env:
-          RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb
-          RESOLVER_CACHE: "0"
-          RESOLVER_DIAG: "1"
         run: |
           set -o pipefail
-          python -m pytest -q resolver/tests --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml 2>&1 | tee pytest-stdout.txt
-          EXITCODE=${PIPESTATUS[0]}
-          exit $EXITCODE
+          mkdir -p "${{ github.workspace }}/.ci"
 
-      - name: Build diagnostics bundle
+      - name: Install dependencies (incl. DuckDB)
         run: |
-          DUCKVER=$(python - <<'PY'
-import duckdb; print(getattr(duckdb,'__version__','unknown'))
-PY
-)
-          python -m resolver.tools.ci_diag_bundle \
-            --suite db-backend-nocache \
-            --duckdb-version "$DUCKVER" \
-            --db-url "duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb" \
-            --scan-path "${{ github.workspace }}/.ci" \
-            --scan-path "${{ github.workspace }}" \
-            --scan-path "/tmp/pytest-of-runner" \
-            --scan-path "/tmp" \
-            --pytest-stdout pytest-stdout.txt \
-            --out "diagnostics.db-nocache-${{ matrix.duckdb_spec }}.zip"
+          set -o pipefail
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[db,test]" || python -m pip install -e .
+          python -m pip install duckdb pytest || true
 
-      - name: Upload diagnostics
+      - name: Verify DuckDB import
+        run: |
+          python - <<'PY'
+          import duckdb
+          import pytest
+
+          print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
+          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
+          PY
+
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        env:
+          RESOLVER_DB_URL: "duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ env.duckdb_label }}.duckdb"
+        run: |
+          set -o pipefail
+          python -m pytest -q resolver/tests --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
+
+      - name: Package diagnostics
+        if: always()
+        env:
+          JOB_NAME: ${{ github.job }}
+          DUCKDB_LABEL: ${{ env.duckdb_label }}
+        run: |
+          python scripts/ci/make_diagnostics.py
+
+      - name: Upload diagnostics bundle
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: db-backend-nocache-${{ matrix.duckdb_spec }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: diagnostics.db-nocache-${{ matrix.duckdb_spec }}.zip
+          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
+          path:
+            - diagnostics_*.tar.gz
+            - .ci/diagnostics/**
+          if-no-files-found: warn
           overwrite: true
+
+      - name: Respect test result
+        if: ${{ always() && steps.tests.outcome == 'failure' }}
+        run: exit 1

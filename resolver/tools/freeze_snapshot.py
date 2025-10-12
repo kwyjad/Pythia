@@ -41,6 +41,7 @@ except Exception:  # pragma: no cover - optional dependency for db dual-write
     duckdb_io = None
 
 from resolver.common import get_logger
+from resolver.helpers.series_semantics import normalize_series_semantics
 
 try:
     from resolver.tools.export_facts import (
@@ -89,6 +90,7 @@ def _fallback_prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFram
     if "series_semantics" not in frame.columns:
         frame["series_semantics"] = ""
     frame["series_semantics"] = frame["series_semantics"].fillna("").astype(str)
+    frame = normalize_series_semantics(frame)
 
     if "value" in frame.columns:
         frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
@@ -132,6 +134,7 @@ def _fallback_prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame 
         semantics.str.strip() == "",
         "new",
     )
+    frame = normalize_series_semantics(frame)
 
     for column in [
         "value_new",
