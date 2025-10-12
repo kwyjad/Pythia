@@ -186,4 +186,4 @@ jobs:
       - name: Skip note
         if: steps.upload_artifact.outcome == 'skipped'
         run: echo "No posts processed; artifact may be empty."
-        
+
