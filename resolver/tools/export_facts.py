@@ -406,11 +406,9 @@ def _maybe_write_to_db(
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
     finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:  # pragma: no cover - best effort cleanup
-                pass
+        # Shared DuckDB connections are cached per URL; leave them open so
+        # subsequent writers/readers reuse the same wrapper instance.
+        pass
 
 
 @dataclass

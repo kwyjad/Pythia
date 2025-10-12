@@ -351,11 +351,8 @@ def _unique_index_columns(
     indexes: dict[str, list[str]] = {}
     try:
         rows = conn.execute(
-            """
-            SELECT index_name, expressions, sql
-            FROM duckdb_indexes()
-            WHERE table_name = ? AND is_unique
-            """,
+            "SELECT index_name, expressions, sql FROM duckdb_indexes() "
+            "WHERE table_name = ? AND is_unique",
             [table],
         ).fetchall()
     except Exception:  # pragma: no cover - optional diagnostic path
@@ -365,18 +362,37 @@ def _unique_index_columns(
         rows = []
 
     for name, expressions, sql in rows or []:
-        if not sql or "CREATE UNIQUE INDEX" not in str(sql).upper():
+        if not name:
             continue
-        expr_text = str(expressions or "").strip()
-        if expr_text.startswith("[") and expr_text.endswith("]"):
-            expr_text = expr_text[1:-1]
-        ordered_columns = [
-            part.strip().strip("\"")
-            for part in expr_text.split(",")
-            if part.strip()
-        ]
-        if ordered_columns:
-            indexes[str(name)] = ordered_columns
+        columns: list[str] = []
+        try:
+            info_rows = conn.execute(
+                f"PRAGMA index_info({_quote_literal(str(name))})"
+            ).fetchall()
+        except Exception:  # pragma: no cover - diagnostics only
+            LOGGER.debug(
+                "duckdb.index_info_failed | table=%s index=%s", table, name, exc_info=True
+            )
+            info_rows = []
+        for row in info_rows:
+            column = None
+            if len(row) >= 3:
+                column = row[2]
+            elif len(row) >= 2:
+                column = row[1]
+            if column is not None:
+                columns.append(str(column))
+        if not columns:
+            expr_text = str(expressions or "").strip()
+            if expr_text.startswith("[") and expr_text.endswith("]"):
+                expr_text = expr_text[1:-1]
+            columns = [
+                part.strip().strip('"')
+                for part in expr_text.split(",")
+                if part.strip()
+            ]
+        if columns:
+            indexes[str(name)] = columns
     return indexes
 
 
@@ -400,9 +416,23 @@ def _has_declared_key(
         return False
 
     canonical = _canonicalize_columns(keys)
+    constraint_sets: list[list[str]] = []
+    unique_indexes: dict[str, list[str]] = {}
+
     try:
-        if _has_constraint_key(conn, table, canonical):
-            return True
+        constraint_sets = _constraint_column_sets(conn, table)
+        for constraint_columns in constraint_sets:
+            if _canonicalize_columns(constraint_columns) == canonical:
+                if diag_enabled():
+                    log_json(
+                        DIAG_LOGGER,
+                        "declared_key_detected",
+                        table=table,
+                        keys=list(keys),
+                        via="constraint",
+                        columns=constraint_columns,
+                    )
+                return True
     except Exception:  # pragma: no cover - diagnostic aid only
         LOGGER.debug(
             "duckdb.constraint_detection_failed | table=%s", table, exc_info=True
@@ -410,12 +440,33 @@ def _has_declared_key(
 
     try:
         unique_indexes = _unique_index_columns(conn, table)
-        for columns in unique_indexes.values():
+        for index_name, columns in unique_indexes.items():
             if _canonicalize_columns(columns) == canonical:
+                if diag_enabled():
+                    log_json(
+                        DIAG_LOGGER,
+                        "declared_key_detected",
+                        table=table,
+                        keys=list(keys),
+                        via="unique_index",
+                        index=index_name,
+                        columns=columns,
+                    )
                 return True
     except Exception:  # pragma: no cover - diagnostic aid only
         LOGGER.debug(
             "duckdb.unique_index_detection_failed | table=%s", table, exc_info=True
+        )
+
+    if diag_enabled():
+        log_json(
+            DIAG_LOGGER,
+            "declared_key_missing",
+            table=table,
+            keys=list(keys),
+            canonical=canonical,
+            constraint_sets=constraint_sets,
+            unique_indexes=unique_indexes,
         )
 
     return False
@@ -760,6 +811,24 @@ def init_schema(
         _ensure_primary_key_or_unique(conn, table_name, columns, str(primary), str(unique))
         _ensure_unique_index(conn, table_name, columns, str(unique))
 
+    try:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_resolved_series
+            ON facts_resolved (ym, iso3, hazard_code, metric, series_semantics)
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_deltas_series
+            ON facts_deltas (ym, iso3, hazard_code, metric)
+            """
+        )
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - idempotent path
+        LOGGER.debug(
+            "duckdb.schema.named_unique_index_failed | error=%s", exc, exc_info=False
+        )
+
     if LOGGER.isEnabledFor(logging.DEBUG):
         table_details = conn.execute(
             """
@@ -816,6 +885,8 @@ def upsert_dataframe(
             "upsert_dataframe expects (conn, table: str, df: pandas.DataFrame, keys=...) or "
             "(conn, df: pandas.DataFrame, table: str, keys=...)"
         )
+
+    init_schema(conn)
 
     merge_sql = ""
     insert_sql = ""

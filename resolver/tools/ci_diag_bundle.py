@@ -9,6 +9,7 @@ import importlib
 import json
 import os
 import platform
+import re
 import sys
 from dataclasses import dataclass, field
 from itertools import islice
@@ -141,7 +142,8 @@ def _pip_duckdb_listing() -> str | None:
 
 
 def _default_scan_paths() -> list[Path]:
-    candidates = [Path.cwd()]
+    workspace = Path.cwd()
+    candidates = [workspace, workspace / ".ci"]
     runner_temp = os.environ.get("RUNNER_TEMP")
     if runner_temp:
         candidates.append(Path(runner_temp))
@@ -312,6 +314,7 @@ def _inspect_db(path: Path, expected_keys: Mapping[str, Sequence[str]], zip_file
                     "is_primary": bool(row[3]),
                     "expressions": _parse_expression_list(row[4]),
                     "sql": row[5],
+                    "columns_ordered": [],
                 }
             )
     except Exception as exc:  # pragma: no cover - diagnostics only
@@ -378,6 +381,36 @@ def _inspect_db(path: Path, expected_keys: Mapping[str, Sequence[str]], zip_file
             str(table_dir.with_suffix(".duckdb_indexes.txt")),
             json.dumps(table_report.indexes, indent=2, default=str),
         )
+        for idx in table_report.indexes:
+            idx_name = idx.get("index_name")
+            if not idx_name:
+                continue
+            safe_name = _safe_index_filename(str(idx_name))
+            try:
+                info_rows = conn.execute(
+                    f"PRAGMA index_info('{idx_name}')"
+                ).fetchall()
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                idx["index_info_error"] = str(exc)
+                _write_text(
+                    zip_file,
+                    str(table_dir / f"{safe_name}.index_info.error.txt"),
+                    str(exc),
+                )
+                continue
+            serialisable = [tuple(row) for row in info_rows]
+            ordered_columns: list[str] = []
+            for row in info_rows:
+                if len(row) >= 3 and row[2] is not None:
+                    ordered_columns.append(str(row[2]))
+                elif len(row) >= 2 and row[1] is not None:
+                    ordered_columns.append(str(row[1]))
+            idx["columns_ordered"] = ordered_columns
+            _write_text(
+                zip_file,
+                str(table_dir / f"{safe_name}.index_info.txt"),
+                json.dumps(serialisable, indent=2, default=str),
+            )
 
         table_report.constraints = constraints_data.get(table, [])
         _write_text(
@@ -427,7 +460,8 @@ def _inspect_db(path: Path, expected_keys: Mapping[str, Sequence[str]], zip_file
             for idx in table_report.indexes:
                 if not (idx.get("is_unique") or idx.get("is_primary")):
                     continue
-                cols = list(idx.get("expressions") or [])
+                columns_pref = idx.get("columns_ordered") or idx.get("expressions") or []
+                cols = list(columns_pref)
                 details.append(
                     f"index {idx.get('index_name')} columns={cols} unique={idx.get('is_unique')} primary={idx.get('is_primary')}"
                 )
@@ -506,6 +540,11 @@ def _safe_db_dirname(path: Path) -> str:
     stem = path.name or "database"
     digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
     return f"{stem}-{digest}"
+
+
+def _safe_index_filename(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    return safe or "index"
 
 
 def _build_env_snapshot(
@@ -685,12 +724,18 @@ def _render_summary(
             if table.indexes:
                 lines.append("- Indexes:")
                 for idx in table.indexes:
-                    cols = ", ".join(idx.get("expressions") or [])
+                    ordered = idx.get("columns_ordered") or []
+                    expressions = idx.get("expressions") or []
+                    cols = ", ".join(ordered or expressions)
                     unique = "unique" if idx.get("is_unique") else "non-unique"
                     primary = " primary" if idx.get("is_primary") else ""
                     lines.append(
                         f"  - `{idx.get('index_name')}` ({unique}{primary}) columns: [{cols}]"
                     )
+                    if ordered and expressions and ordered != expressions:
+                        lines.append(
+                            f"    expressions order (from duckdb_indexes): [{', '.join(expressions)}]"
+                        )
             if table.constraints:
                 lines.append("- Constraints:")
                 for constraint in table.constraints:
