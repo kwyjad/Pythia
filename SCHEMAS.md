@@ -39,7 +39,7 @@ Monthly "new" deltas derived from resolved totals.
 | delta_negative_clamped | integer | no |  |  |
 | first_observation | integer | no |  |  |
 | rebase_flag | integer | no |  |  |
-| series_semantics | enum | yes | new | Canonical semantics flag ('new'); legacy `series` tolerated for migration only. |
+| series_semantics | enum | yes | new, stock, stock_estimate | Canonical semantics flag (defaults to `new`); legacy `series` tolerated for migration only. |
 | source_url | string | no |  |  |
 | value_stock | number | no |  |  |
 
@@ -72,7 +72,7 @@ Canonical facts written to DuckDB alongside CSV exports.
 | delta_negative_clamped | integer | no |  |  |
 | first_observation | integer | no |  |  |
 | rebase_flag | integer | no |  |  |
-| series_semantics | enum | yes | stock, new | Canonical semantics flag; `series` is deprecated and only used for backward compatibility. |
+| series_semantics | enum | yes | stock, new, stock_estimate | Canonical semantics flag (defaults to `stock`); `series` is deprecated and only used for backward compatibility. |
 | source_url | string | no |  |  |
 | value_new | number | no |  |  |
 | value_stock | number | no |  |  |
@@ -101,13 +101,15 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
-| series_semantics | enum | yes | stock, new | Canonical semantics flag; `series` is deprecated and only used for backward compatibility. |
+| series_semantics | enum | yes | stock, new, stock_estimate | Canonical semantics flag (defaults to `stock`); `series` is deprecated and only used for backward compatibility. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
 
-> **Note:** `series_semantics` is the canonical indicator for Resolver series (`'new'` or `'stock'`). Writers canonicalise
-> semantics inputs, enforce `ym` keys in `YYYY-MM`, and uppercase `iso3`/`hazard_code` before persistence. Legacy rows may still
-> populate the historical `series` column, but readers coalesce `series_semantics` with `series` during the migration window.
+> **Note:** `series_semantics` is the canonical indicator for Resolver series and must be one of `new`, `stock`, or
+> `stock_estimate`. Writers canonicalise semantics inputs, enforce `ym` keys in `YYYY-MM`, and uppercase `iso3`/`hazard_code`
+> before persistence. Unknown or blank values are normalised to the table default (`new` for `facts_deltas`, `stock` for
+> `facts_resolved`). Legacy rows may still populate the historical `series` column, but readers coalesce `series_semantics`
+> with `series` during the migration window.
 
 ## db.manifests
 

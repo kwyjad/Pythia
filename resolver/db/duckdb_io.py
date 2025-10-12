@@ -164,25 +164,33 @@ def _savepoints_certainly_unsupported() -> bool:
 def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[None]:
     """Wrap DuckDB DDL in a savepoint or standalone transaction."""
 
-    savepoint = f"ddl_{uuid.uuid4().hex}"
-    in_outer_txn = _connection_in_transaction(conn)
-    mode: str = "savepoint"
-    savepoint_started = False
-    outer_reset = False
+    savepoint = f"sp_{uuid.uuid4().hex[:8]}"
+    mode: str
 
     try:
         conn.execute(f"SAVEPOINT {savepoint}")
     except Exception as exc:
         LOGGER.debug(
-            "duckdb.ddl.savepoint_unavailable | label=%s", label, exc_info=True
+            "duckdb.ddl.savepoint_begin_failed | label=%s", label, exc_info=True
         )
-        if _is_savepoint_syntax_error(exc) and in_outer_txn:
+        if _is_savepoint_syntax_error(exc):
             _record_savepoint_support(False)
-            mode = "passthrough"
-            LOGGER.debug(
-                "duckdb.ddl.passthrough_mode | label=%s | reason=savepoint_unsupported",
-                label,
-            )
+            if _connection_in_transaction(conn):
+                mode = "passthrough"
+                LOGGER.debug(
+                    "duckdb.ddl.savepoint_passthrough | label=%s", label
+                )
+            else:
+                try:
+                    conn.execute("BEGIN")
+                except Exception:
+                    LOGGER.debug(
+                        "duckdb.ddl.begin_failed | label=%s", label, exc_info=True
+                    )
+                    raise
+                else:
+                    mode = "begin"
+                    LOGGER.debug("duckdb.ddl.begin_started | label=%s", label)
         else:
             try:
                 conn.execute("BEGIN")
@@ -192,11 +200,11 @@ def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[
                 )
                 raise
             else:
-                mode = "transaction"
+                mode = "begin"
                 LOGGER.debug("duckdb.ddl.begin_started | label=%s", label)
     else:
         _record_savepoint_support(True)
-        savepoint_started = True
+        mode = "savepoint"
         LOGGER.debug(
             "duckdb.ddl.savepoint_started | label=%s | savepoint=%s", label, savepoint
         )
@@ -204,88 +212,57 @@ def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[
     try:
         yield
     except Exception:
-        if mode == "savepoint" and savepoint_started:
+        if mode == "savepoint":
             try:
                 conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                LOGGER.debug(
+                    "duckdb.ddl.savepoint_rolled_back | label=%s | savepoint=%s",
+                    label,
+                    savepoint,
+                )
             except Exception:  # pragma: no cover - defensive logging
                 LOGGER.debug(
-                    "duckdb.ddl.rollback_to_savepoint_failed | label=%s | savepoint=%s",
+                    "duckdb.ddl.savepoint_rollback_failed | label=%s | savepoint=%s",
                     label,
                     savepoint,
                     exc_info=True,
-                )
-            else:
-                LOGGER.debug(
-                    "duckdb.ddl.rolled_back_to_savepoint | label=%s | savepoint=%s",
-                    label,
-                    savepoint,
                 )
             finally:
                 try:
                     conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    LOGGER.debug(
+                        "duckdb.ddl.savepoint_released_after_error | label=%s | savepoint=%s",
+                        label,
+                        savepoint,
+                    )
                 except Exception:  # pragma: no cover - defensive logging
                     LOGGER.debug(
-                        "duckdb.ddl.release_savepoint_failed | label=%s | savepoint=%s",
+                        "duckdb.ddl.savepoint_release_failed | label=%s | savepoint=%s",
                         label,
                         savepoint,
                         exc_info=True,
                     )
-        elif mode == "transaction":
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:  # pragma: no cover - defensive logging
-                LOGGER.debug(
-                    "duckdb.ddl.rollback_failed | label=%s",
-                    label,
-                    exc_info=True,
-                )
-            else:
-                LOGGER.debug("duckdb.ddl.rolled_back | label=%s", label)
-        else:  # passthrough
-            if in_outer_txn:
-                needs_reset = False
+        else:
+            if mode == "begin":
                 try:
-                    conn.execute("SELECT 1")
-                except Exception as probe_exc:  # pragma: no cover - defensive logging
+                    conn.execute("ROLLBACK")
+                    LOGGER.debug("duckdb.ddl.rollback_completed | label=%s", label)
+                except Exception:  # pragma: no cover - defensive logging
                     LOGGER.debug(
-                        "duckdb.ddl.outer_probe_failed | label=%s", label, exc_info=True
+                        "duckdb.ddl.rollback_failed | label=%s", label, exc_info=True
                     )
-                    message = str(probe_exc).upper()
-                    if isinstance(probe_exc, _TXN_EXC) or "CURRENT TRANSACTION IS ABORTED" in message:
-                        needs_reset = True
-                if needs_reset:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:  # pragma: no cover - defensive logging
-                        LOGGER.debug(
-                            "duckdb.ddl.outer_rollback_failed | label=%s",
-                            label,
-                            exc_info=True,
-                        )
-                    else:
-                        outer_reset = True
-                        LOGGER.debug(
-                            "duckdb.ddl.outer_transaction_rolled_back | label=%s",
-                            label,
-                        )
-                        try:
-                            conn.execute("BEGIN")
-                        except Exception:  # pragma: no cover - defensive logging
-                            LOGGER.debug(
-                                "duckdb.ddl.outer_begin_restore_failed | label=%s",
-                                label,
-                                exc_info=True,
-                            )
+            else:  # passthrough
+                LOGGER.debug("duckdb.ddl.passthrough_error | label=%s", label)
         raise
     else:
-        if mode == "savepoint" and savepoint_started:
+        if mode == "savepoint":
             conn.execute(f"RELEASE SAVEPOINT {savepoint}")
             LOGGER.debug(
                 "duckdb.ddl.savepoint_released | label=%s | savepoint=%s",
                 label,
                 savepoint,
             )
-        elif mode == "transaction":
+        elif mode == "begin":
             conn.execute("COMMIT")
             LOGGER.debug("duckdb.ddl.committed | label=%s", label)
         else:
@@ -395,13 +372,13 @@ def _canonicalize_semantics(
         return frame, {}
     raw = frame["series_semantics"].astype(str).fillna("").str.strip()
     before_counts = raw.str.lower().value_counts(dropna=False).to_dict()
-    canonical = normalize_series_semantics(frame)
-    series = (
-        canonical["series_semantics"].astype(str).fillna("").str.strip()
-    )
-    series = series.mask(series.eq(""), default_target)
-    canonical["series_semantics"] = series
-    after_counts = series.str.lower().value_counts(dropna=False).to_dict()
+    canonical = normalize_series_semantics(frame).copy()
+    semantics = canonical["series_semantics"].astype("string").fillna("")
+    semantics = semantics.str.strip().str.lower()
+    semantics = semantics.mask(~semantics.isin(_ALLOWED_SERIES_SEMANTICS), "")
+    semantics = semantics.mask(semantics.eq(""), default_target)
+    canonical["series_semantics"] = semantics
+    after_counts = semantics.str.lower().value_counts(dropna=False).to_dict()
     if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "canonicalized semantics (%s): %s -> %s",
@@ -1670,214 +1647,222 @@ def write_snapshot(
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
 
-    conn.execute("BEGIN TRANSACTION")
     try:
-        facts_rows = 0
-        deltas_rows = 0
+        with _ddl_transaction(conn, "snapshot_write"):
+            facts_rows = 0
+            deltas_rows = 0
 
-        deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
-        LOGGER.debug("Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym)
-
-        if facts_resolved is not None and not facts_resolved.empty:
-            facts_resolved = _ensure_columns(
-                facts_resolved,
-                FACTS_RESOLVED_KEY_COLUMNS + ["value"],
-            )
-            for key in FACTS_RESOLVED_KEY_COLUMNS:
-                series = (
-                    facts_resolved[key]
-                    .where(facts_resolved[key].notna(), "")
-                    .astype(str)
-                    .str.strip()
-                )
-                if key == "ym":
-                    series = series.replace("", ym)
-                facts_resolved[key] = series
-            computed_semantics = facts_resolved.apply(
-                lambda row: compute_series_semantics(
-                    metric=row.get("metric"), existing=row.get("series_semantics")
-                ),
-                axis=1,
-            )
-            facts_resolved["series_semantics"] = computed_semantics
-            facts_resolved, _ = _canonicalize_semantics(
-                facts_resolved,
-                "facts_resolved",
-                default_target="stock",
-            )
-            _assert_semantics_required(facts_resolved, "facts_resolved")
-            facts_resolved = _coerce_numeric(
-                facts_resolved, "facts_resolved"
-            )
-            facts_resolved = facts_resolved.drop_duplicates(
-                subset=FACTS_RESOLVED_KEY_COLUMNS,
-                keep="last",
-            ).reset_index(drop=True)
-            facts_rows = upsert_dataframe(
-                conn,
-                "facts_resolved",
-                facts_resolved,
-                keys=FACTS_RESOLVED_KEY_COLUMNS,
-            )
-            LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
+            deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
             LOGGER.debug(
-                "facts_resolved series_semantics distribution: %s",
-                dict_counts(facts_resolved["series_semantics"]),
+                "Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym
             )
 
-        deleted_deltas = 0
-        if facts_deltas is not None and not facts_deltas.empty:
-            deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
-            LOGGER.debug("Deleted %s facts_deltas rows for ym=%s", deleted_deltas, ym)
-            facts_deltas = _ensure_columns(
-                facts_deltas,
-                FACTS_DELTAS_KEY_COLUMNS
-                + ["series_semantics", "value_new", "value_stock"],
-            )
-            for key in FACTS_DELTAS_KEY_COLUMNS:
-                series = (
-                    facts_deltas[key]
-                    .where(facts_deltas[key].notna(), "")
-                    .astype(str)
-                    .str.strip()
+            if facts_resolved is not None and not facts_resolved.empty:
+                facts_resolved = _ensure_columns(
+                    facts_resolved,
+                    FACTS_RESOLVED_KEY_COLUMNS + ["value"],
                 )
-                if key == "ym":
-                    series = series.replace("", ym)
-                facts_deltas[key] = series
-            if "series_semantics" not in facts_deltas.columns:
-                facts_deltas["series_semantics"] = "new"
-            facts_deltas, _ = _canonicalize_semantics(
-                facts_deltas,
-                "facts_deltas",
-                default_target="new",
-            )
-            _assert_semantics_required(facts_deltas, "facts_deltas")
-            facts_deltas = _coerce_numeric(
-                facts_deltas, "facts_deltas"
-            )
-            facts_deltas = facts_deltas.drop_duplicates(
-                subset=FACTS_DELTAS_KEY_COLUMNS,
-                keep="last",
-            ).reset_index(drop=True)
-            deltas_rows = upsert_dataframe(
-                conn,
-                "facts_deltas",
-                facts_deltas,
-                keys=FACTS_DELTAS_KEY_COLUMNS,
-            )
-            LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
-            LOGGER.debug(
-                "facts_deltas series_semantics distribution: %s",
-                dict_counts(facts_deltas["series_semantics"]),
-            )
-        else:
-            deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
-            if deleted_deltas:
+                for key in FACTS_RESOLVED_KEY_COLUMNS:
+                    series = (
+                        facts_resolved[key]
+                        .where(facts_resolved[key].notna(), "")
+                        .astype(str)
+                        .str.strip()
+                    )
+                    if key == "ym":
+                        series = series.replace("", ym)
+                    facts_resolved[key] = series
+                computed_semantics = facts_resolved.apply(
+                    lambda row: compute_series_semantics(
+                        metric=row.get("metric"), existing=row.get("series_semantics")
+                    ),
+                    axis=1,
+                )
+                facts_resolved["series_semantics"] = computed_semantics
+                facts_resolved, _ = _canonicalize_semantics(
+                    facts_resolved,
+                    "facts_resolved",
+                    default_target="stock",
+                )
+                _assert_semantics_required(facts_resolved, "facts_resolved")
+                facts_resolved = _coerce_numeric(
+                    facts_resolved, "facts_resolved"
+                )
+                facts_resolved = facts_resolved.drop_duplicates(
+                    subset=FACTS_RESOLVED_KEY_COLUMNS,
+                    keep="last",
+                ).reset_index(drop=True)
+                facts_rows = upsert_dataframe(
+                    conn,
+                    "facts_resolved",
+                    facts_resolved,
+                    keys=FACTS_RESOLVED_KEY_COLUMNS,
+                )
+                LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
                 LOGGER.debug(
-                    "Deleted %s facts_deltas rows for ym=%s (no deltas frame provided)",
-                    deleted_deltas,
-                    ym,
+                    "facts_resolved series_semantics distribution: %s",
+                    dict_counts(facts_resolved["series_semantics"]),
                 )
-        manifest_rows: list[dict] = []
-        manifest_created_at = _default_created_at(meta.get("created_at_utc") if meta else None)
-        meta_schema_version = str(meta.get("schema_version", "")) if meta else ""
-        meta_source_id = str(meta.get("source_id", "")) if meta else ""
-        meta_sha256 = str(meta.get("sha256", "")) if meta else ""
-        if manifests:
-            for entry in manifests:
-                payload = dict(entry)
-                name = str(payload.get("name") or payload.get("path") or "artifact")
-                raw_path = str(payload.get("path") or "").strip()
-                if not raw_path:
-                    raw_path = f"{ym}/{name}"
-                manifest_rows.append(
-                    {
-                        "path": raw_path,
-                        "sha256": str(
-                            payload.get("checksum")
-                            or payload.get("sha256")
-                            or meta_sha256
-                        ),
-                        "row_count": int(payload.get("rows") or payload.get("row_count") or 0),
-                        "schema_version": str(
-                            payload.get("schema_version")
-                            or meta_schema_version
-                        ),
-                        "source_id": str(payload.get("source_id") or meta_source_id),
-                        "created_at": manifest_created_at,
-                    }
+
+            deleted_deltas = 0
+            if facts_deltas is not None and not facts_deltas.empty:
+                deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
+                LOGGER.debug(
+                    "Deleted %s facts_deltas rows for ym=%s", deleted_deltas, ym
                 )
-        patterns = {
-            f"%/{ym}/%",
-            f"%\\{ym}\\%",
-            f"{ym}/%",
-            f"{ym}\\%",
-        }
-        deleted_manifests = 0
-        for pattern in patterns:
-            deleted_manifests += _delete_where(
-                conn, "manifests", "path LIKE ?", [pattern]
+                facts_deltas = _ensure_columns(
+                    facts_deltas,
+                    FACTS_DELTAS_KEY_COLUMNS
+                    + ["series_semantics", "value_new", "value_stock"],
+                )
+                for key in FACTS_DELTAS_KEY_COLUMNS:
+                    series = (
+                        facts_deltas[key]
+                        .where(facts_deltas[key].notna(), "")
+                        .astype(str)
+                        .str.strip()
+                    )
+                    if key == "ym":
+                        series = series.replace("", ym)
+                    facts_deltas[key] = series
+                if "series_semantics" not in facts_deltas.columns:
+                    facts_deltas["series_semantics"] = "new"
+                facts_deltas, _ = _canonicalize_semantics(
+                    facts_deltas,
+                    "facts_deltas",
+                    default_target="new",
+                )
+                _assert_semantics_required(facts_deltas, "facts_deltas")
+                facts_deltas = _coerce_numeric(
+                    facts_deltas, "facts_deltas"
+                )
+                facts_deltas = facts_deltas.drop_duplicates(
+                    subset=FACTS_DELTAS_KEY_COLUMNS,
+                    keep="last",
+                ).reset_index(drop=True)
+                deltas_rows = upsert_dataframe(
+                    conn,
+                    "facts_deltas",
+                    facts_deltas,
+                    keys=FACTS_DELTAS_KEY_COLUMNS,
+                )
+                LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
+                LOGGER.debug(
+                    "facts_deltas series_semantics distribution: %s",
+                    dict_counts(facts_deltas["series_semantics"]),
+                )
+            else:
+                deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
+                if deleted_deltas:
+                    LOGGER.debug(
+                        "Deleted %s facts_deltas rows for ym=%s (no deltas frame provided)",
+                        deleted_deltas,
+                        ym,
+                    )
+            manifest_rows: list[dict] = []
+            manifest_created_at = _default_created_at(
+                meta.get("created_at_utc") if meta else None
             )
-        if manifest_rows:
-            upsert_dataframe(
-                conn,
-                "manifests",
-                pd.DataFrame(manifest_rows),
-                keys=["path"],
+            meta_schema_version = str(meta.get("schema_version", "")) if meta else ""
+            meta_source_id = str(meta.get("source_id", "")) if meta else ""
+            meta_sha256 = str(meta.get("sha256", "")) if meta else ""
+            if manifests:
+                for entry in manifests:
+                    payload = dict(entry)
+                    name = str(payload.get("name") or payload.get("path") or "artifact")
+                    raw_path = str(payload.get("path") or "").strip()
+                    if not raw_path:
+                        raw_path = f"{ym}/{name}"
+                    manifest_rows.append(
+                        {
+                            "path": raw_path,
+                            "sha256": str(
+                                payload.get("checksum")
+                                or payload.get("sha256")
+                                or meta_sha256
+                            ),
+                            "row_count": int(
+                                payload.get("rows") or payload.get("row_count") or 0
+                            ),
+                            "schema_version": str(
+                                payload.get("schema_version")
+                                or meta_schema_version
+                            ),
+                            "source_id": str(payload.get("source_id") or meta_source_id),
+                            "created_at": manifest_created_at,
+                        }
+                    )
+            patterns = {
+                f"%/{ym}/%",
+                f"%\\{ym}\\%",
+                f"{ym}/%",
+                f"{ym}\\%",
+            }
+            deleted_manifests = 0
+            for pattern in patterns:
+                deleted_manifests += _delete_where(
+                    conn, "manifests", "path LIKE ?", [pattern]
+                )
+            if manifest_rows:
+                upsert_dataframe(
+                    conn,
+                    "manifests",
+                    pd.DataFrame(manifest_rows),
+                    keys=["path"],
+                )
+            LOGGER.debug("Deleted %s manifest rows for ym=%s", deleted_manifests, ym)
+            snapshot_payload = {
+                "ym": ym,
+                "created_at": _default_created_at(
+                    meta.get("created_at_utc") if meta else None
+                ),
+                "git_sha": str(meta.get("source_commit_sha", "")) if meta else "",
+                "export_version": str(meta.get("export_version", "")) if meta else "",
+                "facts_rows": facts_rows,
+                "deltas_rows": deltas_rows,
+                "meta": json.dumps(dict(meta or {}), sort_keys=True),
+            }
+            _delete_where(conn, "snapshots", "ym = ?", [ym])
+            conn.execute(
+                """
+                INSERT INTO snapshots
+                (ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    snapshot_payload["ym"],
+                    snapshot_payload["created_at"],
+                    snapshot_payload["git_sha"],
+                    snapshot_payload["export_version"],
+                    int(snapshot_payload["facts_rows"] or 0),
+                    int(snapshot_payload["deltas_rows"] or 0),
+                    snapshot_payload["meta"],
+                ],
             )
-        LOGGER.debug("Deleted %s manifest rows for ym=%s", deleted_manifests, ym)
-        snapshot_payload = {
-            "ym": ym,
-            "created_at": _default_created_at(meta.get("created_at_utc") if meta else None),
-            "git_sha": str(meta.get("source_commit_sha", "")) if meta else "",
-            "export_version": str(meta.get("export_version", "")) if meta else "",
-            "facts_rows": facts_rows,
-            "deltas_rows": deltas_rows,
-            "meta": json.dumps(dict(meta or {}), sort_keys=True),
-        }
-        _delete_where(conn, "snapshots", "ym = ?", [ym])
-        conn.execute(
-            """
-            INSERT INTO snapshots
-            (ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                snapshot_payload["ym"],
-                snapshot_payload["created_at"],
-                snapshot_payload["git_sha"],
-                snapshot_payload["export_version"],
-                int(snapshot_payload["facts_rows"] or 0),
-                int(snapshot_payload["deltas_rows"] or 0),
-                snapshot_payload["meta"],
-            ],
-        )
-        LOGGER.debug(
-            "Snapshot summary: %s",
-            snapshot_payload,
-        )
-        LOGGER.info(
-            (
-                "DuckDB snapshot write complete: ym=%s facts_resolved=%s deltas=%s "
-                "deleted_resolved=%s deleted_deltas=%s"
-            ),
-            ym,
-            facts_rows,
-            deltas_rows,
-            deleted_resolved,
-            deleted_deltas,
-        )
-        if diag_enabled():
-            counts = dump_counts(conn, ym=ym)
-            log_json(
-                DIAG_LOGGER,
-                "post_upsert_counts",
-                ym=ym,
-                **counts,
+            LOGGER.debug(
+                "Snapshot summary: %s",
+                snapshot_payload,
             )
-        conn.execute("COMMIT")
+            LOGGER.info(
+                (
+                    "DuckDB snapshot write complete: ym=%s facts_resolved=%s deltas=%s "
+                    "deleted_resolved=%s deleted_deltas=%s"
+                ),
+                ym,
+                facts_rows,
+                deltas_rows,
+                deleted_resolved,
+                deleted_deltas,
+            )
+            if diag_enabled():
+                counts = dump_counts(conn, ym=ym)
+                log_json(
+                    DIAG_LOGGER,
+                    "post_upsert_counts",
+                    ym=ym,
+                    **counts,
+                )
     except Exception:
-        conn.execute("ROLLBACK")
         if diag_enabled():
             log_json(
                 DIAG_LOGGER,

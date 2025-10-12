@@ -199,6 +199,15 @@ historical `series` column, and DuckDB readers automatically coalesce
 `series_semantics` with `series` so backfilled rows remain queryable during the
 migration window.
 
+- DDL helpers wrap schema statements in a `SAVEPOINT` whenever an outer
+  transaction is already active, releasing or rolling back cleanly before
+  returning. When no transaction is open, they fall back to `BEGIN`/`COMMIT` to
+  preserve the previous behaviour without tripping nested-transaction errors.
+- Frame-level `series_semantics` canonicalisation coerces unknown values to
+  blanks and fills them with the table default (`"new"` for deltas,
+  `"stock"` for snapshots) before validation, so stray text never leaks past
+  `_assert_semantics_required`.
+
 ### DuckDB setup for local development
 
 Follow [resolver/docs/DUCKDB.md](resolver/docs/DUCKDB.md) to install DuckDB and
