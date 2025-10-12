@@ -7,34 +7,34 @@ on:
 
 jobs:
   db_backend_nocache:
-    name: tests (db backend, cache disabled, duckdb=${{ matrix.duckdb_spec }})
+    name: "tests (db backend, cache disabled, duckdb=${{ matrix.duckdb_spec }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         duckdb_spec: [ "0_10_x", "latest" ]
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: "Setup Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Prepare CI dir
+      - name: "Prepare CI dir"
         run: mkdir -p "${{ github.workspace }}/.ci"
 
-      - name: Install workspace (editable)
+      - name: "Install workspace (editable)"
         run: |
           python -m pip install --upgrade pip
           pip uninstall -y resolver || true
           pip install -e .
           pip install pytest
 
-      - name: Run db-backend (cache disabled)
+      - name: "Run db-backend (cache disabled)"
         env:
-          RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb
+          RESOLVER_DB_URL: "duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb"
           RESOLVER_CACHE: "0"
           RESOLVER_DIAG: "1"
         run: |
@@ -43,12 +43,12 @@ jobs:
           EXITCODE=${PIPESTATUS[0]}
           exit $EXITCODE
 
-      - name: Build diagnostics bundle
+      - name: "Build diagnostics bundle"
         run: |
           DUCKVER=$(python - <<'PY'
-import duckdb; print(getattr(duckdb,'__version__','unknown'))
-PY
-)
+          import duckdb; print(getattr(duckdb,'__version__','unknown'))
+          PY
+          )
           python -m resolver.tools.ci_diag_bundle \
             --suite db-backend-nocache \
             --duckdb-version "$DUCKVER" \
@@ -60,9 +60,9 @@ PY
             --pytest-stdout pytest-stdout.txt \
             --out "diagnostics.db-nocache-${{ matrix.duckdb_spec }}.zip"
 
-      - name: Upload diagnostics
+      - name: "Upload diagnostics"
         uses: actions/upload-artifact@v4
         with:
-          name: db-backend-nocache-${{ matrix.duckdb_spec }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: "db-backend-nocache-${{ matrix.duckdb_spec }}-${{ github.run_id }}-${{ github.run_attempt }}"
           path: diagnostics.db-nocache-${{ matrix.duckdb_spec }}.zip
           overwrite: true
