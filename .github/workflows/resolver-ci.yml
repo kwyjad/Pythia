@@ -71,9 +71,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
-          path:
-            - diagnostics_*.tar.gz
-            - .ci/diagnostics/**
+          path: |
+            diagnostics_*.tar.gz
+            .ci/diagnostics/**
           if-no-files-found: warn
           overwrite: true
 

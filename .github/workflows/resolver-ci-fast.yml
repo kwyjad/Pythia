@@ -53,18 +53,21 @@ jobs:
       - name: Package diagnostics (always)
         if: always()
         run: |
-          set +e
+          set -euo pipefail
           mkdir -p .ci/diagnostics
           # Ensure SUMMARY.md exists
-          [ -f .ci/diagnostics/SUMMARY.md ] || echo "# AI SUMMARY\n\n(No summary available.)" > .ci/diagnostics/SUMMARY.md
+          if [ ! -f .ci/diagnostics/SUMMARY.md ]; then
+            printf '# AI SUMMARY\n\n(No summary available.)\n' > .ci/diagnostics/SUMMARY.md
+          fi
           # Carry JUnit (useful for AI parsing fallback)
-          [ -f pytest-junit.xml ] && cp -f pytest-junit.xml .ci/diagnostics/ || true
+          if [ -f pytest-junit.xml ]; then
+            cp -f pytest-junit.xml .ci/diagnostics/ || true
+          fi
           # Lightly collect logs & small DBs for completeness (not required by AI but handy)
           mkdir -p .ci/diagnostics/_snippets || true
           find resolver -maxdepth 6 -type f -name "*.log" -print0 2>/dev/null | xargs -0 -I{} cp --parents "{}" .ci/diagnostics/_snippets 2>/dev/null || true
           find . -maxdepth 6 -type f -name "*.duckdb" -size -50M -print0 2>/dev/null | xargs -0 -I{} cp --parents "{}" .ci/diagnostics/_snippets 2>/dev/null || true
           tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" --exclude-vcs --ignore-failed-read .ci/diagnostics 2>/dev/null || true
-          set -e
 
       - name: Upload diagnostics bundle (always)
         if: always()

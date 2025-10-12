@@ -117,21 +117,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "==> Refreshing poetry.lock (portable)…"
-          # On Poetry 2.2.x there’s no --check. Keep it simple & deterministic.
+          printf '==> Refreshing poetry.lock (portable)…\n'
           poetry lock --no-interaction
           echo "Regenerated/validated poetry.lock."
-          if [["${COMMIT_LOCKFILE:-0}" == "1"]]; then
+
+          if [[ "${COMMIT_LOCKFILE:-0}" == "1" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add poetry.lock
-            if ! git diff --cached --quiet; then
+            if git diff --cached --quiet; then
+              echo "poetry.lock unchanged; skip commit."
+            else
               git commit -m "chore(deps): refresh poetry.lock [skip ci]"
-              # Rebase to avoid “fetch first” rejects on busy branches.
               git pull --rebase origin "${GIT_BRANCH_NAME:-main}" || true
               git push origin "HEAD:${GIT_BRANCH_NAME:-main}"
-            else
-              echo "poetry.lock unchanged; skip commit."
             fi
           fi
 
