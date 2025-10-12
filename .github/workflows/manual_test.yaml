@@ -1,3 +1,4 @@
+---
 name: Test Bot (Manual Run)
 
 on:
@@ -93,13 +94,13 @@ jobs:
       # ---- CSV output path ----
       FORECASTS_CSV_PATH: forecasts.csv
 
-      # Log GitHub Commit config 
+      # Log GitHub Commit config
       HUMAN_LOG_EXT: md
       DISABLE_GIT_LOGS: false
-      COMMIT_LOGS: true 
+      COMMIT_LOGS: true
       GIT_LOG_MESSAGE:"chore(logs): append forecasts & run logs"
       GIT_REMOTE_NAME: origin
-      GIT_BRANCH_NAME: main 
+      GIT_BRANCH_NAME: main
 
        # ---- Cost table (string JSON) ----
       MODEL_COSTS_JSON: |
