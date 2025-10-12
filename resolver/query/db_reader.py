@@ -8,6 +8,12 @@ import logging
 import os
 
 from resolver.db import duckdb_io
+from resolver.diag.diagnostics import (
+    diag_enabled,
+    dump_counts,
+    get_logger as get_diag_logger,
+    log_json,
+)
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
@@ -15,6 +21,55 @@ if not LOGGER.handlers:  # pragma: no cover - silence library default
 DEBUG_ENABLED = os.getenv("RESOLVER_DEBUG") == "1"
 if DEBUG_ENABLED:
     LOGGER.setLevel(logging.DEBUG)
+
+DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
+
+
+def _diag_counts(
+    conn,
+    *,
+    ym: str,
+    iso3: str,
+    hazard_code: str,
+    cutoff: str,
+    event: str,
+    reused_label: str,
+    resolved_path: str | None,
+) -> None:
+    if not diag_enabled():
+        return
+    try:
+        counts = dump_counts(
+            conn,
+            ym=ym,
+            iso3=iso3,
+            hazard=hazard_code,
+            cutoff=cutoff,
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        log_json(
+            DIAG_LOGGER,
+            f"{event}_counts_error",
+            error=repr(exc),
+            ym=ym,
+            iso3=iso3,
+            hazard=hazard_code,
+            cutoff=cutoff,
+            reused=reused_label,
+            path=resolved_path,
+        )
+        return
+    log_json(
+        DIAG_LOGGER,
+        f"{event}_counts",
+        counts=counts,
+        ym=ym,
+        iso3=iso3,
+        hazard=hazard_code,
+        cutoff=cutoff,
+        reused=reused_label,
+        path=resolved_path,
+    )
 
 
 def _series_kind_expr() -> str:
@@ -163,7 +218,29 @@ def fetch_deltas_point(
             resolved_path,
         )
     df = conn.execute(query, params).fetch_df()
+    event_suffix = "empty" if df.empty else "hit"
+    _diag_counts(
+        conn,
+        ym=ym,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        cutoff=cutoff,
+        event=f"fetch_deltas_point_{event_suffix}",
+        reused_label=reused_label or "unknown",
+        resolved_path=resolved_path,
+    )
     if df.empty:
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "fetch_deltas_point_empty",
+                ym=ym,
+                iso3=iso3,
+                hazard=hazard_code,
+                cutoff=cutoff,
+                reused=reused_label,
+                path=resolved_path,
+            )
         return None
     if "series_kind" in df.columns:
         if "series_semantics" in df.columns:
@@ -292,7 +369,29 @@ def fetch_resolved_point(
             resolved_path,
         )
     df = conn.execute(query, params).fetch_df()
+    event_suffix = "empty" if df.empty else "hit"
+    _diag_counts(
+        conn,
+        ym=ym,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        cutoff=cutoff,
+        event=f"fetch_resolved_point_{event_suffix}",
+        reused_label=reused_label or "unknown",
+        resolved_path=resolved_path,
+    )
     if df.empty:
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "fetch_resolved_point_empty",
+                ym=ym,
+                iso3=iso3,
+                hazard=hazard_code,
+                cutoff=cutoff,
+                reused=reused_label,
+                path=resolved_path,
+            )
         return None
     if "series_kind" in df.columns:
         if "series_semantics" in df.columns:
