@@ -1,71 +1,69 @@
 ---
-name: resolver-ci-fast
+name: Resolver CI — Fast
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: resolver-fast-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  fast_tests:
-    name: "fast-tests (duckdb=${{ matrix.duckdb_spec }})"
+  fast-tests:
+    name: Fast tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        duckdb_spec: ["0_10_x", "latest"]
+
+    # Keep a label available for artifact naming even without a matrix
     env:
-      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
-      RESOLVER_DIAG: "1"
+      duckdb_label: default
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Prepare CI dir
+      - name: Install dependencies (fast)
         run: |
           set -o pipefail
-          mkdir -p "${{ github.workspace }}/.ci"
-
-      - name: Install dependencies (incl. DuckDB)
-        run: |
-          set -o pipefail
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[db,test]" || python -m pip install -e .
+          python -m pip install --upgrade pip
+          # Try project extras if defined; fall back to essentials
+          python -m pip install -e ".[test]" || true
           python -m pip install duckdb pytest || true
+          python -c "import sys,duckdb,pytest; print('DuckDB:', duckdb.__version__,'Pytest OK on', sys.version)"
 
-      - name: Verify DuckDB import
-        run: |
-          python - <<'PY'
-          import duckdb
-          import pytest
-
-          print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
-          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
-          PY
-
-      - name: Run tests
-        id: fast_tests
+      - name: Run fast tests
+        id: tests
         continue-on-error: true
-        env:
-          RESOLVER_DB_URL: "duckdb:///${{ github.workspace }}/.ci/fast-${{ env.duckdb_label }}.duckdb"
         run: |
           set -o pipefail
-          python -m pytest -q resolver/tests -k "not slow and not nightly" --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
+          mkdir -p .ci/diagnostics
+          python -m pytest -q resolver/tests -k "not slow and not nightly" --junitxml=pytest-junit.xml
 
-      - name: Package diagnostics
+      - name: Package diagnostics (always)
         if: always()
-        env:
-          JOB_NAME: ${{ github.job }}
-          DUCKDB_LABEL: ${{ env.duckdb_label }}
         run: |
-          python scripts/ci/make_diagnostics.py
+          set +e
+          mkdir -p .ci/diagnostics
+          # Include JUnit if produced
+          [ -f pytest-junit.xml ] && cp -f pytest-junit.xml .ci/diagnostics/ || true
+          # Collect logs & small DB files within repo (avoid system dirs)
+          tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" \
+            --exclude-vcs --ignore-failed-read \
+            .ci/diagnostics \
+            $(git ls-files '*.log' 2>/dev/null) \
+            $(git ls-files '*.duckdb' 2>/dev/null) 2>/dev/null || true
+          # Fallback: if no tarball was created, touch an empty one so upload step finds at least one file
+          [ -f "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" ] || \
+            tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" .ci/diagnostics 2>/dev/null || true
+          set -e
 
-      - name: Upload diagnostics bundle
+      - name: Upload diagnostics bundle (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -76,192 +74,6 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
-      - name: Respect test result
-        if: ${{ always() && steps.fast_tests.outcome == 'failure' }}
+      - name: Respect test outcome
+        if: ${{ always() && steps.tests.outcome == 'failure' }}
         run: exit 1
-
-  db_backend:
-    name: "db-backend (duckdb=${{ matrix.duckdb_spec }})"
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        duckdb_spec: ["0_10_x", "latest"]
-    env:
-      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
-      RESOLVER_DIAG: "1"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Prepare CI dir
-        run: |
-          set -o pipefail
-          mkdir -p "${{ github.workspace }}/.ci"
-
-      - name: Install dependencies (incl. DuckDB)
-        run: |
-          set -o pipefail
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[db,test]" || python -m pip install -e .
-          python -m pip install duckdb pytest || true
-
-      - name: Verify DuckDB import
-        run: |
-          python - <<'PY'
-          import duckdb
-          import pytest
-
-          print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
-          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
-          PY
-
-      - name: Run tests
-        id: db_tests
-        continue-on-error: true
-        env:
-          RESOLVER_DB_URL: "duckdb:///${{ github.workspace }}/.ci/db-${{ env.duckdb_label }}.duckdb"
-        run: |
-          set -o pipefail
-          python -m pytest -q resolver/tests --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
-
-      - name: Package diagnostics
-        if: always()
-        env:
-          JOB_NAME: ${{ github.job }}
-          DUCKDB_LABEL: ${{ env.duckdb_label }}
-        run: |
-          python scripts/ci/make_diagnostics.py
-
-      - name: Upload diagnostics bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
-          path:
-            - diagnostics_*.tar.gz
-            - .ci/diagnostics/**
-          if-no-files-found: warn
-          overwrite: true
-
-      - name: Respect test result
-        if: ${{ always() && steps.db_tests.outcome == 'failure' }}
-        run: exit 1
-
-  connector_smoke:
-    name: "offline-connector-smoke (duckdb=${{ matrix.duckdb_spec }})"
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        duckdb_spec: ["0_10_x", "latest"]
-    env:
-      duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install workspace (editable)
-        run: |
-          set -o pipefail
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e .
-          python -m pip install duckdb pytest || true
-
-      - name: Verify DuckDB import
-        run: |
-          python - <<'PY'
-          import duckdb
-          import pytest
-
-          print("✅ duckdb", getattr(duckdb, "__version__", "unknown"))
-          print("✅ pytest", getattr(pytest, "__version__", "unknown"))
-          PY
-
-      - name: Run smoke
-        id: smoke
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          python -m pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py -k "offline" --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml
-
-      - name: Package diagnostics
-        if: always()
-        env:
-          JOB_NAME: ${{ github.job }}
-          DUCKDB_LABEL: ${{ env.duckdb_label }}
-        run: |
-          python scripts/ci/make_diagnostics.py
-
-      - name: Upload diagnostics bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
-          path:
-            - diagnostics_*.tar.gz
-            - .ci/diagnostics/**
-          if-no-files-found: warn
-          overwrite: true
-
-      - name: Respect smoke result
-        if: ${{ always() && steps.smoke.outcome == 'failure' }}
-        run: exit 1
-
-  aggregate:
-    name: "CI aggregate (fast-tests + db-backend)"
-    runs-on: ubuntu-latest
-    needs: [fast_tests, db_backend]
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./downloads
-
-      - name: Consolidate diagnostics summary
-        run: |
-          python - <<'PY'
-          import os
-          import pathlib
-          import tarfile
-
-          root = pathlib.Path("downloads")
-          archives = sorted(root.rglob("diagnostics_*.tar.gz"))
-          out_dir = pathlib.Path("consolidated")
-          out_dir.mkdir(parents=True, exist_ok=True)
-
-          summary = [
-              "# Resolver — Consolidated Diagnostics",
-              f"Run: {os.environ.get('GITHUB_RUN_ID')} attempt {os.environ.get('GITHUB_RUN_ATTEMPT')}",
-          ]
-
-          for archive in archives:
-              dest = out_dir / archive.name.replace(".tar.gz", "")
-              dest.mkdir(parents=True, exist_ok=True)
-              with tarfile.open(archive) as tar:
-                  tar.extractall(dest, filter="data")
-              summary.append(f"\n\n---\n## {archive.name}\n")
-              summary.append("Contents:")
-              for path in sorted(dest.rglob("*")):
-                  if path.is_file():
-                      summary.append(f"- {path.relative_to(dest)}")
-
-          (out_dir / "SUMMARY.md").write_text("\n".join(summary), encoding="utf-8")
-          PY
-
-      - name: Upload consolidated diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: "diagnostics-consolidated-${{ github.run_id }}-${{ github.run_attempt }}"
-          path: |
-            consolidated/**

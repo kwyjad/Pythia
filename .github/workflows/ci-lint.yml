@@ -2,9 +2,10 @@
 name: CI Lint
 
 on:
-  pull_request:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -18,10 +19,7 @@ jobs:
         with:
           config_file: .yamllint.yml
           file_or_dir: |
-            .github/workflows/ci-lint.yml
-            .github/workflows/resolver-ci.yml
-            .github/workflows/resolver-ci-fast.yml
-            .github/workflows/resolver-ci-nightly.yml
+            .github/workflows
 
       - name: Actionlint
         uses: eifinger/actionlint-action@v1
