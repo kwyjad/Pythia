@@ -1,3 +1,4 @@
+---
 name: resolver-ci
 
 on:
@@ -69,11 +70,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-${{ github.job }}
-          path: |
-            diagnostics_*.tar.gz
-            .ci/diagnostics/**
+          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
+          path:
+            - diagnostics_*.tar.gz
+            - .ci/diagnostics/**
           if-no-files-found: warn
+          overwrite: true
 
       - name: Respect test result
         if: ${{ always() && steps.tests.outcome == 'failure' }}

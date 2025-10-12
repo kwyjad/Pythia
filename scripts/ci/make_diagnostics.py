@@ -150,7 +150,18 @@ def main() -> int:
     _collect_runner_tmp()
 
     tar_path = _make_tarball(job, label)
-    _write_text("SUMMARY.txt", f"Created {tar_path.name}\n")
+    collected_files = [
+        str(path.relative_to(DIAG_ROOT))
+        for path in DIAG_ROOT.rglob("*")
+        if path.is_file()
+    ]
+    collected_files.sort()
+    summary_lines = [
+        f"Created {tar_path.name} with {len(collected_files)} files",
+        *collected_files,
+    ]
+    _write_text("SUMMARY.txt", "\n".join(summary_lines) + "\n")
+    print("\n".join(summary_lines))
     return 0
 
 
