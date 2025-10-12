@@ -17,6 +17,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Prepare CI dir
         run: mkdir -p "${{ github.workspace }}/.ci"
 
@@ -28,22 +33,25 @@ jobs:
           pip install pytest
 
       - name: Run db-backend (cache disabled)
+        env:
+          RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb
+          RESOLVER_CACHE: "0"
+          RESOLVER_DIAG: "1"
         run: |
           set -o pipefail
-          export RESOLVER_DB_URL="duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb"
-          export RESOLVER_CACHE=0
-          python -m pytest -q resolver/tests \
-            --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml 2>&1 | tee pytest-stdout.txt
-          exit ${PIPESTATUS[0]}
+          python -m pytest -q resolver/tests --maxfail=1 --disable-warnings --junitxml=pytest-junit.xml 2>&1 | tee pytest-stdout.txt
+          EXITCODE=${PIPESTATUS[0]}
+          exit $EXITCODE
 
       - name: Build diagnostics bundle
         run: |
-          python -m resolver.tools.ci_diag_bundle \
-            --suite "db-backend-nocache" \
-            --duckdb-version "$(python - <<'PY'
+          DUCKVER=$(python - <<'PY'
 import duckdb; print(getattr(duckdb,'__version__','unknown'))
 PY
-)" \
+)
+          python -m resolver.tools.ci_diag_bundle \
+            --suite db-backend-nocache \
+            --duckdb-version "$DUCKVER" \
             --db-url "duckdb:///${{ github.workspace }}/.ci/db-nocache-${{ matrix.duckdb_spec }}.duckdb" \
             --scan-path "${{ github.workspace }}/.ci" \
             --scan-path "${{ github.workspace }}" \

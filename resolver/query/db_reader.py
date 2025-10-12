@@ -132,6 +132,16 @@ def fetch_deltas_point(
         reused_label = "external"
 
     if conn is None:
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "fetch_deltas_point_connection_missing",
+                ym=ym,
+                iso3=iso3,
+                hazard=hazard_code,
+                cutoff=cutoff,
+                preferred_metric=preferred_metric,
+            )
         return None
 
     semantics_expr = _series_kind_expr()
@@ -275,6 +285,16 @@ def fetch_resolved_point(
         reused_label = "external"
 
     if conn is None:
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "fetch_resolved_point_connection_missing",
+                ym=ym,
+                iso3=iso3,
+                hazard=hazard_code,
+                cutoff=cutoff,
+                preferred_metric=preferred_metric,
+            )
         return None
 
     semantics_expr = _series_kind_expr()
