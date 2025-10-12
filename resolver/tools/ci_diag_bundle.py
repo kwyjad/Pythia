@@ -25,7 +25,7 @@ FILES_TO_STAMP: tuple[tuple[str, str], ...] = (
     ("resolver/query/db_reader.py", "resolver.query.db_reader"),
     ("resolver/query/selectors.py", "resolver.query.selectors"),
     ("resolver/cli/resolver_cli.py", "resolver.cli.resolver_cli"),
-    ("schema.sql", "schema"),
+    ("resolver/db/schema.sql", "resolver.db.schema"),
 )
 DEFAULT_EXPECTED_KEYS = {
     "facts_resolved": ["ym", "iso3", "hazard_code", "metric", "series_semantics"],
@@ -656,6 +656,7 @@ def _render_summary(
     lines.append("## Git & Environment")
     for key in (
         "git_head",
+        "git_show",
         "pr_head_sha",
         "github_sha",
         "github_ref",

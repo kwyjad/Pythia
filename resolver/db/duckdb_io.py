@@ -232,22 +232,38 @@ def _coerce_numeric_cols(
         return frame
 
     coerced = frame.copy()
+    replaced_info: dict[str, dict[str, int]] = {}
     for col in cols:
         if col not in coerced.columns:
             continue
         series = coerced[col]
-        if pd.api.types.is_numeric_dtype(series):
-            coerced[col] = pd.to_numeric(series, errors="coerce")
-            continue
         stringified = series.astype(str).str.strip()
         lowered = stringified.str.lower()
         placeholder_values = {"", "none", "null", "nan", "<na>"}
-        stringified = stringified.mask(lowered.isin(placeholder_values), pd.NA)
-        coerced[col] = pd.to_numeric(stringified, errors="coerce")
+        placeholder_mask = lowered.isin(placeholder_values)
+        numeric = pd.to_numeric(
+            stringified.mask(placeholder_mask, pd.NA), errors="coerce"
+        )
+        try:
+            coerced[col] = pd.Series(numeric, dtype="Float64")
+        except TypeError:  # pragma: no cover - pandas compatibility shim
+            coerced[col] = numeric
+        replaced_info[col] = {
+            "total": int(len(series)),
+            "placeholders_to_null": int(placeholder_mask.sum()),
+            "non_null_after": int(coerced[col].notna().sum()),
+        }
     if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
         present = [col for col in cols if col in coerced.columns]
         LOGGER.debug(
             "duckdb.numeric_coercion | table=%s columns=%s", table_name, present
+        )
+    if diag_enabled() and replaced_info:
+        log_json(
+            DIAG_LOGGER,
+            "numeric_coercion",
+            table=table_name,
+            columns=replaced_info,
         )
     return coerced
 
@@ -421,6 +437,13 @@ def _has_declared_key(
 
     try:
         constraint_sets = _constraint_column_sets(conn, table)
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "constraint_inventory",
+                table=table,
+                constraints=[list(cols) for cols in constraint_sets],
+            )
         for constraint_columns in constraint_sets:
             if _canonicalize_columns(constraint_columns) == canonical:
                 if diag_enabled():
@@ -440,6 +463,13 @@ def _has_declared_key(
 
     try:
         unique_indexes = _unique_index_columns(conn, table)
+        if diag_enabled():
+            log_json(
+                DIAG_LOGGER,
+                "unique_index_inventory",
+                table=table,
+                indexes=unique_indexes,
+            )
         for index_name, columns in unique_indexes.items():
             if _canonicalize_columns(columns) == canonical:
                 if diag_enabled():
@@ -681,7 +711,10 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     if cache_disabled:
         force_reopen = True
 
-    conn, resolved_path = get_shared_duckdb_conn(url, force_reopen=force_reopen)
+    shared_target = ":memory:" if url.endswith("duckdb:///:memory:") else url
+    conn, resolved_path = get_shared_duckdb_conn(
+        shared_target, force_reopen=force_reopen
+    )
     cache_event = getattr(conn, "_last_event", None)
     if cache_disabled:
         cache_event = "miss"
@@ -828,6 +861,23 @@ def init_schema(
         LOGGER.debug(
             "duckdb.schema.named_unique_index_failed | error=%s", exc, exc_info=False
         )
+
+    if diag_enabled():
+        try:
+            inventory: dict[str, dict[str, object]] = {}
+            for table_name, spec in TABLE_KEY_SPECS.items():
+                inventory[table_name] = {
+                    "expected_key": list(spec["columns"]),
+                    "unique_indexes": _unique_index_columns(conn, table_name),
+                    "constraints": _constraint_column_sets(conn, table_name),
+                }
+            log_json(
+                DIAG_LOGGER,
+                "schema_index_inventory",
+                tables=inventory,
+            )
+        except Exception:  # pragma: no cover - diagnostics only
+            LOGGER.debug("schema_index_inventory logging failed", exc_info=True)
 
     if LOGGER.isEnabledFor(logging.DEBUG):
         table_details = conn.execute(
