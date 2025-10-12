@@ -253,15 +253,6 @@ jobs:
         if: always()
         run: |
           raw="nightly"
-          if [ -z "${raw}" ]; then
-            raw="${{ matrix.duckdb_label }}"
-          fi
-          if [ -z "${raw}" ]; then
-            raw="${{ matrix.duckdb }}"
-          fi
-          if [ -z "${raw}" ]; then
-            raw="latest"
-          fi
           SAFE_SUFFIX="${raw}"
           SAFE_SUFFIX="${SAFE_SUFFIX//\*/_}"
           SAFE_SUFFIX="${SAFE_SUFFIX// /_}"

@@ -51,6 +51,7 @@ from resolver.common import (
     dict_counts,
     df_schema,
 )
+from resolver.helpers.series_semantics import normalize_series_semantics
 
 try:
     import yaml
@@ -261,6 +262,7 @@ def _prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None"
         frame.loc[mask, "ym"] = frame.loc[mask, "publication_date"].astype(str).str.slice(0, 7)
 
     frame = _apply_series_semantics(frame)
+    frame = normalize_series_semantics(frame)
     frame["series_semantics"] = frame["series_semantics"].fillna("").astype(str)
 
     for column in RESOLVED_DB_NUMERIC:
@@ -306,6 +308,7 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
         semantics.str.strip() == "",
         DELTAS_DB_DEFAULTS["series_semantics"],
     )
+    frame = normalize_series_semantics(frame)
 
     for column in DELTAS_DB_NUMERIC:
         if column in frame.columns:

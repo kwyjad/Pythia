@@ -37,9 +37,10 @@ _SCHEMA_EXC_TUPLE = (
 
 from resolver.common import compute_series_semantics, dict_counts, df_schema
 from resolver.db.conn_shared import (
+    canonicalize_duckdb_target as _shared_canonicalize_duckdb_target,
     get_shared_duckdb_conn,
-    normalize_duckdb_url as _shared_normalize_duckdb_url,
 )
+from resolver.helpers.series_semantics import normalize_series_semantics
 from resolver.diag.diagnostics import (
     diag_enabled,
     dump_counts,
@@ -119,6 +120,7 @@ if diag_enabled():
         )
 
 _HEALING_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+_WARNED_EXPLICIT_OVERRIDE: set[tuple[str, str]] = set()
 
 
 def _merge_enabled() -> bool:
@@ -138,8 +140,7 @@ def _quote_literal(value: str) -> str:
 
 _YM_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
-_SEM_MAP_STOCK = {"stock", "stock estimate", "snapshot", "inventory"}
-_SEM_MAP_NEW = {"new", "delta", "deltas", "increment", "change"}
+_ALLOWED_SERIES_SEMANTICS = {"", "new", "stock", "stock_estimate"}
 
 
 def _normalize_keys_df(frame: pd.DataFrame | None, table_name: str) -> pd.DataFrame | None:
@@ -167,26 +168,19 @@ def _normalize_keys_df(frame: pd.DataFrame | None, table_name: str) -> pd.DataFr
 def _canonicalize_semantics(
     frame: pd.DataFrame | None, table_name: str, default_target: str
 ) -> tuple[pd.DataFrame | None, dict[str, dict[str, int]]]:
-    """Canonicalize ``series_semantics`` values to ``{'new', 'stock'}``."""
+    """Canonicalize ``series_semantics`` values to ``{'new', 'stock', 'stock_estimate'}``."""
 
     if frame is None or frame.empty or "series_semantics" not in frame.columns:
         return frame, {}
-    canonical = frame.copy()
-    raw = canonical["series_semantics"].astype(str).fillna("").str.strip()
-    lowered = raw.str.lower()
-    out: list[str] = []
-    before_counts = raw.value_counts(dropna=False).to_dict()
-    for value in lowered:
-        if value in _SEM_MAP_STOCK:
-            out.append("stock")
-        elif value in _SEM_MAP_NEW:
-            out.append("new")
-        elif value in {"", "none", "null", "nan"}:
-            out.append(default_target)
-        else:
-            out.append(default_target)
-    canonical["series_semantics"] = out
-    after_counts = canonical["series_semantics"].value_counts(dropna=False).to_dict()
+    raw = frame["series_semantics"].astype(str).fillna("").str.strip()
+    before_counts = raw.str.lower().value_counts(dropna=False).to_dict()
+    canonical = normalize_series_semantics(frame)
+    series = (
+        canonical["series_semantics"].astype(str).fillna("").str.strip()
+    )
+    series = series.mask(series.eq(""), default_target)
+    canonical["series_semantics"] = series
+    after_counts = series.str.lower().value_counts(dropna=False).to_dict()
     if DEBUG_ENABLED and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "canonicalized semantics (%s): %s -> %s",
@@ -198,16 +192,12 @@ def _canonicalize_semantics(
 
 
 def _canonicalise_series_semantics(series: pd.Series) -> pd.Series:
-    """Return ``series`` mapped into the canonical {"", "new", "stock"}."""
+    """Return ``series`` mapped into the canonical {"", "new", "stock", "stock_estimate"}."""
 
-    semantics = series.where(series.notna(), "")
-    semantics = semantics.astype(str).str.strip()
-    lowered = semantics.str.lower()
-    semantics = semantics.mask(lowered.isin({"none", "nan"}), "")
-    semantics = semantics.mask(lowered.isin(_SEM_MAP_NEW), "new")
-    semantics = semantics.mask(lowered.isin(_SEM_MAP_STOCK), "stock")
-    lowered = semantics.astype(str).str.lower()
-    semantics = semantics.mask(~lowered.isin({"", "new", "stock"}), "")
+    frame = pd.DataFrame({"series_semantics": series})
+    normalised = normalize_series_semantics(frame)["series_semantics"]
+    semantics = normalised.astype(str).str.strip()
+    semantics = semantics.mask(~semantics.isin(_ALLOWED_SERIES_SEMANTICS), "")
     return semantics.astype(str)
 
 
@@ -217,9 +207,9 @@ def _assert_semantics_required(frame: pd.DataFrame, table: str) -> None:
     values = (
         frame["series_semantics"].astype(str).str.strip().str.lower().unique().tolist()
     )
-    if not set(values).issubset({"new", "stock"}):
+    if not set(values).issubset({"new", "stock", "stock_estimate"}):
         raise ValueError(
-            f"{table}: series_semantics must be 'new' or 'stock', got {sorted(set(values))}"
+            f"{table}: series_semantics must be one of ['new', 'stock', 'stock_estimate'], got {sorted(set(values))}"
         )
 
 
@@ -641,27 +631,20 @@ def _delete_where(
 def _normalize_duckdb_url(path_or_url: str | None) -> str:
     """Return a normalised DuckDB URL using absolute filesystem paths."""
 
-    candidate = path_or_url or os.environ.get("RESOLVER_DB_URL") or DEFAULT_DB_URL
-    raw = str(candidate).strip()
-    if not raw:
-        raw = DEFAULT_DB_URL
-
-    memory_aliases = {
-        ":memory:",
-        "duckdb:///:memory:",
-        "duckdb://memory",
-        "duckdb://:memory:",
-        "duckdb:memory",
-    }
-    if raw in memory_aliases:
+    env_candidate = os.environ.get("RESOLVER_DB_URL", "").strip()
+    explicit = (path_or_url or "").strip()
+    if explicit and env_candidate and explicit != env_candidate:
+        key = (explicit, env_candidate)
+        if key not in _WARNED_EXPLICIT_OVERRIDE:
+            LOGGER.warning(
+                "RESOLVER_DB_URL overridden by explicit argument; using provided path",
+            )
+            _WARNED_EXPLICIT_OVERRIDE.add(key)
+    raw = explicit or env_candidate or DEFAULT_DB_URL
+    path, url = _shared_canonicalize_duckdb_target(raw)
+    if path == ":memory:":
         return "duckdb:///:memory:"
-
-    normalised_path = _shared_normalize_duckdb_url(raw)
-    if normalised_path == ":memory:":
-        return "duckdb:///:memory:"
-
-    # ``normalize_duckdb_url`` returns an absolute filesystem path.
-    return f"duckdb:///{normalised_path}"
+    return url
 
 
 def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":

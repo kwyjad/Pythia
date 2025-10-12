@@ -13,5 +13,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: YAML Lint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_file: .yamllint.yml
+
       - name: Actionlint
         uses: eifinger/actionlint-action@v1

@@ -6,9 +6,9 @@ import atexit
 import logging
 import os
 import pathlib
-import re
 import threading
 from typing import Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 from resolver.diag.diagnostics import get_logger as get_diag_logger, log_json
 
@@ -51,32 +51,64 @@ def _iter_current_caches() -> tuple[Dict[str, "ConnectionWrapper"], ...]:
     return tuple(caches)
 
 
-def normalize_duckdb_url(db_url: str) -> str:
-    """Return a canonical DuckDB filesystem path for ``db_url``."""
+def canonicalize_duckdb_target(url_or_path: str | None) -> tuple[str, str]:
+    """Return canonical filesystem path and URL for a DuckDB target."""
 
-    raw = (db_url or "").strip()
-    if not raw or raw == ":memory:":
-        return ":memory:"
+    raw = (url_or_path or "").strip()
+    if not raw:
+        raw = ":memory:"
+
+    memory_aliases = {
+        ":memory:",
+        "duckdb:///:memory:",
+        "duckdb://memory",
+        "duckdb://:memory:",
+        "duckdb:memory",
+    }
+
+    if raw in memory_aliases:
+        return ":memory:", "duckdb:///:memory:"
+
     if raw.startswith("duckdb://"):
-        path = re.sub(r"^duckdb:/+", "", raw)
+        parsed = urlparse(raw)
+        path = parsed.path or ""
+        if parsed.netloc and parsed.netloc != ":memory:":
+            path = f"{parsed.netloc}{path}"
+        if path == ":memory:":
+            return ":memory:", "duckdb:///:memory:"
         if not path.startswith("/"):
             path = os.path.join(os.getcwd(), path)
     else:
         path = raw
+
+    if not os.path.isabs(path):
+        path = os.path.join(os.getcwd(), path)
 
     path_obj = pathlib.Path(path).expanduser().resolve()
     try:
         path_obj.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-    return str(path_obj)
+
+    canonical_path = str(path_obj)
+    canonical_url = f"duckdb:///{canonical_path}"
+    return canonical_path, canonical_url
+
+
+def normalize_duckdb_url(db_url: str) -> str:
+    """Return a canonical DuckDB filesystem path for ``db_url``."""
+
+    path, _ = canonicalize_duckdb_target(db_url)
+    return path
 
 
 class ConnectionWrapper:
     """Proxy that evicts cache entries on ``close`` and exposes health checks."""
 
-    def __init__(self, path: str, raw: "duckdb.DuckDBPyConnection") -> None:
+    def __init__(self, path: str, url: str, raw: "duckdb.DuckDBPyConnection") -> None:
         self._path = path
+        self._url = url
+        self._cache_key = url if path != ":memory:" else ":memory:"
         self._raw = raw
         self._closed = False
         self._last_event = "miss"
@@ -100,16 +132,16 @@ class ConnectionWrapper:
                 finally:
                     self._closed = True
                     cache = _get_cache()
-                    if cache.get(self._path) is self:
-                        cache.pop(self._path, None)
+                    if cache.get(self._cache_key) is self:
+                        cache.pop(self._cache_key, None)
                     logger.debug("DuckDB cache evicted on close: %s", self._path)
 
 
-def _open_new(path: str) -> ConnectionWrapper:
+def _open_new(path: str, url: str) -> ConnectionWrapper:
     import duckdb
 
     raw = duckdb.connect(database=path, read_only=False)
-    wrapper = ConnectionWrapper(path, raw)
+    wrapper = ConnectionWrapper(path, url, raw)
     _ALL_PATHS.add(path)
     return wrapper
 
@@ -119,10 +151,11 @@ def get_shared_duckdb_conn(
 ) -> Tuple[ConnectionWrapper, str]:
     """Return a shared DuckDB connection wrapper and its canonical path."""
 
-    path = normalize_duckdb_url(db_url or "")
+    path, url = canonicalize_duckdb_target(db_url)
+    cache_key = url if path != ":memory:" else ":memory:"
     cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
     if cache_disabled:
-        wrapper = _open_new(path)
+        wrapper = _open_new(path, url)
         wrapper._last_event = "miss"
         logger.debug("DuckDB opened (cache disabled): %s", path)
         log_json(
@@ -131,17 +164,18 @@ def get_shared_duckdb_conn(
             cache_event="miss",
             cache_disabled=True,
             path=path,
+            url=url,
         )
         return wrapper, path
 
     with _LOCK:
         cache = _get_cache()
-        wrapper = cache.get(path)
+        wrapper = cache.get(cache_key)
         event = "hit"
         if force_reopen or wrapper is None or wrapper._closed or not wrapper._healthcheck():
             event = "reopen" if wrapper is not None else "miss"
-            wrapper = _open_new(path)
-            cache[path] = wrapper
+            wrapper = _open_new(path, url)
+            cache[cache_key] = wrapper
             logger.debug("DuckDB opened (force=%s): %s", force_reopen, path)
         else:
             logger.debug("DuckDB cache hit: %s", path)
@@ -152,6 +186,7 @@ def get_shared_duckdb_conn(
             cache_event=event,
             cache_disabled=False,
             path=path,
+            url=url,
         )
         return wrapper, path
 
@@ -159,10 +194,11 @@ def get_shared_duckdb_conn(
 def clear_cached_connection(db_url: str) -> None:
     """Evict ``db_url`` from the shared cache."""
 
-    path = normalize_duckdb_url(db_url)
+    path, url = canonicalize_duckdb_target(db_url)
+    cache_key = url if path != ":memory:" else ":memory:"
     with _LOCK:
         cache = _get_cache()
-        wrapper = cache.pop(path, None)
+        wrapper = cache.pop(cache_key, None)
         if wrapper and not wrapper._closed:
             try:
                 wrapper.close()
