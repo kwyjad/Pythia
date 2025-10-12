@@ -79,7 +79,6 @@ jobs:
       FORECASTS_CSV_PATH: forecasts.csv      # write to root forecasts.csv
       LOGS_BASE_DIR: forecast_logs           # save human logs here
 
-
       # Seen Guard controls
       # set to "48" if you want a 2-day re-forecast cool-down window
       SEEN_COOLDOWN_HOURS: "24"
@@ -100,7 +99,7 @@ jobs:
 
        # ---- Cost table (string JSON) ----
       MODEL_COSTS_JSON: |
-        {"openai/gpt-4o":{"prompt":0.0025,"completion":0.01},"anthropic/claude-3.7-sonnet":{"prompt":0.003,"completion":0.015},"gemini-2.5-pro":{"prompt":0.00125,"completion":0.01},"grok-4":{"prompt":0.003,"completion":0.015}}
+        {"openai/gpt-4o":{"prompt":0.0025,"completion":0.01},"anthropic/claude-3.7..."completion":0.01},"grok-4":{"prompt":0.003,"completion":0.015}}
 
     steps:
       - name: Checkout
@@ -163,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add forecast_logs/** || true
           if git diff --cached --quiet; then
             echo "No new forecast data to commit."
@@ -186,4 +185,3 @@ jobs:
       - name: Skip note
         if: steps.upload_artifact.outcome == 'skipped'
         run: echo "No posts processed; artifact may be empty."
-
