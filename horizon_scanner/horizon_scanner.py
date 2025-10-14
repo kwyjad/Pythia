@@ -6,18 +6,46 @@ the Gemini API, and then compiles a final report with a summary table.
 """
 
 import os
+import sys
 import time
 import logging
-import google.generativeai as genai
-import backoff
 import json
 import re
-from datetime import datetime
-from hs_prompt import COUNTRY_ANALYSIS_PROMPT
+from datetime import datetime, date
+from pathlib import Path
+
+import backoff
+import google.generativeai as genai
+
+# Ensure package imports resolve when executed as a script
+CURRENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CURRENT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+try:
+    from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
+    from horizon_scanner.db_writer import upsert_hs_payload
+except ModuleNotFoundError:  # pragma: no cover - fallback for direct execution
+    from hs_prompt import COUNTRY_ANALYSIS_PROMPT
+    from db_writer import upsert_hs_payload
+
+from pythia.db.init import init as init_db
+from pythia.prompts.registry import load_prompt_spec
 
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Prompt metadata for registry/auditing
+PROMPT_KEY = "hs.scenario.v1"
+PROMPT_VERSION = "1.0.0"
+PROMPT_SPEC = load_prompt_spec(
+    PROMPT_KEY,
+    PROMPT_VERSION,
+    COUNTRY_ANALYSIS_PROMPT,
+    str(CURRENT_DIR / "hs_prompt.py"),
+)
 
 # Load the Gemini API key from GitHub Secrets
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -68,53 +96,133 @@ def generate_report_for_country(country):
         return None # Return None if an error occurs
 
 def parse_reports_and_build_table(all_reports_text):
-    """
-    Finds all JSON data blocks in the reports, parses them, and builds a Markdown table.
-    This function is 100% reliable and replaces the second LLM call.
-    """
+    """Parse SCENARIO_DATA_BLOCKs into structured rows and build a summary table."""
     logging.info("Parsing generated reports to build summary table using Python...")
-    all_scenarios = []
-    
-    # **BUG FIX 1**: This regex now correctly finds the JSON block.
-    json_blocks = re.findall(r'<!-- SCENARIO_DATA_BLOCK: (.*?) -->', all_reports_text, re.DOTALL)
 
+    json_blocks = re.findall(r'<!-- SCENARIO_DATA_BLOCK: (.*?) -->', all_reports_text, re.DOTALL)
     if not json_blocks:
         logging.warning("No SCENARIO_DATA_BLOCKs found in the generated reports.")
-        return "| Country | Scenario Name | Probability | People Affected |\n|---|---|---|---|\n| No data found | - | - | - |"
+        fallback = (
+            "| Country | Scenario Title | Hazard | Likely Month | Probability | PIN Best Guess | PA Best Guess |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| No data found | - | - | - | - | - | - |"
+        )
+        return fallback, []
+
+    def _parse_int(value):
+        if value is None:
+            return 0
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            cleaned = re.sub(r"[^0-9\-\.]+", "", value)
+            if cleaned in {"", "-", ".", "-."}:
+                return 0
+            try:
+                return int(float(cleaned))
+            except ValueError:
+                return 0
+        return 0
+
+    scenarios_for_db = []
+    table_entries = []
+    dedupe_keys = set()
 
     for block in json_blocks:
         try:
-            # Clean and parse the JSON data
             data = json.loads(block)
-            country_name = data.get("country", "Unknown")
-            for scenario in data.get("scenarios", []):
-                all_scenarios.append({
-                    "Country": country_name,
-                    "Scenario Name": scenario.get("name", "N/A"),
-                    "Probability": scenario.get("probability", "N/A"),
-                    "People Affected": scenario.get("affected", "N/A")
-                })
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse JSON block: {block}. Error: {e}")
             continue
 
-    if not all_scenarios:
+        country_name = data.get("country") or data.get("country_name") or "Unknown"
+        iso3 = (data.get("iso3") or "").strip().upper()
+        for scenario in data.get("scenarios", []):
+            title = scenario.get("title") or scenario.get("name") or ""
+            hazard_code = (scenario.get("hazard_code") or "").strip().upper()
+            hazard_label = scenario.get("hazard_label") or scenario.get("hazard") or hazard_code
+            likely_window_month = scenario.get("likely_window_month") or ""
+            probability = scenario.get("probability") or scenario.get("probability_of_occurrence") or ""
+            markdown = scenario.get("markdown") or scenario.get("narrative") or ""
+            best_guess_raw = scenario.get("best_guess") or {}
+            best_guess = {
+                "PIN": _parse_int(best_guess_raw.get("PIN")),
+                "PA": _parse_int(best_guess_raw.get("PA")),
+            }
+
+            scenario_json = dict(scenario)
+            scenario_json.setdefault("title", title)
+            scenario_json.setdefault("hazard_code", hazard_code)
+            scenario_json.setdefault("hazard_label", hazard_label)
+            scenario_json.setdefault("likely_window_month", likely_window_month)
+            scenario_json.setdefault("best_guess", best_guess)
+
+            dedupe_key = (iso3 or country_name, hazard_code, title)
+            if dedupe_key in dedupe_keys:
+                continue
+            dedupe_keys.add(dedupe_key)
+
+            table_entries.append(
+                {
+                    "country": country_name,
+                    "title": title or "N/A",
+                    "hazard": hazard_code or hazard_label or "N/A",
+                    "likely_month": likely_window_month or "N/A",
+                    "probability": probability or "N/A",
+                    "pin": best_guess["PIN"],
+                    "pa": best_guess["PA"],
+                }
+            )
+
+            if not iso3:
+                logging.warning(
+                    "Scenario '%s' for %s missing ISO3 code; skipping database persistence.",
+                    title,
+                    country_name,
+                )
+                continue
+
+            scenarios_for_db.append(
+                {
+                    "iso3": iso3,
+                    "country_name": country_name,
+                    "hazard_code": hazard_code,
+                    "hazard_label": hazard_label,
+                    "likely_window_month": likely_window_month,
+                    "best_guess": best_guess,
+                    "title": title,
+                    "markdown": markdown,
+                    "probability": probability,
+                    "json": {**scenario_json, "country": country_name, "iso3": iso3},
+                }
+            )
+
+    if not table_entries:
         logging.warning("JSON blocks were found, but no valid scenario data could be extracted.")
-        return "| Country | Scenario Name | Probability | People Affected |\n|---|---|---|---|\n| No data extracted | - | - | - |"
+        fallback = (
+            "| Country | Scenario Title | Hazard | Likely Month | Probability | PIN Best Guess | PA Best Guess |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| No data extracted | - | - | - | - | - | - |"
+        )
+        return fallback, []
 
-    # Sort the scenarios alphabetically by country name
-    all_scenarios.sort(key=lambda x: x["Country"])
+    table_entries.sort(key=lambda x: (x["country"], x["title"]))
+    table_header = (
+        "| Country | Scenario Title | Hazard | Likely Month | Probability | PIN Best Guess | PA Best Guess |\n"
+        "|---|---|---|---|---|---|---|\n"
+    )
+    table_rows = [
+        f"| {entry['country']} | {entry['title']} | {entry['hazard']} | {entry['likely_month']} | {entry['probability']} | {entry['pin']} | {entry['pa']} |"
+        for entry in table_entries
+    ]
 
-    # Build the Markdown table string
-    table_header = "| Country | Scenario Name | Probability | People Affected |\n|---|---|---|---|\n"
-    table_rows = [f"| {s['Country']} | {s['Scenario Name']} | {s['Probability']} | {s['People Affected']} |" for s in all_scenarios]
-    
-    return table_header + "\n".join(table_rows)
+    return table_header + "\n".join(table_rows), scenarios_for_db
 
 def main():
     """Main function to run the bot."""
     logging.info("Starting Pythia Horizon Scanner...")
-    
+    start_time = datetime.utcnow()
+
     try:
         logging.info("Reading country list from hs_country_list.txt...")
         with open("hs_country_list.txt", "r", encoding="utf-8") as f:
@@ -135,12 +243,35 @@ def main():
         time.sleep(5) 
 
     logging.info("All country reports have been generated.")
-    
+
     # Combine all individual reports into a single string
     all_reports_text = "\n\n---\n\n".join(individual_reports)
 
     # --- New Step: Parse reports and build table using Python ---
-    summary_table = parse_reports_and_build_table(all_reports_text)
+    summary_table, scenarios = parse_reports_and_build_table(all_reports_text)
+
+    # --- Persist structured payloads to DuckDB ---
+    data_dir = REPO_ROOT / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_url = f"duckdb:///{data_dir / 'resolver.duckdb'}"
+    init_db(db_url)
+    run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
+    run_meta = {
+        "run_id": run_id,
+        "started_at": start_time.isoformat(),
+        "finished_at": datetime.utcnow().isoformat(),
+        "countries": json.dumps(countries),
+        "prompt_key": PROMPT_SPEC.key,
+        "prompt_version": PROMPT_SPEC.version,
+        "prompt_sha256": PROMPT_SPEC.sha256,
+    }
+    upsert_hs_payload(
+        db_url,
+        run_meta,
+        scenarios,
+        today=date.today(),
+        horizon_months=6,
+    )
 
     # --- Final Report Assembly ---
     utc_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')

@@ -63,7 +63,11 @@ Present the final output as a single, fenced markdown code block that begins wit
     * Your entire output for this section must be ONLY a bulleted list of the full, direct URLs of the primary sources used.
     * **The format for each source MUST be:** `- **[Website Name] - [Article Title (if available)]:** [Full, direct URL]`.
     * **CRITICAL RULE: You must not use placeholder text or add any commentary such as "Insert relevant URL here". If you cannot find a specific, valid source, omit that line item, but you must find and list at least five valid sources.**
-7.  **Data Summary Block (Mandatory):** After the Sources section, you must include a hidden HTML comment block containing a machine-readable JSON summary of the scenarios. It must be valid JSON. The structure MUST be: `<!-- SCENARIO_DATA_BLOCK: {{"country": "[Country Name]", "scenarios": [{{"name": "[Scenario Name]", "probability": "[Probability %]", "affected": "[Total People Affected]"}}]}} -->`
+7.  **Data Summary Block (Mandatory):** After the Sources section, you must include a hidden HTML comment block containing a machine-readable JSON summary of the scenarios. It must be valid JSON. The structure MUST be: `<!-- SCENARIO_DATA_BLOCK: {{"country": "[Country Name]", "iso3": "[ISO3]", "scenarios": [{{"title": "[Scenario Title]", "hazard_label": "[Hazard Label]", "hazard_code": "[Hazard Code]", "probability": "[Probability %]", "likely_window_month": "[YYYY-MM]", "best_guess": {{"PIN": [int], "PA": [int]}}, "markdown": "[One-paragraph markdown recap of the scenario]"}}]}} -->`.
+    * `"hazard_code"` must be one of `[FL, DR, TC, HW, ACO, ACE, DI, CU, EC, PHE]`. **Do not** use `MULTI` or `OT`.
+    * `"likely_window_month"` must be the single most likely `YYYY-MM` within the next six months for the peak impact of the scenario.
+    * `"best_guess"` must contain integer point estimates for affected people: `{"PIN": <persons>, "PA": <persons>}`.
+    * Keep every scenario strictly single-hazard—never aggregate multiple hazards into one scenario.
 
 """
 
