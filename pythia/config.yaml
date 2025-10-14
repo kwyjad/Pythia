@@ -1,0 +1,45 @@
+app:
+  cron_enabled: false
+  schedule: "0 6 1 * *"          # monthly, 06:00; ignored when cron_enabled=false
+  frequency: "monthly"            # can later be "quarterly"
+  db_url: "duckdb:///data/resolver.duckdb"
+
+security:
+  api_token_header: "X-Pythia-Token"
+  api_tokens: ["CHANGE_THIS_TOKEN"]
+
+hazards_allowed: ["FL","DR","TC","HW","ACO","ACE","DI","CU","EC","PHE"]   # MULTI/OT disabled
+
+hs:
+  horizon_months: 6
+  prompt_version: "1.0.0"
+
+researcher:
+  prompt_version: "1.0.0"
+  web_search: true
+  sources: ["news","metaculus","manifold"]
+
+forecaster:
+  horizons: [1,2,3,4,5,6]
+  metrics: ["PIN","PA"]
+  class_bins: ["<5k","5k-<25k","25k-<100k","100k-<500k",">=500k"]
+  aggregator: { strategy: "Bayes_MC", version: "1.0.0" }
+  providers:
+    openai:   { enabled: true,  model: "gpt-5",           env_key: "OPENAI_API_KEY" }
+    anthropic:{ enabled: true,  model: "claude-4.1-opus", env_key: "ANTHROPIC_API_KEY" }
+    google:   { enabled: true,  model: "gemini-2.5-pro",  env_key: "GEMINI_API_KEY" }
+    xai:      { enabled: true,  model: "grok-4",          env_key: "XAI_API_KEY" }
+
+ranking:
+  representative_values:
+    "<5k": 2500
+    "5k-<25k": 15000
+    "25k-<100k": 62500
+    "100k-<500k": 300000
+    ">=500k": 700000
+  population_source: "worldpop"
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+  base_path: "/v1"
