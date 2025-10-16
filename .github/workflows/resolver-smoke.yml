@@ -37,11 +37,12 @@ jobs:
           echo "Ref: $GITHUB_REF"
           echo "SHA: $GITHUB_SHA"
           python - <<'PY'
-import pathlib
-root = pathlib.Path().resolve()
-print("Working directory:", root)
-print("Tree size:", len(list(root.glob("**/*"))))
-PY
+            import pathlib
+
+            root = pathlib.Path().resolve()
+            print("Working directory:", root)
+            print("Tree size:", len(list(root.glob("**/*"))))
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -75,23 +76,24 @@ PY
         run: |
           set -euo pipefail
           sources=$(python - <<'PY'
-import os
-from pathlib import Path
-from resolver.transform.normalize import ADAPTER_REGISTRY
+            import os
+            from pathlib import Path
 
-period = os.environ["PERIOD_LABEL"]
-raw_dir = Path("data/staging") / period / "raw"
-if not raw_dir.exists():
-    raise SystemExit(f"Raw directory missing: {raw_dir}")
-available = []
-for path in sorted(raw_dir.glob("*.csv")):
-    stem = path.stem
-    if stem in ADAPTER_REGISTRY:
-        available.append(stem)
-if not available:
-    raise SystemExit("No canonicalizable sources found in raw staging data")
-print(",".join(available))
-PY
+            from resolver.transform.normalize import ADAPTER_REGISTRY
+
+            period = os.environ["PERIOD_LABEL"]
+            raw_dir = Path("data/staging") / period / "raw"
+            if not raw_dir.exists():
+                raise SystemExit(f"Raw directory missing: {raw_dir}")
+            available = []
+            for path in sorted(raw_dir.glob("*.csv")):
+                stem = path.stem
+                if stem in ADAPTER_REGISTRY:
+                    available.append(stem)
+            if not available:
+                raise SystemExit("No canonicalizable sources found in raw staging data")
+            print(",".join(available))
+          PY
           )
           echo "NORMALIZE_SOURCES=$sources" >> "$GITHUB_ENV"
 
