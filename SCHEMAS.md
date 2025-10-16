@@ -211,3 +211,13 @@ WorldPop denominators staging output.
 | source_url | string | yes |  |  |
 | year | integer | yes |  |  |
 | notes | string | no |  |  |
+
+## ReliefWeb field mapping
+
+The ReliefWeb API connector sources its `fields[include][]` parameter from
+`resolver/ingestion/config/reliefweb_fields.yml`. The allowlist mirrors the
+columns the staging CSV consumes and explicitly omits the deprecated `type`
+field after the API began returning `400` responses for that include. When
+ReliefWeb responds with an "Unrecognized field" error the connector prunes the
+offending entry, retries once with the remaining allowlisted fields, and still
+writes the canonical header-only CSV when no rows are returned.
