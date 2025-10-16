@@ -1032,6 +1032,8 @@ def init_schema(
                     event_id TEXT,
                     proxy_for TEXT,
                     confidence TEXT,
+                    provenance_source TEXT,
+                    provenance_rank INTEGER,
                     series TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
