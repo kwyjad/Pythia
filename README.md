@@ -217,10 +217,15 @@ python -m resolver.tools.load_and_derive \
 The command:
 
 - Inserts the 12 canonical columns into `facts_raw` and routes `stock` rows into `facts_resolved` (with `new` rows landing in `facts_deltas`).
+- Applies the source-priority resolver so overlapping monthly stock rows collapse to a single winner with provenance (`provenance_source`/`provenance_rank`).
 - Derives monthly `value_new` deltas from the cumulative stock history for each `(iso3, hazard_code, metric, unit, source)` grouping—preserving negative swings when `--allow-negatives` is `1` (the default).
 - Writes `facts_resolved.parquet` and `facts_deltas.parquet` to `data/snapshots/<period>/`, mirroring the DuckDB rows for the requested quarter.
 
 The CLI logs row counts per table along the way so you can confirm non-empty loads before inspecting the exported artifacts.
+
+Source precedence is controlled via [`resolver/ingestion/config/source_priority.yml`](resolver/ingestion/config/source_priority.yml).
+Higher-ranked identifiers win ties, and the resolver records the chosen source and its 1-based rank in the
+`provenance_source`/`provenance_rank` columns on `facts_resolved`.
 
 ### Resolver DuckDB dual-write
 

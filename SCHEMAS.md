@@ -139,6 +139,8 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
+| provenance_source | string | yes |  | Source identifier chosen after applying the priority resolver (matches `source_id`). |
+| provenance_rank | integer | yes |  | `1` = highest priority source according to `resolver/ingestion/config/source_priority.yml`. |
 | series_semantics | enum | yes | stock | Canonical semantics flag (always stored as `stock`); `series` is deprecated and only used for backward compatibility. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
@@ -146,7 +148,9 @@ Resolved precedence outputs stored in DuckDB for querying.
 > **Semantics enforcement:** Database writes canonicalise inputs, normalise key columns, and then collapse
 > `series_semantics` to table-specific values before upserting. Unknown or blank values are
 > coerced to the table default, legacy `series` inputs are tolerated for migration, and `facts_resolved`
-> rows persist as `stock` while `facts_deltas` rows persist as `new`.
+> rows persist as `stock` while `facts_deltas` rows persist as `new`. After canonicalisation,
+> `resolver.transform.resolve_sources` rehydrates `provenance_source`/`provenance_rank` from the
+> configured priority list so the final monthly stock view exposes the winning source and its rank.
 
 ### Semantics
 

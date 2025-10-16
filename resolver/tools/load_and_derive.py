@@ -14,6 +14,7 @@ import pandas as pd
 
 from resolver.db.conn_shared import get_shared_duckdb_conn
 from resolver.db.duckdb_io import init_schema
+from resolver.transform.resolve_sources import resolve_sources
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - library default noise guard
@@ -176,6 +177,8 @@ def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
             "doc_title": stock["source"],
             "event_id": stock["event_id"],
             "confidence": None,
+            "provenance_source": stock["source"],
+            "provenance_rank": None,
         })
         delete_months(conn, "facts_resolved", stock_resolved["ym"].unique())
         resolved_rows = _insert_dataframe(conn, "facts_resolved", stock_resolved)
@@ -384,6 +387,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         canonical = _read_canonical_dir(canonical_dir)
         counts = _load_into_db(conn, canonical)
         LOGGER.info("Loaded canonical counts: %s", counts)
+        prioritized = resolve_sources(conn)
+        LOGGER.info(
+            "Applied source resolution: %s prioritized rows", prioritized
+        )
         derived = _derive_deltas(
             conn, period, allow_negatives=bool(args.allow_negatives)
         )

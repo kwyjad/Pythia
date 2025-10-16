@@ -122,7 +122,7 @@ def test_cli_loads_derives_and_exports(tmp_path: Path, monkeypatch) -> None:
     try:
         raw_count = conn.execute("SELECT COUNT(*) FROM facts_raw").fetchone()[0]
         resolved = conn.execute(
-            "SELECT ym, value FROM facts_resolved ORDER BY ym"
+            "SELECT ym, value, provenance_source, provenance_rank FROM facts_resolved ORDER BY ym"
         ).df()
         deltas = conn.execute(
             "SELECT ym, value_new, value_stock FROM facts_deltas ORDER BY ym"
@@ -133,6 +133,9 @@ def test_cli_loads_derives_and_exports(tmp_path: Path, monkeypatch) -> None:
     assert raw_count == 4
     assert len(resolved) == 3
     assert len(deltas) == 3
+
+    assert set(resolved["provenance_source"]) == {"Relief Org"}
+    assert (resolved["provenance_rank"] >= 1).all()
 
     deltas["cumulative"] = deltas["value_new"].cumsum()
     merged = resolved.merge(deltas, on="ym", how="inner")
