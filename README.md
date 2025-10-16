@@ -188,6 +188,9 @@ python resolver/ingestion/run_all_stubs.py --connector who_phe_client.py
 # writes data/staging/2025Q3/raw/who_phe.csv
 ```
 
+All ingestion connectors emit a header-only CSV when no rows survive filtering
+so downstream stages always find the expected schema.
+
 ### Resolver DuckDB dual-write
 
 Set the `RESOLVER_DB_URL` environment variable to enable database-backed parity
