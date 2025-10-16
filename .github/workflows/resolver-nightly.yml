@@ -1,0 +1,204 @@
+---
+name: "Resolver pipeline — nightly"
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolver-pipeline-nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    if: ${{ github.repository == 'oughtinc/Pythia' }}
+    name: "Nightly pipeline (real connectors)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+      RESOLVER_STAGING_DIR: data/staging
+      RESOLVER_INGESTION_MODE: real
+      RESOLVER_INCLUDE_STUBS: "0"
+      RESOLVER_FAIL_ON_STUB_ERROR: "1"
+      RESOLVER_DEBUG: "0"
+      RESOLVER_WINDOW_DAYS: "14"
+      RESOLVER_FORCE_ENABLE: ifrc_go,unhcr_odp
+      RESOLVER_SKIP_IFRCGO: "0"
+      RESOLVER_SKIP_UNHCR_ODP: "0"
+      GO_API_TOKEN: ${{ secrets.GO_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Debug repo context
+        run: |
+          set -euo pipefail
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Ref: $GITHUB_REF"
+          echo "SHA: $GITHUB_SHA"
+          python - <<'PY'
+          from textwrap import dedent
+
+          exec(
+              dedent(
+                  """
+                  import pathlib
+
+                  root = pathlib.Path().resolve()
+                  print("Working directory:", root)
+                  print("Tree size:", len(list(root.glob("**/*"))))
+                  """
+              )
+          )
+          PY
+
+      - name: Compute ingestion window
+        run: |
+          set -euo pipefail
+          start=$(date -u -d '14 days ago' +%Y-%m-%d)
+          end=$(date -u +%Y-%m-%d)
+          label="nightly-${end}"
+          {
+            echo "RESOLVER_START_ISO=$start"
+            echo "RESOLVER_END_ISO=$end"
+            echo "PERIOD_LABEL=$label"
+            echo "RESOLVER_PERIOD=$label"
+          } >> "$GITHUB_ENV"
+          echo "Nightly window: $start → $end (label=$label)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            resolver/requirements.txt
+
+      - name: Install resolver dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install -r resolver/requirements.txt
+          python -m pip install 'duckdb>=1.0,<2.0'
+
+      - name: Prepare staging directories
+        run: |
+          set -euo pipefail
+          rm -rf "data/staging/${PERIOD_LABEL}"
+          rm -rf "data/snapshots/${PERIOD_LABEL}"
+
+      - name: Run real connectors
+        env:
+          PERIOD_LABEL: ${{ env.PERIOD_LABEL }}
+        run: |
+          set -euo pipefail
+          python resolver/ingestion/run_all_stubs.py \
+            --mode real \
+            --connector ifrc_go_client.py \
+            --connector unhcr_odp_client.py \
+            --strict \
+            --log-level INFO \
+            --log-format json
+
+      - name: Determine canonical sources
+        run: |
+          set -euo pipefail
+          sources=$(python - <<'PY'
+          from textwrap import dedent
+
+          namespace = {}
+          exec(
+              dedent(
+                  """
+                  import os
+                  from pathlib import Path
+
+                  from resolver.transform.normalize import ADAPTER_REGISTRY
+
+                  period = os.environ["PERIOD_LABEL"]
+                  raw_dir = Path("data/staging") / period / "raw"
+                  if not raw_dir.exists():
+                      raise SystemExit(f"Raw directory missing: {raw_dir}")
+                  available = []
+                  for path in sorted(raw_dir.glob("*.csv")):
+                      stem = path.stem
+                      if stem in ADAPTER_REGISTRY:
+                          available.append(stem)
+                  if not available:
+                      raise SystemExit("No canonicalizable sources found in raw staging data")
+                  namespace["result"] = ",".join(available)
+                  """
+              ),
+              globals(),
+              namespace,
+          )
+          print(namespace["result"])
+          PY
+          )
+          echo "NORMALIZE_SOURCES=$sources" >> "$GITHUB_ENV"
+
+      - name: Normalize canonical CSVs
+        run: |
+          set -euo pipefail
+          python -m resolver.transform.normalize \
+            --in "data/staging/${PERIOD_LABEL}/raw" \
+            --out "data/staging/${PERIOD_LABEL}/canonical" \
+            --period "${PERIOD_LABEL}" \
+            --sources "${NORMALIZE_SOURCES}"
+
+      - name: Load and derive snapshot
+        run: |
+          set -euo pipefail
+          python -m resolver.tools.load_and_derive \
+            --period "${PERIOD_LABEL}" \
+            --staging-root data/staging \
+            --snapshots-root data/snapshots \
+            --allow-negatives 1
+
+      - name: Summarize snapshot row counts
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from textwrap import dedent
+
+          exec(
+              dedent(
+                  """
+                  import os
+                  from pathlib import Path
+
+                  import pandas as pd
+
+                  period = os.environ["PERIOD_LABEL"]
+                  base = Path("data/snapshots") / period
+                  resolved = base / "facts_resolved.parquet"
+                  deltas = base / "facts_deltas.parquet"
+                  if not resolved.exists():
+                      raise SystemExit(f"facts_resolved.parquet missing in {base}")
+                  print(f"facts_resolved rows: {pd.read_parquet(resolved).shape[0]}")
+                  if deltas.exists():
+                      print(f"facts_deltas rows: {pd.read_parquet(deltas).shape[0]}")
+                  else:
+                      print("facts_deltas.parquet not produced")
+                  """
+              )
+          )
+          PY
+
+      - name: Upload nightly snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            data/snapshots/${PERIOD_LABEL}/*.parquet
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
