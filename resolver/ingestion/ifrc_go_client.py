@@ -26,9 +26,10 @@ import requests
 import pandas as pd
 import yaml
 
+from resolver.ingestion.utils.io import resolve_output_path
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "ifrc_go.yml"
 
 COUNTRIES = DATA / "countries.csv"
@@ -358,8 +359,9 @@ def collect_rows() -> List[List[str]]:
     return rows
 
 def main():
-    STAGING.mkdir(parents=True, exist_ok=True)
-    out = STAGING / "ifrc_go.csv"
+    default_path = ROOT / "staging" / "ifrc_go.csv"
+    out = resolve_output_path(default_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         rows = collect_rows()

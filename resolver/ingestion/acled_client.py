@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 
 from .acled_auth import get_auth_header
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -27,7 +28,8 @@ CONFIG = ROOT / "ingestion" / "config" / "acled.yml"
 COUNTRIES = DATA / "countries.csv"
 SHOCKS = DATA / "shocks.csv"
 
-OUT_PATH = STAGING / "acled.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "acled.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 
 CANONICAL_HEADERS = [
     "event_id",

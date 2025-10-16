@@ -31,11 +31,15 @@ import requests
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "unhcr.yml"
+
+DEFAULT_OUTPUT = ROOT / "staging" / "unhcr.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 
 __all__ = [
     "load_cfg",
@@ -571,7 +575,8 @@ def make_rows() -> Tuple[List[List[str]], Counter]:
 
 def main() -> None:
     STAGING.mkdir(parents=True, exist_ok=True)
-    out = STAGING / "unhcr.csv"
+    out = OUT_PATH
+    out.parent.mkdir(parents=True, exist_ok=True)
     try:
         rows, counters = make_rows()
     except Exception as exc:  # noqa: BLE001

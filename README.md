@@ -170,6 +170,24 @@ errors for it. When the API responds with "Unrecognized field" the connector
 logs the response, prunes the unsupported entry, retries once with the safe
 allowlist, and still emits the canonical header-only CSV when no rows survive.
 
+### Staging output directory controls
+
+The ingestion runner now writes every connector CSV beneath a single staging
+root driven by environment variables. Set `RESOLVER_STAGING_DIR` to the parent
+directory (for example, `data/staging`) and the runner will emit files under
+`$RESOLVER_STAGING_DIR/<period>/raw/`. Provide `RESOLVER_PERIOD` for a fixed
+label or rely on `RESOLVER_START_ISO`/`RESOLVER_END_ISO` to derive a quarter- or
+date-span based folder (falling back to `unknown`). When unset, outputs continue
+to land in `resolver/staging/` for backwards compatibility. Example:
+
+```bash
+export RESOLVER_STAGING_DIR=$(pwd)/data/staging
+export RESOLVER_START_ISO=2025-07-01
+export RESOLVER_END_ISO=2025-09-30
+python resolver/ingestion/run_all_stubs.py --connector who_phe_client.py
+# writes data/staging/2025Q3/raw/who_phe.csv
+```
+
 ### Resolver DuckDB dual-write
 
 Set the `RESOLVER_DB_URL` environment variable to enable database-backed parity

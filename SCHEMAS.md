@@ -4,6 +4,7 @@
 
 ## Table of contents
 
+- [Pipeline IO](#pipeline-io)
 - [db.facts_deltas](#dbfactsdeltas)
 - [db.facts_raw](#dbfactsraw)
 - [db.facts_resolved](#dbfactsresolved)
@@ -12,6 +13,19 @@
 - [staging.common](#stagingcommon)
 - [staging.unhcr_odp](#stagingunhcrodp)
 - [staging.worldpop](#stagingworldpop)
+
+## Pipeline IO
+
+All ingestion connectors now share a single staging root. When
+`RESOLVER_STAGING_DIR` is set, outputs land in
+`$RESOLVER_STAGING_DIR/<period>/raw/<source>.csv`. The `<period>` segment comes
+from `RESOLVER_PERIOD` when provided, else from the
+`RESOLVER_START_ISO`/`RESOLVER_END_ISO` window (quarter-aligned when both dates
+fall in the same quarter) and otherwise defaults to `unknown`. Set
+`RESOLVER_OUTPUT_DIR` directly to override the computed root or
+`RESOLVER_OUTPUT_PATH` for one-off CLI runs. Without these environment variables
+the historical `resolver/staging/<source>.csv` layout remains active for
+backwards compatibility.
 
 > **DuckDB URL note:** All resolver components open DuckDB databases through a shared connection cache. URLs such as `duckdb:///tmp/db.duckdb`, `duckdb:////abs/db.duckdb`, relative file paths, and `:memory:` are canonicalised to a single filesystem target so writers and readers share the same database session. Enable `RESOLVER_DEBUG=1` to log the resolved path during tests.
 

@@ -19,6 +19,7 @@ import requests
 import yaml
 
 from resolver.tools.denominators import get_population_record, safe_pct_to_people
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -727,7 +728,8 @@ def collect_rows() -> List[List[Any]]:
 
 def main() -> None:
     STAGING.mkdir(parents=True, exist_ok=True)
-    out = STAGING / "hdx.csv"
+    out = resolve_output_path(DEFAULT_OUTPUT)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     if os.getenv("RESOLVER_SKIP_HDX") == "1":
         pd.DataFrame(columns=COLUMNS).to_csv(out, index=False)
@@ -751,3 +753,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+DEFAULT_OUTPUT = ROOT / "staging" / "hdx.csv"

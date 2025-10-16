@@ -34,6 +34,7 @@ from resolver.ingestion.utils import (
     stable_digest,
     to_iso3,
 )
+from resolver.ingestion.utils.io import resolve_output_path
 
 if TYPE_CHECKING:  # pragma: no cover - import guard for typing only
     import pandas as pd
@@ -41,8 +42,9 @@ if TYPE_CHECKING:  # pragma: no cover - import guard for typing only
 ROOT = Path(__file__).resolve().parents[1]
 STAGING = ROOT / "staging"
 CONFIG_PATH = ROOT / "ingestion" / "config" / "dtm.yml"
-OUT_DIR = STAGING
-OUT_PATH = OUT_DIR / "dtm_displacement.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "dtm_displacement.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
+OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH  # backwards compatibility alias
 
 LOG = logging.getLogger("resolver.ingestion.dtm")

@@ -42,6 +42,11 @@ from resolver.ingestion._runner_logging import (
     log_env_summary,
     redact,
 )
+from resolver.ingestion.utils.io import (
+    resolve_output_path,
+    resolve_period_label,
+    resolve_staging_dir,
+)
 
 STAGING = ROOT.parent / "staging"
 CONFIG_DIR = ROOT / "config"
@@ -124,55 +129,97 @@ REAL = [
     "worldpop_client.py",
 ]
 
+CONNECTOR_OUTPUTS: Dict[str, str] = {
+    "ifrc_go_client.py": "ifrc_go.csv",
+    "reliefweb_client.py": "reliefweb.csv",
+    "unhcr_client.py": "unhcr.csv",
+    "unhcr_odp_client.py": "unhcr_odp.csv",
+    "who_phe_client.py": "who_phe.csv",
+    "ipc_client.py": "ipc.csv",
+    "wfp_mvam_client.py": "wfp_mvam.csv",
+    "acled_client.py": "acled.csv",
+    "dtm_client.py": "dtm_displacement.csv",
+    "hdx_client.py": "hdx.csv",
+    "emdat_client.py": "emdat_pa.csv",
+    "gdacs_client.py": "gdacs_signals.csv",
+    "worldpop_client.py": "worldpop_denominators.csv",
+    "ifrc_go_stub.py": "ifrc_go.csv",
+    "reliefweb_stub.py": "reliefweb.csv",
+    "unhcr_stub.py": "unhcr.csv",
+    "hdx_stub.py": "hdx.csv",
+    "who_stub.py": "who.csv",
+    "ipc_stub.py": "ipc.csv",
+    "emdat_stub.py": "emdat.csv",
+    "gdacs_stub.py": "gdacs.csv",
+    "copernicus_stub.py": "copernicus.csv",
+    "unosat_stub.py": "unosat.csv",
+    "acled_stub.py": "acled.csv",
+    "ucdp_stub.py": "ucdp.csv",
+    "fews_stub.py": "fews.csv",
+    "wfp_mvam_stub.py": "wfp_mvam.csv",
+    "gov_ndma_stub.py": "gov_ndma.csv",
+    "dtm_stub.py": "dtm.csv",
+}
+
 SUMMARY_TARGETS = {
-    "who_phe_client.py": {
-        "label": "WHO-PHE",
-        "staging": STAGING / "who_phe.csv",
-        "config": CONFIG_DIR / "who_phe.yml",
+    "ifrc_go_client.py": {
+        "label": "IFRC GO",
+        "filename": CONNECTOR_OUTPUTS["ifrc_go_client.py"],
+        "config": CONFIG_DIR / "ifrc_go.yml",
     },
-    "wfp_mvam_client.py": {
-        "label": "WFP-mVAM",
-        "staging": STAGING / "wfp_mvam.csv",
-        "config": CONFIG_DIR / "wfp_mvam_sources.yml",
-    },
-    "ipc_client.py": {
-        "label": "IPC",
-        "staging": STAGING / "ipc.csv",
-        "config": CONFIG_DIR / "ipc.yml",
+    "reliefweb_client.py": {
+        "label": "ReliefWeb",
+        "filename": CONNECTOR_OUTPUTS["reliefweb_client.py"],
+        "config": CONFIG_DIR / "reliefweb.yml",
     },
     "unhcr_client.py": {
         "label": "UNHCR",
-        "staging": STAGING / "unhcr.csv",
+        "filename": CONNECTOR_OUTPUTS["unhcr_client.py"],
         "config": CONFIG_DIR / "unhcr.yml",
     },
     "unhcr_odp_client.py": {
         "label": "UNHCR-ODP",
-        "staging": STAGING / "unhcr_odp.csv",
+        "filename": CONNECTOR_OUTPUTS["unhcr_odp_client.py"],
         "config": None,
+    },
+    "who_phe_client.py": {
+        "label": "WHO-PHE",
+        "filename": CONNECTOR_OUTPUTS["who_phe_client.py"],
+        "config": CONFIG_DIR / "who_phe.yml",
+    },
+    "ipc_client.py": {
+        "label": "IPC",
+        "filename": CONNECTOR_OUTPUTS["ipc_client.py"],
+        "config": CONFIG_DIR / "ipc.yml",
+    },
+    "wfp_mvam_client.py": {
+        "label": "WFP-mVAM",
+        "filename": CONNECTOR_OUTPUTS["wfp_mvam_client.py"],
+        "config": CONFIG_DIR / "wfp_mvam_sources.yml",
     },
     "acled_client.py": {
         "label": "ACLED",
-        "staging": STAGING / "acled.csv",
+        "filename": CONNECTOR_OUTPUTS["acled_client.py"],
         "config": CONFIG_DIR / "acled.yml",
     },
     "dtm_client.py": {
         "label": "DTM",
-        "staging": STAGING / "dtm_displacement.csv",
+        "filename": CONNECTOR_OUTPUTS["dtm_client.py"],
         "config": CONFIG_DIR / "dtm.yml",
     },
     "gdacs_client.py": {
         "label": "GDACS",
-        "staging": STAGING / "gdacs_signals.csv",
+        "filename": CONNECTOR_OUTPUTS["gdacs_client.py"],
         "config": CONFIG_DIR / "gdacs.yml",
     },
     "emdat_client.py": {
         "label": "EM-DAT",
-        "staging": STAGING / "emdat_pa.csv",
+        "filename": CONNECTOR_OUTPUTS["emdat_client.py"],
         "config": CONFIG_DIR / "emdat.yml",
     },
     "worldpop_client.py": {
         "label": "WorldPop",
-        "staging": STAGING / "worldpop_denominators.csv",
+        "filename": CONNECTOR_OUTPUTS["worldpop_client.py"],
         "config": CONFIG_DIR / "worldpop.yml",
     },
 }
@@ -383,12 +430,12 @@ def _rows_and_method(path: Optional[Path]) -> tuple[int, str]:
     return manifest_rows, "manifest"
 
 
-def _summarise_connector(name: str) -> str | None:
+def _summarise_connector(name: str, output_path: Optional[Path]) -> str | None:
     meta = SUMMARY_TARGETS.get(name)
-    if not meta:
+    if not meta or output_path is None:
         return None
     label = meta["label"]
-    rows, method = _rows_and_method(meta["staging"])
+    rows, method = _rows_and_method(output_path)
     parts = [f"[{label}] rows:{rows}"]
     if method in {"recount", "manifest+verified"}:
         parts.append(f"rows_method:{method}")
@@ -461,9 +508,9 @@ def _summarise_connector(name: str) -> str | None:
     return " ".join(parts)
 
 
-def _safe_summary(name: str) -> str | None:
+def _safe_summary(name: str, output_path: Optional[Path]) -> str | None:
     try:
-        summary = _summarise_connector(name)
+        summary = _summarise_connector(name, output_path)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).warning(
             "failed to summarise connector %s", name, exc_info=exc
@@ -569,8 +616,12 @@ def _build_specs(
 def _create_spec(filename: str, kind: str) -> ConnectorSpec:
     path = ROOT / filename
     meta = SUMMARY_TARGETS.get(filename, {})
-    summary = _safe_summary(filename)
-    output_path = meta.get("staging") if isinstance(meta, dict) else None
+    default_filename = CONNECTOR_OUTPUTS.get(filename)
+    output_path: Optional[Path] = None
+    if default_filename:
+        default_path = STAGING / default_filename
+        output_path = resolve_output_path(default_path)
+    summary = _safe_summary(filename, output_path)
     skip_reason = None
     skip_env = _should_skip(filename)
     if not path.exists():
@@ -580,6 +631,8 @@ def _create_spec(filename: str, kind: str) -> ConnectorSpec:
     metadata: Dict[str, str] = {}
     if output_path:
         metadata["output_path"] = str(output_path)
+    if default_filename:
+        metadata["default_filename"] = default_filename
     canonical_name = ff.norm(filename)
     explicit_config = meta.get("config") if isinstance(meta, dict) else None
     explicit_path = explicit_config if isinstance(explicit_config, Path) else None
@@ -673,6 +726,32 @@ def _render_summary_table(rows: List[Dict[str, object]]) -> str:
     lines = []
     header_line = " | ".join(header.ljust(width) for header, width in zip(headers, widths))
     lines.append(header_line)
+    lines.append("-+-".join("-" * width for width in widths))
+    for row in table_rows:
+        lines.append(" | ".join(str(value).ljust(width) for value, width in zip(row, widths)))
+    return "\n".join(lines)
+
+
+def _render_output_overview(rows: List[Dict[str, object]]) -> str:
+    headers = ["Output Path", "Rows", "Status"]
+    table_rows: List[List[str]] = []
+    for row in rows:
+        path = row.get("output_path")
+        if not path:
+            continue
+        table_rows.append(
+            [
+                str(path),
+                str(row.get("rows", "")),
+                str(row.get("status", "")),
+            ]
+        )
+    if not table_rows:
+        return ""
+    columns = list(zip(headers, *table_rows))
+    widths = [max(len(str(value)) for value in column) for column in columns]
+    lines = []
+    lines.append(" | ".join(header.ljust(width) for header, width in zip(headers, widths)))
     lines.append("-+-".join("-" * width for width in widths))
     for row in table_rows:
         lines.append(" | ".join(str(value).ljust(width) for value, width in zip(row, widths)))
@@ -848,6 +927,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             "event": "logging_setup",
             "log_dir": str(effective_log_dir),
             "run_id": run_id,
+        },
+    )
+    resolved_output_dir = resolve_staging_dir(STAGING)
+    if "RESOLVER_OUTPUT_DIR" not in os.environ:
+        os.environ["RESOLVER_OUTPUT_DIR"] = str(resolved_output_dir)
+    else:
+        resolved_output_dir = Path(os.environ["RESOLVER_OUTPUT_DIR"]).expanduser()
+    period_label = resolve_period_label()
+    root.info(
+        "resolved staging output",
+        extra={
+            "event": "staging_output",
+            "path": str(resolved_output_dir),
+            "period": period_label,
         },
     )
     log_env_summary(root)
@@ -1131,6 +1224,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"duration_ms={duration_ms}, notes={summary_notes or '-'}"
             )
             print(summary_line)
+            output_path_text: Optional[str]
+            if spec.output_path:
+                try:
+                    output_path_text = str(spec.output_path.resolve())
+                except OSError:
+                    output_path_text = str(spec.output_path)
+            else:
+                output_path_text = None
             connectors_summary.append(
                 {
                     "name": spec.name,
@@ -1141,12 +1242,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "notes": summary_notes,
                     "kind": spec.kind,
                     "rows_method": result.get("rows_method") if result else None,
+                    "output_path": output_path_text,
                 }
             )
 
     total_duration_ms = int((time.perf_counter() - total_start) * 1000)
     table = _render_summary_table(connectors_summary)
     root.info("Connector summary\n%s", table, extra={"event": "summary_table"})
+    output_table = _render_output_overview(connectors_summary)
+    if output_table:
+        root.info("Output files\n%s", output_table, extra={"event": "output_table"})
     root.info(
         "run complete",
         extra={
