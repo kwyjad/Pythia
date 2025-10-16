@@ -191,6 +191,16 @@ python resolver/ingestion/run_all_stubs.py --connector who_phe_client.py
 All ingestion connectors emit a header-only CSV when no rows survive filtering
 so downstream stages always find the expected schema.
 
+### Canonical normalization
+
+Use the canonical normalizer to transform raw staging CSVs into the 12-column schema shared by downstream Resolver tooling. The CLI accepts the raw directory, an output directory for canonical CSVs, the optional staging period label, and a comma-separated source list. Example:
+
+```bash
+python -m resolver.transform.normalize \n  --in data/staging/2025Q3/raw \n  --out data/staging/2025Q3/canonical \n  --period 2025Q3 \n  --sources ifrc_go
+```
+
+Each adapter snaps `as_of_date` to the end of the month, filters rows outside the optional `RESOLVER_START_ISO`/`RESOLVER_END_ISO` window, coerces numeric values, and writes exactly 12 headers (`event_id` … `source`). Empty results still emit a header-only CSV so follow-on jobs can rely on the canonical directory layout.
+
 ### Resolver DuckDB dual-write
 
 Set the `RESOLVER_DB_URL` environment variable to enable database-backed parity
