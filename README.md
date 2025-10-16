@@ -201,6 +201,27 @@ python -m resolver.transform.normalize \n  --in data/staging/2025Q3/raw \n  --ou
 
 Each adapter snaps `as_of_date` to the end of the month, filters rows outside the optional `RESOLVER_START_ISO`/`RESOLVER_END_ISO` window, coerces numeric values, and writes exactly 12 headers (`event_id` … `source`). Empty results still emit a header-only CSV so follow-on jobs can rely on the canonical directory layout.
 
+### Load, derive, and export in one step
+
+Once canonical CSVs exist for a staging period, run the bundled loader CLI to populate DuckDB and emit matching Parquet snapshots:
+
+```bash
+python -m resolver.tools.load_and_derive \
+  --period 2025Q3 \
+  --staging-root data/staging \
+  --snapshots-root data/snapshots \
+  --db ${RESOLVER_DB_URL:-resolver/db/resolver.duckdb} \
+  --allow-negatives 1
+```
+
+The command:
+
+- Inserts the 12 canonical columns into `facts_raw` and routes `stock` rows into `facts_resolved` (with `new` rows landing in `facts_deltas`).
+- Derives monthly `value_new` deltas from the cumulative stock history for each `(iso3, hazard_code, metric, unit, source)` grouping—preserving negative swings when `--allow-negatives` is `1` (the default).
+- Writes `facts_resolved.parquet` and `facts_deltas.parquet` to `data/snapshots/<period>/`, mirroring the DuckDB rows for the requested quarter.
+
+The CLI logs row counts per table along the way so you can confirm non-empty loads before inspecting the exported artifacts.
+
 ### Resolver DuckDB dual-write
 
 Set the `RESOLVER_DB_URL` environment variable to enable database-backed parity
