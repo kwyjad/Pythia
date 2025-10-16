@@ -191,6 +191,30 @@ python resolver/ingestion/run_all_stubs.py --connector who_phe_client.py
 All ingestion connectors emit a header-only CSV when no rows survive filtering
 so downstream stages always find the expected schema.
 
+### Connector enablement & overrides
+
+Every connector YAML under `resolver/ingestion/config/` now declares a single
+`enabled` flag. The runner evaluates enablement in a fixed precedence order:
+
+1. Command-line selectors (`--only`, `--pattern`) and
+   `RESOLVER_FORCE_ENABLE` overrides
+2. The connector's `enabled` value
+3. CI gate environment variables such as `RESOLVER_SKIP_IFRCGO=1`
+
+Local runs can opt into disabled connectors without editing YAML by forcing
+them via CLI or setting `RESOLVER_FORCE_ENABLE`. Multiple overrides can be
+comma-separated:
+
+```bash
+RESOLVER_FORCE_ENABLE=acled,reliefweb python resolver/ingestion/run_all_stubs.py
+python resolver/ingestion/run_all_stubs.py --only acled_stub
+python resolver/ingestion/run_all_stubs.py --pattern "(acled|reliefweb)"
+```
+
+Plan logs now emit `gated_by=` and `decision=` fields so you can confirm whether
+a connector was run (`decision=run`) or skipped and why (for example,
+`gated_by=config_disabled` or `gated_by=ci_gate`).
+
 ### Canonical normalization
 
 Use the canonical normalizer to transform raw staging CSVs into the 12-column schema shared by downstream Resolver tooling. The CLI accepts the raw directory, an output directory for canonical CSVs, the optional staging period label, and a comma-separated source list. Example:
