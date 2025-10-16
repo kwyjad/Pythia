@@ -5,6 +5,7 @@
 ## Table of contents
 
 - [Pipeline IO](#pipeline-io)
+- [canonical.normalized](#canonicalnormalized)
 - [db.facts_deltas](#dbfactsdeltas)
 - [db.facts_raw](#dbfactsraw)
 - [db.facts_resolved](#dbfactsresolved)
@@ -34,6 +35,29 @@ backwards compatibility.
 > **Numeric precision:** Snapshot writers coerce `value`, `value_new`, and `value_stock` to floats before persistence so CSV inputs such as `'1,200'` or `'150.0'` are normalised. Placeholder strings like `''`, `'None'`, `'NaN'`, `'<NA>'`, or `'null'` are coerced to `NULL` during writes to keep DuckDB columns numeric. Downstream CLIs round values to the nearest integer only when `unit = 'persons'`; the stored floats retain fractional precision for auditing and non-person metrics.
 
 > **Keys & indexes:** Resolver expects `facts_resolved` rows to be unique on `(ym, iso3, hazard_code, metric, series_semantics)` and `facts_deltas` rows to be unique on `(ym, iso3, hazard_code, metric)`. `init_schema` enforces these natural keys with primary keys (`pk_facts_resolved_series`, `pk_facts_deltas_series`) when the DuckDB build supports `ALTER TABLE ... ADD PRIMARY KEY` and always creates the named unique indexes `ux_facts_resolved_series` and `ux_facts_deltas_series` in that canonical column order via `CREATE UNIQUE INDEX IF NOT EXISTS`. The upsert detector accepts either a matching primary/unique constraint or one of these unique indexes, and the self-healing path re-creates the named indexes (then re-checks) before it raises, keeping DuckDB 0.10.x and newer releases aligned. When a table is missing entirely or the unique keys still are not declared, the writer calls `init_schema` and falls back to a deterministic delete-then-insert strategy driven by the provided key columns so early bootstrap writes never silently drop rows.
+
+## canonical.normalized
+
+Canonical 12-column schema used by downstream resolver tooling. Normalizers write one CSV per source (for example, `ifrc_go.csv`) under the canonical staging directory. Dates are snapped to the last calendar day of the month and rows outside the optional `RESOLVER_START_ISO`/`RESOLVER_END_ISO` window are dropped.
+
+| Name | Type | Required | Enum/Format | Description |
+| --- | --- | --- | --- | --- |
+| event_id | string | yes |  | Source-provided identifier that stays stable across refreshes. |
+| country_name | string | yes |  | Human-readable country name. |
+| iso3 | string | yes | ISO-3166 alpha-3 | Upper-cased ISO-3 country code. |
+| hazard_code | string | yes | Resolver hazard slug | Upper-cased hazard taxonomy code. |
+| hazard_label | string | yes |  | Descriptive hazard label from the source. |
+| hazard_class | string | yes |  | High-level hazard grouping (e.g., `natural`). |
+| metric | enum | yes | in_need, affected, displaced, cases, fatalities\<br>events, participants | Resolver metric key. |
+| unit | enum | yes | persons, persons_cases, events | Canonical unit for the metric. |
+| as_of_date | string | yes | YYYY-MM-DD | Month-end ISO date derived from the raw observation. |
+| value | number | yes |  | Numeric value coerced from the source. |
+| series_semantics | enum | yes | new, stock, stock_estimate | Canonical semantics classification (never blank). |
+| source | string | yes |  | Canonical source slug (e.g., `ifrc_go`). |
+
+> **Month-end snapping:** Normalizers coerce source dates to pandas month-end boundaries (`2025-08-01` → `2025-08-31`) before writing so downstream joins line up with Resolver month keys.
+
+> **Resolver window:** When `RESOLVER_START_ISO` and/or `RESOLVER_END_ISO` are set, normalizers filter rows outside that inclusive window before month-end snapping.
 
 ## db.facts_deltas
 
