@@ -1,6 +1,8 @@
 import datetime as dt
-from pathlib import Path
 import pandas as pd
+from pathlib import Path
+
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -32,10 +34,11 @@ def now_dates():
     return as_of, pub, ing
 
 def write_staging(rows, out_path: Path, *, series_semantics: str = "stock"):
+    resolved_path = resolve_output_path(out_path)
     df = pd.DataFrame(rows, columns=REQUIRED_COLUMNS)
     insert_pos = df.columns.get_loc("metric") + 1 if "metric" in df.columns else len(df.columns)
     semantics_value = str(series_semantics or "stock").strip().lower() or "stock"
     df.insert(insert_pos, "series_semantics", semantics_value)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False)
-    return out_path
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(resolved_path, index=False)
+    return resolved_path

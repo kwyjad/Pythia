@@ -18,6 +18,7 @@ import requests
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -25,7 +26,8 @@ STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "who_phe.yml"
 COUNTRIES = DATA / "countries.csv"
 
-OUT_PATH = STAGING / "who_phe.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "who_phe.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 
 CANONICAL_HEADERS = [
     "event_id",

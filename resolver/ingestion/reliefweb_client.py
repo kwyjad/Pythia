@@ -35,15 +35,15 @@ from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion import _pdf_text as pdf_text_mod
 from resolver.ingestion._pdf_text import smart_extract
 from resolver.ingestion.utils.id_digest import stable_digest
-from resolver.ingestion.utils.io import ensure_headers
+from resolver.ingestion.utils.io import ensure_headers, resolve_output_path
 from resolver.ingestion.utils.month_bucket import month_start
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "reliefweb.yml"
 FIELDS_CONFIG = ROOT / "ingestion" / "config" / "reliefweb_fields.yml"
 REFERENCE = ROOT / "reference"
+STAGING = ROOT / "staging"
 PDF_CACHE = STAGING / ".cache" / "reliefweb" / "pdf"
 LEVEL_CACHE = STAGING / ".cache" / "reliefweb" / "levels"
 
@@ -111,7 +111,10 @@ PDF_COLUMNS = [
     "ingested_at",
 ]
 
-PDF_OUTPUT = STAGING / "reliefweb_pdf.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "reliefweb.csv"
+DEFAULT_PDF_OUTPUT = ROOT / "staging" / "reliefweb_pdf.csv"
+OUTPUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
+PDF_OUTPUT = resolve_output_path(DEFAULT_PDF_OUTPUT)
 
 DEFAULT_PPH = 4.5
 PPH_TABLE = REFERENCE / "avg_household_size.csv"
@@ -1343,7 +1346,9 @@ def main() -> None:
     if os.getenv("RESOLVER_SKIP_RELIEFWEB", "0") == "1":
         print("ReliefWeb connector skipped due to RESOLVER_SKIP_RELIEFWEB=1")
         STAGING.mkdir(parents=True, exist_ok=True)
-        output = STAGING / "reliefweb.csv"
+        output = OUTPUT_PATH
+        output.parent.mkdir(parents=True, exist_ok=True)
+        PDF_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         ensure_headers(output, COLUMNS)
         ensure_headers(PDF_OUTPUT, PDF_COLUMNS)
         ensure_manifest_for_csv(output, source_id="reliefweb_api")
@@ -1352,7 +1357,9 @@ def main() -> None:
         return
 
     STAGING.mkdir(parents=True, exist_ok=True)
-    output = STAGING / "reliefweb.csv"
+    output = OUTPUT_PATH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    PDF_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     try:
         rows, pdf_rows, challenge_tracker = make_rows()
     except RuntimeError as exc:

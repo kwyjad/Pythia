@@ -17,6 +17,7 @@ import requests
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion.utils.io import resolve_output_path
 from resolver.ingestion.utils import (
     map_hazard as _map_hazard_string,
     month_start,
@@ -29,8 +30,9 @@ from resolver.ingestion.utils.allocators import linear_split
 ROOT = Path(__file__).resolve().parents[1]
 STAGING = ROOT / "staging"
 CONFIG_PATH = ROOT / "ingestion" / "config" / "gdacs.yml"
-OUT_DIR = STAGING
-OUT_PATH = OUT_DIR / "gdacs_signals.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "gdacs_signals.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
+OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH  # backwards compatibility alias
 
 LOG = logging.getLogger("resolver.ingestion.gdacs")

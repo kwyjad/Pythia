@@ -36,6 +36,7 @@ from resolver.ingestion.utils import (
     stable_digest,
     to_iso3,
 )
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -44,8 +45,9 @@ CONFIG_PATH = ROOT / "ingestion" / "config" / "emdat.yml"
 
 COUNTRIES = DATA / "countries.csv"
 
-OUT_DIR = STAGING
-OUT_PATH = OUT_DIR / "emdat_pa.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "emdat_pa.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
+OUT_DIR = OUT_PATH.parent
 
 LOG = logging.getLogger("resolver.ingestion.emdat")
 
