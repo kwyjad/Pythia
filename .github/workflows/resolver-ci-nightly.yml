@@ -372,22 +372,22 @@ jobs:
 
           echo "Collecting DB-focused tests (resolver/tests)..."
           python - <<'PY'
-from pathlib import Path
+            from pathlib import Path
 
-root = Path("resolver/tests")
-if not root.exists():
-    print("resolver/tests directory missing")
-    raise SystemExit(0)
+            root = Path("resolver/tests")
+            if not root.exists():
+                print("resolver/tests directory missing")
+                raise SystemExit(0)
 
-patterns = ["test_db_parity.py", "test_duckdb_idempotency.py"]
-tests = []
-for pattern in patterns:
-    tests.extend(sorted(str(p) for p in root.rglob(pattern)))
+            patterns = ["test_db_parity.py", "test_duckdb_idempotency.py"]
+            tests = []
+            for pattern in patterns:
+                tests.extend(sorted(str(p) for p in root.rglob(pattern)))
 
-print(f"Matched {len(tests)} test file(s)")
-for path in tests:
-    print(f" - {path}")
-PY
+            print(f"Matched {len(tests)} test file(s)")
+            for path in tests:
+                print(f" - {path}")
+          PY
 
           echo "Pre-test resource snapshot"
           ulimit -a || true
