@@ -1,0 +1,26 @@
+name: "Collect resolver diagnostics"
+description: "Gather resolver CI diagnostics and package them into a reusable artifact"
+author: "Resolver CI"
+inputs:
+  job_name:
+    description: "Logical job identifier used for artifact naming and directory layout"
+    required: true
+  artifact_name:
+    description: "Optional override for the produced artifact name"
+    required: false
+    default: "diagnostics-${{ inputs.job_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+runs:
+  using: "composite"
+  steps:
+    - name: Ensure collector is executable
+      shell: bash
+      run: |
+        chmod +x "${{ github.action_path }}/collect.sh"
+    - name: Collect diagnostics bundle
+      shell: bash
+      env:
+        INPUT_JOB_NAME: "${{ inputs.job_name }}"
+        INPUT_ARTIFACT_NAME: "${{ inputs.artifact_name }}"
+      run: |
+        set -euo pipefail
+        "${{ github.action_path }}/collect.sh"

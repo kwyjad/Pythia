@@ -146,6 +146,22 @@ jobs:
           fi
           ls -l "${snapshot_dir}"
 
+      - name: Collect diagnostics (always)
+        if: always()
+        uses: ./.github/actions/collect-diagnostics
+        with:
+          job_name: pipeline-smoke
+
+      - name: Upload diagnostics artifact (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
       - name: Upload snapshot artifacts
         uses: actions/upload-artifact@v4
         with:
