@@ -120,3 +120,29 @@ resolver/db/*.wal
 # (If present in repo)
 forecast_logs/
 gtmc_logs/
+
+# --- Resolver runtime artifacts ---
+data/resolver.duckdb
+data/staging/
+data/snapshots/
+data/logs/
+resolver/logs/
+resolver/tmp/
+data/tmp/
+
+# --- Python cache / build ---
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# --- Environment / local setup ---
+.cache/
+.envrc
+*.log
+
+# --- IDE and OS cruft ---
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
