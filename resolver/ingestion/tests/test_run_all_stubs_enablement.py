@@ -35,7 +35,7 @@ def _prepare_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 def _stub_specs(monkeypatch: pytest.MonkeyPatch, spec: run_all_stubs.ConnectorSpec) -> None:
-    def fake_build_specs(real, stubs, selected, run_real, run_stubs):  # noqa: ANN001
+    def fake_build_specs(real, stubs, selected, run_real, run_stubs, **kwargs):  # noqa: ANN001
         return [spec]
 
     monkeypatch.setattr(run_all_stubs, "_build_specs", fake_build_specs)
@@ -139,4 +139,33 @@ def test_force_enable_runs_once(
     assert "forced_by=env" in captured.out
     assert "status=ok" in captured.out
     assert "notes=forced_by_env" in captured.out
+    assert call_count == 1
+
+
+def test_real_mode_list_is_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spec = _make_spec(tmp_path=tmp_path, config={"enabled": False})
+    spec.origin = "real_list"
+    spec.authoritatively_selected = True
+    _stub_specs(monkeypatch, spec)
+    _prepare_runner(monkeypatch, tmp_path)
+
+    call_count = 0
+
+    def fake_run(connector, logger):  # noqa: ANN001
+        nonlocal call_count
+        call_count += 1
+        return {"rows": 3, "rows_method": ""}
+
+    monkeypatch.setattr(run_all_stubs, "_run_connector", fake_run)
+
+    exit_code = run_all_stubs.main(["--mode", "real"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "decision=run" in captured.out
+    assert "gated_by=selected:list" in captured.out
+    assert "origin=real_list" in captured.out
+    assert "enable=True gated_by=selected:list" in captured.out
+    assert "notes=selected:list" in captured.out
     assert call_count == 1

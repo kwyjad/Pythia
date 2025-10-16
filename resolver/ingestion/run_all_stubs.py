@@ -375,6 +375,8 @@ class ConnectorSpec:
     filename: str
     path: Path
     kind: str
+    origin: str = "config"
+    authoritatively_selected: bool = False
     output_path: Optional[Path] = None
     summary: Optional[str] = None
     skip_reason: Optional[str] = None
@@ -438,6 +440,14 @@ def _coerce_config_flag(cfg: dict | None) -> tuple[bool, bool]:
         return bool(raw), has_flag
     except Exception:  # noqa: BLE001 - defensive cast
         return False, has_flag
+
+
+def is_authoritatively_selected(spec: ConnectorSpec) -> bool:
+    """Return ``True`` when the spec originated from an authoritative list."""
+
+    if getattr(spec, "authoritatively_selected", None) is not None:
+        return bool(spec.authoritatively_selected)
+    return spec.origin in {"real_list", "stub_list"}
 
 
 def _rows_and_method(path: Optional[Path]) -> tuple[int, str]:
@@ -643,22 +653,47 @@ def _build_specs(
     selected: set[str] | None,
     run_real: bool,
     run_stubs: bool,
+    *,
+    real_authoritative: bool = False,
+    stub_authoritative: bool = False,
 ) -> List[ConnectorSpec]:
     specs: List[ConnectorSpec] = []
     if run_real:
+        authoritative_real = real_authoritative and bool(real)
         for filename in real:
             if selected and filename not in selected:
                 continue
-            specs.append(_create_spec(filename, "real"))
+            specs.append(
+                _create_spec(
+                    filename,
+                    "real",
+                    origin="real_list",
+                    authoritatively_selected=authoritative_real,
+                )
+            )
     if run_stubs:
+        authoritative_stubs = stub_authoritative and bool(stubs)
         for filename in stubs:
             if selected and filename not in selected:
                 continue
-            specs.append(_create_spec(filename, "stub"))
+            specs.append(
+                _create_spec(
+                    filename,
+                    "stub",
+                    origin="stub_list",
+                    authoritatively_selected=authoritative_stubs,
+                )
+            )
     return specs
 
 
-def _create_spec(filename: str, kind: str) -> ConnectorSpec:
+def _create_spec(
+    filename: str,
+    kind: str,
+    *,
+    origin: str = "config",
+    authoritatively_selected: bool = False,
+) -> ConnectorSpec:
     path = ROOT / filename
     meta = SUMMARY_TARGETS.get(filename, {})
     default_filename = CONNECTOR_OUTPUTS.get(filename)
@@ -697,6 +732,8 @@ def _create_spec(filename: str, kind: str) -> ConnectorSpec:
         filename=filename,
         path=path,
         kind=kind,
+        origin=origin,
+        authoritatively_selected=authoritatively_selected,
         output_path=output_path,
         summary=summary,
         skip_reason=skip_reason,
@@ -824,11 +861,23 @@ def _resolve_enablement(
     if forced_by_pattern:
         forced_sources.append("pattern")
     forced = bool(forced_sources)
+    authoritative = is_authoritatively_selected(spec)
 
     if spec.skip_reason:
         return EnableDecision(
             should_run=False,
             gated_by="preexisting_skip",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=None,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if authoritative and not spec.ci_gate_reason:
+        return EnableDecision(
+            should_run=True,
+            gated_by="selected:list",
             forced_sources=tuple(forced_sources),
             config_enabled=config_enabled,
             has_config_flag=has_flag,
@@ -1104,6 +1153,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     real_set = set(real_list)
     stub_set = set(stub_list)
 
+    strict_mode = bool(args.strict)
+    real_mode_selected = ingestion_mode == "real"
+    stub_mode_selected = ingestion_mode == "stubs"
+
+    if real_mode_selected:
+        strict_mode = True
+
     run_real = True
     run_stubs = include_stubs
     if ingestion_mode:
@@ -1124,7 +1180,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         run_real = any(name in real_set for name in selected)
         run_stubs = any(name in stub_set for name in selected)
 
-    specs = _build_specs(real_list, stub_list, selected, run_real, run_stubs)
+    specs = _build_specs(
+        real_list,
+        stub_list,
+        selected,
+        run_real,
+        run_stubs,
+        real_authoritative=real_mode_selected,
+        stub_authoritative=stub_mode_selected,
+    )
     root.info(
         "planning run",
         extra={
@@ -1192,16 +1256,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         config_path_text = str(spec.config_path) if spec.config_path else "<none>"
         decision_text = "run" if should_run else "skip"
         forced_label = "env" if forced_by_env else "none"
-        gated_for_structured = "forced:env" if forced_by_env else decision.gated_by
         config_enabled_text = "yes" if decision.config_enabled else "no"
+        origin_text = spec.origin or "config"
         root.info(
-            "connector=%s config_path=%s decision=%s gated_by=%s config_enabled=%s forced_by=%s",
+            (
+                "connector=%s config_path=%s decision=%s gated_by=%s "
+                "config_enabled=%s forced_by=%s origin=%s"
+            ),
             name_for_flags,
             config_path_text,
             decision_text,
-            gated_for_structured,
+            decision.gated_by,
             config_enabled_text,
             forced_label,
+            origin_text,
             extra={
                 "event": "enable_check",
                 "connector": name_for_flags,
@@ -1218,6 +1286,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "config_path": str(spec.config_path) if spec.config_path else None,
                 "skip_reason": redact(spec.skip_reason) if spec.skip_reason else None,
                 "applied_skip_reason": decision.applied_skip_reason,
+                "origin": spec.origin,
+                "authoritatively_selected": is_authoritatively_selected(spec),
             },
         )
         legacy_gated_by = "forced_by_env" if forced_by_env else decision.gated_by
@@ -1233,6 +1303,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     specs = checked_specs
 
     connectors_summary: List[Dict[str, object]] = []
+    had_error = False
     total_start = time.perf_counter()
 
     retries = max(0, args.retries)
@@ -1361,6 +1432,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     notes = f"smoke-warning: {notes}"
             else:
                 child.error("failed", exc_info=exc, extra=log_extra)
+                had_error = True
         finally:
             if spec.enable_decision and "env" in spec.enable_decision.forced_sources:
                 if notes:
@@ -1368,6 +1440,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                         notes = f"{notes}; forced_by_env"
                 else:
                     notes = "forced_by_env"
+            if is_authoritatively_selected(spec):
+                if notes:
+                    if "selected:list" not in notes:
+                        notes = f"{notes}; selected:list"
+                else:
+                    notes = "selected:list"
             detach_connector_handler(child, handler)
             summary_notes = redact(notes) if notes else None
             root.info(
@@ -1438,11 +1516,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if entry.get("kind") == "stub" and entry.get("status") == "error"
     )
 
-    if run_real and not run_stubs:
-        return 1 if real_failures else 0
-
-    if args.strict and (real_failures or stub_failures):
+    if strict_mode and had_error:
         return 1
+
+    if run_real and not run_stubs and real_failures:
+        return 1
+
     if fail_on_stub_error and stub_failures:
         return 1
     return 0
