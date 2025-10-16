@@ -385,6 +385,7 @@ class ConnectorSpec:
     ci_gate_reason: Optional[str] = None
     selected_by_only: bool = False
     matched_by_pattern: bool = False
+    enable_decision: EnableDecision | None = None
 
     @property
     def name(self) -> str:
@@ -396,7 +397,7 @@ class EnableDecision:
     should_run: bool
     gated_by: str
     forced_sources: tuple[str, ...] = ()
-    config_enabled: Optional[bool] = None
+    config_enabled: bool = False
     has_config_flag: bool = False
     applied_skip_reason: Optional[str] = None
     ci_gate_reason: Optional[str] = None
@@ -408,6 +409,35 @@ def _load_yaml(path: Optional[Path]) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     return data if isinstance(data, dict) else {}
+
+
+def _coerce_config_flag(cfg: dict | None) -> tuple[bool, bool]:
+    """Return ``(enabled, has_flag)`` for a connector config mapping."""
+
+    if not isinstance(cfg, dict):
+        return False, False
+    raw = None
+    has_flag = False
+    if "enabled" in cfg:
+        raw = cfg.get("enabled")
+        has_flag = True
+    elif "enable" in cfg:
+        raw = cfg.get("enable")
+        has_flag = True
+    if raw is None:
+        return False, has_flag
+    if isinstance(raw, bool):
+        return raw, has_flag
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"true", "1", "yes", "on"}:
+            return True, has_flag
+        if text in {"false", "0", "no", "off"}:
+            return False, has_flag
+    try:
+        return bool(raw), has_flag
+    except Exception:  # noqa: BLE001 - defensive cast
+        return False, has_flag
 
 
 def _rows_and_method(path: Optional[Path]) -> tuple[int, str]:
@@ -784,8 +814,7 @@ def _resolve_enablement(
     forced_by_pattern: bool = False,
 ) -> EnableDecision:
     cfg = spec.config if isinstance(spec.config, dict) else {}
-    has_flag = isinstance(cfg.get("enabled"), bool)
-    config_enabled = bool(cfg.get("enabled")) if has_flag else True
+    config_enabled, has_flag = _coerce_config_flag(cfg)
 
     forced_sources: list[str] = []
     if forced_by_env:
@@ -801,7 +830,7 @@ def _resolve_enablement(
             should_run=False,
             gated_by="preexisting_skip",
             forced_sources=tuple(forced_sources),
-            config_enabled=config_enabled if has_flag else None,
+            config_enabled=config_enabled,
             has_config_flag=has_flag,
             applied_skip_reason=None,
             ci_gate_reason=spec.ci_gate_reason,
@@ -812,30 +841,30 @@ def _resolve_enablement(
             should_run=True,
             gated_by="forced:" + "+".join(forced_sources),
             forced_sources=tuple(forced_sources),
-            config_enabled=config_enabled if has_flag else None,
+            config_enabled=config_enabled,
             has_config_flag=has_flag,
             applied_skip_reason=None,
             ci_gate_reason=spec.ci_gate_reason,
         )
 
-    if not has_flag and spec.ci_gate_reason:
+    if config_enabled and spec.ci_gate_reason:
         return EnableDecision(
             should_run=False,
             gated_by="ci_gate",
             forced_sources=tuple(forced_sources),
-            config_enabled=None,
-            has_config_flag=False,
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
             applied_skip_reason=spec.ci_gate_reason,
             ci_gate_reason=spec.ci_gate_reason,
         )
 
-    if has_flag and not config_enabled:
+    if not config_enabled:
         return EnableDecision(
             should_run=False,
-            gated_by="config_disabled",
+            gated_by="config",
             forced_sources=tuple(forced_sources),
             config_enabled=False,
-            has_config_flag=True,
+            has_config_flag=has_flag,
             applied_skip_reason="disabled: config",
             ci_gate_reason=spec.ci_gate_reason,
         )
@@ -845,29 +874,18 @@ def _resolve_enablement(
             should_run=False,
             gated_by="ci_gate",
             forced_sources=tuple(forced_sources),
-            config_enabled=config_enabled if has_flag else None,
+            config_enabled=config_enabled,
             has_config_flag=has_flag,
             applied_skip_reason=spec.ci_gate_reason,
             ci_gate_reason=spec.ci_gate_reason,
         )
 
-    if has_flag:
-        return EnableDecision(
-            should_run=True,
-            gated_by="config_enabled",
-            forced_sources=tuple(forced_sources),
-            config_enabled=True,
-            has_config_flag=True,
-            applied_skip_reason=None,
-            ci_gate_reason=spec.ci_gate_reason,
-        )
-
     return EnableDecision(
         should_run=True,
-        gated_by="config_default_enabled",
+        gated_by="config",
         forced_sources=tuple(forced_sources),
-        config_enabled=None,
-        has_config_flag=False,
+        config_enabled=config_enabled,
+        has_config_flag=has_flag,
         applied_skip_reason=None,
         ci_gate_reason=spec.ci_gate_reason,
     )
@@ -876,13 +894,8 @@ def _resolve_enablement(
 def _run_connector(spec: ConnectorSpec, logger: logging.LoggerAdapter) -> Dict[str, object]:
     start = time.perf_counter()
     rows_before, method_before = _rows_and_method(spec.output_path)
-    cfg_enabled: Optional[bool] = None
-    if isinstance(spec.config, dict) and isinstance(spec.config.get("enabled"), bool):
-        try:
-            cfg_enabled = bool(spec.config.get("enabled"))
-        except Exception:  # noqa: BLE001
-            cfg_enabled = None
-    if cfg_enabled is False:
+    cfg_enabled, has_flag = _coerce_config_flag(spec.config if isinstance(spec.config, dict) else {})
+    if has_flag and not cfg_enabled:
         logger.info(
             "%s: disabled in config (override active).",
             spec.name,
@@ -1153,50 +1166,46 @@ def main(argv: Optional[List[str]] = None) -> int:
         root.info("No connectors to run", extra={"event": "no_connectors"})
         return 0
 
-    force_overrides = ff.parse_force_enable(os.environ.get("RESOLVER_FORCE_ENABLE", ""))
+    force_raw = (os.getenv("RESOLVER_FORCE_ENABLE", "") or "").strip()
+    raw_force_entries = {entry.strip() for entry in force_raw.split(",") if entry.strip()}
+    normalised_force = {ff.norm(entry) for entry in raw_force_entries if ff.norm(entry)}
     checked_specs: List[ConnectorSpec] = []
     for spec in specs:
         name_for_flags = spec.canonical_name or ff.norm(spec.name)
-        forced_by_env = name_for_flags in force_overrides
+        filename_stem = Path(spec.filename).stem
+        forced_by_env = (
+            name_for_flags in normalised_force
+            or spec.name in raw_force_entries
+            or filename_stem in raw_force_entries
+            or spec.filename in raw_force_entries
+        )
         decision = _resolve_enablement(
             spec,
             forced_by_env=forced_by_env,
             forced_by_only=spec.selected_by_only,
             forced_by_pattern=spec.matched_by_pattern,
         )
+        spec.enable_decision = decision
         if decision.applied_skip_reason and not spec.skip_reason:
             spec.skip_reason = decision.applied_skip_reason
         should_run = decision.should_run and not spec.skip_reason
         config_path_text = str(spec.config_path) if spec.config_path else "<none>"
-        message_parts = [
-            f"connector={name_for_flags}",
-            f"config_path={config_path_text}",
-            f"decision={'run' if should_run else 'skip'}",
-            f"gated_by={decision.gated_by}",
-        ]
-        if decision.config_enabled is not None:
-            message_parts.append(
-                f"config_enabled={'yes' if decision.config_enabled else 'no'}"
-            )
-        if decision.forced_sources:
-            message_parts.append("forced_by=" + "+".join(decision.forced_sources))
-        selectors: list[str] = []
-        if spec.selected_by_only:
-            selectors.append("only")
-        if spec.matched_by_pattern:
-            selectors.append("pattern")
-        if selectors:
-            message_parts.append("selected_by=" + "+".join(selectors))
-        if decision.ci_gate_reason:
-            message_parts.append(f"ci_gate_reason={redact(decision.ci_gate_reason)}")
-        if spec.skip_reason:
-            message_parts.append(f"skip_reason={redact(spec.skip_reason)}")
+        decision_text = "run" if should_run else "skip"
+        forced_label = "env" if forced_by_env else "none"
+        gated_for_structured = "forced:env" if forced_by_env else decision.gated_by
+        config_enabled_text = "yes" if decision.config_enabled else "no"
         root.info(
-            " ".join(message_parts),
+            "connector=%s config_path=%s decision=%s gated_by=%s config_enabled=%s forced_by=%s",
+            name_for_flags,
+            config_path_text,
+            decision_text,
+            gated_for_structured,
+            config_enabled_text,
+            forced_label,
             extra={
                 "event": "enable_check",
                 "connector": name_for_flags,
-                "decision": "run" if should_run else "skip",
+                "decision": decision_text,
                 "gated_by": decision.gated_by,
                 "config_enabled": decision.config_enabled,
                 "has_config_flag": decision.has_config_flag,
@@ -1210,6 +1219,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "skip_reason": redact(spec.skip_reason) if spec.skip_reason else None,
                 "applied_skip_reason": decision.applied_skip_reason,
             },
+        )
+        legacy_gated_by = "forced_by_env" if forced_by_env else decision.gated_by
+        root.info(
+            "connector=%s config_path=%s enable=%s gated_by=%s",
+            name_for_flags,
+            config_path_text,
+            "True" if should_run else "False",
+            legacy_gated_by,
         )
         checked_specs.append(spec)
 
@@ -1345,6 +1362,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 child.error("failed", exc_info=exc, extra=log_extra)
         finally:
+            if spec.enable_decision and "env" in spec.enable_decision.forced_sources:
+                if notes:
+                    if "forced_by_env" not in notes:
+                        notes = f"{notes}; forced_by_env"
+                else:
+                    notes = "forced_by_env"
             detach_connector_handler(child, handler)
             summary_notes = redact(notes) if notes else None
             root.info(

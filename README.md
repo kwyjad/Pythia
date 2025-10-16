@@ -193,27 +193,30 @@ so downstream stages always find the expected schema.
 
 ### Connector enablement & overrides
 
-Every connector YAML under `resolver/ingestion/config/` now declares a single
-`enabled` flag. The runner evaluates enablement in a fixed precedence order:
+Each connector YAML under `resolver/ingestion/config/` should expose an
+`enabled` flag (the runner still honours the legacy `enable` key for
+backwards compatibility). When neither key is present, the connector is treated
+as disabled. The effective precedence is:
 
-1. Command-line selectors (`--only`, `--pattern`) and
-   `RESOLVER_FORCE_ENABLE` overrides
-2. The connector's `enabled` value
-3. CI gate environment variables such as `RESOLVER_SKIP_IFRCGO=1`
+1. A comma-separated `RESOLVER_FORCE_ENABLE` list of connector names. Entries
+   must match the canonical name or filename stem — no wildcards are honoured.
+2. The connector configuration flag (`enabled` or legacy `enable`).
+3. CI guardrails such as `RESOLVER_SKIP_IFRCGO=1`.
 
-Local runs can opt into disabled connectors without editing YAML by forcing
-them via CLI or setting `RESOLVER_FORCE_ENABLE`. Multiple overrides can be
-comma-separated:
+To temporarily bypass the YAML flag without editing files, set
+`RESOLVER_FORCE_ENABLE` to the canonical connector name(s):
 
 ```bash
 RESOLVER_FORCE_ENABLE=acled,reliefweb python resolver/ingestion/run_all_stubs.py
-python resolver/ingestion/run_all_stubs.py --only acled_stub
-python resolver/ingestion/run_all_stubs.py --pattern "(acled|reliefweb)"
 ```
 
-Plan logs now emit `gated_by=` and `decision=` fields so you can confirm whether
-a connector was run (`decision=run`) or skipped and why (for example,
-`gated_by=config_disabled` or `gated_by=ci_gate`).
+The planner emits both a structured decision line and a legacy
+`enable=<bool> gated_by=<reason>` log for every connector. Disabled connectors
+log `enable=False gated_by=config`, appear in the summary as
+`status=skipped notes=disabled: config`, and never launch their subprocess. A
+forced run produces `enable=True gated_by=forced_by_env`, still records a
+structured line with `forced_by=env`, and tags the summary with
+`notes=forced_by_env`.
 
 ### Canonical normalization
 
