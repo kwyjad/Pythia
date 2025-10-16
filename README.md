@@ -191,6 +191,52 @@ python resolver/ingestion/run_all_stubs.py --connector who_phe_client.py
 All ingestion connectors emit a header-only CSV when no rows survive filtering
 so downstream stages always find the expected schema.
 
+### Connector enablement & overrides
+
+Each connector YAML under `resolver/ingestion/config/` should expose an
+`enabled` flag (the runner still honours the legacy `enable` key for
+backwards compatibility). When neither key is present, the connector is treated
+as disabled. The effective precedence is:
+
+1. A comma-separated `RESOLVER_FORCE_ENABLE` list of connector names. Entries
+   must match the canonical name or filename stem — no wildcards are honoured.
+2. The connector configuration flag (`enabled` or legacy `enable`).
+3. CI guardrails such as `RESOLVER_SKIP_IFRCGO=1`.
+
+When you run in a dedicated mode, the module-level lists become authoritative:
+
+- `--mode real` (or `RESOLVER_INGESTION_MODE=real`) honours the `REAL` list. Any
+  connector explicitly listed there runs even if its config file is missing or
+  sets `enabled: false`. The planner records `gated_by=selected:list origin=real_list`
+  and the summary table tags the row with
+  `notes=selected:list` to make the override explicit.
+- `--mode stubs` does the same for the `STUBS` list (`origin=stub_list`).
+
+Connectors that originate from config discovery continue to respect the YAML
+flag unless they are forced via environment or CLI arguments.
+
+To temporarily bypass the YAML flag without editing files, set
+`RESOLVER_FORCE_ENABLE` to the canonical connector name(s):
+
+```bash
+RESOLVER_FORCE_ENABLE=acled,reliefweb python resolver/ingestion/run_all_stubs.py
+```
+
+The planner emits both a structured decision line and a legacy
+`enable=<bool> gated_by=<reason>` log for every connector. The structured entry
+now includes an `origin=` field (`real_list`, `stub_list`, or `config`) so you
+can distinguish authoritative picks from config-driven ones. Disabled
+connectors log `enable=False gated_by=config`, appear in the summary as
+`status=skipped notes=disabled: config`, and never launch their subprocess. A
+forced run produces `enable=True gated_by=forced_by_env`, still records a
+structured line with `forced_by=env`, and tags the summary with
+`notes=forced_by_env`.
+
+Real-mode runs are strict by default: when `--mode real` (or the matching env)
+is active, any connector failure returns a non-zero exit code (the same outcome
+as passing `--strict`). Other modes retain the existing behaviour unless you
+explicitly add `--strict`.
+
 ### Canonical normalization
 
 Use the canonical normalizer to transform raw staging CSVs into the 12-column schema shared by downstream Resolver tooling. The CLI accepts the raw directory, an output directory for canonical CSVs, the optional staging period label, and a comma-separated source list. Example:

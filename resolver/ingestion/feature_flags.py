@@ -1,6 +1,6 @@
 """Helper utilities for connector enable flags and overrides.
 
-All ingestion connector YAML configs now expose a top-level ``enable`` boolean
+All ingestion connector YAML configs now expose a top-level ``enabled`` boolean
 which defaults to ``false`` in the repository so that heavy network calls are
 skipped in CI by default.  Local developers can override these guards by
 setting ``RESOLVER_FORCE_ENABLE`` (for example, ``RESOLVER_FORCE_ENABLE=acled``)
@@ -68,7 +68,7 @@ def is_enabled(
     if env is None:
         env = os.environ
     cfg_dict = _coerce_cfg(cfg)
-    cfg_enable = bool(cfg_dict.get("enable", False))
+    cfg_enable = bool(cfg_dict.get("enabled", False))
     forced = norm(name) in parse_force_enable(env.get("RESOLVER_FORCE_ENABLE"))
     return forced or cfg_enable
 
@@ -83,7 +83,7 @@ def explain_enable(
     if env is None:
         env = os.environ
     cfg_dict = _coerce_cfg(cfg)
-    cfg_enable = bool(cfg_dict.get("enable", False))
+    cfg_enable = bool(cfg_dict.get("enabled", False))
     if norm(name) in parse_force_enable(env.get("RESOLVER_FORCE_ENABLE")):
         return "forced_by_env"
     return "config_enabled" if cfg_enable else "config_disabled"
