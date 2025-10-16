@@ -1,0 +1,135 @@
+---
+name: "Resolver pipeline — smoke"
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolver-pipeline-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: "Smoke pipeline (stubs)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUNBUFFERED: "1"
+      PERIOD_LABEL: ci-smoke
+      RESOLVER_PERIOD: ci-smoke
+      RESOLVER_STAGING_DIR: data/staging
+      RESOLVER_INGESTION_MODE: stubs
+      RESOLVER_FAIL_ON_STUB_ERROR: "0"
+      RESOLVER_DEBUG: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Debug repo context
+        run: |
+          set -euo pipefail
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Ref: $GITHUB_REF"
+          echo "SHA: $GITHUB_SHA"
+          python - <<'PY'
+import pathlib
+root = pathlib.Path().resolve()
+print("Working directory:", root)
+print("Tree size:", len(list(root.glob("**/*"))))
+PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            resolver/requirements.txt
+
+      - name: Install resolver dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install -r resolver/requirements.txt
+          python -m pip install 'duckdb>=1.0,<2.0'
+
+      - name: Prepare staging directories
+        run: |
+          set -euo pipefail
+          rm -rf "data/staging/${PERIOD_LABEL}"
+          rm -rf "data/snapshots/${PERIOD_LABEL}"
+
+      - name: Run stub ingestion
+        run: |
+          set -euo pipefail
+          python resolver/ingestion/run_all_stubs.py --smoke --log-level INFO --log-format json
+
+      - name: Determine canonical sources
+        run: |
+          set -euo pipefail
+          sources=$(python - <<'PY'
+import os
+from pathlib import Path
+from resolver.transform.normalize import ADAPTER_REGISTRY
+
+period = os.environ["PERIOD_LABEL"]
+raw_dir = Path("data/staging") / period / "raw"
+if not raw_dir.exists():
+    raise SystemExit(f"Raw directory missing: {raw_dir}")
+available = []
+for path in sorted(raw_dir.glob("*.csv")):
+    stem = path.stem
+    if stem in ADAPTER_REGISTRY:
+        available.append(stem)
+if not available:
+    raise SystemExit("No canonicalizable sources found in raw staging data")
+print(",".join(available))
+PY
+          )
+          echo "NORMALIZE_SOURCES=$sources" >> "$GITHUB_ENV"
+
+      - name: Normalize canonical CSVs
+        run: |
+          set -euo pipefail
+          python -m resolver.transform.normalize \
+            --in "data/staging/${PERIOD_LABEL}/raw" \
+            --out "data/staging/${PERIOD_LABEL}/canonical" \
+            --period "${PERIOD_LABEL}" \
+            --sources "${NORMALIZE_SOURCES}"
+
+      - name: Load and derive snapshot
+        run: |
+          set -euo pipefail
+          python -m resolver.tools.load_and_derive \
+            --period "${PERIOD_LABEL}" \
+            --staging-root data/staging \
+            --snapshots-root data/snapshots \
+            --allow-negatives 1
+
+      - name: Assert snapshot artifacts
+        run: |
+          set -euo pipefail
+          snapshot_dir="data/snapshots/${PERIOD_LABEL}"
+          if [ ! -f "${snapshot_dir}/facts_resolved.parquet" ]; then
+            echo "::error ::facts_resolved.parquet missing in ${snapshot_dir}"
+            find "${snapshot_dir}" -maxdepth 2 -type f -print || true
+            exit 1
+          fi
+          ls -l "${snapshot_dir}"
+
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-smoke-snapshots
+          path: |
+            data/snapshots/${PERIOD_LABEL}/*.parquet
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
