@@ -1,0 +1,14 @@
+include:
+  - id
+  - title
+  - body
+  - date.created
+  - date.original
+  - date.changed
+  - url
+  - source
+  - format
+  - disaster_type
+  - country
+  - file
+  - files

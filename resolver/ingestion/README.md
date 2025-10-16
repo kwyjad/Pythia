@@ -185,6 +185,7 @@ with real pulls in Epic C.
 
 - Window: last `window_days` for API text extraction and `since_months` for optional PDF backfills.
 - Filters: English language; report/appeal/update formats.
+- Fields: `ingestion/config/reliefweb_fields.yml` enumerates the API field allowlist (the `type` include was removed after ReliefWeb started rejecting it). The client drops anything not in that file and retries once with the allowlist-only set if the API returns "Unrecognized field".
 - Hazards: keyword mapping (conservative, shared by API + PDF parsing).
 - Metrics: API path prefers PIN > PA > cases; PDF path parses `people_in_need`, `people_affected`, and `idps` with table → infographic → narrative precedence.
 - PDFs: `enable_pdfs` toggles attachment parsing. Text extraction auto-falls back to OCR unless `enable_ocr: false`.
