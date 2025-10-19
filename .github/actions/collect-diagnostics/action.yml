@@ -23,7 +23,7 @@ runs:
           python -V || true
           pip --version || true
           pip freeze || true
-          (duckdb --version || true)
+          duckdb --version || true
           uname -a || true
         } > diagnostics/versions.txt 2>&1 || true
 
@@ -45,22 +45,7 @@ runs:
         { echo "== SNAPSHOTS =="; ls -R data/snapshots || true; } > diagnostics/snapshots.txt 2>&1 || true
 
         # DuckDB quick summary (best-effort)
-        python - <<'PY' || true
-import os, duckdb
-
-db = os.environ.get("RESOLVER_DB_PATH", "data/resolver.duckdb")
-try:
-    con = duckdb.connect(db)
-except Exception as exc:  # pragma: no cover
-    print("no db:", exc)
-    raise SystemExit(0)
-for table in ("facts_raw", "facts_resolved", "facts_deltas"):
-    try:
-        count = con.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        print(table, count)
-    except Exception as exc:  # pragma: no cover
-        print(table, "unavailable", exc)
-PY
+        python scripts/ci/duckdb_summary.py > diagnostics/duckdb.txt 2>&1 || true
 
         ZIP="dist/diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip"
         (cd diagnostics && zip -rq "../diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip" . || true)

@@ -67,20 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os
-from pathlib import Path
-from resolver.transform.normalize import ADAPTER_REGISTRY
-
-period = os.environ["PERIOD_LABEL"]
-raw_dir = Path("data/staging") / period / "raw"
-if not raw_dir.exists():
-    raise SystemExit(f"Raw directory missing: {raw_dir}")
-available = [p.stem for p in sorted(raw_dir.glob("*.csv")) if p.stem in ADAPTER_REGISTRY]
-if not available:
-    raise SystemExit("No canonicalizable sources found in raw staging data")
-print("SOURCES=" + ",".join(available))
-PY | tee _sources.env
+          python scripts/ci/discover_normalizable_sources.py "${PERIOD_LABEL}" | tee _sources.env
           grep "^SOURCES=" _sources.env >> "$GITHUB_ENV"
 
       - name: Normalize
@@ -94,7 +81,6 @@ PY | tee _sources.env
             --out "data/staging/${PERIOD_LABEL}/canonical" \
             --period "${PERIOD_LABEL}" \
             --sources "${SOURCES}"
-
       - name: Load / derive / export
         env:
           PERIOD_LABEL: ci-smoke
