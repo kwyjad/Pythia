@@ -30,200 +30,91 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug repo context
-        run: |
-          set -euo pipefail
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Ref: $GITHUB_REF"
-          echo "SHA: $GITHUB_SHA"
-          python - <<'PY'
-          from textwrap import dedent
-
-          exec(
-              dedent(
-                  """
-                  import pathlib
-
-                  root = pathlib.Path().resolve()
-                  print("Working directory:", root)
-                  print("Tree size:", len(list(root.glob("**/*"))))
-                  """
-              )
-          )
-          PY
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            resolver/requirements.txt
 
       - name: Install resolver dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install -r resolver/requirements.txt
-          python -m pip install 'duckdb>=1.0,<2.0'
+          pip install -e .
+          pip install -r resolver/requirements.txt
+          pip install 'duckdb>=1.0,<2.0'
 
-      - name: Prepare staging directories
+      - name: Reset staging directories
         run: |
           set -euo pipefail
           rm -rf "data/staging/${PERIOD_LABEL}"
           rm -rf "data/snapshots/${PERIOD_LABEL}"
 
-      - name: Run stub ingestion
-        run: |
-          set -euo pipefail
-          python resolver/ingestion/run_all_stubs.py --smoke --log-level INFO --log-format json
-
       - name: Prepare raw staging (stubs)
+        env:
+          PERIOD_LABEL: ci-smoke
+        shell: bash
         run: |
           set -euo pipefail
           RAW="data/staging/${PERIOD_LABEL}/raw"
           mkdir -p "$RAW"
-          shopt -s nullglob
-          files=($(printf '%s\n' "$RAW"/*.csv 2>/dev/null || true))
-          if [ "${#files[@]}" -eq 0 ]; then
-            python - <<'PY'
-import csv
-import os
-from pathlib import Path
-
-period = os.environ.get("PERIOD_LABEL", "ci-smoke")
-raw_dir = Path("data") / "staging" / period / "raw"
-raw_dir.mkdir(parents=True, exist_ok=True)
-stub_path = raw_dir / "ifrc_go_stub.csv"
-with stub_path.open("w", encoding="utf-8", newline="") as fh:
-    writer = csv.writer(fh)
-    writer.writerow([
-        "event_id",
-        "country_name",
-        "iso3",
-        "hazard_code",
-        "hazard_label",
-        "hazard_class",
-        "statistic",
-        "value",
-        "unit",
-        "as_of",
-        "published",
-        "source",
-        "source_type",
-        "source_url",
-        "title",
-        "summary",
-        "collection_method",
-        "confidence",
-        "is_final",
-        "ingested_at",
-    ])
-    writer.writerow([
-        "IFRC-EXAMPLE-1",
-        "Example Country",
-        "EXM",
-        "FL",
-        "Flood",
-        "Hydrological",
-        "affected",
-        "1000",
-        "persons",
-        "2024-01-01",
-        "2024-01-01",
-        "IFRC",
-        "sitrep",
-        "https://example.org/ifrc",
-        "Example Flood Event",
-        "Example stub row for CI smoke",
-        "api",
-        "high",
-        "1",
-        "2024-01-01T00:00:00Z",
-    ])
-print(f"Wrote stub CSV to {stub_path}")
-PY
-          else
-            echo "Existing stub CSVs detected in $RAW"
-          fi
-          echo "Raw staging contents:"
+          python -m resolver.ingestion.ifrc_go_stub --out "$RAW"
+          echo "Raw contents:"
           ls -lh "$RAW" || true
 
-      - name: Determine canonical sources
+      - name: Discover normalizable sources
+        env:
+          PERIOD_LABEL: ci-smoke
+        shell: bash
         run: |
           set -euo pipefail
-          sources=$(python - <<'PY'
-          from textwrap import dedent
+          python - <<'PY'
+import os
+from pathlib import Path
+from resolver.transform.normalize import ADAPTER_REGISTRY
 
-          namespace = {}
-          exec(
-              dedent(
-                  """
-                  import os
-                  from pathlib import Path
+period = os.environ["PERIOD_LABEL"]
+raw_dir = Path("data/staging") / period / "raw"
+if not raw_dir.exists():
+    raise SystemExit(f"Raw directory missing: {raw_dir}")
+available = [p.stem for p in sorted(raw_dir.glob("*.csv")) if p.stem in ADAPTER_REGISTRY]
+if not available:
+    raise SystemExit("No canonicalizable sources found in raw staging data")
+print("SOURCES=" + ",".join(available))
+PY | tee _sources.env
+          grep "^SOURCES=" _sources.env >> "$GITHUB_ENV"
 
-                  from resolver.transform.normalize import ADAPTER_REGISTRY
-
-                  period = os.environ["PERIOD_LABEL"]
-                  raw_dir = Path("data/staging") / period / "raw"
-                  if not raw_dir.exists():
-                      raise SystemExit(f"Raw directory missing: {raw_dir}")
-                  available = []
-                  for path in sorted(raw_dir.glob("*.csv")):
-                      stem = path.stem
-                      if stem in ADAPTER_REGISTRY:
-                          available.append(stem)
-                  if not available:
-                      raise SystemExit("No canonicalizable sources found in raw staging data")
-                  namespace["result"] = ",".join(available)
-                  """
-              ),
-              globals(),
-              namespace,
-          )
-          print(namespace["result"])
-          PY
-          )
-          echo "NORMALIZE_SOURCES=$sources" >> "$GITHUB_ENV"
-
-      - name: Normalize canonical CSVs
+      - name: Normalize
+        env:
+          PERIOD_LABEL: ci-smoke
+          SOURCES: ${{ env.SOURCES }}
         run: |
           set -euo pipefail
           python -m resolver.transform.normalize \
             --in "data/staging/${PERIOD_LABEL}/raw" \
             --out "data/staging/${PERIOD_LABEL}/canonical" \
             --period "${PERIOD_LABEL}" \
-            --sources "${NORMALIZE_SOURCES}"
+            --sources "${SOURCES}"
 
-      - name: Load and derive snapshot
+      - name: Load / derive / export
+        env:
+          PERIOD_LABEL: ci-smoke
         run: |
           set -euo pipefail
-          python -m resolver.tools.load_and_derive \
-            --period "${PERIOD_LABEL}" \
-            --staging-root data/staging \
-            --snapshots-root data/snapshots \
-            --allow-negatives 1
+          python -m resolver.tools.load_and_derive load-canonical \
+            --in "data/staging/${PERIOD_LABEL}/canonical"
+          python -m resolver.tools.load_and_derive derive-deltas \
+            --period "${PERIOD_LABEL}" --allow-negatives 1
+          python -m resolver.tools.load_and_derive export \
+            --period "${PERIOD_LABEL}" --format parquet \
+            --out "data/snapshots/${PERIOD_LABEL}"
 
-      - name: Assert snapshot artifacts
-        run: |
-          set -euo pipefail
-          snapshot_dir="data/snapshots/${PERIOD_LABEL}"
-          if [ ! -f "${snapshot_dir}/facts_resolved.parquet" ]; then
-            echo "::error ::facts_resolved.parquet missing in ${snapshot_dir}"
-            find "${snapshot_dir}" -maxdepth 2 -type f -print || true
-            exit 1
-          fi
-          ls -l "${snapshot_dir}"
-
-      - name: Collect diagnostics (always)
+      - name: Collect diagnostics (smoke)
         if: always()
         uses: ./.github/actions/collect-diagnostics
         with:
           job_name: pipeline-smoke
 
-      - name: Upload diagnostics artifact (always)
+      - name: Upload diagnostics (smoke)
         if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -1,19 +1,21 @@
 name: Collect diagnostics
-description: Gathers resolver CI diagnostics and packages a standardized artifact
+description: Gather logs and pack diagnostics zip into dist/
 inputs:
   job_name:
-    description: Short job name used for naming artifacts (e.g., fast-tests, pipeline-smoke)
+    description: Short job name (e.g., fast-tests, pipeline-smoke)
     required: true
 runs:
   using: composite
   steps:
-    - name: Collect diagnostics bundle
+    - name: Collect and pack
       shell: bash
       run: |
         set -euo pipefail
         JOB="${{ inputs.job_name }}"
-        OUT="dist/diagnostics-${JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zip"
-        mkdir -p dist diagnostics "diagnostics/${JOB}"
+        RUN_ID="${{ github.run_id }}"
+        RUN_ATTEMPT="${{ github.run_attempt }}"
+
+        mkdir -p dist diagnostics
 
         # Versions
         {
@@ -21,71 +23,45 @@ runs:
           python -V || true
           pip --version || true
           pip freeze || true
-          duckdb --version || true
+          (duckdb --version || true)
           uname -a || true
-        } > "diagnostics/${JOB}/versions.txt" 2>&1 || true
+        } > diagnostics/versions.txt 2>&1 || true
 
         # Environment snapshot (limited to important vars)
         {
           echo "== IMPORTANT ENVS =="
-          env | grep -E '^(RESOLVER_|PERIOD_LABEL|GITHUB_)' || true
-        } > "diagnostics/${JOB}/environment.txt" 2>&1 || true
+          env | grep -E '^(RESOLVER_|PERIOD_LABEL|GITHUB_|RUNNER_OS)' || true
+        } > diagnostics/env.txt 2>&1 || true
 
         # Git state
         {
           echo "== GIT STATE =="
           git rev-parse HEAD || true
           git status --porcelain || true
-        } > "diagnostics/${JOB}/git.txt" 2>&1 || true
+        } > diagnostics/git.txt 2>&1 || true
 
-        # Data directories
-        {
-          echo "== STAGING =="
-          ls -R data/staging || true
-        } > "diagnostics/${JOB}/staging.txt" 2>&1 || true
+        # Data listings
+        { echo "== STAGING =="; ls -R data/staging || true; } > diagnostics/staging.txt 2>&1 || true
+        { echo "== SNAPSHOTS =="; ls -R data/snapshots || true; } > diagnostics/snapshots.txt 2>&1 || true
 
-        {
-          echo "== SNAPSHOTS =="
-          ls -R data/snapshots || true
-        } > "diagnostics/${JOB}/snapshots.txt" 2>&1 || true
+        # DuckDB quick summary (best-effort)
+        python - <<'PY' || true
+import os, duckdb
 
-        # Resolver logs
-        {
-          echo "== RESOLVER LOGS =="
-          ls -R resolver/logs || true
-        } > "diagnostics/${JOB}/resolver_logs.txt" 2>&1 || true
-
-        if [ -f ".ci/diagnostics/SUMMARY.md" ]; then
-          cp ".ci/diagnostics/SUMMARY.md" "diagnostics/${JOB}/SUMMARY.md"
-        fi
-
-        # DuckDB summary (best-effort)
-        python - <<'PY' > "diagnostics/${JOB}/duckdb.txt" 2>&1 || true
-import os
-import sys
+db = os.environ.get("RESOLVER_DB_PATH", "data/resolver.duckdb")
 try:
-    import duckdb
-except Exception as exc:  # pragma: no cover - diagnostics only
-    print(f"duckdb import failed: {exc}")
-    sys.exit(0)
-
-db_path = os.environ.get("RESOLVER_DB_PATH", "data/resolver.duckdb")
-print(f"Inspecting DuckDB database at {db_path}")
-try:
-    con = duckdb.connect(db_path)
-except Exception as exc:  # pragma: no cover - diagnostics only
-    print(f"unable to open database: {exc}")
-    sys.exit(0)
-
+    con = duckdb.connect(db)
+except Exception as exc:  # pragma: no cover
+    print("no db:", exc)
+    raise SystemExit(0)
 for table in ("facts_raw", "facts_resolved", "facts_deltas"):
     try:
-        count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        print(f"{table}: {count}")
-    except Exception as exc:  # pragma: no cover - diagnostics only
-        print(f"{table}: unavailable ({exc})")
-
-con.close()
+        count = con.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(table, count)
+    except Exception as exc:  # pragma: no cover
+        print(table, "unavailable", exc)
 PY
 
-        (cd diagnostics && zip -rq "../${OUT}" .) || true
-        echo "ARTIFACT_PATH=${OUT}" >> "$GITHUB_ENV"
+        ZIP="dist/diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip"
+        (cd diagnostics && zip -rq "../diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip" . || true)
+        echo "ARTIFACT_PATH=${ZIP}" >> "$GITHUB_ENV"

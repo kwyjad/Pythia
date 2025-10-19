@@ -62,13 +62,13 @@ jobs:
         run: |
           python scripts/ci/make_ai_summary.py || true
 
-      - name: Collect diagnostics (always)
+      - name: Collect diagnostics (fast)
         if: always()
         uses: ./.github/actions/collect-diagnostics
         with:
           job_name: fast-tests
 
-      - name: Upload diagnostics artifact (always)
+      - name: Upload diagnostics artifact (fast)
         if: always()
         uses: actions/upload-artifact@v4
         with:
