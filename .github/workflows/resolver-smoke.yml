@@ -80,6 +80,77 @@ jobs:
           set -euo pipefail
           python resolver/ingestion/run_all_stubs.py --smoke --log-level INFO --log-format json
 
+      - name: Prepare raw staging (stubs)
+        run: |
+          set -euo pipefail
+          RAW="data/staging/${PERIOD_LABEL}/raw"
+          mkdir -p "$RAW"
+          shopt -s nullglob
+          files=($(printf '%s\n' "$RAW"/*.csv 2>/dev/null || true))
+          if [ "${#files[@]}" -eq 0 ]; then
+            python - <<'PY'
+import csv
+import os
+from pathlib import Path
+
+period = os.environ.get("PERIOD_LABEL", "ci-smoke")
+raw_dir = Path("data") / "staging" / period / "raw"
+raw_dir.mkdir(parents=True, exist_ok=True)
+stub_path = raw_dir / "ifrc_go_stub.csv"
+with stub_path.open("w", encoding="utf-8", newline="") as fh:
+    writer = csv.writer(fh)
+    writer.writerow([
+        "event_id",
+        "country_name",
+        "iso3",
+        "hazard_code",
+        "hazard_label",
+        "hazard_class",
+        "statistic",
+        "value",
+        "unit",
+        "as_of",
+        "published",
+        "source",
+        "source_type",
+        "source_url",
+        "title",
+        "summary",
+        "collection_method",
+        "confidence",
+        "is_final",
+        "ingested_at",
+    ])
+    writer.writerow([
+        "IFRC-EXAMPLE-1",
+        "Example Country",
+        "EXM",
+        "FL",
+        "Flood",
+        "Hydrological",
+        "affected",
+        "1000",
+        "persons",
+        "2024-01-01",
+        "2024-01-01",
+        "IFRC",
+        "sitrep",
+        "https://example.org/ifrc",
+        "Example Flood Event",
+        "Example stub row for CI smoke",
+        "api",
+        "high",
+        "1",
+        "2024-01-01T00:00:00Z",
+    ])
+print(f"Wrote stub CSV to {stub_path}")
+PY
+          else
+            echo "Existing stub CSVs detected in $RAW"
+          fi
+          echo "Raw staging contents:"
+          ls -lh "$RAW" || true
+
       - name: Determine canonical sources
         run: |
           set -euo pipefail
@@ -157,7 +228,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error
           retention-days: 7
           overwrite: true

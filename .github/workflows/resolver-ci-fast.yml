@@ -45,6 +45,18 @@ jobs:
           mkdir -p .ci/diagnostics
           python -m pytest -q resolver/tests -k "not slow and not nightly" --junitxml=pytest-junit.xml
 
+      - name: Post-test housekeeping
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "data/snapshots" ]]; then
+            echo "Snapshots exist; listing:"
+            ls -R data/snapshots || true
+          else
+            echo "No snapshots directory (ok for fast tests)."
+          fi
+
       - name: Write AI SUMMARY.md (always)
         if: always()
         run: |
@@ -61,7 +73,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: error
           retention-days: 7
           overwrite: true

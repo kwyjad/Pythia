@@ -1,26 +1,91 @@
-name: "Collect resolver diagnostics"
-description: "Gather resolver CI diagnostics and package them into a reusable artifact"
-author: "Resolver CI"
+name: Collect diagnostics
+description: Gathers resolver CI diagnostics and packages a standardized artifact
 inputs:
   job_name:
-    description: "Logical job identifier used for artifact naming and directory layout"
+    description: Short job name used for naming artifacts (e.g., fast-tests, pipeline-smoke)
     required: true
-  artifact_name:
-    description: "Optional override for the produced artifact name"
-    required: false
-    default: "diagnostics-${{ inputs.job_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
 runs:
-  using: "composite"
+  using: composite
   steps:
-    - name: Ensure collector is executable
-      shell: bash
-      run: |
-        chmod +x "${{ github.action_path }}/collect.sh"
     - name: Collect diagnostics bundle
       shell: bash
-      env:
-        INPUT_JOB_NAME: "${{ inputs.job_name }}"
-        INPUT_ARTIFACT_NAME: "${{ inputs.artifact_name }}"
       run: |
         set -euo pipefail
-        "${{ github.action_path }}/collect.sh"
+        JOB="${{ inputs.job_name }}"
+        OUT="dist/diagnostics-${JOB}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zip"
+        mkdir -p dist diagnostics "diagnostics/${JOB}"
+
+        # Versions
+        {
+          echo "== VERSIONS =="
+          python -V || true
+          pip --version || true
+          pip freeze || true
+          duckdb --version || true
+          uname -a || true
+        } > "diagnostics/${JOB}/versions.txt" 2>&1 || true
+
+        # Environment snapshot (limited to important vars)
+        {
+          echo "== IMPORTANT ENVS =="
+          env | grep -E '^(RESOLVER_|PERIOD_LABEL|GITHUB_)' || true
+        } > "diagnostics/${JOB}/environment.txt" 2>&1 || true
+
+        # Git state
+        {
+          echo "== GIT STATE =="
+          git rev-parse HEAD || true
+          git status --porcelain || true
+        } > "diagnostics/${JOB}/git.txt" 2>&1 || true
+
+        # Data directories
+        {
+          echo "== STAGING =="
+          ls -R data/staging || true
+        } > "diagnostics/${JOB}/staging.txt" 2>&1 || true
+
+        {
+          echo "== SNAPSHOTS =="
+          ls -R data/snapshots || true
+        } > "diagnostics/${JOB}/snapshots.txt" 2>&1 || true
+
+        # Resolver logs
+        {
+          echo "== RESOLVER LOGS =="
+          ls -R resolver/logs || true
+        } > "diagnostics/${JOB}/resolver_logs.txt" 2>&1 || true
+
+        if [ -f ".ci/diagnostics/SUMMARY.md" ]; then
+          cp ".ci/diagnostics/SUMMARY.md" "diagnostics/${JOB}/SUMMARY.md"
+        fi
+
+        # DuckDB summary (best-effort)
+        python - <<'PY' > "diagnostics/${JOB}/duckdb.txt" 2>&1 || true
+import os
+import sys
+try:
+    import duckdb
+except Exception as exc:  # pragma: no cover - diagnostics only
+    print(f"duckdb import failed: {exc}")
+    sys.exit(0)
+
+db_path = os.environ.get("RESOLVER_DB_PATH", "data/resolver.duckdb")
+print(f"Inspecting DuckDB database at {db_path}")
+try:
+    con = duckdb.connect(db_path)
+except Exception as exc:  # pragma: no cover - diagnostics only
+    print(f"unable to open database: {exc}")
+    sys.exit(0)
+
+for table in ("facts_raw", "facts_resolved", "facts_deltas"):
+    try:
+        count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(f"{table}: {count}")
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        print(f"{table}: unavailable ({exc})")
+
+con.close()
+PY
+
+        (cd diagnostics && zip -rq "../${OUT}" .) || true
+        echo "ARTIFACT_PATH=${OUT}" >> "$GITHUB_ENV"
