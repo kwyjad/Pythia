@@ -41,6 +41,8 @@ Every resolver-facing workflow (`resolver-ci-fast`, `resolver-ci`, and `resolver
 
 In practice you will see `diagnostics-fast-tests-<run>-<attempt>.zip` from the fast matrix plus `diagnostics-pipeline-smoke-<run>-<attempt>.zip` from the stubbed pipeline. Download the archive and open `SUMMARY.md` for the quick triage path; the aggregate workflow still merges per-job summaries but writes the consolidated markdown straight to the GitHub Actions step summary so the “Artifacts” list remains predictable.
 
+Smoke runs always place the artifact at `dist/diagnostics-pipeline-smoke-<run>-<attempt>.zip` inside the workspace before upload, and the bundle also contains `smoke-assert.json`. The totals in that JSON match the `SUMMARY.md` canonical row totals so the gating step, diagnostics report, and uploaded archive stay in lockstep.
+
 ### Working behind a proxy
 
 GitHub Actions and the devcontainer bootstrap understand constrained networks. The `resolver-ci-fast` workflow’s DuckDB job first

@@ -113,10 +113,20 @@ jobs:
           status=$?
           set -euo pipefail
 
-          if [ "${status}" -eq 0 ]; then
-            echo "exit=0" > .ci/exitcodes/gate_rows
-          else
-            echo "exit=${status}" > .ci/exitcodes/gate_rows
+          total_rows="n/a"
+          if [ -f .ci/diagnostics/smoke-assert.json ]; then
+            total_rows=$(python - <<'PY' 2>/dev/null || echo "n/a")
+            import json
+            from pathlib import Path
+
+            payload = json.loads(Path(".ci/diagnostics/smoke-assert.json").read_text(encoding="utf-8"))
+            print(payload.get("total_rows", "n/a"))
+            PY
+          fi
+
+          echo "exit=${status} rows=${total_rows}" > .ci/exitcodes/gate_rows
+
+          if [ "${status}" -ne 0 ]; then
             exit "${status}"
           fi
 
@@ -180,7 +190,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ARTIFACT_PATH }}
+          path: dist/diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+      - name: Upload summary mirror (smoke)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/diag-pipeline-smoke/SUMMARY.md
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true

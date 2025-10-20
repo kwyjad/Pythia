@@ -16,6 +16,7 @@ def _write_csv(base: Path, name: str, rows: list[str]) -> Path:
         handle.write("col1\n")
         for row in rows:
             handle.write(f"{row}\n")
+        handle.write("\n")  # ensure trailing blank line is ignored
     return csv_path
 
 
@@ -37,6 +38,13 @@ def test_counts_rows_excluding_header(tmp_path: Path, monkeypatch: pytest.Monkey
 
     assert _run(tmp_path, min_rows=1) == 0
     assert _run(tmp_path, min_rows=3) == 1
+
+
+def test_trailing_blank_lines_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_csv(tmp_path, "blank.csv", ["1", "2", ""])
+
+    assert _run(tmp_path, min_rows=2) == 0
 
 
 def test_handles_header_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -136,37 +136,113 @@ staging_listing_file="${BASE_DIR}/staging.txt"
 } >"${staging_listing_file}" || true
 
 staging_stats_file="${BASE_DIR}/staging_stats.md"
-: >"${staging_stats_file}"
-if [ -d data/staging ]; then
-  found="false"
-  while IFS= read -r csv_file; do
-    [ -n "${csv_file}" ] || continue
-    found="true"
-    echo "### ${csv_file}" >> "${staging_stats_file}"
-    echo '```' >> "${staging_stats_file}"
-    echo "path: ${csv_file}" >> "${staging_stats_file}"
-    if rows=$(wc -l <"${csv_file}" 2>/dev/null); then
-      echo "rows: ${rows}" >> "${staging_stats_file}"
-    else
-      echo "rows: n/a" >> "${staging_stats_file}"
-    fi
-    header="$(head -n 1 "${csv_file}" 2>/dev/null | tr -d '\r')"
-    if [ -n "${header}" ]; then
-      echo "header: ${header}" >> "${staging_stats_file}"
-    else
-      echo "header: <empty>" >> "${staging_stats_file}"
-    fi
-    echo "sample:" >> "${staging_stats_file}"
-    tail -n +2 "${csv_file}" 2>/dev/null | head -n 3 | tr -d '\r' >> "${staging_stats_file}"
-    echo '```' >> "${staging_stats_file}"
-    echo >> "${staging_stats_file}"
-  done < <(find data/staging -type f -name '*.csv' 2>/dev/null | sort)
-  if [ "${found}" = "false" ]; then
-    echo "No CSV files located under data/staging." >> "${staging_stats_file}"
-  fi
-else
-  echo "data/staging missing" >> "${staging_stats_file}"
-fi
+python - <<'PY' >"${staging_stats_file}" 2>/dev/null || true
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+
+
+def rows_from_report() -> dict[Path, int]:
+    report_path = Path(".ci/diagnostics/smoke-assert.json")
+    if not report_path.is_file():
+        return {}
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    mapping: dict[Path, int] = {}
+    for entry in payload.get("files", []):
+        try:
+            entry_path = Path(entry["path"]).resolve()
+        except Exception:
+            continue
+        try:
+            rows = int(entry.get("rows", 0))
+        except Exception:
+            rows = 0
+        mapping[entry_path] = rows
+    return mapping
+
+
+def count_rows(csv_path: Path) -> int:
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = 0
+            for record in reader:
+                if not any(cell.strip() for cell in record):
+                    continue
+                rows += 1
+            return rows
+    except Exception:
+        return 0
+
+
+def header_and_sample(csv_path: Path) -> tuple[str, list[str]]:
+    header = ""
+    sample: list[str] = []
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            header_row = next(reader, [])
+            header = ",".join(header_row)
+            for record in reader:
+                if not any(cell.strip() for cell in record):
+                    continue
+                sample.append(",".join(record))
+                if len(sample) >= 3:
+                    break
+    except Exception:
+        header = ""
+        sample = []
+    return header, sample
+
+
+def main() -> None:
+    staging_root = Path("data/staging")
+    if not staging_root.exists():
+        print("data/staging missing")
+        return
+
+    files = sorted(path.resolve() for path in staging_root.rglob("*.csv"))
+    if not files:
+        print("No CSV files located under data/staging.")
+        return
+
+    row_report = rows_from_report()
+    cwd = Path.cwd()
+    for file_path in files:
+        rel_path = file_path
+        try:
+            rel_path = file_path.relative_to(cwd)
+        except ValueError:
+            pass
+
+        rows = row_report.get(file_path, count_rows(file_path))
+        header, sample = header_and_sample(file_path)
+
+        print(f"### {rel_path}")
+        print("```")
+        print(f"path: {rel_path}")
+        print(f"rows: {rows}")
+        print(f"header: {header if header else '<empty>'}")
+        print("sample:")
+        if sample:
+            for line in sample:
+                print(line)
+        else:
+            print("<no sample>")
+        print("```")
+        print()
+
+
+if __name__ == "__main__":
+    main()
+PY
 
 snapshots_file="${BASE_DIR}/snapshots.txt"
 {
@@ -321,9 +397,11 @@ zip -qr "${ZIP_NAME}" "${BASE_DIR##${DIST_DIR}/}" || true
 popd >/dev/null
 
 if [ -n "${GITHUB_ENV:-}" ]; then
+  ZIP_ABS_PATH="$(pwd)/${ZIP_PATH}"
+  SUMMARY_ABS_PATH="$(pwd)/${SUMMARY_MD}"
   {
-    echo "ARTIFACT_PATH=${ZIP_PATH}"
-    echo "SUMMARY_PATH=${SUMMARY_MD}"
+    echo "ARTIFACT_PATH=${ZIP_ABS_PATH}"
+    echo "SUMMARY_PATH=${SUMMARY_ABS_PATH}"
   } >> "${GITHUB_ENV}"
 fi
 
