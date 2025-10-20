@@ -36,7 +36,7 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 
 Every resolver-facing workflow (`resolver-ci-fast`, `resolver-ci`, and `resolver-smoke`) now calls the reusable diagnostics collector so each job publishes a single archive named `diagnostics-<job>-<run_id>-<run_attempt>.zip`. Inside the ZIP you will find:
 
-- `SUMMARY.md`, a human-friendly digest with Git metadata, versions, sanitized environment variables, DuckDB table counts, staging/snapshot listings, pytest failures, and resolver log tails.
+- `SUMMARY.md`, a human-friendly digest with Git metadata, versions, sanitized environment variables, staging quick stats (rows, headers, and samples for each CSV), DuckDB table counts or "database not found" breadcrumbs, pytest results, resolver log tails, exit-code breadcrumbs from the workflow, and a disk-usage snapshot.
 - Supporting text snapshots (`versions.txt`, `env.txt`, `git.txt`, `staging.txt`, `snapshots.txt`, `duckdb.txt`, `pytest.txt`, and more) for deeper triage when needed.
 
 In practice you will see `diagnostics-fast-tests-<run>-<attempt>.zip` from the fast matrix plus `diagnostics-pipeline-smoke-<run>-<attempt>.zip` from the stubbed pipeline. Download the archive and open `SUMMARY.md` for the quick triage path; the aggregate workflow still merges per-job summaries but writes the consolidated markdown straight to the GitHub Actions step summary so the “Artifacts” list remains predictable.

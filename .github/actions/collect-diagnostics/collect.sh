@@ -6,26 +6,39 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 DIST_DIR="dist"
 BASE_DIR="${DIST_DIR}/diag-${JOB}"
+SUMMARY_MD="${BASE_DIR}/SUMMARY.md"
 ZIP_NAME="diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip"
 ZIP_PATH="${DIST_DIR}/${ZIP_NAME}"
-SUMMARY_MD="${BASE_DIR}/SUMMARY.md"
 
-mkdir -p "${BASE_DIR}"
+mkdir -p "${BASE_DIR}" "${DIST_DIR}" \
+  ".ci" \
+  ".ci/diagnostics" \
+  ".ci/exitcodes"
+
+append_section() {
+  printf '\n## %s\n\n' "$1" >> "${SUMMARY_MD}"
+}
+
+append_code_block() {
+  echo '```' >> "${SUMMARY_MD}"
+  if [ -n "${1:-}" ] && [ -f "$1" ]; then
+    cat "$1" >> "${SUMMARY_MD}"
+  elif [ -n "${2:-}" ]; then
+    echo "$2" >> "${SUMMARY_MD}"
+  fi
+  echo '```' >> "${SUMMARY_MD}"
+}
 
 versions_file="${BASE_DIR}/versions.txt"
-env_file="${BASE_DIR}/env.txt"
-git_file="${BASE_DIR}/git.txt"
-staging_file="${BASE_DIR}/staging.txt"
-snapshots_file="${BASE_DIR}/snapshots.txt"
-logs_file="${BASE_DIR}/logs.txt"
-duckdb_file="${BASE_DIR}/duckdb.txt"
-pytest_file="${BASE_DIR}/pytest.txt"
-
 {
   echo "== VERSIONS =="
   (python -V 2>&1 || true)
   (pip --version 2>&1 || true)
-  (pip freeze 2>&1 || true)
+  if command -v pip >/dev/null 2>&1; then
+    (pip freeze 2>/dev/null | sort || true)
+  else
+    echo "pip not available"
+  fi
   if command -v duckdb >/dev/null 2>&1; then
     (duckdb --version 2>&1 || true)
   else
@@ -34,9 +47,9 @@ pytest_file="${BASE_DIR}/pytest.txt"
   (uname -a 2>&1 || true)
 } >"${versions_file}" || true
 
+env_file="${BASE_DIR}/env.txt"
 python - <<'PY' >"${env_file}" 2>&1 || true
 import os
-from typing import Iterable
 
 SAFE_PREFIXES = (
     "RESOLVER_",
@@ -46,43 +59,73 @@ SAFE_PREFIXES = (
     "CI",
     "PYTHON",
 )
-SENSITIVE_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "KEY", "ACCESS", "CREDENTIAL")
-
-def include_var(name: str) -> bool:
-    for prefix in SAFE_PREFIXES:
-        if name.startswith(prefix):
-            return True
-    return False
-
-def redact(value: str) -> str:
-    if not value:
-        return value
-    return "***" if len(value) > 4 else "***"
-
-def is_sensitive(name: str) -> bool:
-    upper = name.upper()
-    return any(marker in upper for marker in SENSITIVE_MARKERS)
-
-def iter_vars(env: dict) -> Iterable[tuple[str, str]]:
-    for name in sorted(env):
-        if include_var(name):
-            value = env[name]
-            if is_sensitive(name):
-                value = redact(value)
-            yield name, value
+SENSITIVE_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "KEY", "ACCESS", "CREDENTIAL", "PWD", "PASS")
 
 print("== IMPORTANT ENVS ==")
-for key, value in iter_vars(os.environ):
-    print(f"{key}={value}")
+for name in sorted(os.environ):
+    upper = name.upper()
+    if not any(name.startswith(prefix) for prefix in SAFE_PREFIXES):
+        continue
+    value = os.environ.get(name, "")
+    if any(marker in upper for marker in SENSITIVE_MARKERS) and value:
+        value = "***REDACTED***"
+    print(f"{name}={value}")
 PY
 
+git_file="${BASE_DIR}/git.txt"
 {
   echo "== GIT STATE =="
   (git rev-parse HEAD 2>&1 || true)
   (git status --porcelain 2>&1 || true)
-  (git log -1 --oneline 2>&1 || true)
+  (git --no-pager log -1 --oneline 2>&1 || true)
 } >"${git_file}" || true
 
+duckdb_file="${BASE_DIR}/duckdb.txt"
+python - <<'PY' >"${duckdb_file}" 2>&1 || true
+import os
+from pathlib import Path
+
+def main() -> None:
+    try:
+        import duckdb  # type: ignore
+    except ModuleNotFoundError:
+        print("duckdb module not available")
+        return
+
+    db_path = Path(os.environ.get("RESOLVER_DB_PATH", "data/resolver.duckdb")).expanduser()
+    if not db_path.exists():
+        print(f"database not found: {db_path}")
+        return
+
+    con = duckdb.connect(str(db_path))
+    try:
+        print(f"database: {db_path}")
+        try:
+            df = con.sql("PRAGMA database_list").fetchdf()
+            print(df)
+        except Exception as exc:  # pragma: no cover - best effort diagnostics
+            print(f"failed PRAGMA database_list: {exc}")
+        try:
+            tables = [row[0] for row in con.execute("SHOW TABLES").fetchall()]
+        except Exception as exc:
+            print(f"failed to enumerate tables: {exc}")
+            tables = []
+        if not tables:
+            print("no tables present")
+        for table in tables:
+            try:
+                count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                print(f"{table}: {count} rows")
+            except Exception as exc:  # pragma: no cover - best effort diagnostics
+                print(f"{table}: failed to count ({exc})")
+    finally:
+        con.close()
+
+if __name__ == "__main__":
+    main()
+PY
+
+staging_listing_file="${BASE_DIR}/staging.txt"
 {
   echo "== STAGING =="
   if [ -d data/staging ]; then
@@ -90,8 +133,42 @@ PY
   else
     echo "data/staging missing"
   fi
-} >"${staging_file}" || true
+} >"${staging_listing_file}" || true
 
+staging_stats_file="${BASE_DIR}/staging_stats.md"
+: >"${staging_stats_file}"
+if [ -d data/staging ]; then
+  found="false"
+  while IFS= read -r csv_file; do
+    [ -n "${csv_file}" ] || continue
+    found="true"
+    echo "### ${csv_file}" >> "${staging_stats_file}"
+    echo '```' >> "${staging_stats_file}"
+    echo "path: ${csv_file}" >> "${staging_stats_file}"
+    if rows=$(wc -l <"${csv_file}" 2>/dev/null); then
+      echo "rows: ${rows}" >> "${staging_stats_file}"
+    else
+      echo "rows: n/a" >> "${staging_stats_file}"
+    fi
+    header="$(head -n 1 "${csv_file}" 2>/dev/null | tr -d '\r')"
+    if [ -n "${header}" ]; then
+      echo "header: ${header}" >> "${staging_stats_file}"
+    else
+      echo "header: <empty>" >> "${staging_stats_file}"
+    fi
+    echo "sample:" >> "${staging_stats_file}"
+    tail -n +2 "${csv_file}" 2>/dev/null | head -n 3 | tr -d '\r' >> "${staging_stats_file}"
+    echo '```' >> "${staging_stats_file}"
+    echo >> "${staging_stats_file}"
+  done < <(find data/staging -type f -name '*.csv' 2>/dev/null | sort)
+  if [ "${found}" = "false" ]; then
+    echo "No CSV files located under data/staging." >> "${staging_stats_file}"
+  fi
+else
+  echo "data/staging missing" >> "${staging_stats_file}"
+fi
+
+snapshots_file="${BASE_DIR}/snapshots.txt"
 {
   echo "== SNAPSHOTS =="
   if [ -d data/snapshots ]; then
@@ -101,24 +178,27 @@ PY
   fi
 } >"${snapshots_file}" || true
 
+logs_file="${BASE_DIR}/logs.txt"
 {
   echo "== RESOLVER LOGS =="
-  handled=false
+  handled="false"
   for candidate in resolver/logs data/logs; do
     if [ -d "${candidate}" ]; then
-      handled=true
-      while IFS= read -r -d '' log_path; do
-        echo "--- ${log_path}"
+      handled="true"
+      while IFS= read -r log_path; do
+        [ -f "${log_path}" ] || continue
+        echo "--- ${log_path}" | sed 's#//\+#/#g'
         (tail -n 200 "${log_path}" 2>&1 || true)
-      done < <(find "${candidate}" -type f -print0)
+      done < <(find "${candidate}" -type f -name '*.log' 2>/dev/null | sort | head -n 10)
     fi
   done
-  if [ "${handled}" = false ]; then
+  if [ "${handled}" = "false" ]; then
     echo "resolver/logs missing"
     echo "data/logs missing"
   fi
 } >"${logs_file}" || true
 
+pytest_file="${BASE_DIR}/pytest.txt"
 if [ -f pytest-junit.xml ]; then
   python - <<'PY' >"${pytest_file}" 2>&1 || true
 import xml.etree.ElementTree as ET
@@ -150,93 +230,75 @@ else
   echo "pytest-junit.xml missing" >"${pytest_file}"
 fi
 
-python - <<'PY' >"${duckdb_file}" 2>&1 || true
-import os
-from pathlib import Path
+exitcodes_file="${BASE_DIR}/exitcodes.txt"
+if ls .ci/exitcodes/* >/dev/null 2>&1; then
+  {
+    for breadcrumb in .ci/exitcodes/*; do
+      [ -f "${breadcrumb}" ] || continue
+      printf '%s: %s\n' "$(basename "${breadcrumb}")" "$(cat "${breadcrumb}" 2>/dev/null || echo n/a)"
+    done
+  } >"${exitcodes_file}" || true
+else
+  echo "no exitcode breadcrumbs found" >"${exitcodes_file}"
+fi
 
-def main() -> None:
-    db_path = Path(os.environ.get("RESOLVER_DB_PATH", "data/resolver.duckdb"))
-    try:
-        import duckdb  # type: ignore
-    except ModuleNotFoundError:
-        print("duckdb module not available")
-        return
-    if not db_path.exists():
-        print(f"database not found: {db_path}")
-        return
-    con = duckdb.connect(str(db_path))
-    try:
-        tables = [row[0] for row in con.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'").fetchall()]
-    except Exception as exc:
-        print(f"failed to enumerate tables: {exc}")
-        return
-    if not tables:
-        print("no tables present")
-        return
-    for table in tables:
-        try:
-            count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        except Exception as exc:
-            print(f"{table}: failed to count ({exc})")
-        else:
-            print(f"{table}: {count}")
+usage_file="${BASE_DIR}/disk_usage.txt"
+{
+  echo "== DISK USAGE =="
+  (du -sh data resolver 2>/dev/null || true)
+  (df -h . 2>&1 || true)
+} >"${usage_file}" || true
 
-if __name__ == "__main__":
-    main()
-PY
-
-# Build SUMMARY.md
+: >"${SUMMARY_MD}"
 {
   echo "# Diagnostics Summary — ${JOB}"
-  echo ""
-  echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+  echo
+  echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "Run ID: ${RUN_ID} (attempt ${RUN_ATTEMPT})"
-  echo ""
-  echo "## Git"
-  echo '```'
-  cat "${git_file}" 2>/dev/null || true
-  echo '```'
-  echo ""
-  echo "## Versions"
-  echo '```'
-  cat "${versions_file}" 2>/dev/null || true
-  echo '```'
-  echo ""
-  echo "## Environment"
-  echo '```'
-  cat "${env_file}" 2>/dev/null || true
-  echo '```'
-  echo ""
-  echo "## DuckDB"
-  echo '```'
-  cat "${duckdb_file}" 2>/dev/null || true
-  echo '```'
-  echo ""
-  echo "## Staging directory"
-  echo '```'
-  cat "${staging_file}" 2>/dev/null | head -n 200 || true
-  echo '```'
-  echo ""
-  echo "## Snapshots directory"
-  echo '```'
-  cat "${snapshots_file}" 2>/dev/null | head -n 200 || true
-  echo '```'
-  echo ""
-  echo "## Pytest summary"
-  echo '```'
-  cat "${pytest_file}" 2>/dev/null || true
-  echo '```'
-  echo ""
-  echo "## Resolver logs (tail)"
-  echo '```'
-  cat "${logs_file}" 2>/dev/null | tail -n 200 || true
-  echo '```'
-} >"${SUMMARY_MD}" || true
+} >> "${SUMMARY_MD}"
 
-mkdir -p "${DIST_DIR}"
+append_section "Git"
+append_code_block "${git_file}" "git information unavailable"
+
+append_section "Versions"
+append_code_block "${versions_file}" "version details unavailable"
+
+append_section "Environment"
+append_code_block "${env_file}" "no environment snapshot captured"
+
+append_section "DuckDB"
+append_code_block "${duckdb_file}" "duckdb not inspected"
+
+append_section "Staging directory"
+append_code_block "${staging_listing_file}" "data/staging missing"
+
+append_section "Staging quick stats"
+if [ -s "${staging_stats_file}" ]; then
+  cat "${staging_stats_file}" >> "${SUMMARY_MD}"
+else
+  echo "No staging files discovered." >> "${SUMMARY_MD}"
+fi
+
+append_section "Snapshots directory"
+append_code_block "${snapshots_file}" "data/snapshots missing"
+
+append_section "Resolver logs (tail)"
+append_code_block "${logs_file}" "resolver/data logs missing"
+
+append_section "Pytest summary"
+append_code_block "${pytest_file}" "pytest did not emit junit XML"
+
+append_section "Step exit codes"
+append_code_block "${exitcodes_file}" "no exitcode breadcrumbs found"
+
+append_section "Disk usage snapshot"
+append_code_block "${usage_file}" "disk usage unavailable"
+
+cp "${SUMMARY_MD}" ".ci/diagnostics/${JOB}.SUMMARY.md" 2>/dev/null || true
+
 pushd "${DIST_DIR}" >/dev/null
 rm -f "${ZIP_NAME}"
-zip -rq "${ZIP_NAME}" "${BASE_DIR#${DIST_DIR}/}" || true
+zip -qr "${ZIP_NAME}" "${BASE_DIR##${DIST_DIR}/}" || true
 popd >/dev/null
 
 if [ -n "${GITHUB_ENV:-}" ]; then
@@ -245,3 +307,5 @@ if [ -n "${GITHUB_ENV:-}" ]; then
     echo "SUMMARY_PATH=${SUMMARY_MD}"
   } >> "${GITHUB_ENV}"
 fi
+
+exit 0
