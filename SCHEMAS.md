@@ -4,6 +4,8 @@
 
 ## Table of contents
 
+- [Pipeline IO](#pipeline-io)
+- [canonical.normalized](#canonicalnormalized)
 - [db.facts_deltas](#dbfactsdeltas)
 - [db.facts_raw](#dbfactsraw)
 - [db.facts_resolved](#dbfactsresolved)
@@ -13,6 +15,19 @@
 - [staging.unhcr_odp](#stagingunhcrodp)
 - [staging.worldpop](#stagingworldpop)
 
+## Pipeline IO
+
+All ingestion connectors now share a single staging root. When
+`RESOLVER_STAGING_DIR` is set, outputs land in
+`$RESOLVER_STAGING_DIR/<period>/raw/<source>.csv`. The `<period>` segment comes
+from `RESOLVER_PERIOD` when provided, else from the
+`RESOLVER_START_ISO`/`RESOLVER_END_ISO` window (quarter-aligned when both dates
+fall in the same quarter) and otherwise defaults to `unknown`. Set
+`RESOLVER_OUTPUT_DIR` directly to override the computed root or
+`RESOLVER_OUTPUT_PATH` for one-off CLI runs. Without these environment variables
+the historical `resolver/staging/<source>.csv` layout remains active for
+backwards compatibility.
+
 > **DuckDB URL note:** All resolver components open DuckDB databases through a shared connection cache. URLs such as `duckdb:///tmp/db.duckdb`, `duckdb:////abs/db.duckdb`, relative file paths, and `:memory:` are canonicalised to a single filesystem target so writers and readers share the same database session. Enable `RESOLVER_DEBUG=1` to log the resolved path during tests.
 
 > **Schema initialisation:** Exporters and snapshot writers call `init_schema` immediately after opening a connection, guaranteeing that tables, constraints, and indexes exist before any upsert. Fresh databases therefore receive the full schema (including keys) before the first write, preventing silent skips when keys were missing.
@@ -20,6 +35,29 @@
 > **Numeric precision:** Snapshot writers coerce `value`, `value_new`, and `value_stock` to floats before persistence so CSV inputs such as `'1,200'` or `'150.0'` are normalised. Placeholder strings like `''`, `'None'`, `'NaN'`, `'<NA>'`, or `'null'` are coerced to `NULL` during writes to keep DuckDB columns numeric. Downstream CLIs round values to the nearest integer only when `unit = 'persons'`; the stored floats retain fractional precision for auditing and non-person metrics.
 
 > **Keys & indexes:** Resolver expects `facts_resolved` rows to be unique on `(ym, iso3, hazard_code, metric, series_semantics)` and `facts_deltas` rows to be unique on `(ym, iso3, hazard_code, metric)`. `init_schema` enforces these natural keys with primary keys (`pk_facts_resolved_series`, `pk_facts_deltas_series`) when the DuckDB build supports `ALTER TABLE ... ADD PRIMARY KEY` and always creates the named unique indexes `ux_facts_resolved_series` and `ux_facts_deltas_series` in that canonical column order via `CREATE UNIQUE INDEX IF NOT EXISTS`. The upsert detector accepts either a matching primary/unique constraint or one of these unique indexes, and the self-healing path re-creates the named indexes (then re-checks) before it raises, keeping DuckDB 0.10.x and newer releases aligned. When a table is missing entirely or the unique keys still are not declared, the writer calls `init_schema` and falls back to a deterministic delete-then-insert strategy driven by the provided key columns so early bootstrap writes never silently drop rows.
+
+## canonical.normalized
+
+Canonical 12-column schema used by downstream resolver tooling. Normalizers write one CSV per source (for example, `ifrc_go.csv`) under the canonical staging directory. Dates are snapped to the last calendar day of the month and rows outside the optional `RESOLVER_START_ISO`/`RESOLVER_END_ISO` window are dropped.
+
+| Name | Type | Required | Enum/Format | Description |
+| --- | --- | --- | --- | --- |
+| event_id | string | yes |  | Source-provided identifier that stays stable across refreshes. |
+| country_name | string | yes |  | Human-readable country name. |
+| iso3 | string | yes | ISO-3166 alpha-3 | Upper-cased ISO-3 country code. |
+| hazard_code | string | yes | Resolver hazard slug | Upper-cased hazard taxonomy code. |
+| hazard_label | string | yes |  | Descriptive hazard label from the source. |
+| hazard_class | string | yes |  | High-level hazard grouping (e.g., `natural`). |
+| metric | enum | yes | in_need, affected, displaced, cases, fatalities\<br>events, participants | Resolver metric key. |
+| unit | enum | yes | persons, persons_cases, events | Canonical unit for the metric. |
+| as_of_date | string | yes | YYYY-MM-DD | Month-end ISO date derived from the raw observation. |
+| value | number | yes |  | Numeric value coerced from the source. |
+| series_semantics | enum | yes | new, stock, stock_estimate | Canonical semantics classification (never blank). |
+| source | string | yes |  | Canonical source slug (e.g., `ifrc_go`). |
+
+> **Month-end snapping:** Normalizers coerce source dates to pandas month-end boundaries (`2025-08-01` → `2025-08-31`) before writing so downstream joins line up with Resolver month keys.
+
+> **Resolver window:** When `RESOLVER_START_ISO` and/or `RESOLVER_END_ISO` are set, normalizers filter rows outside that inclusive window before month-end snapping.
 
 ## db.facts_deltas
 
@@ -101,6 +139,8 @@ Resolved precedence outputs stored in DuckDB for querying.
 | event_id | string | no |  |  |
 | precedence_tier | string | no |  |  |
 | proxy_for | string | no |  |  |
+| provenance_source | string | yes |  | Source identifier chosen after applying the priority resolver (matches `source_id`). |
+| provenance_rank | integer | yes |  | `1` = highest priority source according to `resolver/ingestion/config/source_priority.yml`. |
 | series_semantics | enum | yes | stock | Canonical semantics flag (always stored as `stock`); `series` is deprecated and only used for backward compatibility. |
 | source_type | string | no |  |  |
 | source_url | string | no |  |  |
@@ -108,7 +148,9 @@ Resolved precedence outputs stored in DuckDB for querying.
 > **Semantics enforcement:** Database writes canonicalise inputs, normalise key columns, and then collapse
 > `series_semantics` to table-specific values before upserting. Unknown or blank values are
 > coerced to the table default, legacy `series` inputs are tolerated for migration, and `facts_resolved`
-> rows persist as `stock` while `facts_deltas` rows persist as `new`.
+> rows persist as `stock` while `facts_deltas` rows persist as `new`. After canonicalisation,
+> `resolver.transform.resolve_sources` rehydrates `provenance_source`/`provenance_rank` from the
+> configured priority list so the final monthly stock view exposes the winning source and its rank.
 
 ### Semantics
 
@@ -211,3 +253,13 @@ WorldPop denominators staging output.
 | source_url | string | yes |  |  |
 | year | integer | yes |  |  |
 | notes | string | no |  |  |
+
+## ReliefWeb field mapping
+
+The ReliefWeb API connector sources its `fields[include][]` parameter from
+`resolver/ingestion/config/reliefweb_fields.yml`. The allowlist mirrors the
+columns the staging CSV consumes and explicitly omits the deprecated `type`
+field after the API began returning `400` responses for that include. When
+ReliefWeb responds with an "Unrecognized field" error the connector prunes the
+offending entry, retries once with the remaining allowlisted fields, and still
+writes the canonical header-only CSV when no rows are returned.

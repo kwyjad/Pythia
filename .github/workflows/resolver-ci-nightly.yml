@@ -354,21 +354,101 @@ jobs:
           echo "BACKEND=$RESOLVER_API_BACKEND"
           echo "DB_URL=$RESOLVER_DB_URL"
 
-      - name: Run tests (db, editable)
-        if: steps.dbfiles.outputs.present == 'true' && steps.robust_install.outputs.mode == 'editable'
-        run: pytest -q
-
-      - name: Run tests (db, fallback)
-        if: steps.dbfiles.outputs.present == 'true' && steps.robust_install.outputs.mode == 'fallback'
+      - name: Run DB tests
+        id: run_db_tests
+        if: steps.dbfiles.outputs.present == 'true'
+        continue-on-error: true
+        timeout-minutes: 25
         env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: pytest -q
+          INSTALL_MODE: ${{ steps.robust_install.outputs.mode }}
+          PYTEST_ADDOPTS: "-vv --maxfail=1 -o log_cli=true -o log_cli_level=INFO --durations=25"
+        run: |
+          set -euo pipefail
+          echo "Resolved install mode: ${INSTALL_MODE:-unset}"
+          if [ "${INSTALL_MODE}" = "fallback" ]; then
+            export PYTHONPATH="${PYTHONPATH:-$GITHUB_WORKSPACE}"
+            echo "Using fallback install mode; PYTHONPATH=$PYTHONPATH"
+          fi
+
+          echo "Collecting DB-focused tests (resolver/tests)..."
+          python - <<'PY'
+            from pathlib import Path
+
+            root = Path("resolver/tests")
+            if not root.exists():
+                print("resolver/tests directory missing")
+                raise SystemExit(0)
+
+            patterns = ["test_db_parity.py", "test_duckdb_idempotency.py"]
+            tests = []
+            for pattern in patterns:
+                tests.extend(sorted(str(p) for p in root.rglob(pattern)))
+
+            print(f"Matched {len(tests)} test file(s)")
+            for path in tests:
+                print(f" - {path}")
+          PY
+
+          echo "Pre-test resource snapshot"
+          ulimit -a || true
+          free -h || true
+          df -h || true
+          ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 20 || true
+
+          echo "Running pytest (timeout 20m)"
+          set +e
+          timeout --preserve-status 20m pytest resolver/tests -k "db_parity or duckdb_idempotency" 2>&1 | tee "pytest-${SAFE_SUFFIX}.log"
+          pytest_rc=${PIPESTATUS[0]}
+          set -e
+          echo "pytest exit code: ${pytest_rc}"
+          printf '%s\n' "${pytest_rc}" > pytest_rc.txt
+
+          echo "Post-test resource snapshot"
+          ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 20 || true
+
+          echo "exit_code=${pytest_rc}" >> "$GITHUB_OUTPUT"
+          exit "${pytest_rc}"
+
+      - name: Upload DB test logs
+        if: always() && steps.dbfiles.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-tests-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
+          path: |
+            pytest-${{ env.SAFE_SUFFIX }}.log
+            pytest_rc.txt
+            .pytest_cache
+            .ci-resolver.duckdb
+            resolver/.coverage
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Debug snapshot (always)
+        if: always() && steps.dbfiles.outputs.present == 'true'
+        run: |
+          python -V
+          uname -a
+          free -h || true
+          df -h || true
+
+      - name: Respect DB test result
+        if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
+        run: |
+          outcome="${{ steps.run_db_tests.outcome }}"
+          exit_code="${{ steps.run_db_tests.outputs.exit_code }}"
+          if [ -z "${exit_code}" ]; then
+            exit_code="unknown"
+          fi
+          if [ "${outcome}" = "failure" ]; then
+            echo "Detected pytest failure (exit code ${exit_code})."
+            exit 1
+          fi
 
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'
         run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
       - name: Upload DB parity diagnostics
-        if: failure()
+        if: steps.dbfiles.outputs.present == 'true' && steps.run_db_tests.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}

@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS facts_resolved (
     event_id TEXT,
     proxy_for TEXT,
     confidence TEXT,
+    provenance_source TEXT,
+    provenance_rank INTEGER,
     series TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT facts_resolved_unique UNIQUE (ym, iso3, hazard_code, metric, series_semantics)

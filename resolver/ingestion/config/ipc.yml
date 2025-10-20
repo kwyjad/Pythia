@@ -1,4 +1,4 @@
-enable: false
+enabled: false
 enabled: false
 dayfirst: false
 feeds: []

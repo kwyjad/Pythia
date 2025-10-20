@@ -161,6 +161,118 @@ recommended 25 MB / 150 MB thresholds and to fail if the tracked repo contents
 grow beyond ~2 GB. Temporary scratch files (`resolver/tmp/`,
 `resolver/exports/*_working.*`, etc.) stay out of Git history via `.gitignore`.
 
+### ReliefWeb connector field allowlist
+
+The ReliefWeb API client now builds its `fields` parameter from
+`resolver/ingestion/config/reliefweb_fields.yml`. That allowlist intentionally
+omits the deprecated `type` include after ReliefWeb started returning HTTP 400
+errors for it. When the API responds with "Unrecognized field" the connector
+logs the response, prunes the unsupported entry, retries once with the safe
+allowlist, and still emits the canonical header-only CSV when no rows survive.
+
+### Staging output directory controls
+
+The ingestion runner now writes every connector CSV beneath a single staging
+root driven by environment variables. Set `RESOLVER_STAGING_DIR` to the parent
+directory (for example, `data/staging`) and the runner will emit files under
+`$RESOLVER_STAGING_DIR/<period>/raw/`. Provide `RESOLVER_PERIOD` for a fixed
+label or rely on `RESOLVER_START_ISO`/`RESOLVER_END_ISO` to derive a quarter- or
+date-span based folder (falling back to `unknown`). When unset, outputs continue
+to land in `resolver/staging/` for backwards compatibility. Example:
+
+```bash
+export RESOLVER_STAGING_DIR=$(pwd)/data/staging
+export RESOLVER_START_ISO=2025-07-01
+export RESOLVER_END_ISO=2025-09-30
+python resolver/ingestion/run_all_stubs.py --connector who_phe_client.py
+# writes data/staging/2025Q3/raw/who_phe.csv
+```
+
+All ingestion connectors emit a header-only CSV when no rows survive filtering
+so downstream stages always find the expected schema.
+
+### Connector enablement & overrides
+
+Each connector YAML under `resolver/ingestion/config/` should expose an
+`enabled` flag (the runner still honours the legacy `enable` key for
+backwards compatibility). When neither key is present, the connector is treated
+as disabled. The effective precedence is:
+
+1. A comma-separated `RESOLVER_FORCE_ENABLE` list of connector names. Entries
+   must match the canonical name or filename stem — no wildcards are honoured.
+2. The connector configuration flag (`enabled` or legacy `enable`).
+3. CI guardrails such as `RESOLVER_SKIP_IFRCGO=1`.
+
+When you run in a dedicated mode, the module-level lists become authoritative:
+
+- `--mode real` (or `RESOLVER_INGESTION_MODE=real`) honours the `REAL` list. Any
+  connector explicitly listed there runs even if its config file is missing or
+  sets `enabled: false`. The planner records `gated_by=selected:list origin=real_list`
+  and the summary table tags the row with
+  `notes=selected:list` to make the override explicit.
+- `--mode stubs` does the same for the `STUBS` list (`origin=stub_list`).
+
+Connectors that originate from config discovery continue to respect the YAML
+flag unless they are forced via environment or CLI arguments.
+
+To temporarily bypass the YAML flag without editing files, set
+`RESOLVER_FORCE_ENABLE` to the canonical connector name(s):
+
+```bash
+RESOLVER_FORCE_ENABLE=acled,reliefweb python resolver/ingestion/run_all_stubs.py
+```
+
+The planner emits both a structured decision line and a legacy
+`enable=<bool> gated_by=<reason>` log for every connector. The structured entry
+now includes an `origin=` field (`real_list`, `stub_list`, or `config`) so you
+can distinguish authoritative picks from config-driven ones. Disabled
+connectors log `enable=False gated_by=config`, appear in the summary as
+`status=skipped notes=disabled: config`, and never launch their subprocess. A
+forced run produces `enable=True gated_by=forced_by_env`, still records a
+structured line with `forced_by=env`, and tags the summary with
+`notes=forced_by_env`.
+
+Real-mode runs are strict by default: when `--mode real` (or the matching env)
+is active, any connector failure returns a non-zero exit code (the same outcome
+as passing `--strict`). Other modes retain the existing behaviour unless you
+explicitly add `--strict`.
+
+### Canonical normalization
+
+Use the canonical normalizer to transform raw staging CSVs into the 12-column schema shared by downstream Resolver tooling. The CLI accepts the raw directory, an output directory for canonical CSVs, the optional staging period label, and a comma-separated source list. Example:
+
+```bash
+python -m resolver.transform.normalize \n  --in data/staging/2025Q3/raw \n  --out data/staging/2025Q3/canonical \n  --period 2025Q3 \n  --sources ifrc_go
+```
+
+Each adapter snaps `as_of_date` to the end of the month, filters rows outside the optional `RESOLVER_START_ISO`/`RESOLVER_END_ISO` window, coerces numeric values, and writes exactly 12 headers (`event_id` … `source`). Empty results still emit a header-only CSV so follow-on jobs can rely on the canonical directory layout.
+
+### Load, derive, and export in one step
+
+Once canonical CSVs exist for a staging period, run the bundled loader CLI to populate DuckDB and emit matching Parquet snapshots:
+
+```bash
+python -m resolver.tools.load_and_derive \
+  --period 2025Q3 \
+  --staging-root data/staging \
+  --snapshots-root data/snapshots \
+  --db ${RESOLVER_DB_URL:-resolver/db/resolver.duckdb} \
+  --allow-negatives 1
+```
+
+The command:
+
+- Inserts the 12 canonical columns into `facts_raw` and routes `stock` rows into `facts_resolved` (with `new` rows landing in `facts_deltas`).
+- Applies the source-priority resolver so overlapping monthly stock rows collapse to a single winner with provenance (`provenance_source`/`provenance_rank`).
+- Derives monthly `value_new` deltas from the cumulative stock history for each `(iso3, hazard_code, metric, unit, source)` grouping—preserving negative swings when `--allow-negatives` is `1` (the default).
+- Writes `facts_resolved.parquet` and `facts_deltas.parquet` to `data/snapshots/<period>/`, mirroring the DuckDB rows for the requested quarter.
+
+The CLI logs row counts per table along the way so you can confirm non-empty loads before inspecting the exported artifacts.
+
+Source precedence is controlled via [`resolver/ingestion/config/source_priority.yml`](resolver/ingestion/config/source_priority.yml).
+Higher-ranked identifiers win ties, and the resolver records the chosen source and its 1-based rank in the
+`provenance_source`/`provenance_rank` columns on `facts_resolved`.
+
 ### Resolver DuckDB dual-write
 
 Set the `RESOLVER_DB_URL` environment variable to enable database-backed parity

@@ -21,6 +21,7 @@ from resolver.tools.denominators import (
     get_population_record,
     safe_pct_to_people,
 )
+from resolver.ingestion.utils.io import resolve_output_path
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
@@ -29,7 +30,8 @@ CONFIG = DEFAULT_CONFIG
 SOURCES_CONFIG = ROOT / "ingestion" / "config" / "wfp_mvam_sources.yml"
 COUNTRIES = DATA / "countries.csv"
 SHOCKS = DATA / "shocks.csv"
-OUT_PATH = STAGING / "wfp_mvam.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "wfp_mvam.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 DEFAULT_DENOMINATOR = DATA / "population.csv"
 
 CANONICAL_HEADERS = [

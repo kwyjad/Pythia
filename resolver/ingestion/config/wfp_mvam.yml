@@ -1,4 +1,4 @@
-enable: false
+enabled: false
 sources:
   - name: mvam_ifc_global
     kind: csv

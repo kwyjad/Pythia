@@ -15,13 +15,15 @@ import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion.utils import ensure_headers, to_iso3
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGING = ROOT / "staging"
 CONFIG_PATH = ROOT / "ingestion" / "config" / "worldpop.yml"
 CONFIG: Path | str = CONFIG_PATH
 OUT_DATA = ROOT / "data" / "population.csv"
-OUT_STAGING = STAGING / "worldpop_denominators.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "worldpop_denominators.csv"
+OUT_STAGING = resolve_output_path(DEFAULT_OUTPUT)
 OUTPUT_PATH = OUT_STAGING  # backwards compatibility alias
 DATA_DIR = ROOT / "data"
 

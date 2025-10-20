@@ -27,14 +27,15 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 import requests
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
 CONFIG_PATH = Path(__file__).resolve().parent / "config" / "unhcr_odp.yml"
 COUNTRIES_CSV = DATA / "countries.csv"
-
-OUT_PATH = STAGING / "unhcr_odp.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "unhcr_odp.csv"
+OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 BASE = "https://data.unhcr.org"
 DEFAULT_SITUATION_PATH = "/en/situations/europe-sea-arrivals"
 UA = "forecaster-resolver/1.0 (github.com/oughtinc/Pythia)"
@@ -546,6 +547,7 @@ def _discover_country_name(html_text: str) -> str:
 
 def write_rows(rows: Iterable[Dict[str, str]]) -> None:
     STAGING.mkdir(parents=True, exist_ok=True)
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUT_PATH, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CANONICAL_HEADER)
         writer.writeheader()

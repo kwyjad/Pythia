@@ -4,35 +4,41 @@ This folder holds **connectors** that generate **staging CSVs**. Most are curren
 (no external calls yet) so you can exercise the pipeline end-to-end. ReliefWeb and IFRC
 GO are now real API clients.
 
+All connectors honour `RESOLVER_STAGING_DIR` and emit CSVs into
+`$RESOLVER_STAGING_DIR/<period>/raw/`. The `<period>` segment comes from
+`RESOLVER_PERIOD` when set, otherwise from the `RESOLVER_START_ISO`/`RESOLVER_END_ISO`
+window (falling back to `unknown`). Without those environment variables the legacy
+`resolver/staging/` directory remains in use.
+
 **Stubs → Export → Validate → Freeze**
 
 Later (Epic C) we will replace stubs with real API/scraper clients.
 
 ## Sources covered
 
-- ReliefWeb — **API connector** (`reliefweb_client.py`) → `staging/reliefweb.csv`
-- ReliefWeb PDFs — **attachment parser** (`reliefweb_client.py`) → `staging/reliefweb_pdf.csv`
-- IFRC GO — **API connector** (`ifrc_go_client.py`) → `staging/ifrc_go.csv`
-- UNHCR ODP — **API connector** (`unhcr_odp_client.py`) → `staging/unhcr_odp.csv`
-- IOM DTM — **API connector** (`dtm_client.py`) → `staging/dtm_displacement.csv`
-- WHO Public Health Emergencies — **API connector** (`who_phe_client.py`) → `staging/who_phe.csv`
+- ReliefWeb — **API connector** (`reliefweb_client.py`) → `data/staging/<period>/raw/reliefweb.csv`
+- ReliefWeb PDFs — **attachment parser** (`reliefweb_client.py`) → `data/staging/<period>/raw/reliefweb_pdf.csv`
+- IFRC GO — **API connector** (`ifrc_go_client.py`) → `data/staging/<period>/raw/ifrc_go.csv`
+- UNHCR ODP — **API connector** (`unhcr_odp_client.py`) → `data/staging/<period>/raw/unhcr_odp.csv`
+- IOM DTM — **API connector** (`dtm_client.py`) → `data/staging/<period>/raw/dtm_displacement.csv`
+- WHO Public Health Emergencies — **API connector** (`who_phe_client.py`) → `data/staging/<period>/raw/who_phe.csv`
 - WHO Emergencies — stub (`who_stub.py`)
 - IPC — stub (`ipc_stub.py`)
-- EM-DAT — **file connector** (`emdat_client.py`) → `staging/emdat_pa.csv`
-- GDACS — **API connector** (`gdacs_client.py`) → `staging/gdacs_signals.csv`
+- EM-DAT — **file connector** (`emdat_client.py`) → `data/staging/<period>/raw/emdat_pa.csv`
+- GDACS — **API connector** (`gdacs_client.py`) → `data/staging/<period>/raw/gdacs_signals.csv`
 - Copernicus EMS — stub (`copernicus_stub.py`)
 - UNOSAT — stub (`unosat_stub.py`)
-- HDX (CKAN) — **API connector** (`hdx_client.py`) → `staging/hdx.csv`
-- ACLED — **API connector** (`acled_client.py`) → `staging/acled.csv`
+- HDX (CKAN) — **API connector** (`hdx_client.py`) → `data/staging/<period>/raw/hdx.csv`
+- ACLED — **API connector** (`acled_client.py`) → `data/staging/<period>/raw/acled.csv`
 - UCDP — stub (`ucdp_stub.py`)
 - FEWS NET — stub (`fews_stub.py`)
-- WorldPop — **denominator loader** (`worldpop_client.py`) → `staging/worldpop_denominators.csv`
-- WFP mVAM — **API connector** (`wfp_mvam_client.py`) → `staging/wfp_mvam.csv`
+- WorldPop — **denominator loader** (`worldpop_client.py`) → `data/staging/<period>/raw/worldpop_denominators.csv`
+- WFP mVAM — **API connector** (`wfp_mvam_client.py`) → `data/staging/<period>/raw/wfp_mvam.csv`
 - Gov NDMA — stub (`gov_ndma_stub.py`)
 
 Each connector:
 - Reads `resolver/data/countries.csv` and `resolver/data/shocks.csv`
-- Produces `resolver/staging/<source>.csv` using the exporter’s expected columns
+- Produces `data/staging/<period>/raw/<source>.csv` using the exporter’s expected columns
 - Must write a CSV that matches `resolver/tools/schema.yml`; CI runs schema
   tests (`pytest -q resolver/tests/test_staging_schema_all.py`) immediately
   after ingestion to catch regressions
@@ -41,10 +47,10 @@ Each connector:
 
 | Connector | Enabled via | Primary source | Monthly allocation | Dedup strategy | Output |
 | --- | --- | --- | --- | --- | --- |
-| GDACS alerts | `ingestion/config/gdacs.yml` → `enabled` | GDACS public API (`geteventlist`) | Alert start month bucket | `(iso3, hazard, month_start, raw_event_id)` keep latest `as_of` | `resolver/staging/gdacs_signals.csv` |
-| EM-DAT impacts | `ingestion/config/emdat.yml` → `enabled` | Licensed EM-DAT CSV/HDX mirror | Linear days-in-month split for spans >14 days | `(iso3, hazard, month_start, raw_event_id, value_type)` | `resolver/staging/emdat_pa.csv` |
-| IOM DTM displacement | `ingestion/config/dtm.yml` → `enabled` | File/HDX stock tables | Stock→flow (`diff_nonneg`) with optional admin totals | `(iso3, admin1, month_start, source_id)` | `resolver/staging/dtm_displacement.csv` |
-| WorldPop denominators | `ingestion/config/worldpop.yml` → `enabled` | Cached WorldPop national totals | Annual totals (no allocation) | `(iso3, year)` upsert on rerun | `resolver/staging/worldpop_denominators.csv` |
+| GDACS alerts | `ingestion/config/gdacs.yml` → `enabled` | GDACS public API (`geteventlist`) | Alert start month bucket | `(iso3, hazard, month_start, raw_event_id)` keep latest `as_of` | `data/staging/<period>/raw/gdacs_signals.csv` |
+| EM-DAT impacts | `ingestion/config/emdat.yml` → `enabled` | Licensed EM-DAT CSV/HDX mirror | Linear days-in-month split for spans >14 days | `(iso3, hazard, month_start, raw_event_id, value_type)` | `data/staging/<period>/raw/emdat_pa.csv` |
+| IOM DTM displacement | `ingestion/config/dtm.yml` → `enabled` | File/HDX stock tables | Stock→flow (`diff_nonneg`) with optional admin totals | `(iso3, admin1, month_start, source_id)` | `data/staging/<period>/raw/dtm_displacement.csv` |
+| WorldPop denominators | `ingestion/config/worldpop.yml` → `enabled` | Cached WorldPop national totals | Annual totals (no allocation) | `(iso3, year)` upsert on rerun | `data/staging/<period>/raw/worldpop_denominators.csv` |
 
 ### GDACS severity & EM-DAT allocation rules
 
@@ -75,11 +81,11 @@ To inspect a single connector locally (example: IFRC GO):
 
 ```bash
 python resolver/ingestion/ifrc_go_client.py
-Get-Content resolver/staging/ifrc_go.csv | Select-Object -First 3   # PowerShell
+Get-Content data/staging/<period>/raw/ifrc_go.csv | Select-Object -First 3   # PowerShell
 ```
 
-The smoke tests expect each connector to exit `0`, emit a header-only CSV in
-`resolver/staging/`, and log a clear reason that it is disabled/placeholder/header-only.
+The smoke tests expect each connector to exit `0`, emit a header-only CSV in the active
+staging directory, and log a clear reason that it is disabled/placeholder/header-only.
 
 ## ReliefWeb PDF pipeline (tests & toggles)
 
@@ -91,8 +97,8 @@ The smoke tests expect each connector to exit `0`, emit a header-only CSV in
 
 ### Outputs
 
-- `resolver/staging/reliefweb_pdf.csv` — PDF-derived tier-2 metrics with monthly deltas.
-- `resolver/staging/reliefweb.csv` — API-derived tier-1 metrics.
+- `data/staging/<period>/raw/reliefweb_pdf.csv` — PDF-derived tier-2 metrics with monthly deltas.
+- `data/staging/<period>/raw/reliefweb.csv` — API-derived tier-1 metrics.
 
 ### Testing locally
 
@@ -185,6 +191,7 @@ with real pulls in Epic C.
 
 - Window: last `window_days` for API text extraction and `since_months` for optional PDF backfills.
 - Filters: English language; report/appeal/update formats.
+- Fields: `ingestion/config/reliefweb_fields.yml` enumerates the API field allowlist (the `type` include was removed after ReliefWeb started rejecting it). The client drops anything not in that file and retries once with the allowlist-only set if the API returns "Unrecognized field".
 - Hazards: keyword mapping (conservative, shared by API + PDF parsing).
 - Metrics: API path prefers PIN > PA > cases; PDF path parses `people_in_need`, `people_affected`, and `idps` with table → infographic → narrative precedence.
 - PDFs: `enable_pdfs` toggles attachment parsing. Text extraction auto-falls back to OCR unless `enable_ocr: false`.

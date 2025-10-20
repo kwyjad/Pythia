@@ -19,11 +19,15 @@ import requests
 import yaml
 
 from resolver.tools.denominators import get_population_record, safe_pct_to_people
+from resolver.ingestion.utils.io import resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "hdx.yml"
+
+DATASET_ID = "hdx"
+DEFAULT_OUTPUT = ROOT / "staging" / f"{DATASET_ID}.csv"
 
 COUNTRIES = DATA / "countries.csv"
 SHOCKS = DATA / "shocks.csv"
@@ -727,11 +731,13 @@ def collect_rows() -> List[List[Any]]:
 
 def main() -> None:
     STAGING.mkdir(parents=True, exist_ok=True)
-    out = STAGING / "hdx.csv"
+    out = resolve_output_path(DEFAULT_OUTPUT)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path = out.resolve()
 
     if os.getenv("RESOLVER_SKIP_HDX") == "1":
         pd.DataFrame(columns=COLUMNS).to_csv(out, index=False)
-        print(f"RESOLVER_SKIP_HDX=1 — wrote empty {out}")
+        print(f"[hdx] RESOLVER_SKIP_HDX=1 wrote {resolved_path} rows=0")
         return
 
     try:
@@ -740,13 +746,13 @@ def main() -> None:
         dbg(f"connector failed: {exc}")
         rows = []
 
-    if not rows:
-        pd.DataFrame(columns=COLUMNS).to_csv(out, index=False)
-        print(f"wrote empty {out}")
-        return
+    if rows:
+        frame = pd.DataFrame(rows, columns=COLUMNS)
+    else:
+        frame = pd.DataFrame(columns=COLUMNS)
 
-    pd.DataFrame(rows, columns=COLUMNS).to_csv(out, index=False)
-    print(f"wrote {out} rows={len(rows)}")
+    frame.to_csv(out, index=False)
+    print(f"[hdx] wrote {resolved_path} rows={len(rows)}")
 
 
 if __name__ == "__main__":

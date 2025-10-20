@@ -35,14 +35,15 @@ from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion import _pdf_text as pdf_text_mod
 from resolver.ingestion._pdf_text import smart_extract
 from resolver.ingestion.utils.id_digest import stable_digest
-from resolver.ingestion.utils.io import ensure_headers
+from resolver.ingestion.utils.io import ensure_headers, resolve_output_path
 from resolver.ingestion.utils.month_bucket import month_start
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
-STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "reliefweb.yml"
+FIELDS_CONFIG = ROOT / "ingestion" / "config" / "reliefweb_fields.yml"
 REFERENCE = ROOT / "reference"
+STAGING = ROOT / "staging"
 PDF_CACHE = STAGING / ".cache" / "reliefweb" / "pdf"
 LEVEL_CACHE = STAGING / ".cache" / "reliefweb" / "levels"
 
@@ -110,7 +111,10 @@ PDF_COLUMNS = [
     "ingested_at",
 ]
 
-PDF_OUTPUT = STAGING / "reliefweb_pdf.csv"
+DEFAULT_OUTPUT = ROOT / "staging" / "reliefweb.csv"
+DEFAULT_PDF_OUTPUT = ROOT / "staging" / "reliefweb_pdf.csv"
+OUTPUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
+PDF_OUTPUT = resolve_output_path(DEFAULT_PDF_OUTPUT)
 
 DEFAULT_PPH = 4.5
 PPH_TABLE = REFERENCE / "avg_household_size.csv"
@@ -763,6 +767,44 @@ def load_cfg() -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def load_field_allowlist() -> List[str]:
+    try:
+        with open(FIELDS_CONFIG, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        LOGGER.warning("ReliefWeb field config missing at %s; falling back to defaults", FIELDS_CONFIG)
+        data = {}
+    include = data.get("include", []) if isinstance(data, dict) else []
+    fields: List[str] = []
+    seen: set[str] = set()
+    for raw in include:
+        field = str(raw).strip()
+        if not field or field in seen:
+            continue
+        seen.add(field)
+        fields.append(field)
+    if not fields:
+        # Minimal baseline of required fields; keep in sync with reliefweb_fields.yml
+        fields = [
+            "id",
+            "title",
+            "body",
+            "date.created",
+            "date.original",
+            "date.changed",
+            "url",
+            "source",
+            "format",
+            "disaster_type",
+            "country",
+            "file",
+        ]
+    return fields
+
+
+FIELD_ALLOWLIST = tuple(load_field_allowlist())
+
+
 def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
     countries = pd.read_csv(COUNTRIES, dtype=str).fillna("")
     shocks = pd.read_csv(SHOCKS, dtype=str).fillna("")
@@ -849,6 +891,60 @@ def _is_waf_challenge(resp: requests.Response) -> bool:
     )
 
 
+FIELD_ERROR_PATTERN = re.compile(r"Unrecognized field ['\"](?P<field>[^'\"]+)['\"]", re.I)
+
+
+def _extract_unrecognized_fields(response: requests.Response) -> Tuple[List[str], str]:
+    message = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error_block = payload.get("error") or {}
+        message = (
+            error_block.get("message")
+            or payload.get("message")
+            or json.dumps(payload, sort_keys=True)
+        )
+    else:
+        message = response.text or ""
+    unknown_fields = [match.group("field") for match in FIELD_ERROR_PATTERN.finditer(message)]
+    return unknown_fields, message
+
+
+def _prune_payload_fields(
+    payload: Dict[str, Any],
+    invalid_fields: Iterable[str],
+    allowlist: Iterable[str],
+) -> Tuple[List[str], List[str]]:
+    fields_section = payload.setdefault("fields", {})
+    current = list(fields_section.get("include", []) or [])
+    allowlist_list = list(dict.fromkeys(allowlist))
+    allowlist_set = set(allowlist_list)
+    invalid_set = {str(field) for field in invalid_fields}
+    seen: set[str] = set()
+    cleaned: List[str] = []
+    dropped: List[str] = []
+    for field in current:
+        field_str = str(field)
+        if field_str in invalid_set:
+            dropped.append(field_str)
+            continue
+        if allowlist_set and field_str not in allowlist_set:
+            dropped.append(field_str)
+            continue
+        if field_str in seen:
+            continue
+        seen.add(field_str)
+        cleaned.append(field_str)
+    if not cleaned:
+        fallback = [f for f in allowlist_list if f not in invalid_set] or allowlist_list
+        cleaned = fallback
+    fields_section["include"] = cleaned
+    return cleaned, dropped
+
+
 def rw_request(
     session: requests.Session,
     url: str,
@@ -858,8 +954,19 @@ def rw_request(
     retry_backoff: float,
     timeout: float,
     challenge_tracker: Dict[str, Any],
+    allowed_fields: Optional[Iterable[str]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     last_err: Optional[str] = None
+    allowlist = list(dict.fromkeys(allowed_fields or []))
+    if allowlist:
+        cleaned, dropped = _prune_payload_fields(payload, [], allowlist)
+        if dropped:
+            LOGGER.warning(
+                "ReliefWeb config requested unsupported fields %s; using allowlist subset %s",
+                ", ".join(sorted(set(dropped))),
+                ", ".join(cleaned),
+            )
+    invalid_seen: set[str] = set()
 
     # 0) Connectivity probe (optional; ignore body)
     for attempt in range(1, max_retries + 1):
@@ -921,6 +1028,20 @@ def rw_request(
                     return None, "empty"
                 time.sleep(retry_backoff * attempt + random.uniform(0, 0.5))
                 continue
+            if 400 <= response.status_code < 500 and allowlist:
+                unknown_fields, message_text = _extract_unrecognized_fields(response)
+                if unknown_fields:
+                    prior = set(unknown_fields) - invalid_seen
+                    invalid_seen.update(unknown_fields)
+                    cleaned, _ = _prune_payload_fields(payload, invalid_seen, allowlist)
+                    LOGGER.warning(
+                        "ReliefWeb API rejected field(s) %s (status %s). Retrying with fields %s",
+                        ", ".join(sorted(prior or set(unknown_fields))),
+                        response.status_code,
+                        ", ".join(cleaned),
+                    )
+                    last_err = message_text
+                    continue
             last_err = _dump(response)
             break
         except Exception as exc:  # pragma: no cover - network failure paths
@@ -936,33 +1057,34 @@ def rw_request(
 
     # 2) GET fallback (single flow with retry loop)
     offset = int(payload.get("offset", 0))
-    get_params: List[Tuple[str, str]] = []
-    for field in payload.get("fields", {}).get("include", []):
-        get_params.append(("fields[include][]", field))
-
-    # Date filter
-    get_params.append(("filter[conditions][0][field]", "date.created"))
-    get_params.append(("filter[conditions][0][value][from]", since))
-    # Language filter
-    get_params.append(("filter[conditions][1][field]", "language"))
-    get_params.append(("filter[conditions][1][value]", "en"))
-    # Format filter(s)
-    formats = payload.get("filter", {}).get("conditions", [])
-    format_values: List[str] = []
-    if len(formats) >= 3:
-        format_entry = formats[2]
-        value = format_entry.get("value", []) if isinstance(format_entry, dict) else []
-        if isinstance(value, list):
-            format_values = [str(v) for v in value]
-    get_params.append(("filter[conditions][2][field]", "format"))
-    for fmt in format_values:
-        get_params.append(("filter[conditions][2][value][]", fmt))
-
-    get_params.append(("sort[]", "date.created:desc"))
-    get_params.append(("limit", str(payload.get("limit", 100))))
-    get_params.append(("offset", str(offset)))
 
     for attempt in range(1, max_retries + 1):
+        get_params: List[Tuple[str, str]] = []
+        for field in payload.get("fields", {}).get("include", []):
+            get_params.append(("fields[include][]", field))
+
+        # Date filter
+        get_params.append(("filter[conditions][0][field]", "date.created"))
+        get_params.append(("filter[conditions][0][value][from]", since))
+        # Language filter
+        get_params.append(("filter[conditions][1][field]", "language"))
+        get_params.append(("filter[conditions][1][value]", "en"))
+        # Format filter(s)
+        formats = payload.get("filter", {}).get("conditions", [])
+        format_values: List[str] = []
+        if len(formats) >= 3:
+            format_entry = formats[2]
+            value = format_entry.get("value", []) if isinstance(format_entry, dict) else []
+            if isinstance(value, list):
+                format_values = [str(v) for v in value]
+        get_params.append(("filter[conditions][2][field]", "format"))
+        for fmt in format_values:
+            get_params.append(("filter[conditions][2][value][]", fmt))
+
+        get_params.append(("sort[]", "date.created:desc"))
+        get_params.append(("limit", str(payload.get("limit", 100))))
+        get_params.append(("offset", str(offset)))
+
         try:
             response = session.get(url, params=get_params, timeout=timeout)
         except Exception as exc:  # pragma: no cover - defensive network handling
@@ -978,6 +1100,20 @@ def rw_request(
             except ValueError as exc:  # pragma: no cover - malformed payload
                 last_err = str(exc)
                 break
+        if 400 <= response.status_code < 500 and allowlist:
+            unknown_fields, message_text = _extract_unrecognized_fields(response)
+            if unknown_fields:
+                prior = set(unknown_fields) - invalid_seen
+                invalid_seen.update(unknown_fields)
+                cleaned, _ = _prune_payload_fields(payload, invalid_seen, allowlist)
+                LOGGER.warning(
+                    "ReliefWeb GET rejected field(s) %s (status %s). Retrying with fields %s",
+                    ", ".join(sorted(prior or set(unknown_fields))),
+                    response.status_code,
+                    ", ".join(cleaned),
+                )
+                last_err = message_text
+                continue
         if _is_waf_challenge(response):
             challenge_tracker["count"] += 1
             if DEBUG:
@@ -1010,20 +1146,13 @@ def build_payload(cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     since = (
         dt.datetime.now(dt.UTC) - dt.timedelta(days=int(cfg["window_days"]))
     ).strftime("%Y-%m-%dT00:00:00Z")
-    fields = [
-        "id",
-        "title",
-        "body",
-        "date.created",
-        "date.original",
-        "date.changed",
-        "url",
-        "source",
-        "format",
-        "type",
-        "disaster_type",
-        "country",
-    ]
+    configured_fields = cfg.get("fields", {}).get("include") if isinstance(cfg.get("fields"), dict) else None
+    if configured_fields:
+        fields = [str(field).strip() for field in configured_fields if str(field).strip()]
+    else:
+        fields = list(FIELD_ALLOWLIST)
+    if not fields:
+        fields = list(FIELD_ALLOWLIST)
     payload = {
         "appname": cfg["appname"],
         "filter": {
@@ -1084,6 +1213,7 @@ def make_rows() -> Tuple[List[List[str]], Dict[str, Any]]:
     appname = os.getenv("RELIEFWEB_APPNAME", appname_cfg)
     url = f"{base_url}?appname={appname}"
     payload, since = build_payload(cfg)
+    allowlist = FIELD_ALLOWLIST
     timeout = float(cfg.get("timeout_seconds", 30))
     max_retries = int(cfg.get("max_retries", 6))
     retry_backoff = float(cfg.get("retry_backoff_seconds", 2))
@@ -1106,6 +1236,7 @@ def make_rows() -> Tuple[List[List[str]], Dict[str, Any]]:
             retry_backoff=retry_backoff,
             timeout=timeout,
             challenge_tracker=challenge_tracker,
+            allowed_fields=allowlist,
         )
         if data is None:
             challenge_tracker["mode"] = mode
@@ -1215,7 +1346,9 @@ def main() -> None:
     if os.getenv("RESOLVER_SKIP_RELIEFWEB", "0") == "1":
         print("ReliefWeb connector skipped due to RESOLVER_SKIP_RELIEFWEB=1")
         STAGING.mkdir(parents=True, exist_ok=True)
-        output = STAGING / "reliefweb.csv"
+        output = OUTPUT_PATH
+        output.parent.mkdir(parents=True, exist_ok=True)
+        PDF_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         ensure_headers(output, COLUMNS)
         ensure_headers(PDF_OUTPUT, PDF_COLUMNS)
         ensure_manifest_for_csv(output, source_id="reliefweb_api")
@@ -1224,7 +1357,9 @@ def main() -> None:
         return
 
     STAGING.mkdir(parents=True, exist_ok=True)
-    output = STAGING / "reliefweb.csv"
+    output = OUTPUT_PATH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    PDF_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     try:
         rows, pdf_rows, challenge_tracker = make_rows()
     except RuntimeError as exc:

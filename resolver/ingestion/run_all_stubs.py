@@ -42,6 +42,11 @@ from resolver.ingestion._runner_logging import (
     log_env_summary,
     redact,
 )
+from resolver.ingestion.utils.io import (
+    resolve_output_path,
+    resolve_period_label,
+    resolve_staging_dir,
+)
 
 STAGING = ROOT.parent / "staging"
 CONFIG_DIR = ROOT / "config"
@@ -124,55 +129,97 @@ REAL = [
     "worldpop_client.py",
 ]
 
+CONNECTOR_OUTPUTS: Dict[str, str] = {
+    "ifrc_go_client.py": "ifrc_go.csv",
+    "reliefweb_client.py": "reliefweb.csv",
+    "unhcr_client.py": "unhcr.csv",
+    "unhcr_odp_client.py": "unhcr_odp.csv",
+    "who_phe_client.py": "who_phe.csv",
+    "ipc_client.py": "ipc.csv",
+    "wfp_mvam_client.py": "wfp_mvam.csv",
+    "acled_client.py": "acled.csv",
+    "dtm_client.py": "dtm_displacement.csv",
+    "hdx_client.py": "hdx.csv",
+    "emdat_client.py": "emdat_pa.csv",
+    "gdacs_client.py": "gdacs_signals.csv",
+    "worldpop_client.py": "worldpop_denominators.csv",
+    "ifrc_go_stub.py": "ifrc_go.csv",
+    "reliefweb_stub.py": "reliefweb.csv",
+    "unhcr_stub.py": "unhcr.csv",
+    "hdx_stub.py": "hdx.csv",
+    "who_stub.py": "who.csv",
+    "ipc_stub.py": "ipc.csv",
+    "emdat_stub.py": "emdat.csv",
+    "gdacs_stub.py": "gdacs.csv",
+    "copernicus_stub.py": "copernicus.csv",
+    "unosat_stub.py": "unosat.csv",
+    "acled_stub.py": "acled.csv",
+    "ucdp_stub.py": "ucdp.csv",
+    "fews_stub.py": "fews.csv",
+    "wfp_mvam_stub.py": "wfp_mvam.csv",
+    "gov_ndma_stub.py": "gov_ndma.csv",
+    "dtm_stub.py": "dtm.csv",
+}
+
 SUMMARY_TARGETS = {
-    "who_phe_client.py": {
-        "label": "WHO-PHE",
-        "staging": STAGING / "who_phe.csv",
-        "config": CONFIG_DIR / "who_phe.yml",
+    "ifrc_go_client.py": {
+        "label": "IFRC GO",
+        "filename": CONNECTOR_OUTPUTS["ifrc_go_client.py"],
+        "config": CONFIG_DIR / "ifrc_go.yml",
     },
-    "wfp_mvam_client.py": {
-        "label": "WFP-mVAM",
-        "staging": STAGING / "wfp_mvam.csv",
-        "config": CONFIG_DIR / "wfp_mvam_sources.yml",
-    },
-    "ipc_client.py": {
-        "label": "IPC",
-        "staging": STAGING / "ipc.csv",
-        "config": CONFIG_DIR / "ipc.yml",
+    "reliefweb_client.py": {
+        "label": "ReliefWeb",
+        "filename": CONNECTOR_OUTPUTS["reliefweb_client.py"],
+        "config": CONFIG_DIR / "reliefweb.yml",
     },
     "unhcr_client.py": {
         "label": "UNHCR",
-        "staging": STAGING / "unhcr.csv",
+        "filename": CONNECTOR_OUTPUTS["unhcr_client.py"],
         "config": CONFIG_DIR / "unhcr.yml",
     },
     "unhcr_odp_client.py": {
         "label": "UNHCR-ODP",
-        "staging": STAGING / "unhcr_odp.csv",
+        "filename": CONNECTOR_OUTPUTS["unhcr_odp_client.py"],
         "config": None,
+    },
+    "who_phe_client.py": {
+        "label": "WHO-PHE",
+        "filename": CONNECTOR_OUTPUTS["who_phe_client.py"],
+        "config": CONFIG_DIR / "who_phe.yml",
+    },
+    "ipc_client.py": {
+        "label": "IPC",
+        "filename": CONNECTOR_OUTPUTS["ipc_client.py"],
+        "config": CONFIG_DIR / "ipc.yml",
+    },
+    "wfp_mvam_client.py": {
+        "label": "WFP-mVAM",
+        "filename": CONNECTOR_OUTPUTS["wfp_mvam_client.py"],
+        "config": CONFIG_DIR / "wfp_mvam_sources.yml",
     },
     "acled_client.py": {
         "label": "ACLED",
-        "staging": STAGING / "acled.csv",
+        "filename": CONNECTOR_OUTPUTS["acled_client.py"],
         "config": CONFIG_DIR / "acled.yml",
     },
     "dtm_client.py": {
         "label": "DTM",
-        "staging": STAGING / "dtm_displacement.csv",
+        "filename": CONNECTOR_OUTPUTS["dtm_client.py"],
         "config": CONFIG_DIR / "dtm.yml",
     },
     "gdacs_client.py": {
         "label": "GDACS",
-        "staging": STAGING / "gdacs_signals.csv",
+        "filename": CONNECTOR_OUTPUTS["gdacs_client.py"],
         "config": CONFIG_DIR / "gdacs.yml",
     },
     "emdat_client.py": {
         "label": "EM-DAT",
-        "staging": STAGING / "emdat_pa.csv",
+        "filename": CONNECTOR_OUTPUTS["emdat_client.py"],
         "config": CONFIG_DIR / "emdat.yml",
     },
     "worldpop_client.py": {
         "label": "WorldPop",
-        "staging": STAGING / "worldpop_denominators.csv",
+        "filename": CONNECTOR_OUTPUTS["worldpop_client.py"],
         "config": CONFIG_DIR / "worldpop.yml",
     },
 }
@@ -328,6 +375,8 @@ class ConnectorSpec:
     filename: str
     path: Path
     kind: str
+    origin: str = "config"
+    authoritatively_selected: bool = False
     output_path: Optional[Path] = None
     summary: Optional[str] = None
     skip_reason: Optional[str] = None
@@ -335,10 +384,25 @@ class ConnectorSpec:
     config_path: Optional[Path] = None
     config: Dict[str, object] = field(default_factory=dict)
     canonical_name: str = ""
+    ci_gate_reason: Optional[str] = None
+    selected_by_only: bool = False
+    matched_by_pattern: bool = False
+    enable_decision: EnableDecision | None = None
 
     @property
     def name(self) -> str:
         return self.filename.rsplit(".", 1)[0]
+
+
+@dataclass
+class EnableDecision:
+    should_run: bool
+    gated_by: str
+    forced_sources: tuple[str, ...] = ()
+    config_enabled: bool = False
+    has_config_flag: bool = False
+    applied_skip_reason: Optional[str] = None
+    ci_gate_reason: Optional[str] = None
 
 
 def _load_yaml(path: Optional[Path]) -> dict:
@@ -347,6 +411,43 @@ def _load_yaml(path: Optional[Path]) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     return data if isinstance(data, dict) else {}
+
+
+def _coerce_config_flag(cfg: dict | None) -> tuple[bool, bool]:
+    """Return ``(enabled, has_flag)`` for a connector config mapping."""
+
+    if not isinstance(cfg, dict):
+        return False, False
+    raw = None
+    has_flag = False
+    if "enabled" in cfg:
+        raw = cfg.get("enabled")
+        has_flag = True
+    elif "enable" in cfg:
+        raw = cfg.get("enable")
+        has_flag = True
+    if raw is None:
+        return False, has_flag
+    if isinstance(raw, bool):
+        return raw, has_flag
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"true", "1", "yes", "on"}:
+            return True, has_flag
+        if text in {"false", "0", "no", "off"}:
+            return False, has_flag
+    try:
+        return bool(raw), has_flag
+    except Exception:  # noqa: BLE001 - defensive cast
+        return False, has_flag
+
+
+def is_authoritatively_selected(spec: ConnectorSpec) -> bool:
+    """Return ``True`` when the spec originated from an authoritative list."""
+
+    if getattr(spec, "authoritatively_selected", None) is not None:
+        return bool(spec.authoritatively_selected)
+    return spec.origin in {"real_list", "stub_list"}
 
 
 def _rows_and_method(path: Optional[Path]) -> tuple[int, str]:
@@ -383,12 +484,12 @@ def _rows_and_method(path: Optional[Path]) -> tuple[int, str]:
     return manifest_rows, "manifest"
 
 
-def _summarise_connector(name: str) -> str | None:
+def _summarise_connector(name: str, output_path: Optional[Path]) -> str | None:
     meta = SUMMARY_TARGETS.get(name)
-    if not meta:
+    if not meta or output_path is None:
         return None
     label = meta["label"]
-    rows, method = _rows_and_method(meta["staging"])
+    rows, method = _rows_and_method(output_path)
     parts = [f"[{label}] rows:{rows}"]
     if method in {"recount", "manifest+verified"}:
         parts.append(f"rows_method:{method}")
@@ -461,9 +562,9 @@ def _summarise_connector(name: str) -> str | None:
     return " ".join(parts)
 
 
-def _safe_summary(name: str) -> str | None:
+def _safe_summary(name: str, output_path: Optional[Path]) -> str | None:
     try:
-        summary = _summarise_connector(name)
+        summary = _summarise_connector(name, output_path)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).warning(
             "failed to summarise connector %s", name, exc_info=exc
@@ -508,6 +609,7 @@ def _filter_by_pattern(specs: Sequence[ConnectorSpec], pattern: str) -> List[Con
         regex_hit = bool(regex and any(regex.search(value) for value in identifiers))
         substr_hit = any(pattern_lower in value.lower() for value in identifiers)
         if fnmatch_hit or regex_hit or substr_hit:
+            spec.matched_by_pattern = True
             matched.append(spec)
     return matched
 
@@ -551,35 +653,64 @@ def _build_specs(
     selected: set[str] | None,
     run_real: bool,
     run_stubs: bool,
+    *,
+    real_authoritative: bool = False,
+    stub_authoritative: bool = False,
 ) -> List[ConnectorSpec]:
     specs: List[ConnectorSpec] = []
     if run_real:
+        authoritative_real = real_authoritative and bool(real)
         for filename in real:
             if selected and filename not in selected:
                 continue
-            specs.append(_create_spec(filename, "real"))
+            specs.append(
+                _create_spec(
+                    filename,
+                    "real",
+                    origin="real_list",
+                    authoritatively_selected=authoritative_real,
+                )
+            )
     if run_stubs:
+        authoritative_stubs = stub_authoritative and bool(stubs)
         for filename in stubs:
             if selected and filename not in selected:
                 continue
-            specs.append(_create_spec(filename, "stub"))
+            specs.append(
+                _create_spec(
+                    filename,
+                    "stub",
+                    origin="stub_list",
+                    authoritatively_selected=authoritative_stubs,
+                )
+            )
     return specs
 
 
-def _create_spec(filename: str, kind: str) -> ConnectorSpec:
+def _create_spec(
+    filename: str,
+    kind: str,
+    *,
+    origin: str = "config",
+    authoritatively_selected: bool = False,
+) -> ConnectorSpec:
     path = ROOT / filename
     meta = SUMMARY_TARGETS.get(filename, {})
-    summary = _safe_summary(filename)
-    output_path = meta.get("staging") if isinstance(meta, dict) else None
+    default_filename = CONNECTOR_OUTPUTS.get(filename)
+    output_path: Optional[Path] = None
+    if default_filename:
+        default_path = STAGING / default_filename
+        output_path = resolve_output_path(default_path)
+    summary = _safe_summary(filename, output_path)
     skip_reason = None
-    skip_env = _should_skip(filename)
+    ci_gate_reason = _should_skip(filename)
     if not path.exists():
         skip_reason = f"missing: {filename}"
-    elif skip_env:
-        skip_reason = skip_env
     metadata: Dict[str, str] = {}
     if output_path:
         metadata["output_path"] = str(output_path)
+    if default_filename:
+        metadata["default_filename"] = default_filename
     canonical_name = ff.norm(filename)
     explicit_config = meta.get("config") if isinstance(meta, dict) else None
     explicit_path = explicit_config if isinstance(explicit_config, Path) else None
@@ -601,6 +732,8 @@ def _create_spec(filename: str, kind: str) -> ConnectorSpec:
         filename=filename,
         path=path,
         kind=kind,
+        origin=origin,
+        authoritatively_selected=authoritatively_selected,
         output_path=output_path,
         summary=summary,
         skip_reason=skip_reason,
@@ -608,6 +741,7 @@ def _create_spec(filename: str, kind: str) -> ConnectorSpec:
         config_path=config_path if isinstance(config_path, Path) else None,
         config=cfg if isinstance(cfg, dict) else {},
         canonical_name=canonical_name,
+        ci_gate_reason=ci_gate_reason,
     )
 
 
@@ -679,22 +813,140 @@ def _render_summary_table(rows: List[Dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def _render_output_overview(rows: List[Dict[str, object]]) -> str:
+    headers = ["Output Path", "Rows", "Status"]
+    table_rows: List[List[str]] = []
+    for row in rows:
+        path = row.get("output_path")
+        if not path:
+            continue
+        table_rows.append(
+            [
+                str(path),
+                str(row.get("rows", "")),
+                str(row.get("status", "")),
+            ]
+        )
+    if not table_rows:
+        return ""
+    columns = list(zip(headers, *table_rows))
+    widths = [max(len(str(value)) for value in column) for column in columns]
+    lines = []
+    lines.append(" | ".join(header.ljust(width) for header, width in zip(headers, widths)))
+    lines.append("-+-".join("-" * width for width in widths))
+    for row in table_rows:
+        lines.append(" | ".join(str(value).ljust(width) for value, width in zip(row, widths)))
+    return "\n".join(lines)
+
+
 def _rows_written(before: int, after: int) -> int:
     return max(0, after - before)
+
+
+def _resolve_enablement(
+    spec: ConnectorSpec,
+    *,
+    forced_by_env: bool = False,
+    forced_by_only: bool = False,
+    forced_by_pattern: bool = False,
+) -> EnableDecision:
+    cfg = spec.config if isinstance(spec.config, dict) else {}
+    config_enabled, has_flag = _coerce_config_flag(cfg)
+
+    forced_sources: list[str] = []
+    if forced_by_env:
+        forced_sources.append("env")
+    if forced_by_only:
+        forced_sources.append("only")
+    if forced_by_pattern:
+        forced_sources.append("pattern")
+    forced = bool(forced_sources)
+    authoritative = is_authoritatively_selected(spec)
+
+    if spec.skip_reason:
+        return EnableDecision(
+            should_run=False,
+            gated_by="preexisting_skip",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=None,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if authoritative and not spec.ci_gate_reason:
+        return EnableDecision(
+            should_run=True,
+            gated_by="selected:list",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=None,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if forced:
+        return EnableDecision(
+            should_run=True,
+            gated_by="forced:" + "+".join(forced_sources),
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=None,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if config_enabled and spec.ci_gate_reason:
+        return EnableDecision(
+            should_run=False,
+            gated_by="ci_gate",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=spec.ci_gate_reason,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if not config_enabled:
+        return EnableDecision(
+            should_run=False,
+            gated_by="config",
+            forced_sources=tuple(forced_sources),
+            config_enabled=False,
+            has_config_flag=has_flag,
+            applied_skip_reason="disabled: config",
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if spec.ci_gate_reason:
+        return EnableDecision(
+            should_run=False,
+            gated_by="ci_gate",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=spec.ci_gate_reason,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    return EnableDecision(
+        should_run=True,
+        gated_by="config",
+        forced_sources=tuple(forced_sources),
+        config_enabled=config_enabled,
+        has_config_flag=has_flag,
+        applied_skip_reason=None,
+        ci_gate_reason=spec.ci_gate_reason,
+    )
 
 
 def _run_connector(spec: ConnectorSpec, logger: logging.LoggerAdapter) -> Dict[str, object]:
     start = time.perf_counter()
     rows_before, method_before = _rows_and_method(spec.output_path)
-    cfg_enable: Optional[bool] = None
-    if isinstance(spec.config, dict) and "enable" in spec.config:
-        try:
-            cfg_enable = bool(spec.config.get("enable"))
-        except Exception:  # noqa: BLE001
-            cfg_enable = None
-    if cfg_enable is False:
+    cfg_enabled, has_flag = _coerce_config_flag(spec.config if isinstance(spec.config, dict) else {})
+    if has_flag and not cfg_enabled:
         logger.info(
-            "%s: disabled (header-only).",
+            "%s: disabled in config (override active).",
             spec.name,
             extra={"event": "config_disabled", "connector": spec.name},
         )
@@ -760,7 +1012,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help=(
             "run a single connector by name (matches config/file stem); "
-            "combine with RESOLVER_FORCE_ENABLE=<name> to override enable flags"
+            "combine with RESOLVER_FORCE_ENABLE=<name> to override the enabled flag"
         ),
     )
     parser.add_argument(
@@ -768,7 +1020,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help=(
             "filter connectors by case-insensitive glob/regex/substring before "
-            "enable checks"
+            "enablement checks"
         ),
     )
     parser.add_argument(
@@ -850,6 +1102,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             "run_id": run_id,
         },
     )
+    resolved_output_dir = resolve_staging_dir(STAGING)
+    if "RESOLVER_OUTPUT_DIR" not in os.environ:
+        os.environ["RESOLVER_OUTPUT_DIR"] = str(resolved_output_dir)
+    else:
+        resolved_output_dir = Path(os.environ["RESOLVER_OUTPUT_DIR"]).expanduser()
+    period_label = resolve_period_label()
+    root.info(
+        "resolved staging output",
+        extra={
+            "event": "staging_output",
+            "path": str(resolved_output_dir),
+            "period": period_label,
+        },
+    )
     log_env_summary(root)
     root.info(
         "parsed arguments",
@@ -887,6 +1153,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     real_set = set(real_list)
     stub_set = set(stub_list)
 
+    strict_mode = bool(args.strict)
+    real_mode_selected = ingestion_mode == "real"
+    stub_mode_selected = ingestion_mode == "stubs"
+
+    if real_mode_selected:
+        strict_mode = True
+
     run_real = True
     run_stubs = include_stubs
     if ingestion_mode:
@@ -907,7 +1180,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         run_real = any(name in real_set for name in selected)
         run_stubs = any(name in stub_set for name in selected)
 
-    specs = _build_specs(real_list, stub_list, selected, run_real, run_stubs)
+    specs = _build_specs(
+        real_list,
+        stub_list,
+        selected,
+        run_real,
+        run_stubs,
+        real_authoritative=real_mode_selected,
+        stub_authoritative=stub_mode_selected,
+    )
     root.info(
         "planning run",
         extra={
@@ -923,7 +1204,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if requested:
         specs = [spec for spec in specs if spec.filename in requested]
     if only_target:
-        specs = [spec for spec in specs if spec.canonical_name == only_target]
+        matched_specs: list[ConnectorSpec] = []
+        for spec in specs:
+            if spec.canonical_name == only_target:
+                spec.selected_by_only = True
+                matched_specs.append(spec)
+        specs = matched_specs
         if not specs:
             root.error(
                 "No connector matched --only %s",
@@ -944,46 +1230,80 @@ def main(argv: Optional[List[str]] = None) -> int:
         root.info("No connectors to run", extra={"event": "no_connectors"})
         return 0
 
-    force_overrides = ff.parse_force_enable(os.environ.get("RESOLVER_FORCE_ENABLE", ""))
+    force_raw = (os.getenv("RESOLVER_FORCE_ENABLE", "") or "").strip()
+    raw_force_entries = {entry.strip() for entry in force_raw.split(",") if entry.strip()}
+    normalised_force = {ff.norm(entry) for entry in raw_force_entries if ff.norm(entry)}
     checked_specs: List[ConnectorSpec] = []
     for spec in specs:
-        cfg = spec.config if isinstance(spec.config, dict) else {}
-        has_enable_flag = "enable" in cfg if isinstance(cfg, dict) else False
-        cfg_enable = bool(cfg.get("enable", False)) if has_enable_flag else False
         name_for_flags = spec.canonical_name or ff.norm(spec.name)
-        forced = name_for_flags in force_overrides
-        enabled = forced or cfg_enable or not has_enable_flag
-        gated_by = "forced_by_env" if forced else "config"
-        config_path_text = str(spec.config_path) if spec.config_path else "<none>"
-        log_message = (
-            f"connector={name_for_flags}"
-            f" config_path={config_path_text}"
-            f" enable={'True' if enabled else 'False'}"
-            f" gated_by={gated_by}"
+        filename_stem = Path(spec.filename).stem
+        forced_by_env = (
+            name_for_flags in normalised_force
+            or spec.name in raw_force_entries
+            or filename_stem in raw_force_entries
+            or spec.filename in raw_force_entries
         )
-        if only_target:
-            log_message += " selected_by=only"
+        decision = _resolve_enablement(
+            spec,
+            forced_by_env=forced_by_env,
+            forced_by_only=spec.selected_by_only,
+            forced_by_pattern=spec.matched_by_pattern,
+        )
+        spec.enable_decision = decision
+        if decision.applied_skip_reason and not spec.skip_reason:
+            spec.skip_reason = decision.applied_skip_reason
+        should_run = decision.should_run and not spec.skip_reason
+        config_path_text = str(spec.config_path) if spec.config_path else "<none>"
+        decision_text = "run" if should_run else "skip"
+        forced_label = "env" if forced_by_env else "none"
+        config_enabled_text = "yes" if decision.config_enabled else "no"
+        origin_text = spec.origin or "config"
         root.info(
-            log_message,
+            (
+                "connector=%s config_path=%s decision=%s gated_by=%s "
+                "config_enabled=%s forced_by=%s origin=%s"
+            ),
+            name_for_flags,
+            config_path_text,
+            decision_text,
+            decision.gated_by,
+            config_enabled_text,
+            forced_label,
+            origin_text,
             extra={
                 "event": "enable_check",
                 "connector": name_for_flags,
-                "enabled": enabled,
-                "config_enable": cfg_enable,
-                "forced": forced,
-                "gated_by": gated_by,
+                "decision": decision_text,
+                "gated_by": decision.gated_by,
+                "config_enabled": decision.config_enabled,
+                "has_config_flag": decision.has_config_flag,
+                "forced_sources": list(decision.forced_sources),
+                "forced": bool(decision.forced_sources),
+                "forced_by_env": forced_by_env,
+                "selected_by_only": spec.selected_by_only,
+                "matched_by_pattern": spec.matched_by_pattern,
+                "ci_gate_reason": decision.ci_gate_reason,
                 "config_path": str(spec.config_path) if spec.config_path else None,
-                "has_enable_flag": has_enable_flag,
-                "selected_by": "only" if only_target else None,
+                "skip_reason": redact(spec.skip_reason) if spec.skip_reason else None,
+                "applied_skip_reason": decision.applied_skip_reason,
+                "origin": spec.origin,
+                "authoritatively_selected": is_authoritatively_selected(spec),
             },
         )
-        if has_enable_flag and not enabled and not spec.skip_reason:
-            spec.skip_reason = "disabled: config"
+        legacy_gated_by = "forced_by_env" if forced_by_env else decision.gated_by
+        root.info(
+            "connector=%s config_path=%s enable=%s gated_by=%s",
+            name_for_flags,
+            config_path_text,
+            "True" if should_run else "False",
+            legacy_gated_by,
+        )
         checked_specs.append(spec)
 
     specs = checked_specs
 
     connectors_summary: List[Dict[str, object]] = []
+    had_error = False
     total_start = time.perf_counter()
 
     retries = max(0, args.retries)
@@ -1112,7 +1432,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     notes = f"smoke-warning: {notes}"
             else:
                 child.error("failed", exc_info=exc, extra=log_extra)
+                had_error = True
         finally:
+            if spec.enable_decision and "env" in spec.enable_decision.forced_sources:
+                if notes:
+                    if "forced_by_env" not in notes:
+                        notes = f"{notes}; forced_by_env"
+                else:
+                    notes = "forced_by_env"
+            if is_authoritatively_selected(spec):
+                if notes:
+                    if "selected:list" not in notes:
+                        notes = f"{notes}; selected:list"
+                else:
+                    notes = "selected:list"
             detach_connector_handler(child, handler)
             summary_notes = redact(notes) if notes else None
             root.info(
@@ -1131,6 +1464,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"duration_ms={duration_ms}, notes={summary_notes or '-'}"
             )
             print(summary_line)
+            output_path_text: Optional[str]
+            if spec.output_path:
+                try:
+                    output_path_text = str(spec.output_path.resolve())
+                except OSError:
+                    output_path_text = str(spec.output_path)
+            else:
+                output_path_text = None
             connectors_summary.append(
                 {
                     "name": spec.name,
@@ -1141,12 +1482,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "notes": summary_notes,
                     "kind": spec.kind,
                     "rows_method": result.get("rows_method") if result else None,
+                    "output_path": output_path_text,
                 }
             )
 
     total_duration_ms = int((time.perf_counter() - total_start) * 1000)
     table = _render_summary_table(connectors_summary)
     root.info("Connector summary\n%s", table, extra={"event": "summary_table"})
+    output_table = _render_output_overview(connectors_summary)
+    if output_table:
+        root.info("Output files\n%s", output_table, extra={"event": "output_table"})
     root.info(
         "run complete",
         extra={
@@ -1171,11 +1516,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if entry.get("kind") == "stub" and entry.get("status") == "error"
     )
 
-    if run_real and not run_stubs:
-        return 1 if real_failures else 0
-
-    if args.strict and (real_failures or stub_failures):
+    if strict_mode and had_error:
         return 1
+
+    if run_real and not run_stubs and real_failures:
+        return 1
+
     if fail_on_stub_error and stub_failures:
         return 1
     return 0
