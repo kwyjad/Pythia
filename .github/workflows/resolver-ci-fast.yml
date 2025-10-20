@@ -23,6 +23,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Diagnostics collector sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/actions/collect-diagnostics/collect.sh
+          tmp_env="$(mktemp)"
+          GITHUB_ENV="${tmp_env}" .github/actions/collect-diagnostics/collect.sh test-sanity
+          test -f dist/diag-test-sanity/SUMMARY.md
+          rm -rf dist/diag-test-sanity dist/diagnostics-test-sanity-*
+          rm -f "${tmp_env}"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -68,22 +79,12 @@ jobs:
         with:
           job_name: fast-tests
 
-      - name: Upload diagnostics summary (fast)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: summary-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.SUMMARY_PATH }}
-          if-no-files-found: ignore
-          retention-days: 7
-          overwrite: true
-
       - name: Upload diagnostics artifact (fast)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          path: ${{ env.ARTIFACT_PATH }}
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
@@ -128,10 +129,17 @@ jobs:
           python scripts/ci/consolidate_summaries.py ./downloads ./consolidated || true
 
       - name: Publish consolidated summary to job log
-        if: always()
+        if: ${{ always() && hashFiles('consolidated/SUMMARY.md') != '' }}
+        shell: bash
         run: |
-          if [ -f consolidated/SUMMARY.md ]; then
-            echo "# Aggregated Resolver Summary" >> "$GITHUB_STEP_SUMMARY"
-            cat consolidated/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No consolidated summary produced" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "# Aggregated Resolver Summary"
+            echo
+            cat consolidated/SUMMARY.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Note missing consolidated summary
+        if: ${{ always() && hashFiles('consolidated/SUMMARY.md') == '' }}
+        shell: bash
+        run: |
+          echo "No consolidated summary produced" >> "$GITHUB_STEP_SUMMARY"

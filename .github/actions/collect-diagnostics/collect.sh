@@ -103,13 +103,19 @@ PY
 
 {
   echo "== RESOLVER LOGS =="
-  if [ -d resolver/logs ]; then
-    while IFS= read -r -d '' log_path; do
-      echo "--- ${log_path}"
-      (tail -n 200 "${log_path}" 2>&1 || true)
-    done < <(find resolver/logs -type f -print0)
-  else
+  handled=false
+  for candidate in resolver/logs data/logs; do
+    if [ -d "${candidate}" ]; then
+      handled=true
+      while IFS= read -r -d '' log_path; do
+        echo "--- ${log_path}"
+        (tail -n 200 "${log_path}" 2>&1 || true)
+      done < <(find "${candidate}" -type f -print0)
+    fi
+  done
+  if [ "${handled}" = false ]; then
     echo "resolver/logs missing"
+    echo "data/logs missing"
   fi
 } >"${logs_file}" || true
 
