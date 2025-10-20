@@ -128,7 +128,7 @@ jobs:
                     row_count = 0
                 total += row_count
             print(total)
-PY
+          PY
           )
 
           echo "Canonical rows discovered: ${total_rows}"
