@@ -300,6 +300,16 @@ if [ -f "${gate_rows_breadcrumb}" ]; then
   fi
 fi
 
+append_section "Smoke assertion"
+smoke_assert_source=".ci/diagnostics/smoke-assert.json"
+smoke_assert_dest="${BASE_DIR}/smoke-assert.json"
+if [ -f "${smoke_assert_source}" ]; then
+  cp "${smoke_assert_source}" "${smoke_assert_dest}" 2>/dev/null || true
+  append_code_block "${smoke_assert_dest}" "smoke assertion report unavailable"
+else
+  append_code_block "" "smoke-assert.json not generated"
+fi
+
 append_section "Disk usage snapshot"
 append_code_block "${usage_file}" "disk usage unavailable"
 

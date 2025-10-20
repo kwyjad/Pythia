@@ -96,49 +96,28 @@ jobs:
             --period "${PERIOD_LABEL}" \
             --sources "${SOURCES}"
 
-      - name: Gate canonical row count
+      - name: Validate stub outputs (rows >= 1)
         env:
           PERIOD_LABEL: ci-smoke
+          RESOLVER_STAGING_DIR: data/staging
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .ci/exitcodes
-          CANONICAL_DIR="data/staging/${PERIOD_LABEL}/canonical"
 
-          if [ ! -d "${CANONICAL_DIR}" ]; then
-            echo "exit=2 reason=missing_canonical_dir" > .ci/exitcodes/gate_rows
-            echo "Canonical directory missing: ${CANONICAL_DIR}" >&2
-            exit 2
-          fi
+          set +e
+          python scripts/ci/assert_smoke_outputs.py \
+            --staging "${RESOLVER_STAGING_DIR}" \
+            --period "${PERIOD_LABEL}" \
+            --min-rows 1
+          status=$?
+          set -euo pipefail
 
-          total_rows=$(python - <<'PY'
-            import os
-            from pathlib import Path
-
-            period = os.environ.get("PERIOD_LABEL", "")
-            canonical = Path("data/staging") / period / "canonical"
-            total = 0
-            for csv_path in sorted(canonical.glob("*.csv")):
-                try:
-                    with csv_path.open("r", encoding="utf-8") as handle:
-                        row_count = sum(1 for _ in handle) - 1
-                except Exception:
-                    row_count = 0
-                if row_count < 0:
-                    row_count = 0
-                total += row_count
-            print(total)
-          PY
-          )
-
-          echo "Canonical rows discovered: ${total_rows}"
-
-          if [ "${total_rows}" -ge 1 ]; then
-            echo "exit=0 rows=${total_rows}" > .ci/exitcodes/gate_rows
+          if [ "${status}" -eq 0 ]; then
+            echo "exit=0" > .ci/exitcodes/gate_rows
           else
-            echo "exit=2 rows=${total_rows}" > .ci/exitcodes/gate_rows
-            echo "No canonical rows produced (expected >= 1 for smoke)." >&2
-            exit 2
+            echo "exit=${status}" > .ci/exitcodes/gate_rows
+            exit "${status}"
           fi
 
       - name: Load / derive / export
