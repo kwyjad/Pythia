@@ -291,6 +291,15 @@ append_code_block "${pytest_file}" "pytest did not emit junit XML"
 append_section "Step exit codes"
 append_code_block "${exitcodes_file}" "no exitcode breadcrumbs found"
 
+gate_rows_breadcrumb=".ci/exitcodes/gate_rows"
+if [ -f "${gate_rows_breadcrumb}" ]; then
+  rows_line=$(grep -Eo 'rows=[0-9]+' "${gate_rows_breadcrumb}" | head -n 1 || true)
+  if [ -n "${rows_line}" ]; then
+    rows_value=${rows_line#rows=}
+    printf '\nCanonical row total (gate_rows): %s\n' "${rows_value}" >> "${SUMMARY_MD}"
+  fi
+fi
+
 append_section "Disk usage snapshot"
 append_code_block "${usage_file}" "disk usage unavailable"
 

@@ -55,9 +55,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p .ci/exitcodes
           RAW_DIR="data/staging/${PERIOD_LABEL}/raw"
           mkdir -p "${RAW_DIR}"
+
+          set +e
           python -m resolver.ingestion.ifrc_go_stub --out "${RAW_DIR}"
+          status=$?
+          set -euo pipefail
+
+          if [ "${status}" -eq 0 ]; then
+            echo "exit=0" > .ci/exitcodes/run_stubs
+          else
+            echo "exit=${status}" > .ci/exitcodes/run_stubs
+            echo "IFRC stub failed with exit code ${status}" >&2
+            exit ${status}
+          fi
+
           echo "Raw contents:"
           ls -lh "${RAW_DIR}" || true
 
@@ -81,6 +95,52 @@ jobs:
             --out "data/staging/${PERIOD_LABEL}/canonical" \
             --period "${PERIOD_LABEL}" \
             --sources "${SOURCES}"
+
+      - name: Gate canonical row count
+        env:
+          PERIOD_LABEL: ci-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/exitcodes
+          CANONICAL_DIR="data/staging/${PERIOD_LABEL}/canonical"
+
+          if [ ! -d "${CANONICAL_DIR}" ]; then
+            echo "exit=2 reason=missing_canonical_dir" > .ci/exitcodes/gate_rows
+            echo "Canonical directory missing: ${CANONICAL_DIR}" >&2
+            exit 2
+          fi
+
+          total_rows=$(python - <<'PY'
+import os
+from pathlib import Path
+
+period = os.environ.get("PERIOD_LABEL", "")
+canonical = Path("data/staging") / period / "canonical"
+total = 0
+for csv_path in sorted(canonical.glob("*.csv")):
+    try:
+        with csv_path.open("r", encoding="utf-8") as handle:
+            row_count = sum(1 for _ in handle) - 1
+    except Exception:
+        row_count = 0
+    if row_count < 0:
+        row_count = 0
+    total += row_count
+print(total)
+PY
+          )
+
+          echo "Canonical rows discovered: ${total_rows}"
+
+          if [ "${total_rows}" -ge 1 ]; then
+            echo "exit=0 rows=${total_rows}" > .ci/exitcodes/gate_rows
+          else
+            echo "exit=2 rows=${total_rows}" > .ci/exitcodes/gate_rows
+            echo "No canonical rows produced (expected >= 1 for smoke)." >&2
+            exit 2
+          fi
+
       - name: Load / derive / export
         env:
           PERIOD_LABEL: ci-smoke
@@ -103,10 +163,10 @@ jobs:
 
           if [ -f data/resolver.duckdb ]; then
             echo "DuckDB present"
-            echo "0" > .ci/exitcodes/check_duckdb
+            echo "exit=0" > .ci/exitcodes/check_duckdb
           else
             echo "DuckDB missing (expected in smoke)"
-            echo "0" > .ci/exitcodes/check_duckdb
+            echo "exit=0" > .ci/exitcodes/check_duckdb
           fi
 
           if ls -lh data/snapshots 1>/dev/null 2>&1; then
@@ -114,7 +174,7 @@ jobs:
           else
             echo "data/snapshots missing (allowed in smoke)"
           fi
-          echo "0" > .ci/exitcodes/ls_snapshots
+          echo "exit=0" > .ci/exitcodes/ls_snapshots
 
           logs_present="false"
           if ls -lh resolver/logs 1>/dev/null 2>&1; then
@@ -128,7 +188,7 @@ jobs:
           if [ "${logs_present}" = "false" ]; then
             echo "resolver/data logs missing (allowed in smoke)"
           fi
-          echo "0" > .ci/exitcodes/ls_logs
+          echo "exit=0" > .ci/exitcodes/ls_logs
 
       - name: Collect diagnostics (smoke)
         if: always()

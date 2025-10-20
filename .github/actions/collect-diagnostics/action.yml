@@ -1,5 +1,5 @@
 name: Collect diagnostics
-description: Gather logs and pack diagnostics zip into dist/
+description: Gather logs, staging stats, and exit-code breadcrumbs into dist/
 inputs:
   job_name:
     description: Short job name (e.g., fast-tests, pipeline-smoke)
