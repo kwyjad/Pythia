@@ -27,6 +27,7 @@ jobs:
       RESOLVER_FAIL_ON_STUB_ERROR: "0"
       RESOLVER_DEBUG: "0"
       SMOKE_MIN_ROWS: "1"
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,19 +97,20 @@ jobs:
             --out "data/staging/${PERIOD_LABEL}/canonical" \
             --period "${PERIOD_LABEL}" \
             --sources "${SOURCES}"
+          echo "Canonical contents:"
+          ls -lh "data/staging/${PERIOD_LABEL}/canonical" || true
 
-      - name: Validate stub outputs (rows >= ${{ env.SMOKE_MIN_ROWS }})
+      - name: Smoke assert canonical rowcount
         id: smoke_assert
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .ci/exitcodes .ci/diagnostics
-          canonical_dir="data/staging/${PERIOD_LABEL}/canonical"
+          CANON_DIR="data/staging/${PERIOD_LABEL}/canonical"
 
           set +e
           python scripts/ci/smoke_assert.py \
-            --canonical-dir "${canonical_dir}" \
+            --canonical-dir "${CANON_DIR}" \
             --min-rows "${SMOKE_MIN_ROWS}" \
             --out ".ci/diagnostics/smoke-assert.json"
           status=$?
@@ -116,18 +118,27 @@ jobs:
 
           total_rows="n/a"
           if [ -f .ci/diagnostics/smoke-assert.json ]; then
-            set +e
-            total_rows=$(python -c "import json, pathlib; print(json.loads(pathlib.Path('.ci/diagnostics/smoke-assert.json').read_text(encoding='utf-8')).get('total_rows', 'n/a'))" 2>/dev/null)
-            py_status=$?
-            set -euo pipefail
-            if [ "${py_status}" -ne 0 ] || [ -z "${total_rows}" ]; then
-              total_rows="n/a"
-            fi
+            total_rows=$(python -c "import json, pathlib; print(json.loads(pathlib.Path('.ci/diagnostics/smoke-assert.json').read_text(encoding='utf-8')).get('total_rows', 'n/a'))" 2>/dev/null || echo "n/a")
           fi
 
-          echo "exit=${status} rows=${total_rows} min=${SMOKE_MIN_ROWS}" > .ci/exitcodes/gate_rows
+          rows_numeric=0
+          if printf '%s' "${total_rows}" | grep -Eq '^[0-9]+$'; then
+            rows_numeric="${total_rows}"
+          fi
 
-          exit "${status}"
+          echo "exit=${status} rows=${rows_numeric} min=${SMOKE_MIN_ROWS}" > .ci/exitcodes/gate_rows
+
+          if [ "${status}" -ne 0 ]; then
+            if printf '%s' "${rows_numeric}" | grep -Eq '^[0-9]+$' && [ "${rows_numeric}" -lt "${SMOKE_MIN_ROWS}" ]; then
+              echo "❌ Canonical rowcount ${rows_numeric} < SMOKE_MIN_ROWS=${SMOKE_MIN_ROWS}" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "❌ Smoke assertion failed (exit=${status}); see diagnostics." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit "${status}"
+          fi
+
+          echo "Canonical rows total: ${rows_numeric}"
+          echo "✅ Canonical rowcount OK (${rows_numeric} ≥ ${SMOKE_MIN_ROWS})" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Load / derive / export
         env:
@@ -198,6 +209,18 @@ jobs:
           retention-days: 7
           overwrite: true
 
+      - name: Write AI SUMMARY.md (always)
+        if: always()
+        run: |
+          python scripts/ci/make_ai_summary.py || true
+          if [ -f ".ci/diagnostics/SUMMARY.md" ]; then
+            {
+              echo "# Smoke summary"
+              echo
+              cat .ci/diagnostics/SUMMARY.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload summary mirror (smoke)
         if: always()
         continue-on-error: true
@@ -218,8 +241,6 @@ jobs:
           retention-days: 7
           overwrite: true
 
-      - name: Enforce smoke row threshold
-        if: "${{ steps.smoke_assert.outcome == 'failure' }}"
-        run: |
-          echo "Smoke assertion threshold not met; see diagnostics." >&2
-          exit 2
+      - name: Respect smoke outcome
+        if: ${{ failure() || steps.smoke_assert.outcome == 'failure' }}
+        run: exit 1

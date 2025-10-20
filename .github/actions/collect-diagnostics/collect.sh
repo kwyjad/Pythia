@@ -21,28 +21,36 @@ mkdir -p "${BASE_DIR}" "${DIST_DIR}" \
 SMOKE_ASSERT_SOURCE=".ci/diagnostics/smoke-assert.json"
 SMOKE_TOTAL_ROWS_VALUE=""
 
-if [ "${MODE}" = "smoke" ]; then
+read_smoke_total() {
+  local value
+  local status
   if [ ! -f "${SMOKE_ASSERT_SOURCE}" ]; then
-    set +e
-    python scripts/ci/smoke_assert.py \
-      --canonical-dir "${SMOKE_CANONICAL_DIR}" \
-      --min-rows "${SMOKE_MIN_ROWS}" \
-      --out "${SMOKE_ASSERT_SOURCE}"
-    SMOKE_ASSERT_STATUS=$?
-    set -euo pipefail
-
-    SMOKE_TOTAL_ROWS_VALUE=$(read_smoke_total)
-    echo "exit=${SMOKE_ASSERT_STATUS} rows=${SMOKE_TOTAL_ROWS_VALUE} min=${SMOKE_MIN_ROWS}" > .ci/exitcodes/gate_rows
+    echo "n/a"
+    return
   fi
+  set +e
+  value=$(python - "${SMOKE_ASSERT_SOURCE}" <<'PY'
+import json
+import pathlib
+import sys
 
-  if [ -z "${SMOKE_TOTAL_ROWS_VALUE}" ] && [ -f "${SMOKE_ASSERT_SOURCE}" ]; then
-    SMOKE_TOTAL_ROWS_VALUE=$(read_smoke_total)
-  fi
+path = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(1)
 
-  if [ -z "${SMOKE_TOTAL_ROWS_VALUE}" ]; then
-    SMOKE_TOTAL_ROWS_VALUE="n/a"
+print(payload.get("total_rows", "n/a"))
+PY
+  )
+  status=$?
+  set -euo pipefail
+  if [ "${status}" -ne 0 ] || [ -z "${value}" ]; then
+    echo "n/a"
+  else
+    echo "${value}" | tr -d '\n'
   fi
-fi
+}
 
 append_section() {
   printf '\n## %s\n\n' "$1" >> "${SUMMARY_MD}"
@@ -58,26 +66,15 @@ append_code_block() {
   echo '```' >> "${SUMMARY_MD}"
 }
 
-read_smoke_total() {
-  local value
-  local status
-  set +e
-  value=$(python - <<'PY'
-import json
-from pathlib import Path
-
-payload = json.loads(Path(".ci/diagnostics/smoke-assert.json").read_text(encoding="utf-8"))
-print(payload.get("total_rows", "n/a"))
-PY
-  )
-  status=$?
-  set -euo pipefail
-  if [ "${status}" -ne 0 ] || [ -z "${value}" ]; then
-    echo "n/a"
-  else
-    echo "${value}" | tr -d '\n'
+if [ "${MODE}" = "smoke" ]; then
+  if [ -z "${SMOKE_TOTAL_ROWS_VALUE}" ] && [ -f "${SMOKE_ASSERT_SOURCE}" ]; then
+    SMOKE_TOTAL_ROWS_VALUE=$(read_smoke_total)
   fi
-}
+
+  if [ -z "${SMOKE_TOTAL_ROWS_VALUE}" ]; then
+    SMOKE_TOTAL_ROWS_VALUE="n/a"
+  fi
+fi
 
 versions_file="${BASE_DIR}/versions.txt"
 {
