@@ -3,50 +3,14 @@ description: Gather logs and pack diagnostics zip into dist/
 inputs:
   job_name:
     description: Short job name (e.g., fast-tests, pipeline-smoke)
-    required: true
+    required: false
+    default: job
 runs:
   using: composite
   steps:
-    - name: Collect and pack
+    - name: Run collector
       shell: bash
       run: |
         set -euo pipefail
-        JOB="${{ inputs.job_name }}"
-        RUN_ID="${{ github.run_id }}"
-        RUN_ATTEMPT="${{ github.run_attempt }}"
-
-        mkdir -p dist diagnostics
-
-        # Versions
-        {
-          echo "== VERSIONS =="
-          python -V || true
-          pip --version || true
-          pip freeze || true
-          duckdb --version || true
-          uname -a || true
-        } > diagnostics/versions.txt 2>&1 || true
-
-        # Environment snapshot (limited to important vars)
-        {
-          echo "== IMPORTANT ENVS =="
-          env | grep -E '^(RESOLVER_|PERIOD_LABEL|GITHUB_|RUNNER_OS)' || true
-        } > diagnostics/env.txt 2>&1 || true
-
-        # Git state
-        {
-          echo "== GIT STATE =="
-          git rev-parse HEAD || true
-          git status --porcelain || true
-        } > diagnostics/git.txt 2>&1 || true
-
-        # Data listings
-        { echo "== STAGING =="; ls -R data/staging || true; } > diagnostics/staging.txt 2>&1 || true
-        { echo "== SNAPSHOTS =="; ls -R data/snapshots || true; } > diagnostics/snapshots.txt 2>&1 || true
-
-        # DuckDB quick summary (best-effort)
-        python scripts/ci/duckdb_summary.py > diagnostics/duckdb.txt 2>&1 || true
-
-        ZIP="dist/diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip"
-        (cd diagnostics && zip -rq "../diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip" . || true)
-        echo "ARTIFACT_PATH=${ZIP}" >> "$GITHUB_ENV"
+        DIR="${GITHUB_ACTION_PATH}"
+        bash "$DIR/collect.sh" "${{ inputs.job_name }}"

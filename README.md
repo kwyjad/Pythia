@@ -34,7 +34,7 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 
 ### CI diagnostics & what to share
 
-Every resolver-facing workflow (`resolver-ci-fast`, `resolver-ci`, and `resolver-smoke`) now calls the reusable diagnostics collector so each job publishes exactly one archive named `diagnostics-<job>-<run_id>-<attempt>.zip`. Download the artifact, unzip it, and review the top-level files—`versions.txt`, `env.txt`, `git.txt`, `staging.txt`, `snapshots.txt`, and `duckdb.txt`—for a quick snapshot of the runtime context and resolver outputs. The aggregate workflow still merges per-job summaries, but instead of uploading a second diagnostics pack it writes the consolidated markdown straight to the GitHub Actions job summary, keeping the “Artifacts” list to one entry per job.
+Every resolver-facing workflow (`resolver-ci-fast`, `resolver-ci`, and `resolver-smoke`) now calls the reusable diagnostics collector so each job publishes exactly one archive named `diagnostics-<job>-<run_id>-<attempt>.zip`. In practice you will see `diagnostics-fast-tests-<run>-<attempt>.zip` from the fast matrix and `diagnostics-pipeline-smoke-<run>-<attempt>.zip` from the stubbed pipeline. Download the artifact, unzip it, and review the top-level files—`versions.txt`, `env.txt`, `git.txt`, `staging.txt`, `snapshots.txt`, and `duckdb.txt`—for a quick snapshot of the runtime context and resolver outputs. The aggregate workflow still merges per-job summaries, but instead of uploading a second diagnostics pack it writes the consolidated markdown straight to the GitHub Actions job summary, keeping the “Artifacts” list to one entry per job.
 
 ### Working behind a proxy
 

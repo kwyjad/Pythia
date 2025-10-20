@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
-from _stub_utils import load_registries, now_dates, write_staging
+from ._stub_utils import load_registries, now_dates, write_staging
 
 OUT = Path(__file__).resolve().parents[1] / "staging" / "ifrc_go.csv"
 

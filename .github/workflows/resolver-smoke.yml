@@ -105,8 +105,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ARTIFACT_PATH }}
-          if-no-files-found: error
+          path: dist/diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}.zip
+          if-no-files-found: ignore
           retention-days: 7
           overwrite: true
 
@@ -114,8 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: resolver-smoke-snapshots
-          path: |
-            data/snapshots/${PERIOD_LABEL}/*.parquet
+          path: data/snapshots/${PERIOD_LABEL}/*.parquet
           if-no-files-found: error
           retention-days: 7
           overwrite: true
