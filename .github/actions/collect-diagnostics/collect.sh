@@ -2,6 +2,9 @@
 set -euo pipefail
 
 JOB="${1:-job}"
+MODE="${2:-generic}"
+SMOKE_CANONICAL_DIR="${3:-data/staging/ci-smoke/canonical}"
+SMOKE_MIN_ROWS="${4:-1}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 DIST_DIR="dist"
@@ -15,6 +18,32 @@ mkdir -p "${BASE_DIR}" "${DIST_DIR}" \
   ".ci/diagnostics" \
   ".ci/exitcodes"
 
+SMOKE_ASSERT_SOURCE=".ci/diagnostics/smoke-assert.json"
+SMOKE_TOTAL_ROWS_VALUE=""
+
+if [ "${MODE}" = "smoke" ]; then
+  if [ ! -f "${SMOKE_ASSERT_SOURCE}" ]; then
+    set +e
+    python scripts/ci/smoke_assert.py \
+      --canonical-dir "${SMOKE_CANONICAL_DIR}" \
+      --min-rows "${SMOKE_MIN_ROWS}" \
+      --out "${SMOKE_ASSERT_SOURCE}"
+    SMOKE_ASSERT_STATUS=$?
+    set -euo pipefail
+
+    SMOKE_TOTAL_ROWS_VALUE=$(read_smoke_total)
+    echo "exit=${SMOKE_ASSERT_STATUS} rows=${SMOKE_TOTAL_ROWS_VALUE} min=${SMOKE_MIN_ROWS}" > .ci/exitcodes/gate_rows
+  fi
+
+  if [ -z "${SMOKE_TOTAL_ROWS_VALUE}" ] && [ -f "${SMOKE_ASSERT_SOURCE}" ]; then
+    SMOKE_TOTAL_ROWS_VALUE=$(read_smoke_total)
+  fi
+
+  if [ -z "${SMOKE_TOTAL_ROWS_VALUE}" ]; then
+    SMOKE_TOTAL_ROWS_VALUE="n/a"
+  fi
+fi
+
 append_section() {
   printf '\n## %s\n\n' "$1" >> "${SUMMARY_MD}"
 }
@@ -27,6 +56,27 @@ append_code_block() {
     echo "$2" >> "${SUMMARY_MD}"
   fi
   echo '```' >> "${SUMMARY_MD}"
+}
+
+read_smoke_total() {
+  local value
+  local status
+  set +e
+  value=$(python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path(".ci/diagnostics/smoke-assert.json").read_text(encoding="utf-8"))
+print(payload.get("total_rows", "n/a"))
+PY
+  )
+  status=$?
+  set -euo pipefail
+  if [ "${status}" -ne 0 ] || [ -z "${value}" ]; then
+    echo "n/a"
+  else
+    echo "${value}" | tr -d '\n'
+  fi
 }
 
 versions_file="${BASE_DIR}/versions.txt"
@@ -380,6 +430,17 @@ append_section "Smoke assertion"
 smoke_assert_source=".ci/diagnostics/smoke-assert.json"
 smoke_assert_dest="${BASE_DIR}/smoke-assert.json"
 if [ -f "${smoke_assert_source}" ]; then
+  if [ "${MODE}" = "smoke" ]; then
+    if printf '%s' "${SMOKE_TOTAL_ROWS_VALUE}" | grep -Eq '^[0-9]+$'; then
+      if [ "${SMOKE_TOTAL_ROWS_VALUE}" -ge "${SMOKE_MIN_ROWS}" ] 2>/dev/null; then
+        printf 'Smoke assertion: PASS (rows=%s, min=%s)\n\n' "${SMOKE_TOTAL_ROWS_VALUE}" "${SMOKE_MIN_ROWS}" >> "${SUMMARY_MD}"
+      else
+        printf 'Smoke assertion: FAIL (rows=%s, min=%s)\n\n' "${SMOKE_TOTAL_ROWS_VALUE}" "${SMOKE_MIN_ROWS}" >> "${SUMMARY_MD}"
+      fi
+    else
+      printf 'Smoke assertion: rows=%s, min=%s\n\n' "${SMOKE_TOTAL_ROWS_VALUE}" "${SMOKE_MIN_ROWS}" >> "${SUMMARY_MD}"
+    fi
+  fi
   cp "${smoke_assert_source}" "${smoke_assert_dest}" 2>/dev/null || true
   append_code_block "${smoke_assert_dest}" "smoke assertion report unavailable"
 else
@@ -403,6 +464,16 @@ if [ -n "${GITHUB_ENV:-}" ]; then
     echo "ARTIFACT_PATH=${ZIP_ABS_PATH}"
     echo "SUMMARY_PATH=${SUMMARY_ABS_PATH}"
   } >> "${GITHUB_ENV}"
+fi
+
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  {
+    echo "artifact_path=$(pwd)/${ZIP_PATH}"
+    echo "summary_path=$(pwd)/${SUMMARY_MD}"
+    if [ "${MODE}" = "smoke" ]; then
+      echo "smoke_total_rows=${SMOKE_TOTAL_ROWS_VALUE}"
+    fi
+  } >> "${GITHUB_OUTPUT}"
 fi
 
 exit 0

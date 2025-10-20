@@ -26,6 +26,7 @@ jobs:
       RESOLVER_INGESTION_MODE: stubs
       RESOLVER_FAIL_ON_STUB_ERROR: "0"
       RESOLVER_DEBUG: "0"
+      SMOKE_MIN_ROWS: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,39 +97,37 @@ jobs:
             --period "${PERIOD_LABEL}" \
             --sources "${SOURCES}"
 
-      - name: Validate stub outputs (rows >= 1)
-        env:
-          PERIOD_LABEL: ci-smoke
-          RESOLVER_STAGING_DIR: data/staging
+      - name: Validate stub outputs (rows >= ${{ env.SMOKE_MIN_ROWS }})
+        id: smoke_assert
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .ci/exitcodes
+          mkdir -p .ci/exitcodes .ci/diagnostics
+          canonical_dir="data/staging/${PERIOD_LABEL}/canonical"
 
           set +e
-          python scripts/ci/assert_smoke_outputs.py \
-            --staging "${RESOLVER_STAGING_DIR}" \
-            --period "${PERIOD_LABEL}" \
-            --min-rows 1
+          python scripts/ci/smoke_assert.py \
+            --canonical-dir "${canonical_dir}" \
+            --min-rows "${SMOKE_MIN_ROWS}" \
+            --out ".ci/diagnostics/smoke-assert.json"
           status=$?
           set -euo pipefail
 
           total_rows="n/a"
           if [ -f .ci/diagnostics/smoke-assert.json ]; then
-            total_rows=$(python - <<'PY' 2>/dev/null || echo "n/a")
-            import json
-            from pathlib import Path
-
-            payload = json.loads(Path(".ci/diagnostics/smoke-assert.json").read_text(encoding="utf-8"))
-            print(payload.get("total_rows", "n/a"))
-            PY
+            set +e
+            total_rows=$(python -c "import json, pathlib; print(json.loads(pathlib.Path('.ci/diagnostics/smoke-assert.json').read_text(encoding='utf-8')).get('total_rows', 'n/a'))" 2>/dev/null)
+            py_status=$?
+            set -euo pipefail
+            if [ "${py_status}" -ne 0 ] || [ -z "${total_rows}" ]; then
+              total_rows="n/a"
+            fi
           fi
 
-          echo "exit=${status} rows=${total_rows}" > .ci/exitcodes/gate_rows
+          echo "exit=${status} rows=${total_rows} min=${SMOKE_MIN_ROWS}" > .ci/exitcodes/gate_rows
 
-          if [ "${status}" -ne 0 ]; then
-            exit "${status}"
-          fi
+          exit "${status}"
 
       - name: Load / derive / export
         env:
@@ -181,9 +180,13 @@ jobs:
 
       - name: Collect diagnostics (smoke)
         if: always()
+        id: collect_smoke
         uses: ./.github/actions/collect-diagnostics
         with:
           job_name: pipeline-smoke
+          mode: smoke
+          smoke_min_rows: ${{ env.SMOKE_MIN_ROWS }}
+          smoke_canonical_dir: "data/staging/${{ env.PERIOD_LABEL }}/canonical"
 
       - name: Upload diagnostics (smoke)
         if: always()
@@ -214,3 +217,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
           overwrite: true
+
+      - name: Enforce smoke row threshold
+        if: "${{ steps.smoke_assert.outcome == 'failure' }}"
+        run: |
+          echo "Smoke assertion threshold not met; see diagnostics." >&2
+          exit 2

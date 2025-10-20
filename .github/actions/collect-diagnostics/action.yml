@@ -5,12 +5,39 @@ inputs:
     description: Short job name (e.g., fast-tests, pipeline-smoke)
     required: false
     default: job
+  mode:
+    description: Collection mode (generic or smoke)
+    required: false
+    default: generic
+  smoke_min_rows:
+    description: Minimum canonical rows required when mode=smoke
+    required: false
+    default: "1"
+  smoke_canonical_dir:
+    description: Canonical directory inspected when mode=smoke
+    required: false
+    default: data/staging/ci-smoke/canonical
+outputs:
+  artifact_path:
+    description: Absolute path to the diagnostics archive
+    value: ${{ steps.collect.outputs.artifact_path }}
+  summary_path:
+    description: Absolute path to the generated SUMMARY.md
+    value: ${{ steps.collect.outputs.summary_path }}
+  smoke_total_rows:
+    description: Total canonical rows observed when mode=smoke
+    value: ${{ steps.collect.outputs.smoke_total_rows }}
 runs:
   using: composite
   steps:
     - name: Run collector
+      id: collect
       shell: bash
       run: |
         set -euo pipefail
         DIR="${GITHUB_ACTION_PATH}"
-        bash "$DIR/collect.sh" "${{ inputs.job_name }}"
+        bash "$DIR/collect.sh" \
+          "${{ inputs.job_name }}" \
+          "${{ inputs.mode }}" \
+          "${{ inputs.smoke_canonical_dir }}" \
+          "${{ inputs.smoke_min_rows }}"

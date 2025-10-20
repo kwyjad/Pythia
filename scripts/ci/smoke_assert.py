@@ -1,4 +1,5 @@
-"""CI helper to verify stub-based smoke outputs contain data rows."""
+"""Validate smoke canonical outputs contain the expected number of data rows."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,13 +9,8 @@ from pathlib import Path
 from typing import Iterable
 
 
-def count_rows_excluding_header(csv_path: Path) -> int:
-    """Return the number of non-empty records in ``csv_path``.
-
-    The header row is ignored and trailing blank lines are skipped so the
-    resulting total matches the markdown quick stats produced by diagnostics.
-    Missing or unreadable files yield ``0``.
-    """
+def count_rows(csv_path: Path) -> int:
+    """Return the number of non-empty data rows in ``csv_path``."""
 
     try:
         with csv_path.open(newline="", encoding="utf-8") as handle:
@@ -33,21 +29,23 @@ def count_rows_excluding_header(csv_path: Path) -> int:
 
 
 def build_report(canonical_dir: Path) -> dict[str, object]:
-    """Collect row counts for CSVs below ``canonical_dir``."""
+    """Build the smoke assertion payload for ``canonical_dir``."""
 
     files: list[dict[str, object]] = []
     total_rows = 0
+
     if canonical_dir.exists():
         for csv_path in sorted(canonical_dir.glob("*.csv")):
-            rows = count_rows_excluding_header(csv_path)
+            rows = count_rows(csv_path)
             total_rows += rows
             files.append({
                 "path": str(csv_path.resolve()),
                 "rows": rows,
             })
 
+    resolved_dir = canonical_dir.resolve() if canonical_dir.exists() else canonical_dir
     return {
-        "canonical_dir": str(canonical_dir.resolve()) if canonical_dir.exists() else str(canonical_dir),
+        "canonical_dir": str(resolved_dir),
         "files": files,
         "total_rows": total_rows,
     }
@@ -57,19 +55,31 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Assert smoke canonical outputs contain data rows",
     )
-    parser.add_argument("--staging", type=Path, required=True, help="Base staging directory")
-    parser.add_argument("--period", required=True, help="Resolver period label")
-    parser.add_argument("--min-rows", type=int, default=1, help="Minimum total canonical rows required")
+    parser.add_argument(
+        "--canonical-dir",
+        type=Path,
+        required=True,
+        help="Canonical directory containing stubbed CSVs",
+    )
+    parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=1,
+        help="Minimum total canonical rows required for success",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path(".ci/diagnostics/smoke-assert.json"),
+        help="Path to the JSON report written for diagnostics",
+    )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    canonical_dir = (args.staging / args.period / "canonical").resolve()
-    report = build_report(canonical_dir)
+    report = build_report(args.canonical_dir)
 
-    diagnostics_dir = Path(".ci/diagnostics")
-    diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    report_path = diagnostics_dir / "smoke-assert.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(
         "SMOKE: canonical rows total={total} (min={minimum}) in {count} file(s)".format(
@@ -78,9 +88,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             count=len(report["files"]),
         )
     )
-    print(f"Report written to {report_path}")
+    print(f"Report written to {args.out}")
 
-    return 0 if report["total_rows"] >= args.min_rows else 1
+    return 0 if report["total_rows"] >= args.min_rows else 2
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised in CI
