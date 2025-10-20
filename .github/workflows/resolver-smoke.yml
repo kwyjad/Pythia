@@ -112,22 +112,22 @@ jobs:
           fi
 
           total_rows=$(python - <<'PY'
-import os
-from pathlib import Path
+            import os
+            from pathlib import Path
 
-period = os.environ.get("PERIOD_LABEL", "")
-canonical = Path("data/staging") / period / "canonical"
-total = 0
-for csv_path in sorted(canonical.glob("*.csv")):
-    try:
-        with csv_path.open("r", encoding="utf-8") as handle:
-            row_count = sum(1 for _ in handle) - 1
-    except Exception:
-        row_count = 0
-    if row_count < 0:
-        row_count = 0
-    total += row_count
-print(total)
+            period = os.environ.get("PERIOD_LABEL", "")
+            canonical = Path("data/staging") / period / "canonical"
+            total = 0
+            for csv_path in sorted(canonical.glob("*.csv")):
+                try:
+                    with csv_path.open("r", encoding="utf-8") as handle:
+                        row_count = sum(1 for _ in handle) - 1
+                except Exception:
+                    row_count = 0
+                if row_count < 0:
+                    row_count = 0
+                total += row_count
+            print(total)
 PY
           )
 
