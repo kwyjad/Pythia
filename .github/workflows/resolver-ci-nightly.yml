@@ -246,6 +246,9 @@ jobs:
       RESOLVER_API_BACKEND: db
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
       RESOLVER_LOG_LEVEL: DEBUG
+      PYTEST_ADDOPTS: "-vv -ra --maxfail=1 --durations=25 --durations-min=1.0"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -333,6 +336,12 @@ jobs:
           echo "mode=fallback" >>"$GITHUB_OUTPUT"
           exit 0
 
+      - name: Ensure test utilities for diagnostics
+        if: steps.dbfiles.outputs.present == 'true'
+        run: |
+          python -m pip install -U pytest pytest-timeout pytest-xdist
+          mkdir -p logs
+
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
         run: |
@@ -346,6 +355,22 @@ jobs:
           print("✅ DuckDB installed:", duckdb.__version__)
           PY
 
+      - name: Snapshot environment
+        if: steps.dbfiles.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          python -V | tee logs/python_version.txt
+          python -c "import duckdb,sys;print(getattr(duckdb, '__version__', 'unknown'))" | tee logs/duckdb_version.txt || true
+          pytest --version | tee logs/pytest_version.txt
+          pip freeze | tee logs/pip_freeze.txt
+          python - <<'PY' | tee logs/repo_tree.txt
+import pathlib
+p = pathlib.Path('.')
+print('CWD:', p.resolve())
+print('Files:', len(list(p.rglob('*'))))
+PY
+
       - name: Show environment
         if: steps.dbfiles.outputs.present == 'true'
         run: |
@@ -354,107 +379,192 @@ jobs:
           echo "BACKEND=$RESOLVER_API_BACKEND"
           echo "DB_URL=$RESOLVER_DB_URL"
 
-      - name: Run DB tests
+      - name: Run full test suite (nightly)
         id: run_db_tests
         if: steps.dbfiles.outputs.present == 'true'
         continue-on-error: true
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           INSTALL_MODE: ${{ steps.robust_install.outputs.mode }}
-          PYTEST_ADDOPTS: "-vv --maxfail=1 -o log_cli=true -o log_cli_level=INFO --durations=25"
         run: |
           set -euo pipefail
+          mkdir -p logs
           echo "Resolved install mode: ${INSTALL_MODE:-unset}"
           if [ "${INSTALL_MODE}" = "fallback" ]; then
             export PYTHONPATH="${PYTHONPATH:-$GITHUB_WORKSPACE}"
             echo "Using fallback install mode; PYTHONPATH=$PYTHONPATH"
           fi
 
-          echo "Collecting DB-focused tests (resolver/tests)..."
+          PYTEST_JUNIT="logs/pytest-nightly.junit.xml"
+          PYTEST_LOG="logs/pytest-nightly.log"
+
+          if [ ! -d resolver/tests ]; then
+            echo "resolver/tests directory missing; skipping pytest run."
+            printf '%s\n' "0" > logs/pytest-exit-code.txt
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Nightly pytest summary"
+              echo
+              echo "Exit code: 0"
+              echo
+              echo "_resolver/tests not found; pytest run skipped._"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "Collecting resolver test inventory"
           python - <<'PY'
-            from pathlib import Path
+import pathlib
+root = pathlib.Path("resolver/tests")
+if not root.exists():
+    print("resolver/tests directory missing; nothing to run")
+    raise SystemExit(0)
+tests = sorted(str(path) for path in root.rglob("test_*.py"))
+print(f"Discovered {len(tests)} test file(s)")
+for path in tests:
+    print(f" - {path}")
+PY
 
-            root = Path("resolver/tests")
-            if not root.exists():
-                print("resolver/tests directory missing")
-                raise SystemExit(0)
-
-            patterns = ["test_db_parity.py", "test_duckdb_idempotency.py"]
-            tests = []
-            for pattern in patterns:
-                tests.extend(sorted(str(p) for p in root.rglob(pattern)))
-
-            print(f"Matched {len(tests)} test file(s)")
-            for path in tests:
-                print(f" - {path}")
-          PY
-
-          echo "Pre-test resource snapshot"
-          ulimit -a || true
-          free -h || true
-          df -h || true
-          ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 20 || true
-
-          echo "Running pytest (timeout 20m)"
+          TEST_RC=0
           set +e
-          timeout --preserve-status 20m pytest resolver/tests -k "db_parity or duckdb_idempotency" 2>&1 | tee "pytest-${SAFE_SUFFIX}.log"
-          pytest_rc=${PIPESTATUS[0]}
+          (pytest resolver/tests \
+                  -n auto \
+                  --timeout=180 --timeout-method=thread \
+                  --junitxml="${PYTEST_JUNIT}" \
+            2>&1 | tee "${PYTEST_LOG}")
+          TEST_RC=${PIPESTATUS[0]}
           set -e
-          echo "pytest exit code: ${pytest_rc}"
-          printf '%s\n' "${pytest_rc}" > pytest_rc.txt
+          printf '%s\n' "${TEST_RC}" > logs/pytest-exit-code.txt
+          echo "exit_code=${TEST_RC}" >> "$GITHUB_OUTPUT"
 
-          echo "Post-test resource snapshot"
-          ps -eo pid,ppid,cmd,%mem,%cpu --sort=-%mem | head -n 20 || true
+          {
+            echo "## Nightly pytest summary"
+            echo
+            echo "Exit code: ${TEST_RC}"
+            echo
+            if [ -f "${PYTEST_LOG}" ]; then
+              echo "<details><summary>Last 200 lines of log</summary>"
+              tail -n 200 "${PYTEST_LOG}" | sed 's/^/    /'
+              echo "</details>"
+            else
+              echo "_Pytest log not found._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "exit_code=${pytest_rc}" >> "$GITHUB_OUTPUT"
-          exit "${pytest_rc}"
+          exit "${TEST_RC}"
 
-      - name: Upload DB test logs
-        if: always() && steps.dbfiles.outputs.present == 'true'
+      - name: DB parity/idempotency tests (if present)
+        id: run_db_parity
+        if: steps.dbfiles.outputs.present == 'true' && hashFiles('resolver/tests/test_db_parity.py','resolver/tests/test_duckdb_idempotency.py') != ''
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          INSTALL_MODE: ${{ steps.robust_install.outputs.mode }}
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          if [ "${INSTALL_MODE}" = "fallback" ]; then
+            export PYTHONPATH="${PYTHONPATH:-$GITHUB_WORKSPACE}"
+            echo "Using fallback install mode for DB parity run; PYTHONPATH=$PYTHONPATH"
+          fi
+
+          PYTEST_JUNIT="logs/pytest-db.junit.xml"
+          DB_LOG="logs/pytest-db.log"
+          DB_RC=0
+          set +e
+          (pytest resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py \
+                  -n auto \
+                  --timeout=120 --timeout-method=thread \
+                  --junitxml="${PYTEST_JUNIT}" \
+            2>&1 | tee "${DB_LOG}")
+          DB_RC=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "${DB_RC}" > logs/pytest-db-exit-code.txt
+          echo "exit_code=${DB_RC}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## DB tests summary"
+            echo
+            echo "Exit code: ${DB_RC}"
+            echo
+            if [ -f "${DB_LOG}" ]; then
+              echo "<details><summary>Last 200 lines of DB log</summary>"
+              tail -n 200 "${DB_LOG}" | sed 's/^/    /'
+              echo "</details>"
+            else
+              echo "_Pytest DB log not found._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "${DB_RC}"
+
+      - name: Always upload nightly artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: db-tests-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
-          path: |
-            pytest-${{ env.SAFE_SUFFIX }}.log
-            pytest_rc.txt
-            .pytest_cache
-            .ci-resolver.duckdb
-            resolver/.coverage
+          name: nightly-artifacts-${{ env.SAFE_SUFFIX || 'nightly' }}-${{ github.job }}-attempt${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 14
+          path: |
+            logs/**
+            **/*.junit.xml
+            .ci-resolver.duckdb
+            resolver/logs/ingestion/**
+            resolver/exports/**
+            resolver/staging/**
+            **/pytest-*.log
+            **/parity_mismatch_expected.csv
+            **/parity_mismatch_db.csv
+            **/parity_mismatch_cell_diffs.csv
 
-      - name: Debug snapshot (always)
-        if: always() && steps.dbfiles.outputs.present == 'true'
+      - name: Evaluate pytest outcomes
+        if: ${{ steps.dbfiles.outputs.present == 'true' }}
+        env:
+          MAIN_EXIT: ${{ steps.run_db_tests.outputs.exit_code }}
+          DB_EXIT: ${{ steps.run_db_parity.outputs.exit_code }}
         run: |
-          python -V
-          uname -a
-          free -h || true
-          df -h || true
+          python - <<'PY'
+import os
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
 
-      - name: Respect DB test result
-        if: ${{ always() && steps.dbfiles.outputs.present == 'true' }}
-        run: |
-          outcome="${{ steps.run_db_tests.outcome }}"
-          exit_code="${{ steps.run_db_tests.outputs.exit_code }}"
-          if [ -z "${exit_code}" ]; then
-            exit_code="unknown"
-          fi
-          if [ "${outcome}" = "failure" ]; then
-            echo "Detected pytest failure (exit code ${exit_code})."
-            exit 1
-          fi
+issues = []
+
+def has_failures(path: pathlib.Path, label: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        tree = ET.parse(path)
+    except ET.ParseError as exc:  # pragma: no cover - diagnostics only
+        issues.append(f"{label}: unable to parse {path} ({exc})")
+        return True
+    total = 0
+    for suite in tree.iter("testsuite"):
+        total += int(suite.attrib.get("failures", "0")) + int(suite.attrib.get("errors", "0"))
+    if total:
+        issues.append(f"{label}: {total} recorded failure/error cases in {path}")
+        return True
+    return False
+
+main_exit = (os.environ.get("MAIN_EXIT") or "").strip()
+db_exit = (os.environ.get("DB_EXIT") or "").strip()
+
+has_failures(pathlib.Path("logs/pytest-nightly.junit.xml"), "nightly suite")
+has_failures(pathlib.Path("logs/pytest-db.junit.xml"), "db parity suite")
+
+if main_exit and main_exit != "0":
+    issues.append(f"nightly pytest exited with {main_exit}")
+if db_exit and db_exit != "0":
+    issues.append(f"db parity pytest exited with {db_exit}")
+
+if issues:
+    print("\n".join(issues))
+    sys.exit(1)
+
+print("All pytest runs reported success.")
+PY
 
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'
         run: echo "::notice ::Skipping DB tests (files not present in this repo/branch)."
-      - name: Upload DB parity diagnostics
-        if: steps.dbfiles.outputs.present == 'true' && steps.run_db_tests.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: db-parity-diagnostics-${{ env.SAFE_SUFFIX }}-${{ github.job }}-attempt${{ github.run_attempt }}
-          path: |
-            **/parity_mismatch_expected.csv
-            **/parity_mismatch_db.csv
-            **/parity_mismatch_cell_diffs.csv
-          if-no-files-found: ignore
-          overwrite: true
