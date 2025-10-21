@@ -47,15 +47,46 @@ jobs:
           if [ -f resolver/requirements.txt ]; then pip install -r resolver/requirements.txt; fi
           pip install pytest 'duckdb>=1.0,<2.0'
 
+      - name: Ensure CI helpers are executable
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/run_and_capture.sh || true
+
       - name: Snapshot environment (pip freeze)
         run: |
           bash scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
+
+      - name: Import probes (python, pytest, duckdb)
+        run: |
+          bash scripts/ci/run_and_capture.sh import-probes "python - <<'PY'
+import sys, os
+print('Python:', sys.version)
+try:
+    import pytest
+    print('Pytest:', getattr(pytest, '__version__', 'unknown'))
+except Exception as exc:
+    print('Pytest import failed:', exc)
+try:
+    import duckdb
+    print('DuckDB:', duckdb.__version__)
+except Exception as exc:
+    print('DuckDB import failed:', exc)
+print('sys.executable:', sys.executable)
+print('PATH:', os.environ.get('PATH', ''))
+PY"
 
       - name: Pytest (with JUnit)
         id: tests
         continue-on-error: true
         run: |
+          # Collect report (fast) for debugging missing-test scenarios
+          bash scripts/ci/run_and_capture.sh pytest-collect "pytest -q resolver/tests -k 'not slow and not nightly' --collect-only"
+          # Timings for the slowest tests can be handy even on fast runs
+          bash scripts/ci/run_and_capture.sh pytest-durations "pytest -q resolver/tests -k 'not slow and not nightly' --maxfail=1 --durations=25 -x || true"
+          # Real run with JUnit
           bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml .ci/diagnostics/pytest-junit.xml"
+          # Mirror JUnit to legacy root filename for collectors that expect it there
+          if [ -f .ci/diagnostics/pytest-junit.xml ]; then cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml; fi
 
       - name: Post-test housekeeping
         if: always()
@@ -79,6 +110,7 @@ jobs:
         uses: ./.github/actions/collect-diagnostics
         with:
           job_name: fast-tests
+          # No schema change; ensure expected files exist in both locations.
 
       - name: Upload diagnostics artifact (fast)
         if: always()

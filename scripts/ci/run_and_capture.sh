@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a command, teeing its output to diagnostics logs and capturing exit codes.
+# Run a command, teeing stdout/stderr into diagnostics and recording an exitcode breadcrumb.
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -8,12 +8,12 @@ if [ "$#" -lt 2 ]; then
 fi
 
 step_name="$1"; shift
-if [ -z "$step_name" ]; then
+if [ -z "${step_name:-}" ]; then
   echo "step_name must be non-empty" >&2
   exit 2
 fi
 
-sanitized_step=$(printf '%s' "$step_name" | tr ' /:\\' '____')
+sanitized_step="$(printf '%s' "$step_name" | tr ' /:\\' '____')"
 diag_dir=".ci/diagnostics"
 exit_dir=".ci/exitcodes"
 mkdir -p "$diag_dir" "$exit_dir"
@@ -32,12 +32,14 @@ bash -o pipefail -c "$cmd" \
 status=$?
 set -euo pipefail
 
+# Combine logs (stderr first) and write a short tail for the SUMMARY.
 : > "$combined_log"
-[ -f "$stderr_log" ] && cat "$stderr_log" >> "$combined_log"
-[ -f "$stdout_log" ] && cat "$stdout_log" >> "$combined_log"
-
-{ [ -f "$stderr_log" ] && cat "$stderr_log"; [ -f "$stdout_log" ] && cat "$stdout_log"; } \
-  | tail -n 120 > "$tail_log" || true
+[ -s "$stderr_log" ] && cat "$stderr_log" >> "$combined_log"
+[ -s "$stdout_log" ] && cat "$stdout_log" >> "$combined_log"
+{
+  [ -s "$stderr_log" ] && cat "$stderr_log"
+  [ -s "$stdout_log" ] && cat "$stdout_log"
+} | tail -n 200 > "$tail_log" || true
 
 printf 'exit=%s\n' "$status" > "${exit_dir}/${sanitized_step}"
 exit "$status"
