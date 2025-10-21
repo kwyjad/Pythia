@@ -84,10 +84,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ARTIFACT_PATH }}
-          if-no-files-found: ignore
+          path: ${{ env.ARTIFACT_PATH }}/**
+          if-no-files-found: warn
           retention-days: 7
-          overwrite: true
 
       - name: Respect test outcome
         if: ${{ always() && steps.tests.outcome == 'failure' }}
@@ -106,18 +105,27 @@ jobs:
         with:
           path: ./downloads
 
-      - name: Expand diagnostics archives
+      - name: Prepare diagnostics summaries
         run: |
           set -euo pipefail
-          find ./downloads -name 'diagnostics-*.zip' -print0 | while IFS= read -r -d '' archive; do
-            artifact_dir="$(dirname "$archive")"
-            if [ "$(basename "$artifact_dir")" = "dist" ]; then
-              artifact_dir="$(dirname "$artifact_dir")"
+          for artifact_dir in ./downloads/*; do
+            [ -d "$artifact_dir" ] || continue
+
+            # Support legacy nested ZIPs if they exist
+            find "$artifact_dir" -maxdepth 1 -type f -name 'diagnostics-*.zip' -print0 |
+              while IFS= read -r -d '' archive; do
+                expand_dir="$artifact_dir/expanded"
+                mkdir -p "$expand_dir"
+                unzip -o "$archive" -d "$expand_dir" >/dev/null || true
+              done
+
+            summary_path=""
+            if [ -f "$artifact_dir/SUMMARY.md" ]; then
+              summary_path="$artifact_dir/SUMMARY.md"
+            else
+              summary_path=$(find "$artifact_dir" -maxdepth 5 -type f -name 'SUMMARY.md' -print -quit || true)
             fi
-            expand_dir="$artifact_dir/expanded"
-            mkdir -p "$expand_dir"
-            unzip -o "$archive" -d "$expand_dir" >/dev/null || true
-            summary_path=$(find "$expand_dir" -maxdepth 4 -name 'SUMMARY.md' -print -quit)
+
             if [ -n "$summary_path" ]; then
               mkdir -p "$artifact_dir/.ci/diagnostics"
               cp "$summary_path" "$artifact_dir/.ci/diagnostics/SUMMARY.md"

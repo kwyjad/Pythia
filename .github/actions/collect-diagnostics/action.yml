@@ -19,7 +19,7 @@ inputs:
     default: data/staging/ci-smoke/canonical
 outputs:
   artifact_path:
-    description: Absolute path to the diagnostics archive
+    description: Absolute path to the diagnostics directory
     value: ${{ steps.collect.outputs.artifact_path }}
   summary_path:
     description: Absolute path to the generated SUMMARY.md

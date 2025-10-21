@@ -8,11 +8,10 @@ SMOKE_MIN_ROWS="${4:-1}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 DIST_DIR="dist"
-BASE_DIR="${DIST_DIR}/diag-${JOB}"
+BASE_DIR="${DIST_DIR}/diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}"
 SUMMARY_MD="${BASE_DIR}/SUMMARY.md"
-ZIP_NAME="diagnostics-${JOB}-${RUN_ID}-${RUN_ATTEMPT}.zip"
-ZIP_PATH="${DIST_DIR}/${ZIP_NAME}"
 
+rm -rf "${BASE_DIR}"
 mkdir -p "${BASE_DIR}" "${DIST_DIR}" \
   ".ci" \
   ".ci/diagnostics" \
@@ -447,25 +446,24 @@ fi
 append_section "Disk usage snapshot"
 append_code_block "${usage_file}" "disk usage unavailable"
 
+mkdir -p "${BASE_DIR}/.ci/diagnostics" 2>/dev/null || true
 cp "${SUMMARY_MD}" ".ci/diagnostics/${JOB}.SUMMARY.md" 2>/dev/null || true
-
-pushd "${DIST_DIR}" >/dev/null
-rm -f "${ZIP_NAME}"
-zip -qr "${ZIP_NAME}" "${BASE_DIR##${DIST_DIR}/}" || true
-popd >/dev/null
+cp "${SUMMARY_MD}" ".ci/diagnostics/SUMMARY.md" 2>/dev/null || true
+cp "${SUMMARY_MD}" "${BASE_DIR}/.ci/diagnostics/SUMMARY.md" 2>/dev/null || true
 
 if [ -n "${GITHUB_ENV:-}" ]; then
-  ZIP_ABS_PATH="$(pwd)/${ZIP_PATH}"
   SUMMARY_ABS_PATH="$(pwd)/${SUMMARY_MD}"
+  ARTIFACT_ABS_PATH="$(pwd)/${BASE_DIR}"
   {
-    echo "ARTIFACT_PATH=${ZIP_ABS_PATH}"
+    echo "ARTIFACT_PATH=${BASE_DIR}"
+    echo "ARTIFACT_PATH_ABS=${ARTIFACT_ABS_PATH}"
     echo "SUMMARY_PATH=${SUMMARY_ABS_PATH}"
   } >> "${GITHUB_ENV}"
 fi
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {
-    echo "artifact_path=$(pwd)/${ZIP_PATH}"
+    echo "artifact_path=$(pwd)/${BASE_DIR}"
     echo "summary_path=$(pwd)/${SUMMARY_MD}"
     if [ "${MODE}" = "smoke" ]; then
       echo "smoke_total_rows=${SMOKE_TOTAL_ROWS_VALUE}"

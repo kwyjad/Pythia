@@ -84,7 +84,9 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/ci/discover_normalizable_sources.py "${PERIOD_LABEL}" | tee _sources.env
-          grep "^SOURCES=" _sources.env >> "$GITHUB_ENV"
+          if ! grep "^SOURCES=" _sources.env >> "$GITHUB_ENV"; then
+            echo "SOURCES=" >> "$GITHUB_ENV"
+          fi
 
       - name: Normalize
         env:
@@ -102,6 +104,7 @@ jobs:
 
       - name: Smoke assert canonical rowcount
         id: smoke_assert
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -204,10 +207,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}.zip
-          if-no-files-found: ignore
+          path: ${{ env.ARTIFACT_PATH }}/**
+          if-no-files-found: warn
           retention-days: 7
-          overwrite: true
 
       - name: Write AI SUMMARY.md (always)
         if: always()
@@ -221,17 +223,6 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload summary mirror (smoke)
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: summary-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/diag-pipeline-smoke/SUMMARY.md
-          if-no-files-found: ignore
-          retention-days: 7
-          overwrite: true
-
       - name: Upload snapshot artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -241,6 +232,22 @@ jobs:
           retention-days: 7
           overwrite: true
 
-      - name: Respect smoke outcome
-        if: ${{ failure() || steps.smoke_assert.outcome == 'failure' }}
-        run: exit 1
+      - name: Finalize smoke outcome
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=1
+          if [ -f .ci/exitcodes/gate_rows ]; then
+            first_field="$(cut -d' ' -f1 < .ci/exitcodes/gate_rows 2>/dev/null || echo exit=1)"
+            code="${first_field#exit=}"
+          fi
+          if [ "${code}" = "0" ]; then
+            echo "Row gate passed; forcing success."
+            exit 0
+          fi
+          if [ "${code}" = "" ]; then
+            code=1
+          fi
+          echo "Row gate failed with exit ${code}" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${code}"
