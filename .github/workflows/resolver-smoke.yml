@@ -20,8 +20,6 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUNBUFFERED: "1"
-      PERIOD_LABEL: ci-smoke
-      RESOLVER_PERIOD: ci-smoke
       RESOLVER_STAGING_DIR: data/staging
       RESOLVER_INGESTION_MODE: stubs
       RESOLVER_FAIL_ON_STUB_ERROR: "0"
@@ -31,6 +29,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Determine quarterly period label
+        run: |
+          set -euo pipefail
+          YEAR=$(date -u +%Y)
+          MON=$(date -u +%m)
+          Q=$(( (10#$MON + 2) / 3 ))
+          LABEL="${YEAR}Q${Q}"
+          {
+            echo "PERIOD_LABEL=${LABEL}"
+            echo "RESOLVER_PERIOD=${LABEL}"
+          } >> "$GITHUB_ENV"
+          echo "Using resolver period ${LABEL}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,6 +56,10 @@ jobs:
           pip install -r resolver/requirements.txt
           pip install 'duckdb>=1.0,<2.0'
 
+      - name: Snapshot environment (pip freeze)
+        run: |
+          scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
+
       - name: Reset staging directories
         run: |
           set -euo pipefail
@@ -52,8 +67,6 @@ jobs:
           rm -rf "data/snapshots/${PERIOD_LABEL}"
 
       - name: Prepare raw staging (stubs)
-        env:
-          PERIOD_LABEL: ci-smoke
         shell: bash
         run: |
           set -euo pipefail
@@ -78,8 +91,6 @@ jobs:
           ls -lh "${RAW_DIR}" || true
 
       - name: Discover normalizable sources
-        env:
-          PERIOD_LABEL: ci-smoke
         shell: bash
         run: |
           set -euo pipefail
@@ -89,18 +100,18 @@ jobs:
           fi
 
       - name: Normalize
-        env:
-          PERIOD_LABEL: ci-smoke
-          SOURCES: ${{ env.SOURCES }}
         run: |
-          set -euo pipefail
-          python -m resolver.transform.normalize \
-            --in "data/staging/${PERIOD_LABEL}/raw" \
-            --out "data/staging/${PERIOD_LABEL}/canonical" \
-            --period "${PERIOD_LABEL}" \
-            --sources "${SOURCES}"
-          echo "Canonical contents:"
-          ls -lh "data/staging/${PERIOD_LABEL}/canonical" || true
+          scripts/ci/run_and_capture.sh normalize "python -m resolver.transform.normalize \
+            --in \"data/staging/${PERIOD_LABEL}/raw\" \
+            --out \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --period \"${PERIOD_LABEL}\" \
+            --sources \"${SOURCES}\""
+
+      - name: Canonical listing
+        run: |
+          scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py \
+            --dir \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --out \".ci/diagnostics/canonical-listing.txt\""
 
       - name: Smoke assert canonical rowcount
         id: smoke_assert
@@ -144,17 +155,18 @@ jobs:
           echo "✅ Canonical rowcount OK (${rows_numeric} ≥ ${SMOKE_MIN_ROWS})" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Load / derive / export
-        env:
-          PERIOD_LABEL: ci-smoke
         run: |
-          set -euo pipefail
-          python -m resolver.tools.load_and_derive load-canonical \
-            --in "data/staging/${PERIOD_LABEL}/canonical"
-          python -m resolver.tools.load_and_derive derive-deltas \
-            --period "${PERIOD_LABEL}" --allow-negatives 1
-          python -m resolver.tools.load_and_derive export \
-            --period "${PERIOD_LABEL}" --format parquet \
-            --out "data/snapshots/${PERIOD_LABEL}"
+          scripts/ci/run_and_capture.sh lda-all "python -m resolver.tools.load_and_derive \
+            --period \"${PERIOD_LABEL}\" \
+            --staging-root data/staging \
+            --snapshots-root data/snapshots \
+            --db data/resolver.duckdb \
+            --allow-negatives 1"
+
+      - name: DuckDB table counts (optional)
+        if: always()
+        run: |
+          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt"
 
       - name: Optional smoke checks
         if: always()

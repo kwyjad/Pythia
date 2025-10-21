@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import logging
 import os
 import re
@@ -45,10 +46,18 @@ class PeriodMonths:
 
     @classmethod
     def from_label(cls, label: str) -> "PeriodMonths":
-        match = re.fullmatch(r"(\d{4})Q([1-4])", label.strip())
+        normalized = label.strip()
+        match = re.fullmatch(r"(\d{4})Q([1-4])", normalized)
         if not match:
+            if re.match(r"(?i)^(ci|dev|test)", normalized):
+                now = dt.datetime.now(dt.timezone.utc)
+                quarter = (now.month - 1) // 3 + 1
+                alias_label = f"{now.year}Q{quarter}"
+                return cls.from_label(alias_label)
             raise ValueError(
-                "--period must match YYYYQ#, e.g. 2025Q3; got %r" % (label,)
+                "Invalid --period label %r. Expected format YYYYQ#, e.g. 2025Q4. "
+                "Labels starting with 'ci', 'dev', or 'test' are mapped to the "
+                "current UTC quarter." % (label,)
             )
         year = int(match.group(1))
         quarter = int(match.group(2))
@@ -57,7 +66,7 @@ class PeriodMonths:
             f"{year}-{month:02d}"
             for month in range(start_month, start_month + 3)
         )
-        return cls(label=label, months=months)
+        return cls(label=f"{year}Q{quarter}", months=months)
 
 
 def _configure_logging(verbose: bool) -> None:

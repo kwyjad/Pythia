@@ -12,10 +12,9 @@ import json
 import os
 import platform
 import re
-import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 import xml.etree.ElementTree as ET
 
@@ -70,39 +69,23 @@ def _gather_metadata() -> str:
     return "\n".join(lines)
 
 
-def _run_command(args: Sequence[str]) -> Tuple[int, str]:
-    try:
-        result = subprocess.run(
-            list(args),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-        output = stdout
-        if stderr:
-            output = stdout + ("\n" if stdout else "") + f"[stderr]\n{stderr}"
-        return result.returncode, output
-    except Exception as exc:  # pragma: no cover - defensive
-        return 1, f"Command {args} failed: {exc}"
-
-
-def _gather_environment() -> str:
+def _gather_environment(diag_root: Path) -> str:
     lines = ["## Environment", ""]
     uname = platform.platform()
     python = sys.version.replace("\n", " ")
     lines.append(f"- **OS:** {uname}")
     lines.append(f"- **Python:** {python}")
 
-    retcode, pip_freeze = _run_command((sys.executable, "-m", "pip", "freeze"))
-    if retcode != 0:
-        lines.append("- **pip freeze:** failed to execute")
-        lines.append("\n````text\n" + pip_freeze + "\n````")
+    pip_freeze_path = diag_root / "pip-freeze.txt"
+    if pip_freeze_path.exists():
+        content = pip_freeze_path.read_text(encoding="utf-8", errors="replace").strip()
+        if content:
+            lines.append("- **pip freeze:** captured from diagnostics")
+            lines.append("\n````text\n" + content + "\n````")
+        else:
+            lines.append("- **pip freeze:** file present but empty")
     else:
-        lines.append("- **pip freeze:**")
-        lines.append("\n````text\n" + (pip_freeze or "(no packages)") + "\n````")
+        lines.append("- **pip freeze:** not present in diagnostics")
 
     try:
         import duckdb  # type: ignore
@@ -217,10 +200,41 @@ def _parse_pytest_results(junit_path: Path) -> Dict[str, object]:
     return stats
 
 
-def _render_pytest_summary(junit_path: Optional[Path]) -> str:
+def _extract_pytest_failure_names(diag_root: Path, limit: int = 10) -> List[str]:
+    candidates: List[str] = []
+    seen = set()
+    for tail_path in sorted(diag_root.glob("pytest-*.tail.txt")):
+        try:
+            text = tail_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("FAILED "):
+                continue
+            remainder = stripped[len("FAILED "):]
+            name = remainder.split(" - ", 1)[0].strip()
+            if not name:
+                continue
+            if name not in seen:
+                candidates.append(name)
+                seen.add(name)
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _render_pytest_summary(diag_root: Path) -> str:
     lines = ["## Pytest Summary", ""]
-    if not junit_path or not junit_path.exists():
-        lines.append("No pytest JUnit report found (expected `pytest-junit.xml`).")
+    junit_path = diag_root / "pytest-junit.xml"
+    if not junit_path.exists():
+        lines.append("No pytest JUnit report found (expected `.ci/diagnostics/pytest-junit.xml`).")
+        failures = _extract_pytest_failure_names(diag_root)
+        if failures:
+            lines.append("")
+            lines.append("Potential failing tests inferred from pytest output:")
+            for name in failures:
+                lines.append(f"- {name}")
         lines.append("")
         return "\n".join(lines)
 
@@ -419,16 +433,168 @@ def _tail_repo_logs(root: Path) -> str:
     return "\n".join(lines)
 
 
-def build_summary(root: Path) -> str:
+def _render_command_tails(diag_root: Path) -> str:
+    lines = ["## Command Tails", ""]
+    tail_files = sorted(diag_root.glob("*.tail.txt"))
+    if not tail_files:
+        lines.append("No command tail files captured.")
+        lines.append("")
+        return "\n".join(lines)
+
+    for tail_path in tail_files:
+        try:
+            content = tail_path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception as exc:
+            lines.append(f"### {tail_path.name}\n\nFailed to read tail file: {exc}\n")
+            continue
+        title = tail_path.name.replace(".tail.txt", "")
+        lines.append(f"### {title}")
+        lines.append("")
+        if content:
+            lines.append("````text")
+            lines.append(content)
+            lines.append("````")
+        else:
+            lines.append("(no output captured)")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _read_json_payload(report_path: Path) -> Dict[str, object] | None:
+    try:
+        lines = report_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+    for idx, line in enumerate(lines):
+        if line.strip().startswith("{"):
+            text = "\n".join(lines[idx:])
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(payload, dict):
+                return payload
+            return None
+    return None
+
+
+def _render_canonical_listing(diag_root: Path) -> str:
+    lines = ["## Canonical Listing", ""]
+    report = diag_root / "canonical-listing.txt"
+    if not report.exists():
+        lines.append("Canonical listing report not present.")
+        lines.append("")
+        return "\n".join(lines)
+
+    payload = _read_json_payload(report)
+    if not payload:
+        lines.append(f"Could not parse canonical listing payload from `{report}`.")
+        lines.append("")
+        return "\n".join(lines)
+
+    directory = payload.get("directory", "(unknown)")
+    exists = payload.get("exists")
+    total_rows = payload.get("total_rows", "n/a")
+    unknown_counts = payload.get("unknown_row_counts", 0)
+    files = payload.get("files", [])
+    lines.append(f"- Directory: `{directory}`")
+    lines.append(f"- Exists: {exists}")
+    lines.append(f"- Files listed: {len(files) if isinstance(files, list) else 'n/a'}")
+    lines.append(f"- Total rows: {total_rows}")
+    if isinstance(unknown_counts, int) and unknown_counts:
+        lines.append(f"- Files with unknown row count: {unknown_counts}")
+    lines.append(f"- Detailed report: `{report}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_duckdb_counts(diag_root: Path) -> str:
+    lines = ["## DuckDB Table Counts", ""]
+    report = diag_root / "duckdb-counts.txt"
+    if not report.exists():
+        lines.append("DuckDB counts report not present.")
+        lines.append("")
+        return "\n".join(lines)
+
+    payload = _read_json_payload(report)
+    if not payload:
+        lines.append(f"Could not parse DuckDB counts payload from `{report}`.")
+        lines.append("")
+        return "\n".join(lines)
+
+    lines.append(f"- Database: `{payload.get('database', '(unknown)')}`")
+    exists = payload.get("exists")
+    lines.append(f"- Exists: {exists}")
+    tables = payload.get("tables", {})
+    if isinstance(tables, dict) and tables:
+        lines.append("")
+        lines.append("| Table | Rows | Note |")
+        lines.append("| --- | --- | --- |")
+        for name, info in sorted(tables.items()):
+            if isinstance(info, dict):
+                rows = info.get("rows")
+                note = info.get("error") if info.get("error") else ""
+                exists_flag = info.get("exists")
+            else:
+                rows = "n/a"
+                note = ""
+                exists_flag = False
+            if not exists_flag:
+                note = (note + "; " if note else "") + "missing"
+            lines.append(f"| `{name}` | {rows if rows is not None else 'n/a'} | {note} |")
+    else:
+        lines.append("- No matching `facts_` tables enumerated.")
+    lines.append("")
+    lines.append(f"- Detailed report: `{report}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_exit_codes(exit_root: Path) -> str:
+    lines = ["## Exit Code Breadcrumbs", ""]
+    if not exit_root.exists():
+        lines.append("No exit codes captured.")
+        lines.append("")
+        return "\n".join(lines)
+
+    files = sorted(p for p in exit_root.iterdir() if p.is_file())
+    if not files:
+        lines.append("No exit code files present.")
+        lines.append("")
+        return "\n".join(lines)
+
+    lines.append("| Step | Exit | Details |")
+    lines.append("| --- | --- | --- |")
+    for path in files:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception as exc:
+            lines.append(f"| `{path.name}` | n/a | failed to read ({exc}) |")
+            continue
+        match = re.search(r"exit=([-0-9]+)", content)
+        exit_value = match.group(1) if match else "n/a"
+        details = content.replace("\n", " ")
+        lines.append(f"| `{path.name}` | {exit_value} | {details} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_summary(repo_root: Path) -> str:
+    diag_root = SUMMARY_DIR if SUMMARY_DIR.exists() else repo_root
+    exit_root = Path(".ci/exitcodes")
+
     parts: List[str] = []
     parts.append(_gather_metadata())
-    parts.append(_gather_environment())
+    parts.append(_gather_environment(diag_root))
     parts.append(_gather_workflow_context())
-    junit_path = root / "pytest-junit.xml"
-    parts.append(_render_pytest_summary(junit_path if junit_path.exists() else None))
-    parts.append(_gather_logs(root))
-    parts.append(_inspect_duckdb(root))
-    parts.append(_tail_repo_logs(root))
+    parts.append(_render_pytest_summary(diag_root))
+    parts.append(_render_command_tails(diag_root))
+    parts.append(_render_canonical_listing(diag_root))
+    parts.append(_render_duckdb_counts(diag_root))
+    parts.append(_render_exit_codes(exit_root))
+    parts.append(_gather_logs(diag_root))
+    parts.append(_inspect_duckdb(repo_root))
+    parts.append(_tail_repo_logs(repo_root))
     parts.append("## Known Issues / Heuristics\n\n- Pending analysis.")
     return "\n".join(parts) + "\n"
 
