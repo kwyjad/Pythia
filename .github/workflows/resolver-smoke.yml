@@ -45,6 +45,10 @@ jobs:
           pip install -r resolver/requirements.txt
           pip install 'duckdb>=1.0,<2.0'
 
+      - name: Snapshot environment (pip freeze)
+        run: |
+          scripts/ci/run_and_capture.sh pip-freeze "pip freeze > .ci/diagnostics/pip-freeze.txt"
+
       - name: Reset staging directories
         run: |
           set -euo pipefail
@@ -93,14 +97,17 @@ jobs:
           PERIOD_LABEL: ci-smoke
           SOURCES: ${{ env.SOURCES }}
         run: |
-          set -euo pipefail
-          python -m resolver.transform.normalize \
-            --in "data/staging/${PERIOD_LABEL}/raw" \
-            --out "data/staging/${PERIOD_LABEL}/canonical" \
-            --period "${PERIOD_LABEL}" \
-            --sources "${SOURCES}"
-          echo "Canonical contents:"
-          ls -lh "data/staging/${PERIOD_LABEL}/canonical" || true
+          scripts/ci/run_and_capture.sh normalize "python -m resolver.transform.normalize \
+            --in \"data/staging/${PERIOD_LABEL}/raw\" \
+            --out \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --period \"${PERIOD_LABEL}\" \
+            --sources \"${SOURCES}\""
+
+      - name: Canonical listing
+        run: |
+          scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py \
+            --dir \"data/staging/${{ env.PERIOD_LABEL }}/canonical\" \
+            --out \".ci/diagnostics/canonical-listing.txt\""
 
       - name: Smoke assert canonical rowcount
         id: smoke_assert
@@ -147,14 +154,21 @@ jobs:
         env:
           PERIOD_LABEL: ci-smoke
         run: |
-          set -euo pipefail
-          python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" load-canonical \
-            --in "data/staging/${PERIOD_LABEL}/canonical"
-          python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" derive-deltas \
-            --allow-negatives 1
-          python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" export \
+          scripts/ci/run_and_capture.sh lda-load "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" load-canonical \
+            --in \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --db \"data/resolver.duckdb\""
+          scripts/ci/run_and_capture.sh lda-derive "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" derive-deltas \
+            --allow-negatives 1 \
+            --db \"data/resolver.duckdb\""
+          scripts/ci/run_and_capture.sh lda-export "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" export \
             --format parquet \
-            --out "data/snapshots/${PERIOD_LABEL}"
+            --out \"data/snapshots/${PERIOD_LABEL}\" \
+            --db \"data/resolver.duckdb\""
+
+      - name: DuckDB table counts (optional)
+        if: always()
+        run: |
+          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt || true"
 
       - name: Optional smoke checks
         if: always()

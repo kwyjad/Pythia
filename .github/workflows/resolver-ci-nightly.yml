@@ -122,10 +122,11 @@ jobs:
         env:
           RESOLVER_FAIL_ON_STUB_ERROR: "0"
         run: |
-          python -m resolver.ingestion.run_all_stubs --mode real --only ${{ matrix.connector }} --log-level INFO --log-format json
+          scripts/ci/run_and_capture.sh connector-${{ matrix.connector }} "python -m resolver.ingestion.run_all_stubs --mode real --only ${{ matrix.connector }} --log-level INFO --log-format json"
       - name: Run staging schema tests
         if: steps.dbfiles.outputs.present == 'true'
-        run: pytest -q resolver/tests/test_staging_schema_all.py
+        run: |
+          scripts/ci/run_and_capture.sh staging-schema "pytest -q resolver/tests/test_staging_schema_all.py"
       - name: Record job status
         if: always()
         env:
@@ -342,6 +343,11 @@ jobs:
           python -m pip install -U pytest pytest-timeout pytest-xdist
           mkdir -p logs
 
+      - name: Snapshot environment (pip freeze)
+        if: steps.dbfiles.outputs.present == 'true'
+        run: |
+          scripts/ci/run_and_capture.sh pip-freeze-nightly "pip freeze > .ci/diagnostics/pip-freeze.txt"
+
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
         run: |
@@ -518,6 +524,16 @@ jobs:
             **/parity_mismatch_expected.csv
             **/parity_mismatch_db.csv
             **/parity_mismatch_cell_diffs.csv
+
+      - name: Canonical listing snapshot
+        if: always()
+        run: |
+          scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py --dir data/staging --out .ci/diagnostics/canonical-listing.txt || true"
+
+      - name: DuckDB table counts (optional)
+        if: always()
+        run: |
+          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db .ci-resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt || true"
 
       - name: Evaluate pytest outcomes
         if: ${{ steps.dbfiles.outputs.present == 'true' }}
