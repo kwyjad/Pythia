@@ -1,3 +1,4 @@
+```bash
 #!/usr/bin/env bash
 # Run a command, teeing its output to diagnostics logs and capturing exit codes.
 set -euo pipefail
@@ -33,25 +34,12 @@ bash -o pipefail -c "$cmd" \
 status=$?
 set -euo pipefail
 
-# Combine logs for compatibility with older tooling.
-if [ -f "$stderr_log" ] || [ -f "$stdout_log" ]; then
-  : > "$combined_log"
-  if [ -f "$stderr_log" ]; then
-    cat "$stderr_log" >> "$combined_log"
-  fi
-  if [ -f "$stdout_log" ]; then
-    cat "$stdout_log" >> "$combined_log"
-  fi
-  # Produce a tail snapshot (stderr first, then stdout) limited to the last 120 lines.
-  {
-    [ -f "$stderr_log" ] && cat "$stderr_log"
-    [ -f "$stdout_log" ] && cat "$stdout_log"
-  } | tail -n 120 > "$tail_log" || true
-else
-  : > "$combined_log"
-  : > "$tail_log"
-fi
+: > "$combined_log"
+[ -f "$stderr_log" ] && cat "$stderr_log" >> "$combined_log"
+[ -f "$stdout_log" ] && cat "$stdout_log" >> "$combined_log"
+
+{ [ -f "$stderr_log" ] && cat "$stderr_log"; [ -f "$stdout_log" ] && cat "$stdout_log"; } \
+  | tail -n 120 > "$tail_log" || true
 
 printf 'exit=%s\n' "$status" > "${exit_dir}/${sanitized_step}"
-
 exit "$status"

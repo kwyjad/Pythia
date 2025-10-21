@@ -156,17 +156,21 @@ jobs:
 
       - name: Load / derive / export
         run: |
-          scripts/ci/run_and_capture.sh lda-all "python -m resolver.tools.load_and_derive \
-            --period \"${PERIOD_LABEL}\" \
-            --staging-root data/staging \
-            --snapshots-root data/snapshots \
-            --db data/resolver.duckdb \
-            --allow-negatives 1"
+          scripts/ci/run_and_capture.sh lda-load "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" load-canonical \
+            --in \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --db \"data/resolver.duckdb\""
+          scripts/ci/run_and_capture.sh lda-derive "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" derive-deltas \
+            --allow-negatives 1 \
+            --db \"data/resolver.duckdb\""
+          scripts/ci/run_and_capture.sh lda-export "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" export \
+            --format parquet \
+            --out \"data/snapshots/${PERIOD_LABEL}\" \
+            --db \"data/resolver.duckdb\""
 
       - name: DuckDB table counts (optional)
         if: always()
         run: |
-          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt"
+          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt || true"
 
       - name: Optional smoke checks
         if: always()

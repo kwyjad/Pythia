@@ -103,14 +103,12 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             info["exists"] = True
             try:
-                count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                rows = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                lines.append(f"{table}: {int(rows)} rows")
+                info["rows"] = int(rows)
             except Exception as exc:  # pragma: no cover - diagnostics only
                 lines.append(f"{table}: failed to count rows ({exc})")
                 info["error"] = str(exc)
-            else:
-                rows = int(count)
-                lines.append(f"{table}: {rows} rows")
-                info["rows"] = rows
             payload["tables"][table] = info
     finally:
         try:
