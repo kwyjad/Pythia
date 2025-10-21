@@ -72,18 +72,56 @@ jobs:
           print('PATH:', os.environ.get('PATH', ''))
           PY"
 
+      - name: Show test tree
+        run: |
+          set -euo pipefail
+          echo "== resolver/tests tree =="
+          if [ -d resolver/tests ]; then
+            find resolver/tests -maxdepth 2 -type f -name 'test_*.py' | sort | sed 's/^/ - /'
+          else
+            echo "resolver/tests missing"
+          fi
+
       - name: Pytest (with JUnit)
         id: tests
         continue-on-error: true
         run: |
-          # Show what would run
-          bash scripts/ci/run_and_capture.sh pytest-collect "pytest -q resolver/tests -k 'not slow and not nightly' --collect-only"
-          # Timings
-          bash scripts/ci/run_and_capture.sh pytest-durations "pytest -q resolver/tests -k 'not slow and not nightly' --maxfail=1 --durations=25 -x || true"
-          # Real run with JUnit
+          set -euo pipefail
+
+          # Collect-only (always allowed to fail non-fatally but we still want logs)
+          if ! bash scripts/ci/run_and_capture.sh pytest-collect "pytest -q resolver/tests -k 'not slow and not nightly' --collect-only"; then
+            echo "pytest --collect-only failed (non-fatal for diagnostics)" >&2
+          fi
+
+          # Durations (non-fatal)
+          if ! bash scripts/ci/run_and_capture.sh pytest-durations "pytest -q resolver/tests -k 'not slow and not nightly' --maxfail=1 --durations=25 -x"; then
+            echo "pytest --durations failed (non-fatal)" >&2
+          fi
+
+          # Real run with JUnit (this one we care about)
           bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml .ci/diagnostics/pytest-junit.xml"
-          # Mirror to legacy root for collectors that expect it
-          [ -f .ci/diagnostics/pytest-junit.xml ] && cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml || true
+
+          # Mirror to legacy root filename for collectors that still look there
+          if [ -f .ci/diagnostics/pytest-junit.xml ]; then
+            cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml
+          fi
+
+      - name: Verify imports (python, pytest, duckdb)
+        run: |
+          python - <<'PY'
+          import sys
+          print('Python:', sys.version)
+          try:
+              import pytest
+              print('Pytest:', getattr(pytest, '__version__', 'unknown'))
+          except Exception as exc:
+              print('Pytest import failed:', exc)
+          try:
+              import duckdb
+              print('DuckDB:', duckdb.__version__)
+          except Exception as exc:
+              print('DuckDB import failed:', exc)
+          PY
 
       - name: Post-test housekeeping
         if: always()
