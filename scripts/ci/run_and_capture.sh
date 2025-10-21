@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 # Run a command, teeing its output to diagnostics logs and capturing exit codes.
 set -euo pipefail
@@ -8,8 +7,7 @@ if [ "$#" -lt 2 ]; then
   exit 2
 fi
 
-step_name="$1"
-shift
+step_name="$1"; shift
 if [ -z "$step_name" ]; then
   echo "step_name must be non-empty" >&2
   exit 2
