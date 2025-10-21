@@ -1,0 +1,253 @@
+---
+name: "Resolver pipeline — smoke"
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolver-pipeline-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: "Smoke pipeline (stubs)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUNBUFFERED: "1"
+      PERIOD_LABEL: ci-smoke
+      RESOLVER_PERIOD: ci-smoke
+      RESOLVER_STAGING_DIR: data/staging
+      RESOLVER_INGESTION_MODE: stubs
+      RESOLVER_FAIL_ON_STUB_ERROR: "0"
+      RESOLVER_DEBUG: "0"
+      SMOKE_MIN_ROWS: "1"
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install resolver dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install -r resolver/requirements.txt
+          pip install 'duckdb>=1.0,<2.0'
+
+      - name: Reset staging directories
+        run: |
+          set -euo pipefail
+          rm -rf "data/staging/${PERIOD_LABEL}"
+          rm -rf "data/snapshots/${PERIOD_LABEL}"
+
+      - name: Prepare raw staging (stubs)
+        env:
+          PERIOD_LABEL: ci-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/exitcodes
+          RAW_DIR="data/staging/${PERIOD_LABEL}/raw"
+          mkdir -p "${RAW_DIR}"
+
+          set +e
+          python -m resolver.ingestion.ifrc_go_stub --out "${RAW_DIR}"
+          status=$?
+          set -euo pipefail
+
+          if [ "${status}" -eq 0 ]; then
+            echo "exit=0" > .ci/exitcodes/run_stubs
+          else
+            echo "exit=${status}" > .ci/exitcodes/run_stubs
+            echo "IFRC stub failed with exit code ${status}" >&2
+            exit ${status}
+          fi
+
+          echo "Raw contents:"
+          ls -lh "${RAW_DIR}" || true
+
+      - name: Discover normalizable sources
+        env:
+          PERIOD_LABEL: ci-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/discover_normalizable_sources.py "${PERIOD_LABEL}" | tee _sources.env
+          if ! grep "^SOURCES=" _sources.env >> "$GITHUB_ENV"; then
+            echo "SOURCES=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Normalize
+        env:
+          PERIOD_LABEL: ci-smoke
+          SOURCES: ${{ env.SOURCES }}
+        run: |
+          set -euo pipefail
+          python -m resolver.transform.normalize \
+            --in "data/staging/${PERIOD_LABEL}/raw" \
+            --out "data/staging/${PERIOD_LABEL}/canonical" \
+            --period "${PERIOD_LABEL}" \
+            --sources "${SOURCES}"
+          echo "Canonical contents:"
+          ls -lh "data/staging/${PERIOD_LABEL}/canonical" || true
+
+      - name: Smoke assert canonical rowcount
+        id: smoke_assert
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/exitcodes .ci/diagnostics
+          CANON_DIR="data/staging/${PERIOD_LABEL}/canonical"
+
+          set +e
+          python scripts/ci/smoke_assert.py \
+            --canonical-dir "${CANON_DIR}" \
+            --min-rows "${SMOKE_MIN_ROWS}" \
+            --out ".ci/diagnostics/smoke-assert.json"
+          status=$?
+          set -euo pipefail
+
+          total_rows="n/a"
+          if [ -f .ci/diagnostics/smoke-assert.json ]; then
+            total_rows=$(python -c "import json, pathlib; print(json.loads(pathlib.Path('.ci/diagnostics/smoke-assert.json').read_text(encoding='utf-8')).get('total_rows', 'n/a'))" 2>/dev/null || echo "n/a")
+          fi
+
+          rows_numeric=0
+          if printf '%s' "${total_rows}" | grep -Eq '^[0-9]+$'; then
+            rows_numeric="${total_rows}"
+          fi
+
+          echo "exit=${status} rows=${rows_numeric} min=${SMOKE_MIN_ROWS}" > .ci/exitcodes/gate_rows
+
+          if [ "${status}" -ne 0 ]; then
+            if printf '%s' "${rows_numeric}" | grep -Eq '^[0-9]+$' && [ "${rows_numeric}" -lt "${SMOKE_MIN_ROWS}" ]; then
+              echo "❌ Canonical rowcount ${rows_numeric} < SMOKE_MIN_ROWS=${SMOKE_MIN_ROWS}" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "❌ Smoke assertion failed (exit=${status}); see diagnostics." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit "${status}"
+          fi
+
+          echo "Canonical rows total: ${rows_numeric}"
+          echo "✅ Canonical rowcount OK (${rows_numeric} ≥ ${SMOKE_MIN_ROWS})" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Load / derive / export
+        env:
+          PERIOD_LABEL: ci-smoke
+        run: |
+          set -euo pipefail
+          python -m resolver.tools.load_and_derive load-canonical \
+            --in "data/staging/${PERIOD_LABEL}/canonical"
+          python -m resolver.tools.load_and_derive derive-deltas \
+            --period "${PERIOD_LABEL}" --allow-negatives 1
+          python -m resolver.tools.load_and_derive export \
+            --period "${PERIOD_LABEL}" --format parquet \
+            --out "data/snapshots/${PERIOD_LABEL}"
+
+      - name: Optional smoke checks
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/exitcodes
+
+          if [ -f data/resolver.duckdb ]; then
+            echo "DuckDB present"
+            echo "exit=0" > .ci/exitcodes/check_duckdb
+          else
+            echo "DuckDB missing (expected in smoke)"
+            echo "exit=0" > .ci/exitcodes/check_duckdb
+          fi
+
+          if ls -lh data/snapshots 1>/dev/null 2>&1; then
+            ls -lh data/snapshots || true
+          else
+            echo "data/snapshots missing (allowed in smoke)"
+          fi
+          echo "exit=0" > .ci/exitcodes/ls_snapshots
+
+          logs_present="false"
+          if ls -lh resolver/logs 1>/dev/null 2>&1; then
+            ls -lh resolver/logs || true
+            logs_present="true"
+          fi
+          if ls -lh data/logs 1>/dev/null 2>&1; then
+            ls -lh data/logs || true
+            logs_present="true"
+          fi
+          if [ "${logs_present}" = "false" ]; then
+            echo "resolver/data logs missing (allowed in smoke)"
+          fi
+          echo "exit=0" > .ci/exitcodes/ls_logs
+
+      - name: Collect diagnostics (smoke)
+        if: always()
+        id: collect_smoke
+        uses: ./.github/actions/collect-diagnostics
+        with:
+          job_name: pipeline-smoke
+          mode: smoke
+          smoke_min_rows: ${{ env.SMOKE_MIN_ROWS }}
+          smoke_canonical_dir: "data/staging/${{ env.PERIOD_LABEL }}/canonical"
+
+      - name: Upload diagnostics (smoke)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_PATH }}/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Write AI SUMMARY.md (always)
+        if: always()
+        run: |
+          python scripts/ci/make_ai_summary.py || true
+          if [ -f ".ci/diagnostics/SUMMARY.md" ]; then
+            {
+              echo "# Smoke summary"
+              echo
+              cat .ci/diagnostics/SUMMARY.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-smoke-snapshots
+          path: data/snapshots/${PERIOD_LABEL}/*.parquet
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+      - name: Finalize smoke outcome
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=1
+          if [ -f .ci/exitcodes/gate_rows ]; then
+            first_field="$(cut -d' ' -f1 < .ci/exitcodes/gate_rows 2>/dev/null || echo exit=1)"
+            code="${first_field#exit=}"
+          fi
+          if [ "${code}" = "0" ]; then
+            echo "Row gate passed; forcing success."
+            exit 0
+          fi
+          if [ "${code}" = "" ]; then
+            code=1
+          fi
+          echo "Row gate failed with exit ${code}" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${code}"

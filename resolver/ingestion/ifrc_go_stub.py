@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import argparse
+import os
 from pathlib import Path
-from _stub_utils import load_registries, now_dates, write_staging
+
+from ._stub_utils import load_registries, now_dates, write_staging
 
 OUT = Path(__file__).resolve().parents[1] / "staging" / "ifrc_go.csv"
 
@@ -26,6 +29,27 @@ def make_rows():
             ])
     return rows
 
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Emit IFRC GO stub data.")
+    parser.add_argument(
+        "--out",
+        help="Directory or CSV file path for stub output; defaults to the resolver staging location.",
+        default=None,
+    )
+    args = parser.parse_args(argv)
+
+    if args.out:
+        target = Path(args.out).expanduser()
+        os.environ.pop("RESOLVER_OUTPUT_PATH", None)
+        os.environ.pop("RESOLVER_OUTPUT_DIR", None)
+        if target.suffix.lower() == ".csv":
+            os.environ["RESOLVER_OUTPUT_PATH"] = str(target)
+        else:
+            os.environ["RESOLVER_OUTPUT_DIR"] = str(target)
+
+    written = write_staging(make_rows(), OUT, series_semantics="stock")
+    print(f"wrote {written}")
+
+
 if __name__ == "__main__":
-    p = write_staging(make_rows(), OUT, series_semantics="stock")
-    print(f"wrote {p}")
+    main()

@@ -23,6 +23,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Diagnostics collector sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/actions/collect-diagnostics/collect.sh
+          tmp_env="$(mktemp)"
+          GITHUB_ENV="${tmp_env}" .github/actions/collect-diagnostics/collect.sh test-sanity
+          test -f dist/diag-test-sanity/SUMMARY.md
+          rm -rf dist/diag-test-sanity dist/diagnostics-test-sanity-*
+          rm -f "${tmp_env}"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -45,40 +56,37 @@ jobs:
           mkdir -p .ci/diagnostics
           python -m pytest -q resolver/tests -k "not slow and not nightly" --junitxml=pytest-junit.xml
 
+      - name: Post-test housekeeping
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "data/snapshots" ]]; then
+            echo "Snapshots exist; listing:"
+            ls -R data/snapshots || true
+          else
+            echo "No snapshots directory (ok for fast tests)."
+          fi
+
       - name: Write AI SUMMARY.md (always)
         if: always()
         run: |
           python scripts/ci/make_ai_summary.py || true
 
-      - name: Package diagnostics (always)
+      - name: Collect diagnostics (fast)
         if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p .ci/diagnostics
-          # Ensure SUMMARY.md exists
-          if [ ! -f .ci/diagnostics/SUMMARY.md ]; then
-            printf '# AI SUMMARY\n\n(No summary available.)\n' > .ci/diagnostics/SUMMARY.md
-          fi
-          # Carry JUnit (useful for AI parsing fallback)
-          if [ -f pytest-junit.xml ]; then
-            cp -f pytest-junit.xml .ci/diagnostics/ || true
-          fi
-          # Lightly collect logs & small DBs for completeness (not required by AI but handy)
-          mkdir -p .ci/diagnostics/_snippets || true
-          find resolver -maxdepth 6 -type f -name "*.log" -print0 2>/dev/null | xargs -0 -I{} cp --parents "{}" .ci/diagnostics/_snippets 2>/dev/null || true
-          find . -maxdepth 6 -type f -name "*.duckdb" -size -50M -print0 2>/dev/null | xargs -0 -I{} cp --parents "{}" .ci/diagnostics/_snippets 2>/dev/null || true
-          tar -czf "diagnostics_${{ github.job }}_${{ env.duckdb_label }}.tar.gz" --exclude-vcs --ignore-failed-read .ci/diagnostics 2>/dev/null || true
+        uses: ./.github/actions/collect-diagnostics
+        with:
+          job_name: fast-tests
 
-      - name: Upload diagnostics bundle (always)
+      - name: Upload diagnostics artifact (fast)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
-          path: |
-            diagnostics_*.tar.gz
-            .ci/diagnostics/**
+          name: diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_PATH }}/**
           if-no-files-found: warn
-          overwrite: true
+          retention-days: 7
 
       - name: Respect test outcome
         if: ${{ always() && steps.tests.outcome == 'failure' }}
@@ -97,14 +105,49 @@ jobs:
         with:
           path: ./downloads
 
+      - name: Prepare diagnostics summaries
+        run: |
+          set -euo pipefail
+          for artifact_dir in ./downloads/*; do
+            [ -d "$artifact_dir" ] || continue
+
+            # Support legacy nested ZIPs if they exist
+            find "$artifact_dir" -maxdepth 1 -type f -name 'diagnostics-*.zip' -print0 |
+              while IFS= read -r -d '' archive; do
+                expand_dir="$artifact_dir/expanded"
+                mkdir -p "$expand_dir"
+                unzip -o "$archive" -d "$expand_dir" >/dev/null || true
+              done
+
+            summary_path=""
+            if [ -f "$artifact_dir/SUMMARY.md" ]; then
+              summary_path="$artifact_dir/SUMMARY.md"
+            else
+              summary_path=$(find "$artifact_dir" -maxdepth 5 -type f -name 'SUMMARY.md' -print -quit || true)
+            fi
+
+            if [ -n "$summary_path" ]; then
+              mkdir -p "$artifact_dir/.ci/diagnostics"
+              cp "$summary_path" "$artifact_dir/.ci/diagnostics/SUMMARY.md"
+            fi
+          done
+
       - name: Merge per-job AI summaries into one file
         run: |
           python scripts/ci/consolidate_summaries.py ./downloads ./consolidated || true
 
-      - name: Upload consolidated AI SUMMARY
-        uses: actions/upload-artifact@v4
-        with:
-          name: diagnostics-consolidated-${{ github.run_id }}-${{ github.run_attempt }}
-          path: consolidated/SUMMARY.md
-          if-no-files-found: warn
-          overwrite: true
+      - name: Publish consolidated summary to job log
+        if: ${{ always() && hashFiles('consolidated/SUMMARY.md') != '' }}
+        shell: bash
+        run: |
+          {
+            echo "# Aggregated Resolver Summary"
+            echo
+            cat consolidated/SUMMARY.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Note missing consolidated summary
+        if: ${{ always() && hashFiles('consolidated/SUMMARY.md') == '' }}
+        shell: bash
+        run: |
+          echo "No consolidated summary produced" >> "$GITHUB_STEP_SUMMARY"
