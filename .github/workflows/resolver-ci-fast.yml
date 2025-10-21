@@ -14,11 +14,8 @@ jobs:
   fast-tests:
     name: Fast tests
     runs-on: ubuntu-latest
-
-    # Keep a label available for artifact naming even without a matrix
     env:
       duckdb_label: default
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,33 +56,33 @@ jobs:
       - name: Import probes (python, pytest, duckdb)
         run: |
           bash scripts/ci/run_and_capture.sh import-probes "python - <<'PY'
-import sys, os
-print('Python:', sys.version)
-try:
-    import pytest
-    print('Pytest:', getattr(pytest, '__version__', 'unknown'))
-except Exception as exc:
-    print('Pytest import failed:', exc)
-try:
-    import duckdb
-    print('DuckDB:', duckdb.__version__)
-except Exception as exc:
-    print('DuckDB import failed:', exc)
-print('sys.executable:', sys.executable)
-print('PATH:', os.environ.get('PATH', ''))
-PY"
+          import sys, os
+          print('Python:', sys.version)
+          try:
+              import pytest
+              print('Pytest:', getattr(pytest, '__version__', 'unknown'))
+          except Exception as exc:
+              print('Pytest import failed:', exc)
+          try:
+              import duckdb
+              print('DuckDB:', duckdb.__version__)
+          except Exception as exc:
+              print('DuckDB import failed:', exc)
+          print('sys.executable:', sys.executable)
+          print('PATH:', os.environ.get('PATH', ''))
+          PY"
 
       - name: Pytest (with JUnit)
         id: tests
         continue-on-error: true
         run: |
-          # Collect report (fast) for debugging missing-test scenarios
+          # Show what would run
           bash scripts/ci/run_and_capture.sh pytest-collect "pytest -q resolver/tests -k 'not slow and not nightly' --collect-only"
-          # Timings for the slowest tests can be handy even on fast runs
+          # Timings
           bash scripts/ci/run_and_capture.sh pytest-durations "pytest -q resolver/tests -k 'not slow and not nightly' --maxfail=1 --durations=25 -x || true"
           # Real run with JUnit
           bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml .ci/diagnostics/pytest-junit.xml"
-          # Mirror JUnit to legacy root filename for collectors that expect it there
+          # Mirror to legacy root for collectors that expect it
           if [ -f .ci/diagnostics/pytest-junit.xml ]; then cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml; fi
 
       - name: Post-test housekeeping
@@ -110,7 +107,6 @@ PY"
         uses: ./.github/actions/collect-diagnostics
         with:
           job_name: fast-tests
-          # No schema change; ensure expected files exist in both locations.
 
       - name: Upload diagnostics artifact (fast)
         if: always()
@@ -144,7 +140,7 @@ PY"
           for artifact_dir in ./downloads/*; do
             [ -d "$artifact_dir" ] || continue
 
-            # Support legacy nested ZIPs if they exist
+            # Expand legacy nested zips if any
             find "$artifact_dir" -maxdepth 1 -type f -name 'diagnostics-*.zip' -print0 |
               while IFS= read -r -d '' archive; do
                 expand_dir="$artifact_dir/expanded"
