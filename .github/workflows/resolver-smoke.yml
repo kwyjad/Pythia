@@ -148,12 +148,12 @@ jobs:
           PERIOD_LABEL: ci-smoke
         run: |
           set -euo pipefail
-          python -m resolver.tools.load_and_derive load-canonical \
+          python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" load-canonical \
             --in "data/staging/${PERIOD_LABEL}/canonical"
-          python -m resolver.tools.load_and_derive derive-deltas \
-            --period "${PERIOD_LABEL}" --allow-negatives 1
-          python -m resolver.tools.load_and_derive export \
-            --period "${PERIOD_LABEL}" --format parquet \
+          python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" derive-deltas \
+            --allow-negatives 1
+          python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" export \
+            --format parquet \
             --out "data/snapshots/${PERIOD_LABEL}"
 
       - name: Optional smoke checks

@@ -26,6 +26,21 @@ If you fork the project under a different slug, update the guarded repository st
 ### Resolver pipeline CI workflows
 
 - `resolver-smoke.yml` runs on pushes, pull requests, and manual dispatches. It executes the full resolver pipeline end-to-end using offline stubs: `resolver.ingestion.ifrc_go_stub` seeds `data/staging/<period>/raw`, `resolver.transform.normalize` canonicalizes every adapter-backed CSV discovered there, and `scripts/ci/smoke_assert.py` tallies rows under `data/staging/<period>/canonical/*.csv`. The job passes when the summed total meets `SMOKE_MIN_ROWS` (default `1`), which keeps the smoke run focused on stub coverage rather than optional DuckDB or snapshot outputs. Once the gate passes, `resolver.tools.load_and_derive` runs the `load-canonical`, `derive-deltas --allow-negatives 1`, and `export --format parquet` subcommands to produce header-safe snapshots, while DuckDB files, logs, and snapshot directories remain optional so smoke runs stay green when those artifacts are absent. Any Parquet outputs that do appear are uploaded as the `resolver-smoke-snapshots` artifact so PRs can still validate the wiring without any network access. See `docs/CI.md` for environment knobs and diagnostics details.
+
+  > **CLI flag order:** `resolver.tools.load_and_derive` expects global options such as `--period` **before** the subcommand name. The smoke workflow invokes it as:
+
+  ```bash
+  python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" load-canonical \
+    --in "data/staging/${PERIOD_LABEL}/canonical"
+
+  python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" derive-deltas \
+    --allow-negatives 1
+
+  python -m resolver.tools.load_and_derive --period "${PERIOD_LABEL}" export \
+    --format parquet --out "data/snapshots/${PERIOD_LABEL}"
+  ```
+
+  Running a global flag after the subcommand (for example, `python -m resolver.tools.load_and_derive load-canonical --period ci-smoke`) triggers argparse’s “the following arguments are required: --period” error.
 - `resolver-nightly.yml` is scheduled for 06:00 UTC and available on demand. It restricts `run_all_stubs.py --mode real` to the small-window connectors we keep secrets for (currently IFRC GO and UNHCR ODP), computes a 14-day ISO window via `RESOLVER_START_ISO`/`RESOLVER_END_ISO`, and reuses the same normalize → load/derive pipeline plus an artifact upload. Nightly logs include per-Parquet row counts, making it easy to confirm when live data flowed (non-zero rows) or when only headers were produced.
 
 ### Resolver diagnostics
