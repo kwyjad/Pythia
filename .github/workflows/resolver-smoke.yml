@@ -58,7 +58,7 @@ jobs:
 
       - name: Snapshot environment (pip freeze)
         run: |
-          scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
+          bash scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
 
       - name: Reset staging directories
         run: |
@@ -101,11 +101,11 @@ jobs:
 
       - name: Normalize
         run: |
-          scripts/ci/run_and_capture.sh normalize "python -m resolver.transform.normalize --in \"data/staging/${PERIOD_LABEL}/raw\" --out \"data/staging/${PERIOD_LABEL}/canonical\" --period \"${PERIOD_LABEL}\" --sources \"${SOURCES}\""
+          bash scripts/ci/run_and_capture.sh normalize "python -m resolver.transform.normalize --in \"data/staging/${PERIOD_LABEL}/raw\" --out \"data/staging/${PERIOD_LABEL}/canonical\" --period \"${PERIOD_LABEL}\" --sources \"${SOURCES}\""
 
       - name: Canonical listing
         run: |
-          scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py --dir \"data/staging/${PERIOD_LABEL}/canonical\" --out \".ci/diagnostics/canonical-listing.txt\""
+          bash scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py --dir \"data/staging/${PERIOD_LABEL}/canonical\" --out \".ci/diagnostics/canonical-listing.txt\""
 
       - name: Smoke assert canonical rowcount
         id: smoke_assert
@@ -150,14 +150,12 @@ jobs:
 
       - name: Load / derive / export
         run: |
-          scripts/ci/run_and_capture.sh lda-load "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" --db \"data/resolver.duckdb\" load-canonical --in \"data/staging/${PERIOD_LABEL}/canonical\""
-          scripts/ci/run_and_capture.sh lda-derive "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" --db \"data/resolver.duckdb\" derive-deltas --allow-negatives 1"
-          scripts/ci/run_and_capture.sh lda-export "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" --db \"data/resolver.duckdb\" export --format parquet --out \"data/snapshots/${PERIOD_LABEL}\""
+          bash scripts/ci/run_and_capture.sh lda-all "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" --staging-root data/staging --snapshots-root data/snapshots --db data/resolver.duckdb --allow-negatives 1"
 
       - name: DuckDB table counts (optional)
         if: always()
         run: |
-          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt" || true
+          bash scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt" || true
 
       - name: Optional smoke checks
         if: always()
