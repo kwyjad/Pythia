@@ -83,7 +83,7 @@ jobs:
           # Real run with JUnit
           bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml .ci/diagnostics/pytest-junit.xml"
           # Mirror to legacy root for collectors that expect it
-          if [ -f .ci/diagnostics/pytest-junit.xml ]; then cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml; fi
+          [ -f .ci/diagnostics/pytest-junit.xml ] && cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml || true
 
       - name: Post-test housekeeping
         if: always()

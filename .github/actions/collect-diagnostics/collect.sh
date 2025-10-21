@@ -372,7 +372,14 @@ def summarize(path: Path) -> None:
 summarize(Path(os.environ["PYTEST_JUNIT"]))
 PY
 else
-  echo "pytest-junit.xml missing" >"${pytest_file}"
+  {
+    echo "pytest-junit.xml missing"
+    if [ -f ".ci/diagnostics/pytest-collect.tail.txt" ]; then
+      echo ""
+      echo "== Pytest (collect-only) tail =="
+      tail -n 120 ".ci/diagnostics/pytest-collect.tail.txt" 2>/dev/null || true
+    fi
+  } >"${pytest_file}"
 fi
 
 exitcodes_file="${BASE_DIR}/exitcodes.txt"
@@ -385,6 +392,20 @@ if compgen -G ".ci/exitcodes/*" >/dev/null; then
   } >"${exitcodes_file}" || true
 else
   echo "no exitcode breadcrumbs found" >"${exitcodes_file}"
+fi
+
+pip_freeze_tail="${BASE_DIR}/pip-freeze-tail.txt"
+if [ -f ".ci/diagnostics/pip-freeze.txt" ]; then
+  cp ".ci/diagnostics/pip-freeze.txt" "${BASE_DIR}/pip-freeze.txt" 2>/dev/null || true
+  {
+    echo "Last 40 lines of .ci/diagnostics/pip-freeze.txt"
+    echo ""
+    tail -n 40 ".ci/diagnostics/pip-freeze.txt" 2>/dev/null || true
+    echo ""
+    echo "(Full pip freeze captured at .ci/diagnostics/pip-freeze.txt in the diagnostics artifact.)"
+  } >"${pip_freeze_tail}" || true
+else
+  echo "pip freeze output not captured" >"${pip_freeze_tail}"
 fi
 
 usage_file="${BASE_DIR}/disk_usage.txt"
@@ -410,6 +431,9 @@ append_code_block "${versions_file}" "version details unavailable"
 
 append_section "Environment"
 append_code_block "${env_file}" "no environment snapshot captured"
+
+append_section "Pip freeze snapshot"
+append_code_block "${pip_freeze_tail}" "pip freeze output unavailable"
 
 append_section "DuckDB"
 append_code_block "${duckdb_file}" "duckdb not inspected"
@@ -437,7 +461,7 @@ append_section "Step exit codes"
 append_code_block "${exitcodes_file}" "no exitcode breadcrumbs found"
 
 if compgen -G ".ci/diagnostics/*.tail.txt" >/dev/null; then
-  append_section "Command tails (last 120 lines)"
+  append_section "Command tails (pip-freeze/import-probes/pytest, last 120 lines)"
   for f in .ci/diagnostics/*.tail.txt; do
     printf '```text (%s)\n' "$f" >> "${SUMMARY_MD}"
     cat "$f" >> "${SUMMARY_MD}"
