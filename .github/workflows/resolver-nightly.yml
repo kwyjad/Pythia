@@ -62,14 +62,19 @@ jobs:
           set -euo pipefail
           start=$(date -u -d '14 days ago' +%Y-%m-%d)
           end=$(date -u +%Y-%m-%d)
+          year=$(date -u -d "$end" +%Y)
+          mon=$(date -u -d "$end" +%m)
+          q=$(( (10#$mon + 2) / 3 ))
+          quarter="${year}Q${q}"
           label="nightly-${end}"
           {
             echo "RESOLVER_START_ISO=$start"
             echo "RESOLVER_END_ISO=$end"
-            echo "PERIOD_LABEL=$label"
-            echo "RESOLVER_PERIOD=$label"
+            echo "PERIOD_LABEL=${quarter}"
+            echo "RESOLVER_PERIOD=${quarter}"
+            echo "RESOLVER_PERIOD_ALIAS=$label"
           } >> "$GITHUB_ENV"
-          echo "Nightly window: $start → $end (label=$label)"
+          echo "Nightly window: $start → $end (period=${quarter}, alias=$label)"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -88,6 +93,10 @@ jobs:
           python -m pip install -r resolver/requirements.txt
           python -m pip install 'duckdb>=1.0,<2.0'
 
+      - name: Snapshot environment (pip freeze)
+        run: |
+          scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
+
       - name: Prepare staging directories
         run: |
           set -euo pipefail
@@ -95,102 +104,104 @@ jobs:
           rm -rf "data/snapshots/${PERIOD_LABEL}"
 
       - name: Run real connectors
-        env:
-          PERIOD_LABEL: ${{ env.PERIOD_LABEL }}
         run: |
-          set -euo pipefail
-          python resolver/ingestion/run_all_stubs.py \
+          scripts/ci/run_and_capture.sh connectors "python resolver/ingestion/run_all_stubs.py \
             --mode real \
             --connector ifrc_go_client.py \
             --connector unhcr_odp_client.py \
             --strict \
             --log-level INFO \
-            --log-format json
+            --log-format json"
 
       - name: Determine canonical sources
         run: |
           set -euo pipefail
-          sources=$(python - <<'PY'
-          from textwrap import dedent
-
-          namespace = {}
-          exec(
-              dedent(
-                  """
-                  import os
-                  from pathlib import Path
-
-                  from resolver.transform.normalize import ADAPTER_REGISTRY
-
-                  period = os.environ["PERIOD_LABEL"]
-                  raw_dir = Path("data/staging") / period / "raw"
-                  if not raw_dir.exists():
-                      raise SystemExit(f"Raw directory missing: {raw_dir}")
-                  available = []
-                  for path in sorted(raw_dir.glob("*.csv")):
-                      stem = path.stem
-                      if stem in ADAPTER_REGISTRY:
-                          available.append(stem)
-                  if not available:
-                      raise SystemExit("No canonicalizable sources found in raw staging data")
-                  namespace["result"] = ",".join(available)
-                  """
-              ),
-              globals(),
-              namespace,
-          )
-          print(namespace["result"])
-          PY
-          )
-          echo "NORMALIZE_SOURCES=$sources" >> "$GITHUB_ENV"
+          scripts/ci/run_and_capture.sh discover-sources "python scripts/ci/discover_normalizable_sources.py \"${PERIOD_LABEL}\" | tee _sources.env"
+          if ! grep "^SOURCES=" _sources.env >> "$GITHUB_ENV"; then
+            echo "SOURCES=" >> "$GITHUB_ENV"
+          fi
 
       - name: Normalize canonical CSVs
         run: |
-          set -euo pipefail
-          python -m resolver.transform.normalize \
-            --in "data/staging/${PERIOD_LABEL}/raw" \
-            --out "data/staging/${PERIOD_LABEL}/canonical" \
-            --period "${PERIOD_LABEL}" \
-            --sources "${NORMALIZE_SOURCES}"
+          scripts/ci/run_and_capture.sh normalize "python -m resolver.transform.normalize \
+            --in \"data/staging/${PERIOD_LABEL}/raw\" \
+            --out \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --period \"${PERIOD_LABEL}\" \
+            --sources \"${SOURCES}\""
+
+      - name: Canonical listing
+        run: |
+          scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py \
+            --dir \"data/staging/${PERIOD_LABEL}/canonical\" \
+            --out \".ci/diagnostics/canonical-listing.txt\""
 
       - name: Load and derive snapshot
         run: |
-          set -euo pipefail
-          python -m resolver.tools.load_and_derive \
-            --period "${PERIOD_LABEL}" \
+          scripts/ci/run_and_capture.sh lda-all "python -m resolver.tools.load_and_derive \
+            --period \"${PERIOD_LABEL}\" \
             --staging-root data/staging \
             --snapshots-root data/snapshots \
-            --allow-negatives 1
+            --db data/resolver.duckdb \
+            --allow-negatives 1"
+
+      - name: DuckDB table counts (optional)
+        if: always()
+        run: |
+          scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt"
 
       - name: Summarize snapshot row counts
+        if: always()
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          from textwrap import dedent
+          scripts/ci/run_and_capture.sh snapshot-summary "python - <<'PY'
+          import os
+          from pathlib import Path
 
-          exec(
-              dedent(
-                  """
-                  import os
-                  from pathlib import Path
+          import pandas as pd
 
-                  import pandas as pd
+          period = os.environ['PERIOD_LABEL']
+          base = Path('data/snapshots') / period
+          resolved = base / 'facts_resolved.parquet'
+          deltas = base / 'facts_deltas.parquet'
+          if not resolved.exists():
+              raise SystemExit(f'facts_resolved.parquet missing in {base}')
+          print(f'facts_resolved rows: {pd.read_parquet(resolved).shape[0]}')
+          if deltas.exists():
+              print(f'facts_deltas rows: {pd.read_parquet(deltas).shape[0]}')
+          else:
+              print('facts_deltas.parquet not produced')
+          PY"
 
-                  period = os.environ["PERIOD_LABEL"]
-                  base = Path("data/snapshots") / period
-                  resolved = base / "facts_resolved.parquet"
-                  deltas = base / "facts_deltas.parquet"
-                  if not resolved.exists():
-                      raise SystemExit(f"facts_resolved.parquet missing in {base}")
-                  print(f"facts_resolved rows: {pd.read_parquet(resolved).shape[0]}")
-                  if deltas.exists():
-                      print(f"facts_deltas rows: {pd.read_parquet(deltas).shape[0]}")
-                  else:
-                      print("facts_deltas.parquet not produced")
-                  """
-              )
-          )
-          PY
+      - name: Write AI SUMMARY.md (always)
+        if: always()
+        run: |
+          python scripts/ci/make_ai_summary.py || true
+
+      - name: Collect diagnostics (nightly)
+        if: always()
+        uses: ./.github/actions/collect-diagnostics
+        with:
+          job_name: nightly
+
+      - name: Upload diagnostics (nightly)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACT_PATH }}/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish nightly summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f ".ci/diagnostics/SUMMARY.md" ]; then
+            {
+              echo "# Nightly summary"
+              echo
+              cat .ci/diagnostics/SUMMARY.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload nightly snapshot
         if: always()

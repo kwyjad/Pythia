@@ -20,8 +20,6 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUNBUFFERED: "1"
-      PERIOD_LABEL: ci-smoke
-      RESOLVER_PERIOD: ci-smoke
       RESOLVER_STAGING_DIR: data/staging
       RESOLVER_INGESTION_MODE: stubs
       RESOLVER_FAIL_ON_STUB_ERROR: "0"
@@ -31,6 +29,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Determine quarterly period label
+        run: |
+          set -euo pipefail
+          YEAR=$(date -u +%Y)
+          MON=$(date -u +%m)
+          Q=$(( (10#$MON + 2) / 3 ))
+          LABEL="${YEAR}Q${Q}"
+          {
+            echo "PERIOD_LABEL=${LABEL}"
+            echo "RESOLVER_PERIOD=${LABEL}"
+          } >> "$GITHUB_ENV"
+          echo "Using resolver period ${LABEL}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,7 +58,7 @@ jobs:
 
       - name: Snapshot environment (pip freeze)
         run: |
-          scripts/ci/run_and_capture.sh pip-freeze "pip freeze > .ci/diagnostics/pip-freeze.txt"
+          scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
 
       - name: Reset staging directories
         run: |
@@ -56,8 +67,6 @@ jobs:
           rm -rf "data/snapshots/${PERIOD_LABEL}"
 
       - name: Prepare raw staging (stubs)
-        env:
-          PERIOD_LABEL: ci-smoke
         shell: bash
         run: |
           set -euo pipefail
@@ -82,8 +91,6 @@ jobs:
           ls -lh "${RAW_DIR}" || true
 
       - name: Discover normalizable sources
-        env:
-          PERIOD_LABEL: ci-smoke
         shell: bash
         run: |
           set -euo pipefail
@@ -93,9 +100,6 @@ jobs:
           fi
 
       - name: Normalize
-        env:
-          PERIOD_LABEL: ci-smoke
-          SOURCES: ${{ env.SOURCES }}
         run: |
           scripts/ci/run_and_capture.sh normalize "python -m resolver.transform.normalize \
             --in \"data/staging/${PERIOD_LABEL}/raw\" \
@@ -106,7 +110,7 @@ jobs:
       - name: Canonical listing
         run: |
           scripts/ci/run_and_capture.sh canonical-listing "python scripts/ci/list_canonical.py \
-            --dir \"data/staging/${{ env.PERIOD_LABEL }}/canonical\" \
+            --dir \"data/staging/${PERIOD_LABEL}/canonical\" \
             --out \".ci/diagnostics/canonical-listing.txt\""
 
       - name: Smoke assert canonical rowcount
@@ -151,8 +155,6 @@ jobs:
           echo "✅ Canonical rowcount OK (${rows_numeric} ≥ ${SMOKE_MIN_ROWS})" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Load / derive / export
-        env:
-          PERIOD_LABEL: ci-smoke
         run: |
           scripts/ci/run_and_capture.sh lda-load "python -m resolver.tools.load_and_derive --period \"${PERIOD_LABEL}\" load-canonical \
             --in \"data/staging/${PERIOD_LABEL}/canonical\" \

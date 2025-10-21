@@ -45,12 +45,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           if [ -f resolver/requirements.txt ]; then pip install -r resolver/requirements.txt; fi
-          pip install pytest
-          pip install 'duckdb>=1.0,<2.0'
+          pip install 'duckdb>=1.0,<2.0' pytest
 
       - name: Snapshot environment (pip freeze)
         run: |
-          scripts/ci/run_and_capture.sh pip-freeze "pip freeze > .ci/diagnostics/pip-freeze.txt"
+          scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
 
       - name: Pytest (with JUnit)
         id: tests

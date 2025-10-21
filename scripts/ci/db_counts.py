@@ -4,10 +4,9 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Iterable
 
-
-TABLES = ("facts_raw", "facts_resolved", "facts_deltas")
+KEY_TABLES = ("facts_raw", "facts_resolved", "facts_monthly_deltas")
 
 
 def format_header(title: str) -> str:
@@ -20,19 +19,27 @@ def write_report(out_path: Path, lines: list[str], payload: dict[str, Any]) -> N
     out_path.write_text("\n".join(text_lines), encoding="utf-8")
 
 
-def table_exists(con: Any, table: str) -> bool:
+def enumerate_tables(con: Any) -> tuple[list[str], str | None]:
     try:
-        result = con.execute(
+        rows = con.execute(
             """
-            SELECT COUNT(*)
+            SELECT table_name
             FROM information_schema.tables
-            WHERE table_name = ?
-            """,
-            [table],
-        ).fetchone()
-    except Exception:
-        return False
-    return bool(result and result[0])
+            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+            """
+        ).fetchall()
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        return [], str(exc)
+    table_names = sorted({row[0] for row in rows if row and row[0]})
+    return table_names, None
+
+
+def select_tables(all_tables: Iterable[str]) -> list[str]:
+    targets = list(KEY_TABLES)
+    for name in all_tables:
+        if name.startswith("facts_") and name not in targets:
+            targets.append(name)
+    return sorted(dict.fromkeys(targets))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         "database": str(db_path),
         "exists": db_path.exists(),
         "tables": {},
+        "all_tables": [],
     }
 
     if not db_path.exists():
@@ -73,21 +81,34 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        for table in TABLES:
+        table_names, table_error = enumerate_tables(con)
+        if table_error:
+            lines.append(f"failed to enumerate tables: {table_error}")
+            payload["error"] = f"enumerate tables failed: {table_error}"
+            write_report(out_path, lines, payload)
+            return 0
+        payload["all_tables"] = table_names
+
+        targets = select_tables(table_names)
+        if not targets:
+            lines.append("no matching tables (facts_*) found")
+            write_report(out_path, lines, payload)
+            return 0
+
+        for table in targets:
             info: dict[str, Any] = {"exists": False, "rows": None}
-            if not table_exists(con, table):
+            if table not in table_names:
                 lines.append(f"{table}: missing")
                 payload["tables"][table] = info
                 continue
             info["exists"] = True
             try:
-                count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                rows = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                lines.append(f"{table}: {int(rows)} rows")
+                info["rows"] = int(rows)
             except Exception as exc:  # pragma: no cover - diagnostics only
                 lines.append(f"{table}: failed to count rows ({exc})")
                 info["error"] = str(exc)
-            else:
-                lines.append(f"{table}: {count} rows")
-                info["rows"] = int(count)
             payload["tables"][table] = info
     finally:
         try:

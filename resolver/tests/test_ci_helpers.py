@@ -48,6 +48,7 @@ def test_list_canonical_reports_rows(tmp_path: Path) -> None:
     payload = read_json_block(out_path)
     assert payload["exists"] is True
     assert payload.get("total_rows") == 2
+    assert payload.get("unknown_row_counts") == 0
     files = payload.get("files")
     assert isinstance(files, list)
     assert any(entry.get("rows") == 2 for entry in files)  # type: ignore[index]
