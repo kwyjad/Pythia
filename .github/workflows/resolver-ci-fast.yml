@@ -41,20 +41,22 @@ jobs:
 
       - name: Install dependencies (fast)
         run: |
-          set -o pipefail
+          set -euo pipefail
           python -m pip install --upgrade pip
-          # Try project extras if defined; fall back to essentials
-          python -m pip install -e ".[test]" || true
-          python -m pip install duckdb pytest || true
-          python -c "import sys,duckdb,pytest; print('DuckDB:', duckdb.__version__,'Pytest OK on', sys.version)"
+          pip install -e .
+          if [ -f resolver/requirements.txt ]; then pip install -r resolver/requirements.txt; fi
+          pip install pytest
+          pip install 'duckdb>=1.0,<2.0'
 
-      - name: Run fast tests
+      - name: Snapshot environment (pip freeze)
+        run: |
+          scripts/ci/run_and_capture.sh pip-freeze "pip freeze > .ci/diagnostics/pip-freeze.txt"
+
+      - name: Pytest (with JUnit)
         id: tests
         continue-on-error: true
         run: |
-          set -o pipefail
-          mkdir -p .ci/diagnostics
-          python -m pytest -q resolver/tests -k "not slow and not nightly" --junitxml=pytest-junit.xml
+          scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml .ci/diagnostics/pytest-junit.xml"
 
       - name: Post-test housekeeping
         if: always()
