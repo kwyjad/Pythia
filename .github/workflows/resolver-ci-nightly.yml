@@ -365,11 +365,12 @@ jobs:
           pytest --version | tee logs/pytest_version.txt
           pip freeze | tee logs/pip_freeze.txt
           python - <<'PY' | tee logs/repo_tree.txt
-import pathlib
-p = pathlib.Path('.')
-print('CWD:', p.resolve())
-print('Files:', len(list(p.rglob('*'))))
-PY
+            import pathlib
+
+            p = pathlib.Path('.')
+            print('CWD:', p.resolve())
+            print('Files:', len(list(p.rglob('*'))))
+          PY
 
       - name: Show environment
         if: steps.dbfiles.outputs.present == 'true'
@@ -414,16 +415,17 @@ PY
 
           echo "Collecting resolver test inventory"
           python - <<'PY'
-import pathlib
-root = pathlib.Path("resolver/tests")
-if not root.exists():
-    print("resolver/tests directory missing; nothing to run")
-    raise SystemExit(0)
-tests = sorted(str(path) for path in root.rglob("test_*.py"))
-print(f"Discovered {len(tests)} test file(s)")
-for path in tests:
-    print(f" - {path}")
-PY
+            import pathlib
+
+            root = pathlib.Path("resolver/tests")
+            if not root.exists():
+                print("resolver/tests directory missing; nothing to run")
+                raise SystemExit(0)
+            tests = sorted(str(path) for path in root.rglob("test_*.py"))
+            print(f"Discovered {len(tests)} test file(s)")
+            for path in tests:
+                print(f" - {path}")
+          PY
 
           TEST_RC=0
           set +e
@@ -524,46 +526,46 @@ PY
           DB_EXIT: ${{ steps.run_db_parity.outputs.exit_code }}
         run: |
           python - <<'PY'
-import os
-import pathlib
-import sys
-import xml.etree.ElementTree as ET
+            import os
+            import pathlib
+            import sys
+            import xml.etree.ElementTree as ET
 
-issues = []
+            issues = []
 
-def has_failures(path: pathlib.Path, label: str) -> bool:
-    if not path.exists():
-        return False
-    try:
-        tree = ET.parse(path)
-    except ET.ParseError as exc:  # pragma: no cover - diagnostics only
-        issues.append(f"{label}: unable to parse {path} ({exc})")
-        return True
-    total = 0
-    for suite in tree.iter("testsuite"):
-        total += int(suite.attrib.get("failures", "0")) + int(suite.attrib.get("errors", "0"))
-    if total:
-        issues.append(f"{label}: {total} recorded failure/error cases in {path}")
-        return True
-    return False
+            def has_failures(path: pathlib.Path, label: str) -> bool:
+                if not path.exists():
+                    return False
+                try:
+                    tree = ET.parse(path)
+                except ET.ParseError as exc:  # pragma: no cover - diagnostics only
+                    issues.append(f"{label}: unable to parse {path} ({exc})")
+                    return True
+                total = 0
+                for suite in tree.iter("testsuite"):
+                    total += int(suite.attrib.get("failures", "0")) + int(suite.attrib.get("errors", "0"))
+                if total:
+                    issues.append(f"{label}: {total} recorded failure/error cases in {path}")
+                    return True
+                return False
 
-main_exit = (os.environ.get("MAIN_EXIT") or "").strip()
-db_exit = (os.environ.get("DB_EXIT") or "").strip()
+            main_exit = (os.environ.get("MAIN_EXIT") or "").strip()
+            db_exit = (os.environ.get("DB_EXIT") or "").strip()
 
-has_failures(pathlib.Path("logs/pytest-nightly.junit.xml"), "nightly suite")
-has_failures(pathlib.Path("logs/pytest-db.junit.xml"), "db parity suite")
+            has_failures(pathlib.Path("logs/pytest-nightly.junit.xml"), "nightly suite")
+            has_failures(pathlib.Path("logs/pytest-db.junit.xml"), "db parity suite")
 
-if main_exit and main_exit != "0":
-    issues.append(f"nightly pytest exited with {main_exit}")
-if db_exit and db_exit != "0":
-    issues.append(f"db parity pytest exited with {db_exit}")
+            if main_exit and main_exit != "0":
+                issues.append(f"nightly pytest exited with {main_exit}")
+            if db_exit and db_exit != "0":
+                issues.append(f"db parity pytest exited with {db_exit}")
 
-if issues:
-    print("\n".join(issues))
-    sys.exit(1)
+            if issues:
+                print("\n".join(issues))
+                sys.exit(1)
 
-print("All pytest runs reported success.")
-PY
+            print("All pytest runs reported success.")
+          PY
 
       - name: Skip DB tests (not present)
         if: steps.dbfiles.outputs.present != 'true'
