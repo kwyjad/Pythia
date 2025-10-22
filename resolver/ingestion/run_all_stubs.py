@@ -17,7 +17,7 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent.parent
@@ -28,6 +28,11 @@ import yaml
 
 import resolver.ingestion.feature_flags as ff
 from resolver.ingestion._exit_policy import compute_exit_code
+from resolver.ingestion.diagnostics_emitter import (
+    append_jsonl as diagnostics_append_jsonl,
+    finalize_run as diagnostics_finalize_run,
+    start_run as diagnostics_start_run,
+)
 
 from resolver.ingestion._manifest import (
     count_csv_rows,
@@ -53,6 +58,8 @@ from resolver.ingestion.utils.io import (
 STAGING = ROOT.parent / "staging"
 CONFIG_DIR = ROOT / "config"
 LOGS_DIR = ROOT.parent / "logs" / "ingestion"
+DIAGNOSTICS_DIR = PROJECT_ROOT / "diagnostics" / "ingestion"
+DIAGNOSTICS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 RESOLVER_DEBUG = bool(int(os.getenv("RESOLVER_DEBUG", "0") or 0))
 
 CONFIG_OVERRIDES = {
@@ -339,6 +346,11 @@ _TRANSIENT_PAT = re.compile(
     re.IGNORECASE,
 )
 
+_MONTH_RE = re.compile(r"^(\d{4})[-/](\d{2})$")
+_DATE_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})$")
+_DIGIT_MONTH_RE = re.compile(r"^(\d{4})(\d{2})$")
+_DIGIT_DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+
 
 def _coerce_process_stream(stream: object | None) -> str:
     if stream is None:
@@ -510,6 +522,191 @@ def _rows_and_method(path: Optional[Path]) -> tuple[int, str]:
         return rows_actual, "manifest+verified"
 
     return manifest_rows, "manifest"
+
+
+def _normalise_month_value(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace("/", "-")
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    match = _MONTH_RE.match(text)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
+    if len(text) >= 10:
+        candidate = text[:10]
+        match = _DATE_RE.match(candidate)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}"
+        try:
+            parsed = dt.date.fromisoformat(candidate)
+        except ValueError:
+            parsed = None
+        if parsed:
+            return f"{parsed.year:04d}-{parsed.month:02d}"
+    match = _DIGIT_MONTH_RE.match(text)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
+    match = _DIGIT_DATE_RE.match(text)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
+    return None
+
+
+def _normalise_date_value(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace("/", "-")
+    if "T" in text:
+        text = text.split("T", 1)[0]
+    if len(text) >= 10:
+        candidate = text[:10]
+        try:
+            dt.date.fromisoformat(candidate)
+            return candidate
+        except ValueError:
+            match = _DATE_RE.match(candidate)
+            if match:
+                return "-".join(match.groups())
+    match = _DIGIT_DATE_RE.match(text)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return None
+
+
+def _clean_iso_value(value: str) -> str:
+    return str(value).strip().upper()
+
+
+def _clean_hazard_value(value: str) -> str:
+    return str(value).strip()
+
+
+def _first_nonempty(row: Mapping[str, object], columns: Sequence[str]) -> Optional[str]:
+    for column in columns:
+        if column not in row:
+            continue
+        candidate = row.get(column)
+        if candidate is None:
+            continue
+        text = str(candidate).strip()
+        if text:
+            return text
+    return None
+
+
+def _collect_output_samples(path: Optional[Path], limit: int = 5000) -> tuple[dict, dict]:
+    coverage = {"ym_min": None, "ym_max": None, "as_of_min": None, "as_of_max": None}
+    samples = {"top_iso3": [], "top_hazard": []}
+    if path is None or not path.exists():
+        return coverage, samples
+
+    iso_counter: Counter[str] = Counter()
+    hazard_counter: Counter[str] = Counter()
+    ym_values: List[str] = []
+    as_of_values: List[str] = []
+
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames or []
+            if not fieldnames:
+                return coverage, samples
+            iso_fields = [
+                name
+                for name in fieldnames
+                if name
+                and any(token in name.lower() for token in ("iso3", "country_iso3", "adm0_iso3", "iso"))
+            ]
+            if not iso_fields:
+                iso_fields = [name for name in fieldnames if name and "country" in name.lower()]
+            hazard_fields = [
+                name
+                for name in fieldnames
+                if name and any(token in name.lower() for token in ("hazard", "shock", "event_type"))
+            ]
+            ym_fields = [
+                name
+                for name in fieldnames
+                if name and any(token in name.lower() for token in ("ym", "yearmonth", "month", "period"))
+            ]
+            as_of_fields = [
+                name
+                for name in fieldnames
+                if name and ("as_of" in name.lower() or "asof" in name.lower())
+            ]
+            if not as_of_fields:
+                fallback_candidates = [
+                    name
+                    for name in fieldnames
+                    if name
+                    and (
+                        name.lower().endswith("_date")
+                        or name.lower()
+                        in {"as_of_date", "publication_date", "report_date", "date"}
+                    )
+                ]
+                for candidate in fallback_candidates:
+                    if candidate not in as_of_fields:
+                        as_of_fields.append(candidate)
+
+            for idx, row in enumerate(reader):
+                if limit and idx >= limit:
+                    break
+                iso_value = _first_nonempty(row, iso_fields)
+                if iso_value:
+                    iso_counter[_clean_iso_value(iso_value)] += 1
+                hazard_value = _first_nonempty(row, hazard_fields)
+                if hazard_value:
+                    hazard_counter[_clean_hazard_value(hazard_value)] += 1
+                ym_value = None
+                for field in ym_fields:
+                    candidate = _normalise_month_value(row.get(field))
+                    if candidate:
+                        ym_value = candidate
+                        break
+                if ym_value:
+                    ym_values.append(ym_value)
+                as_of_value = None
+                for field in as_of_fields:
+                    candidate = _normalise_date_value(row.get(field))
+                    if candidate:
+                        as_of_value = candidate
+                        break
+                if as_of_value:
+                    as_of_values.append(as_of_value)
+    except FileNotFoundError:
+        return coverage, samples
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "diagnostics sampling failed",
+            extra={"event": "diagnostics_error", "path": str(path)},
+            exc_info=exc,
+        )
+        return coverage, samples
+
+    if ym_values:
+        coverage["ym_min"] = min(ym_values)
+        coverage["ym_max"] = max(ym_values)
+    if as_of_values:
+        coverage["as_of_min"] = min(as_of_values)
+        coverage["as_of_max"] = max(as_of_values)
+    samples["top_iso3"] = iso_counter.most_common(5)
+    samples["top_hazard"] = hazard_counter.most_common(5)
+    return coverage, samples
+
+
+def _coerce_int_safe(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
 def _summarise_connector(name: str, output_path: Optional[Path]) -> str | None:
@@ -1085,12 +1282,13 @@ def _run_connector(spec: ConnectorSpec, logger: logging.LoggerAdapter) -> Dict[s
     _invoke_connector(spec.path, logger=logger)
     rows_after, method_after = _rows_and_method(spec.output_path)
     duration_ms = int((time.perf_counter() - start) * 1000)
+    rows_written = _rows_written(rows_before, rows_after)
     logger.info(
         "completed",
         extra={
             "event": "completed",
             "duration_ms": duration_ms,
-            "rows_written": _rows_written(rows_before, rows_after),
+            "rows_written": rows_written,
             "rows_total": rows_after,
             "rows_method_before": method_before,
             "rows_method_after": method_after,
@@ -1102,6 +1300,9 @@ def _run_connector(spec: ConnectorSpec, logger: logging.LoggerAdapter) -> Dict[s
         "duration_ms": duration_ms,
         "rows_method": method_after,
         "rows_method_before": method_before,
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "rows_written": rows_written,
     }
 
 
@@ -1434,6 +1635,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     specs = checked_specs
 
+    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        DIAGNOSTICS_REPORT.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
     connectors_summary: List[Dict[str, object]] = []
     exit_policy_inputs: List[dict] = []
     had_error = False
@@ -1449,6 +1658,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     for spec in specs:
         child = child_logger(spec.name)
         handler = attach_connector_handler(child, spec.name)
+        diagnostics_ctx = diagnostics_start_run(spec.name, "stub" if spec.kind == "stub" else "real")
+        diag_counts: Dict[str, int] = {"fetched": 0, "normalized": 0, "written": 0}
+        diag_http: Dict[str, object] = {}
+        diag_coverage: Optional[Dict[str, object]] = None
+        diag_samples: Optional[Dict[str, object]] = None
+        diag_extras: Dict[str, object] = {}
         attempts = 0
         rows = 0
         status = "skipped"
@@ -1466,6 +1681,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 status = "skipped"
                 attempts = 0
                 rows = 0
+                diag_extras["skip_reason"] = spec.skip_reason
             else:
                 def _attempt(attempt: int) -> Dict[str, object]:
                     nonlocal attempts
@@ -1518,6 +1734,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                 rows = int(result.get("rows", 0))
                 rows_method = str(result.get("rows_method") or "")
                 duration_ms = int((time.perf_counter() - connector_start) * 1000)
+                rows_before = _coerce_int_safe(result.get("rows_before"))
+                rows_after = _coerce_int_safe(result.get("rows_after") or rows)
+                rows_written = _coerce_int_safe(result.get("rows_written"))
+                if rows_written == 0 and rows_after >= 0:
+                    rows_written = max(0, rows_after - rows_before)
+                diag_counts = {
+                    "fetched": _coerce_int_safe(
+                        result.get("fetched_rows")
+                        or result.get("rows_fetched")
+                        or result.get("rows")
+                        or rows
+                    ),
+                    "normalized": _coerce_int_safe(result.get("normalized_rows") or result.get("rows") or rows),
+                    "written": rows_written,
+                }
+                if rows_method:
+                    diag_extras["rows_method"] = rows_method
+                if result.get("rows_method_before"):
+                    diag_extras["rows_method_before"] = result.get("rows_method_before")
+                diag_extras["rows_total"] = rows_after
+                diag_extras["rows_before"] = rows_before
+                diag_extras["rows_written"] = rows_written
+                maybe_http = result.get("http")
+                if isinstance(maybe_http, Mapping):
+                    diag_http = dict(maybe_http)
+                diag_coverage, diag_samples = _collect_output_samples(spec.output_path)
                 if spec.output_path and spec.output_path.exists() and rows == 0:
                     status = "ok-empty"
                     notes = "header-only"
@@ -1557,6 +1799,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "attempts": attempts,
                 "duration_ms": duration_ms,
             }
+            diag_extras["exception_type"] = exc.__class__.__name__
             if warn_only:
                 status = "warning"
                 child.warning("failed (smoke warning)", exc_info=exc, extra=log_extra)
@@ -1578,8 +1821,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                         notes = f"{notes}; selected:list"
                 else:
                     notes = "selected:list"
-            detach_connector_handler(child, handler)
+            if diag_coverage is None and spec.output_path:
+                diag_coverage, diag_samples = _collect_output_samples(spec.output_path)
+            diag_http_payload = dict(diag_http)
+            diag_http_payload["retries"] = max(0, attempts - 1)
+            diag_extras.setdefault("duration_ms", duration_ms)
+            diag_extras["attempts"] = attempts
+            diag_extras["status_raw"] = status
             summary_notes = redact(notes) if notes else None
+            diagnostic_reason = summary_notes or spec.skip_reason or None
+            diagnostics_result = diagnostics_finalize_run(
+                diagnostics_ctx,
+                status=status,
+                reason=diagnostic_reason,
+                http=diag_http_payload,
+                counts=diag_counts,
+                coverage=diag_coverage,
+                samples=diag_samples,
+                extras={key: value for key, value in diag_extras.items() if value is not None},
+            )
+            diagnostics_append_jsonl(DIAGNOSTICS_REPORT, diagnostics_result)
+            detach_connector_handler(child, handler)
             root.info(
                 "connector summary",
                 extra={
