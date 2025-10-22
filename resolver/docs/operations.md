@@ -36,20 +36,12 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
 
 ## Monthly snapshots in CI
 
-- Workflow: `.github/workflows/publish_snapshot.yml`
-- Triggers: manual dispatch (`workflow_dispatch`) and the 1st of each month at 02:00 Europe/Istanbul.
-- Command executed: `python -m resolver.cli.snapshot_cli make-monthly --ym <year-month> --write-db 1`
-- Artifacts: `resolver/snapshots/YYYY-MM/` uploaded to the run for download. When `SNAPSHOT_PUBLISH_TOKEN` is set the job pushes the snapshot directory back to the repository.
-
-### Required GitHub secrets/vars
-
-| Name | Purpose |
-| --- | --- |
-| `RESOLVER_DB_URL` | DuckDB connection string used for dual-writes (`duckdb:///...`). |
-| `SNAPSHOT_PUBLISH_TOKEN` (optional) | Personal access token with repo write access to push snapshot folders. |
-| `RESOLVER_SNAPSHOT_ENV` (optional) | Additional environment flags (e.g., feature toggles) exported before the CLI runs. |
-
-Set repository variables for non-sensitive defaults such as `SNAPSHOT_EXPORT_CONFIG` or staging paths if they differ from repo defaults.
+- Workflow: `.github/workflows/resolver-monthly.yml` (manual dispatch remains available; `.github/workflows/publish_snapshot.yml` is now a fallback for unusual recoveries).
+- Schedule: cron `0 2 1 * *` → 02:00 on the first day of the month in Europe/Istanbul. The workflow derives `SNAPSHOT_TARGET_YM` from the previous month in Istanbul time and exports matching `RESOLVER_START_ISO`/`RESOLVER_END_ISO` bounds for the connectors.
+- Pipeline: run live connectors (skipping any missing credentials), execute `python -m resolver.cli.snapshot_cli make-monthly --ym $SNAPSHOT_TARGET_YM --write-db 1 --db-url data/resolver.duckdb`, build the rolling 12‑month LLM context bundle, and prepare both directories for artifact upload.
+- Artifacts & release: uploads `resolver/snapshots/$SNAPSHOT_TARGET_YM/**` plus `context/` as a single artifact and updates or creates a GitHub Release tagged `resolver-$SNAPSHOT_TARGET_YM` containing a compressed bundle.
+- Runbook checks: review the Actions summary table for healthy `resolved_rows` (zero rows usually means a connector was skipped), confirm the context bundle file sizes look reasonable, and verify the release upload succeeded. Skipped connectors log clear warnings so the run still completes green.
+- SLO: finish within 75 minutes so the artifact and release are available by 03:30 Istanbul. If the run fails, resolve the connector issue and re-run; when live data is unavailable fall back to `publish_snapshot.yml` and note the variance in the monthly summary.
 
 ## Initial backfill workflow
 

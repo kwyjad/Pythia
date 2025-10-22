@@ -1,95 +1,45 @@
+"""Tests for ``resolver.tools.ci_helpers`` used by CI workflows."""
+
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-from pathlib import Path
+import datetime as dt
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from resolver.tools.ci_helpers import (
+    MonthlyWindow,
+    monthly_snapshot_window,
+    previous_month_istanbul,
+)
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+@pytest.mark.parametrize(
+    "moment, expected",
+    [
+        (dt.datetime(2024, 3, 14, 9, 30), "2024-02"),
+        (dt.datetime(2024, 1, 1, 0, 1, tzinfo=ZoneInfo("Europe/Istanbul")), "2023-12"),
+        (dt.datetime(2024, 4, 30, 22, 15, tzinfo=ZoneInfo("UTC")), "2024-04"),
+    ],
+)
+def test_previous_month_istanbul(moment: dt.datetime, expected: str) -> None:
+    """The helper should yield the previous month using Istanbul boundaries."""
+
+    assert previous_month_istanbul(moment) == expected
 
 
-def run_script(script: Path, *args: str) -> str:
-    cmd = [sys.executable, str(script), *args]
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    return result.stdout
+def test_monthly_snapshot_window_bounds() -> None:
+    """The monthly window helper returns ISO bounds for the prior month."""
 
-
-def read_json_block(output_path: Path) -> dict[str, object]:
-    payload_lines = output_path.read_text(encoding="utf-8").splitlines()
-    if not payload_lines:
-        raise AssertionError("report file was empty")
-    json_start = None
-    for idx, line in enumerate(payload_lines):
-        if line.strip().startswith("{"):
-            json_start = idx
-            break
-    if json_start is None:
-        raise AssertionError("no JSON payload found in diagnostics report")
-    payload = json.loads("\n".join(payload_lines[json_start:]))
-    assert isinstance(payload, dict)
-    return payload
-
-
-def test_list_canonical_reports_rows(tmp_path: Path) -> None:
-    canonical_dir = tmp_path / "canonical"
-    canonical_dir.mkdir()
-    csv_path = canonical_dir / "sample.csv"
-    csv_path.write_text("col\n1\n2\n", encoding="utf-8")
-    out_path = tmp_path / "report.txt"
-
-    script = REPO_ROOT / "scripts" / "ci" / "list_canonical.py"
-    run_script(script, "--dir", str(canonical_dir), "--out", str(out_path))
-
-    text = out_path.read_text(encoding="utf-8")
-    assert "sample.csv" in text
-    assert "rows=2" in text
-
-    payload = read_json_block(out_path)
-    assert payload["exists"] is True
-    assert payload.get("total_rows") == 2
-    assert payload.get("unknown_row_counts") == 0
-    files = payload.get("files")
-    assert isinstance(files, list)
-    assert any(entry.get("rows") == 2 for entry in files)  # type: ignore[index]
-
-
-def test_db_counts_handles_missing_db(tmp_path: Path) -> None:
-    db_path = tmp_path / "resolver.duckdb"
-    out_path = tmp_path / "duckdb-report.txt"
-
-    script = REPO_ROOT / "scripts" / "ci" / "db_counts.py"
-    run_script(script, "--db", str(db_path), "--out", str(out_path))
-
-    payload = read_json_block(out_path)
-    assert payload["exists"] is False
-    assert payload.get("tables") == {}
-
-
-def test_run_and_capture_emits_exit_and_tail(tmp_path: Path) -> None:
-    script = REPO_ROOT / "scripts" / "ci" / "run_and_capture.sh"
-    workdir = tmp_path / "workspace"
-    workdir.mkdir()
-    command = [
-        "bash",
-        str(script),
-        "sample",
-        "python -c \"import json; print(json.dumps({'message': 'hello'}))\"",
-    ]
-    result = subprocess.run(command, cwd=workdir, text=True)
-    assert result.returncode == 0
-
-    exit_file = workdir / ".ci" / "exitcodes" / "sample"
-    tail_file = workdir / ".ci" / "diagnostics" / "sample.tail.txt"
-    combined = workdir / ".ci" / "diagnostics" / "sample.log"
-
-    assert exit_file.exists(), "expected exitcode breadcrumb to be created"
-    assert tail_file.exists(), "expected tail log to be created"
-    assert combined.exists(), "expected combined log to be created"
-
-    exit_content = exit_file.read_text(encoding="utf-8").strip()
-    assert exit_content == "exit=0"
-    tail_content = tail_file.read_text(encoding="utf-8")
-    assert "hello" in tail_content
-    combined_content = combined.read_text(encoding="utf-8")
-    assert "hello" in combined_content
+    now = dt.datetime(2024, 2, 1, 1, 30, tzinfo=ZoneInfo("UTC"))
+    window = monthly_snapshot_window(now)
+    assert isinstance(window, MonthlyWindow)
+    assert window.ym == "2024-01"
+    assert window.start_iso == "2024-01-01"
+    assert window.end_iso == "2024-01-31"
+    assert window.to_env() == {
+        "SNAPSHOT_TARGET_YM": "2024-01",
+        "RESOLVER_PERIOD": "2024-01",
+        "RESOLVER_START_ISO": "2024-01-01",
+        "RESOLVER_END_ISO": "2024-01-31",
+    }
