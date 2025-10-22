@@ -65,7 +65,7 @@ def test_enabled_flag_false_skips_connector(
     monkeypatch.setattr(run_all_stubs, "_run_connector", fake_run)
 
     exit_code = run_all_stubs.main([])
-    assert exit_code == 1
+    assert exit_code == 0
     captured = capsys.readouterr()
     assert "decision=skip" in captured.out
     assert "enable=False gated_by=config" in captured.out
@@ -91,7 +91,7 @@ def test_legacy_enable_flag_false_skips_connector(
     monkeypatch.setattr(run_all_stubs, "_run_connector", fake_run)
 
     exit_code = run_all_stubs.main([])
-    assert exit_code == 1
+    assert exit_code == 0
     captured = capsys.readouterr()
     assert "enable=False gated_by=config" in captured.out
     assert ", mode=skipped" in captured.out
@@ -116,7 +116,7 @@ def test_missing_flag_defaults_to_disabled(
     monkeypatch.setattr(run_all_stubs, "_run_connector", fake_run)
 
     exit_code = run_all_stubs.main([])
-    assert exit_code == 1
+    assert exit_code == 0
     captured = capsys.readouterr()
     assert "enable=False gated_by=config" in captured.out
     assert ", mode=skipped" in captured.out

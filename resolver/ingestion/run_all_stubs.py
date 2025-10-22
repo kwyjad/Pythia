@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import csv
 import datetime as dt
+import fnmatch
+from collections import Counter
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import yaml
 
 import resolver.ingestion.feature_flags as ff
+from resolver.ingestion._exit_policy import compute_exit_code
 
 from resolver.ingestion._manifest import (
     count_csv_rows,
@@ -898,6 +900,55 @@ def _rows_written(before: int, after: int) -> int:
     return max(0, after - before)
 
 
+def _normalise_exit_status(status: str) -> str:
+    status_lower = (status or "").lower()
+    if status_lower.startswith("ok"):
+        return "ok"
+    if status_lower in {"error", "skipped"}:
+        return status_lower
+    if status_lower == "warning":
+        return "ok"
+    if not status_lower:
+        return "skipped"
+    return status_lower
+
+
+def _format_skip_reason(reason: str) -> str:
+    formatted = reason.strip().lower()
+    if formatted == "disabled: config":
+        return "config disables"
+    if formatted == "disabled: ci":
+        return "CI disables"
+    return reason.strip()
+
+
+def _describe_exit_decision(results: List[dict], exit_code: int) -> str:
+    statuses = [str(entry.get("status") or "").lower() for entry in results]
+    reasons = [str(entry.get("reason") or "") for entry in results if entry.get("reason")]
+    unique_reasons = [
+        _format_skip_reason(reason)
+        for reason in sorted({reason for reason in reasons if reason})
+    ]
+    reason_text = ", ".join(unique_reasons)
+    if exit_code == 0:
+        if any(status == "ok" for status in statuses):
+            return "at least one connector ran ⇒ success"
+        if statuses and all(status == "skipped" for status in statuses):
+            if reason_text:
+                return f"all skipped due to {reason_text} ⇒ success"
+            return "all connectors skipped for benign reasons ⇒ success"
+        return "success"
+    if any(status == "error" for status in statuses):
+        return "one or more connectors failed ⇒ exit 1"
+    if statuses and all(status == "skipped" for status in statuses):
+        if reason_text:
+            return f"all skipped due to {reason_text} ⇒ exit 1"
+        return "all connectors skipped ⇒ exit 1"
+    if not statuses:
+        return "no connectors evaluated ⇒ exit 1"
+    return "no connectors ran ⇒ exit 1"
+
+
 def _resolve_enablement(
     spec: ConnectorSpec,
     *,
@@ -1384,6 +1435,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     specs = checked_specs
 
     connectors_summary: List[Dict[str, object]] = []
+    exit_policy_inputs: List[dict] = []
     had_error = False
     total_start = time.perf_counter()
 
@@ -1570,6 +1622,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "reason": summary_notes,
                 }
             )
+            normalised_status = _normalise_exit_status(status)
+            exit_reason = None
+            if normalised_status == "skipped":
+                exit_reason = spec.skip_reason or notes
+            exit_policy_inputs.append({"status": normalised_status, "reason": exit_reason})
 
     total_duration_ms = int((time.perf_counter() - total_start) * 1000)
     table = _render_summary_table(connectors_summary)
@@ -1600,24 +1657,70 @@ def main(argv: Optional[List[str]] = None) -> int:
         for entry in connectors_summary
         if entry.get("kind") == "stub" and entry.get("status") == "error"
     )
-    connectors_ran = sum(
-        1
-        for entry in connectors_summary
-        if entry.get("status") != "skipped"
+    status_counts = Counter(entry.get("status") for entry in connectors_summary)
+    normalised_counts = Counter(result.get("status") for result in exit_policy_inputs)
+
+    root.info(
+        "status counts",
+        extra={
+            "event": "connector_status_counts",
+            "status_counts": dict(status_counts),
+            "normalised_counts": dict(normalised_counts),
+        },
     )
 
+    policy_exit_code = compute_exit_code(exit_policy_inputs)
+    policy_reason = _describe_exit_decision(exit_policy_inputs, policy_exit_code)
+    root.info(
+        "exit policy result",
+        extra={
+            "event": "exit_policy",
+            "exit_code": policy_exit_code,
+            "reason": policy_reason,
+            "status_counts": dict(normalised_counts),
+        },
+    )
+
+    exit_code = policy_exit_code
+    exit_reason_text = policy_reason
+
     if strict_mode and had_error:
-        return 1
+        exit_code = 1
+        exit_reason_text = "strict mode: connector error forces failure"
+    elif run_real and not run_stubs and real_failures:
+        exit_code = 1
+        exit_reason_text = "real connector failure forces non-zero exit"
+    elif fail_on_stub_error and stub_failures:
+        exit_code = 1
+        exit_reason_text = "stub failure with FAIL_ON_STUB_ERROR=1"
 
-    if run_real and not run_stubs and real_failures:
-        return 1
+    root.info(
+        "final exit decision",
+        extra={
+            "event": "exit_decision",
+            "exit_code": exit_code,
+            "exit_reason": exit_reason_text,
+            "policy_exit_code": policy_exit_code,
+            "policy_reason": policy_reason,
+            "status_counts": dict(status_counts),
+            "normalised_counts": dict(normalised_counts),
+            "strict_mode": strict_mode,
+            "had_error": had_error,
+            "real_failures": real_failures,
+            "stub_failures": stub_failures,
+            "run_real": run_real,
+            "run_stubs": run_stubs,
+        },
+    )
 
-    if fail_on_stub_error and stub_failures:
-        return 1
+    summary_counts_text = ", ".join(
+        f"{status}={count}" for status, count in sorted(status_counts.items()) if status
+    )
+    if not summary_counts_text:
+        summary_counts_text = "none"
+    print(f"Connector totals: {summary_counts_text} | exit={exit_code} ({exit_reason_text})")
 
-    if connectors_ran == 0:
-        return 1
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
