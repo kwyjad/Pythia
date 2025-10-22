@@ -96,6 +96,31 @@ def test_wfp_mvam_disabled_by_config(monkeypatch, tmp_path, caplog):
     ), "expected enable log to show config gating"
 
 
+def test_wfp_mvam_disabled_prints_skip_reason(monkeypatch, tmp_path, capsys):
+    module = _prepare_runner(monkeypatch, tmp_path)
+
+    config_path = module.CONFIG_DIR / "wfp_mvam_sources.yml"
+    config_path.write_text("enable: false\n", encoding="utf-8")
+
+    calls: list[str] = []
+
+    def _record(spec, _logger):
+        calls.append(spec.filename)
+        return {"status": "ok", "rows": 0, "duration_ms": 0}
+
+    monkeypatch.setattr(module, "_run_connector", _record)
+
+    exit_code = module.main([])
+
+    assert exit_code == 0
+    assert calls == []
+
+    captured = capsys.readouterr()
+    assert "mode=skipped" in captured.out
+    assert "reason=disabled: config" in captured.out
+    assert "Connector totals" in captured.out
+
+
 def test_wfp_mvam_forced_by_env(monkeypatch, tmp_path, caplog):
     module = _prepare_runner(monkeypatch, tmp_path)
 

@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import csv
 import datetime as dt
+import fnmatch
+from collections import Counter
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import yaml
 
 import resolver.ingestion.feature_flags as ff
+from resolver.ingestion._exit_policy import compute_exit_code
 
 from resolver.ingestion._manifest import (
     count_csv_rows,
@@ -263,6 +265,32 @@ SKIP_ENVS = {
     "hdx_client.py": ("RESOLVER_SKIP_HDX", "HDX connector"),
     "worldpop_client.py": ("RESOLVER_SKIP_WORLDPOP", "WorldPop connector"),
     "wfp_mvam_client.py": ("RESOLVER_SKIP_WFP_MVAM", "WFP mVAM connector"),
+}
+
+SECRET_GATES: Dict[str, Dict[str, object]] = {
+    "acled_client.py": {
+        "alternatives": [
+            ("ACLED_REFRESH_TOKEN",),
+            ("ACLED_ACCESS_TOKEN",),
+            ("ACLED_TOKEN",),
+            ("ACLED_USERNAME", "ACLED_PASSWORD"),
+        ],
+        "message": "missing ACLED_REFRESH_TOKEN/ACLED_TOKEN credentials",
+    },
+    "unhcr_odp_client.py": {
+        "alternatives": [
+            (
+                "UNHCR_ODP_USERNAME",
+                "UNHCR_ODP_PASSWORD",
+                "UNHCR_ODP_CLIENT_ID",
+                "UNHCR_ODP_CLIENT_SECRET",
+            ),
+        ],
+        "message": (
+            "missing UNHCR_ODP_USERNAME/UNHCR_ODP_PASSWORD/UNHCR_ODP_CLIENT_ID/"
+            "UNHCR_ODP_CLIENT_SECRET"
+        ),
+    },
 }
 
 
@@ -582,6 +610,26 @@ def _should_skip(script: str) -> Optional[str]:
     return None
 
 
+def _check_secret_gate(filename: str) -> tuple[bool, Optional[str]]:
+    gate = SECRET_GATES.get(filename)
+    if not gate:
+        return True, None
+    alternatives = gate.get("alternatives", [])
+    for combo in alternatives:
+        if all(os.getenv(name, "").strip() for name in combo):
+            return True, None
+    message = gate.get("message")
+    if isinstance(message, str) and message:
+        return False, message
+    formatted = " or ".join(
+        " + ".join(names) if len(names) > 1 else names[0]
+        for names in alternatives
+    )
+    if not formatted:
+        formatted = "required credentials"
+    return False, f"missing {formatted}"
+
+
 def _normalise_name(name: str) -> str:
     name = name.strip()
     if not name:
@@ -788,20 +836,29 @@ def _with_attempt_logger(
 
 
 def _render_summary_table(rows: List[Dict[str, object]]) -> str:
-    headers = ["Connector", "Status", "Attempts", "Rows", "Duration(ms)", "Notes"]
+    headers = [
+        "Connector",
+        "Mode",
+        "Status",
+        "Attempts",
+        "Rows",
+        "Duration(ms)",
+        "Reason",
+    ]
     table_rows = [
         [
             row.get("name", ""),
+            row.get("mode", ""),
             row.get("status", ""),
             str(row.get("attempts", "")),
             str(row.get("rows", "")),
             str(row.get("duration_ms", "")),
-            row.get("notes", "") or "",
+            row.get("reason") or row.get("notes") or "",
         ]
         for row in rows
     ]
     if not table_rows:
-        table_rows = [["-", "-", "0", "0", "0", ""]]
+        table_rows = [["-", "-", "-", "0", "0", "0", ""]]
     columns = list(zip(headers, *table_rows))
     widths = [max(len(str(value)) for value in column) for column in columns]
     lines = []
@@ -843,6 +900,55 @@ def _rows_written(before: int, after: int) -> int:
     return max(0, after - before)
 
 
+def _normalise_exit_status(status: str) -> str:
+    status_lower = (status or "").lower()
+    if status_lower.startswith("ok"):
+        return "ok"
+    if status_lower in {"error", "skipped"}:
+        return status_lower
+    if status_lower == "warning":
+        return "ok"
+    if not status_lower:
+        return "skipped"
+    return status_lower
+
+
+def _format_skip_reason(reason: str) -> str:
+    formatted = reason.strip().lower()
+    if formatted == "disabled: config":
+        return "config disables"
+    if formatted == "disabled: ci":
+        return "CI disables"
+    return reason.strip()
+
+
+def _describe_exit_decision(results: List[dict], exit_code: int) -> str:
+    statuses = [str(entry.get("status") or "").lower() for entry in results]
+    reasons = [str(entry.get("reason") or "") for entry in results if entry.get("reason")]
+    unique_reasons = [
+        _format_skip_reason(reason)
+        for reason in sorted({reason for reason in reasons if reason})
+    ]
+    reason_text = ", ".join(unique_reasons)
+    if exit_code == 0:
+        if any(status == "ok" for status in statuses):
+            return "at least one connector ran ⇒ success"
+        if statuses and all(status == "skipped" for status in statuses):
+            if reason_text:
+                return f"all skipped due to {reason_text} ⇒ success"
+            return "all connectors skipped for benign reasons ⇒ success"
+        return "success"
+    if any(status == "error" for status in statuses):
+        return "one or more connectors failed ⇒ exit 1"
+    if statuses and all(status == "skipped" for status in statuses):
+        if reason_text:
+            return f"all skipped due to {reason_text} ⇒ exit 1"
+        return "all connectors skipped ⇒ exit 1"
+    if not statuses:
+        return "no connectors evaluated ⇒ exit 1"
+    return "no connectors ran ⇒ exit 1"
+
+
 def _resolve_enablement(
     spec: ConnectorSpec,
     *,
@@ -862,6 +968,11 @@ def _resolve_enablement(
         forced_sources.append("pattern")
     forced = bool(forced_sources)
     authoritative = is_authoritatively_selected(spec)
+    requires_secret = spec.kind == "real"
+    secrets_ok = True
+    secret_reason: Optional[str] = None
+    if requires_secret:
+        secrets_ok, secret_reason = _check_secret_gate(spec.filename)
 
     if spec.skip_reason:
         return EnableDecision(
@@ -875,6 +986,16 @@ def _resolve_enablement(
         )
 
     if authoritative and not spec.ci_gate_reason:
+        if requires_secret and not secrets_ok and not forced:
+            return EnableDecision(
+                should_run=False,
+                gated_by="secret",
+                forced_sources=tuple(forced_sources),
+                config_enabled=config_enabled,
+                has_config_flag=has_flag,
+                applied_skip_reason=secret_reason,
+                ci_gate_reason=spec.ci_gate_reason,
+            )
         return EnableDecision(
             should_run=True,
             gated_by="selected:list",
@@ -926,6 +1047,17 @@ def _resolve_enablement(
             config_enabled=config_enabled,
             has_config_flag=has_flag,
             applied_skip_reason=spec.ci_gate_reason,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if requires_secret and not secrets_ok and not forced:
+        return EnableDecision(
+            should_run=False,
+            gated_by="secret",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=secret_reason,
             ci_gate_reason=spec.ci_gate_reason,
         )
 
@@ -1303,6 +1435,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     specs = checked_specs
 
     connectors_summary: List[Dict[str, object]] = []
+    exit_policy_inputs: List[dict] = []
     had_error = False
     total_start = time.perf_counter()
 
@@ -1333,79 +1466,78 @@ def main(argv: Optional[List[str]] = None) -> int:
                 status = "skipped"
                 attempts = 0
                 rows = 0
-                continue
-
-            def _attempt(attempt: int) -> Dict[str, object]:
-                nonlocal attempts
-                attempts = max(attempts, attempt)
-                attempt_logger = _with_attempt_logger(child, attempt)
-                start_extra = {
-                    "event": "start",
-                    "attempt": attempt,
-                    "kind": spec.kind,
-                    "path": str(spec.path),
-                }
-                for key, value in spec.metadata.items():
-                    start_extra[key] = redact(value)
-                if spec.summary:
-                    start_extra["summary"] = redact(spec.summary)
-                attempt_logger.info("starting", extra=start_extra)
-                return _run_connector(spec, attempt_logger)
-
-            def _should_retry(exc: BaseException) -> bool:
-                exit_code: int | None = None
-                stderr_text = ""
-                stdout_text = ""
-                if isinstance(exc, subprocess.CalledProcessError):
-                    exit_code = exc.returncode
-                    try:
-                        if getattr(exc, "stderr", None):
-                            stderr_text = _coerce_process_stream(exc.stderr)
-                        if getattr(exc, "stdout", None):
-                            stdout_text = _coerce_process_stream(exc.stdout)
-                    except Exception:  # noqa: BLE001
-                        stderr_text = ""
-                        stdout_text = ""
-                return _is_retryable_exception(
-                    exc,
-                    exit_code=exit_code,
-                    stderr=stderr_text or None,
-                    stdout=stdout_text or None,
-                )
-
-            result = retry_call(
-                _attempt,
-                retries=retries,
-                base_delay=retry_base,
-                max_delay=retry_max,
-                jitter=not args.retry_no_jitter,
-                logger=child,
-                connector=spec.name,
-                is_retryable=_should_retry,
-            )
-            rows = int(result.get("rows", 0))
-            rows_method = str(result.get("rows_method") or "")
-            duration_ms = int((time.perf_counter() - connector_start) * 1000)
-            if spec.output_path and spec.output_path.exists() and rows == 0:
-                status = "ok-empty"
-                notes = "header-only"
             else:
-                status = "ok"
-            if rows_method in {"recount", "manifest+verified"}:
-                method_note = f"rows:{rows_method}"
-                notes = f"{notes}; {method_note}" if notes else method_note
-            child.info(
-                "finished",
-                extra={
-                    "event": "finished",
-                    "status": status,
-                    "rows": rows,
-                    "attempts": attempts,
-                    "duration_ms": duration_ms,
-                    "rows_method": rows_method or None,
-                    "notes": redact(notes) if notes else None,
-                },
-            )
+                def _attempt(attempt: int) -> Dict[str, object]:
+                    nonlocal attempts
+                    attempts = max(attempts, attempt)
+                    attempt_logger = _with_attempt_logger(child, attempt)
+                    start_extra = {
+                        "event": "start",
+                        "attempt": attempt,
+                        "kind": spec.kind,
+                        "path": str(spec.path),
+                    }
+                    for key, value in spec.metadata.items():
+                        start_extra[key] = redact(value)
+                    if spec.summary:
+                        start_extra["summary"] = redact(spec.summary)
+                    attempt_logger.info("starting", extra=start_extra)
+                    return _run_connector(spec, attempt_logger)
+
+                def _should_retry(exc: BaseException) -> bool:
+                    exit_code: int | None = None
+                    stderr_text = ""
+                    stdout_text = ""
+                    if isinstance(exc, subprocess.CalledProcessError):
+                        exit_code = exc.returncode
+                        try:
+                            if getattr(exc, "stderr", None):
+                                stderr_text = _coerce_process_stream(exc.stderr)
+                            if getattr(exc, "stdout", None):
+                                stdout_text = _coerce_process_stream(exc.stdout)
+                        except Exception:  # noqa: BLE001
+                            stderr_text = ""
+                            stdout_text = ""
+                    return _is_retryable_exception(
+                        exc,
+                        exit_code=exit_code,
+                        stderr=stderr_text or None,
+                        stdout=stdout_text or None,
+                    )
+
+                result = retry_call(
+                    _attempt,
+                    retries=retries,
+                    base_delay=retry_base,
+                    max_delay=retry_max,
+                    jitter=not args.retry_no_jitter,
+                    logger=child,
+                    connector=spec.name,
+                    is_retryable=_should_retry,
+                )
+                rows = int(result.get("rows", 0))
+                rows_method = str(result.get("rows_method") or "")
+                duration_ms = int((time.perf_counter() - connector_start) * 1000)
+                if spec.output_path and spec.output_path.exists() and rows == 0:
+                    status = "ok-empty"
+                    notes = "header-only"
+                else:
+                    status = "ok"
+                if rows_method in {"recount", "manifest+verified"}:
+                    method_note = f"rows:{rows_method}"
+                    notes = f"{notes}; {method_note}" if notes else method_note
+                child.info(
+                    "finished",
+                    extra={
+                        "event": "finished",
+                        "status": status,
+                        "rows": rows,
+                        "attempts": attempts,
+                        "duration_ms": duration_ms,
+                        "rows_method": rows_method or None,
+                        "notes": redact(notes) if notes else None,
+                    },
+                )
         except Exception as exc:  # noqa: BLE001
             duration_ms = int((time.perf_counter() - connector_start) * 1000)
             status = "error"
@@ -1457,11 +1589,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "attempts": attempts,
                     "duration_ms": duration_ms,
                     "notes": summary_notes,
+                    "reason": summary_notes,
                 },
             )
+            mode = "skipped" if status == "skipped" else spec.kind
+            reason_text = summary_notes or "-"
             summary_line = (
-                f"{spec.name}, status={status}, attempts={attempts}, "
-                f"duration_ms={duration_ms}, notes={summary_notes or '-'}"
+                f"{spec.name}, mode={mode}, status={status}, attempts={attempts}, "
+                f"duration_ms={duration_ms}, reason={reason_text}"
             )
             print(summary_line)
             output_path_text: Optional[str]
@@ -1483,8 +1618,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "kind": spec.kind,
                     "rows_method": result.get("rows_method") if result else None,
                     "output_path": output_path_text,
+                    "mode": mode,
+                    "reason": summary_notes,
                 }
             )
+            normalised_status = _normalise_exit_status(status)
+            exit_reason = None
+            if normalised_status == "skipped":
+                exit_reason = spec.skip_reason or notes
+            exit_policy_inputs.append({"status": normalised_status, "reason": exit_reason})
 
     total_duration_ms = int((time.perf_counter() - total_start) * 1000)
     table = _render_summary_table(connectors_summary)
@@ -1515,16 +1657,70 @@ def main(argv: Optional[List[str]] = None) -> int:
         for entry in connectors_summary
         if entry.get("kind") == "stub" and entry.get("status") == "error"
     )
+    status_counts = Counter(entry.get("status") for entry in connectors_summary)
+    normalised_counts = Counter(result.get("status") for result in exit_policy_inputs)
+
+    root.info(
+        "status counts",
+        extra={
+            "event": "connector_status_counts",
+            "status_counts": dict(status_counts),
+            "normalised_counts": dict(normalised_counts),
+        },
+    )
+
+    policy_exit_code = compute_exit_code(exit_policy_inputs)
+    policy_reason = _describe_exit_decision(exit_policy_inputs, policy_exit_code)
+    root.info(
+        "exit policy result",
+        extra={
+            "event": "exit_policy",
+            "exit_code": policy_exit_code,
+            "reason": policy_reason,
+            "status_counts": dict(normalised_counts),
+        },
+    )
+
+    exit_code = policy_exit_code
+    exit_reason_text = policy_reason
 
     if strict_mode and had_error:
-        return 1
+        exit_code = 1
+        exit_reason_text = "strict mode: connector error forces failure"
+    elif run_real and not run_stubs and real_failures:
+        exit_code = 1
+        exit_reason_text = "real connector failure forces non-zero exit"
+    elif fail_on_stub_error and stub_failures:
+        exit_code = 1
+        exit_reason_text = "stub failure with FAIL_ON_STUB_ERROR=1"
 
-    if run_real and not run_stubs and real_failures:
-        return 1
+    root.info(
+        "final exit decision",
+        extra={
+            "event": "exit_decision",
+            "exit_code": exit_code,
+            "exit_reason": exit_reason_text,
+            "policy_exit_code": policy_exit_code,
+            "policy_reason": policy_reason,
+            "status_counts": dict(status_counts),
+            "normalised_counts": dict(normalised_counts),
+            "strict_mode": strict_mode,
+            "had_error": had_error,
+            "real_failures": real_failures,
+            "stub_failures": stub_failures,
+            "run_real": run_real,
+            "run_stubs": run_stubs,
+        },
+    )
 
-    if fail_on_stub_error and stub_failures:
-        return 1
-    return 0
+    summary_counts_text = ", ".join(
+        f"{status}={count}" for status, count in sorted(status_counts.items()) if status
+    )
+    if not summary_counts_text:
+        summary_counts_text = "none"
+    print(f"Connector totals: {summary_counts_text} | exit={exit_code} ({exit_reason_text})")
+
+    return exit_code
 
 
 if __name__ == "__main__":

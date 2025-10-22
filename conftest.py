@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +13,63 @@ except Exception:  # pragma: no cover - pytest will import this module regardles
 
 
 DUCKDB_SCHEME = "duckdb:///"
+
+
+def _has_xdist() -> bool:
+    try:
+        import xdist  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _strip_xdist_tokens(values: list[str]) -> list[str]:
+    stripped: list[str] = []
+    skip_next = False
+    for token in values:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "-n":
+            skip_next = True
+            continue
+        if token.startswith("-n"):
+            # covers -nauto or -n=auto
+            continue
+        if token == "--numprocesses":
+            skip_next = True
+            continue
+        if token.startswith("--numprocesses"):
+            continue
+        stripped.append(token)
+    return stripped
+
+
+XDIST_AVAILABLE = _has_xdist()
+XDIST_NOTICE_EMITTED = False
+
+
+if not XDIST_AVAILABLE:
+    addopts = os.environ.get("PYTEST_ADDOPTS")
+    if addopts:
+        tokens = addopts.split()
+        filtered = _strip_xdist_tokens(tokens)
+        if filtered != tokens:
+            new_value = " ".join(filtered)
+            if new_value:
+                os.environ["PYTEST_ADDOPTS"] = new_value
+            else:
+                os.environ.pop("PYTEST_ADDOPTS", None)
+            if not XDIST_NOTICE_EMITTED:
+                print("[note] pytest-xdist not available; running single-process")
+                XDIST_NOTICE_EMITTED = True
+    argv_tokens = _strip_xdist_tokens(sys.argv[1:])
+    if argv_tokens != sys.argv[1:]:
+        if not XDIST_NOTICE_EMITTED:
+            print("[note] pytest-xdist not available; running single-process")
+            XDIST_NOTICE_EMITTED = True
+        sys.argv[1:] = argv_tokens
 
 
 def _derive_worker_path(base_path: Path, workerid: Optional[str]) -> Path:
@@ -46,9 +104,11 @@ def _prepare_worker_db(base_url: str | None, workerid: Optional[str]) -> str | N
     return f"{DUCKDB_SCHEME}{worker_path}"
 
 
-def pytest_configure_node(node):  # pragma: no cover - xdist only
-    base_url = os.environ.get("RESOLVER_DB_URL")
-    node.workerinput["resolver_db_url_base"] = base_url
+if XDIST_AVAILABLE:
+
+    def pytest_configure_node(node):  # pragma: no cover - xdist only
+        base_url = os.environ.get("RESOLVER_DB_URL")
+        node.workerinput["resolver_db_url_base"] = base_url
 
 
 def pytest_configure(config):  # pragma: no cover - runtime hook
