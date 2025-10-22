@@ -1,0 +1,314 @@
+---
+name: Resolver — Initial Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      months_back:
+        description: "Number of months to include (default 12)"
+        required: false
+        default: "12"
+      only:
+        description: "Optional connector name for --only"
+        required: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  BACKFILL_DB_PATH: data/resolver_backfill.duckdb
+  BACKFILL_INGEST_ARTIFACT: resolver-backfill-ingest-${{ github.run_id }}-${{ github.run_attempt }}
+  BACKFILL_SNAPSHOT_ARTIFACT: resolver-backfill-snapshots-${{ github.run_id }}-${{ github.run_attempt }}
+  BACKFILL_CONTEXT_ARTIFACT: resolver-backfill-context-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  ingest:
+    name: Ingest connectors
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.window.outputs.months }}
+      start_iso: ${{ steps.window.outputs.start_iso }}
+      end_iso: ${{ steps.window.outputs.end_iso }}
+      month_count: ${{ steps.window.outputs.month_count }}
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ env.BACKFILL_DB_PATH }}
+      ACLED_TOKEN: ${{ secrets.ACLED_TOKEN }}
+      ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
+      ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
+      ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      HDX_API_KEY: ${{ secrets.HDX_API_KEY }}
+      UNHCR_ODP_USERNAME: ${{ secrets.UNHCR_ODP_USERNAME }}
+      UNHCR_ODP_PASSWORD: ${{ secrets.UNHCR_ODP_PASSWORD }}
+      UNHCR_ODP_CLIENT_ID: ${{ secrets.UNHCR_ODP_CLIENT_ID }}
+      UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
+      ONLY_CONNECTOR: ${{ github.event.inputs.only }}
+      RESOLVER_OUTPUT_DIR: data/staging
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -e .[db]
+
+      - name: Compute backfill window
+        id: window
+        env:
+          MONTHS_INPUT: ${{ github.event.inputs.months_back }}
+        run: |
+          set -euo pipefail
+          MONTHS_BACK=${MONTHS_INPUT:-12}
+          MONTHS_BACK="${MONTHS_BACK}" python - <<'PY'
+import calendar
+import datetime as dt
+import os
+from zoneinfo import ZoneInfo
+
+months_back = int(os.environ.get("MONTHS_BACK", "12"))
+now = dt.datetime.now(ZoneInfo("Europe/Istanbul"))
+year = now.year
+month = now.month
+months: list[str] = []
+for _ in range(months_back):
+    months.append(f"{year:04d}-{month:02d}")
+    month -= 1
+    if month == 0:
+        month = 12
+        year -= 1
+months.reverse()
+if not months:
+    raise SystemExit("months_back must be >= 1")
+start_iso = months[0] + "-01"
+end_year, end_month = map(int, months[-1].split("-"))
+last_day = calendar.monthrange(end_year, end_month)[1]
+end_iso = f"{end_year:04d}-{end_month:02d}-{last_day:02d}"
+outputs = {
+    "months": ",".join(months),
+    "start_iso": start_iso,
+    "end_iso": end_iso,
+    "month_count": str(len(months)),
+}
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+    for key, value in outputs.items():
+        print(f"{key}={value}", file=fh)
+with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+    fh.write(f"BACKFILL_MONTHS={' '.join(months)}\n")
+    fh.write(f"BACKFILL_MONTHS_CSV={outputs['months']}\n")
+    fh.write(f"BACKFILL_START_ISO={start_iso}\n")
+    fh.write(f"BACKFILL_END_ISO={end_iso}\n")
+PY
+          echo "Derived months: ${{ steps.window.outputs.months }}"
+
+      - name: Run connectors
+        env:
+          RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
+          RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
+          ARGS=("--mode" "real" "--retries" "2")
+          if [ -n "${ONLY_CONNECTOR:-}" ]; then
+            ARGS+=("--only" "${ONLY_CONNECTOR}")
+          fi
+          python resolver/ingestion/run_all_stubs.py "${ARGS[@]}"
+
+      - name: Upload ingestion outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
+          if-no-files-found: warn
+          path: |
+            data/
+            resolver/staging/
+            resolver/logs/ingestion/
+
+  derive-freeze:
+    name: Derive & freeze snapshots
+    runs-on: ubuntu-latest
+    needs: ingest
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ env.BACKFILL_DB_PATH }}
+      BACKFILL_MONTHS_CSV: ${{ needs.ingest.outputs.months }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -e .[db]
+
+      - name: Download ingestion bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
+          path: .
+
+      - name: Export canonical facts
+        run: |
+          set -euo pipefail
+          mkdir -p resolver/exports/backfill
+          python -m resolver.tools.export_facts --in resolver/staging --out resolver/exports/backfill --config resolver/tools/export_config.yml
+
+      - name: Derive and freeze monthly snapshots
+        env:
+          MONTHS: ${{ env.BACKFILL_MONTHS_CSV }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a months <<< "${MONTHS}"
+          for ym in "${months[@]}"; do
+            echo "::group::Deriving ${ym}"
+            month_dir="resolver/exports/backfill/${ym}"
+            mkdir -p "${month_dir}"
+            CURRENT_YM="${ym}" python - <<'PY'
+import os
+from pathlib import Path
+import pandas as pd
+
+ym = os.environ["CURRENT_YM"]
+base_csv = Path("resolver/exports/backfill/facts.csv")
+out_dir = Path("resolver/exports/backfill") / ym
+out_dir.mkdir(parents=True, exist_ok=True)
+if not base_csv.exists():
+    raise SystemExit(f"facts.csv missing at {base_csv}")
+df = pd.read_csv(base_csv)
+if "as_of_date" in df.columns:
+    df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce")
+    df = df[df["as_of_date"].dt.strftime("%Y-%m") == ym]
+elif "ym" in df.columns:
+    df = df[df["ym"].astype(str) == ym]
+if df.empty:
+    df = df.head(0)
+df.to_csv(out_dir / "facts.csv", index=False)
+df.to_parquet(out_dir / "facts.parquet", index=False)
+PY
+            if [ ! -s "${month_dir}/facts.csv" ]; then
+              echo "No facts rows for ${ym}; skipping snapshot"
+              echo "::endgroup::"
+              continue
+            fi
+            cutoff=$(CURRENT_YM="${ym}" python - <<'PY'
+import calendar
+import os
+ym = os.environ["CURRENT_YM"]
+year, month = map(int, ym.split("-"))
+last = calendar.monthrange(year, month)[1]
+print(f"{year:04d}-{month:02d}-{last:02d}")
+PY
+            )
+            python -m resolver.tools.precedence_engine --facts "${month_dir}/facts.csv" --cutoff "${cutoff}" --outdir "${month_dir}"
+            if [ ! -f "${month_dir}/resolved.csv" ]; then
+              echo "resolved.csv missing for ${ym}; skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            python -m resolver.tools.make_deltas --resolved "${month_dir}/resolved.csv" --out "${month_dir}/deltas.csv"
+            python -m resolver.tools.freeze_snapshot \
+              --facts "${month_dir}/facts.csv" \
+              --deltas "${month_dir}/deltas.csv" \
+              --resolved "${month_dir}/resolved.csv" \
+              --month "${ym}" \
+              --outdir resolver/snapshots \
+              --write-db 1 \
+              --db-url "duckdb:///${BACKFILL_DB_PATH}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload snapshots and database
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
+          if-no-files-found: warn
+          path: |
+            resolver/snapshots/
+            resolver/exports/backfill/
+            ${{ env.BACKFILL_DB_PATH }}
+
+  context:
+    name: Build LLM context bundle
+    runs-on: ubuntu-latest
+    needs:
+      - ingest
+      - derive-freeze
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ env.BACKFILL_DB_PATH }}
+      CONTEXT_MONTHS: ${{ needs.ingest.outputs.month_count }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -e .[db]
+
+      - name: Download snapshots bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
+          path: .
+
+      - name: Build context bundle
+        run: |
+          set -euo pipefail
+          mkdir -p context
+          python -m resolver.tools.build_llm_context --months "${CONTEXT_MONTHS:-12}" --outdir context
+
+      - name: Upload context artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_CONTEXT_ARTIFACT }}
+          if-no-files-found: warn
+          path: context/
+
+  artifacts:
+    name: Publish combined artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - derive-freeze
+      - context
+    steps:
+      - name: Download snapshots
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
+          path: .
+
+      - name: Download context bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_CONTEXT_ARTIFACT }}
+          path: .
+
+      - name: Upload combined bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-initial-backfill-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: |
+            resolver/snapshots/
+            context/
+            ${{ env.BACKFILL_DB_PATH }}

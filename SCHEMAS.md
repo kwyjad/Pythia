@@ -13,6 +13,7 @@
 - [db.facts_deltas](#dbfactsdeltas)
 - [db.snapshots](#dbsnapshots)
 - [db.manifests](#dbmanifests)
+- [context.facts_last12](#contextfacts_last12)
 
 ## staging.common
 
@@ -209,3 +210,17 @@ Snapshot manifest entries mirroring CSV exports.
 | checksum | string | no |  |  |
 | payload | string | no |  |  |
 | created_at | datetime | no |  |  |
+
+## context.facts_last12
+
+LLM context bundle summarising monthly new-series PIN/PA totals.
+
+| Name | Type | Required | Enum/Format | Description |
+| --- | --- | --- | --- | --- |
+| iso3 | string | yes |  |  |
+| hazard_code | string | yes |  |  |
+| ym | string | yes |  | Year-month bucket (YYYY-MM) |
+| metric | enum | yes | in_need, affected |  |
+| unit | enum | yes | persons |  |
+| value | number | yes |  |  |
+| series | enum | yes | new |  |

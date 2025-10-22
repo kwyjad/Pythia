@@ -479,6 +479,36 @@ entities:
       - name: created_at
         type: datetime
         required: false
+  context.facts_last12:
+    kind: context
+    description: LLM context bundle summarising monthly new-series PIN/PA totals.
+    allow_extra_columns: false
+    columns:
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: ym
+        type: string
+        required: true
+        description: Year-month bucket (YYYY-MM)
+      - name: metric
+        type: enum
+        enum: [in_need, affected]
+        required: true
+      - name: unit
+        type: enum
+        enum: [persons]
+        required: true
+      - name: value
+        type: number
+        required: true
+      - name: series
+        type: enum
+        enum: [new]
+        required: true
 
 required:
   - event_id

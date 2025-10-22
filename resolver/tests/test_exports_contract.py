@@ -6,6 +6,7 @@ from resolver.tests.test_utils import (
     load_schema, load_countries, load_shocks, read_csv,
     discover_export_files, today_iso, require_columns
 )
+from resolver.tools import build_llm_context as llm_context
 
 try:
     from resolver.db import duckdb_io
@@ -184,3 +185,12 @@ def test_duckdb_facts_resolved_contract_if_present():
     assert df["hazard_code"].isin(set(shocks["hazard_code"])).all()
 
     conn.close()
+
+
+def test_llm_context_schema_contract():
+    frame = llm_context.build_context_frame(months=[])
+    expected = ["iso3", "hazard_code", "ym", "metric", "unit", "value", "series"]
+    missing = [col for col in expected if col not in frame.columns]
+    assert not missing, f"Context frame missing columns: {missing}"
+    if not frame.empty:
+        assert set(frame["series"].unique()) == {"new"}
