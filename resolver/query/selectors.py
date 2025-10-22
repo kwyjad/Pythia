@@ -17,6 +17,7 @@ from resolver.diag.diagnostics import (
     get_logger as get_diag_logger,
     log_json,
 )
+from resolver.io import files_locator
 
 # --- begin duckdb import guard ---
 try:
@@ -60,6 +61,8 @@ def normalize_backend(value: Optional[str], *, default: str = "files") -> str:
     if value is None:
         return default
     backend = value.strip().lower()
+    if backend == "csv":
+        backend = "files"
     if backend not in VALID_BACKENDS:
         return default
     return backend
@@ -89,6 +92,21 @@ def first_day_of_month_from_ym(ym: str) -> str:
 def load_resolved_for_month(ym: str, is_current_month: bool) -> Tuple[Optional[pd.DataFrame], str]:
     """Load the resolved dataset according to month selection rules."""
 
+    # Prefer an explicit files backend root when available.
+    try:
+        files_root = files_locator.discover_files_root()
+    except FileNotFoundError:
+        files_root = None
+
+    if files_root is not None:
+        resolved_df = files_locator.load_table(files_root, "facts_resolved")
+        if not resolved_df.empty:
+            df = resolved_df.copy()
+            if "ym" in df.columns:
+                df = df[df["ym"].astype(str) == ym]
+            if not df.empty:
+                return df.fillna(""), "files_facts_resolved"
+
     snapshot_path = SNAPSHOTS / ym / "facts.parquet"
 
     if not is_current_month:
@@ -113,6 +131,19 @@ def load_deltas_for_month(ym: str, is_current_month: bool) -> Tuple[Optional[pd.
     """Load monthly deltas for a given month if available."""
 
     candidates: list[Tuple[Path, str]] = []
+
+    try:
+        files_root = files_locator.discover_files_root()
+    except FileNotFoundError:
+        files_root = None
+    else:
+        deltas_df = files_locator.load_table(files_root, "facts_deltas")
+        if not deltas_df.empty:
+            df = deltas_df.copy()
+            if "ym" in df.columns:
+                df = df[df["ym"].astype(str) == ym]
+            if not df.empty:
+                return df.fillna(""), "files_facts_deltas"
 
     if not is_current_month:
         monthly_path = STATE / "monthly" / ym / "deltas.csv"

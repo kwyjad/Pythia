@@ -18,10 +18,16 @@ All staging CSVs under `resolver/staging/` adhere to [`resolver/tools/schema.yml
 
 - `pph_used` — numeric people-per-household multiplier applied when converting households → people
 - `extraction_method` — `pdf_native` or `ocr` indicating which text layer produced the metric
+- `extraction_layer` — raw text layer selected for parsing when both native text and OCR output are available
 - `pdf_score` — selector score used to pick the attachment
 - `matched_phrase` — snippet showing the parsed metric context
+- `method_details` — free-form text describing the parsing or conversion method applied
+- `method_value` — numeric or textual value associated with the method (for example, parsed denominators)
+- `month_start` — canonical ISO date representing the first day of the reporting month
+- `resource_url` — attachment URL used for retrieval and auditing
 - `series_semantics` — fixed to `new` to denote monthly deltas already computed in the connector
 - `tier` — set to `2` so precedence can prioritise higher-tier sources when present
+- `value_level` — cached stock total before the connector computes monthly deltas
 
 The ReliefWeb PDF manifest (`resolver/staging/reliefweb_pdf.csv.meta.json`) mirrors the standard manifest structure with additional keys for attachment `artifact_sha256`, selector `score`, and `extraction_method`.
 

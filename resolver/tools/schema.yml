@@ -95,6 +95,44 @@ entities:
         type: integer
         required: false
         nullable: true
+  staging.reliefweb_pdf:
+    kind: staging
+    description: ReliefWeb PDF staging output with attachment metadata.
+    extends: staging.common
+    allow_extra_columns: false
+    columns:
+      - name: extraction_layer
+        type: string
+        required: false
+        nullable: true
+      - name: matched_phrase
+        type: string
+        required: false
+        nullable: true
+      - name: method_details
+        type: string
+        required: false
+        nullable: true
+      - name: method_value
+        type: string
+        required: false
+        nullable: true
+      - name: month_start
+        type: string
+        required: false
+        nullable: true
+      - name: resource_url
+        type: string
+        required: false
+        nullable: true
+      - name: tier
+        type: string
+        required: false
+        nullable: true
+      - name: value_level
+        type: number
+        required: false
+        nullable: true
   staging.unhcr_odp:
     kind: staging
     description: UNHCR Operational Data Portal staging output.

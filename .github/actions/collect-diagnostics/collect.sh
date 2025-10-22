@@ -343,7 +343,29 @@ elif [ -f "pytest-junit.xml" ]; then
   pytest_source="pytest-junit.xml"
 fi
 
+junit_summary_line="JUnit: missing"
 if [ -n "${pytest_source}" ]; then
+  set +e
+  junit_summary_line=$("$PYTHON" - "${pytest_source}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tree = ET.parse(path)
+root = tree.getroot()
+tests = root.attrib.get("tests", "0")
+failures = root.attrib.get("failures", "0")
+errors = root.attrib.get("errors", "0")
+skipped = root.attrib.get("skipped", "0")
+print(f"JUnit: present; tests={tests} failures={failures} errors={errors} skipped={skipped}")
+PY
+  )
+  status=$?
+  set -euo pipefail
+  if [ "${status}" -ne 0 ] || [ -z "${junit_summary_line}" ]; then
+    junit_summary_line="JUnit: present (unable to parse)"
+  fi
   PYTEST_JUNIT="${pytest_source}" "$PYTHON" - <<'PY' >"${pytest_file}" 2>&1 || true
 import os
 import xml.etree.ElementTree as ET
@@ -455,6 +477,7 @@ append_section "Resolver logs (tail)"
 append_code_block "${logs_file}" "resolver/data logs missing"
 
 append_section "Pytest summary"
+printf '%s\n\n' "${junit_summary_line}" >> "${SUMMARY_MD}"
 append_code_block "${pytest_file}" "pytest did not emit junit XML"
 
 append_section "Step exit codes"
