@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from resolver.tools import build_forecaster_features as features
+from resolver.tools import llm_context
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
@@ -147,3 +150,86 @@ def test_forecaster_features_basic_aggregations(tmp_path: Path) -> None:
     assert csv_path.exists()
     roundtrip = pd.read_parquet(out_path)
     assert len(roundtrip) == len(frame)
+
+
+def test_llm_context_bundle_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    months = ["2024-01", "2024-02"]
+
+    january = _frame(
+        [
+            {
+                "iso3": "eth",
+                "hazard_code": "dr",
+                "metric": "in_need",
+                "unit": "persons",
+                "value_new": "1249.6",
+            },
+            {
+                "iso3": "eth",
+                "hazard_code": "dr",
+                "metric": "affected",
+                "unit": "households",
+                "value_new": 75.5,
+            },
+        ]
+    )
+    february = _frame(
+        [
+            {
+                "iso3": "Ken",
+                "hazard_code": "FL",
+                "metric": "in_need",
+                "unit": "persons",
+                "value": 200.2,
+            }
+        ]
+    )
+    fixtures = {"2024-01": january, "2024-02": february}
+
+    def fake_loader(ym: str, is_current_month: bool, requested_series: str, backend: str):
+        assert not is_current_month
+        assert requested_series == "new"
+        assert backend == "db"
+        df = fixtures.get(ym)
+        if df is None:
+            return None, "fake", requested_series
+        return df, "fake", requested_series
+
+    monkeypatch.setattr(llm_context.selectors, "load_series_for_month", fake_loader)
+
+    frame = llm_context.build_context_frame(months=months, backend="db")
+    assert list(frame.columns) == list(llm_context.CONTEXT_COLUMNS)
+    counts = {ym: int((frame["ym"] == ym).sum()) for ym in months}
+    assert counts == {"2024-01": 2, "2024-02": 1}
+    assert (frame["series"] == "new").all()
+
+    bundle_paths = llm_context.write_context_bundle(
+        months=months,
+        outdir=tmp_path,
+        backend="db",
+        frame=frame,
+    )
+    jsonl_path = Path(bundle_paths["jsonl"])
+    parquet_path = Path(bundle_paths["parquet"])
+    assert jsonl_path.exists()
+    assert parquet_path.exists()
+
+    with jsonl_path.open(encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle if line.strip()]
+
+    assert len(records) == 3
+    persons_values = [row["value"] for row in records if row["unit"].lower().startswith("person")]
+    assert persons_values and all(isinstance(value, int) for value in persons_values)
+    assert persons_values[0] == 1250
+
+    households = next(row for row in records if row["unit"] == "households")
+    assert isinstance(households["value"], float)
+    assert households["value"] == pytest.approx(75.5)
+
+    parquet_frame = (
+        pd.read_parquet(parquet_path)
+        .sort_values(llm_context.CONTEXT_COLUMNS)
+        .reset_index(drop=True)
+    )
+    expected = frame.sort_values(list(frame.columns)).reset_index(drop=True)
+    pd.testing.assert_frame_equal(parquet_frame, expected, check_dtype=False)

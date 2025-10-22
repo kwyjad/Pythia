@@ -53,6 +53,9 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
 - Final artifacts:
   - `resolver/snapshots/<YYYY-MM>/` with `facts_resolved.*`, optional `facts_deltas.*`, and `manifest.json` per month.
   - `context/facts_last12.jsonl` and `context/facts_last12.parquet` ready for Forecaster ingestion.
+    Each row covers a `(ym, iso3, hazard_code, metric)` tuple with `unit`, rounded `value`, and `series="new"`.
+    The Forecaster LLM reads the JSONL file directly to hydrate its monthly context embeddings;
+    the matching Parquet provides the same schema for analytics spot checks.
 - After a run completes download the combined artifact (named `resolver-initial-backfill-<run_id>`) and verify the snapshot manifests plus context bundle row counts before handing off to forecasting ops.
 
 ## ReliefWeb PDF local runs
