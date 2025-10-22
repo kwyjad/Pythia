@@ -30,15 +30,13 @@ jobs:
       month_count: ${{ steps.window.outputs.month_count }}
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb
-      ACLED_TOKEN: ${{ secrets.ACLED_TOKEN }}
       ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
-      HDX_API_KEY: ${{ secrets.HDX_API_KEY }}
-      UNHCR_ODP_USERNAME: ${{ secrets.UNHCR_ODP_USERNAME }}
-      UNHCR_ODP_PASSWORD: ${{ secrets.UNHCR_ODP_PASSWORD }}
-      UNHCR_ODP_CLIENT_ID: ${{ secrets.UNHCR_ODP_CLIENT_ID }}
-      UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
+      DTM_API_PRIMARY_KEY: ${{ secrets.DTM_API_PRIMARY_KEY }}
+      DTM_API_SECONDARY_KEY: ${{ secrets.DTM_API_SECONDARY_KEY }}
+      RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
+      RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       ONLY_CONNECTOR: ${{ github.event.inputs.only }}
       RESOLVER_OUTPUT_DIR: data/staging
     steps:

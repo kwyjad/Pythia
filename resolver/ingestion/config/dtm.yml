@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 sources:
   - type: file
     id_or_path: ""

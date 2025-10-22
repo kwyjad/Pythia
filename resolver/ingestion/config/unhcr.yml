@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 base_url: "https://api.unhcr.org/population/v1/"
 user_agent: "forecaster-resolver/1.0 (github.com/oughtinc/Pythia)"
 window_days: 60

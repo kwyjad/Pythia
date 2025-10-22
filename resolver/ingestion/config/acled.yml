@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 base_url: "https://api.acleddata.com/acled/read"
 window_days: 450
 limit: 1000

@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 window_days: 365
 retry:
   tries: 5
@@ -7,11 +7,11 @@ endpoints:
   event_list: "https://www.gdacs.org/gdacsapi/api/events/geteventlist"
   event_details: "https://www.gdacs.org/gdacsapi/api/events/getevent"
 hazard_map:
-  EQ: earthquake
   FL: flood
   TC: tropical_cyclone
   VO: volcano
   WF: wildfire
+  DR: drought
 severity_map:
   Green: 0
   Orange: 1

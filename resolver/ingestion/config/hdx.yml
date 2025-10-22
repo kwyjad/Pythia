@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 base_url: https://data.humdata.org
 query_text: people in need
 prefer_hxl: true
