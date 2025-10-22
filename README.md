@@ -21,6 +21,13 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
   - Cache-enabled runs expect repeated `duckdb_io.get_db(url)` calls to return the same connection object; cache-disabled runs (`RESOLVER_DISABLE_CONN_CACHE=1`) intentionally return fresh handles, and tests should branch accordingly.
 
+## Go Live: Initial resolver backfill
+
+- Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back` or `only` connector filter if you need a narrower run).
+- The workflow executes the live connectors, freezes `resolver/snapshots/<YYYY-MM>/` for each of the requested months, and dual-writes into DuckDB so downstream selectors stay in sync.
+- The final job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` and uploads `context/facts_last12.jsonl` plus `context/facts_last12.parquet` alongside the snapshot artifacts.
+- After the run completes download the combined artifact, confirm each `manifest.json` row count, and hand the bundle to the Forecaster deployment.
+
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
 ### Resolver pipeline CI workflows

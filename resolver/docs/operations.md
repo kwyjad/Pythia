@@ -51,6 +51,18 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
 
 Set repository variables for non-sensitive defaults such as `SNAPSHOT_EXPORT_CONFIG` or staging paths if they differ from repo defaults.
 
+## Initial backfill workflow
+
+- Workflow: `.github/workflows/resolver-initial-backfill.yml` (manual dispatch only).
+- Launch it from the **Actions** tab by choosing **Resolver — Initial Backfill**, overriding the `months_back` input (default `12`) or `only` connector filter as needed.
+- The `ingest` job runs `resolver/ingestion/run_all_stubs.py --mode real`, wiring connector secrets from the environment. Connectors without credentials stay in header-only mode so the workflow still succeeds.
+- The `derive-freeze` job loops over the computed year-month list, runs `export_facts → precedence_engine → make_deltas`, and freezes each snapshot via `python -m resolver.tools.freeze_snapshot --facts … --month <YYYY-MM> --write-db 1` so DuckDB mirrors remain in sync.
+- The `context` job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` to produce `facts_last12.jsonl` and `facts_last12.parquet`.
+- Final artifacts:
+  - `resolver/snapshots/<YYYY-MM>/` with `facts_resolved.*`, optional `facts_deltas.*`, and `manifest.json` per month.
+  - `context/facts_last12.jsonl` and `context/facts_last12.parquet` ready for Forecaster ingestion.
+- After a run completes download the combined artifact (named `resolver-initial-backfill-<run_id>`) and verify the snapshot manifests plus context bundle row counts before handing off to forecasting ops.
+
 ## ReliefWeb PDF local runs
 
 The PDF branch can be exercised without network access by enabling the feature flags and relying on mocked text extraction:
