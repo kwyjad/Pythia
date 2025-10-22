@@ -215,6 +215,8 @@ Snapshot manifest entries mirroring CSV exports.
 
 LLM context bundle summarising monthly new-series PIN/PA totals.
 
+Column order is canonical: `iso3`, `hazard_code`, `ym`, `metric`, `unit`, `value`, `series`. The builder returns an empty DataFrame with these columns when no months are available so downstream consumers can rely on the schema.
+
 | Name | Type | Required | Enum/Format | Description |
 | --- | --- | --- | --- | --- |
 | iso3 | string | yes |  |  |

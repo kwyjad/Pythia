@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from resolver.tools import build_forecaster_features as features
-from resolver.tools import build_llm_context as llm_context
+from resolver.tools import llm_context
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
@@ -197,16 +197,24 @@ def test_llm_context_bundle_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(llm_context.selectors, "load_series_for_month", fake_loader)
 
-    frame, counts = llm_context.build_context_frame(months)
-    assert list(frame.columns) == list(llm_context.TARGET_COLUMNS)
+    frame = llm_context.build_context_frame(months=months, backend="db")
+    assert list(frame.columns) == list(llm_context.CONTEXT_COLUMNS)
+    counts = {ym: int((frame["ym"] == ym).sum()) for ym in months}
     assert counts == {"2024-01": 2, "2024-02": 1}
     assert (frame["series"] == "new").all()
 
-    bundle = llm_context.write_context_bundle(frame, tmp_path)
-    assert bundle.jsonl.exists()
-    assert bundle.parquet.exists()
+    bundle_paths = llm_context.write_context_bundle(
+        months=months,
+        outdir=tmp_path,
+        backend="db",
+        frame=frame,
+    )
+    jsonl_path = Path(bundle_paths["jsonl"])
+    parquet_path = Path(bundle_paths["parquet"])
+    assert jsonl_path.exists()
+    assert parquet_path.exists()
 
-    with bundle.jsonl.open(encoding="utf-8") as handle:
+    with jsonl_path.open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
 
     assert len(records) == 3
@@ -218,6 +226,10 @@ def test_llm_context_bundle_rounding(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert isinstance(households["value"], float)
     assert households["value"] == pytest.approx(75.5)
 
-    parquet_frame = pd.read_parquet(bundle.parquet).sort_values(llm_context.TARGET_COLUMNS).reset_index(drop=True)
+    parquet_frame = (
+        pd.read_parquet(parquet_path)
+        .sort_values(llm_context.CONTEXT_COLUMNS)
+        .reset_index(drop=True)
+    )
     expected = frame.sort_values(list(frame.columns)).reset_index(drop=True)
     pd.testing.assert_frame_equal(parquet_frame, expected, check_dtype=False)
