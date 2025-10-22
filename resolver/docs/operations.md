@@ -98,6 +98,11 @@ Use the GitHub Actions diagnostics table (rendered by `scripts/ci/summarize_conn
 - **Coverage (ym / as_of):** Ensure the `ym_min → ym_max` range matches the requested backfill window. Narrow ranges or `—` entries suggest the connector only delivered part of the period and may need a rerun.
 - **Details panel:** Review the top ISO3/hazard samples and `rate_limit_remaining` values. A near-zero rate limit hints that you should increase backoff or reduce concurrency before relaunching the job.
 
+### Stub vs Full connector diagnostics
+
+- **Stub summary:** When ingestion aborts before `diagnostics/ingestion/connectors_report.jsonl` is written, the summarizer still creates `diagnostics/ingestion/summary.md` with a short stub titled “Ingestion Diagnostics.” The stub text explicitly notes that no connectors report was produced and points you back to earlier workflow steps (setup, window computation, dependency install) for triage.
+- **Full summary:** Healthy runs include both the JSONL report and the rendered Markdown table. Expect the job summary to show the aggregate counts, per-connector table, and collapsible details; download the `connector-diagnostics` artifact when you need the raw telemetry for notebooks or release notes.
+
 ## Continuous integration
 
 The `resolver-ci` workflow executes offline smoke tests plus the ReliefWeb PDF unit suite. When the optional Markdown link checker is enabled it runs after the tests and reports broken intra-repo links in the job logs without failing the build.

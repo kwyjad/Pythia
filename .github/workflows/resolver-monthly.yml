@@ -130,6 +130,9 @@ jobs:
           CMD="python resolver/ingestion/run_all_stubs.py --mode real --retries 2 --strict --log-level INFO --log-format json"
           scripts/ci/run_and_capture.sh connectors "$CMD"
 
+      - name: Prepare diagnostics dir
+        run: mkdir -p diagnostics/ingestion
+
       - name: Summarize connector diagnostics
         if: always()
         run: |
