@@ -244,6 +244,7 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
+      ART_ROOT: ${{ github.workspace }}/ci_artifacts
       RESOLVER_API_BACKEND: db
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/.ci-resolver.duckdb
       RESOLVER_LOG_LEVEL: DEBUG
@@ -263,6 +264,26 @@ jobs:
           SAFE_SUFFIX="${SAFE_SUFFIX// /_}"
           SAFE_SUFFIX="$(printf '%s' "${SAFE_SUFFIX}" | tr -c 'A-Za-z0-9_.-' '_')"
           echo "SAFE_SUFFIX=${SAFE_SUFFIX}" >> "$GITHUB_ENV"
+
+      - name: Initialize run folders (fresh)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${ART_ROOT}"
+          RUN_TS="$(date -u +'%Y%m%dT%H%M%SZ')"
+          ART_DIR="${ART_ROOT}/${RUN_TS}-${GITHUB_SHA::7}"
+          echo "RUN_TS=${RUN_TS}" >> "$GITHUB_ENV"
+          echo "ART_DIR=${ART_DIR}" >> "$GITHUB_ENV"
+          echo "Initialized artifact directory: ${ART_DIR}"
+          rm -rf logs .ci/diagnostics .ci/exitcodes || true
+          mkdir -p logs "${ART_DIR}"
+          if [[ "${RESOLVER_DB_URL:-}" == duckdb:///* ]]; then
+            db_path="${RESOLVER_DB_URL#duckdb:///}"
+            if [ -n "${db_path}" ]; then
+              rm -f "${db_path}" || true
+            fi
+          fi
 
       - name: Debug repo context
         run: |
@@ -341,12 +362,6 @@ jobs:
         if: steps.dbfiles.outputs.present == 'true'
         run: |
           python -m pip install -U pytest pytest-timeout pytest-xdist
-          mkdir -p logs
-
-      - name: Snapshot environment (pip freeze)
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          scripts/ci/run_and_capture.sh pip-freeze-nightly "pip freeze > .ci/diagnostics/pip-freeze.txt"
 
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
@@ -361,31 +376,6 @@ jobs:
           print("✅ DuckDB installed:", duckdb.__version__)
           PY
 
-      - name: Snapshot environment
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p logs
-          python -V | tee logs/python_version.txt
-          python -c "import duckdb,sys;print(getattr(duckdb, '__version__', 'unknown'))" | tee logs/duckdb_version.txt || true
-          pytest --version | tee logs/pytest_version.txt
-          pip freeze | tee logs/pip_freeze.txt
-          python - <<'PY' | tee logs/repo_tree.txt
-            import pathlib
-
-            p = pathlib.Path('.')
-            print('CWD:', p.resolve())
-            print('Files:', len(list(p.rglob('*'))))
-          PY
-
-      - name: Show environment
-        if: steps.dbfiles.outputs.present == 'true'
-        run: |
-          python -V
-          python -c "import duckdb,sys;print('duckdb',duckdb.__version__)"
-          echo "BACKEND=$RESOLVER_API_BACKEND"
-          echo "DB_URL=$RESOLVER_DB_URL"
-
       - name: Run full test suite (nightly)
         id: run_db_tests
         if: steps.dbfiles.outputs.present == 'true'
@@ -393,71 +383,45 @@ jobs:
         timeout-minutes: 45
         env:
           INSTALL_MODE: ${{ steps.robust_install.outputs.mode }}
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p logs
           echo "Resolved install mode: ${INSTALL_MODE:-unset}"
           if [ "${INSTALL_MODE}" = "fallback" ]; then
             export PYTHONPATH="${PYTHONPATH:-$GITHUB_WORKSPACE}"
             echo "Using fallback install mode; PYTHONPATH=$PYTHONPATH"
           fi
 
-          PYTEST_JUNIT="logs/pytest-nightly.junit.xml"
-          PYTEST_LOG="logs/pytest-nightly.log"
-
           if [ ! -d resolver/tests ]; then
             echo "resolver/tests directory missing; skipping pytest run."
-            printf '%s\n' "0" > logs/pytest-exit-code.txt
+            printf '%s\n' "0" | tee "${ART_DIR}/pytest.exit"
+            printf '%s\n' "_resolver/tests not found; pytest run skipped._" | tee "${ART_DIR}/pytest.out"
             echo "exit_code=0" >> "$GITHUB_OUTPUT"
-            {
-              echo "## Nightly pytest summary"
-              echo
-              echo "Exit code: 0"
-              echo
-              echo "_resolver/tests not found; pytest run skipped._"
-            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           echo "Collecting resolver test inventory"
-          python - <<'PY'
+          python - <<'PY' | tee "${ART_DIR}/test-inventory.txt"
             import pathlib
 
             root = pathlib.Path("resolver/tests")
-            if not root.exists():
-                print("resolver/tests directory missing; nothing to run")
-                raise SystemExit(0)
             tests = sorted(str(path) for path in root.rglob("test_*.py"))
             print(f"Discovered {len(tests)} test file(s)")
             for path in tests:
                 print(f" - {path}")
           PY
 
+          PYTEST_JUNIT="${ART_DIR}/junit.xml"
+          PYTEST_OUT="${ART_DIR}/pytest.out"
+
           TEST_RC=0
           set +e
-          (pytest resolver/tests \
-                  -n auto \
-                  --timeout=180 --timeout-method=thread \
-                  --junitxml="${PYTEST_JUNIT}" \
-            2>&1 | tee "${PYTEST_LOG}")
+          pytest resolver/tests -n auto --timeout=180 --timeout-method=thread --junitxml="${PYTEST_JUNIT}" 2>&1 | tee "${PYTEST_OUT}"
           TEST_RC=${PIPESTATUS[0]}
           set -e
-          printf '%s\n' "${TEST_RC}" > logs/pytest-exit-code.txt
-          echo "exit_code=${TEST_RC}" >> "$GITHUB_OUTPUT"
 
-          {
-            echo "## Nightly pytest summary"
-            echo
-            echo "Exit code: ${TEST_RC}"
-            echo
-            if [ -f "${PYTEST_LOG}" ]; then
-              echo "<details><summary>Last 200 lines of log</summary>"
-              tail -n 200 "${PYTEST_LOG}" | sed 's/^/    /'
-              echo "</details>"
-            else
-              echo "_Pytest log not found._"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "${TEST_RC}" > "${ART_DIR}/pytest.exit"
+          echo "exit_code=${TEST_RC}" >> "$GITHUB_OUTPUT"
 
           exit "${TEST_RC}"
 
@@ -470,60 +434,24 @@ jobs:
           INSTALL_MODE: ${{ steps.robust_install.outputs.mode }}
         run: |
           set -euo pipefail
-          mkdir -p logs
           if [ "${INSTALL_MODE}" = "fallback" ]; then
             export PYTHONPATH="${PYTHONPATH:-$GITHUB_WORKSPACE}"
             echo "Using fallback install mode for DB parity run; PYTHONPATH=$PYTHONPATH"
           fi
 
-          PYTEST_JUNIT="logs/pytest-db.junit.xml"
-          DB_LOG="logs/pytest-db.log"
+          PYTEST_JUNIT="${ART_DIR}/db.junit.xml"
+          PYTEST_OUT="${ART_DIR}/pytest-db.out"
+
           DB_RC=0
           set +e
-          (pytest resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py \
-                  -n auto \
-                  --timeout=120 --timeout-method=thread \
-                  --junitxml="${PYTEST_JUNIT}" \
-            2>&1 | tee "${DB_LOG}")
+          pytest resolver/tests/test_db_parity.py resolver/tests/test_duckdb_idempotency.py -n auto --timeout=120 --timeout-method=thread --junitxml="${PYTEST_JUNIT}" 2>&1 | tee "${PYTEST_OUT}"
           DB_RC=${PIPESTATUS[0]}
           set -e
-          printf '%s\n' "${DB_RC}" > logs/pytest-db-exit-code.txt
+
+          printf '%s\n' "${DB_RC}" > "${ART_DIR}/pytest-db.exit"
           echo "exit_code=${DB_RC}" >> "$GITHUB_OUTPUT"
 
-          {
-            echo "## DB tests summary"
-            echo
-            echo "Exit code: ${DB_RC}"
-            echo
-            if [ -f "${DB_LOG}" ]; then
-              echo "<details><summary>Last 200 lines of DB log</summary>"
-              tail -n 200 "${DB_LOG}" | sed 's/^/    /'
-              echo "</details>"
-            else
-              echo "_Pytest DB log not found._"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
           exit "${DB_RC}"
-
-      - name: Always upload nightly artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nightly-artifacts-${{ env.SAFE_SUFFIX || 'nightly' }}-${{ github.job }}-attempt${{ github.run_attempt }}
-          if-no-files-found: warn
-          retention-days: 14
-          path: |
-            logs/**
-            **/*.junit.xml
-            .ci-resolver.duckdb
-            resolver/logs/ingestion/**
-            resolver/exports/**
-            resolver/staging/**
-            **/pytest-*.log
-            **/parity_mismatch_expected.csv
-            **/parity_mismatch_db.csv
-            **/parity_mismatch_cell_diffs.csv
 
       - name: Canonical listing snapshot
         if: always()
@@ -534,6 +462,47 @@ jobs:
         if: always()
         run: |
           scripts/ci/run_and_capture.sh duckdb-counts "python scripts/ci/db_counts.py --db .ci-resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt || true"
+
+      - name: Stage diagnostics bundle
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${ART_DIR}"
+          if [ -d logs ]; then
+            mkdir -p "${ART_DIR}/logs"
+            cp -R logs/. "${ART_DIR}/logs/" || true
+          fi
+          if [ -d .ci/diagnostics ]; then
+            mkdir -p "${ART_DIR}/ci-diagnostics"
+            cp -R .ci/diagnostics/. "${ART_DIR}/ci-diagnostics/" || true
+          fi
+          if [ -d .ci/exitcodes ]; then
+            mkdir -p "${ART_DIR}/ci-exitcodes"
+            cp -R .ci/exitcodes/. "${ART_DIR}/ci-exitcodes/" || true
+          fi
+          for target in resolver/logs/ingestion resolver/exports resolver/staging; do
+            if [ -d "$target" ]; then
+              mkdir -p "${ART_DIR}/${target}"
+              cp -R "$target"/. "${ART_DIR}/${target}/" || true
+            fi
+          done
+
+      - name: Build summary.md from diagnostics
+        if: always()
+        shell: bash
+        run: |
+          python scripts/ci/collect_diagnostics.py "${ART_DIR}"
+
+      - name: Upload nightly bundle (this run only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ env.SAFE_SUFFIX }}-${{ github.job }}-${{ env.RUN_TS }}
+          path: ${{ env.ART_DIR }}/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
 
       - name: Evaluate pytest outcomes
         if: ${{ steps.dbfiles.outputs.present == 'true' }}
@@ -568,8 +537,9 @@ jobs:
             main_exit = (os.environ.get("MAIN_EXIT") or "").strip()
             db_exit = (os.environ.get("DB_EXIT") or "").strip()
 
-            has_failures(pathlib.Path("logs/pytest-nightly.junit.xml"), "nightly suite")
-            has_failures(pathlib.Path("logs/pytest-db.junit.xml"), "db parity suite")
+            art_dir = pathlib.Path(os.environ.get("ART_DIR", ".")).resolve()
+            has_failures(art_dir / "junit.xml", "nightly suite")
+            has_failures(art_dir / "db.junit.xml", "db parity suite")
 
             if main_exit and main_exit != "0":
                 issues.append(f"nightly pytest exited with {main_exit}")
