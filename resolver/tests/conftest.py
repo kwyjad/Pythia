@@ -54,15 +54,15 @@ def _ensure_fast_exports() -> Optional[FastExports]:
 
 @lru_cache(maxsize=1)
 def _exports_available() -> bool:
-    bundle = _ensure_fast_exports()
-    if bundle is not None:
-        exports_dir = bundle.exports_dir
-        if exports_dir.exists() and any(exports_dir.glob("*.csv")):
-            return True
     env_dir = os.environ.get("RESOLVER_TEST_DATA_DIR")
     if env_dir:
         exports = Path(env_dir) / "exports"
         if exports.exists() and any(exports.glob("*.csv")):
+            return True
+    bundle = _ensure_fast_exports()
+    if bundle is not None:
+        exports_dir = bundle.exports_dir
+        if exports_dir.exists() and any(exports_dir.glob("*.csv")):
             return True
     if EXPORTS_DIR.exists() and any(EXPORTS_DIR.glob("*.csv")):
         return True
@@ -218,4 +218,32 @@ def fast_staging_dir() -> Path:
     if not staging_dir.exists():
         pytest.skip("staging fixtures unavailable")
     return staging_dir
+
+
+if os.environ.get("RUN_EXPORTS_TESTS") == "1":
+
+    @pytest.fixture(scope="session", autouse=True)
+    def _opt_in_exports(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        """Provide a tiny exports directory for opt-in contract tests."""
+
+        base = tmp_path_factory.mktemp("resolver_opt_in_exports")
+        exports_dir = base / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+
+        facts_path = exports_dir / "facts.csv"
+        facts_path.write_text(
+            "event_id,iso3,hazard_code,metric,value,unit,as_of_date,publication_date,ym,"
+            "hazard_label,hazard_class,publisher,source_type\n"
+            "EVT-OPT,PHL,TC,affected,10,persons,2024-01-02,2024-01-03,2024-01,"
+            "Typhoon,Storm,ReliefWeb,agency\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("RESOLVER_TEST_DATA_DIR", str(base))
+        _patch_test_utils(base)
+        try:
+            yield exports_dir
+        finally:
+            monkeypatch.undo()
 

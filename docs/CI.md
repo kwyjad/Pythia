@@ -39,3 +39,11 @@ set for the duration of the tests, and `fast_staging_dir` points schema checks
 at the generated canonical directory. The previously skipped contract and
 staging-schema suites now execute inside the fast matrix without requiring live
 staging data or network access.
+
+Set `RUN_EXPORTS_TESTS=1` to opt into a lightweight exports fixture that
+generates a minimal `facts.csv` when committed exports are absent. This keeps
+the default run quick while allowing developers to exercise the exports
+contract tests on demand. The diagnostics summary now parses
+`.ci/diagnostics/pytest-junit.xml` via `scripts/ci/junit_stats.py` and falls
+back to the pytest command tails when the XML is missing or incomplete, so the
+reported totals in `SUMMARY.md` always reflect the real pytest outcome.
