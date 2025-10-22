@@ -11,10 +11,6 @@ from resolver.tools.schema_validate import load_schema, validate_staging_csv
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESOLVER_ROOT = REPO_ROOT / "resolver"
 TOOLS_DIR = RESOLVER_ROOT / "tools"
-STAGING_DIR = RESOLVER_ROOT / "staging"
-
-STAGING_FILES: List[Path] = sorted(STAGING_DIR.glob("*.csv"))
-
 SCHEMA_PATH = TOOLS_DIR / "schema.yml"
 
 
@@ -23,26 +19,20 @@ def schema() -> Dict[str, object]:
     return load_schema(SCHEMA_PATH)
 
 
-@pytest.mark.parametrize(
-    "csv_path",
-    [pytest.param(path, id=path.name) for path in STAGING_FILES]
-    if STAGING_FILES
-    else [
-        pytest.param(
-            None,
-            id="no-staging-files",
-            marks=pytest.mark.skip(reason="resolver/staging is empty; run the ingestor first"),
-        )
-    ],
-)
-def test_staging_csv_matches_schema(csv_path: Path | None, schema: Dict[str, object]) -> None:
-    if csv_path is None:
-        pytest.skip("resolver/staging is empty; run resolver/ingestion/run_all_stubs.py")
+@pytest.fixture(scope="session")
+def staging_files(fast_staging_dir: Path) -> List[Path]:
+    files = sorted(fast_staging_dir.glob("*.csv"))
+    if not files:
+        pytest.skip("staging fixtures unavailable; fast_exports bootstrap failed")
+    return files
 
-    ok, errors = validate_staging_csv(csv_path, schema)
-    if not ok:
-        formatted = "\n  - " + "\n  - ".join(errors)
-        pytest.fail(f"{csv_path.name} schema violations:{formatted}")
+
+def test_staging_csv_matches_schema(staging_files: List[Path], schema: Dict[str, object]) -> None:
+    for csv_path in staging_files:
+        ok, errors = validate_staging_csv(csv_path, schema)
+        if not ok:
+            formatted = "\n  - " + "\n  - ".join(errors)
+            pytest.fail(f"{csv_path.name} schema violations:{formatted}")
 
 
 def test_validate_known_entity_with_temp_files(tmp_path: Path, schema: Dict[str, object]) -> None:

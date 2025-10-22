@@ -14,9 +14,13 @@ import platform
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
-import xml.etree.ElementTree as ET
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.ci.junit_stats import parse_junit
 
 SUMMARY_DIR = Path(".ci/diagnostics")
 SUMMARY_PATH = SUMMARY_DIR / "SUMMARY.md"
@@ -40,6 +44,9 @@ ENV_INTERESTING_PATTERNS = [
         r"^AWS_",
     )
 ]
+
+PYTEST_SUMMARY_LINE = re.compile(r"=+\s*(.+?)\s*=+")
+PYTEST_COLLECTED_LINE = re.compile(r"collected\s+(?P<count>\d+)\s+items", re.IGNORECASE)
 
 
 def _safe_write_text(path: Path, content: str) -> None:
@@ -124,101 +131,84 @@ def _gather_workflow_context() -> str:
     return "\n".join(lines)
 
 
-def _parse_pytest_results(junit_path: Path) -> Dict[str, object]:
-    stats = {
-        "tests": 0,
-        "errors": 0,
-        "failures": 0,
-        "skipped": 0,
-        "xfail": 0,
-        "passed": 0,
-        "details": [],
-    }
-    try:
-        tree = ET.parse(junit_path)
-        root = tree.getroot()
-    except Exception as exc:
-        stats["error"] = f"Failed to parse JUnit XML: {exc}"
-        return stats
-
-    testsuite_elements = root.findall(".//testsuite")
-    if not testsuite_elements:
-        testsuite_elements = [root]
-
-    total_failures = 0
-    total_errors = 0
-    total_skipped = 0
-    total_tests = 0
-    details: List[Dict[str, str]] = []
-
-    for suite in testsuite_elements:
-        total_tests += int(suite.attrib.get("tests", 0))
-        total_failures += int(suite.attrib.get("failures", 0))
-        total_errors += int(suite.attrib.get("errors", 0))
-        total_skipped += int(suite.attrib.get("skipped", 0))
-        for case in suite.findall("testcase"):
-            failure_nodes = case.findall("failure")
-            error_nodes = case.findall("error")
-            if not failure_nodes and not error_nodes:
-                continue
-            detail_lines = []
-            for node in failure_nodes + error_nodes:
-                message = node.attrib.get("message", "(no message)")
-                node_type = node.attrib.get("type", node.tag)
-                text = node.text or ""
-                detail_lines.append(
-                    f"### {node_type}: {message}\n\n````text\n{text.strip()}\n````"
-                )
-            system_out = "\n".join(
-                [n.text or "" for n in case.findall("system-out")] +
-                [n.text or "" for n in case.findall("system-err")]
-            ).strip()
-            if system_out:
-                detail_lines.append("**Captured Output:**\n\n````text\n" + system_out + "\n````")
-
-            classname = case.attrib.get("classname", "")
-            name = case.attrib.get("name", "")
-            nodeid = case.attrib.get("file", "")
-            header = f"## Test Failure: {classname}::{name}" if classname else f"## Test Failure: {name}"
-            if nodeid:
-                header += f"\n\n- File: `{nodeid}`"
-            details.append({
-                "header": header,
-                "body": "\n\n".join(detail_lines),
-            })
-
-    stats.update(
-        {
-            "tests": total_tests,
-            "failures": total_failures,
-            "errors": total_errors,
-            "skipped": total_skipped,
-            "passed": max(total_tests - total_failures - total_errors - total_skipped, 0),
-            "details": details,
-        }
-    )
-    return stats
-
-
-def _extract_pytest_failure_names(diag_root: Path, limit: int = 10) -> List[str]:
-    candidates: List[str] = []
-    seen = set()
+def _collect_pytest_tail_texts(diag_root: Path) -> List[str]:
+    texts: List[str] = []
     for tail_path in sorted(diag_root.glob("pytest-*.tail.txt")):
         try:
-            text = tail_path.read_text(encoding="utf-8", errors="replace")
+            texts.append(tail_path.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             continue
+    return texts
+
+
+def _infer_pytest_totals_from_text(text: str) -> Dict[str, int] | None:
+    if not text.strip():
+        return None
+
+    totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "passed": 0}
+    summary_content = None
+    for line in reversed(text.splitlines()):
+        match = PYTEST_SUMMARY_LINE.search(line)
+        if match:
+            summary_content = match.group(1)
+            break
+
+    if summary_content:
+        for part in summary_content.split(","):
+            tokens = part.strip().split()
+            if len(tokens) < 2:
+                continue
+            try:
+                count = int(tokens[0])
+            except ValueError:
+                continue
+            label = tokens[1].lower()
+            if label.startswith("fail"):
+                totals["failures"] += count
+            elif label.startswith("error"):
+                totals["errors"] += count
+            elif label.startswith("skip"):
+                totals["skipped"] += count
+            elif label.startswith("pass"):
+                totals["passed"] += count
+
+    collected = None
+    for line in text.splitlines():
+        match = PYTEST_COLLECTED_LINE.search(line)
+        if match:
+            try:
+                collected = int(match.group("count"))
+            except (ValueError, TypeError):
+                continue
+            break
+
+    if collected is not None:
+        totals["tests"] = collected
+    else:
+        derived_total = totals["failures"] + totals["errors"] + totals["skipped"] + totals["passed"]
+        totals["tests"] = derived_total
+
+    if totals["tests"] == 0 and totals["failures"] == 0 and totals["errors"] == 0 and totals["skipped"] == 0 and totals["passed"] == 0:
+        return None
+
+    totals["passed"] = max(totals["tests"] - totals["failures"] - totals["errors"] - totals["skipped"], 0)
+    return totals
+
+
+def _extract_pytest_failure_names(texts: List[str], limit: int = 5) -> List[str]:
+    candidates: List[str] = []
+    seen = set()
+    for text in texts:
         for line in text.splitlines():
             stripped = line.strip()
             if not stripped.startswith("FAILED "):
                 continue
             remainder = stripped[len("FAILED "):]
             name = remainder.split(" - ", 1)[0].strip()
-            if not name:
+            if not name or name in seen:
                 continue
-            if name not in seen:
-                candidates.append(name)
-                seen.add(name)
+            candidates.append(name)
+            seen.add(name)
             if len(candidates) >= limit:
                 return candidates
     return candidates
@@ -226,39 +216,59 @@ def _extract_pytest_failure_names(diag_root: Path, limit: int = 10) -> List[str]
 
 def _render_pytest_summary(diag_root: Path) -> str:
     lines = ["## Pytest Summary", ""]
-    junit_path = diag_root / "pytest-junit.xml"
-    if not junit_path.exists():
-        lines.append("No pytest JUnit report found (expected `.ci/diagnostics/pytest-junit.xml`).")
-        failures = _extract_pytest_failure_names(diag_root)
-        if failures:
-            lines.append("")
-            lines.append("Potential failing tests inferred from pytest output:")
-            for name in failures:
-                lines.append(f"- {name}")
-        lines.append("")
-        return "\n".join(lines)
+    junit_candidates = [diag_root / "pytest-junit.xml", Path("pytest-junit.xml")]
+    junit_path = next((path for path in junit_candidates if path.exists()), None)
 
-    stats = _parse_pytest_results(junit_path)
-    if "error" in stats:
-        lines.append(str(stats["error"]))
-        lines.append("")
-        return "\n".join(lines)
+    stats = None
+    stats_error: str | None = None
+    if junit_path:
+        try:
+            stats = parse_junit(junit_path)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            stats_error = str(exc)
 
-    lines.append(
-        "- **Total:** {tests} | **Passed:** {passed} | **Failures:** {failures} | "
-        "**Errors:** {errors} | **Skipped:** {skipped}".format(**stats)
-    )
+    tail_texts = _collect_pytest_tail_texts(diag_root)
+    combined_tail = "\n".join(tail_texts)
+    inferred = _infer_pytest_totals_from_text(combined_tail) if combined_tail else None
 
-    details: Sequence[Dict[str, str]] = stats.get("details", [])  # type: ignore
-    if details:
-        for item in details:
-            lines.append("")
-            lines.append(item["header"])
-            lines.append("")
-            lines.append(item["body"])
-            lines.append("")
+    if junit_path:
+        if stats:
+            lines.append(f"- **JUnit report:** `{junit_path}`")
+        elif stats_error:
+            lines.append(f"- **JUnit report:** `{junit_path}` (parse error: {stats_error})")
+        else:
+            lines.append(f"- **JUnit report:** `{junit_path}` (no totals found)")
     else:
-        lines.append("\nAll tests passed.")
+        lines.append("- **JUnit report:** missing")
+
+    effective = None
+    if stats and stats.get("tests", 0) > 0:
+        effective = stats
+    elif inferred:
+        effective = inferred
+
+    if effective:
+        lines.append(
+            "- **Totals:** tests={tests} | passed={passed} | failures={failures} | errors={errors} | skipped={skipped}".format(
+                **effective
+            )
+        )
+        if stats and stats.get("tests", 0) == 0 and inferred:
+            lines.append("- Totals inferred from pytest output because JUnit reported zero tests.")
+    else:
+        lines.append("- No pytest totals available.")
+
+    failure_names = _extract_pytest_failure_names(tail_texts)
+    if failure_names:
+        lines.append("")
+        lines.append("### Top failures")
+        for name in failure_names:
+            lines.append(f"- {name}")
+        lines.append("")
+
+    if effective and effective.get("failures", 0) == 0 and effective.get("errors", 0) == 0:
+        lines.append("")
+        lines.append("All tests passed.")
 
     lines.append("")
     return "\n".join(lines)

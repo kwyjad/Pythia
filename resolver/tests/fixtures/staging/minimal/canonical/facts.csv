@@ -1,0 +1,4 @@
+event_id,country_name,iso3,hazard_code,hazard_label,hazard_class,metric,unit,as_of_date,publication_date,publisher,source_type,source_url,doc_title,definition_text,method,confidence,revision,ingested_at,series_semantics,value,value_new,source
+E1,Philippines,PHL,TC,Tropical Cyclone,Cyclone,in_need,persons,2024-01-31,2024-02-01,OCHA,situation_report,https://example.org/resolved,January SitRep,People in need as of 31 Jan,estimate,medium,1,2024-02-02,stock,1500,,OCHA Situation Room
+E2,Philippines,PHL,TC,Tropical Cyclone,Cyclone,in_need,persons,2024-02-29,2024-03-02,OCHA,situation_report,https://example.org/update,February SitRep,People newly in need,estimate,medium,1,2024-03-03,new,1600,1600,OCHA Situation Room
+E3,Philippines,PHL,FL,Flood,Flood,in_need,persons,2024-01-31,2024-02-01,OCHA,situation_report,https://example.org/flood,Flood SitRep,Flood response needs,estimate,medium,1,2024-02-02,stock,500,,OCHA Situation Room

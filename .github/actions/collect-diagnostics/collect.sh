@@ -17,6 +17,15 @@ mkdir -p "${BASE_DIR}" "${DIST_DIR}" \
   ".ci/diagnostics" \
   ".ci/exitcodes"
 
+# Pick the toolchain python installed by actions/setup-python if present
+if command -v python >/dev/null 2>&1; then
+  PYTHON=python
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+else
+  PYTHON=python
+fi
+
 SMOKE_ASSERT_SOURCE=".ci/diagnostics/smoke-assert.json"
 SMOKE_TOTAL_ROWS_VALUE=""
 
@@ -28,7 +37,7 @@ read_smoke_total() {
     return
   fi
   set +e
-  value=$(python - "${SMOKE_ASSERT_SOURCE}" <<'PY'
+  value=$("$PYTHON" - "${SMOKE_ASSERT_SOURCE}" <<'PY'
 import json
 import pathlib
 import sys
@@ -78,23 +87,29 @@ fi
 versions_file="${BASE_DIR}/versions.txt"
 {
   echo "== VERSIONS =="
-  (python -V 2>&1 || true)
-  (pip --version 2>&1 || true)
-  if command -v pip >/dev/null 2>&1; then
-    (pip freeze 2>/dev/null | sort || true)
-  else
-    echo "pip not available"
-  fi
+  "$PYTHON" - <<'PY'
+import sys, subprocess, shutil, platform
+print(f"Python {sys.version.split()[0]}")
+pip = shutil.which("pip") or ""
+print(subprocess.getoutput(f"{pip} --version" if pip else "pip not found"))
+print(subprocess.getoutput("pip freeze || true"))
+print(subprocess.getoutput("uname -a || true"))
+PY
+  echo ""
+  echo "== PYTHON PATHS =="
+  which -a python || true
+  which -a python3 || true
+  echo ""
+  echo "== DUCKDB =="
   if command -v duckdb >/dev/null 2>&1; then
-    (duckdb --version 2>&1 || true)
+    duckdb --version 2>&1 || true
   else
     echo "duckdb binary not available"
   fi
-  (uname -a 2>&1 || true)
 } >"${versions_file}" || true
 
 env_file="${BASE_DIR}/env.txt"
-python - <<'PY' >"${env_file}" 2>&1 || true
+"$PYTHON" - <<'PY' >"${env_file}" 2>&1 || true
 import os
 
 SAFE_PREFIXES = (
@@ -127,7 +142,7 @@ git_file="${BASE_DIR}/git.txt"
 } >"${git_file}" || true
 
 duckdb_file="${BASE_DIR}/duckdb.txt"
-python - <<'PY' >"${duckdb_file}" 2>&1 || true
+"$PYTHON" - <<'PY' >"${duckdb_file}" 2>&1 || true
 import os
 from pathlib import Path
 
@@ -182,7 +197,7 @@ staging_listing_file="${BASE_DIR}/staging.txt"
 } >"${staging_listing_file}" || true
 
 staging_stats_file="${BASE_DIR}/staging_stats.md"
-python - <<'PY' >"${staging_stats_file}" 2>/dev/null || true
+"$PYTHON" - <<'PY' >"${staging_stats_file}" 2>/dev/null || true
 from __future__ import annotations
 
 import csv
@@ -321,8 +336,38 @@ logs_file="${BASE_DIR}/logs.txt"
 } >"${logs_file}" || true
 
 pytest_file="${BASE_DIR}/pytest.txt"
-if [ -f pytest-junit.xml ]; then
-  python - <<'PY' >"${pytest_file}" 2>&1 || true
+pytest_source=""
+if [ -f ".ci/diagnostics/pytest-junit.xml" ]; then
+  pytest_source=".ci/diagnostics/pytest-junit.xml"
+elif [ -f "pytest-junit.xml" ]; then
+  pytest_source="pytest-junit.xml"
+fi
+
+junit_summary_line="JUnit: missing"
+if [ -n "${pytest_source}" ]; then
+  set +e
+  junit_summary_line=$("$PYTHON" - "${pytest_source}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tree = ET.parse(path)
+root = tree.getroot()
+tests = root.attrib.get("tests", "0")
+failures = root.attrib.get("failures", "0")
+errors = root.attrib.get("errors", "0")
+skipped = root.attrib.get("skipped", "0")
+print(f"JUnit: present; tests={tests} failures={failures} errors={errors} skipped={skipped}")
+PY
+  )
+  status=$?
+  set -euo pipefail
+  if [ "${status}" -ne 0 ] || [ -z "${junit_summary_line}" ]; then
+    junit_summary_line="JUnit: present (unable to parse)"
+  fi
+  PYTEST_JUNIT="${pytest_source}" "$PYTHON" - <<'PY' >"${pytest_file}" 2>&1 || true
+import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -346,14 +391,21 @@ def summarize(path: Path) -> None:
                     print(text[:2000])
                     print("---")
 
-summarize(Path("pytest-junit.xml"))
+summarize(Path(os.environ["PYTEST_JUNIT"]))
 PY
 else
-  echo "pytest-junit.xml missing" >"${pytest_file}"
+  {
+    echo "pytest-junit.xml missing"
+    if [ -f ".ci/diagnostics/pytest-collect.tail.txt" ]; then
+      echo ""
+      echo "== Pytest (collect-only) tail =="
+      tail -n 120 ".ci/diagnostics/pytest-collect.tail.txt" 2>/dev/null || true
+    fi
+  } >"${pytest_file}"
 fi
 
 exitcodes_file="${BASE_DIR}/exitcodes.txt"
-if ls .ci/exitcodes/* >/dev/null 2>&1; then
+if compgen -G ".ci/exitcodes/*" >/dev/null; then
   {
     for breadcrumb in .ci/exitcodes/*; do
       [ -f "${breadcrumb}" ] || continue
@@ -362,6 +414,20 @@ if ls .ci/exitcodes/* >/dev/null 2>&1; then
   } >"${exitcodes_file}" || true
 else
   echo "no exitcode breadcrumbs found" >"${exitcodes_file}"
+fi
+
+pip_freeze_tail="${BASE_DIR}/pip-freeze-tail.txt"
+if [ -f ".ci/diagnostics/pip-freeze.txt" ]; then
+  cp ".ci/diagnostics/pip-freeze.txt" "${BASE_DIR}/pip-freeze.txt" 2>/dev/null || true
+  {
+    echo "Last 40 lines of .ci/diagnostics/pip-freeze.txt"
+    echo ""
+    tail -n 40 ".ci/diagnostics/pip-freeze.txt" 2>/dev/null || true
+    echo ""
+    echo "(Full pip freeze captured at .ci/diagnostics/pip-freeze.txt in the diagnostics artifact.)"
+  } >"${pip_freeze_tail}" || true
+else
+  echo "pip freeze output not captured" >"${pip_freeze_tail}"
 fi
 
 usage_file="${BASE_DIR}/disk_usage.txt"
@@ -388,6 +454,9 @@ append_code_block "${versions_file}" "version details unavailable"
 append_section "Environment"
 append_code_block "${env_file}" "no environment snapshot captured"
 
+append_section "Pip freeze snapshot"
+append_code_block "${pip_freeze_tail}" "pip freeze output unavailable"
+
 append_section "DuckDB"
 append_code_block "${duckdb_file}" "duckdb not inspected"
 
@@ -408,10 +477,20 @@ append_section "Resolver logs (tail)"
 append_code_block "${logs_file}" "resolver/data logs missing"
 
 append_section "Pytest summary"
+printf '%s\n\n' "${junit_summary_line}" >> "${SUMMARY_MD}"
 append_code_block "${pytest_file}" "pytest did not emit junit XML"
 
 append_section "Step exit codes"
 append_code_block "${exitcodes_file}" "no exitcode breadcrumbs found"
+
+if compgen -G ".ci/diagnostics/*.tail.txt" >/dev/null; then
+  append_section "Command tails (pip-freeze/import-probes/pytest, last 120 lines)"
+  for f in .ci/diagnostics/*.tail.txt; do
+    printf '```text (%s)\n' "$f" >> "${SUMMARY_MD}"
+    cat "$f" >> "${SUMMARY_MD}"
+    printf '```\n' >> "${SUMMARY_MD}"
+  done
+fi
 
 gate_rows_breadcrumb=".ci/exitcodes/gate_rows"
 if [ -f "${gate_rows_breadcrumb}" ]; then

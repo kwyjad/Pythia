@@ -1,6 +1,5 @@
-```bash
 #!/usr/bin/env bash
-# Run a command, teeing its output to diagnostics logs and capturing exit codes.
+# Run a command, teeing its stdout/stderr to diagnostics logs and recording exit codes.
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -20,10 +19,11 @@ diag_dir=".ci/diagnostics"
 exit_dir=".ci/exitcodes"
 mkdir -p "$diag_dir" "$exit_dir"
 
-stdout_log="${diag_dir}/${sanitized_step}.out.log"
-stderr_log="${diag_dir}/${sanitized_step}.err.log"
-combined_log="${diag_dir}/${sanitized_step}.log"
-tail_log="${diag_dir}/${sanitized_step}.tail.txt"
+log_base="${diag_dir}/${sanitized_step}"
+stdout_log="${log_base}.out.log"
+stderr_log="${log_base}.err.log"
+combined_log="${log_base}.log"
+tail_log="${log_base}.tail.txt"
 
 cmd="$*"
 status=0
@@ -34,12 +34,16 @@ bash -o pipefail -c "$cmd" \
 status=$?
 set -euo pipefail
 
+# Combine logs (stderr first so errors float to the top).
 : > "$combined_log"
 [ -f "$stderr_log" ] && cat "$stderr_log" >> "$combined_log"
 [ -f "$stdout_log" ] && cat "$stdout_log" >> "$combined_log"
 
-{ [ -f "$stderr_log" ] && cat "$stderr_log"; [ -f "$stdout_log" ] && cat "$stdout_log"; } \
-  | tail -n 120 > "$tail_log" || true
+# Tail snapshot
+{
+  [ -f "$stderr_log" ] && cat "$stderr_log"
+  [ -f "$stdout_log" ] && cat "$stdout_log"
+} | tail -n 120 > "$tail_log" || true
 
 printf 'exit=%s\n' "$status" > "${exit_dir}/${sanitized_step}"
 exit "$status"

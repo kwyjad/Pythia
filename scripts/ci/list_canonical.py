@@ -1,7 +1,7 @@
 from __future__ import annotations
+
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -17,19 +17,19 @@ def count_rows_csv(csv_path: Path) -> tuple[int | None, str | None]:
         if total == 0:
             return 0, None
         return max(total - 1, 0), None
-    except Exception as exc:  # pragma: no cover - best effort diagnostics
+    except Exception as exc:
         return None, f"failed to count CSV rows ({exc})"
 
 
 def count_rows_parquet(parquet_path: Path) -> tuple[int | None, str | None]:
     errors: list[str] = []
 
-    try:  # Prefer DuckDB for speed and low memory usage.
+    # Prefer DuckDB for speed and low memory usage.
+    try:
         import duckdb  # type: ignore
-
         try:
             con = duckdb.connect()
-        except Exception as exc:  # pragma: no cover - diagnostic path
+        except Exception as exc:
             errors.append(f"duckdb connect failed ({exc})")
         else:
             try:
@@ -38,7 +38,7 @@ def count_rows_parquet(parquet_path: Path) -> tuple[int | None, str | None]:
                     [str(parquet_path)],
                 ).fetchone()[0]
                 return int(rows), None
-            except Exception as exc:  # pragma: no cover - diagnostic path
+            except Exception as exc:
                 errors.append(f"duckdb count failed ({exc})")
             finally:
                 try:
@@ -48,26 +48,26 @@ def count_rows_parquet(parquet_path: Path) -> tuple[int | None, str | None]:
     except ModuleNotFoundError as exc:
         errors.append(f"duckdb missing ({exc})")
 
+    # Try PyArrow metadata if DuckDB path failed.
     try:
         import pyarrow.parquet as pq  # type: ignore
-
         try:
             pf = pq.ParquetFile(str(parquet_path))
-            metadata = pf.metadata
-            if metadata is not None:
-                return int(metadata.num_rows), None
-        except Exception as exc:  # pragma: no cover - diagnostic path
+            md = pf.metadata
+            if md is not None:
+                return int(md.num_rows), None
+        except Exception as exc:
             errors.append(f"pyarrow failed ({exc})")
     except ModuleNotFoundError as exc:
         errors.append(f"pyarrow missing ({exc})")
 
+    # Last resort: pandas
     try:
         import pandas as pd  # type: ignore
-
         try:
             frame = pd.read_parquet(parquet_path)
             return int(frame.shape[0]), None
-        except Exception as exc:  # pragma: no cover - diagnostic path
+        except Exception as exc:
             errors.append(f"pandas failed ({exc})")
     except ModuleNotFoundError as exc:
         errors.append(f"pandas missing ({exc})")
@@ -78,48 +78,8 @@ def count_rows_parquet(parquet_path: Path) -> tuple[int | None, str | None]:
 
 def iter_canonical_files(canonical_dir: Path) -> Iterable[Path]:
     for path in sorted(canonical_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() in SUPPORTED_SUFFIXES:
+        if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
             yield path
-
-
-def collect(canonical_dir: Path) -> tuple[list[str], list[dict[str, Any]], int, int]:
-    lines: list[str] = []
-    entries: list[dict[str, Any]] = []
-    total_known_rows = 0
-    unknown_counts = 0
-
-    for path in iter_canonical_files(canonical_dir):
-        rel_path = path.relative_to(canonical_dir)
-        suffix = path.suffix.lower()
-        if suffix == ".csv":
-            rows, error = count_rows_csv(path)
-        else:
-            rows, error = count_rows_parquet(path)
-
-        size = path.stat().st_size
-        entry: dict[str, Any] = {
-            "path": str(rel_path),
-            "rows": rows,
-            "bytes": size,
-            "type": suffix.lstrip("."),
-        }
-        if error:
-            entry["error"] = error
-        if rows is not None:
-            total_known_rows += rows
-            row_display = f"rows={rows}"
-        else:
-            unknown_counts += 1
-            row_display = "rows=?"
-        line = f"{rel_path} ({entry['type']}): {row_display} bytes={size}"
-        if error:
-            line += f" error={error}"
-        lines.append(line)
-        entries.append(entry)
-
-    return lines, entries, total_known_rows, unknown_counts
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -131,8 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     canonical_dir = Path(args.directory)
     out_path = Path(args.out)
 
-    header = "== Canonical directory listing =="
-    lines: list[str] = [header, f"directory: {canonical_dir}"]
+    lines: list[str] = ["== Canonical directory listing ==", f"directory: {canonical_dir}"]
     payload: dict[str, Any] = {
         "directory": str(canonical_dir),
         "exists": canonical_dir.is_dir(),
@@ -151,17 +110,47 @@ def main(argv: list[str] | None = None) -> int:
         out_path.write_text("\n".join(lines + ["", json.dumps(payload, indent=2, sort_keys=True)]), encoding="utf-8")
         return 0
 
-    file_lines, entries, total_rows, unknown_counts = collect(canonical_dir)
+    entries: list[dict[str, Any]] = []
+    total_known_rows = 0
+    unknown_counts = 0
+    for path in iter_canonical_files(canonical_dir):
+        rel = path.relative_to(canonical_dir)
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            rows, error = count_rows_csv(path)
+        else:
+            rows, error = count_rows_parquet(path)
+
+        size = path.stat().st_size
+        entry: dict[str, Any] = {
+            "path": str(rel),
+            "rows": rows,
+            "bytes": size,
+            "type": suffix.lstrip("."),
+        }
+        if error:
+            entry["error"] = error
+        if rows is not None:
+            total_known_rows += rows
+            row_display = f"rows={rows}"
+        else:
+            unknown_counts += 1
+            row_display = "rows=?"
+        line = f"{rel} ({entry['type']}): {row_display} bytes={size}"
+        if error:
+            line += f" error={error}"
+        lines.append(line)
+        entries.append(entry)
+
     payload["files"] = entries
-    payload["total_rows"] = total_rows
+    payload["total_rows"] = total_known_rows
     payload["unknown_row_counts"] = unknown_counts
 
-    if not file_lines:
+    if not entries:
         lines.append("no CSV/Parquet files found")
     else:
-        lines.append(f"files: {len(file_lines)}")
-        lines.extend(file_lines)
-        lines.append(f"total rows (excluding headers where applicable): {total_rows}")
+        lines.append(f"files: {len(entries)}")
+        lines.append(f"total rows (excluding headers where applicable): {total_known_rows}")
         if unknown_counts:
             lines.append(f"files with unknown row count: {unknown_counts}")
 
@@ -171,4 +160,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

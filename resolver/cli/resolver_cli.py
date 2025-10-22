@@ -48,6 +48,7 @@ from resolver.query.selectors import (
     resolve_point,
     ym_from_cutoff,
 )
+from resolver.io import files_locator
 from resolver.db.conn_shared import get_shared_duckdb_conn
 from resolver.diag.diagnostics import (
     dump_counts,
@@ -335,6 +336,27 @@ def _run_single(args: List[str]) -> None:
     )
 
     if not result:
+        extra_hint = ""
+        if backend_choice in {"files", "csv"}:
+            try:
+                files_root = files_locator.discover_files_root(
+                    os.environ.get("RESOLVER_SNAPSHOTS_DIR")
+                )
+            except FileNotFoundError as exc:
+                extra_hint = f" Files backend root missing: {exc}."
+            else:
+                table = "facts_deltas" if series_requested == "new" else "facts_resolved"
+                df_hint = files_locator.load_table(files_root, table)
+                if df_hint.empty:
+                    locator_reason = df_hint.attrs.get("locator_reason", "no rows located")
+                    extra_hint = (
+                        f" Files root {files_root} table {table}: {locator_reason}."
+                    )
+                else:
+                    extra_hint = (
+                        f" Files root {files_root} table {table}: rows located but none matched"
+                        " iso3/hazard/cutoff."
+                    )
         if backend_choice in {"db", "auto"}:
             db_url = os.environ.get("RESOLVER_DB_URL")
             conn, resolved_path = get_shared_duckdb_conn(db_url)
@@ -418,7 +440,7 @@ def _run_single(args: List[str]) -> None:
         message = (
             "No data found for "
             f"iso3={iso3}, hazard={hazard_code}, series={series_requested} at cutoff {args.cutoff} "
-            f"(backend {backend_choice}; checked {dataset_hint})."
+            f"(backend {backend_choice}; checked {dataset_hint}).{extra_hint}"
         )
         emit_no_data(message)
 

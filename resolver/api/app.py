@@ -27,6 +27,7 @@ from resolver.query.selectors import (
     resolve_point,
     ym_from_cutoff,
 )
+from resolver.io import files_locator
 
 app = FastAPI(title="Resolver API", version="0.1.0")
 DEFAULT_BACKEND = normalize_backend(os.environ.get("RESOLVER_API_BACKEND"), default="files")
@@ -96,12 +97,33 @@ def resolve(
     )
 
     if not result:
+        extra_hint = ""
+        if backend_choice in {"files", "csv"}:
+            try:
+                files_root = files_locator.discover_files_root(
+                    os.environ.get("RESOLVER_SNAPSHOTS_DIR")
+                )
+            except FileNotFoundError as exc:
+                extra_hint = f" Files backend root missing: {exc}."
+            else:
+                table = "facts_deltas" if series == "new" else "facts_resolved"
+                df_hint = files_locator.load_table(files_root, table)
+                if df_hint.empty:
+                    locator_reason = df_hint.attrs.get("locator_reason", "no rows located")
+                    extra_hint = (
+                        f" Files root {files_root} table {table}: {locator_reason}."
+                    )
+                else:
+                    extra_hint = (
+                        f" Files root {files_root} table {table}: rows located but none matched"
+                        " iso3/hazard/cutoff."
+                    )
         raise HTTPException(
             status_code=404,
             detail=(
                 "No data found for "
                 f"iso3={iso3_code}, hazard={hz_code}, series={series} at cutoff {cutoff} "
-                f"(backend {backend_choice})."
+                f"(backend {backend_choice}).{extra_hint}"
             ),
         )
 

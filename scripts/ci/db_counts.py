@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from typing import Any, Iterable
 
+# Core tables we expect; we'll also include any other facts_* we find.
 KEY_TABLES = ("facts_raw", "facts_resolved", "facts_monthly_deltas")
 
 
@@ -28,10 +29,10 @@ def enumerate_tables(con: Any) -> tuple[list[str], str | None]:
             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
             """
         ).fetchall()
-    except Exception as exc:  # pragma: no cover - diagnostic path
+    except Exception as exc:
         return [], str(exc)
-    table_names = sorted({row[0] for row in rows if row and row[0]})
-    return table_names, None
+    names = sorted({row[0] for row in rows if row and row[0]})
+    return names, None
 
 
 def select_tables(all_tables: Iterable[str]) -> list[str]:
@@ -39,7 +40,9 @@ def select_tables(all_tables: Iterable[str]) -> list[str]:
     for name in all_tables:
         if name.startswith("facts_") and name not in targets:
             targets.append(name)
-    return sorted(dict.fromkeys(targets))
+    # de-dupe, keep order-ish
+    seen: dict[str, None] = {}
+    return [t for t in targets if not (t in seen or seen.setdefault(t, None))]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,17 +77,17 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         con = duckdb.connect(str(db_path))
-    except Exception as exc:  # pragma: no cover - best effort diagnostics
+    except Exception as exc:
         lines.append(f"failed to connect: {exc}")
         payload["error"] = f"connect failed: {exc}"
         write_report(out_path, lines, payload)
         return 0
 
     try:
-        table_names, table_error = enumerate_tables(con)
-        if table_error:
-            lines.append(f"failed to enumerate tables: {table_error}")
-            payload["error"] = f"enumerate tables failed: {table_error}"
+        table_names, table_err = enumerate_tables(con)
+        if table_err:
+            lines.append(f"failed to enumerate tables: {table_err}")
+            payload["error"] = f"enumerate tables failed: {table_err}"
             write_report(out_path, lines, payload)
             return 0
         payload["all_tables"] = table_names
@@ -103,10 +106,11 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             info["exists"] = True
             try:
-                rows = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                lines.append(f"{table}: {int(rows)} rows")
-                info["rows"] = int(rows)
-            except Exception as exc:  # pragma: no cover - diagnostics only
+                count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                rows = int(count)
+                lines.append(f"{table}: {rows} rows")
+                info["rows"] = rows
+            except Exception as exc:
                 lines.append(f"{table}: failed to count rows ({exc})")
                 info["error"] = str(exc)
             payload["tables"][table] = info
