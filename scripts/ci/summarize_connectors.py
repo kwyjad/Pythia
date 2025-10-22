@@ -12,6 +12,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 DEFAULT_HTTP_KEYS = ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status")
 SUMMARY_TITLE = "# Connector Diagnostics"
+MISSING_REPORT_SUMMARY = (
+    "# Ingestion Diagnostics\n\n"
+    "**No connectors report was produced.**  \n"
+    "This usually means the ingestion step failed early (e.g., setup or backfill window).  \n"
+    "Check earlier steps in the job log.\n"
+)
 
 
 def _ensure_dict(data: Any) -> Dict[str, Any]:
@@ -321,6 +327,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = Path(args.report)
     out_path = Path(args.out)
+    if not report_path.exists():
+        write_markdown(out_path, MISSING_REPORT_SUMMARY)
+        if args.github_step_summary:
+            append_to_summary(MISSING_REPORT_SUMMARY)
+        return 0
     try:
         entries = load_report(report_path)
     except Exception as exc:

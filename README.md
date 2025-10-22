@@ -43,6 +43,10 @@ python -m resolver.tools.build_llm_context --months 12 --outdir context/
 
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
+#### CI & Backfill Troubleshooting
+
+- When the workflow publishes a stub connector diagnostics summary (“No connectors report was produced”), ingestion probably failed before diagnostics were emitted. Inspect earlier steps—especially setup and backfill window computation—for the root cause before chasing connector logs.
+
 ### Resolver pipeline CI workflows
 
 - `resolver-smoke.yml` runs on pushes, pull requests, and manual dispatches. It executes the full resolver pipeline end-to-end using offline stubs: `resolver.ingestion.ifrc_go_stub` seeds `data/staging/<period>/raw`, `resolver.transform.normalize` canonicalizes every adapter-backed CSV discovered there, and `scripts/ci/smoke_assert.py` tallies rows under `data/staging/<period>/canonical/*.csv`. The job passes when the summed total meets `SMOKE_MIN_ROWS` (default `1`), which keeps the smoke run focused on stub coverage rather than optional DuckDB or snapshot outputs. Once the gate passes, `resolver.tools.load_and_derive` runs the `load-canonical`, `derive-deltas --allow-negatives 1`, and `export --format parquet` subcommands to produce header-safe snapshots, while DuckDB files, logs, and snapshot directories remain optional so smoke runs stay green when those artifacts are absent. Any Parquet outputs that do appear are uploaded as the `resolver-smoke-snapshots` artifact so PRs can still validate the wiring without any network access. See `docs/CI.md` for environment knobs and diagnostics details.

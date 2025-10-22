@@ -59,50 +59,11 @@ jobs:
       - name: Compute backfill window
         id: window
         env:
-          MONTHS_INPUT: ${{ github.event.inputs.months_back }}
+          MONTHS_INPUT: ${{ inputs.months_back || 12 }}
+          TIMEZONE: Europe/Istanbul
         run: |
           set -euo pipefail
-          MONTHS_BACK=${MONTHS_INPUT:-12}
-          MONTHS_BACK="${MONTHS_BACK}" python - <<'PY'
-            import calendar
-            import datetime as dt
-            import os
-            from zoneinfo import ZoneInfo
-
-            months_back = int(os.environ.get("MONTHS_BACK", "12"))
-            now = dt.datetime.now(ZoneInfo("Europe/Istanbul"))
-            year = now.year
-            month = now.month
-            months: list[str] = []
-            for _ in range(months_back):
-                months.append(f"{year:04d}-{month:02d}")
-                month -= 1
-                if month == 0:
-                    month = 12
-                    year -= 1
-            months.reverse()
-            if not months:
-                raise SystemExit("months_back must be >= 1")
-            start_iso = months[0] + "-01"
-            end_year, end_month = map(int, months[-1].split("-"))
-            last_day = calendar.monthrange(end_year, end_month)[1]
-            end_iso = f"{end_year:04d}-{end_month:02d}-{last_day:02d}"
-            outputs = {
-                "months": ",".join(months),
-                "start_iso": start_iso,
-                "end_iso": end_iso,
-                "month_count": str(len(months)),
-            }
-            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-                for key, value in outputs.items():
-                    print(f"{key}={value}", file=fh)
-            with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
-                fh.write(f"BACKFILL_MONTHS={' '.join(months)}\n")
-                fh.write(f"BACKFILL_MONTHS_CSV={outputs['months']}\n")
-                fh.write(f"BACKFILL_START_ISO={start_iso}\n")
-                fh.write(f"BACKFILL_END_ISO={end_iso}\n")
-            print(f"Derived months: {outputs['months']}")
-          PY
+          python -m scripts.ci.compute_backfill_window
 
       - name: Run connectors
         env:
@@ -116,6 +77,9 @@ jobs:
             ARGS+=("--only" "${ONLY_CONNECTOR}")
           fi
           python resolver/ingestion/run_all_stubs.py "${ARGS[@]}"
+
+      - name: Prepare diagnostics dir
+        run: mkdir -p diagnostics/ingestion
 
       - name: Summarize connector diagnostics
         if: always()
