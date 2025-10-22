@@ -217,6 +217,18 @@ update calibration weights on a schedule,
 
 commit/push changes automatically.
 
+### Live Mode Secrets
+
+Repository connectors only run against live APIs when the expected credentials are present. Add repository secrets under **Settings → Secrets and variables → Actions → New repository secret** for each entry in the table below.【F:README.md†L624-L624】 The same names can be exported locally (for example via `direnv` or `.env`) to reproduce CI runs.
+
+| Connector | Requires secret? | Secret name(s) | Notes |
+|---|---|---|---|
+| ACLED | Yes | `ACLED_REFRESH_TOKEN` (or `ACLED_TOKEN` / `ACLED_USERNAME`+`ACLED_PASSWORD`) | Requests a 450‑day window at 1,000 rows per call and the runner skips when no ACLED credentials are set.【F:resolver/ingestion/config/acled.yml†L1-L5】【F:resolver/ingestion/run_all_stubs.py†L268-L277】 |
+| IFRC GO | Optional | `GO_API_TOKEN` | Covers the last 45 days of Field Reports, Appeals, and Situation Reports; the token header only matters for authenticated portals or higher-rate bursts.【F:resolver/ingestion/config/ifrc_go.yml†L2-L17】【F:resolver/ingestion/ifrc_go_client.py†L5-L14】 |
+| ReliefWeb | Optional | `RELIEFWEB_APPNAME` | Uses 0.6 s pauses between 100-row pages and falls back to the configured app name when the secret is missing.【F:resolver/ingestion/config/reliefweb.yml†L20-L25】【F:resolver/ingestion/reliefweb_client.py†L1211-L1221】 |
+| UNHCR ODP | Yes | `UNHCR_ODP_USERNAME`, `UNHCR_ODP_PASSWORD`, `UNHCR_ODP_CLIENT_ID`, `UNHCR_ODP_CLIENT_SECRET` | Scrapes monthly Operational Data Portal widgets (max one page) and only runs when the full credential set is available.【F:resolver/ingestion/config/unhcr_odp.yml†L2-L11】【F:resolver/ingestion/run_all_stubs.py†L278-L291】 |
+| All other live connectors | No | – | DTM, EM-DAT, GDACS, HDX, IPC, UNHCR population, WFP mVAM, WHO PHE, and WorldPop rely on configuration only; they skip when disabled in YAML but do not require secrets.【F:resolver/ingestion/config/dtm.yml†L2-L6】【F:resolver/ingestion/config/emdat.yml†L2-L9】【F:resolver/ingestion/config/gdacs.yml†L2-L8】【F:resolver/ingestion/config/hdx.yml†L1-L18】【F:resolver/ingestion/config/ipc.yml†L1-L5】【F:resolver/ingestion/config/unhcr.yml†L2-L19】【F:resolver/ingestion/config/wfp_mvam_sources.yml†L1-L3】【F:resolver/ingestion/config/who_phe.yml†L1-L9】【F:resolver/ingestion/config/worldpop.yml†L1-L14】 |
+
 Resolver artifact hygiene
 
 Nightly resolver runs can generate sizeable exports. The CI workflow calls

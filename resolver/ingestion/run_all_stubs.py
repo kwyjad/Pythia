@@ -265,6 +265,32 @@ SKIP_ENVS = {
     "wfp_mvam_client.py": ("RESOLVER_SKIP_WFP_MVAM", "WFP mVAM connector"),
 }
 
+SECRET_GATES: Dict[str, Dict[str, object]] = {
+    "acled_client.py": {
+        "alternatives": [
+            ("ACLED_REFRESH_TOKEN",),
+            ("ACLED_ACCESS_TOKEN",),
+            ("ACLED_TOKEN",),
+            ("ACLED_USERNAME", "ACLED_PASSWORD"),
+        ],
+        "message": "missing ACLED_REFRESH_TOKEN/ACLED_TOKEN credentials",
+    },
+    "unhcr_odp_client.py": {
+        "alternatives": [
+            (
+                "UNHCR_ODP_USERNAME",
+                "UNHCR_ODP_PASSWORD",
+                "UNHCR_ODP_CLIENT_ID",
+                "UNHCR_ODP_CLIENT_SECRET",
+            ),
+        ],
+        "message": (
+            "missing UNHCR_ODP_USERNAME/UNHCR_ODP_PASSWORD/UNHCR_ODP_CLIENT_ID/"
+            "UNHCR_ODP_CLIENT_SECRET"
+        ),
+    },
+}
+
 
 # Prefer known "fatal" / non-retryable exit codes (sysexits) when available
 _EX_USAGE = getattr(os, "EX_USAGE", 64)
@@ -582,6 +608,26 @@ def _should_skip(script: str) -> Optional[str]:
     return None
 
 
+def _check_secret_gate(filename: str) -> tuple[bool, Optional[str]]:
+    gate = SECRET_GATES.get(filename)
+    if not gate:
+        return True, None
+    alternatives = gate.get("alternatives", [])
+    for combo in alternatives:
+        if all(os.getenv(name, "").strip() for name in combo):
+            return True, None
+    message = gate.get("message")
+    if isinstance(message, str) and message:
+        return False, message
+    formatted = " or ".join(
+        " + ".join(names) if len(names) > 1 else names[0]
+        for names in alternatives
+    )
+    if not formatted:
+        formatted = "required credentials"
+    return False, f"missing {formatted}"
+
+
 def _normalise_name(name: str) -> str:
     name = name.strip()
     if not name:
@@ -788,20 +834,29 @@ def _with_attempt_logger(
 
 
 def _render_summary_table(rows: List[Dict[str, object]]) -> str:
-    headers = ["Connector", "Status", "Attempts", "Rows", "Duration(ms)", "Notes"]
+    headers = [
+        "Connector",
+        "Mode",
+        "Status",
+        "Attempts",
+        "Rows",
+        "Duration(ms)",
+        "Reason",
+    ]
     table_rows = [
         [
             row.get("name", ""),
+            row.get("mode", ""),
             row.get("status", ""),
             str(row.get("attempts", "")),
             str(row.get("rows", "")),
             str(row.get("duration_ms", "")),
-            row.get("notes", "") or "",
+            row.get("reason") or row.get("notes") or "",
         ]
         for row in rows
     ]
     if not table_rows:
-        table_rows = [["-", "-", "0", "0", "0", ""]]
+        table_rows = [["-", "-", "-", "0", "0", "0", ""]]
     columns = list(zip(headers, *table_rows))
     widths = [max(len(str(value)) for value in column) for column in columns]
     lines = []
@@ -862,6 +917,11 @@ def _resolve_enablement(
         forced_sources.append("pattern")
     forced = bool(forced_sources)
     authoritative = is_authoritatively_selected(spec)
+    requires_secret = spec.kind == "real"
+    secrets_ok = True
+    secret_reason: Optional[str] = None
+    if requires_secret:
+        secrets_ok, secret_reason = _check_secret_gate(spec.filename)
 
     if spec.skip_reason:
         return EnableDecision(
@@ -875,6 +935,16 @@ def _resolve_enablement(
         )
 
     if authoritative and not spec.ci_gate_reason:
+        if requires_secret and not secrets_ok and not forced:
+            return EnableDecision(
+                should_run=False,
+                gated_by="secret",
+                forced_sources=tuple(forced_sources),
+                config_enabled=config_enabled,
+                has_config_flag=has_flag,
+                applied_skip_reason=secret_reason,
+                ci_gate_reason=spec.ci_gate_reason,
+            )
         return EnableDecision(
             should_run=True,
             gated_by="selected:list",
@@ -926,6 +996,17 @@ def _resolve_enablement(
             config_enabled=config_enabled,
             has_config_flag=has_flag,
             applied_skip_reason=spec.ci_gate_reason,
+            ci_gate_reason=spec.ci_gate_reason,
+        )
+
+    if requires_secret and not secrets_ok and not forced:
+        return EnableDecision(
+            should_run=False,
+            gated_by="secret",
+            forced_sources=tuple(forced_sources),
+            config_enabled=config_enabled,
+            has_config_flag=has_flag,
+            applied_skip_reason=secret_reason,
             ci_gate_reason=spec.ci_gate_reason,
         )
 
@@ -1333,79 +1414,78 @@ def main(argv: Optional[List[str]] = None) -> int:
                 status = "skipped"
                 attempts = 0
                 rows = 0
-                continue
-
-            def _attempt(attempt: int) -> Dict[str, object]:
-                nonlocal attempts
-                attempts = max(attempts, attempt)
-                attempt_logger = _with_attempt_logger(child, attempt)
-                start_extra = {
-                    "event": "start",
-                    "attempt": attempt,
-                    "kind": spec.kind,
-                    "path": str(spec.path),
-                }
-                for key, value in spec.metadata.items():
-                    start_extra[key] = redact(value)
-                if spec.summary:
-                    start_extra["summary"] = redact(spec.summary)
-                attempt_logger.info("starting", extra=start_extra)
-                return _run_connector(spec, attempt_logger)
-
-            def _should_retry(exc: BaseException) -> bool:
-                exit_code: int | None = None
-                stderr_text = ""
-                stdout_text = ""
-                if isinstance(exc, subprocess.CalledProcessError):
-                    exit_code = exc.returncode
-                    try:
-                        if getattr(exc, "stderr", None):
-                            stderr_text = _coerce_process_stream(exc.stderr)
-                        if getattr(exc, "stdout", None):
-                            stdout_text = _coerce_process_stream(exc.stdout)
-                    except Exception:  # noqa: BLE001
-                        stderr_text = ""
-                        stdout_text = ""
-                return _is_retryable_exception(
-                    exc,
-                    exit_code=exit_code,
-                    stderr=stderr_text or None,
-                    stdout=stdout_text or None,
-                )
-
-            result = retry_call(
-                _attempt,
-                retries=retries,
-                base_delay=retry_base,
-                max_delay=retry_max,
-                jitter=not args.retry_no_jitter,
-                logger=child,
-                connector=spec.name,
-                is_retryable=_should_retry,
-            )
-            rows = int(result.get("rows", 0))
-            rows_method = str(result.get("rows_method") or "")
-            duration_ms = int((time.perf_counter() - connector_start) * 1000)
-            if spec.output_path and spec.output_path.exists() and rows == 0:
-                status = "ok-empty"
-                notes = "header-only"
             else:
-                status = "ok"
-            if rows_method in {"recount", "manifest+verified"}:
-                method_note = f"rows:{rows_method}"
-                notes = f"{notes}; {method_note}" if notes else method_note
-            child.info(
-                "finished",
-                extra={
-                    "event": "finished",
-                    "status": status,
-                    "rows": rows,
-                    "attempts": attempts,
-                    "duration_ms": duration_ms,
-                    "rows_method": rows_method or None,
-                    "notes": redact(notes) if notes else None,
-                },
-            )
+                def _attempt(attempt: int) -> Dict[str, object]:
+                    nonlocal attempts
+                    attempts = max(attempts, attempt)
+                    attempt_logger = _with_attempt_logger(child, attempt)
+                    start_extra = {
+                        "event": "start",
+                        "attempt": attempt,
+                        "kind": spec.kind,
+                        "path": str(spec.path),
+                    }
+                    for key, value in spec.metadata.items():
+                        start_extra[key] = redact(value)
+                    if spec.summary:
+                        start_extra["summary"] = redact(spec.summary)
+                    attempt_logger.info("starting", extra=start_extra)
+                    return _run_connector(spec, attempt_logger)
+
+                def _should_retry(exc: BaseException) -> bool:
+                    exit_code: int | None = None
+                    stderr_text = ""
+                    stdout_text = ""
+                    if isinstance(exc, subprocess.CalledProcessError):
+                        exit_code = exc.returncode
+                        try:
+                            if getattr(exc, "stderr", None):
+                                stderr_text = _coerce_process_stream(exc.stderr)
+                            if getattr(exc, "stdout", None):
+                                stdout_text = _coerce_process_stream(exc.stdout)
+                        except Exception:  # noqa: BLE001
+                            stderr_text = ""
+                            stdout_text = ""
+                    return _is_retryable_exception(
+                        exc,
+                        exit_code=exit_code,
+                        stderr=stderr_text or None,
+                        stdout=stdout_text or None,
+                    )
+
+                result = retry_call(
+                    _attempt,
+                    retries=retries,
+                    base_delay=retry_base,
+                    max_delay=retry_max,
+                    jitter=not args.retry_no_jitter,
+                    logger=child,
+                    connector=spec.name,
+                    is_retryable=_should_retry,
+                )
+                rows = int(result.get("rows", 0))
+                rows_method = str(result.get("rows_method") or "")
+                duration_ms = int((time.perf_counter() - connector_start) * 1000)
+                if spec.output_path and spec.output_path.exists() and rows == 0:
+                    status = "ok-empty"
+                    notes = "header-only"
+                else:
+                    status = "ok"
+                if rows_method in {"recount", "manifest+verified"}:
+                    method_note = f"rows:{rows_method}"
+                    notes = f"{notes}; {method_note}" if notes else method_note
+                child.info(
+                    "finished",
+                    extra={
+                        "event": "finished",
+                        "status": status,
+                        "rows": rows,
+                        "attempts": attempts,
+                        "duration_ms": duration_ms,
+                        "rows_method": rows_method or None,
+                        "notes": redact(notes) if notes else None,
+                    },
+                )
         except Exception as exc:  # noqa: BLE001
             duration_ms = int((time.perf_counter() - connector_start) * 1000)
             status = "error"
@@ -1457,11 +1537,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "attempts": attempts,
                     "duration_ms": duration_ms,
                     "notes": summary_notes,
+                    "reason": summary_notes,
                 },
             )
+            mode = "skipped" if status == "skipped" else spec.kind
+            reason_text = summary_notes or "-"
             summary_line = (
-                f"{spec.name}, status={status}, attempts={attempts}, "
-                f"duration_ms={duration_ms}, notes={summary_notes or '-'}"
+                f"{spec.name}, mode={mode}, status={status}, attempts={attempts}, "
+                f"duration_ms={duration_ms}, reason={reason_text}"
             )
             print(summary_line)
             output_path_text: Optional[str]
@@ -1483,6 +1566,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "kind": spec.kind,
                     "rows_method": result.get("rows_method") if result else None,
                     "output_path": output_path_text,
+                    "mode": mode,
+                    "reason": summary_notes,
                 }
             )
 
@@ -1515,6 +1600,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         for entry in connectors_summary
         if entry.get("kind") == "stub" and entry.get("status") == "error"
     )
+    connectors_ran = sum(
+        1
+        for entry in connectors_summary
+        if entry.get("status") != "skipped"
+    )
 
     if strict_mode and had_error:
         return 1
@@ -1523,6 +1613,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     if fail_on_stub_error and stub_failures:
+        return 1
+
+    if connectors_ran == 0:
         return 1
     return 0
 
