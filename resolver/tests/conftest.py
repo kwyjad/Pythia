@@ -6,11 +6,12 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
-from typing import Iterable
+from typing import Iterable, Optional
 
 import pytest
 
 from . import _synthetic_testdata
+from resolver.tests.fixtures.bootstrap_fast_exports import FastExports, build_fast_exports
 
 CI_ENV_VAR = "GITHUB_ACTIONS"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,8 @@ EXPORTS_DIR = REPO_ROOT / "exports"
 STAGING_DIR = REPO_ROOT / "staging"
 STATE_DIR = REPO_ROOT / "state"
 SNAPSHOTS_DIR = REPO_ROOT / "snapshots"
+
+_FAST_EXPORTS: Optional[FastExports] = None
 
 
 def _running_on_ci() -> bool:
@@ -30,7 +33,32 @@ def _flag_enabled(var: str, default: str = "1") -> bool:
 
 
 @lru_cache(maxsize=1)
+def _ensure_fast_exports() -> Optional[FastExports]:
+    global _FAST_EXPORTS
+    if _FAST_EXPORTS is not None:
+        return _FAST_EXPORTS
+
+    try:
+        bundle = build_fast_exports()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        print(f"[resolver-tests] fast exports bootstrap failed: {exc}")
+        return None
+
+    _FAST_EXPORTS = bundle
+    os.environ.setdefault("RESOLVER_TEST_DATA_DIR", str(bundle.base_dir))
+    os.environ.setdefault("RESOLVER_SNAPSHOTS_DIR", str(bundle.snapshots_root))
+    os.environ.setdefault("RESOLVER_DB_PATH", str(bundle.db_path))
+    _patch_test_utils(bundle.base_dir)
+    return bundle
+
+
+@lru_cache(maxsize=1)
 def _exports_available() -> bool:
+    bundle = _ensure_fast_exports()
+    if bundle is not None:
+        exports_dir = bundle.exports_dir
+        if exports_dir.exists() and any(exports_dir.glob("*.csv")):
+            return True
     env_dir = os.environ.get("RESOLVER_TEST_DATA_DIR")
     if env_dir:
         exports = Path(env_dir) / "exports"
@@ -45,13 +73,14 @@ def _exports_available() -> bool:
 
 @lru_cache(maxsize=1)
 def _staging_available() -> bool:
+    bundle = _ensure_fast_exports()
+    if bundle is not None and any(bundle.canonical_dir.glob("*.csv")):
+        return True
     return STAGING_DIR.exists() and any(STAGING_DIR.glob("*.csv"))
 
 
 def _should_skip_node(nodeid: str) -> bool:
     nodeid = nodeid.lower()
-    if "test_staging_schema_all.py" in nodeid:
-        return True
     if "staging_schema" in nodeid:
         return not _staging_available()
     if "schema_parity" in nodeid or "export_parity" in nodeid:
@@ -164,4 +193,29 @@ def _duckdb_cache_hygiene():
     module.clear_all_cached_connections()
     yield
     module.clear_all_cached_connections()
+
+
+@pytest.fixture(scope="session")
+def fast_exports() -> FastExports:
+    bundle = _ensure_fast_exports()
+    if bundle is None:
+        pytest.skip("fast exports fixture unavailable")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("RESOLVER_TEST_DATA_DIR", str(bundle.base_dir))
+    monkeypatch.setenv("RESOLVER_SNAPSHOTS_DIR", str(bundle.snapshots_root))
+    monkeypatch.setenv("RESOLVER_DB_PATH", str(bundle.db_path))
+    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{bundle.db_path}")
+    try:
+        yield bundle
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.fixture(scope="session")
+def fast_staging_dir() -> Path:
+    staging_dir = REPO_ROOT / "tests" / "fixtures" / "staging" / "minimal" / "staging"
+    if not staging_dir.exists():
+        pytest.skip("staging fixtures unavailable")
+    return staging_dir
 

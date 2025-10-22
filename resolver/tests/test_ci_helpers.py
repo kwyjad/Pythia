@@ -64,3 +64,32 @@ def test_db_counts_handles_missing_db(tmp_path: Path) -> None:
     payload = read_json_block(out_path)
     assert payload["exists"] is False
     assert payload.get("tables") == {}
+
+
+def test_run_and_capture_emits_exit_and_tail(tmp_path: Path) -> None:
+    script = REPO_ROOT / "scripts" / "ci" / "run_and_capture.sh"
+    workdir = tmp_path / "workspace"
+    workdir.mkdir()
+    command = [
+        "bash",
+        str(script),
+        "sample",
+        "python -c \"import json; print(json.dumps({'message': 'hello'}))\"",
+    ]
+    result = subprocess.run(command, cwd=workdir, text=True)
+    assert result.returncode == 0
+
+    exit_file = workdir / ".ci" / "exitcodes" / "sample"
+    tail_file = workdir / ".ci" / "diagnostics" / "sample.tail.txt"
+    combined = workdir / ".ci" / "diagnostics" / "sample.log"
+
+    assert exit_file.exists(), "expected exitcode breadcrumb to be created"
+    assert tail_file.exists(), "expected tail log to be created"
+    assert combined.exists(), "expected combined log to be created"
+
+    exit_content = exit_file.read_text(encoding="utf-8").strip()
+    assert exit_content == "exit=0"
+    tail_content = tail_file.read_text(encoding="utf-8")
+    assert "hello" in tail_content
+    combined_content = combined.read_text(encoding="utf-8")
+    assert "hello" in combined_content

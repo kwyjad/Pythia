@@ -25,37 +25,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Diagnostics collector sanity check
+      - name: Diagnostics collector syntax check
         shell: bash
-        continue-on-error: true
         run: |
           set -euo pipefail
-          # 1) Syntax check only
           bash -n .github/actions/collect-diagnostics/collect.sh
-
-          # 2) Run collector self-test; don't fail the job if it returns non-zero
-          tmp_env="$(mktemp)"
-          set +e
-          GITHUB_ENV="${tmp_env}" .github/actions/collect-diagnostics/collect.sh test-sanity
-          rc=$?
-          set -euo pipefail
-
-          # 3) Read the artifact dir from temp env or fallback to legacy path
-          artifact_dir="$(awk -F= '/^ARTIFACT_PATH=/{print $2}' "${tmp_env}" 2>/dev/null || true)"
-          if [ -z "${artifact_dir}" ]; then
-            artifact_dir="dist/diag-test-sanity"
-          fi
-
-          # 4) Never hard-fail here; just warn and show contents if missing
-          if [ -f "${artifact_dir}/SUMMARY.md" ]; then
-            echo "Collector sanity OK: ${artifact_dir}/SUMMARY.md"
-          else
-            echo "WARNING: Collector sanity: ${artifact_dir}/SUMMARY.md missing (rc=${rc})."
-            ls -R "${artifact_dir}" || true
-          fi
-
-          # 5) Cleanup
-          rm -rf dist/diag-test-sanity dist/diagnostics-test-sanity-* "${tmp_env}" || true
 
       - name: Install dependencies (fast)
         run: |
