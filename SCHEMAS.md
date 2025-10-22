@@ -221,6 +221,6 @@ LLM context bundle summarising monthly new-series PIN/PA totals.
 | hazard_code | string | yes |  |  |
 | ym | string | yes |  | Year-month bucket (YYYY-MM) |
 | metric | enum | yes | in_need, affected |  |
-| unit | enum | yes | persons |  |
-| value | number | yes |  |  |
+| unit | string | yes |  | Measurement unit (`persons` rows are rounded to whole numbers) |
+| value | number | yes |  | Numeric total per month/metric |
 | series | enum | yes | new |  |
