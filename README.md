@@ -28,6 +28,11 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - The final job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` and uploads `context/facts_last12.jsonl` plus `context/facts_last12.parquet` alongside the snapshot artifacts.
 - After the run completes download the combined artifact, confirm each `manifest.json` row count, and hand the bundle to the Forecaster deployment.
 
+### Resolver monthly pipeline
+
+- Workflow: `.github/workflows/resolver-monthly.yml` runs on the first of every month at 02:00 Europe/Istanbul (and on manual dispatch) to ingest live connectors, freeze `resolver/snapshots/<YYYY-MM>/`, and rebuild the 12‑month LLM context bundle.
+- Artifacts are uploaded to the run and attached to a GitHub Release tagged `resolver-<YYYY-MM>` so the latest snapshot and `context/` bundle stay available without manual steps.
+
 If you fork the project under a different slug, update the guarded repository string inside the workflows before enabling CI.
 
 ### Resolver pipeline CI workflows

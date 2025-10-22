@@ -1,0 +1,231 @@
+---
+name: "Resolver — Monthly"
+
+on:
+  schedule:
+    - cron: "0 2 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolver-pipeline-monthly
+  cancel-in-progress: false
+
+jobs:
+  monthly:
+    if: ${{ github.repository == 'oughtinc/Pythia' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      PYTHONUNBUFFERED: "1"
+      RESOLVER_INGESTION_MODE: real
+      RESOLVER_INCLUDE_STUBS: "0"
+      RESOLVER_FAIL_ON_STUB_ERROR: "0"
+      RESOLVER_DEBUG: "0"
+      RESOLVER_FORCE_ENABLE: ""
+      SNAPSHOT_PUBLISH_TOKEN: ${{ secrets.SNAPSHOT_PUBLISH_TOKEN }}
+      ACLED_TOKEN: ${{ secrets.ACLED_TOKEN }}
+      ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
+      ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
+      ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      GO_API_TOKEN: ${{ secrets.GO_API_TOKEN }}
+      HDX_API_KEY: ${{ secrets.HDX_API_KEY }}
+      UNHCR_ODP_USERNAME: ${{ secrets.UNHCR_ODP_USERNAME }}
+      UNHCR_ODP_PASSWORD: ${{ secrets.UNHCR_ODP_PASSWORD }}
+      UNHCR_ODP_CLIENT_ID: ${{ secrets.UNHCR_ODP_CLIENT_ID }}
+      UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            resolver/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install -r resolver/requirements.txt
+          python -m pip install 'duckdb>=1.0,<2.0'
+
+      - name: Compute monthly snapshot window
+        id: window
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from resolver.tools.ci_helpers import monthly_snapshot_window
+
+          window = monthly_snapshot_window()
+          env_path = os.environ["GITHUB_ENV"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"ym={window.ym}", file=output)
+              print(f"start_iso={window.start_iso}", file=output)
+              print(f"end_iso={window.end_iso}", file=output)
+          with open(env_path, "a", encoding="utf-8") as env:
+              for key, value in window.to_env().items():
+                  env.write(f"{key}={value}\n")
+          print(f"Monthly target: {window.ym} ({window.start_iso} → {window.end_iso})")
+          PY
+
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          rm -rf resolver/staging resolver/exports context
+          rm -rf resolver/snapshots/${SNAPSHOT_TARGET_YM}
+          rm -f data/resolver.duckdb
+          mkdir -p resolver/logs/ingestion .ci/diagnostics .ci/exitcodes data
+
+      - name: Configure connector skips
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+
+          def has_acled_creds() -> bool:
+              token = os.getenv("ACLED_TOKEN", "").strip()
+              access = os.getenv("ACLED_ACCESS_TOKEN", "").strip()
+              user = os.getenv("ACLED_USERNAME", "").strip()
+              password = os.getenv("ACLED_PASSWORD", "").strip()
+              refresh = os.getenv("ACLED_REFRESH_TOKEN", "").strip()
+              return bool(token or access or (user and password) or refresh)
+
+          def has_unhcr_odp_creds() -> bool:
+              required = [
+                  "UNHCR_ODP_USERNAME",
+                  "UNHCR_ODP_PASSWORD",
+                  "UNHCR_ODP_CLIENT_ID",
+                  "UNHCR_ODP_CLIENT_SECRET",
+              ]
+              return all(os.getenv(name, "").strip() for name in required)
+
+          decisions = {
+              "RESOLVER_SKIP_ACLED": not has_acled_creds(),
+              "RESOLVER_SKIP_UNHCR_ODP": not has_unhcr_odp_creds(),
+          }
+
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as env:
+              for key, should_skip in decisions.items():
+                  value = "1" if should_skip else "0"
+                  env.write(f"{key}={value}\n")
+                  state = "skipping" if should_skip else "enabled"
+                  print(f"{key}={value} ({state})")
+          PY
+
+      - name: Run live connectors
+        run: |
+          set -euo pipefail
+          CMD="python resolver/ingestion/run_all_stubs.py --mode real --retries 2 --strict --log-level INFO --log-format json"
+          scripts/ci/run_and_capture.sh connectors "$CMD"
+
+      - name: Freeze monthly snapshot
+        run: |
+          set -euo pipefail
+          SNAPSHOT_CMD="python -m resolver.cli.snapshot_cli make-monthly --ym \"${SNAPSHOT_TARGET_YM}\" --staging resolver/staging --exports-dir resolver/exports/${SNAPSHOT_TARGET_YM} --outdir resolver/snapshots --write-db 1 --db-url data/resolver.duckdb --overwrite"
+          scripts/ci/run_and_capture.sh snapshot "$SNAPSHOT_CMD"
+
+      - name: Build LLM context bundle
+        run: |
+          set -euo pipefail
+          scripts/ci/run_and_capture.sh context "python -m resolver.tools.build_llm_context --months 12 --outdir context"
+
+      - name: Create release archive
+        run: |
+          set -euo pipefail
+          tar -czf resolver-monthly-${SNAPSHOT_TARGET_YM}.tar.gz resolver/snapshots/${SNAPSHOT_TARGET_YM} context
+
+      - name: Upload snapshot and context artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-monthly-${{ env.SNAPSHOT_TARGET_YM }}
+          if-no-files-found: error
+          path: |
+            resolver/snapshots/${{ env.SNAPSHOT_TARGET_YM }}
+            context
+
+      - name: Upload diagnostics bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-monthly-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            .ci/diagnostics
+            .ci/exitcodes
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="resolver-${SNAPSHOT_TARGET_YM}"
+          archive="resolver-monthly-${SNAPSHOT_TARGET_YM}.tar.gz"
+          notes="Automated resolver snapshot for ${SNAPSHOT_TARGET_YM}."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$archive" --clobber
+          else
+            gh release create "$tag" "$archive" --title "Resolver snapshot ${SNAPSHOT_TARGET_YM}" --notes "$notes"
+          fi
+
+      - name: Summarize outputs
+        if: always()
+        env:
+          SNAPSHOT_TARGET_YM: ${{ env.SNAPSHOT_TARGET_YM }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          target = os.environ.get("SNAPSHOT_TARGET_YM", "unknown")
+          manifest_path = Path("resolver/snapshots") / target / "manifest.json"
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          rows: list[tuple[str, str]] = []
+
+          if manifest_path.exists():
+              data = json.loads(manifest_path.read_text(encoding="utf-8"))
+              resolved = data.get("resolved_rows", data.get("rows"))
+              if resolved is not None:
+                  rows.append(("resolved_rows", str(resolved)))
+              if "deltas_rows" in data:
+                  rows.append(("deltas_rows", str(data["deltas_rows"])) )
+              if "facts_rows" in data:
+                  rows.append(("facts_rows", str(data["facts_rows"])) )
+          else:
+              rows.append(("manifest", "missing"))
+
+          context_dir = Path("context")
+          context_files = []
+          if context_dir.exists():
+              for file_path in sorted(context_dir.iterdir()):
+                  if file_path.is_file():
+                      context_files.append((file_path.name, file_path.stat().st_size))
+
+          with summary_path.open("a", encoding="utf-8") as handle:
+              handle.write("## Resolver monthly snapshot\n")
+              handle.write(f"Target month: `{target}`\n\n")
+              if rows:
+                  handle.write("| Metric | Value |\n")
+                  handle.write("| --- | --- |\n")
+                  for key, value in rows:
+                      handle.write(f"| {key} | {value} |\n")
+                  handle.write("\n")
+              if context_files:
+                  handle.write("### Context bundle\n")
+                  for name, size in context_files:
+                      handle.write(f"- `{name}` ({size} bytes)\n")
+                  handle.write("\n")
+          PY
