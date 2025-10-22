@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf resolver/staging resolver/exports context
-          rm -rf resolver/snapshots/${SNAPSHOT_TARGET_YM}
+          rm -rf "resolver/snapshots/${SNAPSHOT_TARGET_YM}"
           rm -f data/resolver.duckdb
           mkdir -p resolver/logs/ingestion .ci/diagnostics .ci/exitcodes data
 
@@ -133,7 +133,7 @@ jobs:
       - name: Freeze monthly snapshot
         run: |
           set -euo pipefail
-          SNAPSHOT_CMD="python -m resolver.cli.snapshot_cli make-monthly --ym \"${SNAPSHOT_TARGET_YM}\" --staging resolver/staging --exports-dir resolver/exports/${SNAPSHOT_TARGET_YM} --outdir resolver/snapshots --write-db 1 --db-url data/resolver.duckdb --overwrite"
+          SNAPSHOT_CMD="python -m resolver.cli.snapshot_cli make-monthly --ym \"${SNAPSHOT_TARGET_YM}\" --staging resolver/staging --exports-dir \"resolver/exports/${SNAPSHOT_TARGET_YM}\" --outdir resolver/snapshots --write-db 1 --db-url data/resolver.duckdb --overwrite"
           scripts/ci/run_and_capture.sh snapshot "$SNAPSHOT_CMD"
 
       - name: Build LLM context bundle
@@ -144,7 +144,7 @@ jobs:
       - name: Create release archive
         run: |
           set -euo pipefail
-          tar -czf resolver-monthly-${SNAPSHOT_TARGET_YM}.tar.gz resolver/snapshots/${SNAPSHOT_TARGET_YM} context
+          tar -czf "resolver-monthly-${SNAPSHOT_TARGET_YM}.tar.gz" "resolver/snapshots/${SNAPSHOT_TARGET_YM}" context
 
       - name: Upload snapshot and context artifacts
         uses: actions/upload-artifact@v4
