@@ -66,44 +66,44 @@ jobs:
           set -euo pipefail
           MONTHS_BACK=${MONTHS_INPUT:-12}
           MONTHS_BACK="${MONTHS_BACK}" python - <<'PY'
-import calendar
-import datetime as dt
-import os
-from zoneinfo import ZoneInfo
+            import calendar
+            import datetime as dt
+            import os
+            from zoneinfo import ZoneInfo
 
-months_back = int(os.environ.get("MONTHS_BACK", "12"))
-now = dt.datetime.now(ZoneInfo("Europe/Istanbul"))
-year = now.year
-month = now.month
-months: list[str] = []
-for _ in range(months_back):
-    months.append(f"{year:04d}-{month:02d}")
-    month -= 1
-    if month == 0:
-        month = 12
-        year -= 1
-months.reverse()
-if not months:
-    raise SystemExit("months_back must be >= 1")
-start_iso = months[0] + "-01"
-end_year, end_month = map(int, months[-1].split("-"))
-last_day = calendar.monthrange(end_year, end_month)[1]
-end_iso = f"{end_year:04d}-{end_month:02d}-{last_day:02d}"
-outputs = {
-    "months": ",".join(months),
-    "start_iso": start_iso,
-    "end_iso": end_iso,
-    "month_count": str(len(months)),
-}
-with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-    for key, value in outputs.items():
-        print(f"{key}={value}", file=fh)
-with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
-    fh.write(f"BACKFILL_MONTHS={' '.join(months)}\n")
-    fh.write(f"BACKFILL_MONTHS_CSV={outputs['months']}\n")
-    fh.write(f"BACKFILL_START_ISO={start_iso}\n")
-    fh.write(f"BACKFILL_END_ISO={end_iso}\n")
-PY
+            months_back = int(os.environ.get("MONTHS_BACK", "12"))
+            now = dt.datetime.now(ZoneInfo("Europe/Istanbul"))
+            year = now.year
+            month = now.month
+            months: list[str] = []
+            for _ in range(months_back):
+                months.append(f"{year:04d}-{month:02d}")
+                month -= 1
+                if month == 0:
+                    month = 12
+                    year -= 1
+            months.reverse()
+            if not months:
+                raise SystemExit("months_back must be >= 1")
+            start_iso = months[0] + "-01"
+            end_year, end_month = map(int, months[-1].split("-"))
+            last_day = calendar.monthrange(end_year, end_month)[1]
+            end_iso = f"{end_year:04d}-{end_month:02d}-{last_day:02d}"
+            outputs = {
+                "months": ",".join(months),
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+                "month_count": str(len(months)),
+            }
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                for key, value in outputs.items():
+                    print(f"{key}={value}", file=fh)
+            with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+                fh.write(f"BACKFILL_MONTHS={' '.join(months)}\n")
+                fh.write(f"BACKFILL_MONTHS_CSV={outputs['months']}\n")
+                fh.write(f"BACKFILL_START_ISO={start_iso}\n")
+                fh.write(f"BACKFILL_END_ISO={end_iso}\n")
+          PY
           echo "Derived months: ${{ steps.window.outputs.months }}"
 
       - name: Run connectors
@@ -176,40 +176,40 @@ PY
             month_dir="resolver/exports/backfill/${ym}"
             mkdir -p "${month_dir}"
             CURRENT_YM="${ym}" python - <<'PY'
-import os
-from pathlib import Path
-import pandas as pd
+            import os
+            from pathlib import Path
+            import pandas as pd
 
-ym = os.environ["CURRENT_YM"]
-base_csv = Path("resolver/exports/backfill/facts.csv")
-out_dir = Path("resolver/exports/backfill") / ym
-out_dir.mkdir(parents=True, exist_ok=True)
-if not base_csv.exists():
-    raise SystemExit(f"facts.csv missing at {base_csv}")
-df = pd.read_csv(base_csv)
-if "as_of_date" in df.columns:
-    df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce")
-    df = df[df["as_of_date"].dt.strftime("%Y-%m") == ym]
-elif "ym" in df.columns:
-    df = df[df["ym"].astype(str) == ym]
-if df.empty:
-    df = df.head(0)
-df.to_csv(out_dir / "facts.csv", index=False)
-df.to_parquet(out_dir / "facts.parquet", index=False)
-PY
+            ym = os.environ["CURRENT_YM"]
+            base_csv = Path("resolver/exports/backfill/facts.csv")
+            out_dir = Path("resolver/exports/backfill") / ym
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if not base_csv.exists():
+                raise SystemExit(f"facts.csv missing at {base_csv}")
+            df = pd.read_csv(base_csv)
+            if "as_of_date" in df.columns:
+                df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce")
+                df = df[df["as_of_date"].dt.strftime("%Y-%m") == ym]
+            elif "ym" in df.columns:
+                df = df[df["ym"].astype(str) == ym]
+            if df.empty:
+                df = df.head(0)
+            df.to_csv(out_dir / "facts.csv", index=False)
+            df.to_parquet(out_dir / "facts.parquet", index=False)
+            PY
             if [ ! -s "${month_dir}/facts.csv" ]; then
               echo "No facts rows for ${ym}; skipping snapshot"
               echo "::endgroup::"
               continue
             fi
             cutoff=$(CURRENT_YM="${ym}" python - <<'PY'
-import calendar
-import os
-ym = os.environ["CURRENT_YM"]
-year, month = map(int, ym.split("-"))
-last = calendar.monthrange(year, month)[1]
-print(f"{year:04d}-{month:02d}-{last:02d}")
-PY
+            import calendar
+            import os
+            ym = os.environ["CURRENT_YM"]
+            year, month = map(int, ym.split("-"))
+            last = calendar.monthrange(year, month)[1]
+            print(f"{year:04d}-{month:02d}-{last:02d}")
+            PY
             )
             python -m resolver.tools.precedence_engine --facts "${month_dir}/facts.csv" --cutoff "${cutoff}" --outdir "${month_dir}"
             if [ ! -f "${month_dir}/resolved.csv" ]; then
