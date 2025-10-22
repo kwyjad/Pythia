@@ -14,6 +14,7 @@
 - [db.snapshots](#dbsnapshots)
 - [db.manifests](#dbmanifests)
 - [context.facts_last12](#contextfacts_last12)
+- [Ingestion Diagnostics Schema](#ingestion-diagnostics-schema)
 
 ## staging.common
 
@@ -226,3 +227,39 @@ Column order is canonical: `iso3`, `hazard_code`, `ym`, `metric`, `unit`, `value
 | unit | string | yes |  | Measurement unit (`persons` rows are rounded to whole numbers) |
 | value | number | yes |  | Numeric total per month/metric |
 | series | enum | yes | new |  |
+
+## Ingestion Diagnostics Schema
+
+Structured JSONL lines emitted by `resolver/ingestion/run_all_stubs.py` and summarised by `scripts/ci/summarize_connectors.py`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| connector_id | string | yes | Canonical connector identifier (e.g. `acled_client`). |
+| mode | enum | yes | `real` or `stub`. |
+| status | enum | yes | `ok`, `skipped`, or `error`. |
+| reason | string | no | Normalised skip/failure reason (for example `disabled: config`, `missing secret ACLED_TOKEN`, `upstream-502`). |
+| started_at_utc | string | yes | ISO-8601 UTC timestamp of the attempt start. |
+| duration_ms | integer | yes | Total runtime in milliseconds. |
+| http | object | yes | HTTP telemetry with keys `2xx`, `4xx`, `5xx`, `retries`, `rate_limit_remaining`, and `last_status`. |
+| counts | object | yes | Row totals with keys `fetched`, `normalized`, and `written`. |
+| coverage | object | yes | Time-window coverage: `ym_min`, `ym_max`, `as_of_min`, `as_of_max` (nullable). |
+| samples | object | yes | Top samples (arrays of `[value, count]`) under `top_iso3` and `top_hazard`. |
+| extras | object | no | Connector-specific metadata (for example `rows_method`, `rows_before`, `rows_written`). Sensitive values are redacted to `***`. |
+
+Example JSONL entry:
+
+```json
+{
+  "connector_id": "acled_client",
+  "mode": "real",
+  "status": "ok",
+  "reason": null,
+  "started_at_utc": "2024-02-01T02:04:12Z",
+  "duration_ms": 182345,
+  "http": {"2xx": 42, "4xx": 0, "5xx": 0, "retries": 1, "rate_limit_remaining": 75, "last_status": 200},
+  "counts": {"fetched": 520, "normalized": 515, "written": 510},
+  "coverage": {"ym_min": "2023-12", "ym_max": "2024-01", "as_of_min": "2024-01-05", "as_of_max": "2024-01-31"},
+  "samples": {"top_iso3": [["KEN", 120], ["UGA", 95]], "top_hazard": [["conflict", 140]]},
+  "extras": {"rows_method": "manifest", "rows_before": 0, "rows_written": 510}
+}
+```

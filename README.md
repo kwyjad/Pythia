@@ -98,6 +98,15 @@ Fast tests no longer rely on ad-hoc exports in the repository tree. During colle
 
 Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and writes. When enabled, the resolver logs the source file path, Python/DuckDB versions, cache resolution events, schema/index snapshots, input column samples, and post-write row counts before each upsert. CLI reads that fail to find data record the resolved database path and row-count summaries (total rows, keyed rows, and cutoff-filtered rows) to stderr so you can distinguish empty writes from URL mismatches, and they now emit targeted DEBUG counts (total rows, rows matching the `(ym, iso3, hazard_code)` key, and rows surviving the cutoff filter) immediately before the CLI exits. When an upsert detects a declared-key mismatch, diagnostics now include the discovered unique indexes **with canonical column order** so you can confirm DuckDB has materialised the expected `ux_*` definitions, and schema initialisation logs the entire unique-index inventory for both facts tables. The flag leaves default logging untouched when unset, making it safe to toggle on only for triage runs or CI retries.
 
+### Ingestion diagnostics
+
+![Example connector diagnostics summary table](docs/images/ingestion-summary.svg)
+
+- Every live ingestion run writes structured connector telemetry to `diagnostics/ingestion/connectors_report.jsonl`. Each line captures the connector id, mode (`real` vs `stub`), status, retry counts, HTTP tallies, row totals, coverage windows, and the top ISO3/hazard samples pulled from the output CSV.
+- After `run_all_stubs.py` finishes, `python -m scripts.ci.summarize_connectors --report diagnostics/ingestion/connectors_report.jsonl --out diagnostics/ingestion/summary.md --github-step-summary` renders a Markdown dashboard. GitHub Actions surfaces that table directly in the job summary so you can spot failed connectors, zero-row exports, or spikes in `4xx/5xx` responses without downloading logs.
+- The workflow also publishes a `connector-diagnostics` artifact containing both `diagnostics/ingestion/summary.md` (human-readable) and the raw `diagnostics/ingestion/connectors_report.jsonl` (machine-readable). Use the Markdown for quick triage and feed the JSONL into ad-hoc notebooks when you need to chart retries, coverage drift, or rate-limit exhaustion across runs.
+- Reasons such as `disabled: config`, `missing secret`, or upstream HTTP errors are normalised in the summary so repeated skips bubble to the top of the reason histogram. Coverage columns render the year-month window (`ym_min → ym_max`) alongside the earliest/latest `as_of` dates, making it easy to confirm a connector backfilled the intended period.
+
 ### CI diagnostics & what to share
 
 Every resolver-facing workflow (`resolver-ci-fast`, `resolver-ci`, and `resolver-smoke`) now calls the reusable diagnostics collector so each job publishes a single archive named `diagnostics-<job>-<run_id>-<run_attempt>.zip` (GitHub zips the uploaded directory automatically). Inside that archive you will find:

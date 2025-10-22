@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="200" viewBox="0 0 760 200" role="img" aria-labelledby="title desc">
+  <title id="title">Example connector diagnostics table</title>
+  <desc id="desc">Sample rows from the connector diagnostics summary highlighting status, HTTP totals, and row counts.</desc>
+  <rect x="0" y="0" width="760" height="200" fill="#f9fafb" stroke="#d1d5db" stroke-width="1" rx="12" ry="12" />
+  <rect x="24" y="36" width="712" height="36" fill="#111827" rx="6" ry="6" />
+  <text x="40" y="58" fill="#f9fafb" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">Connector</text>
+  <text x="150" y="58" fill="#f9fafb" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">Status</text>
+  <text x="230" y="58" fill="#f9fafb" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">Reason</text>
+  <text x="390" y="58" fill="#f9fafb" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">2xx/4xx/5xx (retries)</text>
+  <text x="560" y="58" fill="#f9fafb" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">Rows (f/n/w)</text>
+  <text x="680" y="58" fill="#f9fafb" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">Coverage</text>
+  <rect x="24" y="84" width="712" height="38" fill="#ffffff" stroke="#d1d5db" stroke-width="1" rx="6" ry="6" />
+  <text x="40" y="108" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">acled_client</text>
+  <text x="150" y="108" fill="#047857" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">ok</text>
+  <text x="230" y="108" fill="#4b5563" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">—</text>
+  <text x="390" y="108" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">42/0/0 (1)</text>
+  <text x="560" y="108" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">520/515/510</text>
+  <text x="680" y="108" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">2023-01 → 2023-02</text>
+  <rect x="24" y="128" width="712" height="38" fill="#ffffff" stroke="#d1d5db" stroke-width="1" rx="6" ry="6" />
+  <text x="40" y="152" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">worldpop_client</text>
+  <text x="150" y="152" fill="#b91c1c" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600">error</text>
+  <text x="230" y="152" fill="#b91c1c" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">upstream-502</text>
+  <text x="390" y="152" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">8/0/3 (2)</text>
+  <text x="560" y="152" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">0/0/0</text>
+  <text x="680" y="152" fill="#111827" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14">—</text>
+</svg>

@@ -88,6 +88,16 @@ pytest -q resolver/tests/ingestion/test_reliefweb_pdf.py
 - Override destinations with `RUNNER_LOG_DIR=/tmp/resolver-logs`.
 - Set verbosity via `RUNNER_LOG_LEVEL=DEBUG` and format via `RUNNER_LOG_FORMAT=json`.
 
+## Troubleshooting connectors
+
+Use the GitHub Actions diagnostics table (rendered by `scripts/ci/summarize_connectors.py`) as the first-line triage tool:
+
+- **Status / Reason:** `skipped` rows with `disabled: config` mean the connector’s YAML intentionally disables it; `missing secret …` indicates the corresponding secret wasn’t present in the workflow environment.
+- **2xx/4xx/5xx (retries):** A spike in `4xx` responses usually means credentials expired or the request window was rejected—regenerate tokens or narrow the backfill window. Large `5xx` counts point to upstream instability; consider retrying later or temporarily skipping the connector.
+- **Rows (f/n/w):** Values of `0/0/0` after a supposedly real run mean only headers were written. Inspect the connector logs under `resolver/logs/ingestion/<connector>.log` to confirm whether the upstream returned empty payloads or parsing failed.
+- **Coverage (ym / as_of):** Ensure the `ym_min → ym_max` range matches the requested backfill window. Narrow ranges or `—` entries suggest the connector only delivered part of the period and may need a rerun.
+- **Details panel:** Review the top ISO3/hazard samples and `rate_limit_remaining` values. A near-zero rate limit hints that you should increase backoff or reduce concurrency before relaunching the job.
+
 ## Continuous integration
 
 The `resolver-ci` workflow executes offline smoke tests plus the ReliefWeb PDF unit suite. When the optional Markdown link checker is enabled it runs after the tests and reports broken intra-repo links in the job logs without failing the build.
