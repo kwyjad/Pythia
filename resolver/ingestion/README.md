@@ -286,6 +286,12 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
 - `DTM_DEFAULT_HAZARD=<key>` — override the fallback hazard keyword (default `displacement_influx`).
 - `DTM_BASE=<url>` — override the base discovery endpoint (defaults to `https://data.humdata.org`).
 - `RELIEFWEB_APPNAME` — reused for User-Agent hints when hitting HDX mirrors.
+- `--mode records|header-only` — CLI switch controlling whether the connector fetches real records (`records`, default) or only
+  writes the CSV header for smoke tests. The backfill workflow exports `RESOLVER_BACKFILL=1` and forces `--mode records` so
+  header-only runs are rejected.
+- HTTP diagnostics log every request with redacted headers and capture error bodies when responses are non-2xx. The
+  `data/staging/dtm_displacement.csv.meta.json` companion records `request_url`/`request_urls`, a `status_histogram`, `pages`
+  fetched, and which API key (`auth_used`) ultimately succeeded.
 
 **Compatibility helpers:** The module continues to expose the historic
 `SERIES_INCIDENT`/`SERIES_CUMULATIVE` constants, `load_registries`,

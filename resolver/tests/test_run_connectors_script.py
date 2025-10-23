@@ -91,3 +91,26 @@ def test_run_connectors_propagates_failure(monkeypatch: pytest.MonkeyPatch, tmp_
     statuses = {entry["connector_id"]: entry["status"] for entry in entries}
     assert statuses["alpha_client"] == "error"
     assert statuses["beta_client"] == "ok"
+
+
+def test_run_connectors_force_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ONLY_CONNECTOR", "gamma_client")
+    monkeypatch.delenv("CONNECTOR_LIST", raising=False)
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+
+    captured_cmds: list[list[str]] = []
+
+    def fake_popen(cmd, stdout=None, stderr=None, env=None, text=None, bufsize=None):
+        captured_cmds.append(list(cmd))
+        return StubProcess(0, "ok\n")
+
+    _set_fake_popen(monkeypatch, fake_popen)
+
+    rc = run_connectors.main(["--force-mode", "gamma_client=records"])
+    assert rc == 0
+    assert len(captured_cmds) == 1
+    cmd = captured_cmds[0]
+    assert "--mode" in cmd
+    mode_index = cmd.index("--mode")
+    assert cmd[mode_index + 1] == "records"

@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
     Any,
     Dict,
     Iterable,
@@ -25,10 +24,14 @@ from typing import (
     Tuple,
 )
 
+import pandas as pd
 import yaml
+import httpx
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion._shared.validation import validate_required_fields, write_json
+from resolver.ingestion._shared.date_utils import parse_dates, window_mask
+from resolver.ingestion._shared.run_io import count_csv_rows, write_json
+from resolver.ingestion._shared.validation import validate_required_fields
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
     finalize_run as diagnostics_finalize_run,
@@ -41,10 +44,8 @@ from resolver.ingestion.utils import (
     stable_digest,
     to_iso3,
 )
-from resolver.ingestion.utils.io import resolve_output_path
-
-if TYPE_CHECKING:  # pragma: no cover - import guard for typing only
-    import pandas as pd
+from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
+from resolver.ingestion.utils.http_debug import log_request, log_response
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGING = ROOT / "staging"
@@ -53,10 +54,12 @@ DEFAULT_OUTPUT = ROOT / "staging" / "dtm_displacement.csv"
 OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH  # backwards compatibility alias
+META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
 DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
 CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 CONFIG_ISSUES_PATH = DIAGNOSTICS_DIR / "dtm_config_issues.json"
 RESOLVED_SOURCES_PATH = DIAGNOSTICS_DIR / "dtm_sources_resolved.json"
+RUN_DETAILS_PATH = DIAGNOSTICS_DIR / "dtm_run.json"
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
@@ -103,6 +106,9 @@ HAZARD_KEY_TO_CODE = {
 
 MULTI_HAZARD = ("multi", "Multi-shock Displacement/Needs", "all")
 
+DEFAULT_PAGE_SIZE = 1000
+HTTP_TIMEOUT = 60.0
+
 
 @dataclass(frozen=True)
 class Hazard:
@@ -125,6 +131,12 @@ class SourceResult:
     http_counts: Dict[str, int] = field(
         default_factory=lambda: {"2xx": 0, "4xx": 0, "5xx": 0}
     )
+    rows_before: int = 0
+    rows_after: int = 0
+    dropped: int = 0
+    parse_errors: int = 0
+    min_date: Optional[str] = None
+    max_date: Optional[str] = None
 
     @property
     def rows(self) -> int:
@@ -486,13 +498,6 @@ def ensure_header_only() -> None:
     ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
 
 
-def _load_csv(path: Path) -> Iterable[Mapping[str, Any]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            yield row
-
-
 def _parse_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -523,6 +528,44 @@ def _source_label(entry: Mapping[str, Any]) -> str:
     return str(entry.get("id") or entry.get("name") or entry.get("id_or_path") or "dtm_source")
 
 
+def _compose_url(base: str, path: str) -> str:
+    if not base:
+        return path
+    base_clean = base.rstrip("/")
+    segment = str(path or "").lstrip("/")
+    if not segment:
+        return base_clean
+    return f"{base_clean}/{segment}"
+
+
+def _status_bucket(status: int) -> str:
+    if 200 <= status < 300:
+        return "2xx"
+    if 400 <= status < 500:
+        return "4xx"
+    if 500 <= status < 600:
+        return "5xx"
+    return f"{status // 100}xx"
+
+
+def _coerce_records(payload: Any) -> List[Mapping[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, Mapping)]
+    if isinstance(payload, Mapping):
+        for key in ("results", "data", "items", "records"):
+            block = payload.get(key)
+            if isinstance(block, list):
+                return [item for item in block if isinstance(item, Mapping)]
+        # Some APIs wrap under data -> records
+        data_block = payload.get("data")
+        if isinstance(data_block, Mapping):
+            for key in ("results", "items", "records"):
+                block = data_block.get(key)
+                if isinstance(block, list):
+                    return [item for item in block if isinstance(item, Mapping)]
+    return []
+
+
 def _column(row: Mapping[str, Any], *candidates: str) -> Optional[str]:
     lowered = {col.lower(): col for col in row.keys()}
     for candidate in candidates:
@@ -536,50 +579,287 @@ def _column(row: Mapping[str, Any], *candidates: str) -> Optional[str]:
     return None
 
 
-def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> SourceResult:
+def _fetch_remote_dataframe(
+    source_label: str,
+    entry: Mapping[str, Any],
+    cfg: Mapping[str, Any],
+    *,
+    client: httpx.Client,
+    http_summary: Optional[dict[str, Any]],
+    http_stats: Dict[str, Any],
+    no_date_filter: bool,
+    window_start: Optional[str],
+    window_end: Optional[str],
+) -> tuple[pd.DataFrame, dict[str, Any], Dict[str, int]]:
+    base = str(entry.get("base_url") or cfg.get("base_url") or os.getenv("DTM_API_BASE", "")).strip()
+    if not base:
+        raise RuntimeError("DTM config missing base_url for API source")
+    path = str(entry.get("id_or_path") or "").strip()
+    if not path:
+        raise RuntimeError(f"DTM source {source_label} missing id_or_path")
+    url = _compose_url(base, path)
+
+    params: Dict[str, Any] = {str(k): v for k, v in (entry.get("params") or {}).items()}
+    limit = int(entry.get("page_size") or DEFAULT_PAGE_SIZE)
+    if limit <= 0:
+        limit = DEFAULT_PAGE_SIZE
+    max_pages = int(entry.get("max_pages") or 50)
+    start_param = str(entry.get("start_param") or "from")
+    end_param = str(entry.get("end_param") or "to")
+
+    if not no_date_filter and window_start and window_end:
+        params.setdefault(start_param, window_start.split("T")[0])
+        params.setdefault(end_param, window_end.split("T")[0])
+
+    primary_key = (os.getenv("DTM_API_PRIMARY_KEY") or "").strip()
+    secondary_key = (os.getenv("DTM_API_SECONDARY_KEY") or "").strip()
+    headers: Dict[str, str] = {"Accept": "application/json"}
+    if primary_key:
+        headers["X-Api-Key"] = primary_key
+
+    records: List[Mapping[str, Any]] = []
+    http_counts: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0}
+    page = 1
+    using_secondary = False
+
+    summary = http_summary if http_summary is not None else {}
+    summary.setdefault("status_histogram", defaultdict(int))
+    summary.setdefault("request_urls", [])
+
+    while page <= max_pages:
+        page_params = dict(params)
+        page_params.setdefault("limit", limit)
+        page_params["page"] = page
+        log_request(LOG, "GET", url, headers=headers, params=page_params)
+        if headers.get("X-Api-Key") == primary_key and primary_key and not using_secondary:
+            summary["used_primary"] = True
+        response = client.get(url, params=page_params, headers=headers, timeout=HTTP_TIMEOUT)
+        summary["pages"] = int(summary.get("pages", 0)) + 1
+        summary["status_histogram"][str(response.status_code)] += 1
+        summary["request_urls"].append(str(response.request.url))
+        bucket = _status_bucket(response.status_code)
+        http_counts[bucket] = http_counts.get(bucket, 0) + 1
+        http_stats[bucket] = http_stats.get(bucket, 0) + 1
+        http_stats["last_status"] = response.status_code
+        rate_remaining = response.headers.get("X-RateLimit-Remaining")
+        if rate_remaining is not None:
+            http_stats["rate_limit_remaining"] = rate_remaining
+
+        if response.status_code in {401, 403} and not using_secondary and secondary_key:
+            log_response(LOG, response.status_code, headers=response.headers, sample_body=response.content)
+            LOG.warning("dtm: %s received %s; retrying with secondary key", source_label, response.status_code)
+            http_stats["retries"] = http_stats.get("retries", 0) + 1
+            headers["X-Api-Key"] = secondary_key
+            using_secondary = True
+            summary["used_secondary"] = True
+            # retry same page with secondary key
+            continue
+
+        if response.status_code >= 400:
+            log_response(LOG, response.status_code, headers=response.headers, sample_body=response.content)
+            raise RuntimeError(
+                f"DTM source {source_label} failed with status {response.status_code}: {response.text[:256]}"
+            )
+
+        if using_secondary:
+            summary["used_secondary"] = True
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"DTM source {source_label} returned non-JSON response") from exc
+
+        batch = _coerce_records(payload)
+        LOG.debug("dtm: %s page=%s size=%s", source_label, page, len(batch))
+        if not batch:
+            break
+        records.extend(batch)
+
+        pagination_info = None
+        if isinstance(payload, Mapping):
+            meta_block = payload.get("meta") if isinstance(payload.get("meta"), Mapping) else None
+            pagination_info = payload.get("pagination") or (meta_block.get("pagination") if isinstance(meta_block, Mapping) else None)
+        if isinstance(pagination_info, Mapping):
+            next_token = pagination_info.get("next")
+            if not next_token:
+                break
+        if len(batch) < limit:
+            break
+        page += 1
+
+    frame = pd.DataFrame.from_records(records)
+    file_ctx = {"source": "api", "url": url, "label": source_label}
+    return frame, file_ctx, http_counts
+
+def _read_source(
+    entry: Mapping[str, Any],
+    cfg: Mapping[str, Any],
+    *,
+    no_date_filter: bool,
+    window_start: Optional[str],
+    window_end: Optional[str],
+    mode: str,
+    http_client: Optional[httpx.Client],
+    http_summary: Optional[dict[str, Any]],
+    http_stats: Dict[str, Any],
+) -> SourceResult:
     source_label = _source_label(entry)
     LOG.debug("dtm: begin source %s", source_label)
     source_type = str(entry.get("type") or "file").strip().lower()
-    if source_type != "file":
-        raise ValueError("DTM connector currently supports file sources only")
+
+    if mode == "header-only":
+        LOG.info("dtm: header-only mode active; skipping %s", source_label)
+        return SourceResult(
+            source_name=source_label,
+            status="skipped",
+            skip_reason="header-only mode",
+        )
+
     path = entry.get("id_or_path")
     if not path:
         LOG.warning("dtm: skipping source %s (missing id_or_path)", source_label)
         return SourceResult(
             source_name=source_label,
-            status="skipped",
+            status="invalid",
             skip_reason="missing id_or_path",
         )
-    csv_path = Path(path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"DTM source not found: {csv_path}")
-    LOG.debug("dtm: resolved source %s path=%s", source_label, csv_path)
-    file_ctx = {"filename": csv_path.name, "path": str(csv_path)}
+
+    http_counts: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0}
+    file_ctx: Dict[str, Any]
+
+    if source_type in {"api", "http", "records"}:
+        if http_client is None:
+            raise RuntimeError("DTM API source requested but HTTP client is unavailable")
+        frame, file_ctx, http_counts = _fetch_remote_dataframe(
+            source_label,
+            entry,
+            cfg,
+            client=http_client,
+            http_summary=http_summary,
+            http_stats=http_stats,
+            no_date_filter=no_date_filter,
+            window_start=window_start,
+            window_end=window_end,
+        )
+    else:
+        csv_path = Path(str(path))
+        if not csv_path.exists():
+            raise FileNotFoundError(f"DTM source not found: {csv_path}")
+        LOG.debug("dtm: resolved source %s path=%s", source_label, csv_path)
+        file_ctx = {"filename": csv_path.name, "path": str(csv_path)}
+        try:
+            frame = pd.read_csv(csv_path, dtype=object, keep_default_na=False)
+        except pd.errors.EmptyDataError:
+            frame = pd.DataFrame()
+
     aliases = cfg.get("country_aliases") or {}
     measure = str(entry.get("measure") or "stock").strip().lower()
     cause_map = {str(k).strip().lower(): str(v) for k, v in (cfg.get("cause_map") or {}).items()}
-    country_column = entry.get("country_column")
-    admin_column = entry.get("admin1_column")
-    date_column = entry.get("date_column")
-    value_column = entry.get("value_column")
-    cause_column = entry.get("cause_column")
-    rows = list(_load_csv(csv_path))
-    if not rows:
+
+    rows_before = int(frame.shape[0])
+    header_probe: MutableMapping[str, Any] = {str(col): None for col in frame.columns}
+
+    if rows_before == 0 or not header_probe:
         LOG.debug("dtm: end source %s rows=0", source_label)
-        return SourceResult(source_name=source_label, records=[], status="ok")
-    if not country_column:
-        country_column = _column(rows[0], "country_iso3", "iso3", "country")
-    if not admin_column:
-        admin_column = _column(rows[0], "admin1", "adm1", "province", "state")
+        return SourceResult(
+            source_name=source_label,
+            records=[],
+            status="ok",
+            rows_before=rows_before,
+            rows_after=0,
+            dropped=rows_before,
+            parse_errors=0,
+            http_counts=http_counts,
+        )
+
+    def _resolve_column(*candidates: Optional[str]) -> Optional[str]:
+        explicit = candidates[0] if candidates else None
+        if explicit:
+            resolved_explicit = _column(header_probe, str(explicit))
+            if resolved_explicit:
+                return resolved_explicit
+            return None
+        fallbacks = [str(name) for name in candidates[1:] if name]
+        if not fallbacks:
+            return None
+        return _column(header_probe, *fallbacks)
+
+    country_column = _resolve_column(entry.get("country_column"), "country_iso3", "iso3", "country")
+    admin_column = _resolve_column(entry.get("admin1_column"), "admin1", "adm1", "province", "state")
+    date_column = _resolve_column(entry.get("date_column"), "date", "month", "period")
+    value_column = _resolve_column(entry.get("value_column"), "value", "count", "population", "total")
+    cause_column = _resolve_column(entry.get("cause_column"), "cause", "cause_category", "reason")
+
     if not date_column:
-        date_column = _column(rows[0], "date", "month", "period")
-    if not value_column:
-        value_column = _column(rows[0], "value", "count", "population", "total")
-    if not value_column or not date_column or not country_column:
+        LOG.warning("dtm: skipping source %s (missing date_column)", source_label)
+        return SourceResult(
+            source_name=source_label,
+            status="invalid",
+            skip_reason="missing date_column",
+            rows_before=rows_before,
+            rows_after=0,
+            dropped=rows_before,
+            parse_errors=0,
+            http_counts=http_counts,
+        )
+
+    if not value_column or not country_column:
         raise ValueError("DTM source missing required columns")
+
+    fmt = str(entry.get("date_format")) if entry.get("date_format") else None
+    parsed_dates, parse_errors = parse_dates(frame[date_column], fmt)
+    valid_dates = parsed_dates.notna()
+    parsed_valid = parsed_dates[valid_dates]
+
+    min_iso: Optional[str] = None
+    max_iso: Optional[str] = None
+    if not parsed_valid.empty:
+        min_candidate = parsed_valid.min()
+        max_candidate = parsed_valid.max()
+        if pd.notna(min_candidate):
+            min_iso = min_candidate.date().isoformat()
+        if pd.notna(max_candidate):
+            max_iso = max_candidate.date().isoformat()
+
+    window_enabled = bool(not no_date_filter and window_start and window_end)
+    if window_enabled:
+        window_series = window_mask(parsed_dates, str(window_start), str(window_end))
+    else:
+        window_series = pd.Series(True, index=frame.index)
+
+    final_mask = valid_dates & window_series
+    rows_after = int(final_mask.sum())
+    dropped = rows_before - rows_after
+
+    if rows_after == 0:
+        LOG.debug(
+            "dtm: end source %s rows=0 (kept=%s dropped=%s parse_errors=%s)",
+            source_label,
+            rows_after,
+            dropped,
+            parse_errors,
+        )
+        return SourceResult(
+            source_name=source_label,
+            records=[],
+            status="ok",
+            rows_before=rows_before,
+            rows_after=rows_after,
+            dropped=dropped,
+            parse_errors=parse_errors,
+            min_date=min_iso,
+            max_date=max_iso,
+            http_counts=http_counts,
+        )
+
+    filtered = frame.loc[final_mask].copy()
+    filtered = filtered.where(pd.notna(filtered), None)
+    rows = filtered.to_dict(orient="records")
+
     per_admin: dict[tuple[str, str], dict[datetime, float]] = defaultdict(dict)
     per_admin_asof: dict[tuple[str, str], dict[datetime, str]] = defaultdict(dict)
     causes: dict[tuple[str, str], str] = {}
+
     for row in rows:
         iso = to_iso3(row.get(country_column), aliases)
         if not iso:
@@ -600,6 +880,7 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> SourceResu
             causes[(iso, admin1)] = _resolve_cause({cause_column: row.get(cause_column)}, cause_map)
         else:
             causes[(iso, admin1)] = _resolve_cause(row, cause_map)
+
     records: List[Dict[str, Any]] = []
     for key, series in per_admin.items():
         iso, admin1 = key
@@ -609,11 +890,12 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> SourceResu
             flows = {month_start(k): float(v) for k, v in series.items() if month_start(k)}
         cause = causes.get(key, DEFAULT_CAUSE)
         for bucket, value in flows.items():
-            if not bucket or value is None:
+            if not bucket or value is None or value <= 0:
                 continue
-            if value <= 0:
-                continue
-            record_as_of = per_admin_asof.get(key, {}).get(bucket) or datetime.now(timezone.utc).date().isoformat()
+            record_as_of = (
+                per_admin_asof.get(key, {}).get(bucket)
+                or datetime.now(timezone.utc).date().isoformat()
+            )
             records.append(
                 {
                     "iso3": iso,
@@ -626,11 +908,41 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> SourceResu
                     "as_of": record_as_of,
                 }
             )
-    LOG.debug("dtm: end source %s rows=%s", source_label, len(records))
-    return SourceResult(source_name=source_label, records=records, status="ok")
+
+    LOG.debug(
+        "dtm: end source %s rows=%s (kept=%s dropped=%s parse_errors=%s)",
+        source_label,
+        len(records),
+        rows_after,
+        dropped,
+        parse_errors,
+    )
+    return SourceResult(
+        source_name=source_label,
+        records=records,
+        status="ok",
+        rows_before=rows_before,
+        rows_after=rows_after,
+        dropped=dropped,
+        parse_errors=parse_errors,
+        min_date=min_iso,
+        max_date=max_iso,
+        http_counts=http_counts,
+    )
 
 
-def build_rows(cfg: Mapping[str, Any], *, results: Optional[List[SourceResult]] = None) -> List[List[Any]]:
+def build_rows(
+    cfg: Mapping[str, Any],
+    *,
+    results: Optional[List[SourceResult]] = None,
+    no_date_filter: bool = False,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    mode: str = "records",
+    http_client: Optional[httpx.Client] = None,
+    http_summary: Optional[dict[str, Any]] = None,
+    http_stats: Optional[Dict[str, Any]] = None,
+) -> List[List[Any]]:
     sources = cfg.get("sources") or []
     admin_mode = str(cfg.get("admin_agg") or "both").strip().lower()
     all_records: List[Dict[str, Any]] = []
@@ -638,7 +950,17 @@ def build_rows(cfg: Mapping[str, Any], *, results: Optional[List[SourceResult]] 
     for entry in sources:
         if not isinstance(entry, Mapping):
             continue
-        result = _read_source(entry, cfg)
+        result = _read_source(
+            entry,
+            cfg,
+            no_date_filter=no_date_filter,
+            window_start=window_start,
+            window_end=window_end,
+            mode=mode,
+            http_client=http_client,
+            http_summary=http_summary,
+            http_stats=http_stats or {"2xx": 0, "4xx": 0, "5xx": 0},
+        )
         collected.append(result)
         if result.records:
             all_records.extend(result.records)
@@ -761,6 +1083,25 @@ def _log_as_of_fallbacks() -> None:
         _AS_OF_FALLBACK_COUNTS[key] = 0
 
 
+def _pluralise_sources(count: int) -> str:
+    return "source" if count == 1 else "sources"
+
+
+def _header_only_reason(invalid_count: int, kept: int) -> str:
+    parts = ["header-only"]
+    if invalid_count:
+        parts.append(f"{invalid_count} {_pluralise_sources(invalid_count)} invalid")
+    parts.append(f"kept={kept}")
+    return "; ".join(parts)
+
+
+def _nonempty_reason(kept: int, dropped: int, parse_errors: int, invalid_count: int) -> str:
+    core = f"kept={kept}, dropped={dropped}, parse_errors={parse_errors}"
+    if invalid_count:
+        return f"{core}; invalid_sources={invalid_count}"
+    return core
+
+
 def write_rows(rows: List[List[Any]]) -> None:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", newline="", encoding="utf-8") as handle:
@@ -777,11 +1118,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Exit with code 2 when any DTM source entry lacks id_or_path.",
     )
+    parser.add_argument(
+        "--strict-empty",
+        action="store_true",
+        help="Exit with code 3 when no rows are written (after diagnostics).",
+    )
+    parser.add_argument(
+        "--no-date-filter",
+        action="store_true",
+        help="Disable the ingestion window filter for DTM sources.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("records", "header-only"),
+        default="records",
+        help="Select between full record downloads or header-only output.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv or ())
+    mode = str(getattr(args, "mode", "records") or "records").lower()
+    if os.getenv("RESOLVER_BACKFILL") == "1" and mode == "header-only":
+        raise SystemExit("Backfill cannot run in header-only mode.")
     level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     log_level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
@@ -797,19 +1157,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "last_status": None,
     }
     counts: Dict[str, int] = {"fetched": 0, "normalized": 0, "written": 0}
-    extras: Dict[str, Any] = {"status_raw": "ok", "attempts": 1, "rows_total": 0}
+    extras: Dict[str, Any] = {"status_raw": "ok", "attempts": 1, "rows_total": 0, "mode": mode}
 
     status_raw = "ok"
     reason: Optional[str] = None
     exit_code = 0
     strict = args.fail_on_missing_config or _env_bool("DTM_STRICT", False)
+    strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
+    no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
+    window_start_dt, window_end_dt = resolve_ingestion_window()
+    window_start_iso = window_start_dt.isoformat() if window_start_dt else None
+    window_end_iso = window_end_dt.isoformat() if window_end_dt else None
+    window_disabled = no_date_filter or not (window_start_iso and window_end_iso)
     extras["strict_mode"] = strict
+    extras["strict_empty"] = strict_empty
+    extras["no_date_filter"] = no_date_filter
+    if window_start_iso:
+        extras["window_start"] = window_start_iso
+    if window_end_iso:
+        extras["window_end"] = window_end_iso
+    extras["window_disabled"] = window_disabled
+
+    http_summary: dict[str, Any] = {
+        "status_histogram": defaultdict(int),
+        "pages": 0,
+        "request_urls": [],
+        "used_primary": False,
+        "used_secondary": False,
+    }
+    http_client: Optional[httpx.Client] = None
+    if mode == "records":
+        http_client = httpx.Client(timeout=HTTP_TIMEOUT)
 
     source_results: List[SourceResult] = []
     invalid_entries: list[dict[str, Any]] = []
     valid_sources: list[dict[str, Any]] = []
     invalid_names: list[str] = []
     rows_written = 0
+    config_invalid_count = 0
+    runtime_invalid: list[dict[str, str]] = []
+    sources_raw: List[Mapping[str, Any]] = []
     config_timestamp: Optional[str] = None
 
     try:
@@ -832,7 +1219,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 valid_sources, invalid_entries = validate_required_fields(
                     sources_raw, required=("id_or_path",)
                 )
-                invalid_count = len(invalid_entries)
+                config_invalid_count = len(invalid_entries)
                 valid_count = len(valid_sources)
                 config_timestamp = (
                     datetime.now(timezone.utc)
@@ -842,7 +1229,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 issues_payload: Dict[str, Any] = {
                     "generated_at": config_timestamp,
-                    "summary": {"invalid": invalid_count, "valid": valid_count},
+                    "summary": {"invalid": config_invalid_count, "valid": valid_count},
                     "invalid": [],
                 }
                 for entry in invalid_entries:
@@ -858,20 +1245,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 extras["config_issues_path"] = str(CONFIG_ISSUES_PATH)
                 extras.update(
                     {
-                        "invalid_sources": invalid_count,
+                        "invalid_sources": config_invalid_count,
                         "valid_sources": valid_count,
                     }
                 )
                 if invalid_names:
                     extras["invalid_source_names"] = invalid_names
-                if invalid_count and strict:
+                if config_invalid_count and strict:
                     status_raw = "error"
                     reason = "missing id_or_path"
                     extras["status_raw"] = status_raw
                     exit_code = 2
                     LOG.error(
                         "dtm: missing id_or_path for %s source(s); strict mode aborting",
-                        invalid_count,
+                        config_invalid_count,
                     )
                     ensure_header_only()
                 else:
@@ -880,13 +1267,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     if LOG.isEnabledFor(logging.DEBUG):
                         resolved_payload = {
                             "generated_at": config_timestamp,
-                            "invalid_sources": invalid_count,
+                            "invalid_sources": config_invalid_count,
                             "valid_sources": valid_count,
                             "sources": valid_sources,
                         }
                         write_json(RESOLVED_SOURCES_PATH, resolved_payload)
                         extras["sources_resolved_path"] = str(RESOLVED_SOURCES_PATH)
-                    rows = build_rows(filtered_cfg, results=source_results)
+                    start_count = len(source_results)
+                    rows = build_rows(
+                        filtered_cfg,
+                        results=source_results,
+                        no_date_filter=no_date_filter,
+                        window_start=window_start_iso,
+                        window_end=window_end_iso,
+                        mode=mode,
+                        http_client=http_client,
+                        http_summary=http_summary,
+                        http_stats=http_stats,
+                    )
+                    new_results = source_results[start_count:]
+                    for result in new_results:
+                        if result.status == "invalid" and result.skip_reason:
+                            runtime_invalid.append(
+                                {
+                                    "name": result.source_name,
+                                    "reason": result.skip_reason,
+                                    "rows_before": result.rows_before,
+                                    "parse_errors": result.parse_errors,
+                                }
+                            )
+                            invalid_names.append(result.source_name)
                     write_rows(rows)
                     rows_written = len(rows)
                     counts.update(
@@ -921,32 +1331,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         )
                         extras["skipped_sources"].extend(skip for skip in skipped_from_run if skip)
                     if rows_written:
-                        status_raw = "ok"
-                        reason = "missing id_or_path" if invalid_count else None
-                        extras["status_raw"] = status_raw
-                        if invalid_count:
+                        if config_invalid_count or runtime_invalid:
                             LOG.warning(
-                                "dtm: wrote %s rows with %s invalid source(s) missing id_or_path",
+                                "dtm: wrote %s rows with %s invalid source(s)",
                                 rows_written,
-                                invalid_count,
+                                config_invalid_count + len(runtime_invalid),
                             )
                         else:
                             LOG.info("dtm: wrote %s rows", rows_written)
                     else:
-                        if invalid_count and not valid_sources:
-                            status_raw = "skipped"
-                            reason = "missing id_or_path"
-                        elif invalid_count:
-                            status_raw = "ok"
-                            reason = "missing id_or_path"
-                        else:
-                            status_raw = "ok-empty"
-                            reason = "no rows"
-                        extras["status_raw"] = status_raw
-                        if invalid_count:
+                        total_invalid = config_invalid_count + len(runtime_invalid)
+                        if total_invalid:
                             LOG.warning(
-                                "dtm: header-only output; %s source(s) missing id_or_path",
-                                invalid_count,
+                                "dtm: header-only output; %s invalid source(s)",
+                                total_invalid,
                             )
                         else:
                             LOG.info("dtm: wrote header only (no rows)")
@@ -962,10 +1360,212 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception:
             pass
     finally:
-        extras.setdefault("invalid_sources", len(invalid_entries))
+        if http_client is not None:
+            try:
+                http_client.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+        actual_rows = count_csv_rows(OUT_PATH)
+        rows_written = actual_rows
+        counts.update(
+            {
+                "fetched": max(counts.get("fetched", 0), actual_rows),
+                "normalized": max(counts.get("normalized", 0), actual_rows),
+                "written": actual_rows,
+            }
+        )
+
+        rows_before_total = sum(result.rows_before for result in source_results)
+        rows_after_total = sum(result.rows_after for result in source_results)
+        dropped_total = sum(result.dropped for result in source_results)
+        parse_errors_total = sum(result.parse_errors for result in source_results)
+        min_dates = [result.min_date for result in source_results if result.min_date]
+        max_dates = [result.max_date for result in source_results if result.max_date]
+        min_overall = min(min_dates) if min_dates else None
+        max_overall = max(max_dates) if max_dates else None
+        runtime_invalid_count = len(runtime_invalid)
+        total_invalid = config_invalid_count + runtime_invalid_count
+
+        if LOG.isEnabledFor(logging.DEBUG):
+            LOG.debug(
+                "dtm: window=%s→%s (disabled=%s), parsed min=%s, max=%s, kept=%s, dropped=%s (parse_errors=%s), invalid_sources=%s",
+                window_start_iso or "—",
+                window_end_iso or "—",
+                window_disabled,
+                min_overall or "—",
+                max_overall or "—",
+                rows_after_total,
+                dropped_total,
+                parse_errors_total,
+                total_invalid,
+            )
+
+        if total_invalid and status_raw not in {"error", "skipped"}:
+            status_raw = "error"
+            if not reason:
+                reason = f"invalid sources: {total_invalid}"
+            extras["status_raw"] = status_raw
+            exit_code = 4 if exit_code == 0 else exit_code
+
+        extras.setdefault("invalid_sources_config", config_invalid_count)
         extras.setdefault("valid_sources", len(valid_sources))
-        extras.setdefault("rows_total", rows_written)
+        extras["invalid_sources"] = total_invalid
+        extras["rows_total"] = actual_rows
+        extras["rows_written"] = actual_rows
+        extras["missing_sources"] = total_invalid
+        extras["kept_rows"] = rows_after_total
+        extras["dropped_rows"] = dropped_total
+        extras["parse_errors"] = parse_errors_total
+        if min_overall:
+            extras["parsed_min"] = min_overall
+        if max_overall:
+            extras["parsed_max"] = max_overall
+        status_hist = {
+            str(key): int(value)
+            for key, value in http_summary.get("status_histogram", {}).items()
+            if int(value)
+        }
+        if status_hist:
+            extras["http_status_histogram"] = status_hist
+        extras["http_pages"] = int(http_summary.get("pages", 0))
+        request_urls = [str(url) for url in http_summary.get("request_urls", []) if url]
+        if request_urls:
+            extras["request_urls"] = request_urls
+        auth_used = "none"
+        if mode == "records":
+            if http_summary.get("used_secondary"):
+                auth_used = "secondary"
+            elif http_summary.get("used_primary"):
+                auth_used = "primary"
+        extras["auth_used"] = auth_used
+
+        meta_payload: Dict[str, Any] = {}
+        try:
+            if META_PATH.exists():
+                meta_payload = json.loads(META_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta_payload = {}
+        meta_payload["row_count"] = actual_rows
+        if window_start_iso:
+            meta_payload["backfill_start"] = window_start_iso
+        if window_end_iso:
+            meta_payload["backfill_end"] = window_end_iso
+        meta_payload["sources_total"] = len(sources_raw)
+        meta_payload["sources_valid"] = max(len(valid_sources) - runtime_invalid_count, 0)
+        meta_payload["sources_invalid"] = total_invalid
+        if status_hist:
+            meta_payload["status_histogram"] = status_hist
+        meta_payload["pages"] = int(http_summary.get("pages", 0))
+        if request_urls:
+            if len(request_urls) == 1:
+                meta_payload["request_url"] = request_urls[0]
+            else:
+                meta_payload["request_urls"] = request_urls
+        if mode == "records":
+            meta_payload["auth_used"] = auth_used
+        write_json(META_PATH, meta_payload)
+        extras["meta_path"] = str(META_PATH)
+
+        valid_payload: List[Dict[str, Any]] = []
+        invalid_payload: List[Dict[str, Any]] = []
+        for result in source_results:
+            payload: Dict[str, Any] = {
+                "name": result.source_name,
+                "status": result.status,
+                "rows": result.rows,
+                "rows_before": result.rows_before,
+                "rows_after": result.rows_after,
+                "dropped": result.dropped,
+                "parse_errors": result.parse_errors,
+                "min": result.min_date,
+                "max": result.max_date,
+            }
+            if result.skip_reason:
+                payload["skip_reason"] = result.skip_reason
+                payload.setdefault("reason", result.skip_reason)
+            if result.error:
+                payload["error"] = result.error
+            if result.http_counts:
+                payload["http_counts"] = dict(result.http_counts)
+            if result.status == "invalid":
+                invalid_payload.append(payload)
+            else:
+                valid_payload.append(payload)
+
+        for entry in invalid_entries:
+            record = dict(entry)
+            missing_fields = list(record.pop("_missing_required", []))
+            invalid_payload.append(
+                {
+                    "name": _source_label(record),
+                    "reason": "missing id_or_path",
+                    "missing": missing_fields,
+                    "details": record,
+                }
+            )
+
+        run_payload: Dict[str, Any] = {
+            "generated_at": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "window": {
+                "start": window_start_iso,
+                "end": window_end_iso,
+                "disabled": window_disabled,
+            },
+            "rows_written": actual_rows,
+            "missing_id_or_path": config_invalid_count,
+            "outputs": {
+                "csv": str(OUT_PATH),
+                "meta": str(META_PATH),
+            },
+            "sources": {"valid": valid_payload, "invalid": invalid_payload},
+            "totals": {
+                "rows_before": rows_before_total,
+                "rows_after": rows_after_total,
+                "rows_written": actual_rows,
+                "kept": rows_after_total,
+                "dropped": dropped_total,
+                "parse_errors": parse_errors_total,
+                "invalid_sources": total_invalid,
+                "min": min_overall,
+                "max": max_overall,
+            },
+            "http": {
+                "status_histogram": status_hist,
+                "pages": int(http_summary.get("pages", 0)),
+                "auth_used": auth_used,
+                "request_urls": request_urls,
+            },
+        }
+        write_json(RUN_DETAILS_PATH, run_payload)
+        extras["run_details_path"] = str(RUN_DETAILS_PATH)
+
+        final_status = status_raw
+        final_reason = reason
+        if final_status not in {"error", "skipped"}:
+            if actual_rows == 0:
+                final_status = "ok-empty"
+                final_reason = _header_only_reason(total_invalid, rows_after_total)
+            else:
+                final_status = "ok"
+                final_reason = _nonempty_reason(
+                    rows_after_total,
+                    dropped_total,
+                    parse_errors_total,
+                    total_invalid,
+                )
+
+        if strict_empty and final_status == "ok-empty" and exit_code == 0:
+            exit_code = 3
+            LOG.error("dtm: strict empty mode aborting (no rows written)")
+
+        status_raw = final_status
+        reason = final_reason
         extras["status_raw"] = status_raw
+        extras["exit_code"] = exit_code
+
         diagnostics_result = diagnostics_finalize_run(
             diagnostics_ctx,
             status=status_raw,

@@ -22,6 +22,23 @@ on:
           - INFO
           - WARNING
           - ERROR
+      empty_policy:
+        description: "What to do when a connector writes 0 rows? (allow|warn|fail)"
+        required: false
+        default: "allow"
+        type: choice
+        options:
+          - allow
+          - warn
+          - fail
+      no_date_filter:
+        description: "DTM: disable the date window filter (sanity check)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -50,7 +67,10 @@ jobs:
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: data/staging
-      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
+      LOG_LEVEL: ${{ inputs.log_level }}
+      EMPTY_POLICY: ${{ inputs.empty_policy }}
+      NO_DATE_FILTER: ${{ inputs.no_date_filter }}
+      RESOLVER_BACKFILL: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -71,7 +91,7 @@ jobs:
       - name: Compute backfill window
         id: window
         env:
-          MONTHS_INPUT: ${{ inputs.months_back || 12 }}
+          MONTHS_INPUT: ${{ inputs.months_back }}
           TIMEZONE: Europe/Istanbul
         run: |
           set -euo pipefail
@@ -88,6 +108,7 @@ jobs:
           RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
           ONLY_CONNECTOR: ${{ inputs.only_connector }}
           LOG_LEVEL: ${{ inputs.log_level }}
+          EMPTY_POLICY: ${{ inputs.empty_policy }}
           # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
         run: |
           set -euo pipefail
@@ -97,7 +118,25 @@ jobs:
             export PYTHONWARNINGS=default
           fi
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-          python -m scripts.ci.run_connectors
+          DTM_ARGS=""
+          if [ "${EMPTY_POLICY:-allow}" = "fail" ]; then
+            DTM_ARGS="--strict-empty"
+          fi
+          if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
+            if [ -n "${DTM_ARGS}" ]; then
+              DTM_ARGS="${DTM_ARGS} --no-date-filter"
+            else
+              DTM_ARGS="--no-date-filter"
+            fi
+          fi
+          CMD_ARGS=("--force-mode" "dtm_client=records" "--extra-env" "dtm_client=LOG_LEVEL=${LOG_LEVEL}")
+          if [ -n "${DTM_ARGS}" ]; then
+            CMD_ARGS+=("--extra-args" "dtm_client=${DTM_ARGS}")
+          fi
+          if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
+            CMD_ARGS+=("--extra-env" "dtm_client=DTM_NO_DATE_FILTER=1")
+          fi
+          python -m scripts.ci.run_connectors "${CMD_ARGS[@]}"
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
