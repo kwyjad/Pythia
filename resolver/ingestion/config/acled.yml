@@ -1,7 +1,16 @@
 enabled: true
 base_url: "https://api.acleddata.com/acled/read"
 window_days: 450
-limit: 1000
+limit: 5000
+auth:
+  type: query
+  params:
+    email: "${ACLED_USERNAME}"
+    key: "${ACLED_ACCESS_KEY}"
+query:
+  event_date_where: "between"
+  format: "json"
+  limit: 5000
 token: ""
 keys:
   date: ["event_date", "event_date_new", "date"]

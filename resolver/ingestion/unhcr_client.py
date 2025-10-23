@@ -31,7 +31,7 @@ import requests
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion.utils.io import resolve_output_path
+from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -161,6 +161,16 @@ def _effective_years(params_cfg: Dict[str, Any]) -> List[int]:
                 years.append(int(str(value).strip()))
             except Exception:  # noqa: BLE001
                 continue
+    start_override, end_override = resolve_ingestion_window()
+    override_years: List[int] = []
+    if start_override:
+        override_years.append(start_override.year)
+    if end_override and end_override.year not in override_years:
+        override_years.append(end_override.year)
+    if start_override and end_override and end_override.year > start_override.year:
+        override_years.extend(range(start_override.year, end_override.year + 1))
+    if override_years:
+        years = override_years
     today = dt.date.today()
     if years:
         return sorted({year for year in years if year > 0}, reverse=True)
@@ -337,8 +347,13 @@ def make_rows() -> Tuple[List[List[str]], Counter]:
         raise RuntimeError("UNHCR config missing base_url or endpoint")
 
     window_days = int(cfg.get("window_days", 60) or 60)
-    since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=window_days)
-    since = since_dt.date()
+    start_override, end_override = resolve_ingestion_window()
+    if start_override:
+        since = start_override
+    else:
+        since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=window_days)
+        since = since_dt.date()
+    until: Optional[dt.date] = end_override
 
     years = _effective_years(params_cfg)
     granularity = str(params_cfg.get("granularity", "year")).strip().lower() or "year"
@@ -465,6 +480,8 @@ def make_rows() -> Tuple[List[List[str]], Counter]:
                 _dbg("drop_bad_date", as_of=as_of)
                 continue
             if as_of_date < since:
+                continue
+            if until and as_of_date > until:
                 continue
             counters["after_window"] += 1
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import io
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from resolver.tools.denominators import (
     get_population_record,
     safe_pct_to_people,
 )
-from resolver.ingestion.utils.io import resolve_output_path
+from resolver.ingestion.utils.io import render_with_context, resolve_output_path
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
@@ -190,6 +191,222 @@ def _load_admin_population_table(path: Optional[str]) -> Optional[pd.DataFrame]:
     if normalised.empty:
         return None
     return normalised
+
+
+def _record_resolved_url(source: Dict[str, Any], url: str) -> None:
+    if url:
+        source["resolved_url"] = url
+
+
+def _render_source_value(value: Any) -> Any:
+    if isinstance(value, str):
+        rendered = render_with_context(value)
+        return rendered
+    if isinstance(value, list):
+        rendered_list = [_render_source_value(item) for item in value]
+        return [item for item in rendered_list if item not in (None, "")]
+    if isinstance(value, (int, float)):
+        return value
+    return value
+
+
+def _prepare_request(source: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, str]]:
+    raw_url = str(source.get("url", "") or "").strip()
+    base_url = str(source.get("base_url", "") or "").strip()
+    if not raw_url and base_url:
+        raw_url = base_url
+    url = render_with_context(raw_url)
+
+    params_raw = source.get("params")
+    params: Dict[str, Any] = {}
+    if isinstance(params_raw, dict):
+        for key, value in params_raw.items():
+            rendered = _render_source_value(value)
+            if isinstance(rendered, list):
+                filtered = [item for item in rendered if item not in (None, "")]
+                if filtered:
+                    params[key] = [str(item) for item in filtered]
+            elif rendered not in (None, ""):
+                params[key] = str(rendered)
+
+    headers_raw = source.get("headers")
+    headers: Dict[str, str] = {}
+    if isinstance(headers_raw, dict):
+        for key, value in headers_raw.items():
+            rendered = _render_source_value(value)
+            if rendered in (None, ""):
+                continue
+            headers[str(key)] = str(rendered)
+
+    return url, params, headers
+
+
+def _fetch_remote_bytes(
+    url: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    source: Optional[Dict[str, Any]] = None,
+) -> io.BytesIO:
+    resp = requests.get(url, params=params or None, headers=headers or None, timeout=60)
+    resp.raise_for_status()
+    if source is not None:
+        _record_resolved_url(source, resp.url)
+    return io.BytesIO(resp.content)
+
+
+def _extract_json_records(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        if "features" in payload and isinstance(payload["features"], list):
+            records: List[Dict[str, Any]] = []
+            for feature in payload["features"]:
+                if not isinstance(feature, dict):
+                    continue
+                attributes = feature.get("attributes")
+                if isinstance(attributes, dict):
+                    records.append(attributes)
+                else:
+                    record = {k: v for k, v in feature.items() if k != "geometry"}
+                    if record:
+                        records.append(record)
+            return records
+        for key in ("data", "results", "items", "records", "value", "values"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                return [item for item in candidate if isinstance(item, dict)]
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+        if parsed <= 0:
+            return default
+        return parsed
+    except Exception:
+        return default
+
+
+def _fetch_json_dataframe(
+    url: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    source: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    pagination = source.get("pagination") if isinstance(source, dict) else None
+    if isinstance(pagination, dict):
+        pagination_type = str(pagination.get("type") or "").strip().lower()
+    else:
+        pagination_type = ""
+
+    if pagination_type == "page":
+        page_param = str(pagination.get("param") or "page").strip()
+        size_param = str(pagination.get("page_size_param") or "") or None
+        base_params = dict(params or {})
+        start_page = _coerce_positive_int(
+            pagination.get("start") or base_params.get(page_param) or 1,
+            1,
+        )
+        page_size_default = pagination.get("page_size") or (
+            base_params.get(size_param) if size_param else None
+        )
+        page_size = _coerce_positive_int(page_size_default, 1000)
+        max_pages = _coerce_positive_int(pagination.get("max_pages"), 0)
+        frames: List[pd.DataFrame] = []
+        page = start_page
+        while True:
+            page_params = dict(base_params)
+            page_params[page_param] = page
+            if size_param and page_size:
+                page_params[size_param] = page_size
+            resp = requests.get(url, params=page_params or None, headers=headers or None, timeout=60)
+            resp.raise_for_status()
+            if source is not None:
+                _record_resolved_url(source, resp.url)
+            try:
+                payload = resp.json()  # type: ignore[assignment]
+            except ValueError:
+                payload = {}
+            records = _extract_json_records(payload)
+            if not records:
+                break
+            frames.append(pd.DataFrame(records))
+            total_pages = None
+            for key in ("totalPages", "totalPage", "pageCount"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if isinstance(value, int) and value > 0:
+                    total_pages = value
+                    break
+            if total_pages is not None and page >= total_pages:
+                break
+            if page_size and len(records) < page_size:
+                break
+            page += 1
+            if max_pages and len(frames) >= max_pages:
+                break
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame()
+
+    if pagination_type == "offset":
+        offset_param = str(pagination.get("offset_param") or "resultOffset")
+        size_param = str(pagination.get("page_size_param") or "resultRecordCount")
+        base_params = dict(params or {})
+        start_offset = _coerce_positive_int(base_params.get(offset_param) or pagination.get("start") or 0, 0)
+        page_size = _coerce_positive_int(pagination.get("page_size") or base_params.get(size_param) or 2000, 2000)
+        max_pages = _coerce_positive_int(pagination.get("max_pages"), 0)
+        frames = []
+        offset = start_offset
+        iterations = 0
+        while True:
+            page_params = dict(base_params)
+            page_params[offset_param] = offset
+            if size_param:
+                page_params[size_param] = page_size
+            resp = requests.get(url, params=page_params or None, headers=headers or None, timeout=60)
+            resp.raise_for_status()
+            if source is not None:
+                _record_resolved_url(source, resp.url)
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {}
+            records = _extract_json_records(payload)
+            if not records:
+                break
+            frames.append(pd.DataFrame(records))
+            exceeded = False
+            if isinstance(payload, dict):
+                exceeded = bool(payload.get("exceededTransferLimit"))
+            if not exceeded and page_size and len(records) < page_size:
+                break
+            if page_size:
+                offset += page_size
+            else:
+                offset += len(records)
+            iterations += 1
+            if max_pages and iterations >= max_pages:
+                break
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame()
+
+    resp = requests.get(url, params=params or None, headers=headers or None, timeout=60)
+    resp.raise_for_status()
+    if source is not None:
+        _record_resolved_url(source, resp.url)
+    try:
+        payload = resp.json()
+    except ValueError:
+        return pd.DataFrame()
+    records = _extract_json_records(payload)
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
 
 
 def _lookup_admin_population(
@@ -384,23 +601,19 @@ def _extract_text(row: pd.Series, columns: List[str]) -> str:
 
 
 def _load_dataframe(source: Dict[str, Any]) -> Optional[pd.DataFrame]:
-    url = source.get("url")
+    url, params, headers = _prepare_request(source)
     if not url:
         return None
     kind = (source.get("kind") or "csv").lower()
     appname = os.getenv("RELIEFWEB_APPNAME")
+    if appname and "User-Agent" not in headers:
+        headers["User-Agent"] = appname
+
     if url.startswith("http://") or url.startswith("https://"):
-        headers = {}
-        if appname:
-            headers["User-Agent"] = appname
-        if isinstance(source.get("headers"), dict):
-            headers.update({str(k): str(v) for k, v in source["headers"].items()})
         try:
-            resp = requests.get(url, headers=headers or None, timeout=60)
-            if resp.status_code == 404:
-                print(f"[wfp_mvam] {url} returned 404; skipping source")
-                return None
-            resp.raise_for_status()
+            if kind == "json":
+                return _fetch_json_dataframe(url, params=params, headers=headers, source=source)
+            data = _fetch_remote_bytes(url, params=params, headers=headers, source=source)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "HTTPError"
             print(f"[wfp_mvam] {url} returned {status}; skipping source")
@@ -408,24 +621,38 @@ def _load_dataframe(source: Dict[str, Any]) -> Optional[pd.DataFrame]:
         except requests.RequestException as exc:
             print(f"[wfp_mvam] request error for {url}: {exc}")
             return None
-        data = io.BytesIO(resp.content)
         if kind == "csv":
             return pd.read_csv(data)
         if kind in {"xlsx", "xls", "excel"}:
             return pd.read_excel(data)
-        if kind == "json":
-            return pd.read_json(io.BytesIO(resp.content))
-        return pd.read_csv(data)
-    path = Path(url)
+        if kind == "json":  # fallback if pagination disabled
+            try:
+                payload = json.load(io.BytesIO(data.getvalue()))
+            except Exception:
+                return None
+            records = _extract_json_records(payload)
+            if not records:
+                return None
+            return pd.DataFrame(records)
+        try:
+            return pd.read_csv(data)
+        except Exception:
+            data.seek(0)
+            return pd.read_json(data)
+
+    path = Path(render_with_context(url))
     if not path.exists():
         dbg(f"source path {url} missing")
         return None
+    _record_resolved_url(source, str(path))
     if kind == "csv":
         return pd.read_csv(path)
     if kind in {"xlsx", "xls", "excel"}:
         return pd.read_excel(path)
     if kind == "json":
-        return pd.read_json(path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        records = _extract_json_records(payload)
+        return pd.DataFrame(records)
     return pd.read_csv(path)
 
 
@@ -608,7 +835,7 @@ def collect_rows() -> List[List[Any]]:
         series_hint = source.get("series_hint", "stock")
         publisher = source.get("publisher", DEFAULT_PUBLISHER)
         source_type = source.get("source_type", DEFAULT_SOURCE_TYPE)
-        source_url = source.get("url", "")
+        source_url = source.get("resolved_url") or source.get("url", "")
         doc_title = source.get("name") or "WFP mVAM dataset"
         source_id = source.get("name") or source_url or "wfp_mvam"
 

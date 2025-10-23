@@ -1,9 +1,23 @@
 enabled: true
 sources:
-  cholera_global:
-    url: ""
+  - name: cholera_global
+    kind: json
+    url: https://services7.arcgis.com/mOBPykOjAyBO2ZKk/arcgis/rest/services/Cholera_Weekly/FeatureServer/0/query
+    params:
+      where: "1=1"
+      outFields: "*"
+      f: json
+      resultRecordCount: 2000
+      resultOffset: 0
+      orderByFields: "ReportDate"
+    pagination:
+      type: offset
+      offset_param: resultOffset
+      page_size_param: resultRecordCount
+      page_size: 2000
+      max_pages: 50
+    time_keys: ["ReportDate", "EpiWeek", "EpiYear"]
+    country_keys: ["Country", "ISO3", "WHO_region"]
+    case_keys: ["Cases", "New_Cases"]
     disease: cholera
-  measles_global:
-    url: ""
-    disease: measles
 auth: {}
