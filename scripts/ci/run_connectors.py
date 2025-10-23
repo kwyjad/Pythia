@@ -33,6 +33,12 @@ REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse only the arguments provided by our runner or tests.
+
+    When invoked under pytest we pass an empty list so argparse does not try
+    to consume pytest's own CLI flags from ``sys.argv``.
+    """
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--extra-args",
@@ -54,7 +60,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "--extra-env 'dtm_client=DTM_NO_DATE_FILTER=1'"
         ),
     )
-    return parser.parse_args(argv)
+    if argv is None:
+        argv = []
+    return parser.parse_args(list(argv))
 
 
 def _parse_extra_args(values: Sequence[str]) -> Dict[str, List[str]]:
@@ -169,7 +177,7 @@ def _resolve_connectors(env: Dict[str, str]) -> List[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
+    args = parse_args(argv if argv is not None else [])
     extra_args = _parse_extra_args(args.extra_args)
     extra_env = _parse_extra_env(args.extra_env)
     root = Path.cwd()

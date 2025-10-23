@@ -67,9 +67,9 @@ jobs:
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: data/staging
-      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
-      EMPTY_POLICY: ${{ inputs.empty_policy || 'allow' }}
-      NO_DATE_FILTER: ${{ inputs.no_date_filter || 'false' }}
+      LOG_LEVEL: ${{ inputs.log_level }}
+      EMPTY_POLICY: ${{ inputs.empty_policy }}
+      NO_DATE_FILTER: ${{ inputs.no_date_filter }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -90,7 +90,7 @@ jobs:
       - name: Compute backfill window
         id: window
         env:
-          MONTHS_INPUT: ${{ inputs.months_back || 12 }}
+          MONTHS_INPUT: ${{ inputs.months_back }}
           TIMEZONE: Europe/Istanbul
         run: |
           set -euo pipefail
@@ -102,37 +102,37 @@ jobs:
           python -m scripts.ci.compute_backfill_window
 
       - name: Run connectors (with per-connector log tee)
-      env:
-        RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
-        RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
-        ONLY_CONNECTOR: ${{ inputs.only_connector }}
-        LOG_LEVEL: ${{ inputs.log_level }}
-        EMPTY_POLICY: ${{ inputs.empty_policy }}
-        # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
-      run: |
-        set -euo pipefail
-        if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-          set -x
-          export PYTHONDEVMODE=1
-          export PYTHONWARNINGS=default
-        fi
-        mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-        DTM_ARGS=""
-        if [ "${EMPTY_POLICY:-allow}" = "fail" ]; then
-          DTM_ARGS="--strict-empty"
-        fi
-        if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
-          if [ -n "${DTM_ARGS}" ]; then
-            DTM_ARGS="${DTM_ARGS} --no-date-filter"
-          else
-            DTM_ARGS="--no-date-filter"
+        env:
+          RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
+          RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
+          ONLY_CONNECTOR: ${{ inputs.only_connector }}
+          LOG_LEVEL: ${{ inputs.log_level }}
+          EMPTY_POLICY: ${{ inputs.empty_policy }}
+          # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
           fi
-        fi
-        CMD_ARGS=(--extra-args "dtm_client=${DTM_ARGS}")
-        if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
-          CMD_ARGS+=(--extra-env "dtm_client=DTM_NO_DATE_FILTER=1")
-        fi
-        python -m scripts.ci.run_connectors "${CMD_ARGS[@]}"
+          mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
+          DTM_ARGS=""
+          if [ "${EMPTY_POLICY:-allow}" = "fail" ]; then
+            DTM_ARGS="--strict-empty"
+          fi
+          if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
+            if [ -n "${DTM_ARGS}" ]; then
+              DTM_ARGS="${DTM_ARGS} --no-date-filter"
+            else
+              DTM_ARGS="--no-date-filter"
+            fi
+          fi
+          CMD_ARGS=(--extra-args "dtm_client=${DTM_ARGS}")
+          if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
+            CMD_ARGS+=(--extra-env "dtm_client=DTM_NO_DATE_FILTER=1")
+          fi
+          python -m scripts.ci.run_connectors "${CMD_ARGS[@]}"
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
