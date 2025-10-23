@@ -279,6 +279,7 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
 
 **Env toggles:**
 
+- `DTM_API_KEY` — **Required for API mode**. Set with your DTM API v3 subscription key to fetch live IDP data. Register at https://dtm-apim-portal.iom.int/ and subscribe to API-V3. Without this key, the connector runs in header-only mode when using API configuration.
 - `RESOLVER_SKIP_DTM=1` — skip the connector (still writes an empty `staging/dtm_displacement.csv` with canonical headers).
 - `RESOLVER_MAX_RESULTS=<int>` — optional cap for emitted rows.
 - `RESOLVER_DEBUG=1` — verbose logging (shared convention across ingestion clients).

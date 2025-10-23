@@ -273,8 +273,9 @@ The DTM connector supports two modes: **API mode** (recommended) and **file mode
 When the configuration includes an `api` section and `sources` is empty or omitted, the connector fetches data directly from the IOM DTM API v3.
 
 **Requirements:**
-- `DTM_API_KEY` environment variable must be set with your subscription key
+- `DTM_API_KEY` environment variable must be set with your subscription key to fetch live data
 - Register at https://dtm-apim-portal.iom.int/ and subscribe to API-V3 to obtain a key
+- **Fallback behavior:** If `DTM_API_KEY` is not set, the connector runs in header-only mode (writes CSV with column headers but no data rows) and does not fail
 
 **Configuration fields:**
 

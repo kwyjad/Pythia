@@ -41,6 +41,7 @@ jobs:
       ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
       GO_API_TOKEN: ${{ secrets.GO_API_TOKEN }}
       HDX_API_KEY: ${{ secrets.HDX_API_KEY }}
       UNHCR_ODP_USERNAME: ${{ secrets.UNHCR_ODP_USERNAME }}

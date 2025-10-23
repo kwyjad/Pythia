@@ -983,10 +983,27 @@ def _fetch_api_data(
     Returns:
         List of records with standardized fields
     """
+    from resolver.ingestion.dtm_auth import check_api_key_configured
+
     if results is None:
         results = []
     if http_counts is None:
         http_counts = {"2xx": 0, "4xx": 0, "5xx": 0}
+
+    # Check if API key is configured before attempting to fetch
+    if not check_api_key_configured():
+        LOG.warning(
+            "DTM API mode requested but DTM_API_KEY not configured. "
+            "Skipping API data fetch. Set DTM_API_KEY to fetch live data."
+        )
+        results.append(
+            SourceResult(
+                source_name="dtm_api",
+                status="skipped",
+                skip_reason="api-key-not-configured",
+            )
+        )
+        return []
 
     all_records: List[Dict[str, Any]] = []
 
@@ -1449,11 +1466,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    from resolver.ingestion.dtm_auth import check_api_key_configured
+
     args = parse_args(argv or ())
     level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     log_level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
     LOG.setLevel(log_level)
+
+    # Check API key configuration early for diagnostics
+    api_key_configured = check_api_key_configured()
+    if api_key_configured:
+        LOG.info("DTM API key is configured")
+    else:
+        LOG.warning(
+            "DTM API key NOT configured - connector will run in limited mode. "
+            "Set DTM_API_KEY environment variable to fetch live data from DTM API."
+        )
 
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
     http_stats: Dict[str, Any] = {
@@ -1465,7 +1494,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "last_status": None,
     }
     counts: Dict[str, int] = {"fetched": 0, "normalized": 0, "written": 0}
-    extras: Dict[str, Any] = {"status_raw": "ok", "attempts": 1, "rows_total": 0}
+    extras: Dict[str, Any] = {
+        "status_raw": "ok",
+        "attempts": 1,
+        "rows_total": 0,
+        "api_key_configured": api_key_configured,
+    }
 
     status_raw = "ok"
     reason: Optional[str] = None
