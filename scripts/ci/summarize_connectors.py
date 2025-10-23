@@ -252,13 +252,35 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         coverage = entry.get("coverage", {})
         connector_id = str(entry.get("connector_id"))
         log_path = logs_dir / f"{connector_id}.log"
+        extras = _ensure_dict(entry.get("extras"))
+        config_issues_path = extras.get("config_issues_path")
         log_cell = str(log_path) if log_path.exists() else "—"
+        if connector_id == "dtm_client" and config_issues_path:
+            config_path_text = str(config_issues_path)
+            log_cell = (
+                f"{log_cell} / {config_path_text}"
+                if log_cell != "—"
+                else config_path_text
+            )
+        reason_text = entry.get("reason")
+        if (
+            connector_id == "dtm_client"
+            and isinstance(reason_text, str)
+            and "missing id_or_path" in reason_text
+        ):
+            invalid_count = extras.get("invalid_sources")
+            status = str(entry.get("status") or "").strip() or "skipped"
+            if invalid_count:
+                reason_text = f"{status}: missing id_or_path ({invalid_count})"
+            else:
+                reason_text = f"{status}: missing id_or_path"
+        reason_cell = _format_reason(reason_text)
         rows.append(
             [
                 connector_id,
                 str(entry.get("mode")),
                 str(entry.get("status")),
-                _format_reason(entry.get("reason")),
+                reason_cell,
                 _format_duration(entry.get("duration_ms", 0)),
                 _format_http(entry.get("http", {})),
                 _format_rows(entry.get("counts", {})),

@@ -90,7 +90,7 @@ def test_dtm_header_written(tmp_path, monkeypatch):
 
     dtm_client.OUT_DIR = Path(tmp_path)
     dtm_client.OUT_PATH = Path(tmp_path) / "dtm.csv"
-    assert dtm_client.main() is False
+    assert dtm_client.main() == 0
 
     with open(dtm_client.OUT_PATH, newline="", encoding="utf-8") as f:
         row = next(csv.reader(f))

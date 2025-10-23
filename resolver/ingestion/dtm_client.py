@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import logging
 import os
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -27,6 +28,12 @@ from typing import (
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion._shared.validation import validate_required_fields, write_json
+from resolver.ingestion.diagnostics_emitter import (
+    append_jsonl as diagnostics_append_jsonl,
+    finalize_run as diagnostics_finalize_run,
+    start_run as diagnostics_start_run,
+)
 from resolver.ingestion.utils import (
     ensure_headers,
     flow_from_stock,
@@ -46,6 +53,10 @@ DEFAULT_OUTPUT = ROOT / "staging" / "dtm_displacement.csv"
 OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH  # backwards compatibility alias
+DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
+CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
+CONFIG_ISSUES_PATH = DIAGNOSTICS_DIR / "dtm_config_issues.json"
+RESOLVED_SOURCES_PATH = DIAGNOSTICS_DIR / "dtm_sources_resolved.json"
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
@@ -102,10 +113,29 @@ class Hazard:
     hclass: str
 
 
+@dataclass
+class SourceResult:
+    """Container describing the outcome of processing a single source entry."""
+
+    source_name: str
+    records: List[Dict[str, Any]] = field(default_factory=list)
+    status: str = "ok"
+    skip_reason: Optional[str] = None
+    error: Optional[str] = None
+    http_counts: Dict[str, int] = field(
+        default_factory=lambda: {"2xx": 0, "4xx": 0, "5xx": 0}
+    )
+
+    @property
+    def rows(self) -> int:
+        return len(self.records)
+
+
 __all__ = [
     "SERIES_INCIDENT",
     "SERIES_CUMULATIVE",
     "Hazard",
+    "SourceResult",
     "load_registries",
     "infer_hazard",
     "rollup_subnational",
@@ -114,6 +144,7 @@ __all__ = [
     "ensure_header_only",
     "build_rows",
     "write_rows",
+    "parse_args",
     "main",
 ]
 
@@ -430,7 +461,7 @@ def _extract_record_as_of(row: dict, file_ctx: dict) -> str:
         return mtime_iso
     # 4) run date fallback
     _AS_OF_FALLBACK_COUNTS["run"] += 1
-    return datetime.utcnow().date().isoformat()
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def _is_candidate_newer(existing_iso: str, candidate_iso: str) -> bool:
@@ -505,16 +536,24 @@ def _column(row: Mapping[str, Any], *candidates: str) -> Optional[str]:
     return None
 
 
-def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> SourceResult:
+    source_label = _source_label(entry)
+    LOG.debug("dtm: begin source %s", source_label)
     source_type = str(entry.get("type") or "file").strip().lower()
     if source_type != "file":
         raise ValueError("DTM connector currently supports file sources only")
     path = entry.get("id_or_path")
     if not path:
-        raise FileNotFoundError("DTM source missing id_or_path")
+        LOG.warning("dtm: skipping source %s (missing id_or_path)", source_label)
+        return SourceResult(
+            source_name=source_label,
+            status="skipped",
+            skip_reason="missing id_or_path",
+        )
     csv_path = Path(path)
     if not csv_path.exists():
         raise FileNotFoundError(f"DTM source not found: {csv_path}")
+    LOG.debug("dtm: resolved source %s path=%s", source_label, csv_path)
     file_ctx = {"filename": csv_path.name, "path": str(csv_path)}
     aliases = cfg.get("country_aliases") or {}
     measure = str(entry.get("measure") or "stock").strip().lower()
@@ -526,7 +565,8 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> List[Dict[
     cause_column = entry.get("cause_column")
     rows = list(_load_csv(csv_path))
     if not rows:
-        return []
+        LOG.debug("dtm: end source %s rows=0", source_label)
+        return SourceResult(source_name=source_label, records=[], status="ok")
     if not country_column:
         country_column = _column(rows[0], "country_iso3", "iso3", "country")
     if not admin_column:
@@ -561,7 +601,6 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> List[Dict[
         else:
             causes[(iso, admin1)] = _resolve_cause(row, cause_map)
     records: List[Dict[str, Any]] = []
-    source_label = _source_label(entry)
     for key, series in per_admin.items():
         iso, admin1 = key
         if measure == "stock":
@@ -574,7 +613,7 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> List[Dict[
                 continue
             if value <= 0:
                 continue
-            record_as_of = per_admin_asof.get(key, {}).get(bucket) or datetime.utcnow().date().isoformat()
+            record_as_of = per_admin_asof.get(key, {}).get(bucket) or datetime.now(timezone.utc).date().isoformat()
             records.append(
                 {
                     "iso3": iso,
@@ -587,22 +626,26 @@ def _read_source(entry: Mapping[str, Any], cfg: Mapping[str, Any]) -> List[Dict[
                     "as_of": record_as_of,
                 }
             )
-    return records
+    LOG.debug("dtm: end source %s rows=%s", source_label, len(records))
+    return SourceResult(source_name=source_label, records=records, status="ok")
 
 
-def build_rows(cfg: Mapping[str, Any]) -> List[List[Any]]:
+def build_rows(cfg: Mapping[str, Any], *, results: Optional[List[SourceResult]] = None) -> List[List[Any]]:
     sources = cfg.get("sources") or []
     admin_mode = str(cfg.get("admin_agg") or "both").strip().lower()
     all_records: List[Dict[str, Any]] = []
+    collected = results if results is not None else []
     for entry in sources:
         if not isinstance(entry, Mapping):
             continue
-        records = _read_source(entry, cfg)
-        all_records.extend(records)
+        result = _read_source(entry, cfg)
+        collected.append(result)
+        if result.records:
+            all_records.extend(result.records)
     if not all_records:
         _log_as_of_fallbacks()
         return []
-    run_date = datetime.utcnow().date().isoformat()
+    run_date = datetime.now(timezone.utc).date().isoformat()
     method = "dtm_stock_to_flow" if any(rec.get("measure") == "stock" for rec in all_records) else "dtm_flow"
     dedup: dict[tuple[str, str, str, str], Dict[str, Any]] = {}
     country_totals: dict[tuple[str, str, str], float] = defaultdict(float)
@@ -727,21 +770,212 @@ def write_rows(rows: List[List[Any]]) -> None:
     ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
 
 
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    if os.getenv("RESOLVER_SKIP_DTM"):
-        LOG.info("dtm: skipped via RESOLVER_SKIP_DTM")
-        ensure_header_only()
-        return False
-    cfg = load_config()
-    if not cfg.get("enabled"):
-        LOG.info("dtm: disabled via config; writing header only")
-        ensure_header_only()
-        return False
-    rows = build_rows(cfg)
-    write_rows(rows)
-    LOG.info("dtm: wrote %s rows", len(rows))
-    return 0
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fail-on-missing-config",
+        action="store_true",
+        help="Exit with code 2 when any DTM source entry lacks id_or_path.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv or ())
+    level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
+    log_level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
+    LOG.setLevel(log_level)
+
+    diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
+    http_stats: Dict[str, Any] = {
+        "2xx": 0,
+        "4xx": 0,
+        "5xx": 0,
+        "retries": 0,
+        "rate_limit_remaining": None,
+        "last_status": None,
+    }
+    counts: Dict[str, int] = {"fetched": 0, "normalized": 0, "written": 0}
+    extras: Dict[str, Any] = {"status_raw": "ok", "attempts": 1, "rows_total": 0}
+
+    status_raw = "ok"
+    reason: Optional[str] = None
+    exit_code = 0
+    strict = args.fail_on_missing_config or _env_bool("DTM_STRICT", False)
+    extras["strict_mode"] = strict
+
+    source_results: List[SourceResult] = []
+    invalid_entries: list[dict[str, Any]] = []
+    valid_sources: list[dict[str, Any]] = []
+    invalid_names: list[str] = []
+    rows_written = 0
+    config_timestamp: Optional[str] = None
+
+    try:
+        if os.getenv("RESOLVER_SKIP_DTM"):
+            status_raw = "skipped"
+            reason = "disabled via RESOLVER_SKIP_DTM"
+            extras["status_raw"] = status_raw
+            LOG.info("dtm: skipped via RESOLVER_SKIP_DTM")
+            ensure_header_only()
+        else:
+            cfg = load_config()
+            if not cfg.get("enabled"):
+                status_raw = "skipped"
+                reason = "disabled: config"
+                extras["status_raw"] = status_raw
+                LOG.info("dtm: disabled via config; writing header only")
+                ensure_header_only()
+            else:
+                sources_raw = cfg.get("sources") or []
+                valid_sources, invalid_entries = validate_required_fields(
+                    sources_raw, required=("id_or_path",)
+                )
+                invalid_count = len(invalid_entries)
+                valid_count = len(valid_sources)
+                config_timestamp = (
+                    datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+                issues_payload: Dict[str, Any] = {
+                    "generated_at": config_timestamp,
+                    "summary": {"invalid": invalid_count, "valid": valid_count},
+                    "invalid": [],
+                }
+                for entry in invalid_entries:
+                    record = dict(entry)
+                    missing = list(record.pop("_missing_required", []))
+                    invalid_name = _source_label(record)
+                    if invalid_name:
+                        invalid_names.append(invalid_name)
+                    issues_payload["invalid"].append(
+                        {**record, "error": "missing id_or_path", "missing": missing}
+                    )
+                write_json(CONFIG_ISSUES_PATH, issues_payload)
+                extras["config_issues_path"] = str(CONFIG_ISSUES_PATH)
+                extras.update(
+                    {
+                        "invalid_sources": invalid_count,
+                        "valid_sources": valid_count,
+                    }
+                )
+                if invalid_names:
+                    extras["invalid_source_names"] = invalid_names
+                if invalid_count and strict:
+                    status_raw = "error"
+                    reason = "missing id_or_path"
+                    extras["status_raw"] = status_raw
+                    exit_code = 2
+                    LOG.error(
+                        "dtm: missing id_or_path for %s source(s); strict mode aborting",
+                        invalid_count,
+                    )
+                    ensure_header_only()
+                else:
+                    filtered_cfg = dict(cfg)
+                    filtered_cfg["sources"] = valid_sources
+                    if LOG.isEnabledFor(logging.DEBUG):
+                        resolved_payload = {
+                            "generated_at": config_timestamp,
+                            "invalid_sources": invalid_count,
+                            "valid_sources": valid_count,
+                            "sources": valid_sources,
+                        }
+                        write_json(RESOLVED_SOURCES_PATH, resolved_payload)
+                        extras["sources_resolved_path"] = str(RESOLVED_SOURCES_PATH)
+                    rows = build_rows(filtered_cfg, results=source_results)
+                    write_rows(rows)
+                    rows_written = len(rows)
+                    counts.update(
+                        {
+                            "fetched": rows_written,
+                            "normalized": rows_written,
+                            "written": rows_written,
+                        }
+                    )
+                    extras["rows_total"] = rows_written
+                    if source_results:
+                        extras["sources"] = [
+                            {
+                                "name": result.source_name,
+                                "status": result.status,
+                                "rows": result.rows,
+                                "skip_reason": result.skip_reason,
+                                "http_counts": dict(result.http_counts),
+                            }
+                            for result in source_results
+                        ]
+                    skipped_from_run = [
+                        {"name": res.source_name, "reason": res.skip_reason}
+                        for res in source_results
+                        if res.status == "skipped" and res.skip_reason
+                    ]
+                    if invalid_names or skipped_from_run:
+                        extras.setdefault("skipped_sources", [])
+                        extras["skipped_sources"].extend(
+                            {"name": name, "reason": "missing id_or_path"}
+                            for name in invalid_names
+                        )
+                        extras["skipped_sources"].extend(skip for skip in skipped_from_run if skip)
+                    if rows_written:
+                        status_raw = "ok"
+                        reason = "missing id_or_path" if invalid_count else None
+                        extras["status_raw"] = status_raw
+                        if invalid_count:
+                            LOG.warning(
+                                "dtm: wrote %s rows with %s invalid source(s) missing id_or_path",
+                                rows_written,
+                                invalid_count,
+                            )
+                        else:
+                            LOG.info("dtm: wrote %s rows", rows_written)
+                    else:
+                        if invalid_count and not valid_sources:
+                            status_raw = "skipped"
+                            reason = "missing id_or_path"
+                        elif invalid_count:
+                            status_raw = "ok"
+                            reason = "missing id_or_path"
+                        else:
+                            status_raw = "ok-empty"
+                            reason = "no rows"
+                        extras["status_raw"] = status_raw
+                        if invalid_count:
+                            LOG.warning(
+                                "dtm: header-only output; %s source(s) missing id_or_path",
+                                invalid_count,
+                            )
+                        else:
+                            LOG.info("dtm: wrote header only (no rows)")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        status_raw = "error"
+        reason = str(exc)
+        extras["status_raw"] = status_raw
+        extras["exception"] = str(exc)
+        exit_code = 1
+        LOG.exception("dtm: run failed: %s", exc)
+        try:
+            ensure_header_only()
+        except Exception:
+            pass
+    finally:
+        extras.setdefault("invalid_sources", len(invalid_entries))
+        extras.setdefault("valid_sources", len(valid_sources))
+        extras.setdefault("rows_total", rows_written)
+        extras["status_raw"] = status_raw
+        diagnostics_result = diagnostics_finalize_run(
+            diagnostics_ctx,
+            status=status_raw,
+            reason=reason,
+            http=http_stats,
+            counts=counts,
+            extras=extras,
+        )
+        diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+    return exit_code
 
 
 if __name__ == "__main__":
