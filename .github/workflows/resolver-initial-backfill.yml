@@ -8,9 +8,20 @@ on:
         description: "Number of months to include (default 12)"
         required: false
         default: "12"
-      only:
-        description: "Optional connector name for --only"
+      only_connector:
+        description: "Optional connector name for --only (e.g. dtm_client)"
         required: false
+        default: ""
+      log_level:
+        description: "Log level (DEBUG, INFO, WARNING, ERROR)"
+        required: false
+        default: "INFO"
+        type: choice
+        options:
+          - DEBUG
+          - INFO
+          - WARNING
+          - ERROR
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -37,8 +48,9 @@ jobs:
       DTM_API_SECONDARY_KEY: ${{ secrets.DTM_API_SECONDARY_KEY }}
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
-      ONLY_CONNECTOR: ${{ github.event.inputs.only }}
+      ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: data/staging
+      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -63,20 +75,29 @@ jobs:
           TIMEZONE: Europe/Istanbul
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python -m scripts.ci.compute_backfill_window
 
-      - name: Run connectors
+      - name: Run connectors (with per-connector log tee)
         env:
           RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
           RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
+          ONLY_CONNECTOR: ${{ inputs.only_connector }}
+          LOG_LEVEL: ${{ inputs.log_level }}
+          # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-          ARGS=("--mode" "real" "--retries" "2" "--selected" "fetch")
-          if [ -n "${ONLY_CONNECTOR:-}" ]; then
-            ARGS+=("--only" "${ONLY_CONNECTOR}")
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
           fi
-          python resolver/ingestion/run_all_stubs.py "${ARGS[@]}"
+          mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
+          python -m scripts.ci.run_connectors
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
@@ -85,10 +106,23 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python -m scripts.ci.summarize_connectors \
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary
+
+      - name: Upload connector logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-logs
+          path: diagnostics/ingestion/logs/
+          if-no-files-found: warn
 
       - name: Upload connector diagnostics
         if: always()
@@ -117,6 +151,7 @@ jobs:
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb
       BACKFILL_MONTHS_CSV: ${{ needs.ingest.outputs.months }}
+      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -143,6 +178,11 @@ jobs:
       - name: Export canonical facts
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           mkdir -p resolver/exports/backfill
           python -m resolver.tools.export_facts \
             --in resolver/staging \
@@ -154,6 +194,11 @@ jobs:
           MONTHS: ${{ env.BACKFILL_MONTHS_CSV }}
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python - <<'PY'
           import calendar
           import os
@@ -276,6 +321,7 @@ jobs:
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb
       CONTEXT_MONTHS: ${{ needs.ingest.outputs.month_count }}
+      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -302,6 +348,11 @@ jobs:
       - name: Build context bundle
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           mkdir -p context
           python -m resolver.tools.build_llm_context --months "${CONTEXT_MONTHS:-12}" --outdir context
 
@@ -318,6 +369,8 @@ jobs:
     needs:
       - derive-freeze
       - context
+    env:
+      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
       - name: Download snapshots
         uses: actions/download-artifact@v4

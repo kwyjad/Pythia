@@ -4,7 +4,18 @@ name: "Resolver — Monthly"
 on:
   schedule:
     - cron: "0 2 1 * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG, INFO, WARNING, ERROR)"
+        required: false
+        default: "INFO"
+        type: choice
+        options:
+          - DEBUG
+          - INFO
+          - WARNING
+          - ERROR
 
 permissions:
   contents: write
@@ -36,6 +47,7 @@ jobs:
       UNHCR_ODP_PASSWORD: ${{ secrets.UNHCR_ODP_PASSWORD }}
       UNHCR_ODP_CLIENT_ID: ${{ secrets.UNHCR_ODP_CLIENT_ID }}
       UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
+      LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -63,6 +75,11 @@ jobs:
         id: window
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python - <<'PY'
           import os
           from resolver.tools.ci_helpers import monthly_snapshot_window
@@ -90,6 +107,11 @@ jobs:
       - name: Configure connector skips
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python - <<'PY'
           import os
 
@@ -124,11 +146,18 @@ jobs:
                   print(f"{key}={value} ({state})")
           PY
 
-      - name: Run live connectors
+      - name: Run live connectors (with per-connector log tee)
+        env:
+          LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
+          # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
         run: |
           set -euo pipefail
-          CMD="python resolver/ingestion/run_all_stubs.py --mode real --retries 2 --strict --log-level INFO --log-format json"
-          scripts/ci/run_and_capture.sh connectors "$CMD"
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          python -m scripts.ci.run_connectors
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
@@ -137,10 +166,23 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python -m scripts.ci.summarize_connectors \
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary
+
+      - name: Upload connector logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-logs
+          path: diagnostics/ingestion/logs/
+          if-no-files-found: warn
 
       - name: Upload connector diagnostics
         if: always()
@@ -155,12 +197,22 @@ jobs:
       - name: Freeze monthly snapshot
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           SNAPSHOT_CMD="python -m resolver.cli.snapshot_cli make-monthly --ym \"${SNAPSHOT_TARGET_YM}\" --staging resolver/staging --exports-dir \"resolver/exports/${SNAPSHOT_TARGET_YM}\" --outdir resolver/snapshots --write-db 1 --db-url data/resolver.duckdb --overwrite"
           scripts/ci/run_and_capture.sh snapshot "$SNAPSHOT_CMD"
 
       - name: Build LLM context bundle
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           scripts/ci/run_and_capture.sh context "python -m resolver.tools.build_llm_context --months 12 --outdir context"
 
       - name: Create release archive
@@ -207,6 +259,11 @@ jobs:
           SNAPSHOT_TARGET_YM: ${{ env.SNAPSHOT_TARGET_YM }}
         run: |
           set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
           python - <<'PY'
           import json
           import os
