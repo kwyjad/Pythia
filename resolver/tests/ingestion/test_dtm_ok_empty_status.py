@@ -45,7 +45,7 @@ def _setup_paths(monkeypatch, tmp_path: Path) -> Path:
 
 
 def _stub_build_rows(monkeypatch):
-    def fake_build_rows(cfg, *, results=None, no_date_filter=False, window_start=None, window_end=None):
+    def fake_build_rows(cfg, *, results=None, no_date_filter=False, window_start=None, window_end=None, http_counts=None):
         if results is not None:
             results.append(dtm_client.SourceResult(source_name="stub", status="ok"))
         return []
