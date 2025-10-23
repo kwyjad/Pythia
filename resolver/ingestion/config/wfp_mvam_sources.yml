@@ -1,3 +1,18 @@
 enabled: true
-sources: []
+sources:
+  - name: mvam_ifc_global
+    kind: json
+    url: https://databridges.vam.wfp.org/api/external/FoodSecurity/List
+    params:
+      indicatorCode: insufficient_food_consumption
+      dateFrom: "{{ start_iso }}"
+      dateTo: "{{ end_iso }}"
+      pageSize: 5000
+    pagination:
+      type: page
+      param: pageNumber
+      start: 1
+      page_size_param: pageSize
+      page_size: 5000
+      max_pages: 20
 auth: {}

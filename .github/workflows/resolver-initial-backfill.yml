@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-          ARGS=("--mode" "real" "--retries" "2")
+          ARGS=("--mode" "real" "--retries" "2" "--selected" "fetch")
           if [ -n "${ONLY_CONNECTOR:-}" ]; then
             ARGS+=("--only" "${ONLY_CONNECTOR}")
           fi

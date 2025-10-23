@@ -7,9 +7,11 @@ import datetime as dt
 import os
 import re
 from pathlib import Path
-from typing import Sequence
+from typing import Dict, Optional, Sequence
 
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9_.-]+")
+_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
+_PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
 
 
 def ensure_headers(path: Path, headers: Sequence[str]) -> None:
@@ -99,3 +101,69 @@ def resolve_output_path(default_path: Path) -> Path:
 
     staging_dir = resolve_staging_dir(default_path.parent)
     return staging_dir / default_path.name
+
+
+def _first_env_date(*names: str) -> Optional[dt.date]:
+    for name in names:
+        value = _parse_iso_date(os.getenv(name))
+        if value:
+            return value
+    return None
+
+
+def resolve_ingestion_window() -> tuple[Optional[dt.date], Optional[dt.date]]:
+    """Return the effective start/end dates for ingestion if available."""
+
+    start = _first_env_date("RESOLVER_START_ISO", "BACKFILL_START_ISO")
+    end = _first_env_date("RESOLVER_END_ISO", "BACKFILL_END_ISO")
+    return start, end
+
+
+def ingestion_placeholder_context(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Return a dictionary with common date placeholders for templating."""
+
+    start, end = resolve_ingestion_window()
+    context: Dict[str, str] = {}
+    if start:
+        context["start_iso"] = start.isoformat()
+        context["start_date"] = start.isoformat()
+        context["start_year"] = f"{start.year:04d}"
+        context["start_month"] = f"{start.month:02d}"
+        context["start_day"] = f"{start.day:02d}"
+    if end:
+        context["end_iso"] = end.isoformat()
+        context["end_date"] = end.isoformat()
+        context["end_year"] = f"{end.year:04d}"
+        context["end_month"] = f"{end.month:02d}"
+        context["end_day"] = f"{end.day:02d}"
+    if start and end and end >= start:
+        context["window_days"] = str((end - start).days)
+    if extra:
+        for key, value in extra.items():
+            if value is None:
+                continue
+            context[key] = str(value)
+    return context
+
+
+def render_with_context(value: str, extra: Optional[Dict[str, str]] = None) -> str:
+    """Render a string replacing ``${ENV}`` and ``{{ placeholders }}``."""
+
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return ""
+
+    def _env_replace(match: re.Match[str]) -> str:
+        env_name = match.group(1)
+        return os.getenv(env_name, "")
+
+    rendered = _ENV_PATTERN.sub(_env_replace, text)
+    context = ingestion_placeholder_context(extra)
+
+    def _placeholder_replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return context.get(key, "")
+
+    return _PLACEHOLDER_PATTERN.sub(_placeholder_replace, rendered)

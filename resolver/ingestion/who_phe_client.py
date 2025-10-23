@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import io
+import json
 import math
 import os
 import re
@@ -18,7 +19,7 @@ import requests
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion.utils.io import resolve_output_path
+from resolver.ingestion.utils.io import render_with_context, resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -372,26 +373,175 @@ def _load_remote(url: str, *, headers: Optional[Dict[str, str]] = None) -> io.By
     return io.BytesIO(resp.content)
 
 
+def _record_resolved_url(source: Dict[str, Any], url: str) -> None:
+    if url:
+        source["resolved_url"] = url
+
+
+def _render_source_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return render_with_context(value)
+    if isinstance(value, list):
+        rendered = [_render_source_value(item) for item in value]
+        return [item for item in rendered if item not in (None, "")]
+    return value
+
+
+def _prepare_request(source: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, str]]:
+    raw_url = str(source.get("url", "") or "").strip()
+    base_url = str(source.get("base_url", "") or "").strip()
+    if not raw_url and base_url:
+        raw_url = base_url
+    url = render_with_context(raw_url)
+
+    params: Dict[str, Any] = {}
+    params_raw = source.get("params")
+    if isinstance(params_raw, dict):
+        for key, value in params_raw.items():
+            rendered = _render_source_value(value)
+            if isinstance(rendered, list):
+                filtered = [item for item in rendered if item not in (None, "")]
+                if filtered:
+                    params[key] = [str(item) for item in filtered]
+            elif rendered not in (None, ""):
+                params[key] = str(rendered)
+
+    headers: Dict[str, str] = {}
+    headers_raw = source.get("headers")
+    if isinstance(headers_raw, dict):
+        for key, value in headers_raw.items():
+            rendered = _render_source_value(value)
+            if rendered in (None, ""):
+                continue
+            headers[str(key)] = str(rendered)
+
+    return url, params, headers
+
+
+def _extract_json_records(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        if "features" in payload and isinstance(payload["features"], list):
+            records: List[Dict[str, Any]] = []
+            for feature in payload["features"]:
+                if not isinstance(feature, dict):
+                    continue
+                attributes = feature.get("attributes")
+                if isinstance(attributes, dict):
+                    records.append(attributes)
+                else:
+                    record = {k: v for k, v in feature.items() if k != "geometry"}
+                    if record:
+                        records.append(record)
+            return records
+        for key in ("data", "results", "items", "records", "value", "values"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                return [item for item in candidate if isinstance(item, dict)]
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _fetch_json_frame(
+    url: str,
+    params: Dict[str, Any],
+    headers: Dict[str, str],
+    source: Dict[str, Any],
+) -> pd.DataFrame:
+    pagination = source.get("pagination") if isinstance(source.get("pagination"), dict) else None
+    pagination_type = str(pagination.get("type") or "") if isinstance(pagination, dict) else ""
+    pagination_type = pagination_type.strip().lower()
+
+    if pagination_type == "offset":
+        offset_param = str(pagination.get("offset_param") or "resultOffset")
+        size_param = str(pagination.get("page_size_param") or "resultRecordCount")
+        page_size = _coerce_positive_int(pagination.get("page_size") or params.get(size_param) or 2000, 2000)
+        start_offset = _coerce_positive_int(pagination.get("start") or params.get(offset_param) or 0, 0)
+        max_pages = _coerce_positive_int(pagination.get("max_pages"), 0)
+        frames: List[pd.DataFrame] = []
+        offset = start_offset
+        iterations = 0
+        while True:
+            page_params = dict(params)
+            page_params[offset_param] = offset
+            if size_param:
+                page_params[size_param] = page_size
+            resp = requests.get(url, params=page_params or None, headers=headers or None, timeout=60)
+            resp.raise_for_status()
+            _record_resolved_url(source, resp.url)
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {}
+            records = _extract_json_records(payload)
+            if not records:
+                break
+            frames.append(pd.DataFrame(records))
+            exceeded = bool(payload.get("exceededTransferLimit")) if isinstance(payload, dict) else False
+            if not exceeded and page_size and len(records) < page_size:
+                break
+            offset += page_size if page_size else len(records)
+            iterations += 1
+            if max_pages and iterations >= max_pages:
+                break
+        if frames:
+            return pd.concat(frames, ignore_index=True)
+        return pd.DataFrame()
+
+    resp = requests.get(url, params=params or None, headers=headers or None, timeout=60)
+    resp.raise_for_status()
+    _record_resolved_url(source, resp.url)
+    try:
+        payload = resp.json()
+    except ValueError:
+        return pd.DataFrame()
+    records = _extract_json_records(payload)
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
+
+
 def _load_frame(source: Dict[str, Any]) -> SourceFrame:
-    url = str(source.get("url", "")).strip()
+    url, params, headers = _prepare_request(source)
     kind = str(source.get("kind", "csv") or "csv").lower()
     if not url:
         raise ValueError("source missing url")
-    buf: io.BytesIO | Path
+
     if url.startswith("http://") or url.startswith("https://"):
         dbg(f"fetching {url}")
-        buf = _load_remote(url, headers=source.get("headers"))
+        if kind == "json":
+            df = _fetch_json_frame(url, params, headers, source)
+        else:
+            buf = _load_remote(url, headers=headers)
+            _record_resolved_url(source, url)
+            if kind in {"xlsx", "xls"}:
+                df = pd.read_excel(buf, dtype=str)
+            else:
+                df = pd.read_csv(buf, dtype=str)
     else:
-        path = Path(url)
+        path = Path(render_with_context(url))
         if not path.is_absolute():
-            path = ROOT / url
+            path = ROOT / path
         if not path.exists():
             raise FileNotFoundError(f"source path not found: {path}")
-        buf = path
-    if kind == "xlsx" or kind == "xls":
-        df = pd.read_excel(buf, dtype=str)
-    else:
-        df = pd.read_csv(buf, dtype=str)
+        _record_resolved_url(source, str(path))
+        if kind in {"xlsx", "xls"}:
+            df = pd.read_excel(path, dtype=str)
+        elif kind == "json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            df = pd.DataFrame(_extract_json_records(payload))
+        else:
+            df = pd.read_csv(path, dtype=str)
+
     return _prepare_frame(df)
 
 
@@ -621,9 +771,9 @@ def collect_rows() -> List[Dict[str, Any]]:
     for source in sources:
         name = str(source.get("name") or "who_phe").strip()
         disease = str(source.get("disease") or "PHE").strip()
-        source_url = str(source.get("url", ""))
-        publication_date = str(source.get("publication_date", ""))
-        doc_title = source.get("doc_title") or f"WHO PHE {disease} surveillance"
+        publication_date = render_with_context(str(source.get("publication_date", "")))
+        doc_title_raw = source.get("doc_title") or f"WHO PHE {disease} surveillance"
+        doc_title = render_with_context(str(doc_title_raw))
 
         try:
             frame = _load_frame(source)
@@ -636,6 +786,8 @@ def collect_rows() -> List[Dict[str, Any]]:
         except Exception as exc:
             dbg(f"source {name} failed to load: {exc}")
             continue
+
+        source_url = str(source.get("resolved_url") or source.get("url", ""))
 
         try:
             parsed_rows, series_type = _parse_rows_for_source(source, frame, name_to_iso3)

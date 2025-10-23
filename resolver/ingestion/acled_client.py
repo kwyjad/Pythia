@@ -18,7 +18,11 @@ from urllib.parse import urlencode
 
 from .acled_auth import get_auth_header
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion.utils.io import resolve_output_path
+from resolver.ingestion.utils.io import (
+    render_with_context,
+    resolve_ingestion_window,
+    resolve_output_path,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -272,6 +276,51 @@ def _build_source_url(base_url: str, params: Dict[str, Any], token_keys: Sequenc
     return f"{base_url}?{urlencode(safe_params, doseq=True)}"
 
 
+def _resolve_query_params(config: Dict[str, Any]) -> Dict[str, Any]:
+    params: Dict[str, Any] = {}
+    raw = config.get("query") if isinstance(config, dict) else None
+    if not isinstance(raw, dict):
+        return params
+    for key, value in raw.items():
+        if isinstance(value, list):
+            resolved = [render_with_context(str(item)) for item in value]
+            params[key] = [item for item in resolved if item != ""]
+        elif isinstance(value, (str, int, float)):
+            if isinstance(value, str):
+                rendered = render_with_context(value)
+                if rendered == "":
+                    continue
+                params[key] = rendered
+            else:
+                params[key] = value
+        else:
+            params[key] = value
+    return params
+
+
+def _apply_query_auth(params: Dict[str, Any], config: Dict[str, Any]) -> None:
+    auth = config.get("auth") if isinstance(config, dict) else None
+    if not isinstance(auth, dict):
+        return
+    if str(auth.get("type") or "").strip().lower() != "query":
+        return
+    auth_params = auth.get("params")
+    if not isinstance(auth_params, dict):
+        return
+    for key, value in auth_params.items():
+        if isinstance(value, list):
+            rendered = [render_with_context(str(item)) for item in value]
+            filtered = [item for item in rendered if item != ""]
+            if filtered:
+                params[key] = filtered
+        elif isinstance(value, str):
+            rendered = render_with_context(value)
+            if rendered != "":
+                params[key] = rendered
+        elif value is not None:
+            params[key] = value
+
+
 def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
     base_url = os.getenv("ACLED_BASE", config.get("base_url", "https://api.acleddata.com"))
 
@@ -280,17 +329,27 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
     max_pages = _env_int("RESOLVER_MAX_PAGES")
     max_results = _env_int("RESOLVER_MAX_RESULTS")
 
-    end_date = date.today()
-    start_date = end_date - timedelta(days=window_days)
+    override_start, override_end = resolve_ingestion_window()
+    end_date = override_end or date.today()
+    start_date = override_start or (end_date - timedelta(days=window_days))
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
 
     params: Dict[str, Any] = {
-        "event_date": f"{start_date:%Y-%m-%d}|{end_date:%Y-%m-%d}",
         "limit": limit,
         "page": 1,
-        "format": "json",
     }
 
-    token_keys = {"access_token", "key", "token"}
+    params.update(_resolve_query_params(config))
+    params.setdefault("format", "json")
+    params["event_date"] = f"{start_date:%Y-%m-%d}|{end_date:%Y-%m-%d}"
+    params.setdefault("event_date_where", "between")
+    params.setdefault("limit", limit)
+    params.setdefault("page", 1)
+
+    _apply_query_auth(params, config)
+
+    token_keys = {"access_token", "key", "token", "email", "username", "password"}
     source_url = _build_source_url(base_url, params, token_keys)
 
     records: List[Dict[str, Any]] = []

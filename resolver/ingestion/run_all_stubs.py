@@ -122,6 +122,11 @@ INCLUDE_STUBS = os.environ.get("RESOLVER_INCLUDE_STUBS", "0") == "1"
 FAIL_ON_STUB_ERROR = os.environ.get("RESOLVER_FAIL_ON_STUB_ERROR", "0") == "1"
 FORCE_DTM_STUB = os.environ.get("RESOLVER_FORCE_DTM_STUB", "0") == "1"
 
+_SELECTED_DEFAULT = (os.environ.get("SELECTED") or "list").strip().lower() or "list"
+if _SELECTED_DEFAULT not in {"list", "fetch"}:
+    _SELECTED_DEFAULT = "list"
+SELECTED_MODE = _SELECTED_DEFAULT
+
 REAL = [
     "ifrc_go_client.py",
     "reliefweb_client.py",
@@ -1193,9 +1198,12 @@ def _resolve_enablement(
                 applied_skip_reason=secret_reason,
                 ci_gate_reason=spec.ci_gate_reason,
             )
+        selection = "list"
+        if spec.kind == "real" and SELECTED_MODE in {"list", "fetch"}:
+            selection = SELECTED_MODE
         return EnableDecision(
             should_run=True,
-            gated_by="selected:list",
+            gated_by=f"selected:{selection}",
             forced_sources=tuple(forced_sources),
             config_enabled=config_enabled,
             has_config_flag=has_flag,
@@ -1375,6 +1383,12 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             " fetch windows"
         ),
     )
+    parser.add_argument(
+        "--selected",
+        choices=("list", "fetch"),
+        default=None,
+        help="selection mode for diagnostics gating (list or fetch)",
+    )
     if argv is None:
         return parser.parse_args()
     return parser.parse_args(argv)
@@ -1382,6 +1396,11 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv)
+    global SELECTED_MODE
+    selected_mode = (args.selected or os.environ.get("SELECTED") or SELECTED_MODE).strip().lower()
+    if selected_mode not in {"list", "fetch"}:
+        selected_mode = "list"
+    SELECTED_MODE = selected_mode
     root_input = sys.argv if argv is None else ['<custom>'] + list(argv)
     requested = {_normalise_name(name) for name in args.connector if name}
     selected: Optional[set[str]] = requested or None
@@ -1460,6 +1479,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "run_stubs_arg": args.run_stubs,
             "only": args.only,
             "pattern": args.pattern,
+            "selected_mode": SELECTED_MODE,
         },
     )
 
