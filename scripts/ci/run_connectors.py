@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Sequence
 
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
@@ -29,6 +30,70 @@ DEFAULT_CONNECTORS: List[str] = [
 
 LOGS_DIR = Path("diagnostics") / "ingestion" / "logs"
 REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--extra-args",
+        action="append",
+        default=[],
+        metavar="CONNECTOR=ARGS",
+        help=(
+            "Optional connector-specific CLI arguments. Can be repeated, e.g. "
+            "--extra-args 'dtm_client=--strict-empty'"
+        ),
+    )
+    parser.add_argument(
+        "--extra-env",
+        action="append",
+        default=[],
+        metavar="CONNECTOR=KEY=VALUE",
+        help=(
+            "Optional connector-specific environment overrides. Can be repeated, e.g. "
+            "--extra-env 'dtm_client=DTM_NO_DATE_FILTER=1'"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _parse_extra_args(values: Sequence[str]) -> Dict[str, List[str]]:
+    mapping: Dict[str, List[str]] = {}
+    for raw in values:
+        text = (raw or "").strip()
+        if not text or "=" not in text:
+            continue
+        connector, extra = text.split("=", 1)
+        key = connector.strip()
+        if not key:
+            continue
+        args = shlex.split(extra.strip()) if extra.strip() else []
+        if key in mapping:
+            mapping[key].extend(args)
+        else:
+            mapping[key] = list(args)
+    return mapping
+
+
+def _parse_extra_env(values: Sequence[str]) -> Dict[str, Dict[str, str]]:
+    mapping: Dict[str, Dict[str, str]] = {}
+    for raw in values:
+        text = (raw or "").strip()
+        if not text or "=" not in text:
+            continue
+        connector, rest = text.split("=", 1)
+        key_value = rest.strip()
+        if not connector or "=" not in key_value:
+            continue
+        key, value = key_value.split("=", 1)
+        conn_key = connector.strip()
+        env_key = key.strip()
+        if not conn_key or not env_key:
+            continue
+        env_value = value.strip()
+        bucket = mapping.setdefault(conn_key, {})
+        bucket[env_key] = env_value
+    return mapping
 
 
 class TeeProcess:
@@ -103,7 +168,10 @@ def _resolve_connectors(env: Dict[str, str]) -> List[str]:
     return raw_list or list(DEFAULT_CONNECTORS)
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    extra_args = _parse_extra_args(args.extra_args)
+    extra_env = _parse_extra_env(args.extra_env)
     root = Path.cwd()
     logs_dir = root / LOGS_DIR
     report_path = root / REPORT_PATH
@@ -136,10 +204,17 @@ def main() -> int:
             continue
         module = f"resolver.ingestion.{name}"
         cmd = [python_exe, "-m", module]
+        additional = extra_args.get(name, [])
+        if additional:
+            cmd.extend(additional)
         log_path = logs_dir / f"{name}.log"
         print(f"=== RUN {name} → {log_path} ===")
         diagnostics_ctx = diagnostics_start_run(name, "real")
-        rc = try_with_optional_debug(cmd, log_path, env)
+        connector_env = dict(env)
+        overrides = extra_env.get(name)
+        if overrides:
+            connector_env.update(overrides)
+        rc = try_with_optional_debug(cmd, log_path, connector_env)
         status = "ok" if rc == 0 else "error"
         reason = None if rc == 0 else f"exit code {rc}"
         result = diagnostics_finalize_run(
