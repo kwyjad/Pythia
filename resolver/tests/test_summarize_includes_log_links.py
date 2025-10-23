@@ -23,10 +23,16 @@ def test_summary_includes_log_links(monkeypatch, tmp_path: Path) -> None:
     markdown = summarize_connectors.build_markdown(entries)
 
     assert "| Logs |" in markdown
+    assert "| Meta |" in markdown
 
     table_lines = [line for line in markdown.splitlines() if line.startswith("| ")]
     alpha_line = next(line for line in table_lines if line.startswith("| alpha_client |"))
     beta_line = next(line for line in table_lines if line.startswith("| beta_client |"))
 
-    assert alpha_line.endswith("| diagnostics/ingestion/logs/alpha_client.log |")
-    assert beta_line.endswith("| — |")
+    alpha_cells = [cell.strip() for cell in alpha_line.strip("| ").split(" | ")]
+    beta_cells = [cell.strip() for cell in beta_line.strip("| ").split(" | ")]
+
+    assert alpha_cells[-2] == "diagnostics/ingestion/logs/alpha_client.log"
+    assert alpha_cells[-1] == "—"
+    assert beta_cells[-2] == "—"
+    assert beta_cells[-1] == "—"

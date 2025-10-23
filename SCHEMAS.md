@@ -276,7 +276,43 @@ records any missing values in `diagnostics/ingestion/dtm_config_issues.json`.
 | `name` | no | Friendly name used in logs and diagnostics. Defaults to the `id_or_path` when omitted. |
 | `type` | no | Source type. Only `file` is currently supported. |
 | `measure` | no | Set to `stock` (default) to derive flows or `flow` when the CSV already reports per-period movements. |
-| `country_column`, `admin1_column`, `date_column`, `value_column`, `cause_column` | no | Optional overrides for column detection. When unspecified the connector infers columns using common aliases. |
+| `country_column`, `admin1_column`, `date_column`, `value_column`, `cause_column` | no | Optional overrides for column detection. When unspecified the connector infers columns using common aliases. The runtime validator confirms that the resolved `date_column` exists; sources with missing columns are listed under `diagnostics/ingestion/dtm_run.json` → `sources.invalid`. |
 
 When `LOG_LEVEL=DEBUG`, the resolved source list is mirrored to
 `diagnostics/ingestion/dtm_sources_resolved.json` for triage.
+
+### Output metadata
+
+- `data/staging/dtm_displacement.csv.meta.json` mirrors the CSV output and records:
+  - `row_count`: number of written rows (excluding the header).
+  - `backfill_start`/`backfill_end`: the effective ingestion window resolved from environment variables.
+  - `sources_total`, `sources_valid`, `sources_invalid`: summary counts after configuration and runtime validation.
+- `diagnostics/ingestion/dtm_run.json` is rewritten on every execution and has the shape:
+
+```jsonc
+{
+  "window": {"start": "2023-01-01", "end": "2023-12-31", "disabled": false},
+  "outputs": {"csv": "…", "meta": "…"},
+  "sources": {
+    "valid": [
+      {"name": "…", "rows_before": 10, "rows_after": 8, "dropped": 2,
+       "parse_errors": 1, "min": "2023-01-01", "max": "2023-02-01"}
+    ],
+    "invalid": [
+      {"name": "missing-id", "reason": "missing id_or_path"},
+      {"name": "missing-date", "reason": "missing date_column"}
+    ]
+  },
+  "totals": {
+    "rows_before": 12,
+    "rows_after": 8,
+    "rows_written": 8,
+    "kept": 8,
+    "dropped": 4,
+    "parse_errors": 1,
+    "invalid_sources": 2
+  }
+}
+```
+
+Runs that write no data rows are classified as **ok-empty** and emit reasons such as `header-only; 2 sources invalid; kept=0`. The connector summary reads the `totals.kept`, `totals.dropped`, and `totals.parse_errors` fields to populate the dedicated columns in the Markdown table.

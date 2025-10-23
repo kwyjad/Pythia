@@ -96,6 +96,16 @@ def _normalise_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _load_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict(data) if isinstance(data, Mapping) else {}
+
+
 def load_report(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"Report not found: {path}")
@@ -191,6 +201,15 @@ def _format_sample_list(label: str, samples: Sequence[Tuple[str, int]]) -> str |
     return f"- **{label}:** {', '.join(items)}"
 
 
+def _format_optional_int(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        return str(int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _format_extras(extras: Mapping[str, Any]) -> str | None:
     if not extras:
         return None
@@ -242,12 +261,18 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         "Duration",
         "2xx/4xx/5xx (retries)",
         "Rows (f/n/w)",
+        "Kept",
+        "Dropped",
+        "ParseErrs",
         "Coverage (ym)",
         "Coverage (as_of)",
         "Logs",
+        "Meta",
     ]
     logs_dir = Path("diagnostics/ingestion/logs")
     rows: List[List[str]] = []
+    dtm_run_path: Path | None = None
+    dtm_run_data: Dict[str, Any] | None = None
     for entry in entries:
         coverage = entry.get("coverage", {})
         connector_id = str(entry.get("connector_id"))
@@ -262,7 +287,53 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 if log_cell != "—"
                 else config_path_text
             )
+        meta_path_raw = extras.get("meta_path")
+        meta_cell = "—"
+        if meta_path_raw:
+            meta_path = Path(str(meta_path_raw))
+            if meta_path.exists():
+                meta_cell = str(meta_path)
         reason_text = entry.get("reason")
+        status_text = str(entry.get("status"))
+        kept_cell = "—"
+        dropped_cell = "—"
+        parse_cell = "—"
+        if connector_id == "dtm_client":
+            status_raw = str(extras.get("status_raw") or status_text)
+            rows_written_extra = extras.get("rows_written")
+            if rows_written_extra is not None:
+                rows_written_value = _coerce_int(rows_written_extra)
+            else:
+                rows_written_value = _coerce_int(entry.get("counts", {}).get("written"))
+            if status_raw == "ok-empty" or rows_written_value == 0:
+                status_text = "ok-empty"
+                if not reason_text:
+                    reason_text = "header-only (0 rows)"
+            elif status_raw:
+                status_text = status_raw
+            run_details_raw = extras.get("run_details_path")
+            candidate_path = (
+                Path(str(run_details_raw))
+                if run_details_raw
+                else Path("diagnostics/ingestion/dtm_run.json")
+            )
+            if dtm_run_data is None or candidate_path != dtm_run_path:
+                dtm_run_path = candidate_path
+                dtm_run_data = _load_json(candidate_path)
+            totals = _ensure_dict(dtm_run_data.get("totals")) if dtm_run_data else {}
+            kept_value = totals.get("kept")
+            dropped_value = totals.get("dropped")
+            parse_value = totals.get("parse_errors")
+            if kept_value is not None:
+                kept_cell = _format_optional_int(kept_value)
+            elif totals.get("rows_after") is not None:
+                kept_cell = _format_optional_int(totals.get("rows_after"))
+            elif totals.get("rows_written") is not None:
+                kept_cell = _format_optional_int(totals.get("rows_written"))
+            if dropped_value is not None:
+                dropped_cell = _format_optional_int(dropped_value)
+            if parse_value is not None:
+                parse_cell = _format_optional_int(parse_value)
         if (
             connector_id == "dtm_client"
             and isinstance(reason_text, str)
@@ -279,14 +350,18 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             [
                 connector_id,
                 str(entry.get("mode")),
-                str(entry.get("status")),
+                status_text,
                 reason_cell,
                 _format_duration(entry.get("duration_ms", 0)),
                 _format_http(entry.get("http", {})),
                 _format_rows(entry.get("counts", {})),
+                kept_cell,
+                dropped_cell,
+                parse_cell,
                 _format_coverage(coverage.get("ym_min"), coverage.get("ym_max")),
                 _format_coverage(coverage.get("as_of_min"), coverage.get("as_of_max")),
                 log_cell,
+                meta_cell,
             ]
         )
     if not rows:
