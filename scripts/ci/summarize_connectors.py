@@ -228,6 +228,22 @@ def _render_details(entry: Mapping[str, Any]) -> str:
     connector = entry.get("connector_id", "unknown")
     lines = ["<details>", f"<summary>{connector} diagnostics</summary>", ""]
     bullets: List[str] = []
+
+    # Show API key configuration status for connectors that need it
+    extras = _ensure_dict(entry.get("extras", {}))
+    if "api_key_configured" in extras:
+        api_configured = extras["api_key_configured"]
+        if api_configured:
+            bullets.append("- **API Key:** ✓ Configured")
+        else:
+            bullets.append("- **API Key:** ✗ Not configured")
+            bullets.append("- **Action Required:** Set `DTM_API_KEY` in GitHub secrets to fetch live data")
+
+    # Show mode (api, file, header-only) if available
+    mode_info = extras.get("mode")
+    if mode_info:
+        bullets.append(f"- **Mode:** {mode_info}")
+
     top_iso3 = _format_sample_list("Top ISO3", entry.get("samples", {}).get("top_iso3", []))
     if top_iso3:
         bullets.append(top_iso3)
@@ -241,9 +257,16 @@ def _render_details(entry: Mapping[str, Any]) -> str:
     last_status = http.get("last_status")
     if last_status not in (None, ""):
         bullets.append(f"- **Last status:** {last_status}")
-    extras_line = _format_extras(entry.get("extras", {}))
+
+    # Show additional extras, but filter out the ones we already displayed
+    filtered_extras = {
+        k: v for k, v in extras.items()
+        if k not in ("api_key_configured", "mode")
+    }
+    extras_line = _format_extras(filtered_extras)
     if extras_line:
         bullets.append(extras_line)
+
     if not bullets:
         bullets.append("- _No additional diagnostics recorded._")
     lines.extend(bullets)
