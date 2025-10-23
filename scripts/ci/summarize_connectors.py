@@ -244,13 +244,18 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         "Rows (f/n/w)",
         "Coverage (ym)",
         "Coverage (as_of)",
+        "Logs",
     ]
+    logs_dir = Path("diagnostics/ingestion/logs")
     rows: List[List[str]] = []
     for entry in entries:
         coverage = entry.get("coverage", {})
+        connector_id = str(entry.get("connector_id"))
+        log_path = logs_dir / f"{connector_id}.log"
+        log_cell = str(log_path) if log_path.exists() else "—"
         rows.append(
             [
-                str(entry.get("connector_id")),
+                connector_id,
                 str(entry.get("mode")),
                 str(entry.get("status")),
                 _format_reason(entry.get("reason")),
@@ -259,6 +264,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 _format_rows(entry.get("counts", {})),
                 _format_coverage(coverage.get("ym_min"), coverage.get("ym_max")),
                 _format_coverage(coverage.get("as_of_min"), coverage.get("as_of_max")),
+                log_cell,
             ]
         )
     if not rows:

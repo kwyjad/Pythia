@@ -119,4 +119,4 @@ def test_coverage_formats_missing_values(tmp_path: Path) -> None:
         reason="missing secret",
     )
     markdown = summarize_connectors.build_markdown(summarize_connectors.load_report(report))
-    assert "| fews_stub | stub | skipped | missing secret | — | 0/0/0 (0) | 0/0/0 | — | — |" in markdown
+    assert "| fews_stub | stub | skipped | missing secret | — | 0/0/0 (0) | 0/0/0 | — | — | — |" in markdown

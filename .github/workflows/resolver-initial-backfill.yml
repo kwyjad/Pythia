@@ -82,10 +82,13 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
-      - name: Run connectors
+      - name: Run connectors (with per-connector log tee)
         env:
           RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
           RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
+          ONLY_CONNECTOR: ${{ inputs.only_connector }}
+          LOG_LEVEL: ${{ inputs.log_level }}
+          # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
@@ -94,11 +97,7 @@ jobs:
             export PYTHONWARNINGS=default
           fi
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-          ARGS=("--mode" "real" "--retries" "2" "--selected" "fetch")
-          if [ -n "${ONLY_CONNECTOR:-}" ]; then
-            ARGS+=("--only" "${ONLY_CONNECTOR}")
-          fi
-          python resolver/ingestion/run_all_stubs.py "${ARGS[@]}"
+          python -m scripts.ci.run_connectors
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
@@ -116,6 +115,14 @@ jobs:
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary
+
+      - name: Upload connector logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connector-logs
+          path: diagnostics/ingestion/logs/
+          if-no-files-found: warn
 
       - name: Upload connector diagnostics
         if: always()

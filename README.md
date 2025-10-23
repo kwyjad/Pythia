@@ -40,6 +40,12 @@ python -m resolver.tools.build_llm_context --months 12 --outdir context/
 
 Use the `log_level` input on resolver workflow dispatch forms to control verbosity. Selecting `DEBUG` enables Python developer mode, default warnings, and command echoing so triaging failing connectors is easier.
 
+### Raw connector logs
+
+- Each connector mirrors its stdout/stderr stream into `diagnostics/ingestion/logs/<connector>.log` while the workflow is running.
+- Pick `log_level=DEBUG` when you need deeper traces; the runner automatically passes `--debug` to connectors that support it and falls back gracefully when they do not.
+- The diagnostics summary table now includes a **Logs** column with links to those files, and the workflow publishes a dedicated `connector-logs` artifact so you can download the entire directory when investigating failures.
+
 ### Resolver monthly pipeline
 
 - Workflow: `.github/workflows/resolver-monthly.yml` runs on the first of every month at 02:00 Europe/Istanbul (and on manual dispatch) to ingest live connectors, freeze `resolver/snapshots/<YYYY-MM>/`, and rebuild the 12‑month LLM context bundle.
