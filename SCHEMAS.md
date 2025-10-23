@@ -263,3 +263,20 @@ Example JSONL entry:
   "extras": {"rows_method": "manifest", "rows_before": 0, "rows_written": 510}
 }
 ```
+
+## DTM source configuration
+
+Each `resolver/ingestion/config/dtm.yml` entry must declare a file-like source. The
+preflight validator enforces the required fields before ingestion starts and
+records any missing values in `diagnostics/ingestion/dtm_config_issues.json`.
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `id_or_path` | yes | Absolute path or cloud identifier for the CSV payload. The connector skips entries that omit this value and records the failure in diagnostics. |
+| `name` | no | Friendly name used in logs and diagnostics. Defaults to the `id_or_path` when omitted. |
+| `type` | no | Source type. Only `file` is currently supported. |
+| `measure` | no | Set to `stock` (default) to derive flows or `flow` when the CSV already reports per-period movements. |
+| `country_column`, `admin1_column`, `date_column`, `value_column`, `cause_column` | no | Optional overrides for column detection. When unspecified the connector infers columns using common aliases. |
+
+When `LOG_LEVEL=DEBUG`, the resolved source list is mirrored to
+`diagnostics/ingestion/dtm_sources_resolved.json` for triage.
