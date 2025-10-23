@@ -266,9 +266,50 @@ Example JSONL entry:
 
 ## DTM source configuration
 
-Each `resolver/ingestion/config/dtm.yml` entry must declare a file-like source. The
-preflight validator enforces the required fields before ingestion starts and
-records any missing values in `diagnostics/ingestion/dtm_config_issues.json`.
+The DTM connector supports two modes: **API mode** (recommended) and **file mode** (legacy).
+
+### API Mode (DTM API v3)
+
+When the configuration includes an `api` section and `sources` is empty or omitted, the connector fetches data directly from the IOM DTM API v3.
+
+**Requirements:**
+- `DTM_API_KEY` environment variable must be set with your subscription key
+- Register at https://dtm-apim-portal.iom.int/ and subscribe to API-V3 to obtain a key
+
+**Configuration fields:**
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `api.base_url` | no | API base URL (default: `https://dtm-apim-portal.iom.int/api/v3`) |
+| `api.rate_limit_delay` | no | Seconds to wait between requests (default: `1.0`) |
+| `api.timeout` | no | Request timeout in seconds (default: `30`) |
+| `admin_levels` | no | List of admin levels to fetch: `admin0`, `admin1`, `admin2` (default: all three) |
+| `countries` | no | List of country names to fetch. If `null` or omitted, fetches all available countries |
+| `operations` | no | List of operation types to filter (e.g., `"Displacement due to conflict"`). If `null`, fetches all |
+| `field_mapping` | no | Maps API response field names to internal schema (see config file for defaults) |
+| `output.measure` | no | Set to `stock` (default) to convert cumulative figures to flows |
+
+**Example configuration:**
+```yaml
+enabled: true
+api:
+  base_url: "https://dtm-apim-portal.iom.int/api/v3"
+  rate_limit_delay: 1.0
+  timeout: 30
+admin_levels:
+  - admin0
+  - admin1
+  - admin2
+countries:
+  - Ethiopia
+  - Sudan
+```
+
+### File Mode (Legacy)
+
+When `sources` contains entries with `id_or_path`, the connector reads from local CSV files.
+
+**Configuration fields:**
 
 | Field | Required | Description |
 | --- | --- | --- |

@@ -1,10 +1,93 @@
+# DTM API Configuration
+# Displacement Tracking Matrix (IOM) - API v3
+# Registration: https://dtm-apim-portal.iom.int/
+# Requires: DTM_API_KEY environment variable
+
 enabled: true
-sources:
-  - type: file
-    id_or_path: ""
-stock_to_flow_rule: diff_nonneg
+
+# API connection settings
+api:
+  base_url: "https://dtm-apim-portal.iom.int/api/v3"
+  rate_limit_delay: 1.0  # seconds between requests
+  timeout: 30  # request timeout in seconds
+
+# Data collection windows (will be overridden by CLI args)
+window:
+  start_date: null  # Uses --start-date from CLI
+  end_date: null    # Uses --end-date from CLI
+
+# Which admin levels to fetch
+admin_levels:
+  - admin0  # Country level
+  - admin1  # State/province level
+  - admin2  # District level
+
+# Countries to fetch (null = all available countries)
+# Uncomment and modify to limit to specific countries
+countries: null
+# countries:
+#   - Ethiopia
+#   - Sudan
+#   - Lebanon
+#   - Somalia
+#   - Ukraine
+#   - Yemen
+#   - Afghanistan
+
+# Operations to include (null = all)
+# Uncomment to filter by displacement type
+operations: null
+# operations:
+#   - "Displacement due to conflict"
+#   - "Displacement due to disaster"
+
+# Field mappings from API response to our schema
+field_mapping:
+  country_column: "CountryName"
+  admin1_column: "Admin1Name"
+  admin2_column: "Admin2Name"
+  date_column: "ReportingDate"
+  idp_column: "TotalIDPs"  # Main IDP count field (varies by endpoint)
+  round_column: "RoundNumber"
+  admin1_pcode_column: "Admin1Pcode"
+  admin2_pcode_column: "Admin2Pcode"
+
+# Alternative field names to try (API v3 may vary)
+field_aliases:
+  idp_count:
+    - "TotalIDPs"
+    - "IDPTotal"
+    - "Total_IDPs"
+    - "NumIndividuals"
+    - "Individuals"
+
+# Output settings
+output:
+  measure: "stock"  # DTM provides stock (point-in-time) data
+  dedupe_keys:
+    - country
+    - admin1
+    - admin2
+    - reporting_date
+    - round_number
+
+# Admin aggregation mode: "both", "admin1", "country"
 admin_agg: both
+
+# Cause/displacement driver mapping
 cause_map:
   conflict: conflict
   disaster: disaster
+  "displacement due to conflict": conflict
+  "displacement due to disaster": disaster
+
+# Country name aliases (for standardization)
 country_aliases: {}
+
+# Legacy compatibility (for backwards compatibility with file-based sources)
+# Leave empty when using API mode
+sources: []
+
+# Data processing options
+stock_to_flow_rule: diff_nonneg
+allow_first_month_delta: false

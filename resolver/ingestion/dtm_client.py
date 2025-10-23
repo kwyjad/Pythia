@@ -25,9 +25,12 @@ from typing import (
 )
 
 import pandas as pd
+import requests
+import time
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion.dtm_auth import get_dtm_api_key, get_auth_headers
 from resolver.ingestion._shared.date_utils import parse_dates, window_mask
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
 from resolver.ingestion._shared.validation import validate_required_fields
@@ -143,6 +146,7 @@ __all__ = [
     "SERIES_CUMULATIVE",
     "Hazard",
     "SourceResult",
+    "DTMApiClient",
     "load_registries",
     "infer_hazard",
     "rollup_subnational",
@@ -154,6 +158,221 @@ __all__ = [
     "parse_args",
     "main",
 ]
+
+
+class DTMApiClient:
+    """Client for fetching data from DTM API v3."""
+
+    def __init__(self, config: dict):
+        """Initialize DTM API client.
+
+        Args:
+            config: Configuration dictionary with 'api' settings.
+        """
+        api_cfg = config.get("api", {})
+        self.base_url = api_cfg.get("base_url", "https://dtm-apim-portal.iom.int/api/v3")
+        self.timeout = api_cfg.get("timeout", 30)
+        self.rate_limit_delay = api_cfg.get("rate_limit_delay", 1.0)
+
+        try:
+            self.api_key = get_dtm_api_key()
+        except RuntimeError as exc:
+            LOG.error("DTM API authentication failed: %s", exc)
+            raise
+
+        LOG.info("DTM API client initialized (base_url=%s)", self.base_url)
+
+    def _make_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        http_counts: Optional[Dict[str, int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Make authenticated request to DTM API.
+
+        Args:
+            endpoint: API endpoint (e.g., "Countries", "IdpAdmin0Data")
+            params: Query parameters
+            http_counts: Dictionary to update with HTTP status counts
+
+        Returns:
+            List of data dictionaries from API response
+
+        Raises:
+            requests.HTTPError: If request fails
+        """
+        url = f"{self.base_url}/{endpoint}"
+        headers = get_auth_headers()
+
+        # Apply rate limiting
+        if self.rate_limit_delay > 0:
+            time.sleep(self.rate_limit_delay)
+
+        LOG.debug("DTM API request: %s (params=%s)", endpoint, params)
+
+        try:
+            response = requests.get(
+                url, headers=headers, params=params, timeout=self.timeout
+            )
+
+            # Update HTTP counts
+            if http_counts is not None:
+                status_code = response.status_code
+                if 200 <= status_code < 300:
+                    http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+                elif 400 <= status_code < 500:
+                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+                elif 500 <= status_code < 600:
+                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
+                http_counts["last_status"] = status_code
+
+            response.raise_for_status()
+            data = response.json()
+
+            # API returns different structures; handle both list and dict with 'data' key
+            if isinstance(data, list):
+                result = data
+            elif isinstance(data, dict) and "data" in data:
+                result = data["data"]
+            elif isinstance(data, dict):
+                result = [data]
+            else:
+                result = []
+
+            LOG.debug("DTM API response: %s rows from %s", len(result), endpoint)
+            return result
+
+        except requests.exceptions.Timeout:
+            LOG.error("DTM API timeout for %s", endpoint)
+            raise
+        except requests.exceptions.HTTPError as exc:
+            LOG.error(
+                "DTM API HTTP error for %s: %s (status=%s)",
+                endpoint,
+                exc,
+                exc.response.status_code if exc.response else "unknown",
+            )
+            raise
+        except requests.exceptions.RequestException as exc:
+            LOG.error("DTM API request failed for %s: %s", endpoint, exc)
+            raise
+
+    def get_countries(
+        self, http_counts: Optional[Dict[str, int]] = None
+    ) -> pd.DataFrame:
+        """Fetch list of all available countries.
+
+        Args:
+            http_counts: Dictionary to update with HTTP status counts
+
+        Returns:
+            DataFrame with country information
+        """
+        data = self._make_request("Countries", http_counts=http_counts)
+        return pd.DataFrame(data)
+
+    def get_idp_admin0(
+        self,
+        country: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        from_round: Optional[int] = None,
+        to_round: Optional[int] = None,
+        http_counts: Optional[Dict[str, int]] = None,
+    ) -> pd.DataFrame:
+        """Fetch IDP data at country level (Admin 0).
+
+        Args:
+            country: Filter by country name
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+            from_round: Start round number
+            to_round: End round number
+            http_counts: Dictionary to update with HTTP status counts
+
+        Returns:
+            DataFrame with Admin 0 IDP data
+        """
+        params: Dict[str, Any] = {}
+        if country:
+            params["CountryName"] = country
+        if from_date:
+            params["FromReportingDate"] = from_date
+        if to_date:
+            params["ToReportingDate"] = to_date
+        if from_round is not None:
+            params["FromRoundNumber"] = from_round
+        if to_round is not None:
+            params["ToRoundNumber"] = to_round
+
+        data = self._make_request("IdpAdmin0Data", params, http_counts=http_counts)
+        return pd.DataFrame(data)
+
+    def get_idp_admin1(
+        self,
+        country: Optional[str] = None,
+        admin1: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        http_counts: Optional[Dict[str, int]] = None,
+    ) -> pd.DataFrame:
+        """Fetch IDP data at state/province level (Admin 1).
+
+        Args:
+            country: Filter by country name
+            admin1: Filter by Admin 1 name
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+            http_counts: Dictionary to update with HTTP status counts
+
+        Returns:
+            DataFrame with Admin 1 IDP data
+        """
+        params: Dict[str, Any] = {}
+        if country:
+            params["CountryName"] = country
+        if admin1:
+            params["Admin1Name"] = admin1
+        if from_date:
+            params["FromReportingDate"] = from_date
+        if to_date:
+            params["ToReportingDate"] = to_date
+
+        data = self._make_request("IdpAdmin1Data", params, http_counts=http_counts)
+        return pd.DataFrame(data)
+
+    def get_idp_admin2(
+        self,
+        country: Optional[str] = None,
+        operation: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        http_counts: Optional[Dict[str, int]] = None,
+    ) -> pd.DataFrame:
+        """Fetch IDP data at district level (Admin 2).
+
+        Args:
+            country: Filter by country name
+            operation: Filter by operation type
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+            http_counts: Dictionary to update with HTTP status counts
+
+        Returns:
+            DataFrame with Admin 2 IDP data
+        """
+        params: Dict[str, Any] = {}
+        if country:
+            params["CountryName"] = country
+        if operation:
+            params["Operation"] = operation
+        if from_date:
+            params["FromReportingDate"] = from_date
+        if to_date:
+            params["ToReportingDate"] = to_date
+
+        data = self._make_request("IdpAdmin2Data", params, http_counts=http_counts)
+        return pd.DataFrame(data)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -742,6 +961,281 @@ def _read_source(
     )
 
 
+def _fetch_api_data(
+    cfg: Mapping[str, Any],
+    *,
+    results: Optional[List[SourceResult]] = None,
+    no_date_filter: bool = False,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    http_counts: Optional[Dict[str, int]] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch IDP data from DTM API for all configured admin levels.
+
+    Args:
+        cfg: Configuration dictionary
+        results: List to append SourceResult objects to
+        no_date_filter: Whether to disable date filtering
+        window_start: Start date for filtering (YYYY-MM-DD)
+        window_end: End date for filtering (YYYY-MM-DD)
+        http_counts: Dictionary to update with HTTP status counts
+
+    Returns:
+        List of records with standardized fields
+    """
+    if results is None:
+        results = []
+    if http_counts is None:
+        http_counts = {"2xx": 0, "4xx": 0, "5xx": 0}
+
+    all_records: List[Dict[str, Any]] = []
+
+    try:
+        client = DTMApiClient(cfg)
+    except RuntimeError as exc:
+        LOG.error("Failed to initialize DTM API client: %s", exc)
+        results.append(
+            SourceResult(
+                source_name="dtm_api",
+                status="error",
+                error=str(exc),
+            )
+        )
+        return []
+
+    admin_levels = cfg.get("admin_levels", ["admin0", "admin1", "admin2"])
+    countries = cfg.get("countries")  # None = all countries
+    operations = cfg.get("operations")  # None = all operations
+
+    # Format dates for API (YYYY-MM-DD)
+    from_date = window_start if not no_date_filter and window_start else None
+    to_date = window_end if not no_date_filter and window_end else None
+
+    LOG.info(
+        "Fetching DTM data: levels=%s, countries=%s, date_range=%s to %s",
+        admin_levels,
+        countries or "all",
+        from_date or "—",
+        to_date or "—",
+    )
+
+    field_mapping = cfg.get("field_mapping", {})
+    field_aliases = cfg.get("field_aliases", {})
+    country_column = field_mapping.get("country_column", "CountryName")
+    admin1_column = field_mapping.get("admin1_column", "Admin1Name")
+    admin2_column = field_mapping.get("admin2_column", "Admin2Name")
+    date_column = field_mapping.get("date_column", "ReportingDate")
+    round_column = field_mapping.get("round_column", "RoundNumber")
+
+    # Get list of IDP count field candidates
+    idp_field_candidates = field_aliases.get("idp_count", ["TotalIDPs", "IDPTotal"])
+    if field_mapping.get("idp_column"):
+        idp_field_candidates.insert(0, field_mapping["idp_column"])
+
+    aliases = cfg.get("country_aliases") or {}
+    measure = cfg.get("output", {}).get("measure", "stock")
+    cause_map = {
+        str(k).strip().lower(): str(v)
+        for k, v in (cfg.get("cause_map") or {}).items()
+    }
+
+    # Iterate over admin levels
+    for admin_level in admin_levels:
+        level_name = admin_level.strip().lower()
+
+        # Determine which countries to fetch
+        country_list = countries if countries else [None]
+
+        for country in country_list:
+            source_label = f"dtm_api_{level_name}"
+            if country:
+                source_label = f"{source_label}_{country}"
+
+            try:
+                if level_name == "admin0":
+                    df = client.get_idp_admin0(
+                        country=country,
+                        from_date=from_date,
+                        to_date=to_date,
+                        http_counts=http_counts,
+                    )
+                elif level_name == "admin1":
+                    df = client.get_idp_admin1(
+                        country=country,
+                        from_date=from_date,
+                        to_date=to_date,
+                        http_counts=http_counts,
+                    )
+                elif level_name == "admin2":
+                    # Admin2 supports operation filtering
+                    for operation in (operations or [None]):
+                        df = client.get_idp_admin2(
+                            country=country,
+                            operation=operation,
+                            from_date=from_date,
+                            to_date=to_date,
+                            http_counts=http_counts,
+                        )
+                        if not df.empty:
+                            break
+                else:
+                    LOG.warning("Unknown admin level: %s", level_name)
+                    continue
+
+                if df.empty:
+                    LOG.debug("No data for %s", source_label)
+                    results.append(
+                        SourceResult(
+                            source_name=source_label,
+                            status="ok",
+                            rows_before=0,
+                            rows_after=0,
+                        )
+                    )
+                    continue
+
+                rows_before = len(df)
+                LOG.debug("Fetched %s rows for %s", rows_before, source_label)
+
+                # Find the IDP count column
+                idp_column = None
+                for candidate in idp_field_candidates:
+                    if candidate in df.columns:
+                        idp_column = candidate
+                        break
+
+                if not idp_column:
+                    LOG.warning(
+                        "No IDP count column found for %s (tried: %s)",
+                        source_label,
+                        idp_field_candidates,
+                    )
+                    results.append(
+                        SourceResult(
+                            source_name=source_label,
+                            status="invalid",
+                            skip_reason="missing IDP count column",
+                            rows_before=rows_before,
+                        )
+                    )
+                    continue
+
+                # Convert DataFrame to records
+                per_admin: dict[tuple[str, str], dict[datetime, float]] = defaultdict(
+                    dict
+                )
+                per_admin_asof: dict[tuple[str, str], dict[datetime, str]] = defaultdict(
+                    dict
+                )
+                causes: dict[tuple[str, str], str] = {}
+
+                for _, row in df.iterrows():
+                    iso = to_iso3(row.get(country_column), aliases)
+                    if not iso:
+                        continue
+
+                    bucket = month_start(row.get(date_column))
+                    if not bucket:
+                        continue
+
+                    admin1 = ""
+                    if admin1_column in df.columns:
+                        admin1 = str(row.get(admin1_column) or "").strip()
+                    if level_name == "admin2" and admin2_column in df.columns:
+                        # For admin2, concatenate admin1 and admin2
+                        admin2 = str(row.get(admin2_column) or "").strip()
+                        if admin2:
+                            admin1 = f"{admin1}/{admin2}" if admin1 else admin2
+
+                    value = _parse_float(row.get(idp_column))
+                    if value is None or value < 0:
+                        continue
+
+                    per_admin[(iso, admin1)][bucket] = value
+
+                    # Use reporting date as as_of
+                    as_of_value = str(row.get(date_column) or "")
+                    if as_of_value:
+                        as_of_value = _parse_iso_date_or_none(as_of_value) or as_of_value
+                    if not as_of_value:
+                        as_of_value = datetime.now(timezone.utc).date().isoformat()
+
+                    existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
+                    if not existing_asof or _is_candidate_newer(
+                        existing_asof, as_of_value
+                    ):
+                        per_admin_asof[(iso, admin1)][bucket] = as_of_value
+
+                    # Set default cause
+                    causes[(iso, admin1)] = _resolve_cause(row.to_dict(), cause_map)
+
+                # Convert to standard record format
+                for key, series in per_admin.items():
+                    iso, admin1 = key
+                    if measure == "stock":
+                        flows = flow_from_stock(series)
+                    else:
+                        flows = {
+                            month_start(k): float(v)
+                            for k, v in series.items()
+                            if month_start(k)
+                        }
+                    cause = causes.get(key, DEFAULT_CAUSE)
+                    for bucket, value in flows.items():
+                        if not bucket or value is None or value <= 0:
+                            continue
+                        record_as_of = (
+                            per_admin_asof.get(key, {}).get(bucket)
+                            or datetime.now(timezone.utc).date().isoformat()
+                        )
+                        all_records.append(
+                            {
+                                "iso3": iso,
+                                "admin1": admin1,
+                                "month": bucket,
+                                "value": float(value),
+                                "cause": cause,
+                                "measure": measure,
+                                "source_id": source_label,
+                                "as_of": record_as_of,
+                            }
+                        )
+
+                rows_after = len(
+                    [r for r in all_records if r["source_id"] == source_label]
+                )
+                LOG.info(
+                    "Processed %s: fetched=%s, kept=%s",
+                    source_label,
+                    rows_before,
+                    rows_after,
+                )
+
+                results.append(
+                    SourceResult(
+                        source_name=source_label,
+                        status="ok",
+                        rows_before=rows_before,
+                        rows_after=rows_after,
+                        http_counts=dict(http_counts),
+                    )
+                )
+
+            except Exception as exc:
+                LOG.error("Failed to fetch %s: %s", source_label, exc, exc_info=True)
+                results.append(
+                    SourceResult(
+                        source_name=source_label,
+                        status="error",
+                        error=str(exc),
+                        http_counts=dict(http_counts),
+                    )
+                )
+
+    LOG.info("Total records fetched from API: %s", len(all_records))
+    return all_records
+
+
 def build_rows(
     cfg: Mapping[str, Any],
     *,
@@ -749,24 +1243,44 @@ def build_rows(
     no_date_filter: bool = False,
     window_start: Optional[str] = None,
     window_end: Optional[str] = None,
+    http_counts: Optional[Dict[str, int]] = None,
 ) -> List[List[Any]]:
     sources = cfg.get("sources") or []
     admin_mode = str(cfg.get("admin_agg") or "both").strip().lower()
     all_records: List[Dict[str, Any]] = []
     collected = results if results is not None else []
-    for entry in sources:
-        if not isinstance(entry, Mapping):
-            continue
-        result = _read_source(
-            entry,
+
+    # Determine if we should use API mode or file mode
+    use_api_mode = "api" in cfg and not sources
+
+    if use_api_mode:
+        # Use API to fetch data
+        LOG.info("Using DTM API mode")
+        api_records = _fetch_api_data(
             cfg,
+            results=collected,
             no_date_filter=no_date_filter,
             window_start=window_start,
             window_end=window_end,
+            http_counts=http_counts,
         )
-        collected.append(result)
-        if result.records:
-            all_records.extend(result.records)
+        all_records.extend(api_records)
+    else:
+        # Use file-based sources
+        LOG.info("Using DTM file mode (%s sources)", len(sources))
+        for entry in sources:
+            if not isinstance(entry, Mapping):
+                continue
+            result = _read_source(
+                entry,
+                cfg,
+                no_date_filter=no_date_filter,
+                window_start=window_start,
+                window_end=window_end,
+            )
+            collected.append(result)
+            if result.records:
+                all_records.extend(result.records)
     if not all_records:
         _log_as_of_fallbacks()
         return []
@@ -1063,6 +1577,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         no_date_filter=no_date_filter,
                         window_start=window_start_iso,
                         window_end=window_end_iso,
+                        http_counts=http_stats,
                     )
                     new_results = source_results[start_count:]
                     for result in new_results:
