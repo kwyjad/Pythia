@@ -23,7 +23,7 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 
 ## Go Live: Initial resolver backfill
 
-- Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back` or `only` connector filter if you need a narrower run).
+- Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
 - The workflow executes the live connectors, freezes `resolver/snapshots/<YYYY-MM>/` for each of the requested months, and dual-writes into DuckDB so downstream selectors stay in sync.
 - The final job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` and uploads `context/facts_last12.jsonl` plus `context/facts_last12.parquet` alongside the snapshot artifacts.
 - After the run completes download the combined artifact, confirm each `manifest.json` row count, and hand the bundle to the Forecaster deployment.
@@ -35,6 +35,10 @@ python -m resolver.tools.build_llm_context --dry-run
 # or write artifacts
 python -m resolver.tools.build_llm_context --months 12 --outdir context/
 ```
+
+### Debugging runs
+
+Use the `log_level` input on resolver workflow dispatch forms to control verbosity. Selecting `DEBUG` enables Python developer mode, default warnings, and command echoing so triaging failing connectors is easier.
 
 ### Resolver monthly pipeline
 
