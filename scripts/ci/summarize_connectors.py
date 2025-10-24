@@ -80,11 +80,23 @@ def _normalise_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
         "top_hazard": _normalise_samples(samples_raw.get("top_hazard")),
     }
     extras = _ensure_dict(entry.get("extras"))
+    status_raw = str(
+        entry.get("status_raw")
+        or extras.get("status_raw")
+        or entry.get("status")
+        or "skipped"
+    )
+    exit_code = _coerce_int(entry.get("exit_code") if entry.get("exit_code") is not None else extras.get("exit_code"))
+    status = str(entry.get("status") or status_raw or "skipped")
+    if status_raw.lower() == "error" or (exit_code not in (None, 0)):
+        status = "error"
 
     return {
         "connector_id": str(entry.get("connector_id") or entry.get("name") or "unknown"),
         "mode": str(entry.get("mode") or "real"),
-        "status": str(entry.get("status") or "skipped"),
+        "status": status,
+        "status_raw": status_raw,
+        "exit_code": exit_code,
         "reason": _clean_reason(entry.get("reason")),
         "started_at_utc": str(entry.get("started_at_utc") or ""),
         "duration_ms": _coerce_int(entry.get("duration_ms")),
@@ -453,15 +465,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = Path(args.report)
     out_path = Path(args.out)
+    created_stub = False
     if not report_path.exists():
-        write_markdown(out_path, MISSING_REPORT_SUMMARY)
-        if args.github_step_summary:
-            append_to_summary(MISSING_REPORT_SUMMARY)
-        return 0
+        stub = {
+            "connector_id": "unknown",
+            "mode": "real",
+            "status": "error",
+            "status_raw": "error",
+            "reason": "missing-report",
+            "http": {},
+            "counts": {},
+            "extras": {
+                "hint": "connector did not start or preflight failed",
+                "exit_code": 1,
+                "status_raw": "error",
+            },
+        }
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(stub))
+            handle.write("\n")
+        created_stub = True
     try:
         entries = load_report(report_path)
     except Exception as exc:
         print(f"summarize_connectors: {exc}", file=sys.stderr)
+        if created_stub:
+            write_markdown(out_path, MISSING_REPORT_SUMMARY)
+            if args.github_step_summary:
+                append_to_summary(MISSING_REPORT_SUMMARY)
         return 1
     markdown = build_markdown(entries)
     write_markdown(out_path, markdown)

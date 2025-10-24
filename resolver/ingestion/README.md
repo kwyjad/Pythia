@@ -43,6 +43,13 @@ Each connector:
   tests (`pytest -q resolver/tests/test_staging_schema_all.py`) immediately
   after ingestion to catch regressions
 
+## DTM connector dependencies
+
+The DTM API client depends on the [`dtmapi`](https://pypi.org/project/dtmapi/) package. Install it
+alongside the resolver by running `pip install -e .[connectors]` (preferred) or
+`pip install "dtmapi>=0.1.5"` inside your virtual environment before invoking
+`resolver/ingestion/dtm_client.py`.
+
 ## Connector toggles & outputs
 
 | Connector | Enabled via | Primary source | Monthly allocation | Dedup strategy | Output |

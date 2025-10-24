@@ -302,14 +302,14 @@ field_aliases:
 - `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 
 **Output metadata:**
-- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count plus the resolved ingestion window.
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps`), effective query parameters (`effective_params`), HTTP counters (`http_counters`), and timing information (`timings_ms`).
 - `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
 {
   "window": {"start": "2024-01-01", "end": "2024-02-01"},
   "countries": {"requested": ["KEN"], "resolved": ["Kenya"]},
-  "http": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0, "retries": 0, "last_status": 200},
+  "http": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0, "retries": 0, "rate_limit_remaining": null, "last_status": 200},
   "paging": {"pages": 3, "page_size": 500, "total_received": 1200},
   "rows": {"fetched": 1200, "normalized": 1180, "written": 1180, "kept": 1180, "dropped": 20},
   "totals": {
@@ -323,7 +323,23 @@ field_aliases:
   "status": "ok",
   "reason": "wrote 1180 rows",
   "outputs": {"csv": "data/staging/dtm_displacement.csv", "meta": "data/staging/dtm_displacement.csv.meta.json"},
-  "extras": {"api_sample_path": "diagnostics/ingestion/dtm_api_sample.json"},
+  "extras": {
+    "api_sample_path": "diagnostics/ingestion/dtm_api_sample.json",
+    "deps": {"python": "3.11.9", "packages": [{"name": "dtmapi", "version": "0.1.5"}]},
+    "effective_params": {
+      "resource": "dtmapi",
+      "admin_levels": ["admin0", "admin1"],
+      "countries_requested": ["Kenya"],
+      "countries_resolved": ["Kenya"],
+      "operations": null,
+      "window_start": "2024-01-01",
+      "window_end": "2024-02-01",
+      "no_date_filter": false,
+      "per_page": 500,
+      "max_pages": 3
+    },
+    "timings_ms": {"preflight": 45, "fetch_total": 1234, "normalize": 210, "write": 80}
+  },
   "args": {"strict_empty": false, "no_date_filter": false}
 }
 ```
