@@ -277,7 +277,7 @@ The DTM connector is API-only and always calls the official DTM API via the `dtm
 | Field | Required | Description |
 | --- | --- | --- |
 | `api.admin_levels` | no | Levels to fetch (`admin0`, `admin1`, `admin2`). Defaults to `admin1` and `admin0`. |
-| `api.countries` | no | ISO3 codes or country names. Empty list ⇒ fetch all available countries. |
+| `api.countries` | no | Ignored hint of ISO3 codes or country names. Discovery always fetches the full catalog but the provided list is echoed in diagnostics. |
 | `api.operations` | no | Operation names for admin2 pulls. |
 | `field_mapping` | no | Overrides for API column names (rarely needed). |
 | `field_aliases.idp_count` | no | Candidate columns containing the IDP total. |
@@ -288,7 +288,6 @@ The DTM connector is API-only and always calls the official DTM API via the `dtm
 enabled: true
 api:
   admin_levels: [admin1, admin0]
-  countries: []
   operations: []
 output:
   measure: stock
@@ -300,9 +299,10 @@ field_aliases:
 - `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
 - `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
 - `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
+- `diagnostics/ingestion/raw/dtm/<level>.<country>.head.csv` snapshots of the first successful fetch per level (up to 100 rows) for quick schema inspection.
 
 **Output metadata:**
-- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps`), effective query parameters (`effective_params`), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), and any per-country failures recorded during the run (`failures`).
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), and any per-country failures recorded during the run (`failures`).
 - `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
@@ -325,20 +325,27 @@ field_aliases:
   "outputs": {"csv": "data/staging/dtm_displacement.csv", "meta": "data/staging/dtm_displacement.csv.meta.json"},
   "extras": {
     "api_sample_path": "diagnostics/ingestion/dtm_api_sample.json",
-    "deps": {"python": "3.11.9", "packages": [{"name": "dtmapi", "version": "0.1.5"}]},
+    "deps": {
+      "python": "3.11.9",
+      "executable": "/usr/bin/python3",
+      "dtmapi": "0.1.5",
+      "pandas": "2.1.4",
+      "requests": "2.31.0"
+    },
     "effective_params": {
       "resource": "dtmapi",
+      "from": "2024-01-01",
+      "to": "2024-02-01",
       "admin_levels": ["admin0", "admin1"],
-      "countries_requested": ["Kenya"],
-      "countries_resolved": ["Kenya"],
       "operations": null,
-      "window_start": "2024-01-01",
-      "window_end": "2024-02-01",
+      "country_mode": "ALL",
+      "discovered_countries_count": 45,
+      "countries_requested": [],
+      "countries": ["Kenya", "Uganda"],
+      "idp_aliases": ["TotalIDPs", "IDPTotal", "numPresentIdpInd"],
       "no_date_filter": false,
       "per_page": 500,
-      "max_pages": 3,
-      "country_mode": "LIST",
-      "countries_count": 1
+      "max_pages": 3
     },
     "per_country_counts": [
       {"country": "Kenya", "level": "admin0", "rows": 1180, "window": "2024-01-01->2024-02-01"}

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pandas as pd
 import pytest
+import sys
 
 from resolver.ingestion import dtm_client
 from resolver.ingestion.dtm_client import DTMApiClient, DTMHttpError
@@ -43,9 +43,6 @@ def stub_dtmapi(monkeypatch: pytest.MonkeyPatch) -> DummyDTMApi:
     module = SimpleNamespace(DTMApi=lambda subscription_key=None: DummyDTMApi(subscription_key=subscription_key))
     monkeypatch.setitem(sys.modules, "dtmapi", module)
     return dummy
-
-
-import sys  # placed after fixture to appease linter
 
 
 @pytest.fixture()
@@ -118,17 +115,21 @@ def test_discover_all_countries_normalizes(monkeypatch: pytest.MonkeyPatch) -> N
     assert result == ["Kenya", "Somalia"]
 
 
-def test_discover_all_countries_uses_client_http_counts() -> None:
-    called = {}
+def test_discover_all_countries_invokes_sdk_catalog() -> None:
+    class FakeApi:
+        def __init__(self) -> None:
+            self.calls = 0
 
-    class FakeClient:
-        def get_countries(self, http_counts: Optional[dict] = None) -> pd.DataFrame:  # type: ignore[override]
-            called["http_counts"] = http_counts
-            return pd.DataFrame([
-                {"CountryName": "Ethiopia"},
-                {"CountryName": "Somalia"},
-            ])
+        def get_all_countries(self) -> pd.DataFrame:
+            self.calls += 1
+            return pd.DataFrame(
+                [
+                    {"CountryName": "Ethiopia"},
+                    {"CountryName": "Somalia"},
+                ]
+            )
 
-    names = dtm_client._discover_all_countries(FakeClient(), http_counts={})
+    api = FakeApi()
+    names = dtm_client._discover_all_countries(api)
     assert names == ["Ethiopia", "Somalia"]
-    assert called["http_counts"] == {}
+    assert api.calls == 1

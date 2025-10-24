@@ -18,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 import yaml
@@ -32,7 +32,6 @@ from resolver.ingestion.diagnostics_emitter import (
 )
 from resolver.ingestion.dtm_auth import check_api_key_configured, get_dtm_api_key
 from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest, to_iso3
-from resolver.ingestion.utils.country_names import resolve_accept_names
 from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,6 +109,12 @@ ADMIN_METHODS = {
 }
 
 
+class ConfigDict(dict):
+    """Dictionary subclass that retains the source path for logging."""
+
+    _source_path: Optional[str] = None
+
+
 def _preflight_dependencies() -> Tuple[Dict[str, Any], bool]:
     info: Dict[str, Any] = {
         "python": sys.version.split()[0],
@@ -179,53 +184,44 @@ def _package_version(name: str) -> str:
     return str(getattr(module, "__version__", "unknown"))
 
 
-def _discover_all_countries(
-    api: Any, *, http_counts: Optional[MutableMapping[str, int]] = None
-) -> List[str]:
+def _discover_all_countries(api: Any) -> List[str]:
     """Return a sorted list of country names discovered via the DTM SDK."""
 
-    frame: Any = None
+    frame = api.get_all_countries()
+    if not isinstance(frame, pd.DataFrame):
+        frame = pd.DataFrame(frame)
 
-    getter = getattr(api, "get_all_countries", None)
-    if callable(getter):
-        frame = getter()
-    else:
-        getter = getattr(api, "get_countries", None)
-        if callable(getter):
-            try:
-                if http_counts is not None:
-                    frame = getter(http_counts=http_counts)
-                else:
-                    frame = getter()
-            except TypeError:
-                frame = getter()
-        else:
-            raise AttributeError("Provided API client lacks country discovery methods")
+    names = sorted(
+        {
+            str(row["CountryName"]).strip()
+            for _, row in frame.iterrows()
+            if row.get("CountryName")
+        }
+    )
+    return names
 
-    if frame is None:
-        return []
 
-    if isinstance(frame, pd.DataFrame):
-        data_frame = frame
-    else:
-        try:
-            data_frame = pd.DataFrame(frame)
-        except Exception:
-            return []
+def _dump_head(df: pd.DataFrame, level: str, country: str, limit: int = 100) -> None:
+    out_dir = DIAGNOSTICS_DIR / "raw" / "dtm"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_country = country.replace("/", "-").replace(" ", "_")
+    path = out_dir / f"{level}.{safe_country}.head.csv"
+    df.head(limit).to_csv(path, index=False)
+    LOG.info("raw head written: %s (rows=%d)", path, min(limit, len(df)))
 
-    if data_frame.empty:
-        return []
 
-    names = set()
-    for _, row in data_frame.iterrows():
-        raw_value = row.get("CountryName", "")
-        if pd.isna(raw_value):
-            continue
-        text = str(raw_value).strip()
-        if not text:
-            continue
-        names.add(text)
-    return sorted(names)
+def _resolve_idp_value_column(df: pd.DataFrame, aliases: Sequence[str]) -> Optional[str]:
+    for alias in aliases:
+        if alias in df.columns:
+            return alias
+
+    pattern = re.compile(r"(?i)^(?:num|total).*(idp)")
+    candidates = [column for column in df.columns if pattern.search(column)]
+    for column in candidates:
+        if str(df[column].dtype).startswith(("int", "float")):
+            LOG.warning("fallback idp_count column selected by regex: %s", column)
+            return column
+    return candidates[0] if candidates else None
 
 
 def _write_connector_report(
@@ -666,9 +662,14 @@ def _is_candidate_newer(existing_iso: str, candidate_iso: str) -> bool:
 
 def load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
-        return {}
+        cfg = ConfigDict()
+        cfg._source_path = str(CONFIG_PATH)
+        return cfg
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {}
+        data = yaml.safe_load(handle) or {}
+    cfg = ConfigDict(data if isinstance(data, dict) else {})
+    cfg._source_path = str(CONFIG_PATH)
+    return cfg
 
 
 def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -817,40 +818,24 @@ def _fetch_api_data(
     requested_operations = _normalize_list(api_cfg.get("operations"))
 
     summary["countries"]["requested"] = requested_countries
+    if requested_countries:
+        LOG.info(
+            "Config requested countries=%s but discovery mode is enforced; ignoring list",
+            requested_countries,
+        )
 
+    target = client.client if hasattr(client, "client") else client
     try:
-        resolved_countries = resolve_accept_names(client, requested_countries)
+        resolved_countries = _discover_all_countries(target)
     except Exception as exc:
-        LOG.warning("Failed to resolve country names: %s", exc)
-        resolved_countries = requested_countries[:] if requested_countries else []
+        LOG.error("Failed to auto-discover countries: %s", exc)
+        resolved_countries = []
 
-    discovery_mode = not requested_countries
-    if not resolved_countries:
-        target = client.client if hasattr(client, "client") else client
-        if discovery_mode:
-            LOG.info("No countries configured; discovering via DTM catalog")
-        try:
-            resolved_countries = _discover_all_countries(target, http_counts=http_counter)
-        except Exception as exc:
-            LOG.error("Failed to auto-discover countries: %s", exc)
-            resolved_countries = []
-        if not resolved_countries:
-            try:
-                countries_df = client.get_countries(http_counter)
-            except Exception:
-                countries_df = pd.DataFrame()
-            if not countries_df.empty:
-                resolved_countries = sorted(
-                    {
-                        str(row.get("CountryName", "")).strip()
-                        for _, row in countries_df.iterrows()
-                        if str(row.get("CountryName", "")).strip()
-                    }
-                )
-        if resolved_countries:
-            LOG.info("Discovered %d countries from DTM catalog", len(resolved_countries))
+    discovered_count = len(resolved_countries)
+    LOG.info("Discovered %d countries from DTM catalog", discovered_count)
     summary["countries"]["resolved"] = resolved_countries
 
+    country_mode = "ALL"
     if not resolved_countries:
         resolved_countries = [None]
 
@@ -865,6 +850,7 @@ def _fetch_api_data(
         "operations": None if operations == [None] else operations,
         "window_start": from_date,
         "window_end": to_date,
+        "country_mode": country_mode,
     }
     write_json(API_REQUEST_PATH, {**request_payload, "api_key": "***"})
 
@@ -887,26 +873,29 @@ def _fetch_api_data(
     )
     effective_params = {
         "resource": summary["api"]["endpoint"],
+        "from": from_date,
+        "to": to_date,
         "admin_levels": admin_levels,
-        "countries_requested": requested_countries,
-        "countries_resolved": [] if resolved_countries == [None] else resolved_countries,
         "operations": None if operations == [None] else operations,
-        "window_start": from_date,
-        "window_end": to_date,
+        "country_mode": country_mode,
+        "discovered_countries_count": discovered_count,
+        "countries": [] if resolved_countries == [None] else resolved_countries,
+        "countries_requested": requested_countries,
         "no_date_filter": bool(no_date_filter),
         "per_page": None,
         "max_pages": None,
-        "country_mode": "ALL" if discovery_mode else "LIST",
-        "countries_count": 0 if resolved_countries == [None] else len(resolved_countries),
     }
     summary.setdefault("extras", {})["effective_params"] = effective_params
 
+    base_idp_aliases = ["TotalIDPs", "IDPTotal", "numPresentIdpInd"]
     LOG.info(
-        "effective: dates %s → %s; admin_levels=%s; country_mode=%s",
+        "effective: dates %s → %s; admin_levels=%s; country_mode=%s; discovered_countries=%d; idp_aliases=%s",
         from_date or "-",
         to_date or "-",
         admin_levels,
-        effective_params["country_mode"],
+        country_mode,
+        discovered_count,
+        base_idp_aliases,
     )
 
     field_mapping = cfg.get("field_mapping", {})
@@ -915,9 +904,10 @@ def _fetch_api_data(
     admin1_column = field_mapping.get("admin1_column", "Admin1Name")
     admin2_column = field_mapping.get("admin2_column", "Admin2Name")
     date_column = field_mapping.get("date_column", "ReportingDate")
-    idp_candidates = list(field_aliases.get("idp_count", ["TotalIDPs", "IDPTotal"]))
-    if field_mapping.get("idp_column"):
-        idp_candidates.insert(0, field_mapping["idp_column"])
+    idp_candidates = list(field_aliases.get("idp_count", base_idp_aliases))
+    for alias in (field_mapping.get("idp_column"), *base_idp_aliases):
+        if alias and alias not in idp_candidates:
+            idp_candidates.append(alias)
 
     aliases = cfg.get("country_aliases") or {}
     measure = str(cfg.get("output", {}).get("measure", "stock")).strip().lower()
@@ -928,6 +918,11 @@ def _fetch_api_data(
 
     all_records: List[Dict[str, Any]] = []
     used_secondary = False
+    head_written_levels: Set[str] = set()
+
+    effective_params_ref = summary.get("extras", {}).get("effective_params")
+    if isinstance(effective_params_ref, MutableMapping):
+        effective_params_ref["idp_aliases"] = list(idp_candidates)
 
     for level in admin_levels:
         for country_name in resolved_countries:
@@ -1025,10 +1020,43 @@ def _fetch_api_data(
                         summary["paging"]["page_size"] = max(current, size)
                     if page.empty:
                         continue
-                    idp_column = next((col for col in idp_candidates if col in page.columns), None)
+                    LOG.debug(
+                        "all columns (n=%d): %s",
+                        len(page.columns),
+                        list(page.columns),
+                    )
+                    idp_column = _resolve_idp_value_column(page, idp_candidates)
+                    LOG.info("resolved value column: idp_count_col=%r", idp_column)
                     if not idp_column:
-                        LOG.warning("No IDP value column present for %s", level)
+                        LOG.warning(
+                            "no value column matched; aliases=%s; rows=%d",
+                            idp_candidates,
+                            len(page),
+                        )
+                        failures.append(
+                            {
+                                "country": country_label,
+                                "level": level,
+                                "operation": operation,
+                                "error": "MissingValueColumn",
+                                "message": "aliases=%s columns=%s"
+                                % (idp_candidates, list(page.columns)),
+                            }
+                        )
                         continue
+                    if level not in head_written_levels:
+                        try:
+                            _dump_head(page, level, country_label)
+                        except Exception:  # pragma: no cover - diagnostics only
+                            LOG.debug(
+                                "failed to write raw head for level=%s country=%s", 
+                                level,
+                                country_label,
+                                exc_info=True,
+                            )
+                        else:
+                            head_written_levels.add(level)
+                    page = page.rename(columns={idp_column: "idp_count"})
 
                     per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
                     per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
@@ -1048,7 +1076,7 @@ def _fetch_api_data(
                             admin2 = str(row.get(admin2_column) or "").strip()
                             if admin2:
                                 admin1 = f"{admin1}/{admin2}" if admin1 else admin2
-                        value = _parse_float(row.get(idp_column))
+                        value = _parse_float(row.get("idp_count"))
                         if value is None or value <= 0:
                             continue
                         per_admin[(iso, admin1)][bucket] = float(value)
@@ -1344,6 +1372,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     dep_info, have_dtmapi = _preflight_dependencies()
     timings_ms: Dict[str, int] = {"preflight": max(0, int((time.perf_counter() - preflight_started) * 1000))}
     _log_dependency_snapshot(dep_info)
+    deps_payload = {
+        "python": dep_info.get("python", sys.version.split()[0]),
+        "executable": dep_info.get("executable", sys.executable),
+        "dtmapi": _package_version("dtmapi"),
+        "pandas": _package_version("pandas"),
+        "requests": _package_version("requests"),
+    }
     LOG.info(
         "env: python=%s exe=%s",
         dep_info.get("python", sys.version.split()[0]),
@@ -1351,9 +1386,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     LOG.info(
         "deps: dtmapi=%s pandas=%s requests=%s",
-        _package_version("dtmapi"),
-        _package_version("pandas"),
-        _package_version("requests"),
+        deps_payload["dtmapi"],
+        deps_payload["pandas"],
+        deps_payload["requests"],
     )
 
     api_key_configured = check_api_key_configured()
@@ -1363,7 +1398,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     base_http["last_status"] = None
     base_extras: Dict[str, Any] = {
         "api_key_configured": api_key_configured,
-        "deps": dep_info,
+        "deps": deps_payload,
         "strict_empty": strict_empty,
         "no_date_filter": no_date_filter,
         "timings_ms": dict(timings_ms),
@@ -1395,7 +1430,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "reason": reason,
             "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
             "extras": {
-                "deps": dep_info,
+                "deps": deps_payload,
                 "timings_ms": dict(timings_ms),
                 "strict_empty": strict_empty,
                 "no_date_filter": no_date_filter,
@@ -1428,6 +1463,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ensure_header_only()
         else:
             cfg = load_config()
+            LOG.info(
+                "config_loaded_from=%s",
+                getattr(cfg, "_source_path", "<unknown>"),
+            )
             if not cfg.get("enabled", True):
                 status = "skipped"
                 reason = "disabled via config"
@@ -1508,7 +1547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rows_summary = summary.get("rows", {}) if isinstance(summary, Mapping) else {}
     summary_extras = dict(summary.get("extras", {})) if isinstance(summary, Mapping) else {}
     summary_extras["timings_ms"] = dict(timings_ms)
-    summary_extras.setdefault("deps", dep_info)
+    summary_extras.setdefault("deps", deps_payload)
     totals = {
         "rows_fetched": rows_summary.get("fetched", 0),
         "rows_normalized": rows_summary.get("normalized", rows_written),
@@ -1534,7 +1573,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rows_written,
         window_start_iso,
         window_end_iso,
-        deps=dep_info,
+        deps=deps_payload,
         effective_params=effective_params,
         http_counters=http_payload,
         timings_ms=timings_ms,

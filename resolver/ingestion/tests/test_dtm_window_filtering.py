@@ -17,7 +17,7 @@ class StubClient:
     def __init__(self, config: dict, *, subscription_key: str | None = None) -> None:
         self.config = config
 
-    def get_countries(self, *_: object, **__: object) -> pd.DataFrame:
+    def get_all_countries(self, *_: object, **__: object) -> pd.DataFrame:
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
     def get_idp_admin0(self, **_: object) -> pd.DataFrame:
@@ -77,7 +77,6 @@ def test_window_values_recorded(monkeypatch: pytest.MonkeyPatch, patched_paths: 
     monkeypatch.setenv("RESOLVER_START_ISO", "2024-01-01")
     monkeypatch.setenv("RESOLVER_END_ISO", "2024-12-31")
     monkeypatch.setattr(dtm_client, "DTMApiClient", StubClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
 
     exit_code = dtm_client.main([])
 

@@ -297,10 +297,11 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
 
 **API configuration tips:**
 
-- `api.countries: []` (or omitting the key) tells the connector to discover **all** countries exposed by the DTM SDK via `get_all_countries()`. The resolved list is logged (`"Discovered N countries"`) and captured in diagnostics.
-- `api.admin_levels` accepts `admin0`, `admin1`, and/or `admin2`. Multiple levels are queried sequentially using the official `dtmapi` endpoints (`get_idp_admin{0,1,2}_data`).
-- Date filters are passed as `FromReportingDate`/`ToReportingDate`. If the workflow does not supply a window, the client defaults to the previous 12 full months.
-- The diagnostics JSON now records dependency versions (`deps`), the effective parameters used (including `country_mode` and total discovered countries), per-country row counts, and any per-country failures so backfills can spot partial outages quickly.
+- Country selection is always automatic. The connector calls the SDK’s `get_all_countries()` catalog and logs `country_mode=ALL` alongside the discovered count. Any `api.countries:` list in config is ignored (but echoed in diagnostics for traceability).
+- `api.admin_levels` accepts `admin0`, `admin1`, and/or `admin2`. Each level maps to the official `dtmapi` SDK functions (`get_idp_admin{0,1,2}_data`) queried per discovered country.
+- Requests are parameterized with `CountryName`, `FromReportingDate`, and `ToReportingDate`. When the workflow does not provide a window, the connector defaults to the previous 12 full months.
+- IDP value mapping prefers the aliases `TotalIDPs`, `IDPTotal`, and `numPresentIdpInd`. If none are present, a regex fallback picks a numeric column matching `/^(num|total).*idp/i` and logs the decision before renaming it to `idp_count`.
+- Diagnostics now capture dependency versions (`deps`), the effective parameters used (including `country_mode`, discovered country count, and value aliases), per-country row counts, and any per-country failures. The first successful fetch per level also writes a raw snapshot to `diagnostics/ingestion/raw/dtm/<level>.<country>.head.csv` for schema inspection.
 
 **Compatibility helpers:** The module continues to expose the historic
 `SERIES_INCIDENT`/`SERIES_CUMULATIVE` constants, `load_registries`,

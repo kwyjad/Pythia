@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import csv
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -122,17 +123,33 @@ def test_main_writes_outputs_and_diagnostics(
             self.rate_limit_delay = 0
             self.timeout = 0
 
-        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
-            return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+        def get_all_countries(self) -> pd.DataFrame:
+            return pd.DataFrame(
+                [
+                    {"CountryName": "Ethiopia", "ISO3": "ETH"},
+                    {"CountryName": "Somalia", "ISO3": "SOM"},
+                ]
+            )
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
-            return pd.DataFrame(
-                {
-                    "CountryName": ["Kenya"],
-                    "ReportingDate": ["2024-05-15"],
-                    "TotalIDPs": [120],
-                }
-            )
+            country = _.get("country")
+            if country == "Ethiopia":
+                return pd.DataFrame(
+                    {
+                        "CountryName": ["Ethiopia"],
+                        "ReportingDate": ["2024-05-15"],
+                        "numPresentIdpInd": [120],
+                    }
+                )
+            if country == "Somalia":
+                return pd.DataFrame(
+                    {
+                        "CountryName": ["Somalia"],
+                        "ReportingDate": ["2024-05-15"],
+                        "total_people_idp": [95],
+                    }
+                )
+            return pd.DataFrame()
 
         def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
@@ -141,8 +158,11 @@ def test_main_writes_outputs_and_diagnostics(
             return pd.DataFrame()
 
     monkeypatch.setattr(dtm_client, "DTMApiClient", DummyClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
-    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
+    monkeypatch.setattr(
+        dtm_client,
+        "load_config",
+        lambda: {"enabled": True, "api": {"admin_levels": ["admin0"], "countries": ["Kenya"]}},
+    )
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
     def _finalize(*_, status: str, reason: str, http: Dict[str, Any], counts: Dict[str, Any], extras: Dict[str, Any]):
         payload = {"status": status, "reason": reason, "http": http, "counts": counts, "extras": extras}
@@ -160,14 +180,27 @@ def test_main_writes_outputs_and_diagnostics(
     rc = dtm_client.main([])
     assert rc == 0
     csv_lines = patch_paths["OUT_PATH"].read_text(encoding="utf-8").strip().splitlines()
-    assert len(csv_lines) == 3
+    assert len(csv_lines) > 1
+    with patch_paths["OUT_PATH"].open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        value_samples = {
+            (
+                lambda payload: payload.get("value", payload.get("total_value"))
+            )(json.loads(row["raw_fields_json"]))
+            if row.get("raw_fields_json")
+            else None
+            for row in reader
+        }
+    assert 120 in value_samples
+    assert 95 in value_samples
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["rows"]["written"] == 2
-    assert run_payload["rows"]["fetched"] == 1
-    assert run_payload["totals"]["rows_written"] == 2
+    assert run_payload["rows"]["written"] > 0
+    assert run_payload["rows"]["fetched"] > 0
+    assert run_payload["totals"]["rows_written"] == run_payload["rows"]["written"]
     assert run_payload["args"]["strict_empty"] is False
     request = json.loads(patch_paths["API_REQUEST_PATH"].read_text(encoding="utf-8"))
     assert request["admin_levels"] == ["admin0"]
+    assert request["country_mode"] == "ALL"
     meta_payload = json.loads(patch_paths["META_PATH"].read_text(encoding="utf-8"))
     assert "deps" in meta_payload
     assert "effective_params" in meta_payload
@@ -177,6 +210,13 @@ def test_main_writes_outputs_and_diagnostics(
     assert isinstance(meta_payload["per_country_counts"], list)
     assert "failures" in meta_payload
     assert isinstance(meta_payload["failures"], list)
+    assert meta_payload["effective_params"]["country_mode"] == "ALL"
+    assert meta_payload["effective_params"]["discovered_countries_count"] == 2
+    assert meta_payload["effective_params"]["countries_requested"] == ["Kenya"]
+    assert meta_payload["effective_params"]["idp_aliases"]
+    raw_dir = patch_paths["DIAGNOSTICS_DIR"] / "raw" / "dtm"
+    assert raw_dir.exists()
+    assert any(child.name.startswith("admin0.") for child in raw_dir.iterdir())
     assert "timings_ms" in run_payload["extras"]
     assert "effective_params" in run_payload["extras"]
     assert "deps" in run_payload["extras"]
@@ -194,7 +234,7 @@ def test_main_strict_empty_exits_nonzero(
             self.rate_limit_delay = 0
             self.timeout = 0
 
-        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+        def get_all_countries(self) -> pd.DataFrame:
             return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
@@ -207,7 +247,6 @@ def test_main_strict_empty_exits_nonzero(
             return pd.DataFrame()
 
     monkeypatch.setattr(dtm_client, "DTMApiClient", EmptyClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
     monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
     monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
@@ -228,7 +267,7 @@ def test_main_zero_rows_reason_and_totals(
             self.rate_limit_delay = 0
             self.timeout = 0
 
-        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+        def get_all_countries(self) -> pd.DataFrame:
             return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
@@ -241,7 +280,6 @@ def test_main_zero_rows_reason_and_totals(
             return pd.DataFrame()
 
     monkeypatch.setattr(dtm_client, "DTMApiClient", EmptyClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
     monkeypatch.setattr(
         dtm_client,
         "load_config",
@@ -303,7 +341,7 @@ def test_main_retries_with_secondary_key(
             self.rate_limit_delay = 0
             self.timeout = 0
 
-        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+        def get_all_countries(self) -> pd.DataFrame:
             return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
@@ -325,7 +363,6 @@ def test_main_retries_with_secondary_key(
             return pd.DataFrame()
 
     monkeypatch.setattr(dtm_client, "DTMApiClient", FailingClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
     monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
     monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})

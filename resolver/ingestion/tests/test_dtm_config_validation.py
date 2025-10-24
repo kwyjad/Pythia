@@ -92,10 +92,10 @@ def test_env_skip_overrides(patched_paths: Dict[str, Path], monkeypatch: pytest.
     assert report["reason"] == "disabled via RESOLVER_SKIP_DTM"
 
 
-def test_empty_country_list_discovers_all(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_config_country_list_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     config = {
         "enabled": True,
-        "api": {"admin_levels": ["admin0"], "countries": []},
+        "api": {"admin_levels": ["admin0"], "countries": ["Kenya"]},
     }
 
     class DiscoveryClient:
@@ -132,7 +132,6 @@ def test_empty_country_list_discovers_all(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setenv("DTM_API_KEY", "primary")
     monkeypatch.setattr(dtm_client, "DTMApiClient", DiscoveryClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: [])
 
     rows, summary = dtm_client.build_rows(
         config,
@@ -143,9 +142,13 @@ def test_empty_country_list_discovers_all(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert rows, "expected at least one row"
+    assert summary["countries"]["requested"] == ["Kenya"]
     assert summary["countries"]["resolved"] == ["Ethiopia", "Somalia"]
+    assert summary["api"]["query_params"]["country_mode"] == "ALL"
     effective = summary["extras"]["effective_params"]
     assert effective["country_mode"] == "ALL"
-    assert effective["countries_count"] == 2
+    assert effective["discovered_countries_count"] == 2
+    assert effective["countries_requested"] == ["Kenya"]
+    assert effective["countries"] == ["Ethiopia", "Somalia"]
     per_country = summary["extras"]["per_country_counts"]
     assert {entry["country"] for entry in per_country} == {"Ethiopia", "Somalia"}

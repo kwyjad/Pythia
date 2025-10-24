@@ -19,7 +19,7 @@ class FailThenSucceedClient:
         self.subscription_key = subscription_key
         self._failed = False
 
-    def get_countries(self, *_: object, **__: object) -> pd.DataFrame:
+    def get_all_countries(self, *_: object, **__: object) -> pd.DataFrame:
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
     def get_idp_admin0(self, **_: object) -> pd.DataFrame:
@@ -80,7 +80,6 @@ def test_retry_secondary_key(monkeypatch: pytest.MonkeyPatch, patched_paths: Dic
     monkeypatch.setenv("DTM_API_PRIMARY_KEY", "primary")
     monkeypatch.setenv("DTM_API_SECONDARY_KEY", "secondary")
     monkeypatch.setattr(dtm_client, "DTMApiClient", FailThenSucceedClient)
-    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
 
     exit_code = dtm_client.main([])
 
