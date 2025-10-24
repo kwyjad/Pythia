@@ -168,22 +168,33 @@ class DTMApiClient:
         Args:
             config: Configuration dictionary with 'api' settings.
         """
+        LOG.info("=" * 70)
+        LOG.info("DTM API CLIENT INITIALIZATION")
+        LOG.info("=" * 70)
+
         try:
             from dtmapi import DTMApi
+            import dtmapi
+            version = getattr(dtmapi, "__version__", "unknown")
+            LOG.info("✓ dtmapi package found (version %s)", version)
         except ImportError as exc:
-            LOG.error(
-                "Failed to import dtmapi package. Install with: pip install dtmapi>=0.1.5"
-            )
+            LOG.error("✗ dtmapi package not installed")
+            LOG.error("Run: pip install dtmapi>=0.1.5 --break-system-packages")
             raise RuntimeError(
                 "dtmapi package not installed. Run: pip install dtmapi>=0.1.5"
             ) from exc
 
         api_key = get_dtm_api_key()
         if not api_key:
+            LOG.error("✗ DTM_API_KEY not configured")
             raise ValueError("DTM API key not configured")
 
-        # Initialize official client
+        LOG.info("✓ DTM_API_KEY configured (%d characters)", len(api_key))
+
+        # Initialize official client - NO CUSTOM HTTP CODE
+        LOG.info("Initializing official DTMApi client...")
         self.client = DTMApi(subscription_key=api_key)
+        LOG.info("✓ Official DTMApi client initialized")
 
         # Store config for reference
         self.config = config
@@ -191,25 +202,21 @@ class DTMApiClient:
         self.rate_limit_delay = api_cfg.get("rate_limit_delay", 1.0)
         self.timeout = api_cfg.get("timeout", 60)
 
-        # Log package version if available
-        try:
-            import dtmapi
-            version = getattr(dtmapi, "__version__", "unknown")
-            LOG.info("DTM API client initialized using dtmapi package v%s", version)
-        except Exception:
-            LOG.info("DTM API client initialized using official dtmapi package")
-
         # Test connection by fetching countries
         try:
-            LOG.info("Testing DTM API connection...")
+            LOG.info("Testing API connection by fetching countries list...")
             countries = self.get_countries()
             LOG.info(
-                "✓ DTM API connection successful (%d countries available)",
+                "✓ DTM API connection SUCCESSFUL (%d countries available)",
                 len(countries),
             )
         except Exception as e:
             LOG.warning("✗ DTM API connection test failed: %s", e)
             LOG.warning("Will attempt to fetch data anyway...")
+
+        LOG.info("=" * 70)
+        LOG.info("DTM CLIENT READY - Using official dtmapi package v%s", version)
+        LOG.info("=" * 70)
 
     def get_countries(
         self, http_counts: Optional[Dict[str, int]] = None
@@ -223,14 +230,14 @@ class DTMApiClient:
             DataFrame with country information
         """
         try:
-            LOG.debug("Fetching countries list")
+            LOG.debug("Fetching countries via OFFICIAL dtmapi.get_all_countries()")
             df = self.client.get_all_countries()
 
             # Track success
             if http_counts is not None:
                 http_counts["2xx"] = http_counts.get("2xx", 0) + 1
 
-            LOG.info("Successfully fetched %d countries", len(df))
+            LOG.info("✓ Fetched %d countries from official dtmapi", len(df))
             return df
         except Exception as e:
             LOG.error("Failed to fetch countries: %s", e)
@@ -273,14 +280,15 @@ class DTMApiClient:
             DataFrame with Admin 0 IDP data
         """
         try:
-            LOG.debug(
-                "Fetching Admin0 data: country=%s, from_date=%s, to_date=%s",
-                country,
-                from_date,
-                to_date,
+            LOG.info(
+                "Fetching Admin0 via OFFICIAL dtmapi.get_idp_admin0_data(): "
+                "country=%s, from_date=%s, to_date=%s",
+                country or "ALL",
+                from_date or "—",
+                to_date or "—",
             )
 
-            # Call official API method
+            # Call official API method - NO CUSTOM HTTP CODE
             df = self.client.get_idp_admin0_data(
                 CountryName=country,
                 FromReportingDate=from_date,
@@ -293,7 +301,7 @@ class DTMApiClient:
             if http_counts is not None:
                 http_counts["2xx"] = http_counts.get("2xx", 0) + 1
 
-            LOG.info("Successfully fetched %d Admin0 records", len(df))
+            LOG.info("✓ Fetched %d Admin0 records from official dtmapi", len(df))
 
             # Rate limiting
             if self.rate_limit_delay > 0:
@@ -341,15 +349,16 @@ class DTMApiClient:
             DataFrame with Admin 1 IDP data
         """
         try:
-            LOG.debug(
-                "Fetching Admin1 data: country=%s, admin1=%s, from_date=%s, to_date=%s",
-                country,
-                admin1,
-                from_date,
-                to_date,
+            LOG.info(
+                "Fetching Admin1 via OFFICIAL dtmapi.get_idp_admin1_data(): "
+                "country=%s, admin1=%s, from_date=%s, to_date=%s",
+                country or "ALL",
+                admin1 or "ALL",
+                from_date or "—",
+                to_date or "—",
             )
 
-            # Call official API method
+            # Call official API method - NO CUSTOM HTTP CODE
             df = self.client.get_idp_admin1_data(
                 CountryName=country,
                 Admin1Name=admin1,
@@ -361,7 +370,7 @@ class DTMApiClient:
             if http_counts is not None:
                 http_counts["2xx"] = http_counts.get("2xx", 0) + 1
 
-            LOG.info("Successfully fetched %d Admin1 records", len(df))
+            LOG.info("✓ Fetched %d Admin1 records from official dtmapi", len(df))
 
             # Rate limiting
             if self.rate_limit_delay > 0:
@@ -408,15 +417,16 @@ class DTMApiClient:
             DataFrame with Admin 2 IDP data
         """
         try:
-            LOG.debug(
-                "Fetching Admin2 data: country=%s, operation=%s, from_date=%s, to_date=%s",
-                country,
-                operation,
-                from_date,
-                to_date,
+            LOG.info(
+                "Fetching Admin2 via OFFICIAL dtmapi.get_idp_admin2_data(): "
+                "country=%s, operation=%s, from_date=%s, to_date=%s",
+                country or "ALL",
+                operation or "ALL",
+                from_date or "—",
+                to_date or "—",
             )
 
-            # Call official API method
+            # Call official API method - NO CUSTOM HTTP CODE
             df = self.client.get_idp_admin2_data(
                 CountryName=country,
                 Operation=operation,
@@ -428,7 +438,7 @@ class DTMApiClient:
             if http_counts is not None:
                 http_counts["2xx"] = http_counts.get("2xx", 0) + 1
 
-            LOG.info("Successfully fetched %d Admin2 records", len(df))
+            LOG.info("✓ Fetched %d Admin2 records from official dtmapi", len(df))
 
             # Rate limiting
             if self.rate_limit_delay > 0:
