@@ -1,7 +1,10 @@
+"""Ensure diagnostics are emitted even when the connector fails."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Dict
 
 import pytest
 import yaml
@@ -9,52 +12,57 @@ import yaml
 from resolver.ingestion import dtm_client
 
 
-def _prepare_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
-    out_path = tmp_path / "dtm.csv"
+@pytest.fixture()
+def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Path]:
     diagnostics_dir = tmp_path / "diagnostics" / "ingestion"
-    mapping = {
+    out_path = tmp_path / "outputs" / "dtm.csv"
+    mappings = {
         "CONFIG_PATH": tmp_path / "dtm.yml",
         "OUT_PATH": out_path,
         "OUT_DIR": out_path.parent,
         "OUTPUT_PATH": out_path,
         "DEFAULT_OUTPUT": out_path,
+        "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
         "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
-        "CONFIG_ISSUES_PATH": diagnostics_dir / "dtm_config_issues.json",
-        "RESOLVED_SOURCES_PATH": diagnostics_dir / "dtm_sources_resolved.json",
+        "RUN_DETAILS_PATH": diagnostics_dir / "dtm_run.json",
+        "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
+        "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
     }
-    for name, value in mapping.items():
+    for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
-    return mapping
+    return mappings
 
 
-def _write_config(path: Path, *, source_path: Path) -> None:
-    payload = {
-        "enabled": True,
-        "sources": [{"name": "broken", "id_or_path": str(source_path)}],
-    }
+def write_min_config(path: Path) -> None:
+    payload = {"enabled": True, "api": {}}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
 
-def test_diagnostics_written_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    paths = _prepare_paths(monkeypatch, tmp_path)
-    missing_file = tmp_path / "does-not-exist.csv"
-    _write_config(paths["CONFIG_PATH"], source_path=missing_file)
-    monkeypatch.delenv("DTM_STRICT", raising=False)
+def read_report(path: Path) -> dict:
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines, "expected report lines"
+    return json.loads(lines[-1])
+
+
+def test_report_line_written_on_exception(patched_paths: Dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    write_min_config(patched_paths["CONFIG_PATH"])
+
+    def explode(*_: object, **__: object) -> tuple[list[list[object]], dict]:
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setenv("DTM_API_KEY", "dummy")
+    monkeypatch.setattr(dtm_client, "build_rows", explode)
 
     exit_code = dtm_client.main([])
 
     assert exit_code == 1
-    report_path = paths["CONNECTORS_REPORT"]
-    assert report_path.exists()
-    content = report_path.read_text(encoding="utf-8").strip().splitlines()
-    assert content
-    payload = json.loads(content[-1])
-    assert payload["status"] == "error"
-    assert "missing id_or_path" not in payload["reason"]
-    assert "DTM source not found" in payload["reason"]
-    extras = payload["extras"]
+    report = read_report(patched_paths["CONNECTORS_REPORT"])
+    assert report["status"] == "error"
+    assert "kaboom" in report["reason"]
+    extras = report["extras"]
     assert extras["rows_total"] == 0
-    issues = json.loads(paths["CONFIG_ISSUES_PATH"].read_text(encoding="utf-8"))
-    assert issues["summary"]["invalid"] == 0
+    run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["status"] == "error"
+    assert run_payload["rows"]["written"] == 0

@@ -264,30 +264,30 @@ Example JSONL entry:
 }
 ```
 
-## DTM source configuration
+## DTM API diagnostics
 
-The DTM connector is API-only and always calls the official DTM API v3 via the `dtmapi` package.
+The DTM connector is API-only and always calls the official DTM API via the `dtmapi` package.
 
-**Requirements:**
-- `DTM_API_KEY` environment variable (primary subscription key). The connector aborts if the key is missing.
-- Optional `DTM_API_SECONDARY_KEY` environment variable. When present the connector retries with the secondary key on 401/403 responses.
+**Secrets:**
+- `DTM_API_PRIMARY_KEY` or legacy `DTM_API_KEY` (required).
+- `DTM_API_SECONDARY_KEY` (optional) retried on authentication failures.
 
 **Configuration fields:**
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `api.admin_levels` | no | List of admin levels to fetch: `admin0`, `admin1`, `admin2` (default: all three). |
-| `api.countries` | no | List of country names; use an empty list to fetch all available countries. |
-| `api.operations` | no | List of operation names, primarily for admin2 pulls. |
-| `field_mapping` | no | Maps API response field names to internal schema (see config file for defaults). |
-| `field_aliases.idp_count` | no | Candidate columns used to detect the IDP count. |
-| `output.measure` | no | Set to `stock` (default) to convert cumulative figures to flows. |
+| `api.admin_levels` | no | Levels to fetch (`admin0`, `admin1`, `admin2`). Defaults to `admin1` and `admin0`. |
+| `api.countries` | no | ISO3 codes or country names. Empty list ⇒ fetch all available countries. |
+| `api.operations` | no | Operation names for admin2 pulls. |
+| `field_mapping` | no | Overrides for API column names (rarely needed). |
+| `field_aliases.idp_count` | no | Candidate columns containing the IDP total. |
+| `output.measure` | no | `stock` (default) converts cumulative totals to flows; `flow` keeps month deltas. |
 
 **Example configuration:**
 ```yaml
 enabled: true
 api:
-  admin_levels: [admin0, admin1, admin2]
+  admin_levels: [admin1, admin0]
   countries: []
   operations: []
 output:
@@ -296,30 +296,38 @@ field_aliases:
   idp_count: ["TotalIDPs", "IDPTotal"]
 ```
 
-**Diagnostics:** each run emits:
-- `diagnostics/ingestion/dtm_run.json` capturing the ingestion window, filters, HTTP status counts (`2xx`, `4xx`, `5xx`, `timeout`, `error`), and row totals (`admin0`, `admin1`, `admin2`, `total`).
-- `diagnostics/ingestion/dtm_api_request.json` summarising the requested admin levels, countries, operations, and date window.
-- `diagnostics/ingestion/dtm_api_response_sample.json` containing the first 100 standardized output rows for quick inspection.
-### Output metadata
+**Diagnostics:** each execution writes:
+- `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), and row totals (`admin0`, `admin1`, `admin2`, `total`).
+- `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
+- `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 
-- `data/staging/dtm_displacement.csv.meta.json` mirrors the CSV output and records:
-  - `row_count`: number of written rows (excluding the header).
-  - `backfill_start`/`backfill_end`: the effective ingestion window resolved from environment variables.
-  - `sources_total`, `sources_valid`, `sources_invalid`: summary counts after configuration and runtime validation.
-- `diagnostics/ingestion/dtm_run.json` is rewritten on every execution and has the shape:
+**Output metadata:**
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count plus the resolved ingestion window.
+- `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
 {
-  "mode": "api",
-  "trigger": "api-only",
-  "admin_levels": ["admin0", "admin1", "admin2"],
-  "countries": null,
-  "operations": null,
-  "window_start": "2024-01-01",
-  "window_end": "2024-02-01",
-  "http_counts": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0},
-  "row_counts": {"admin0": 1, "admin1": 1, "admin2": 0, "total": 2}
+  "window": {"start": "2024-01-01", "end": "2024-02-01"},
+  "countries": {"requested": ["KEN"], "resolved": ["Kenya"]},
+  "http": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0, "retries": 0, "last_status": 200},
+  "paging": {"pages": 3, "page_size": 500, "total_received": 1200},
+  "rows": {"fetched": 1200, "normalized": 1180, "written": 1180, "kept": 1180, "dropped": 20},
+  "status": "ok",
+  "reason": "wrote 1180 rows",
+  "outputs": {"csv": "data/staging/dtm_displacement.csv", "meta": "data/staging/dtm_displacement.csv.meta.json"},
+  "extras": {"api_sample_path": "diagnostics/ingestion/dtm_api_sample.json"}
 }
 ```
 
-Runs that write no data rows are classified as **ok-empty** and emit the message `header-only; kept=0`. The connector summary reads the `row_counts.total` field to populate the Markdown table.
+**Exit codes:**
+
+| Exit code | Status | Description |
+| --- | --- | --- |
+| `0` | `ok` | Successful run with at least one row written. |
+| `0` | `ok-empty` | Successful run with zero rows (header-only output). |
+| `3` | `ok-empty` | Zero rows with `--strict-empty`/`DTM_STRICT_EMPTY=1`. |
+| `2` | `error` | Configuration or authentication failure (missing key, invalid config). |
+| `1` | `error` | Runtime exception (network failure, unexpected API error). |
+| `skipped` | `skipped` | `RESOLVER_SKIP_DTM=1` or connector disabled in config. |
+
+Zero-row runs are marked `ok-empty`; `dtm_api_sample.json` captures the API response sample to help diagnose the cause.

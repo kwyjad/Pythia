@@ -1,228 +1,178 @@
+"""High-level dtm_client tests covering CLI behaviours."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import pytest
 
 from resolver.ingestion import dtm_client
-import resolver.ingestion.dtm_auth as dtm_auth
 
 
 @pytest.fixture(autouse=True)
-def clear_env(monkeypatch):
+def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
+    monkeypatch.delenv("DTM_API_PRIMARY_KEY", raising=False)
     monkeypatch.delenv("DTM_API_SECONDARY_KEY", raising=False)
+    monkeypatch.delenv("RESOLVER_START_ISO", raising=False)
+    monkeypatch.delenv("RESOLVER_END_ISO", raising=False)
 
 
-def _configure_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Dict[str, Path]:
-    out_path = tmp_path / "dtm.csv"
-    monkeypatch.setattr(dtm_client, "OUT_PATH", out_path)
-    monkeypatch.setattr(dtm_client, "OUTPUT_PATH", out_path)
-    monkeypatch.setattr(dtm_client, "META_PATH", tmp_path / "dtm.meta.json")
-    monkeypatch.setattr(dtm_client, "RUN_DETAILS_PATH", tmp_path / "dtm_run.json")
-    monkeypatch.setattr(dtm_client, "API_REQUEST_PATH", tmp_path / "dtm_api_request.json")
-    monkeypatch.setattr(
-        dtm_client, "API_RESPONSE_SAMPLE_PATH", tmp_path / "dtm_api_response_sample.json"
-    )
-    return {
-        "out": out_path,
-        "run": dtm_client.RUN_DETAILS_PATH,
-        "request": dtm_client.API_REQUEST_PATH,
-        "sample": dtm_client.API_RESPONSE_SAMPLE_PATH,
+@pytest.fixture()
+def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Path]:
+    diagnostics_dir = tmp_path / "diagnostics" / "ingestion"
+    out_path = tmp_path / "outputs" / "dtm.csv"
+    mappings = {
+        "OUT_PATH": out_path,
+        "OUT_DIR": out_path.parent,
+        "OUTPUT_PATH": out_path,
+        "DEFAULT_OUTPUT": out_path,
+        "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
+        "DIAGNOSTICS_DIR": diagnostics_dir,
+        "RUN_DETAILS_PATH": diagnostics_dir / "dtm_run.json",
+        "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
+        "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
     }
+    for name, value in mappings.items():
+        monkeypatch.setattr(dtm_client, name, value)
+    return mappings
 
 
-def test_build_rows_requires_api_config():
+def test_build_rows_requires_api_config() -> None:
     with pytest.raises(ValueError) as excinfo:
-        dtm_client.build_rows({})
+        dtm_client.build_rows({}, no_date_filter=False, window_start=None, window_end=None)
     assert "DTM is API-only" in str(excinfo.value)
 
 
-def test_main_writes_api_outputs_and_diagnostics(monkeypatch, tmp_path):
-    paths = _configure_paths(tmp_path, monkeypatch)
+def test_main_writes_outputs_and_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
+) -> None:
     monkeypatch.setenv("DTM_API_KEY", "primary")
-    monkeypatch.setattr(dtm_auth, "check_api_key_configured", lambda: True)
 
     class DummyClient:
-        def __init__(self, _cfg: dict, *, subscription_key: Optional[str] = None):
-            self.subscription_key = subscription_key
+        def __init__(self, *_: Any, **__: Any) -> None:
             self.rate_limit_delay = 0
-            self.timeout = 60
+            self.timeout = 0
 
-        def get_idp_admin0(
-            self,
-            country: Optional[str] = None,
-            from_date: Optional[str] = None,
-            to_date: Optional[str] = None,
-            http_counts: Optional[Dict[str, int]] = None,
-            **_: Any,
-        ) -> pd.DataFrame:
-            if http_counts is not None:
-                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+            return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+
+        def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame(
                 {
                     "CountryName": ["Kenya"],
-                    "ReportingDate": ["2024-01-15"],
+                    "ReportingDate": ["2024-05-15"],
                     "TotalIDPs": [120],
                 }
             )
 
-        def get_idp_admin1(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
 
-        def get_idp_admin2(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
 
     monkeypatch.setattr(dtm_client, "DTMApiClient", DummyClient)
+    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
+    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
     monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
     monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
-    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {}})
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main([])
     assert rc == 0
-    csv_path = paths["out"]
-    assert csv_path.exists()
-    lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 2  # header + row
-
-    run_payload = json.loads(paths["run"].read_text(encoding="utf-8"))
-    assert run_payload["mode"] == "api"
-    assert run_payload["row_counts"]["total"] == 1
-    request_payload = json.loads(paths["request"].read_text(encoding="utf-8"))
-    assert request_payload["admin_levels"] == ["admin0", "admin1", "admin2"]
-    sample_rows = json.loads(paths["sample"].read_text(encoding="utf-8"))
-    assert len(sample_rows) == 1
+    csv_lines = patch_paths["OUT_PATH"].read_text(encoding="utf-8").strip().splitlines()
+    assert len(csv_lines) == 3
+    run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["rows"]["written"] == 2
+    assert run_payload["rows"]["fetched"] == 1
+    request = json.loads(patch_paths["API_REQUEST_PATH"].read_text(encoding="utf-8"))
+    assert request["admin_levels"] == ["admin0"]
 
 
-def test_main_strict_empty_exits_nonzero(monkeypatch, tmp_path):
-    _configure_paths(tmp_path, monkeypatch)
+def test_main_strict_empty_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
+) -> None:
     monkeypatch.setenv("DTM_API_KEY", "primary")
-    monkeypatch.setattr(dtm_auth, "check_api_key_configured", lambda: True)
 
     class EmptyClient:
-        def __init__(self, *_: Any, **__: Any):
+        def __init__(self, *_: Any, **__: Any) -> None:
             self.rate_limit_delay = 0
-            self.timeout = 60
+            self.timeout = 0
 
-        def get_idp_admin0(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+            return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+
+        def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame(columns=["CountryName", "ReportingDate", "TotalIDPs"])
 
-        def get_idp_admin1(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
 
-        def get_idp_admin2(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
 
     monkeypatch.setattr(dtm_client, "DTMApiClient", EmptyClient)
+    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
+    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
     monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
     monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
-    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {}})
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main(["--strict-empty"])
     assert rc == 3
 
 
-def test_fetch_retries_with_secondary_key(monkeypatch):
-    monkeypatch.setenv("DTM_API_KEY", "primary")
+def test_main_retries_with_secondary_key(
+    monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DTM_API_PRIMARY_KEY", "primary")
     monkeypatch.setenv("DTM_API_SECONDARY_KEY", "secondary")
-    monkeypatch.setattr(dtm_auth, "check_api_key_configured", lambda: True)
 
-    call_state = {"attempts": 0}
+    attempt = {"count": 0}
 
     class FailingClient:
-        def __init__(self, *_: Any, subscription_key: Optional[str] = None):
+        def __init__(self, *_: Any, subscription_key: Optional[str] = None) -> None:
             self.subscription_key = subscription_key
             self.rate_limit_delay = 0
             self.timeout = 0
 
-        def get_idp_admin0(
-            self,
-            *,
-            http_counts: Optional[Dict[str, int]] = None,
-            **__: Any,
-        ) -> pd.DataFrame:
-            call_state["attempts"] += 1
-            if call_state["attempts"] == 1:
-                _record = dtm_client.DTMUnauthorizedError(401, "unauthorized")
-                raise _record
-            if http_counts is not None:
-                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+            return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+
+        def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
+            attempt["count"] += 1
+            if self.subscription_key == "primary":
+                raise dtm_client.DTMUnauthorizedError(401, "unauthorized")
             return pd.DataFrame(
                 {
                     "CountryName": ["Kenya"],
-                    "ReportingDate": ["2024-01-15"],
-                    "TotalIDPs": [50],
-                }
-            )
-
-        def get_idp_admin1(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
-            return pd.DataFrame()
-
-        def get_idp_admin2(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
-            return pd.DataFrame()
-
-    monkeypatch.setattr(dtm_client, "DTMApiClient", FailingClient)
-    records, summary = dtm_client._fetch_api_data({"api": {}, "admin_levels": ["admin0"]})
-    assert call_state["attempts"] == 2
-    assert summary["row_counts"]["total"] == 1
-    assert records[0]["value"] == 50.0
-
-
-def test_fetch_accumulates_multiple_levels(monkeypatch):
-    monkeypatch.setenv("DTM_API_KEY", "primary")
-    monkeypatch.setattr(dtm_auth, "check_api_key_configured", lambda: True)
-
-    class MultiClient:
-        def __init__(self, *_: Any, **__: Any):
-            self.rate_limit_delay = 0
-            self.timeout = 0
-
-        def get_idp_admin0(
-            self,
-            *,
-            http_counts: Optional[Dict[str, int]] = None,
-            **__: Any,
-        ) -> pd.DataFrame:
-            if http_counts is not None:
-                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
-            return pd.DataFrame(
-                {
-                    "CountryName": ["Kenya"],
-                    "ReportingDate": ["2024-01-15"],
-                    "TotalIDPs": [100],
-                }
-            )
-
-        def get_idp_admin1(
-            self,
-            *,
-            http_counts: Optional[Dict[str, int]] = None,
-            **__: Any,
-        ) -> pd.DataFrame:
-            if http_counts is not None:
-                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
-            return pd.DataFrame(
-                {
-                    "CountryName": ["Kenya"],
-                    "Admin1Name": ["Nairobi"],
-                    "ReportingDate": ["2024-01-15"],
+                    "ReportingDate": ["2024-06-01"],
                     "TotalIDPs": [25],
                 }
             )
 
-        def get_idp_admin2(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
 
-    monkeypatch.setattr(dtm_client, "DTMApiClient", MultiClient)
-    records, summary = dtm_client._fetch_api_data({"api": {}, "admin_levels": ["admin0", "admin1"]})
-    assert summary["row_counts"]["admin0"] == 1
-    assert summary["row_counts"]["admin1"] == 1
-    assert summary["row_counts"]["total"] == 2
-    assert {record["source_id"] for record in records} == {"dtm_api_admin0", "dtm_api_admin1"}
+        def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(dtm_client, "DTMApiClient", FailingClient)
+    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
+    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
+    monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
+    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
+    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
+    monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
+
+    rc = dtm_client.main([])
+    assert rc == 0
+    assert attempt["count"] == 2
+    run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["http"]["retries"] == 1

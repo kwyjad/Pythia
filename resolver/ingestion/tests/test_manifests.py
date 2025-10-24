@@ -77,15 +77,26 @@ def test_runner_writes_to_staging_root(tmp_path: Path, monkeypatch: pytest.Monke
             skip_reason=None,
             metadata=metadata,
             config_path=None,
-            config={},
+            config={"enabled": True},
             canonical_name=name,
+            origin="real_list",
+            authoritatively_selected=True,
         )
         specs.append(spec)
 
     writer_map[specs[0].path.name] = (specs[0].output_path, [["r1", "v1"], ["r2", "v2"]])
     writer_map[specs[1].path.name] = (specs[1].output_path, [])
 
-    def fake_build_specs(real, stubs, selected, run_real, run_stubs):
+    def fake_build_specs(
+        real,
+        stubs,
+        selected,
+        run_real,
+        run_stubs,
+        *,
+        real_authoritative=False,
+        stub_authoritative=False,
+    ):
         return list(specs)
 
     def fake_invoke(path: Path, *, logger=None) -> None:  # type: ignore[override]
