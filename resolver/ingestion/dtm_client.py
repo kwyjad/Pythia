@@ -25,12 +25,11 @@ from typing import (
 )
 
 import pandas as pd
-import requests
 import time
 import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion.dtm_auth import get_dtm_api_key, get_auth_headers
+from resolver.ingestion.dtm_auth import get_dtm_api_key
 from resolver.ingestion._shared.date_utils import parse_dates, window_mask
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
 from resolver.ingestion._shared.validation import validate_required_fields
@@ -161,168 +160,61 @@ __all__ = [
 
 
 class DTMApiClient:
-    """Client for fetching data from DTM API v3."""
+    """Wrapper around official dtmapi.DTMApi client."""
 
     def __init__(self, config: dict):
-        """Initialize DTM API client.
+        """Initialize DTM API client using official dtmapi package.
 
         Args:
             config: Configuration dictionary with 'api' settings.
         """
-        api_cfg = config.get("api", {})
-        # CRITICAL FIX: Use the actual API gateway URL, not the portal URL
-        # The portal (dtm-apim-portal.iom.int) is for registration only
-        # The actual API gateway is at dtmapi.iom.int
-        self.base_url = api_cfg.get("base_url", "https://dtmapi.iom.int").rstrip("/")
-        self.timeout = api_cfg.get("timeout", 30)
-        self.rate_limit_delay = api_cfg.get("rate_limit_delay", 1.0)
-
         try:
-            self.api_key = get_dtm_api_key()
-        except RuntimeError as exc:
-            LOG.error("DTM API authentication failed: %s", exc)
-            raise
-
-        LOG.info("DTM API client initialized (base_url=%s)", self.base_url)
-
-    def _make_request(
-        self,
-        endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        http_counts: Optional[Dict[str, int]] = None,
-    ) -> List[Dict[str, Any]]:
-        """Make authenticated request to DTM API.
-
-        Args:
-            endpoint: API endpoint (e.g., "v3/displacement/admin0")
-            params: Query parameters
-            http_counts: Dictionary to update with HTTP status counts
-
-        Returns:
-            List of data dictionaries from API response
-
-        Raises:
-            requests.HTTPError: If request fails
-            ValueError: On unexpected responses or redirects
-        """
-        url = f"{self.base_url}/{endpoint}"
-        headers = get_auth_headers()
-
-        # Apply rate limiting
-        if self.rate_limit_delay > 0:
-            time.sleep(self.rate_limit_delay)
-
-        LOG.debug("DTM API request: %s (params=%s)", endpoint, params)
-
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=self.timeout,
-                allow_redirects=False,  # IMPORTANT: Detect redirects early
-            )
-
-            # Update HTTP counts
-            if http_counts is not None:
-                status_code = response.status_code
-                if 200 <= status_code < 300:
-                    http_counts["2xx"] = http_counts.get("2xx", 0) + 1
-                elif 400 <= status_code < 500:
-                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
-                elif 500 <= status_code < 600:
-                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
-                http_counts["last_status"] = status_code
-
-            # Check for redirects (302, 301, etc.)
-            if 300 <= response.status_code < 400:
-                redirect_location = response.headers.get("Location", "unknown")
-                LOG.error(
-                    "DTM API returned redirect %s to %s. "
-                    "This usually means the base_url is incorrect. "
-                    "Current base_url: %s. "
-                    "Check https://dtm-apim-portal.iom.int/ for the correct API gateway URL.",
-                    response.status_code,
-                    redirect_location,
-                    self.base_url,
-                )
-                raise ValueError(
-                    f"API redirect detected ({response.status_code} -> {redirect_location}). "
-                    f"The base_url may be incorrect. Current: {self.base_url}"
-                )
-
-            response.raise_for_status()
-
-            # Try to parse JSON
-            try:
-                data = response.json()
-            except json.JSONDecodeError as e:
-                content_type = response.headers.get("Content-Type", "unknown")
-                content_preview = response.text[:200] if response.text else "(empty)"
-                LOG.error(
-                    "Failed to parse API response as JSON. "
-                    "Status: %s, Content-Type: %s, Preview: %s",
-                    response.status_code,
-                    content_type,
-                    content_preview,
-                )
-                raise ValueError(f"Invalid JSON response from {url}: {e}") from e
-
-            # Handle official DTM API response format: {"isSuccess": true, "result": [...]}
-            if isinstance(data, dict) and "isSuccess" in data:
-                if not data.get("isSuccess"):
-                    error_messages = data.get("errorMessages", ["Unknown error"])
-                    error_msg = "; ".join(str(e) for e in error_messages)
-                    raise ValueError(f"API returned error: {error_msg}")
-                result = data.get("result", [])
-                if not isinstance(result, list):
-                    result = [result] if result else []
-            # Legacy format support: handle various response structures
-            elif isinstance(data, list):
-                result = data
-            elif isinstance(data, dict) and "data" in data:
-                result = data["data"]
-                if not isinstance(result, list):
-                    result = [result] if result else []
-            elif isinstance(data, dict) and "value" in data:  # OData format
-                result = data["value"]
-                if not isinstance(result, list):
-                    result = [result] if result else []
-            elif isinstance(data, dict):
-                # Single object or unknown format
-                if "error" in data or "Error" in data:
-                    error_msg = data.get("error") or data.get("Error", "Unknown error")
-                    raise ValueError(f"API returned error: {error_msg}")
-                result = [data]
-            else:
-                result = []
-
-            LOG.debug("DTM API response: %s rows from %s", len(result), endpoint)
-            return result
-
-        except requests.exceptions.Timeout:
-            LOG.error("DTM API timeout for %s after %ss", endpoint, self.timeout)
-            raise
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response else "unknown"
+            from dtmapi import DTMApi
+        except ImportError as exc:
             LOG.error(
-                "DTM API HTTP error for %s: %s (status=%s)",
-                endpoint,
-                exc,
-                status,
+                "Failed to import dtmapi package. Install with: pip install dtmapi>=0.1.5"
             )
-            raise
-        except requests.exceptions.ConnectionError as e:
-            LOG.error("Failed to connect to DTM API at %s: %s", url, e)
-            raise
-        except requests.exceptions.RequestException as exc:
-            LOG.error("DTM API request failed for %s: %s", endpoint, exc)
-            raise
+            raise RuntimeError(
+                "dtmapi package not installed. Run: pip install dtmapi>=0.1.5"
+            ) from exc
+
+        api_key = get_dtm_api_key()
+        if not api_key:
+            raise ValueError("DTM API key not configured")
+
+        # Initialize official client
+        self.client = DTMApi(subscription_key=api_key)
+
+        # Store config for reference
+        self.config = config
+        api_cfg = config.get("api", {})
+        self.rate_limit_delay = api_cfg.get("rate_limit_delay", 1.0)
+        self.timeout = api_cfg.get("timeout", 60)
+
+        # Log package version if available
+        try:
+            import dtmapi
+            version = getattr(dtmapi, "__version__", "unknown")
+            LOG.info("DTM API client initialized using dtmapi package v%s", version)
+        except Exception:
+            LOG.info("DTM API client initialized using official dtmapi package")
+
+        # Test connection by fetching countries
+        try:
+            LOG.info("Testing DTM API connection...")
+            countries = self.get_countries()
+            LOG.info(
+                "✓ DTM API connection successful (%d countries available)",
+                len(countries),
+            )
+        except Exception as e:
+            LOG.warning("✗ DTM API connection test failed: %s", e)
+            LOG.warning("Will attempt to fetch data anyway...")
 
     def get_countries(
         self, http_counts: Optional[Dict[str, int]] = None
     ) -> pd.DataFrame:
-        """Fetch list of all available countries.
+        """Get list of all available countries.
 
         Args:
             http_counts: Dictionary to update with HTTP status counts
@@ -330,8 +222,31 @@ class DTMApiClient:
         Returns:
             DataFrame with country information
         """
-        data = self._make_request("v3/displacement/country-list", http_counts=http_counts)
-        return pd.DataFrame(data)
+        try:
+            LOG.debug("Fetching countries list")
+            df = self.client.get_all_countries()
+
+            # Track success
+            if http_counts is not None:
+                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+
+            LOG.info("Successfully fetched %d countries", len(df))
+            return df
+        except Exception as e:
+            LOG.error("Failed to fetch countries: %s", e)
+
+            # Track failure
+            if http_counts is not None:
+                if "timeout" in str(e).lower():
+                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
+                elif "404" in str(e) or "not found" in str(e).lower():
+                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+                elif "500" in str(e) or "server" in str(e).lower():
+                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
+                else:
+                    http_counts["error"] = http_counts.get("error", 0) + 1
+
+            return pd.DataFrame()
 
     def get_idp_admin0(
         self,
@@ -344,6 +259,8 @@ class DTMApiClient:
     ) -> pd.DataFrame:
         """Fetch IDP data at country level (Admin 0).
 
+        Uses official dtmapi.DTMApi.get_idp_admin0_data() method.
+
         Args:
             country: Filter by country name
             from_date: Start date (YYYY-MM-DD)
@@ -355,20 +272,51 @@ class DTMApiClient:
         Returns:
             DataFrame with Admin 0 IDP data
         """
-        params: Dict[str, Any] = {}
-        if country:
-            params["CountryName"] = country
-        if from_date:
-            params["FromReportingDate"] = from_date
-        if to_date:
-            params["ToReportingDate"] = to_date
-        if from_round is not None:
-            params["FromRoundNumber"] = from_round
-        if to_round is not None:
-            params["ToRoundNumber"] = to_round
+        try:
+            LOG.debug(
+                "Fetching Admin0 data: country=%s, from_date=%s, to_date=%s",
+                country,
+                from_date,
+                to_date,
+            )
 
-        data = self._make_request("v3/displacement/admin0", params, http_counts=http_counts)
-        return pd.DataFrame(data)
+            # Call official API method
+            df = self.client.get_idp_admin0_data(
+                CountryName=country,
+                FromReportingDate=from_date,
+                ToReportingDate=to_date,
+                FromRoundNumber=from_round,
+                ToRoundNumber=to_round,
+            )
+
+            # Track success
+            if http_counts is not None:
+                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+
+            LOG.info("Successfully fetched %d Admin0 records", len(df))
+
+            # Rate limiting
+            if self.rate_limit_delay > 0:
+                time.sleep(self.rate_limit_delay)
+
+            return df
+
+        except Exception as e:
+            LOG.error("Failed to fetch Admin0 data: %s", e)
+
+            # Track failure
+            if http_counts is not None:
+                if "timeout" in str(e).lower():
+                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
+                elif "404" in str(e) or "not found" in str(e).lower():
+                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+                elif "500" in str(e) or "server" in str(e).lower():
+                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
+                else:
+                    http_counts["error"] = http_counts.get("error", 0) + 1
+
+            # Return empty DataFrame on error (fail gracefully)
+            return pd.DataFrame()
 
     def get_idp_admin1(
         self,
@@ -380,6 +328,8 @@ class DTMApiClient:
     ) -> pd.DataFrame:
         """Fetch IDP data at state/province level (Admin 1).
 
+        Uses official dtmapi.DTMApi.get_idp_admin1_data() method.
+
         Args:
             country: Filter by country name
             admin1: Filter by Admin 1 name
@@ -390,18 +340,50 @@ class DTMApiClient:
         Returns:
             DataFrame with Admin 1 IDP data
         """
-        params: Dict[str, Any] = {}
-        if country:
-            params["CountryName"] = country
-        if admin1:
-            params["Admin1Name"] = admin1
-        if from_date:
-            params["FromReportingDate"] = from_date
-        if to_date:
-            params["ToReportingDate"] = to_date
+        try:
+            LOG.debug(
+                "Fetching Admin1 data: country=%s, admin1=%s, from_date=%s, to_date=%s",
+                country,
+                admin1,
+                from_date,
+                to_date,
+            )
 
-        data = self._make_request("v3/displacement/admin1", params, http_counts=http_counts)
-        return pd.DataFrame(data)
+            # Call official API method
+            df = self.client.get_idp_admin1_data(
+                CountryName=country,
+                Admin1Name=admin1,
+                FromReportingDate=from_date,
+                ToReportingDate=to_date,
+            )
+
+            # Track success
+            if http_counts is not None:
+                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+
+            LOG.info("Successfully fetched %d Admin1 records", len(df))
+
+            # Rate limiting
+            if self.rate_limit_delay > 0:
+                time.sleep(self.rate_limit_delay)
+
+            return df
+
+        except Exception as e:
+            LOG.error("Failed to fetch Admin1 data: %s", e)
+
+            # Track failure
+            if http_counts is not None:
+                if "timeout" in str(e).lower():
+                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
+                elif "404" in str(e) or "not found" in str(e).lower():
+                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+                elif "500" in str(e) or "server" in str(e).lower():
+                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
+                else:
+                    http_counts["error"] = http_counts.get("error", 0) + 1
+
+            return pd.DataFrame()
 
     def get_idp_admin2(
         self,
@@ -413,6 +395,8 @@ class DTMApiClient:
     ) -> pd.DataFrame:
         """Fetch IDP data at district level (Admin 2).
 
+        Uses official dtmapi.DTMApi.get_idp_admin2_data() method.
+
         Args:
             country: Filter by country name
             operation: Filter by operation type
@@ -423,18 +407,50 @@ class DTMApiClient:
         Returns:
             DataFrame with Admin 2 IDP data
         """
-        params: Dict[str, Any] = {}
-        if country:
-            params["CountryName"] = country
-        if operation:
-            params["Operation"] = operation
-        if from_date:
-            params["FromReportingDate"] = from_date
-        if to_date:
-            params["ToReportingDate"] = to_date
+        try:
+            LOG.debug(
+                "Fetching Admin2 data: country=%s, operation=%s, from_date=%s, to_date=%s",
+                country,
+                operation,
+                from_date,
+                to_date,
+            )
 
-        data = self._make_request("v3/displacement/admin2", params, http_counts=http_counts)
-        return pd.DataFrame(data)
+            # Call official API method
+            df = self.client.get_idp_admin2_data(
+                CountryName=country,
+                Operation=operation,
+                FromReportingDate=from_date,
+                ToReportingDate=to_date,
+            )
+
+            # Track success
+            if http_counts is not None:
+                http_counts["2xx"] = http_counts.get("2xx", 0) + 1
+
+            LOG.info("Successfully fetched %d Admin2 records", len(df))
+
+            # Rate limiting
+            if self.rate_limit_delay > 0:
+                time.sleep(self.rate_limit_delay)
+
+            return df
+
+        except Exception as e:
+            LOG.error("Failed to fetch Admin2 data: %s", e)
+
+            # Track failure
+            if http_counts is not None:
+                if "timeout" in str(e).lower():
+                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
+                elif "404" in str(e) or "not found" in str(e).lower():
+                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+                elif "500" in str(e) or "server" in str(e).lower():
+                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
+                else:
+                    http_counts["error"] = http_counts.get("error", 0) + 1
+
+            return pd.DataFrame()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -1562,6 +1578,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rows_total": 0,
         "api_key_configured": api_key_configured,
     }
+
+    # Add dtmapi package information to diagnostics
+    try:
+        import dtmapi
+        dtmapi_version = getattr(dtmapi, "__version__", "unknown")
+        extras["api_package"] = "dtmapi"
+        extras["api_package_version"] = dtmapi_version
+        LOG.info("Using dtmapi package version %s", dtmapi_version)
+    except ImportError:
+        extras["api_package"] = "dtmapi"
+        extras["api_package_version"] = "not installed"
+        LOG.warning(
+            "dtmapi package not installed. Install with: pip install dtmapi>=0.1.5"
+        )
 
     status_raw = "ok"
     reason: Optional[str] = None
