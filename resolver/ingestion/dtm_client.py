@@ -26,13 +26,7 @@ from resolver.ingestion.diagnostics_emitter import (
     start_run as diagnostics_start_run,
 )
 from resolver.ingestion.dtm_auth import check_api_key_configured, get_dtm_api_key
-from resolver.ingestion.utils import (
-    ensure_headers,
-    flow_from_stock,
-    month_start,
-    stable_digest,
-    to_iso3,
-)
+from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest, to_iso3
 from resolver.ingestion.utils.country_names import resolve_accept_names
 from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
 
@@ -51,11 +45,7 @@ API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
 API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
 API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
 
-DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
-
-LOG = logging.getLogger("resolver.ingestion.dtm")
-
-COLUMNS = [
+CANONICAL_HEADERS = [
     "source",
     "country_iso3",
     "admin1",
@@ -71,6 +61,25 @@ COLUMNS = [
     "raw_fields_json",
 ]
 
+SERIES_INCIDENT = "incident"
+SERIES_CUMULATIVE = "cumulative"
+
+__all__ = [
+    "CANONICAL_HEADERS",
+    "SERIES_INCIDENT",
+    "SERIES_CUMULATIVE",
+    "load_config",
+    "load_registries",
+    "build_rows",
+    "main",
+]
+
+DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG = logging.getLogger("resolver.ingestion.dtm")
+
+COLUMNS = CANONICAL_HEADERS
+
 DEFAULT_CAUSE = "unknown"
 HTTP_COUNT_KEYS = ("2xx", "4xx", "5xx", "timeout", "error")
 ROW_COUNT_KEYS = ("admin0", "admin1", "admin2", "total")
@@ -78,7 +87,7 @@ ROW_COUNT_KEYS = ("admin0", "admin1", "admin2", "total")
 
 def _extract_status_code(exc: Exception) -> Optional[int]:
     message = str(exc)
-    for token in re.findall(r"(\d{3})", message):
+    for token in re.findall(r"(\d{3})", message):
         try:
             code = int(token)
         except ValueError:
@@ -303,6 +312,26 @@ def load_config() -> Dict[str, Any]:
         return {}
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
+
+
+def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return minimal registry stubs for tests and CLI helpers."""
+
+    countries = pd.DataFrame(
+        [
+            {"iso3": "AAA", "name": "Country A"},
+            {"iso3": "BBB", "name": "Country B"},
+            {"iso3": "CCC", "name": "Country C"},
+        ]
+    )
+    shocks = pd.DataFrame(
+        [
+            {"code": "DI", "key": "displacement_influx", "name": "Displacement influx"},
+            {"code": "FL", "key": "flood", "name": "Flood"},
+            {"code": "DR", "key": "drought", "name": "Drought"},
+        ]
+    )
+    return countries, shocks
 
 
 def ensure_header_only() -> None:
@@ -866,7 +895,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if status == "ok":
         if rows_written == 0:
             status = "ok-empty"
-            reason = "no rows returned"
+            reason = "header-only (0 rows)"
+            extras["rows_total"] = 0
         else:
             reason = f"wrote {rows_written} rows"
 
@@ -885,13 +915,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "status_raw": status,
         }
     )
+    extras["api_attempted"] = bool(http_stats.get("last_status"))
 
     http_payload = {key: int(http_stats.get(key, 0)) for key in HTTP_COUNT_KEYS}
     http_payload["retries"] = int(http_stats.get("retries", 0))
     http_payload["last_status"] = http_stats.get("last_status")
 
     rows_summary = summary.get("rows", {}) if isinstance(summary, Mapping) else {}
-
+    summary_extras = dict(summary.get("extras", {})) if isinstance(summary, Mapping) else {}
+    totals = {
+        "rows_fetched": rows_summary.get("fetched", 0),
+        "rows_normalized": rows_summary.get("normalized", rows_written),
+        "rows_written": rows_written,
+        "kept": rows_summary.get("kept", rows_written),
+        "dropped": rows_summary.get("dropped", 0),
+        "parse_errors": rows_summary.get("parse_errors", 0),
+    }
     run_payload = {
         "window": {"start": window_start_iso, "end": window_end_iso},
         "countries": summary.get("countries", {}),
@@ -904,10 +943,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "kept": rows_summary.get("kept", rows_written),
             "dropped": rows_summary.get("dropped", 0),
         },
+        "totals": totals,
         "status": status,
         "reason": reason,
         "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
-        "extras": summary.get("extras", {}),
+        "extras": summary_extras,
+        "args": vars(args),
     }
     if rows_written == 0 and "api_sample_path" not in run_payload["extras"] and API_SAMPLE_PATH.exists():
         run_payload["extras"]["api_sample_path"] = str(API_SAMPLE_PATH)

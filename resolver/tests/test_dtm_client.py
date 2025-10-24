@@ -32,6 +32,7 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
         "DEFAULT_OUTPUT": out_path,
         "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
+        "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
         "RUN_DETAILS_PATH": diagnostics_dir / "dtm_run.json",
         "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
@@ -39,6 +40,24 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
     return mappings
+
+
+def test_canonical_headers_exported() -> None:
+    assert dtm_client.CANONICAL_HEADERS == [
+        "source",
+        "country_iso3",
+        "admin1",
+        "event_id",
+        "as_of",
+        "month_start",
+        "value_type",
+        "value",
+        "unit",
+        "method",
+        "confidence",
+        "raw_event_id",
+        "raw_fields_json",
+    ]
 
 
 def test_build_rows_requires_api_config() -> None:
@@ -79,8 +98,17 @@ def test_main_writes_outputs_and_diagnostics(
     monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
     monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
-    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
-    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
+    def _finalize(*_, status: str, reason: str, http: Dict[str, Any], counts: Dict[str, Any], extras: Dict[str, Any]):
+        payload = {"status": status, "reason": reason, "http": http, "counts": counts, "extras": extras}
+        return payload
+
+    def _append(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+
+    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", _finalize)
+    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", _append)
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main([])
@@ -90,6 +118,8 @@ def test_main_writes_outputs_and_diagnostics(
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["rows"]["written"] == 2
     assert run_payload["rows"]["fetched"] == 1
+    assert run_payload["totals"]["rows_written"] == 2
+    assert run_payload["args"]["strict_empty"] is False
     request = json.loads(patch_paths["API_REQUEST_PATH"].read_text(encoding="utf-8"))
     assert request["admin_levels"] == ["admin0"]
 
@@ -126,6 +156,77 @@ def test_main_strict_empty_exits_nonzero(
 
     rc = dtm_client.main(["--strict-empty"])
     assert rc == 3
+
+
+def test_main_zero_rows_reason_and_totals(
+    monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+
+    class EmptyClient:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            self.rate_limit_delay = 0
+            self.timeout = 0
+
+        def get_countries(self, *_: Any, **__: Any) -> pd.DataFrame:
+            return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+
+        def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame(columns=["CountryName", "ReportingDate", "TotalIDPs"])
+
+        def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(dtm_client, "DTMApiClient", EmptyClient)
+    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: ["Kenya"])
+    monkeypatch.setattr(
+        dtm_client,
+        "load_config",
+        lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}},
+    )
+    monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
+
+    def _finalize(
+        *_: Any,
+        status: str,
+        reason: str,
+        http: Dict[str, Any],
+        counts: Dict[str, Any],
+        extras: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "reason": reason,
+            "http": http,
+            "counts": counts,
+            "extras": extras,
+        }
+
+    def _append(path: Path, payload: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+
+    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", _finalize)
+    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", _append)
+    monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
+
+    rc = dtm_client.main([])
+    assert rc == 0
+    run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["status"] == "ok-empty"
+    assert run_payload["reason"] == "header-only (0 rows)"
+    assert run_payload["totals"]["rows_written"] == 0
+    assert run_payload["totals"]["rows_fetched"] == 0
+    assert run_payload["args"]["strict_empty"] is False
+    report_lines = patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
+    assert report_lines
+    report = json.loads(report_lines[-1])
+    assert report["status"] == "ok-empty"
+    assert report["reason"] == "header-only (0 rows)"
 
 
 def test_main_retries_with_secondary_key(

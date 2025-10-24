@@ -1,9 +1,13 @@
 enabled: true
 
 api:
-  admin_levels: [admin0, admin1, admin2]
-  countries: []
+  countries:
+    - "Sudan"
+    - "Ethiopia"
+    - "Somalia"
+  admin_levels: [admin0, admin1]
   operations: []
+  indicators: ["idps"]
 
 output:
   measure: stock

@@ -297,7 +297,7 @@ field_aliases:
 ```
 
 **Diagnostics:** each execution writes:
-- `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), and row totals (`admin0`, `admin1`, `admin2`, `total`).
+- `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
 - `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
 - `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 
@@ -312,10 +312,19 @@ field_aliases:
   "http": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0, "retries": 0, "last_status": 200},
   "paging": {"pages": 3, "page_size": 500, "total_received": 1200},
   "rows": {"fetched": 1200, "normalized": 1180, "written": 1180, "kept": 1180, "dropped": 20},
+  "totals": {
+    "rows_fetched": 1200,
+    "rows_normalized": 1180,
+    "rows_written": 1180,
+    "kept": 1180,
+    "dropped": 20,
+    "parse_errors": 0
+  },
   "status": "ok",
   "reason": "wrote 1180 rows",
   "outputs": {"csv": "data/staging/dtm_displacement.csv", "meta": "data/staging/dtm_displacement.csv.meta.json"},
-  "extras": {"api_sample_path": "diagnostics/ingestion/dtm_api_sample.json"}
+  "extras": {"api_sample_path": "diagnostics/ingestion/dtm_api_sample.json"},
+  "args": {"strict_empty": false, "no_date_filter": false}
 }
 ```
 
@@ -330,4 +339,4 @@ field_aliases:
 | `1` | `error` | Runtime exception (network failure, unexpected API error). |
 | `skipped` | `skipped` | `RESOLVER_SKIP_DTM=1` or connector disabled in config. |
 
-Zero-row runs are marked `ok-empty`; `dtm_api_sample.json` captures the API response sample to help diagnose the cause.
+Zero-row runs are marked `ok-empty` with reason `"header-only (0 rows)"`; `dtm_api_sample.json` captures the API response sample to help diagnose the cause.
