@@ -318,6 +318,10 @@ When `sources` contains entries with `id_or_path`, the connector reads from loca
 | `name` | no | Friendly name used in logs and diagnostics. Defaults to the `id_or_path` when omitted. |
 | `type` | no | Source type. Only `file` is currently supported. |
 | `measure` | no | Set to `stock` (default) to derive flows or `flow` when the CSV already reports per-period movements. |
+
+**Diagnostics:** each run emits `diagnostics/ingestion/dtm_run.json` capturing the connector mode, trigger, filters, HTTP
+counts (`2xx`, `4xx`, `5xx`, `timeout`, `error`), and row totals (`admin0`, `admin1`, `admin2`, `total`). The file is
+informational and may change without schema guarantees.
 | `country_column`, `admin1_column`, `date_column`, `value_column`, `cause_column` | no | Optional overrides for column detection. When unspecified the connector infers columns using common aliases. The runtime validator confirms that the resolved `date_column` exists; sources with missing columns are listed under `diagnostics/ingestion/dtm_run.json` → `sources.invalid`. |
 
 When `LOG_LEVEL=DEBUG`, the resolved source list is mirrored to

@@ -86,7 +86,7 @@ def test_make_request_http_counts(mock_get, mock_config, mock_api_key):
     mock_response.json.return_value = []
     mock_get.return_value = mock_response
 
-    http_counts = {"2xx": 0, "4xx": 0, "5xx": 0}
+    http_counts = {"2xx": 0, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0}
     client = DTMApiClient(mock_config)
     client._make_request("TestEndpoint", http_counts=http_counts)
 

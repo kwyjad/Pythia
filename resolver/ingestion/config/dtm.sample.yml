@@ -1,0 +1,14 @@
+enabled: true
+# Either top-level api: {} …
+api: {}
+# …or sources: [{ type: api }]
+# sources:
+#   - type: api
+
+admin_levels: [admin0, admin1, admin2]   # optional
+countries: []                             # or ["Kenya", "Sudan"] to scope
+operations: []                            # optional, for admin2
+output:
+  measure: stock                          # or "flow" (delta month-over-month)
+field_aliases:
+  idp_count: ["TotalIDPs", "IDPTotal"]    # server field candidates
