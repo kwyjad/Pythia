@@ -17,7 +17,7 @@ class CountryClient:
     def __init__(self, config: dict, *, subscription_key: str | None = None) -> None:
         self.config = config
 
-    def get_countries(self, *_: object, **__: object) -> pd.DataFrame:
+    def get_all_countries(self, *_: object, **__: object) -> pd.DataFrame:
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}, {"CountryName": "Uganda", "ISO3": "UGA"}])
 
     def get_idp_admin0(self, **_: object) -> pd.DataFrame:
@@ -75,18 +75,16 @@ def test_resolved_countries_recorded(monkeypatch: pytest.MonkeyPatch, patched_pa
     write_config(patched_paths["CONFIG_PATH"])
     monkeypatch.setenv("DTM_API_KEY", "dummy")
     monkeypatch.setattr(dtm_client, "DTMApiClient", CountryClient)
-    monkeypatch.setattr(
-        dtm_client,
-        "resolve_accept_names",
-        lambda _client, requested: ["Kenya" if item.upper() == "KEN" else item for item in requested],
-    )
-
     exit_code = dtm_client.main([])
 
     assert exit_code == 0
     run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["countries"]["requested"] == ["KEN", "Uganda"]
     assert run_payload["countries"]["resolved"] == ["Kenya", "Uganda"]
+    effective = run_payload["extras"]["effective_params"]
+    assert effective["country_mode"] == "ALL"
+    assert effective["countries_requested"] == ["KEN", "Uganda"]
+    assert effective["countries"] == ["Kenya", "Uganda"]
     report_lines = patched_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
     report = json.loads(report_lines[-1])
     assert report["status"] == "ok"

@@ -17,7 +17,7 @@ class DummyClient:
     def __init__(self, config: dict, *, subscription_key: str | None = None) -> None:
         self.config = config
 
-    def get_countries(self, *_: object, **__: object) -> pd.DataFrame:
+    def get_all_countries(self, *_: object, **__: object) -> pd.DataFrame:
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
     def get_idp_admin0(self, **_: object) -> pd.DataFrame:
@@ -70,11 +70,6 @@ def run_zero_row(monkeypatch: pytest.MonkeyPatch, patched_paths: Dict[str, Path]
     monkeypatch.setenv("DTM_API_KEY", "dummy")
     monkeypatch.setenv("LOG_LEVEL", "INFO")
     monkeypatch.setattr(dtm_client, "DTMApiClient", DummyClient)
-    monkeypatch.setattr(
-        dtm_client,
-        "resolve_accept_names",
-        lambda *_: ["Kenya"],
-    )
     args = ["--strict-empty"] if strict else []
     return dtm_client.main(args)
 
