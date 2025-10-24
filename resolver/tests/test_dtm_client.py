@@ -34,10 +34,14 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
         "DEFAULT_OUTPUT": out_path,
         "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
+        "DTM_DIAGNOSTICS_DIR": diagnostics_dir / "dtm",
         "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
         "RUN_DETAILS_PATH": diagnostics_dir / "dtm_run.json",
         "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
+        "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
+        "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
+        "REQUESTS_LOG_PATH": diagnostics_dir / "dtm" / "requests.jsonl",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
@@ -214,14 +218,42 @@ def test_main_writes_outputs_and_diagnostics(
     assert meta_payload["effective_params"]["discovered_countries_count"] == 2
     assert meta_payload["effective_params"]["countries_requested"] == ["Kenya"]
     assert meta_payload["effective_params"]["idp_aliases"]
+    assert "discovery" in meta_payload
+    assert meta_payload["discovery"]["total_countries"] == 2
+    assert meta_payload["discovery"]["source"] == "countries"
+    assert "diagnostics" in meta_payload
+    assert meta_payload["diagnostics"]["requests_log"] == str(patch_paths["REQUESTS_LOG_PATH"])
+    assert any(
+        str(path).endswith("sample_admin0.csv")
+        for path in meta_payload["diagnostics"].get("samples", [])
+    )
     raw_dir = patch_paths["DIAGNOSTICS_DIR"] / "raw" / "dtm"
     assert raw_dir.exists()
     assert any(child.name.startswith("admin0.") for child in raw_dir.iterdir())
+    discovery_snapshot = patch_paths["DISCOVERY_SNAPSHOT_PATH"]
+    assert discovery_snapshot.exists()
+    snapshot_df = pd.read_csv(discovery_snapshot)
+    assert set(snapshot_df["CountryName"]) == {"Ethiopia", "Somalia"}
+    requests_log = patch_paths["REQUESTS_LOG_PATH"]
+    assert requests_log.exists()
+    request_entries = [
+        json.loads(line)
+        for line in requests_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert request_entries
+    assert all("country" in entry for entry in request_entries)
+    sample_path = patch_paths["DTM_DIAGNOSTICS_DIR"] / "sample_admin0.csv"
+    assert sample_path.exists()
     assert "timings_ms" in run_payload["extras"]
     assert "effective_params" in run_payload["extras"]
     assert "deps" in run_payload["extras"]
     assert "per_country_counts" in run_payload["extras"]
     assert "failures" in run_payload["extras"]
+    assert "discovery" in run_payload["extras"]
+    assert run_payload["extras"]["discovery"]["total_countries"] == 2
+    assert "diagnostics" in run_payload["extras"]
+    assert run_payload["extras"]["diagnostics"]["requests_log"] == str(requests_log)
 
 
 def test_main_strict_empty_exits_nonzero(
@@ -374,3 +406,51 @@ def test_main_retries_with_secondary_key(
     assert attempt["count"] == 2
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["http"]["retries"] == 1
+
+
+def test_requests_log_written(
+    monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+
+    class DummyClient:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            self.rate_limit_delay = 0
+            self.timeout = 0
+
+        def get_all_countries(self) -> pd.DataFrame:
+            return pd.DataFrame([{"CountryName": "Kenya"}])
+
+        def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "CountryName": ["Kenya"],
+                    "ReportingDate": ["2024-06-01"],
+                    "TotalIDPs": [25],
+                }
+            )
+
+        def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(dtm_client, "DTMApiClient", DummyClient)
+    monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
+    monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
+    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
+    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
+    monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
+
+    rc = dtm_client.main([])
+    assert rc == 0
+    log_file = patch_paths["REQUESTS_LOG_PATH"]
+    assert log_file.exists()
+    lines = [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert lines
+    assert all("country" in entry for entry in lines)
