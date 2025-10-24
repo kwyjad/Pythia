@@ -173,9 +173,15 @@ def test_main_writes_outputs_and_diagnostics(
     assert "effective_params" in meta_payload
     assert "http_counters" in meta_payload
     assert "timings_ms" in meta_payload
+    assert "per_country_counts" in meta_payload
+    assert isinstance(meta_payload["per_country_counts"], list)
+    assert "failures" in meta_payload
+    assert isinstance(meta_payload["failures"], list)
     assert "timings_ms" in run_payload["extras"]
     assert "effective_params" in run_payload["extras"]
     assert "deps" in run_payload["extras"]
+    assert "per_country_counts" in run_payload["extras"]
+    assert "failures" in run_payload["extras"]
 
 
 def test_main_strict_empty_exits_nonzero(

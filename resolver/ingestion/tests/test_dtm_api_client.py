@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Dict
+from types import SimpleNamespace
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import pytest
@@ -85,3 +86,49 @@ def test_http_errors_raise(monkeypatch: pytest.MonkeyPatch, config: dict) -> Non
     client = DTMApiClient(config)
     with pytest.raises(DTMHttpError):
         client.get_idp_admin0(country="Kenya")
+
+
+def test_admin_methods_use_sdk_parameter_names(
+    monkeypatch: pytest.MonkeyPatch, config: dict
+) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+    client = DTMApiClient(config)
+    client.get_idp_admin0(country="Kenya")
+    calls = client.client.calls
+    assert calls["admin0"]["CountryName"] == "Kenya"
+    assert "FromReportingDate" in calls["admin0"]
+    client.get_idp_admin1(country="Kenya")
+    assert calls["admin1"]["CountryName"] == "Kenya"
+    client.get_idp_admin2(country="Kenya", operation=None)
+    assert calls["admin2"]["CountryName"] == "Kenya"
+    assert "Operation" not in calls["admin2"]
+
+
+def test_discover_all_countries_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    frame = pd.DataFrame(
+        [
+            {"CountryName": "Kenya"},
+            {"CountryName": " Somalia "},
+            {"CountryName": None},
+            {"CountryName": "Kenya"},
+        ]
+    )
+    api = SimpleNamespace(get_all_countries=lambda: frame)
+    result = dtm_client._discover_all_countries(api)
+    assert result == ["Kenya", "Somalia"]
+
+
+def test_discover_all_countries_uses_client_http_counts() -> None:
+    called = {}
+
+    class FakeClient:
+        def get_countries(self, http_counts: Optional[dict] = None) -> pd.DataFrame:  # type: ignore[override]
+            called["http_counts"] = http_counts
+            return pd.DataFrame([
+                {"CountryName": "Ethiopia"},
+                {"CountryName": "Somalia"},
+            ])
+
+    names = dtm_client._discover_all_countries(FakeClient(), http_counts={})
+    assert names == ["Ethiopia", "Somalia"]
+    assert called["http_counts"] == {}

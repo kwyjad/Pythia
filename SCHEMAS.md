@@ -302,7 +302,7 @@ field_aliases:
 - `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 
 **Output metadata:**
-- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps`), effective query parameters (`effective_params`), HTTP counters (`http_counters`), and timing information (`timings_ms`).
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps`), effective query parameters (`effective_params`), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), and any per-country failures recorded during the run (`failures`).
 - `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
@@ -336,8 +336,14 @@ field_aliases:
       "window_end": "2024-02-01",
       "no_date_filter": false,
       "per_page": 500,
-      "max_pages": 3
+      "max_pages": 3,
+      "country_mode": "LIST",
+      "countries_count": 1
     },
+    "per_country_counts": [
+      {"country": "Kenya", "level": "admin0", "rows": 1180, "window": "2024-01-01->2024-02-01"}
+    ],
+    "failures": [],
     "timings_ms": {"preflight": 45, "fetch_total": 1234, "normalize": 210, "write": 80}
   },
   "args": {"strict_empty": false, "no_date_filter": false}

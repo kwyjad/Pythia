@@ -103,6 +103,12 @@ DEFAULT_CAUSE = "unknown"
 HTTP_COUNT_KEYS = ("2xx", "4xx", "5xx", "timeout", "error")
 ROW_COUNT_KEYS = ("admin0", "admin1", "admin2", "total")
 
+ADMIN_METHODS = {
+    "admin0": "get_idp_admin0",
+    "admin1": "get_idp_admin1",
+    "admin2": "get_idp_admin2",
+}
+
 
 def _preflight_dependencies() -> Tuple[Dict[str, Any], bool]:
     info: Dict[str, Any] = {
@@ -163,6 +169,63 @@ def _log_dependency_snapshot(info: Mapping[str, Any]) -> None:
         if snippet:
             for line in snippet.splitlines()[:10]:
                 LOG.debug("pip show dtmapi: %s", line.strip())
+
+
+def _package_version(name: str) -> str:
+    try:
+        module = importlib.import_module(name)
+    except Exception:
+        return "missing"
+    return str(getattr(module, "__version__", "unknown"))
+
+
+def _discover_all_countries(
+    api: Any, *, http_counts: Optional[MutableMapping[str, int]] = None
+) -> List[str]:
+    """Return a sorted list of country names discovered via the DTM SDK."""
+
+    frame: Any = None
+
+    getter = getattr(api, "get_all_countries", None)
+    if callable(getter):
+        frame = getter()
+    else:
+        getter = getattr(api, "get_countries", None)
+        if callable(getter):
+            try:
+                if http_counts is not None:
+                    frame = getter(http_counts=http_counts)
+                else:
+                    frame = getter()
+            except TypeError:
+                frame = getter()
+        else:
+            raise AttributeError("Provided API client lacks country discovery methods")
+
+    if frame is None:
+        return []
+
+    if isinstance(frame, pd.DataFrame):
+        data_frame = frame
+    else:
+        try:
+            data_frame = pd.DataFrame(frame)
+        except Exception:
+            return []
+
+    if data_frame.empty:
+        return []
+
+    names = set()
+    for _, row in data_frame.iterrows():
+        raw_value = row.get("CountryName", "")
+        if pd.isna(raw_value):
+            continue
+        text = str(raw_value).strip()
+        if not text:
+            continue
+        names.add(text)
+    return sorted(names)
 
 
 def _write_connector_report(
@@ -361,12 +424,14 @@ class DTMApiClient:
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
         try:
-            frame = self.client.get_idp_admin2_data(
-                CountryName=country,
-                Operation=operation,
-                FromReportingDate=from_date,
-                ToReportingDate=to_date,
-            )
+            params = {
+                "CountryName": country,
+                "FromReportingDate": from_date,
+                "ToReportingDate": to_date,
+            }
+            if operation:
+                params["Operation"] = operation
+            frame = self.client.get_idp_admin2_data(**params)
             self._record_success(http_counts, 200)
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
@@ -662,12 +727,8 @@ def _iter_level_pages(
     to_date: Optional[str],
     http_counts: MutableMapping[str, int],
 ):
-    fetchers = {
-        "admin0": client.get_idp_admin0,
-        "admin1": client.get_idp_admin1,
-        "admin2": client.get_idp_admin2,
-    }
-    fetcher = fetchers.get(level)
+    method_name = ADMIN_METHODS.get(level)
+    fetcher = getattr(client, method_name) if method_name else None
     if fetcher is None:
         raise ValueError(f"Unsupported admin level: {level}")
     kwargs = {
@@ -676,7 +737,7 @@ def _iter_level_pages(
         "to_date": to_date,
         "http_counts": http_counts,
     }
-    if level == "admin2":
+    if level == "admin2" and operation:
         kwargs["operation"] = operation
     frame = fetcher(**kwargs)
     safe_kwargs = {key: value for key, value in kwargs.items() if key != "http_counts"}
@@ -739,6 +800,12 @@ def _fetch_api_data(
         "countries": {"requested": [], "resolved": []},
     }
 
+    summary_extras = summary.setdefault("extras", {})
+    per_country_counts: List[Dict[str, Any]] = []
+    failures: List[Dict[str, Any]] = []
+    summary_extras["per_country_counts"] = per_country_counts
+    summary_extras["failures"] = failures
+
     primary_key = os.getenv("DTM_API_PRIMARY_KEY") or os.getenv("DTM_API_KEY")
     secondary_key = os.getenv("DTM_API_SECONDARY_KEY") or None
 
@@ -756,19 +823,32 @@ def _fetch_api_data(
     except Exception as exc:
         LOG.warning("Failed to resolve country names: %s", exc)
         resolved_countries = requested_countries[:] if requested_countries else []
+
+    discovery_mode = not requested_countries
     if not resolved_countries:
+        target = client.client if hasattr(client, "client") else client
+        if discovery_mode:
+            LOG.info("No countries configured; discovering via DTM catalog")
         try:
-            countries_df = client.get_countries(http_counter)
-        except Exception:
-            countries_df = pd.DataFrame()
-        if not countries_df.empty:
-            resolved_countries = sorted(
-                {
-                    str(row.get("CountryName", "")).strip()
-                    for _, row in countries_df.iterrows()
-                    if str(row.get("CountryName", "")).strip()
-                }
-            )
+            resolved_countries = _discover_all_countries(target, http_counts=http_counter)
+        except Exception as exc:
+            LOG.error("Failed to auto-discover countries: %s", exc)
+            resolved_countries = []
+        if not resolved_countries:
+            try:
+                countries_df = client.get_countries(http_counter)
+            except Exception:
+                countries_df = pd.DataFrame()
+            if not countries_df.empty:
+                resolved_countries = sorted(
+                    {
+                        str(row.get("CountryName", "")).strip()
+                        for _, row in countries_df.iterrows()
+                        if str(row.get("CountryName", "")).strip()
+                    }
+                )
+        if resolved_countries:
+            LOG.info("Discovered %d countries from DTM catalog", len(resolved_countries))
     summary["countries"]["resolved"] = resolved_countries
 
     if not resolved_countries:
@@ -816,8 +896,18 @@ def _fetch_api_data(
         "no_date_filter": bool(no_date_filter),
         "per_page": None,
         "max_pages": None,
+        "country_mode": "ALL" if discovery_mode else "LIST",
+        "countries_count": 0 if resolved_countries == [None] else len(resolved_countries),
     }
     summary.setdefault("extras", {})["effective_params"] = effective_params
+
+    LOG.info(
+        "effective: dates %s → %s; admin_levels=%s; country_mode=%s",
+        from_date or "-",
+        to_date or "-",
+        admin_levels,
+        effective_params["country_mode"],
+    )
 
     field_mapping = cfg.get("field_mapping", {})
     field_aliases = cfg.get("field_aliases", {})
@@ -840,10 +930,19 @@ def _fetch_api_data(
     used_secondary = False
 
     for level in admin_levels:
-        level_counts = 0
         for country_name in resolved_countries:
             for operation in (operations if level == "admin2" else [None]):
                 combo_count = 0
+                country_label = country_name or "all countries"
+                op_suffix = f", operation={operation}" if operation else ""
+                LOG.info(
+                    "planning fetch: level=%s country=%s from=%s to=%s%s",
+                    level,
+                    country_label,
+                    from_date or "-",
+                    to_date or "-",
+                    op_suffix,
+                )
                 try:
                     pages = list(
                         _iter_level_pages(
@@ -865,19 +964,57 @@ def _fetch_api_data(
                         LOG.warning("Retrying DTM API request with secondary key")
                         client = DTMApiClient(cfg, subscription_key=secondary_key)
                         used_secondary = True
-                        pages = list(
-                            _iter_level_pages(
-                                client,
-                                level,
-                                country=country_name,
-                                operation=operation,
-                                from_date=from_date,
-                                to_date=to_date,
-                                http_counts=http_counter,
+                        try:
+                            pages = list(
+                                _iter_level_pages(
+                                    client,
+                                    level,
+                                    country=country_name,
+                                    operation=operation,
+                                    from_date=from_date,
+                                    to_date=to_date,
+                                    http_counts=http_counter,
+                                )
                             )
-                        )
+                        except Exception as retry_exc:
+                            LOG.error(
+                                "Failed after retry for country=%s level=%s: %s",
+                                country_label,
+                                level,
+                                retry_exc,
+                                exc_info=True,
+                            )
+                            failures.append(
+                                {
+                                    "country": country_label,
+                                    "level": level,
+                                    "operation": operation,
+                                    "error": type(retry_exc).__name__,
+                                    "message": str(retry_exc),
+                                }
+                            )
+                            continue
                     else:
                         raise
+                except Exception as exc:
+                    LOG.error(
+                        "country fetch failed: country=%s level=%s%s error=%s",
+                        country_label,
+                        level,
+                        op_suffix,
+                        exc,
+                        exc_info=True,
+                    )
+                    failures.append(
+                        {
+                            "country": country_label,
+                            "level": level,
+                            "operation": operation,
+                            "error": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    )
+                    continue
 
                 for page in pages:
                     summary["paging"]["pages"] += 1
@@ -950,21 +1087,26 @@ def _fetch_api_data(
                                 }
                             )
                             combo_count += 1
-                            level_counts += 1
                             summary["row_counts"][level] += 1
                             summary["row_counts"]["total"] += 1
                             summary["rows"]["fetched"] += 1
 
                 range_label = f"{from_date or '-'}->{to_date or '-'}"
-                country_label = country_name or "all countries"
-                if level == "admin2" and operation:
-                    country_label = f"{country_label} (operation={operation})"
+                per_country_counts.append(
+                    {
+                        "country": country_label,
+                        "level": level,
+                        "operation": operation,
+                        "rows": combo_count,
+                        "window": range_label,
+                    }
+                )
                 LOG.info(
-                    "Fetched %s rows (%s) for %s %s",
-                    f"{combo_count:,}",
+                    "country=%s level=%s rows=%s total_so_far=%s",
+                    country_label if not operation else f"{country_label} (operation={operation})",
                     level,
-                    country_label,
-                    range_label,
+                    combo_count,
+                    summary["rows"]["fetched"],
                 )
 
     effective_params = summary.get("extras", {}).get("effective_params")
@@ -1172,6 +1314,8 @@ def _write_meta(
     effective_params: Mapping[str, Any],
     http_counters: Mapping[str, Any],
     timings_ms: Mapping[str, Any],
+    per_country_counts: Sequence[Mapping[str, Any]] = (),
+    failures: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     payload: Dict[str, Any] = {"row_count": rows}
     if window_start:
@@ -1182,6 +1326,8 @@ def _write_meta(
     payload["effective_params"] = dict(effective_params)
     payload["http_counters"] = dict(http_counters)
     payload["timings_ms"] = {key: int(value) for key, value in timings_ms.items()}
+    payload["per_country_counts"] = list(per_country_counts)
+    payload["failures"] = list(failures)
     write_json(META_PATH, payload)
 
 
@@ -1198,6 +1344,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     dep_info, have_dtmapi = _preflight_dependencies()
     timings_ms: Dict[str, int] = {"preflight": max(0, int((time.perf_counter() - preflight_started) * 1000))}
     _log_dependency_snapshot(dep_info)
+    LOG.info(
+        "env: python=%s exe=%s",
+        dep_info.get("python", sys.version.split()[0]),
+        dep_info.get("executable", sys.executable),
+    )
+    LOG.info(
+        "deps: dtmapi=%s pandas=%s requests=%s",
+        _package_version("dtmapi"),
+        _package_version("pandas"),
+        _package_version("requests"),
+    )
 
     api_key_configured = check_api_key_configured()
     base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
@@ -1368,6 +1525,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         effective_params = {}
 
+    per_country_counts_payload = list(summary_extras.get("per_country_counts", []))
+    failures_payload = list(summary_extras.get("failures", []))
+    summary_extras["per_country_counts"] = per_country_counts_payload
+    summary_extras["failures"] = failures_payload
+
     _write_meta(
         rows_written,
         window_start_iso,
@@ -1376,6 +1538,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         effective_params=effective_params,
         http_counters=http_payload,
         timings_ms=timings_ms,
+        per_country_counts=per_country_counts_payload,
+        failures=failures_payload,
     )
 
     run_payload = {
@@ -1406,6 +1570,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if API_SAMPLE_PATH.exists():
         extras["api_sample_path"] = str(API_SAMPLE_PATH)
     extras.setdefault("effective_params", effective_params)
+    extras.setdefault("per_country_counts", per_country_counts_payload)
+    extras.setdefault("failures", failures_payload)
     diagnostics_result = diagnostics_finalize_run(
         diagnostics_ctx,
         status=status,
