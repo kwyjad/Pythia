@@ -264,97 +264,79 @@ Example JSONL entry:
 }
 ```
 
-## DTM source configuration
+## DTM API diagnostics
 
-The DTM connector supports two modes: **API mode** (recommended) and **file mode** (legacy).
+The DTM connector is API-only and always calls the official DTM API via the `dtmapi` package.
 
-### API Mode (DTM API v3)
-
-When the configuration includes an `api` section and `sources` is empty or omitted, the connector fetches data directly from the IOM DTM API v3.
-
-**Requirements:**
-- `DTM_API_KEY` environment variable must be set with your subscription key to fetch live data
-- Register at https://dtm-apim-portal.iom.int/ and subscribe to API-V3 to obtain a key
-- **Fallback behavior:** If `DTM_API_KEY` is not set, the connector runs in header-only mode (writes CSV with column headers but no data rows) and does not fail
+**Secrets:**
+- `DTM_API_PRIMARY_KEY` or legacy `DTM_API_KEY` (required).
+- `DTM_API_SECONDARY_KEY` (optional) retried on authentication failures.
 
 **Configuration fields:**
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `api.base_url` | no | API base URL (default: `https://dtm-apim-portal.iom.int/api/v3`) |
-| `api.rate_limit_delay` | no | Seconds to wait between requests (default: `1.0`) |
-| `api.timeout` | no | Request timeout in seconds (default: `30`) |
-| `admin_levels` | no | List of admin levels to fetch: `admin0`, `admin1`, `admin2` (default: all three) |
-| `countries` | no | List of country names to fetch. If `null` or omitted, fetches all available countries |
-| `operations` | no | List of operation types to filter (e.g., `"Displacement due to conflict"`). If `null`, fetches all |
-| `field_mapping` | no | Maps API response field names to internal schema (see config file for defaults) |
-| `output.measure` | no | Set to `stock` (default) to convert cumulative figures to flows |
+| `api.admin_levels` | no | Levels to fetch (`admin0`, `admin1`, `admin2`). Defaults to `admin1` and `admin0`. |
+| `api.countries` | no | ISO3 codes or country names. Empty list ⇒ fetch all available countries. |
+| `api.operations` | no | Operation names for admin2 pulls. |
+| `field_mapping` | no | Overrides for API column names (rarely needed). |
+| `field_aliases.idp_count` | no | Candidate columns containing the IDP total. |
+| `output.measure` | no | `stock` (default) converts cumulative totals to flows; `flow` keeps month deltas. |
 
 **Example configuration:**
 ```yaml
 enabled: true
 api:
-  base_url: "https://dtm-apim-portal.iom.int/api/v3"
-  rate_limit_delay: 1.0
-  timeout: 30
-admin_levels:
-  - admin0
-  - admin1
-  - admin2
-countries:
-  - Ethiopia
-  - Sudan
+  admin_levels: [admin1, admin0]
+  countries: []
+  operations: []
+output:
+  measure: stock
+field_aliases:
+  idp_count: ["TotalIDPs", "IDPTotal"]
 ```
 
-### File Mode (Legacy)
+**Diagnostics:** each execution writes:
+- `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
+- `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
+- `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 
-When `sources` contains entries with `id_or_path`, the connector reads from local CSV files.
-
-**Configuration fields:**
-
-| Field | Required | Description |
-| --- | --- | --- |
-| `id_or_path` | yes | Absolute path or cloud identifier for the CSV payload. The connector skips entries that omit this value and records the failure in diagnostics. |
-| `name` | no | Friendly name used in logs and diagnostics. Defaults to the `id_or_path` when omitted. |
-| `type` | no | Source type. Only `file` is currently supported. |
-| `measure` | no | Set to `stock` (default) to derive flows or `flow` when the CSV already reports per-period movements. |
-| `country_column`, `admin1_column`, `date_column`, `value_column`, `cause_column` | no | Optional overrides for column detection. When unspecified the connector infers columns using common aliases. The runtime validator confirms that the resolved `date_column` exists; sources with missing columns are listed under `diagnostics/ingestion/dtm_run.json` → `sources.invalid`. |
-
-When `LOG_LEVEL=DEBUG`, the resolved source list is mirrored to
-`diagnostics/ingestion/dtm_sources_resolved.json` for triage.
-
-### Output metadata
-
-- `data/staging/dtm_displacement.csv.meta.json` mirrors the CSV output and records:
-  - `row_count`: number of written rows (excluding the header).
-  - `backfill_start`/`backfill_end`: the effective ingestion window resolved from environment variables.
-  - `sources_total`, `sources_valid`, `sources_invalid`: summary counts after configuration and runtime validation.
-- `diagnostics/ingestion/dtm_run.json` is rewritten on every execution and has the shape:
+**Output metadata:**
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count plus the resolved ingestion window.
+- `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
 {
-  "window": {"start": "2023-01-01", "end": "2023-12-31", "disabled": false},
-  "outputs": {"csv": "…", "meta": "…"},
-  "sources": {
-    "valid": [
-      {"name": "…", "rows_before": 10, "rows_after": 8, "dropped": 2,
-       "parse_errors": 1, "min": "2023-01-01", "max": "2023-02-01"}
-    ],
-    "invalid": [
-      {"name": "missing-id", "reason": "missing id_or_path"},
-      {"name": "missing-date", "reason": "missing date_column"}
-    ]
-  },
+  "window": {"start": "2024-01-01", "end": "2024-02-01"},
+  "countries": {"requested": ["KEN"], "resolved": ["Kenya"]},
+  "http": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0, "retries": 0, "last_status": 200},
+  "paging": {"pages": 3, "page_size": 500, "total_received": 1200},
+  "rows": {"fetched": 1200, "normalized": 1180, "written": 1180, "kept": 1180, "dropped": 20},
   "totals": {
-    "rows_before": 12,
-    "rows_after": 8,
-    "rows_written": 8,
-    "kept": 8,
-    "dropped": 4,
-    "parse_errors": 1,
-    "invalid_sources": 2
-  }
+    "rows_fetched": 1200,
+    "rows_normalized": 1180,
+    "rows_written": 1180,
+    "kept": 1180,
+    "dropped": 20,
+    "parse_errors": 0
+  },
+  "status": "ok",
+  "reason": "wrote 1180 rows",
+  "outputs": {"csv": "data/staging/dtm_displacement.csv", "meta": "data/staging/dtm_displacement.csv.meta.json"},
+  "extras": {"api_sample_path": "diagnostics/ingestion/dtm_api_sample.json"},
+  "args": {"strict_empty": false, "no_date_filter": false}
 }
 ```
 
-Runs that write no data rows are classified as **ok-empty** and emit reasons such as `header-only; 2 sources invalid; kept=0`. The connector summary reads the `totals.kept`, `totals.dropped`, and `totals.parse_errors` fields to populate the dedicated columns in the Markdown table.
+**Exit codes:**
+
+| Exit code | Status | Description |
+| --- | --- | --- |
+| `0` | `ok` | Successful run with at least one row written. |
+| `0` | `ok-empty` | Successful run with zero rows (header-only output). |
+| `3` | `ok-empty` | Zero rows with `--strict-empty`/`DTM_STRICT_EMPTY=1`. |
+| `2` | `error` | Configuration or authentication failure (missing key, invalid config). |
+| `1` | `error` | Runtime exception (network failure, unexpected API error). |
+| `skipped` | `skipped` | `RESOLVER_SKIP_DTM=1` or connector disabled in config. |
+
+Zero-row runs are marked `ok-empty` with reason `"header-only (0 rows)"`; `dtm_api_sample.json` captures the API response sample to help diagnose the cause.

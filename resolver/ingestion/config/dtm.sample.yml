@@ -1,0 +1,9 @@
+enabled: true
+api:
+  admin_levels: [admin0, admin1, admin2]
+  countries: []
+  operations: []
+output:
+  measure: stock
+field_aliases:
+  idp_count: ["TotalIDPs", "IDPTotal"]

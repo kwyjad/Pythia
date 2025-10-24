@@ -1,7 +1,10 @@
+"""DTM configuration validation tests for API-only mode."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Dict
 
 import pytest
 import yaml
@@ -9,92 +12,79 @@ import yaml
 from resolver.ingestion import dtm_client
 
 
-def _prepare_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
-    out_path = tmp_path / "dtm.csv"
+@pytest.fixture()
+def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Path]:
     diagnostics_dir = tmp_path / "diagnostics" / "ingestion"
-    paths = {
+    out_path = tmp_path / "outputs" / "dtm.csv"
+    api_request = diagnostics_dir / "dtm_api_request.json"
+    run_path = diagnostics_dir / "dtm_run.json"
+    sample_path = diagnostics_dir / "dtm_api_sample.json"
+    mappings = {
         "CONFIG_PATH": tmp_path / "dtm.yml",
         "OUT_PATH": out_path,
         "OUT_DIR": out_path.parent,
         "OUTPUT_PATH": out_path,
         "DEFAULT_OUTPUT": out_path,
+        "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
         "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
-        "CONFIG_ISSUES_PATH": diagnostics_dir / "dtm_config_issues.json",
-        "RESOLVED_SOURCES_PATH": diagnostics_dir / "dtm_sources_resolved.json",
+        "RUN_DETAILS_PATH": run_path,
+        "API_REQUEST_PATH": api_request,
+        "API_SAMPLE_PATH": sample_path,
     }
-    for name, value in paths.items():
+    for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
-    return paths
+    return mappings
 
 
-def _write_config(path: Path, sources: list[dict[str, object]]) -> None:
-    payload = {"enabled": True, "sources": sources}
+def write_config(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
 
-def _read_report(path: Path) -> dict:
-    content = path.read_text(encoding="utf-8").strip().splitlines()
-    assert content, "expected at least one diagnostics record"
-    return json.loads(content[-1])
+def read_report(path: Path) -> dict:
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines, "expected connectors_report.jsonl to have at least one entry"
+    return json.loads(lines[-1])
 
 
-def test_dtm_config_preflight_skips_invalid_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    paths = _prepare_paths(monkeypatch, tmp_path)
-    valid_csv = tmp_path / "valid.csv"
-    valid_csv.write_text("country_iso3,date,value\nKEN,2023-01-15,10\n", encoding="utf-8")
-    sources = [
-        {"name": "missing"},
-        {"name": "blank", "id_or_path": ""},
-        {"name": "valid", "id_or_path": str(valid_csv)},
-    ]
-    _write_config(paths["CONFIG_PATH"], sources)
-    monkeypatch.delenv("DTM_STRICT", raising=False)
-
-    exit_code = dtm_client.main([])
-
-    assert exit_code == 0
-    issues_path = paths["CONFIG_ISSUES_PATH"]
-    assert issues_path.exists()
-    issues = json.loads(issues_path.read_text(encoding="utf-8"))
-    assert issues["summary"]["invalid"] == 2
-    assert all(item["error"] == "missing id_or_path" for item in issues["invalid"])
-
-    report = _read_report(paths["CONNECTORS_REPORT"])
-    assert report["status"] == "ok"
-    assert report["reason"] == "missing id_or_path"
-    extras = report["extras"]
-    assert extras["invalid_sources"] == 2
-    assert extras["valid_sources"] == 1
-    assert extras["rows_total"] > 0
-    assert extras["config_issues_path"] == str(issues_path)
-
-
-def test_dtm_strict_mode_exits_with_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    paths = _prepare_paths(monkeypatch, tmp_path)
-    valid_csv = tmp_path / "valid.csv"
-    valid_csv.write_text("country_iso3,date,value\nKEN,2023-01-15,10\n", encoding="utf-8")
-    sources = [
-        {"name": "missing"},
-        {"name": "blank", "id_or_path": ""},
-        {"name": "valid", "id_or_path": str(valid_csv)},
-    ]
-    _write_config(paths["CONFIG_PATH"], sources)
-    monkeypatch.setenv("DTM_STRICT", "1")
+def test_missing_api_block_aborts(patched_paths: Dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    write_config(patched_paths["CONFIG_PATH"], {"enabled": True})
+    monkeypatch.delenv("DTM_API_KEY", raising=False)
 
     exit_code = dtm_client.main([])
 
     assert exit_code == 2
-    issues_path = paths["CONFIG_ISSUES_PATH"]
-    assert issues_path.exists()
-    issues = json.loads(issues_path.read_text(encoding="utf-8"))
-    assert issues["summary"]["invalid"] == 2
-
-    report = _read_report(paths["CONNECTORS_REPORT"])
+    report = read_report(patched_paths["CONNECTORS_REPORT"])
     assert report["status"] == "error"
-    assert report["reason"] == "missing id_or_path"
-    extras = report["extras"]
-    assert extras["invalid_sources"] == 2
-    assert extras["rows_total"] == 0
-    assert extras["config_issues_path"] == str(issues_path)
+    assert "API-only" in report["reason"]
+    run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["status"] == "error"
+    assert run_payload["rows"]["written"] == 0
+
+
+def test_disabled_configuration_skips(patched_paths: Dict[str, Path]) -> None:
+    write_config(patched_paths["CONFIG_PATH"], {"enabled": False, "api": {}})
+
+    exit_code = dtm_client.main([])
+
+    assert exit_code == 0
+    report = read_report(patched_paths["CONNECTORS_REPORT"])
+    assert report["status"] == "skipped"
+    assert report["reason"] == "disabled via config"
+    csv_path = patched_paths["OUT_PATH"]
+    assert csv_path.exists()
+    content = csv_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(content) == 1, "header-only output expected"
+
+
+def test_env_skip_overrides(patched_paths: Dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    write_config(patched_paths["CONFIG_PATH"], {"enabled": True, "api": {}})
+    monkeypatch.setenv("RESOLVER_SKIP_DTM", "1")
+
+    exit_code = dtm_client.main([])
+
+    assert exit_code == 0
+    report = read_report(patched_paths["CONNECTORS_REPORT"])
+    assert report["status"] == "skipped"
+    assert report["reason"] == "disabled via RESOLVER_SKIP_DTM"

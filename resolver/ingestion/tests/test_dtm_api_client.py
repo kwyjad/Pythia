@@ -1,201 +1,87 @@
-#!/usr/bin/env python3
-"""Tests for DTM API client."""
+"""Unit tests for the thin DTMApiClient wrapper."""
 
-import json
-from unittest.mock import Mock, patch
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any, Dict
 
 import pandas as pd
 import pytest
-import requests
 
-from resolver.ingestion.dtm_client import DTMApiClient
-
-
-@pytest.fixture
-def mock_config():
-    """Fixture for DTM API configuration."""
-    return {
-        "api": {
-            "base_url": "https://test.api.example.com/v3",
-            "rate_limit_delay": 0,  # No delay for tests
-            "timeout": 10,
-        }
-    }
+from resolver.ingestion import dtm_client
+from resolver.ingestion.dtm_client import DTMApiClient, DTMHttpError
 
 
-@pytest.fixture
-def mock_api_key(monkeypatch):
-    """Fixture to mock DTM API key."""
-    monkeypatch.setenv("DTM_API_KEY", "test-api-key-12345")
+class DummyDTMApi:
+    def __init__(self, *, subscription_key: str) -> None:
+        self.subscription_key = subscription_key
+        self.calls: Dict[str, Dict[str, Any]] = {}
+
+    def get_all_countries(self) -> pd.DataFrame:
+        self.calls.setdefault("countries", {})
+        return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+
+    def get_idp_admin0_data(self, **params: Any) -> pd.DataFrame:
+        self.calls.setdefault("admin0", params)
+        return pd.DataFrame(
+            {"CountryName": ["Kenya"], "ReportingDate": ["2024-01-01"], "TotalIDPs": [100]}
+        )
+
+    def get_idp_admin1_data(self, **params: Any) -> pd.DataFrame:
+        self.calls.setdefault("admin1", params)
+        return pd.DataFrame()
+
+    def get_idp_admin2_data(self, **params: Any) -> pd.DataFrame:
+        self.calls.setdefault("admin2", params)
+        return pd.DataFrame()
 
 
-def test_dtm_api_client_init_success(mock_config, mock_api_key):
-    """Test successful DTMApiClient initialization."""
-    client = DTMApiClient(mock_config)
-
-    assert client.base_url == "https://test.api.example.com/v3"
-    assert client.timeout == 10
-    assert client.rate_limit_delay == 0
-    assert client.api_key == "test-api-key-12345"
+@pytest.fixture(autouse=True)
+def stub_dtmapi(monkeypatch: pytest.MonkeyPatch) -> DummyDTMApi:
+    dummy = DummyDTMApi(subscription_key="primary")
+    module = SimpleNamespace(DTMApi=lambda subscription_key=None: DummyDTMApi(subscription_key=subscription_key))
+    monkeypatch.setitem(sys.modules, "dtmapi", module)
+    return dummy
 
 
-def test_dtm_api_client_init_missing_key(mock_config, monkeypatch):
-    """Test DTMApiClient initialization fails with missing API key."""
+import sys  # placed after fixture to appease linter
+
+
+@pytest.fixture()
+def config() -> dict:
+    return {"api": {"timeout": 1, "rate_limit_delay": 0}}
+
+
+def test_init_requires_key(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
-
-    with pytest.raises(RuntimeError):
-        DTMApiClient(mock_config)
-
-
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_make_request_success_list_response(mock_get, mock_config, mock_api_key):
-    """Test _make_request with list response."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [{"id": 1}, {"id": 2}]
-    mock_get.return_value = mock_response
-
-    client = DTMApiClient(mock_config)
-    result = client._make_request("TestEndpoint")
-
-    assert len(result) == 2
-    assert result[0]["id"] == 1
-    mock_get.assert_called_once()
+    with pytest.raises(ValueError):
+        DTMApiClient(config)
 
 
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_make_request_success_dict_with_data(mock_get, mock_config, mock_api_key):
-    """Test _make_request with dict response containing 'data' key."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"data": [{"id": 3}, {"id": 4}]}
-    mock_get.return_value = mock_response
-
-    client = DTMApiClient(mock_config)
-    result = client._make_request("TestEndpoint")
-
-    assert len(result) == 2
-    assert result[0]["id"] == 3
+def test_get_countries(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+    client = DTMApiClient(config)
+    df = client.get_countries()
+    assert list(df["CountryName"]) == ["Kenya"]
 
 
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_make_request_http_counts(mock_get, mock_config, mock_api_key):
-    """Test _make_request updates HTTP counts."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = []
-    mock_get.return_value = mock_response
-
-    http_counts = {"2xx": 0, "4xx": 0, "5xx": 0}
-    client = DTMApiClient(mock_config)
-    client._make_request("TestEndpoint", http_counts=http_counts)
-
+def test_get_idp_admin0_updates_http_counts(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+    client = DTMApiClient(config)
+    http_counts = {"2xx": 0, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0, "last_status": None}
+    df = client.get_idp_admin0(country="Kenya", http_counts=http_counts)
+    assert not df.empty
     assert http_counts["2xx"] == 1
     assert http_counts["last_status"] == 200
 
 
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_make_request_http_error(mock_get, mock_config, mock_api_key):
-    """Test _make_request handles HTTP errors."""
-    mock_response = Mock()
-    mock_response.status_code = 404
-    mock_response.raise_for_status.side_effect = requests.HTTPError()
-    mock_get.return_value = mock_response
+def test_http_errors_raise(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
+    class ErrorDTMApi(DummyDTMApi):
+        def get_idp_admin0_data(self, **params: Any) -> pd.DataFrame:
+            raise dtm_client.DTMUnauthorizedError(401, "unauthorized")  # type: ignore[name-defined]
 
-    client = DTMApiClient(mock_config)
-
-    with pytest.raises(requests.HTTPError):
-        client._make_request("TestEndpoint")
-
-
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_get_countries(mock_get, mock_config, mock_api_key):
-    """Test get_countries method."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {"CountryName": "Ethiopia", "ISO3": "ETH"},
-        {"CountryName": "Sudan", "ISO3": "SDN"},
-    ]
-    mock_get.return_value = mock_response
-
-    client = DTMApiClient(mock_config)
-    df = client.get_countries()
-
-    assert isinstance(df, pd.DataFrame)
-    assert len(df) == 2
-    assert "CountryName" in df.columns
-
-
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_get_idp_admin0_with_params(mock_get, mock_config, mock_api_key):
-    """Test get_idp_admin0 with query parameters."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {"CountryName": "Ethiopia", "TotalIDPs": 1000}
-    ]
-    mock_get.return_value = mock_response
-
-    client = DTMApiClient(mock_config)
-    df = client.get_idp_admin0(
-        country="Ethiopia",
-        from_date="2024-01-01",
-        to_date="2024-12-31",
-    )
-
-    assert isinstance(df, pd.DataFrame)
-    assert len(df) == 1
-
-    # Verify params were passed correctly
-    call_args = mock_get.call_args
-    assert call_args[1]["params"]["CountryName"] == "Ethiopia"
-    assert call_args[1]["params"]["FromReportingDate"] == "2024-01-01"
-    assert call_args[1]["params"]["ToReportingDate"] == "2024-12-31"
-
-
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_get_idp_admin1(mock_get, mock_config, mock_api_key):
-    """Test get_idp_admin1 method."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {
-            "CountryName": "Sudan",
-            "Admin1Name": "Khartoum",
-            "TotalIDPs": 5000,
-        }
-    ]
-    mock_get.return_value = mock_response
-
-    client = DTMApiClient(mock_config)
-    df = client.get_idp_admin1(country="Sudan")
-
-    assert isinstance(df, pd.DataFrame)
-    assert len(df) == 1
-    assert "Admin1Name" in df.columns
-
-
-@patch("resolver.ingestion.dtm_client.requests.get")
-def test_get_idp_admin2(mock_get, mock_config, mock_api_key):
-    """Test get_idp_admin2 method."""
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = [
-        {
-            "CountryName": "Lebanon",
-            "Admin2Name": "Beirut",
-            "TotalIDPs": 2000,
-            "Operation": "Displacement due to conflict",
-        }
-    ]
-    mock_get.return_value = mock_response
-
-    client = DTMApiClient(mock_config)
-    df = client.get_idp_admin2(
-        country="Lebanon", operation="Displacement due to conflict"
-    )
-
-    assert isinstance(df, pd.DataFrame)
-    assert len(df) == 1
-    assert "Admin2Name" in df.columns
+    monkeypatch.setitem(sys.modules, "dtmapi", SimpleNamespace(DTMApi=lambda subscription_key=None: ErrorDTMApi(subscription_key=subscription_key)))
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+    client = DTMApiClient(config)
+    with pytest.raises(DTMHttpError):
+        client.get_idp_admin0(country="Kenya")

@@ -1,0 +1,28 @@
+{
+  "admin0": [
+    {
+      "CountryName": "Kenya",
+      "ISO3": "KEN",
+      "ReportingDate": "2024-01-15",
+      "TotalIDPs": 1500
+    }
+  ],
+  "admin1": [
+    {
+      "CountryName": "Kenya",
+      "Admin1Name": "Nairobi",
+      "ReportingDate": "2024-01-15",
+      "TotalIDPs": 600
+    }
+  ],
+  "admin2": [
+    {
+      "CountryName": "Kenya",
+      "Admin1Name": "Nairobi",
+      "Admin2Name": "Westlands",
+      "ReportingDate": "2024-01-15",
+      "TotalIDPs": 300,
+      "Operation": "Conflict"
+    }
+  ]
+}
