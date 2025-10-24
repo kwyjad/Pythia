@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import logging
 import os
 from collections import defaultdict
@@ -30,9 +31,7 @@ import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion.dtm_auth import get_dtm_api_key
-from resolver.ingestion._shared.date_utils import parse_dates, window_mask
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
-from resolver.ingestion._shared.validation import validate_required_fields
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
     finalize_run as diagnostics_finalize_run,
@@ -60,6 +59,8 @@ CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 CONFIG_ISSUES_PATH = DIAGNOSTICS_DIR / "dtm_config_issues.json"
 RESOLVED_SOURCES_PATH = DIAGNOSTICS_DIR / "dtm_sources_resolved.json"
 RUN_DETAILS_PATH = DIAGNOSTICS_DIR / "dtm_run.json"
+API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
+API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
 
 DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -129,6 +130,62 @@ def _empty_row_counts() -> Dict[str, int]:
     return {key: 0 for key in ROW_COUNT_KEYS}
 
 
+def _extract_status_code(error: BaseException) -> Optional[int]:
+    """Best-effort parse of an HTTP status code from an exception."""
+
+    message = str(error)
+    for token in re.findall(r"\b(\d{3})\b", message):
+        try:
+            code = int(token)
+        except ValueError:
+            continue
+        if 400 <= code < 600:
+            return code
+    return None
+
+
+def _is_auth_status(code: Optional[int]) -> bool:
+    return code in {401, 403}
+
+def _record_http_failure(exc: Exception, http_counts: Optional[Dict[str, int]]) -> None:
+    """Update HTTP counters and raise for actionable API failures."""
+
+    if http_counts is not None:
+        message = str(exc).lower()
+        if "timeout" in message:
+            http_counts["timeout"] = http_counts.get("timeout", 0) + 1
+        elif "404" in message or "not found" in message:
+            http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+        elif "401" in message or "403" in message:
+            http_counts["4xx"] = http_counts.get("4xx", 0) + 1
+        elif "500" in message or "server" in message:
+            http_counts["5xx"] = http_counts.get("5xx", 0) + 1
+        else:
+            http_counts["error"] = http_counts.get("error", 0) + 1
+
+    status = _extract_status_code(exc)
+    if status is not None and 400 <= status < 600:
+        message = str(exc)
+        if _is_auth_status(status):
+            raise DTMUnauthorizedError(status, message) from exc
+        raise DTMHttpError(status, message) from exc
+
+
+class DTMHttpError(RuntimeError):
+    """Error raised when the DTM API returns an HTTP error status."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class DTMUnauthorizedError(DTMHttpError):
+    """Error raised specifically for 401/403 authentication failures."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(status_code, message)
+
+
 @dataclass(frozen=True)
 class Hazard:
     """Lightweight hazard tuple for legacy helpers."""
@@ -182,11 +239,12 @@ __all__ = [
 class DTMApiClient:
     """Wrapper around official dtmapi.DTMApi client."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, subscription_key: Optional[str] = None):
         """Initialize DTM API client using official dtmapi package.
 
         Args:
             config: Configuration dictionary with 'api' settings.
+            subscription_key: Optional explicit API key to use.
         """
         try:
             from dtmapi import DTMApi
@@ -198,9 +256,16 @@ class DTMApiClient:
                 "dtmapi package not installed. Run: pip install dtmapi>=0.1.5"
             ) from exc
 
-        api_key = get_dtm_api_key()
+        if subscription_key is None:
+            api_key = get_dtm_api_key()
+        else:
+            api_key = subscription_key.strip()
+            if not api_key:
+                api_key = None
         if not api_key:
             raise ValueError("DTM API key not configured")
+
+        self.subscription_key = api_key
 
         # Initialize official client
         self.client = DTMApi(subscription_key=api_key)
@@ -254,18 +319,7 @@ class DTMApiClient:
             return df
         except Exception as e:
             LOG.error("Failed to fetch countries: %s", e)
-
-            # Track failure
-            if http_counts is not None:
-                if "timeout" in str(e).lower():
-                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
-                elif "404" in str(e) or "not found" in str(e).lower():
-                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
-                elif "500" in str(e) or "server" in str(e).lower():
-                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
-                else:
-                    http_counts["error"] = http_counts.get("error", 0) + 1
-
+            _record_http_failure(e, http_counts)
             return pd.DataFrame()
 
     def get_idp_admin0(
@@ -323,19 +377,7 @@ class DTMApiClient:
 
         except Exception as e:
             LOG.error("Failed to fetch Admin0 data: %s", e)
-
-            # Track failure
-            if http_counts is not None:
-                if "timeout" in str(e).lower():
-                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
-                elif "404" in str(e) or "not found" in str(e).lower():
-                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
-                elif "500" in str(e) or "server" in str(e).lower():
-                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
-                else:
-                    http_counts["error"] = http_counts.get("error", 0) + 1
-
-            # Return empty DataFrame on error (fail gracefully)
+            _record_http_failure(e, http_counts)
             return pd.DataFrame()
 
     def get_idp_admin1(
@@ -391,18 +433,7 @@ class DTMApiClient:
 
         except Exception as e:
             LOG.error("Failed to fetch Admin1 data: %s", e)
-
-            # Track failure
-            if http_counts is not None:
-                if "timeout" in str(e).lower():
-                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
-                elif "404" in str(e) or "not found" in str(e).lower():
-                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
-                elif "500" in str(e) or "server" in str(e).lower():
-                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
-                else:
-                    http_counts["error"] = http_counts.get("error", 0) + 1
-
+            _record_http_failure(e, http_counts)
             return pd.DataFrame()
 
     def get_idp_admin2(
@@ -458,18 +489,7 @@ class DTMApiClient:
 
         except Exception as e:
             LOG.error("Failed to fetch Admin2 data: %s", e)
-
-            # Track failure
-            if http_counts is not None:
-                if "timeout" in str(e).lower():
-                    http_counts["timeout"] = http_counts.get("timeout", 0) + 1
-                elif "404" in str(e) or "not found" in str(e).lower():
-                    http_counts["4xx"] = http_counts.get("4xx", 0) + 1
-                elif "500" in str(e) or "server" in str(e).lower():
-                    http_counts["5xx"] = http_counts.get("5xx", 0) + 1
-                else:
-                    http_counts["error"] = http_counts.get("error", 0) + 1
-
+            _record_http_failure(e, http_counts)
             return pd.DataFrame()
 
 
@@ -836,242 +856,8 @@ def _resolve_cause(row: Mapping[str, Any], cause_map: Mapping[str, str]) -> str:
     return DEFAULT_CAUSE
 
 
-def _source_label(entry: Mapping[str, Any]) -> str:
-    return str(entry.get("id") or entry.get("name") or entry.get("id_or_path") or "dtm_source")
 
 
-def _column(row: Mapping[str, Any], *candidates: str) -> Optional[str]:
-    lowered = {col.lower(): col for col in row.keys()}
-    for candidate in candidates:
-        key = candidate.lower()
-        if key in lowered:
-            return lowered[key]
-    for candidate in candidates:
-        for col in row.keys():
-            if col.lower().replace(" ", "") == candidate.lower().replace(" ", ""):
-                return col
-    return None
-
-
-def _read_source(
-    entry: Mapping[str, Any],
-    cfg: Mapping[str, Any],
-    *,
-    no_date_filter: bool,
-    window_start: Optional[str],
-    window_end: Optional[str],
-) -> SourceResult:
-    source_label = _source_label(entry)
-    LOG.debug("dtm: begin source %s", source_label)
-    source_type_raw = entry.get("type")
-    source_type = (
-        str(source_type_raw).strip().lower() if source_type_raw is not None else "file"
-    )
-    if source_type in {"api", "dtm_api"}:
-        LOG.debug("dtm: api source %s delegated to _fetch_api_data", source_label)
-        return SourceResult(source_name=source_label, status="delegated")
-    if source_type not in {"", "file"}:
-        LOG.warning(
-            "dtm: skipping source %s (unsupported type=%s)",
-            source_label,
-            source_type,
-        )
-        return SourceResult(
-            source_name=source_label,
-            status="skipped",
-            skip_reason=f"unsupported type {source_type}",
-        )
-    path = entry.get("id_or_path")
-    if not path:
-        LOG.warning("dtm: skipping source %s (missing id_or_path)", source_label)
-        return SourceResult(
-            source_name=source_label,
-            status="skipped",
-            skip_reason="missing id_or_path",
-        )
-    csv_path = Path(path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"DTM source not found: {csv_path}")
-    LOG.debug("dtm: resolved source %s path=%s", source_label, csv_path)
-    file_ctx = {"filename": csv_path.name, "path": str(csv_path)}
-    aliases = cfg.get("country_aliases") or {}
-    measure = str(entry.get("measure") or "stock").strip().lower()
-    cause_map = {str(k).strip().lower(): str(v) for k, v in (cfg.get("cause_map") or {}).items()}
-
-    try:
-        frame = pd.read_csv(csv_path, dtype=object, keep_default_na=False)
-    except pd.errors.EmptyDataError:
-        frame = pd.DataFrame()
-
-    rows_before = int(frame.shape[0])
-    header_probe: MutableMapping[str, Any] = {str(col): None for col in frame.columns}
-
-    if rows_before == 0 or not header_probe:
-        LOG.debug("dtm: end source %s rows=0", source_label)
-        return SourceResult(
-            source_name=source_label,
-            records=[],
-            status="ok",
-            rows_before=rows_before,
-            rows_after=0,
-            dropped=rows_before,
-            parse_errors=0,
-        )
-
-    def _resolve_column(*candidates: Optional[str]) -> Optional[str]:
-        explicit = candidates[0] if candidates else None
-        if explicit:
-            resolved_explicit = _column(header_probe, str(explicit))
-            if resolved_explicit:
-                return resolved_explicit
-            return None
-        fallbacks = [str(name) for name in candidates[1:] if name]
-        if not fallbacks:
-            return None
-        return _column(header_probe, *fallbacks)
-
-    country_column = _resolve_column(entry.get("country_column"), "country_iso3", "iso3", "country")
-    admin_column = _resolve_column(entry.get("admin1_column"), "admin1", "adm1", "province", "state")
-    date_column = _resolve_column(entry.get("date_column"), "date", "month", "period")
-    value_column = _resolve_column(entry.get("value_column"), "value", "count", "population", "total")
-    cause_column = _resolve_column(entry.get("cause_column"), "cause", "cause_category", "reason")
-
-    if not date_column:
-        LOG.warning("dtm: skipping source %s (missing date_column)", source_label)
-        return SourceResult(
-            source_name=source_label,
-            status="invalid",
-            skip_reason="missing date_column",
-            rows_before=rows_before,
-            rows_after=0,
-            dropped=rows_before,
-            parse_errors=0,
-        )
-
-    if not value_column or not country_column:
-        raise ValueError("DTM source missing required columns")
-
-    fmt = str(entry.get("date_format")) if entry.get("date_format") else None
-    parsed_dates, parse_errors = parse_dates(frame[date_column], fmt)
-    valid_dates = parsed_dates.notna()
-    parsed_valid = parsed_dates[valid_dates]
-
-    min_iso: Optional[str] = None
-    max_iso: Optional[str] = None
-    if not parsed_valid.empty:
-        min_candidate = parsed_valid.min()
-        max_candidate = parsed_valid.max()
-        if pd.notna(min_candidate):
-            min_iso = min_candidate.date().isoformat()
-        if pd.notna(max_candidate):
-            max_iso = max_candidate.date().isoformat()
-
-    window_enabled = bool(not no_date_filter and window_start and window_end)
-    if window_enabled:
-        window_series = window_mask(parsed_dates, str(window_start), str(window_end))
-    else:
-        window_series = pd.Series(True, index=frame.index)
-
-    final_mask = valid_dates & window_series
-    rows_after = int(final_mask.sum())
-    dropped = rows_before - rows_after
-
-    if rows_after == 0:
-        LOG.debug(
-            "dtm: end source %s rows=0 (kept=%s dropped=%s parse_errors=%s)",
-            source_label,
-            rows_after,
-            dropped,
-            parse_errors,
-        )
-        return SourceResult(
-            source_name=source_label,
-            records=[],
-            status="ok",
-            rows_before=rows_before,
-            rows_after=rows_after,
-            dropped=dropped,
-            parse_errors=parse_errors,
-            min_date=min_iso,
-            max_date=max_iso,
-        )
-
-    filtered = frame.loc[final_mask].copy()
-    filtered = filtered.where(pd.notna(filtered), None)
-    rows = filtered.to_dict(orient="records")
-
-    per_admin: dict[tuple[str, str], dict[datetime, float]] = defaultdict(dict)
-    per_admin_asof: dict[tuple[str, str], dict[datetime, str]] = defaultdict(dict)
-    causes: dict[tuple[str, str], str] = {}
-
-    for row in rows:
-        iso = to_iso3(row.get(country_column), aliases)
-        if not iso:
-            continue
-        bucket = month_start(row.get(date_column))
-        if not bucket:
-            continue
-        admin1 = str(row.get(admin_column) or "").strip() if admin_column else ""
-        value = _parse_float(row.get(value_column))
-        if value is None or value < 0:
-            continue
-        per_admin[(iso, admin1)][bucket] = value
-        as_of_value = _extract_record_as_of(row, file_ctx)
-        existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
-        if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
-            per_admin_asof[(iso, admin1)][bucket] = as_of_value
-        if cause_column and row.get(cause_column):
-            causes[(iso, admin1)] = _resolve_cause({cause_column: row.get(cause_column)}, cause_map)
-        else:
-            causes[(iso, admin1)] = _resolve_cause(row, cause_map)
-
-    records: List[Dict[str, Any]] = []
-    for key, series in per_admin.items():
-        iso, admin1 = key
-        if measure == "stock":
-            flows = flow_from_stock(series)
-        else:
-            flows = {month_start(k): float(v) for k, v in series.items() if month_start(k)}
-        cause = causes.get(key, DEFAULT_CAUSE)
-        for bucket, value in flows.items():
-            if not bucket or value is None or value <= 0:
-                continue
-            record_as_of = (
-                per_admin_asof.get(key, {}).get(bucket)
-                or datetime.now(timezone.utc).date().isoformat()
-            )
-            records.append(
-                {
-                    "iso3": iso,
-                    "admin1": admin1,
-                    "month": bucket,
-                    "value": float(value),
-                    "cause": cause,
-                    "measure": measure,
-                    "source_id": source_label,
-                    "as_of": record_as_of,
-                }
-            )
-
-    LOG.debug(
-        "dtm: end source %s rows=%s (kept=%s dropped=%s parse_errors=%s)",
-        source_label,
-        len(records),
-        rows_after,
-        dropped,
-        parse_errors,
-    )
-    return SourceResult(
-        source_name=source_label,
-        records=records,
-        status="ok",
-        rows_before=rows_before,
-        rows_after=rows_after,
-        dropped=dropped,
-        parse_errors=parse_errors,
-        min_date=min_iso,
-        max_date=max_iso,
-    )
 
 
 def _fetch_api_data(
@@ -1096,24 +882,16 @@ def _fetch_api_data(
     }
 
     if not check_api_key_configured():
-        LOG.warning(
-            "DTM API mode requested but DTM_API_KEY not configured. "
-            "Skipping API data fetch. Set DTM_API_KEY to fetch live data."
-        )
-        results.append(
-            SourceResult(
-                source_name="dtm_api",
-                status="skipped",
-                skip_reason="api-key-not-configured",
-            )
-        )
-        return [], summary
+        raise RuntimeError("DTM API key not configured")
+
+    primary_key = os.environ.get("DTM_API_KEY", "").strip()
+    secondary_key = os.environ.get("DTM_API_SECONDARY_KEY", "").strip() or None
 
     all_records: List[Dict[str, Any]] = []
 
     try:
-        client = DTMApiClient(cfg)
-    except RuntimeError as exc:
+        client = DTMApiClient(cfg, subscription_key=primary_key)
+    except (RuntimeError, ValueError) as exc:
         LOG.error("Failed to initialize DTM API client: %s", exc)
         results.append(
             SourceResult(
@@ -1122,7 +900,7 @@ def _fetch_api_data(
                 error=str(exc),
             )
         )
-        return [], summary
+        raise
 
     admin_levels_cfg = cfg.get("admin_levels", ["admin0", "admin1", "admin2"])
     admin_levels = [str(level).strip().lower() for level in admin_levels_cfg]
@@ -1146,10 +924,23 @@ def _fetch_api_data(
     from_date = window_start if not no_date_filter and window_start else None
     to_date = window_end if not no_date_filter and window_end else None
 
+    request_payload = {
+        "admin_levels": admin_levels,
+        "countries": None
+        if country_targets == [None]
+        else [str(c) for c in country_targets],
+        "operations": None
+        if operation_targets == [None]
+        else [str(o) for o in operation_targets],
+        "window_start": from_date,
+        "window_end": to_date,
+    }
+    write_json(API_REQUEST_PATH, request_payload)
+
     LOG.info(
         "Fetching DTM data: levels=%s, countries=%s, date_range=%s to %s",
         admin_levels,
-        country_targets if country_targets != [None] else "all",
+        request_payload["countries"] or "all",
         from_date or "—",
         to_date or "—",
     )
@@ -1173,6 +964,52 @@ def _fetch_api_data(
         for k, v in (cfg.get("cause_map") or {}).items()
     }
 
+    used_secondary = False
+
+    def _fetch_level(
+        level_name: str,
+        *,
+        country: Optional[str],
+        operation: Optional[str],
+    ) -> pd.DataFrame:
+        nonlocal client, used_secondary
+        while True:
+            try:
+                if level_name == "admin0":
+                    return client.get_idp_admin0(
+                        country=country,
+                        from_date=from_date,
+                        to_date=to_date,
+                        http_counts=http_counter,
+                    )
+                if level_name == "admin1":
+                    return client.get_idp_admin1(
+                        country=country,
+                        from_date=from_date,
+                        to_date=to_date,
+                        http_counts=http_counter,
+                    )
+                if level_name == "admin2":
+                    return client.get_idp_admin2(
+                        country=country,
+                        operation=operation,
+                        from_date=from_date,
+                        to_date=to_date,
+                        http_counts=http_counter,
+                    )
+                raise ValueError(f"Unsupported admin level: {level_name}")
+            except DTMUnauthorizedError as exc:
+                if secondary_key and not used_secondary:
+                    LOG.warning(
+                        "Primary DTM API key rejected (%s); retrying with secondary key",
+                        exc.status_code,
+                    )
+                    used_secondary = True
+                    http_counter["retries"] = http_counter.get("retries", 0) + 1
+                    client = DTMApiClient(cfg, subscription_key=secondary_key)
+                    continue
+                raise
+
     for admin_level in admin_levels:
         level_name = admin_level.strip().lower()
 
@@ -1187,180 +1024,9 @@ def _fetch_api_data(
                 source_label = "_".join(source_label_parts)
 
                 try:
-                    if level_name == "admin0":
-                        df = client.get_idp_admin0(
-                            country=country,
-                            from_date=from_date,
-                            to_date=to_date,
-                            http_counts=http_counter,
-                        )
-                    elif level_name == "admin1":
-                        df = client.get_idp_admin1(
-                            country=country,
-                            from_date=from_date,
-                            to_date=to_date,
-                            http_counts=http_counter,
-                        )
-                    elif level_name == "admin2":
-                        df = client.get_idp_admin2(
-                            country=country,
-                            operation=operation,
-                            from_date=from_date,
-                            to_date=to_date,
-                            http_counts=http_counter,
-                        )
-                    else:
-                        LOG.warning("Unsupported admin level: %s", admin_level)
-                        continue
-
-                    if round_column in df.columns:
-                        df = df.sort_values(
-                            by=[date_column, round_column], ascending=[True, True]
-                        )
-
-                    rows_before = int(df.shape[0])
-                    if rows_before == 0:
-                        LOG.debug("No data for %s", source_label)
-                        results.append(
-                            SourceResult(
-                                source_name=source_label,
-                                status="ok",
-                                rows_before=0,
-                                rows_after=0,
-                                http_counts=dict(http_counter),
-                            )
-                        )
-                        continue
-
-                    LOG.debug("Fetched %s rows for %s", rows_before, source_label)
-
-                    idp_column = None
-                    for candidate in idp_field_candidates:
-                        if candidate in df.columns:
-                            idp_column = candidate
-                            break
-
-                    if not idp_column:
-                        LOG.warning(
-                            "No IDP count column found for %s (tried: %s)",
-                            source_label,
-                            idp_field_candidates,
-                        )
-                        results.append(
-                            SourceResult(
-                                source_name=source_label,
-                                status="invalid",
-                                skip_reason="missing IDP count column",
-                                rows_before=rows_before,
-                                http_counts=dict(http_counter),
-                            )
-                        )
-                        continue
-
-                    per_admin: dict[tuple[str, str], dict[datetime, float]] = defaultdict(dict)
-                    per_admin_asof: dict[tuple[str, str], dict[datetime, str]] = defaultdict(dict)
-                    causes: dict[tuple[str, str], str] = {}
-
-                    new_rows = 0
-                    for _, row in df.iterrows():
-                        iso = to_iso3(row.get(country_column), aliases)
-                        if not iso:
-                            continue
-
-                        bucket = month_start(row.get(date_column))
-                        if not bucket:
-                            continue
-
-                        admin1 = ""
-                        if admin1_column in df.columns:
-                            admin1 = str(row.get(admin1_column) or "").strip()
-                        if level_name == "admin2" and admin2_column in df.columns:
-                            admin2 = str(row.get(admin2_column) or "").strip()
-                            if admin2:
-                                admin1 = f"{admin1}/{admin2}" if admin1 else admin2
-
-                        value = _parse_float(row.get(idp_column))
-                        if value is None or value < 0:
-                            continue
-
-                        per_admin[(iso, admin1)][bucket] = value
-
-                        as_of_value = str(row.get(date_column) or "")
-                        if as_of_value:
-                            as_of_value = _parse_iso_date_or_none(as_of_value) or as_of_value
-                        if not as_of_value:
-                            as_of_value = datetime.now(timezone.utc).date().isoformat()
-
-                        existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
-                        if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
-                            per_admin_asof[(iso, admin1)][bucket] = as_of_value
-
-                        causes[(iso, admin1)] = _resolve_cause(row.to_dict(), cause_map)
-
-                    for key, series in per_admin.items():
-                        iso, admin1 = key
-                        if measure == "stock":
-                            flows = flow_from_stock(series)
-                        else:
-                            flows = {
-                                month_start(k): float(v)
-                                for k, v in series.items()
-                                if month_start(k)
-                            }
-                        cause = causes.get(key, DEFAULT_CAUSE)
-                        for bucket, value in flows.items():
-                            if not bucket or value is None or value <= 0:
-                                continue
-                            record_as_of = (
-                                per_admin_asof.get(key, {}).get(bucket)
-                                or datetime.now(timezone.utc).date().isoformat()
-                            )
-                            all_records.append(
-                                {
-                                    "iso3": iso,
-                                    "admin1": admin1,
-                                    "month": bucket,
-                                    "value": float(value),
-                                    "cause": cause,
-                                    "measure": measure,
-                                    "source_id": source_label,
-                                    "as_of": record_as_of,
-                                }
-                            )
-                            new_rows += 1
-
-                    summary["row_counts"].setdefault(level_name, 0)
-                    summary["row_counts"][level_name] += new_rows
-                    summary["row_counts"]["total"] += new_rows
-
-                    range_label = f"{from_date or '—'}→{to_date or '—'}"
-                    if country:
-                        iso_candidate = to_iso3(country, aliases)
-                        country_label = iso_candidate or str(country)
-                    else:
-                        country_label = "all countries"
-                    if level_name == "admin2" and operation:
-                        country_label = f"{country_label} (operation={operation})"
-                    LOG.info(
-                        "Fetched %s rows (%s) for %s %s",
-                        f"{new_rows:,}",
-                        level_name,
-                        country_label,
-                        range_label,
-                    )
-
-                    results.append(
-                        SourceResult(
-                            source_name=source_label,
-                            status="ok",
-                            rows_before=rows_before,
-                            rows_after=new_rows,
-                            http_counts=dict(http_counter),
-                        )
-                    )
-
-                except Exception as exc:
-                    LOG.error("Failed to fetch %s: %s", source_label, exc, exc_info=True)
+                    df = _fetch_level(level_name, country=country, operation=operation)
+                except DTMHttpError as exc:
+                    LOG.error("Failed to fetch %s: %s", source_label, exc)
                     results.append(
                         SourceResult(
                             source_name=source_label,
@@ -1369,12 +1035,160 @@ def _fetch_api_data(
                             http_counts=dict(http_counter),
                         )
                     )
+                    raise
+
+                if round_column in df.columns:
+                    df = df.sort_values(
+                        by=[date_column, round_column], ascending=[True, True]
+                    )
+
+                rows_before = int(df.shape[0])
+                if rows_before == 0:
+                    LOG.debug("No data for %s", source_label)
+                    results.append(
+                        SourceResult(
+                            source_name=source_label,
+                            status="ok",
+                            rows_before=0,
+                            rows_after=0,
+                            http_counts=dict(http_counter),
+                        )
+                    )
+                    continue
+
+                LOG.debug("Fetched %s rows for %s", rows_before, source_label)
+
+                idp_column = None
+                for candidate in idp_field_candidates:
+                    if candidate in df.columns:
+                        idp_column = candidate
+                        break
+
+                if not idp_column:
+                    LOG.warning(
+                        "No IDP count column found for %s (tried: %s)",
+                        source_label,
+                        idp_field_candidates,
+                    )
+                    results.append(
+                        SourceResult(
+                            source_name=source_label,
+                            status="invalid",
+                            skip_reason="missing IDP count column",
+                            rows_before=rows_before,
+                            http_counts=dict(http_counter),
+                        )
+                    )
+                    continue
+
+                per_admin: dict[tuple[str, str], dict[datetime, float]] = defaultdict(dict)
+                per_admin_asof: dict[tuple[str, str], dict[datetime, str]] = defaultdict(dict)
+                causes: dict[tuple[str, str], str] = {}
+
+                new_rows = 0
+                for _, row in df.iterrows():
+                    iso = to_iso3(row.get(country_column), aliases)
+                    if not iso:
+                        continue
+
+                    bucket = month_start(row.get(date_column))
+                    if not bucket:
+                        continue
+
+                    admin1 = ""
+                    if admin1_column in df.columns:
+                        admin1 = str(row.get(admin1_column) or "").strip()
+                    if level_name == "admin2" and admin2_column in df.columns:
+                        admin2 = str(row.get(admin2_column) or "").strip()
+                        if admin2:
+                            admin1 = f"{admin1}/{admin2}" if admin1 else admin2
+
+                    value = _parse_float(row.get(idp_column))
+                    if value is None or value < 0:
+                        continue
+
+                    per_admin[(iso, admin1)][bucket] = value
+
+                    as_of_value = str(row.get(date_column) or "")
+                    if as_of_value:
+                        as_of_value = _parse_iso_date_or_none(as_of_value) or as_of_value
+                    if not as_of_value:
+                        as_of_value = datetime.now(timezone.utc).date().isoformat()
+
+                    existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
+                    if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
+                        per_admin_asof[(iso, admin1)][bucket] = as_of_value
+
+                    causes[(iso, admin1)] = _resolve_cause(row.to_dict(), cause_map)
+
+                for key, series in per_admin.items():
+                    iso, admin1 = key
+                    if measure == "stock":
+                        flows = flow_from_stock(series)
+                    else:
+                        flows = {
+                            month_start(k): float(v)
+                            for k, v in series.items()
+                            if month_start(k)
+                        }
+                    cause = causes.get(key, DEFAULT_CAUSE)
+                    for bucket, value in flows.items():
+                        if not bucket or value is None or value <= 0:
+                            continue
+                        record_as_of = (
+                            per_admin_asof.get(key, {}).get(bucket)
+                            or datetime.now(timezone.utc).date().isoformat()
+                        )
+                        all_records.append(
+                            {
+                                "iso3": iso,
+                                "admin1": admin1,
+                                "month": bucket,
+                                "value": float(value),
+                                "cause": cause,
+                                "measure": measure,
+                                "source_id": source_label,
+                                "as_of": record_as_of,
+                            }
+                        )
+                        new_rows += 1
+
+                summary["row_counts"].setdefault(level_name, 0)
+                summary["row_counts"][level_name] += new_rows
+                summary["row_counts"]["total"] += new_rows
+
+                range_label = f"{from_date or '—'}→{to_date or '—'}"
+                if country:
+                    iso_candidate = to_iso3(country, aliases)
+                    country_label = iso_candidate or str(country)
+                else:
+                    country_label = "all countries"
+                if level_name == "admin2" and operation:
+                    country_label = f"{country_label} (operation={operation})"
+                LOG.info(
+                    "Fetched %s rows (%s) for %s %s",
+                    f"{new_rows:,}",
+                    level_name,
+                    country_label,
+                    range_label,
+                )
+
+                results.append(
+                    SourceResult(
+                        source_name=source_label,
+                        status="ok",
+                        rows_before=rows_before,
+                        rows_after=new_rows,
+                        http_counts=dict(http_counter),
+                    )
+                )
 
     summary["http_counts"] = {
         key: int(http_counter.get(key, 0)) for key in HTTP_COUNT_KEYS
     }
     LOG.info("Total records fetched from API: %s", len(all_records))
     return all_records, summary
+
 
 
 def build_rows(
@@ -1387,7 +1201,16 @@ def build_rows(
     http_counts: Optional[Dict[str, int]] = None,
     diagnostics: Optional[MutableMapping[str, Any]] = None,
 ) -> List[List[Any]]:
+    if "api" not in cfg:
+        raise ValueError(
+            "Config error: DTM is API-only; provide an 'api:' block in "
+            "resolver/ingestion/config/dtm.yml"
+        )
+
     sources = cfg.get("sources") or []
+    if sources:
+        LOG.warning("DTM is API-only; 'sources' section is ignored.")
+
     http_stats = _ensure_http_count_keys(http_counts)
     admin_mode = str(cfg.get("admin_agg") or "both").strip().lower()
     all_records: List[Dict[str, Any]] = []
@@ -1413,66 +1236,25 @@ def build_rows(
             )
         diag_target["window_start"] = None if no_date_filter else window_start
         diag_target["window_end"] = None if no_date_filter else window_end
+        diag_target["mode"] = "api"
+        diag_target["trigger"] = "api-only"
 
-    # Determine if we should use API mode or file mode
-    has_api_top = "api" in cfg
-    has_api_source = any(
-        isinstance(s, dict)
-        and str(s.get("type", "")).lower() in {"api", "dtm_api"}
-        for s in sources
+    LOG.info("Using DTM API mode (api-only)")
+    api_records, api_summary = _fetch_api_data(
+        cfg,
+        results=collected,
+        no_date_filter=no_date_filter,
+        window_start=window_start,
+        window_end=window_end,
+        http_counts=http_stats,
     )
-    trigger_parts: List[str] = []
-    if has_api_top:
-        trigger_parts.append("top-level-api")
-    if has_api_source:
-        trigger_parts.append("source-type-api")
-    if not sources:
-        trigger_parts.append("no-sources")
-    use_api_mode = has_api_top or has_api_source or (not sources and has_api_top)
-    trigger_str = "|".join(trigger_parts)
+    all_records.extend(api_records)
     if diag_target is not None:
-        diag_target["mode"] = "api" if use_api_mode else "file"
-        diag_target["trigger"] = trigger_str if use_api_mode else None
-
-    if use_api_mode:
-        # Use API to fetch data
-        LOG.info("Using DTM API mode (trigger=%s)", trigger_str or "config")
-        api_records, api_summary = _fetch_api_data(
-            cfg,
-            results=collected,
-            no_date_filter=no_date_filter,
-            window_start=window_start,
-            window_end=window_end,
-            http_counts=http_stats,
+        diag_target["row_counts"] = api_summary.get("row_counts", _empty_row_counts())
+        diag_target["http_counts"] = api_summary.get(
+            "http_counts", _empty_http_counts()
         )
-        all_records.extend(api_records)
-        if diag_target is not None:
-            diag_target["row_counts"] = api_summary.get("row_counts", _empty_row_counts())
-            diag_target["http_counts"] = api_summary.get(
-                "http_counts", _empty_http_counts()
-            )
-    else:
-        # Use file-based sources
-        LOG.info("Using DTM file mode (%s sources)", len(sources))
-        for entry in sources:
-            if not isinstance(entry, Mapping):
-                continue
-            result = _read_source(
-                entry,
-                cfg,
-                no_date_filter=no_date_filter,
-                window_start=window_start,
-                window_end=window_end,
-            )
-            collected.append(result)
-            if result.records:
-                all_records.extend(result.records)
-        if diag_target is not None and "row_counts" not in diag_target:
-            diag_target["row_counts"] = _empty_row_counts()
-        if diag_target is not None and "http_counts" not in diag_target:
-            diag_target["http_counts"] = {
-                key: int(http_stats.get(key, 0)) for key in HTTP_COUNT_KEYS
-            }
+
     if not all_records:
         _log_as_of_fallbacks()
         return []
@@ -1502,14 +1284,15 @@ def build_rows(
                 "value": int(round(value)),
                 "unit": "people",
                 "method": method,
-                "confidence": rec.get("cause", DEFAULT_CAUSE),
-                "raw_event_id": f"{rec['source_id']}::{admin1 or 'national'}::{month.strftime('%Y%m')}",
+                "confidence": DEFAULT_CAUSE,
+                "raw_event_id": f"{rec['source_id']}::{admin1 or 'country'}::{month.strftime('%Y%m')}",
                 "raw_fields_json": json.dumps(
                     {
                         "source_id": rec["source_id"],
                         "admin1": admin1,
+                        "month": month_iso,
+                        "value": value,
                         "cause": rec.get("cause", DEFAULT_CAUSE),
-                        "measure": rec.get("measure"),
                     },
                     ensure_ascii=False,
                 ),
@@ -1574,6 +1357,10 @@ def build_rows(
         for rec in rows
     ]
     formatted.sort(key=lambda row: (row[1], row[2], row[5], row[3]))
+    try:
+        write_json(API_RESPONSE_SAMPLE_PATH, formatted[:100])
+    except Exception as exc:
+        LOG.warning('Failed to write DTM API response sample: %s', exc)
     if diag_target is not None:
         diag_rows = diag_target.get("row_counts") or _empty_row_counts()
         diag_rows = {**_empty_row_counts(), **diag_rows}
@@ -1632,11 +1419,6 @@ def write_rows(rows: List[List[Any]]) -> None:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--fail-on-missing-config",
-        action="store_true",
-        help="Exit with code 2 when any DTM source entry lacks id_or_path.",
-    )
-    parser.add_argument(
         "--strict-empty",
         action="store_true",
         help="Exit with code 3 when no rows are written (after diagnostics).",
@@ -1658,14 +1440,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
     LOG.setLevel(log_level)
 
-    # Check API key configuration early for diagnostics
     api_key_configured = check_api_key_configured()
     if api_key_configured:
         LOG.info("DTM API key is configured")
     else:
-        LOG.warning(
-            "DTM API key NOT configured - connector will run in limited mode. "
-            "Set DTM_API_KEY environment variable to fetch live data from DTM API."
+        LOG.error(
+            "DTM API key NOT configured - connector cannot run. Set DTM_API_KEY to continue."
         )
 
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
@@ -1687,31 +1467,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "api_key_configured": api_key_configured,
     }
 
-    # Add dtmapi package information to diagnostics
-    try:
-        import dtmapi
-        dtmapi_version = getattr(dtmapi, "__version__", "unknown")
-        extras["api_package"] = "dtmapi"
-        extras["api_package_version"] = dtmapi_version
-        LOG.info("Using dtmapi package version %s", dtmapi_version)
-    except ImportError:
-        extras["api_package"] = "dtmapi"
-        extras["api_package_version"] = "not installed"
-        LOG.warning(
-            "dtmapi package not installed. Install with: pip install dtmapi>=0.1.5"
-        )
-
     status_raw = "ok"
     reason: Optional[str] = None
     exit_code = 0
-    strict = args.fail_on_missing_config or _env_bool("DTM_STRICT", False)
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     window_start_dt, window_end_dt = resolve_ingestion_window()
     window_start_iso = window_start_dt.isoformat() if window_start_dt else None
     window_end_iso = window_end_dt.isoformat() if window_end_dt else None
     window_disabled = no_date_filter or not (window_start_iso and window_end_iso)
-    extras["strict_mode"] = strict
     extras["strict_empty"] = strict_empty
     extras["no_date_filter"] = no_date_filter
     if window_start_iso:
@@ -1721,20 +1485,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     extras["window_disabled"] = window_disabled
 
     source_results: List[SourceResult] = []
-    invalid_entries: list[dict[str, Any]] = []
-    valid_sources: list[dict[str, Any]] = []
-    invalid_names: list[str] = []
+    run_diagnostics: Dict[str, Any] = {}
     rows_written = 0
-    config_invalid_count = 0
-    runtime_invalid: list[dict[str, str]] = []
-    sources_raw: List[Mapping[str, Any]] = []
-    config_timestamp: Optional[str] = None
+    cfg: Mapping[str, Any] = {}
 
     try:
         if os.getenv("RESOLVER_SKIP_DTM"):
             status_raw = "skipped"
             reason = "disabled via RESOLVER_SKIP_DTM"
-            extras["status_raw"] = status_raw
             LOG.info("dtm: skipped via RESOLVER_SKIP_DTM")
             ensure_header_only()
         else:
@@ -1742,322 +1500,132 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not cfg.get("enabled"):
                 status_raw = "skipped"
                 reason = "disabled: config"
-                extras["status_raw"] = status_raw
                 LOG.info("dtm: disabled via config; writing header only")
                 ensure_header_only()
             else:
-                sources_raw = cfg.get("sources") or []
-                valid_sources, invalid_entries = validate_required_fields(
-                    sources_raw, required=("id_or_path",)
+                filtered_cfg = dict(cfg)
+                sources_cfg = filtered_cfg.pop("sources", None)
+                if sources_cfg:
+                    LOG.warning("DTM is API-only; 'sources' section is ignored.")
+                rows = build_rows(
+                    filtered_cfg,
+                    results=source_results,
+                    no_date_filter=no_date_filter,
+                    window_start=window_start_iso,
+                    window_end=window_end_iso,
+                    http_counts=http_stats,
+                    diagnostics=run_diagnostics,
                 )
-                config_invalid_count = len(invalid_entries)
-                valid_count = len(valid_sources)
-                config_timestamp = (
-                    datetime.now(timezone.utc)
-                    .replace(microsecond=0)
-                    .isoformat()
-                    .replace("+00:00", "Z")
-                )
-                issues_payload: Dict[str, Any] = {
-                    "generated_at": config_timestamp,
-                    "summary": {"invalid": config_invalid_count, "valid": valid_count},
-                    "invalid": [],
-                }
-                for entry in invalid_entries:
-                    record = dict(entry)
-                    missing = list(record.pop("_missing_required", []))
-                    invalid_name = _source_label(record)
-                    if invalid_name:
-                        invalid_names.append(invalid_name)
-                    issues_payload["invalid"].append(
-                        {**record, "error": "missing id_or_path", "missing": missing}
-                    )
-                write_json(CONFIG_ISSUES_PATH, issues_payload)
-                extras["config_issues_path"] = str(CONFIG_ISSUES_PATH)
-                extras.update(
-                    {
-                        "invalid_sources": config_invalid_count,
-                        "valid_sources": valid_count,
-                    }
-                )
-                if invalid_names:
-                    extras["invalid_source_names"] = invalid_names
-                if config_invalid_count and strict:
-                    status_raw = "error"
-                    reason = "missing id_or_path"
-                    extras["status_raw"] = status_raw
-                    exit_code = 2
-                    LOG.error(
-                        "dtm: missing id_or_path for %s source(s); strict mode aborting",
-                        config_invalid_count,
-                    )
-                    ensure_header_only()
-                else:
-                    filtered_cfg = dict(cfg)
-                    filtered_cfg["sources"] = valid_sources
-                    if LOG.isEnabledFor(logging.DEBUG):
-                        resolved_payload = {
-                            "generated_at": config_timestamp,
-                            "invalid_sources": config_invalid_count,
-                            "valid_sources": valid_count,
-                            "sources": valid_sources,
-                        }
-                        write_json(RESOLVED_SOURCES_PATH, resolved_payload)
-                        extras["sources_resolved_path"] = str(RESOLVED_SOURCES_PATH)
-                    start_count = len(source_results)
-                    run_diagnostics: Dict[str, Any] = {}
-                    rows = build_rows(
-                        filtered_cfg,
-                        results=source_results,
-                        no_date_filter=no_date_filter,
-                        window_start=window_start_iso,
-                        window_end=window_end_iso,
-                        http_counts=http_stats,
-                        diagnostics=run_diagnostics,
-                    )
-                    new_results = source_results[start_count:]
-                    for result in new_results:
-                        if result.status == "invalid" and result.skip_reason:
-                            runtime_invalid.append(
-                                {
-                                    "name": result.source_name,
-                                    "reason": result.skip_reason,
-                                    "rows_before": result.rows_before,
-                                    "parse_errors": result.parse_errors,
-                                }
-                            )
-                            invalid_names.append(result.source_name)
+                rows_written = len(rows)
+                counts["fetched"] = rows_written
+                counts["normalized"] = rows_written
+                extras["rows_total"] = rows_written
+                if rows:
                     write_rows(rows)
-                    rows_written = len(rows)
-                    counts.update(
-                        {
-                            "fetched": rows_written,
-                            "normalized": rows_written,
-                            "written": rows_written,
-                        }
-                    )
-                    extras["rows_total"] = rows_written
-                    if source_results:
-                        extras["sources"] = [
-                            {
-                                "name": result.source_name,
-                                "status": result.status,
-                                "rows": result.rows,
-                                "skip_reason": result.skip_reason,
-                                "http_counts": dict(result.http_counts),
-                            }
-                            for result in source_results
-                        ]
-                    skipped_from_run = [
-                        {"name": res.source_name, "reason": res.skip_reason}
-                        for res in source_results
-                        if res.status == "skipped" and res.skip_reason
-                    ]
-                    if invalid_names or skipped_from_run:
-                        extras.setdefault("skipped_sources", [])
-                        extras["skipped_sources"].extend(
-                            {"name": name, "reason": "missing id_or_path"}
-                            for name in invalid_names
-                        )
-                        extras["skipped_sources"].extend(skip for skip in skipped_from_run if skip)
-                    if rows_written:
-                        if config_invalid_count or runtime_invalid:
-                            LOG.warning(
-                                "dtm: wrote %s rows with %s invalid source(s)",
-                                rows_written,
-                                config_invalid_count + len(runtime_invalid),
-                            )
-                        else:
-                            LOG.info("dtm: wrote %s rows", rows_written)
-                    else:
-                        total_invalid = config_invalid_count + len(runtime_invalid)
-                        if total_invalid:
-                            LOG.warning(
-                                "dtm: header-only output; %s invalid source(s)",
-                                total_invalid,
-                            )
-                        else:
-                            LOG.info("dtm: wrote header only (no rows)")
-    except Exception as exc:  # pragma: no cover - defensive guard
+                    counts["written"] = rows_written
+                    LOG.info("dtm: wrote %s rows to %s", rows_written, OUT_PATH)
+                else:
+                    write_json(API_RESPONSE_SAMPLE_PATH, [])
+                    ensure_header_only()
+                    LOG.info("dtm: no rows returned; wrote header only")
+    except ValueError as exc:
+        LOG.error("dtm: %s", exc)
         status_raw = "error"
         reason = str(exc)
-        extras["status_raw"] = status_raw
-        extras["exception"] = str(exc)
-        exit_code = 1
-        LOG.exception("dtm: run failed: %s", exc)
+        exit_code = 2
+    except DTMHttpError as exc:
+        LOG.error("dtm: API error %s", exc)
+        status_raw = "error"
+        reason = str(exc)
+        exit_code = 2
+    except RuntimeError as exc:
+        LOG.error("dtm: runtime error %s", exc)
+        status_raw = "error"
+        reason = str(exc)
+        exit_code = 2
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.exception("dtm: unexpected error")
+        status_raw = "error"
+        reason = str(exc)
+        exit_code = 2
+
+    actual_rows = rows_written
+    if rows_written and exit_code == 0:
+        extras["output_path"] = str(OUT_PATH)
+    if not rows_written and OUT_PATH.exists():
         try:
-            ensure_header_only()
-        except Exception:
-            pass
-    finally:
-        actual_rows = count_csv_rows(OUT_PATH)
-        rows_written = actual_rows
-        counts.update(
-            {
-                "fetched": max(counts.get("fetched", 0), actual_rows),
-                "normalized": max(counts.get("normalized", 0), actual_rows),
-                "written": actual_rows,
-            }
-        )
+            actual_rows = count_csv_rows(OUT_PATH)
+        except OSError:
+            actual_rows = 0
 
-        rows_before_total = sum(result.rows_before for result in source_results)
-        rows_after_total = sum(result.rows_after for result in source_results)
-        dropped_total = sum(result.dropped for result in source_results)
-        parse_errors_total = sum(result.parse_errors for result in source_results)
-        min_dates = [result.min_date for result in source_results if result.min_date]
-        max_dates = [result.max_date for result in source_results if result.max_date]
-        min_overall = min(min_dates) if min_dates else None
-        max_overall = max(max_dates) if max_dates else None
-        runtime_invalid_count = len(runtime_invalid)
-        total_invalid = config_invalid_count + runtime_invalid_count
+    meta_payload: Dict[str, Any] = {}
+    try:
+        if META_PATH.exists():
+            meta_payload = json.loads(META_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta_payload = {}
+    meta_payload["row_count"] = actual_rows
+    if window_start_iso:
+        meta_payload["backfill_start"] = window_start_iso
+    if window_end_iso:
+        meta_payload["backfill_end"] = window_end_iso
+    meta_payload["sources_total"] = len(source_results)
+    meta_payload["sources_valid"] = sum(1 for result in source_results if result.status == "ok")
+    meta_payload["sources_invalid"] = sum(
+        1 for result in source_results if result.status not in {"ok", "delegated"}
+    )
+    write_json(META_PATH, meta_payload)
+    extras["meta_path"] = str(META_PATH)
 
-        if LOG.isEnabledFor(logging.DEBUG):
-            LOG.debug(
-                "dtm: window=%s→%s (disabled=%s), parsed min=%s, max=%s, kept=%s, dropped=%s (parse_errors=%s), invalid_sources=%s",
-                window_start_iso or "—",
-                window_end_iso or "—",
-                window_disabled,
-                min_overall or "—",
-                max_overall or "—",
-                rows_after_total,
-                dropped_total,
-                parse_errors_total,
-                total_invalid,
-            )
+    if status_raw not in {"error", "skipped"}:
+        if actual_rows == 0:
+            status_raw = "ok-empty"
+            reason = _header_only_reason(0, 0)
+        else:
+            status_raw = "ok"
+            reason = _nonempty_reason(actual_rows, 0, 0, 0)
 
-        extras.setdefault("invalid_sources_config", config_invalid_count)
-        extras.setdefault("valid_sources", len(valid_sources))
-        extras["invalid_sources"] = total_invalid
-        extras["rows_total"] = actual_rows
-        extras["rows_written"] = actual_rows
-        extras["missing_sources"] = total_invalid
-        extras["kept_rows"] = rows_after_total
-        extras["dropped_rows"] = dropped_total
-        extras["parse_errors"] = parse_errors_total
-        if min_overall:
-            extras["parsed_min"] = min_overall
-        if max_overall:
-            extras["parsed_max"] = max_overall
+    if strict_empty and status_raw == "ok-empty" and exit_code == 0:
+        exit_code = 3
+        LOG.error("dtm: strict empty mode aborting (no rows written)")
 
-        meta_payload: Dict[str, Any] = {}
-        try:
-            if META_PATH.exists():
-                meta_payload = json.loads(META_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            meta_payload = {}
-        meta_payload["row_count"] = actual_rows
-        if window_start_iso:
-            meta_payload["backfill_start"] = window_start_iso
-        if window_end_iso:
-            meta_payload["backfill_end"] = window_end_iso
-        meta_payload["sources_total"] = len(sources_raw)
-        meta_payload["sources_valid"] = max(len(valid_sources) - runtime_invalid_count, 0)
-        meta_payload["sources_invalid"] = total_invalid
-        write_json(META_PATH, meta_payload)
-        extras["meta_path"] = str(META_PATH)
+    extras["status_raw"] = status_raw
+    extras["exit_code"] = exit_code
 
-        valid_payload: List[Dict[str, Any]] = []
-        invalid_payload: List[Dict[str, Any]] = []
-        for result in source_results:
-            payload: Dict[str, Any] = {
-                "name": result.source_name,
-                "status": result.status,
-                "rows": result.rows,
-                "rows_before": result.rows_before,
-                "rows_after": result.rows_after,
-                "dropped": result.dropped,
-                "parse_errors": result.parse_errors,
-                "min": result.min_date,
-                "max": result.max_date,
-            }
-            if result.skip_reason:
-                payload["skip_reason"] = result.skip_reason
-                payload.setdefault("reason", result.skip_reason)
-            if result.error:
-                payload["error"] = result.error
-            if result.http_counts:
-                payload["http_counts"] = dict(result.http_counts)
-            if result.status == "invalid":
-                invalid_payload.append(payload)
-            else:
-                valid_payload.append(payload)
+    diag_admin_levels = run_diagnostics.get("admin_levels") or [
+        str(level).strip().lower()
+        for level in (cfg.get("admin_levels") if 'cfg' in locals() and isinstance(cfg, Mapping) else ["admin0", "admin1", "admin2"])
+    ]
+    diag_countries = run_diagnostics.get("countries")
+    diag_operations = run_diagnostics.get("operations")
+    diag_http = _ensure_http_count_keys(run_diagnostics.get("http_counts"))
+    diag_rows = run_diagnostics.get("row_counts") or _empty_row_counts()
+    diag_rows = {**_empty_row_counts(), **diag_rows}
+    if not diag_rows.get("total"):
+        diag_rows["total"] = actual_rows
+    run_payload: Dict[str, Any] = {
+        "mode": run_diagnostics.get("mode", "api"),
+        "trigger": run_diagnostics.get("trigger"),
+        "admin_levels": diag_admin_levels,
+        "countries": diag_countries,
+        "operations": diag_operations,
+        "window_start": None if window_disabled else window_start_iso,
+        "window_end": None if window_disabled else window_end_iso,
+        "http_counts": {key: int(diag_http.get(key, 0)) for key in HTTP_COUNT_KEYS},
+        "row_counts": {key: int(diag_rows.get(key, 0)) for key in ROW_COUNT_KEYS},
+    }
+    write_json(RUN_DETAILS_PATH, run_payload)
+    extras["run_details_path"] = str(RUN_DETAILS_PATH)
 
-        for entry in invalid_entries:
-            record = dict(entry)
-            missing_fields = list(record.pop("_missing_required", []))
-            invalid_payload.append(
-                {
-                    "name": _source_label(record),
-                    "reason": "missing id_or_path",
-                    "missing": missing_fields,
-                    "details": record,
-                }
-            )
-
-        diag_admin_levels = run_diagnostics.get("admin_levels") or [
-            str(level).strip().lower()
-            for level in (filtered_cfg.get("admin_levels") or ["admin0", "admin1", "admin2"])
-        ]
-        diag_countries = run_diagnostics.get("countries")
-        diag_operations = run_diagnostics.get("operations")
-        diag_http = _ensure_http_count_keys(run_diagnostics.get("http_counts"))
-        diag_http_counts = {
-            key: int(diag_http.get(key, 0)) for key in HTTP_COUNT_KEYS
-        }
-        diag_rows = run_diagnostics.get("row_counts") or _empty_row_counts()
-        diag_rows = {**_empty_row_counts(), **diag_rows}
-        if not diag_rows.get("total"):
-            diag_rows["total"] = rows_written
-        diag_row_counts = {
-            key: int(diag_rows.get(key, 0)) for key in ROW_COUNT_KEYS
-        }
-        run_payload: Dict[str, Any] = {
-            "mode": run_diagnostics.get("mode", "file"),
-            "trigger": run_diagnostics.get("trigger"),
-            "admin_levels": diag_admin_levels,
-            "countries": diag_countries,
-            "operations": diag_operations,
-            "window_start": None if window_disabled else window_start_iso,
-            "window_end": None if window_disabled else window_end_iso,
-            "http_counts": diag_http_counts,
-            "row_counts": diag_row_counts,
-        }
-        write_json(RUN_DETAILS_PATH, run_payload)
-        extras["run_details_path"] = str(RUN_DETAILS_PATH)
-
-        final_status = status_raw
-        final_reason = reason
-        if final_status not in {"error", "skipped"}:
-            if actual_rows == 0:
-                final_status = "ok-empty"
-                final_reason = _header_only_reason(total_invalid, rows_after_total)
-            else:
-                final_status = "ok"
-                final_reason = _nonempty_reason(
-                    rows_after_total,
-                    dropped_total,
-                    parse_errors_total,
-                    total_invalid,
-                )
-
-        if strict_empty and final_status == "ok-empty" and exit_code == 0:
-            exit_code = 3
-            LOG.error("dtm: strict empty mode aborting (no rows written)")
-
-        status_raw = final_status
-        reason = final_reason
-        extras["status_raw"] = status_raw
-        extras["exit_code"] = exit_code
-
-        diagnostics_result = diagnostics_finalize_run(
-            diagnostics_ctx,
-            status=status_raw,
-            reason=reason,
-            http=http_stats,
-            counts=counts,
-            extras=extras,
-        )
-        diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+    diagnostics_result = diagnostics_finalize_run(
+        diagnostics_ctx,
+        status=status_raw,
+        reason=reason,
+        http=http_stats,
+        counts=counts,
+        extras=extras,
+    )
+    diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
     return exit_code
 
 

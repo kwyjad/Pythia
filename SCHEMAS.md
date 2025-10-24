@@ -266,67 +266,40 @@ Example JSONL entry:
 
 ## DTM source configuration
 
-The DTM connector supports two modes: **API mode** (recommended) and **file mode** (legacy).
-
-### API Mode (DTM API v3)
-
-When the configuration includes an `api` section and `sources` is empty or omitted, the connector fetches data directly from the IOM DTM API v3.
+The DTM connector is API-only and always calls the official DTM API v3 via the `dtmapi` package.
 
 **Requirements:**
-- `DTM_API_KEY` environment variable must be set with your subscription key to fetch live data
-- Register at https://dtm-apim-portal.iom.int/ and subscribe to API-V3 to obtain a key
-- **Fallback behavior:** If `DTM_API_KEY` is not set, the connector runs in header-only mode (writes CSV with column headers but no data rows) and does not fail
+- `DTM_API_KEY` environment variable (primary subscription key). The connector aborts if the key is missing.
+- Optional `DTM_API_SECONDARY_KEY` environment variable. When present the connector retries with the secondary key on 401/403 responses.
 
 **Configuration fields:**
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `api.base_url` | no | API base URL (default: `https://dtm-apim-portal.iom.int/api/v3`) |
-| `api.rate_limit_delay` | no | Seconds to wait between requests (default: `1.0`) |
-| `api.timeout` | no | Request timeout in seconds (default: `30`) |
-| `admin_levels` | no | List of admin levels to fetch: `admin0`, `admin1`, `admin2` (default: all three) |
-| `countries` | no | List of country names to fetch. If `null` or omitted, fetches all available countries |
-| `operations` | no | List of operation types to filter (e.g., `"Displacement due to conflict"`). If `null`, fetches all |
-| `field_mapping` | no | Maps API response field names to internal schema (see config file for defaults) |
-| `output.measure` | no | Set to `stock` (default) to convert cumulative figures to flows |
+| `api.admin_levels` | no | List of admin levels to fetch: `admin0`, `admin1`, `admin2` (default: all three). |
+| `api.countries` | no | List of country names; use an empty list to fetch all available countries. |
+| `api.operations` | no | List of operation names, primarily for admin2 pulls. |
+| `field_mapping` | no | Maps API response field names to internal schema (see config file for defaults). |
+| `field_aliases.idp_count` | no | Candidate columns used to detect the IDP count. |
+| `output.measure` | no | Set to `stock` (default) to convert cumulative figures to flows. |
 
 **Example configuration:**
 ```yaml
 enabled: true
 api:
-  base_url: "https://dtm-apim-portal.iom.int/api/v3"
-  rate_limit_delay: 1.0
-  timeout: 30
-admin_levels:
-  - admin0
-  - admin1
-  - admin2
-countries:
-  - Ethiopia
-  - Sudan
+  admin_levels: [admin0, admin1, admin2]
+  countries: []
+  operations: []
+output:
+  measure: stock
+field_aliases:
+  idp_count: ["TotalIDPs", "IDPTotal"]
 ```
 
-### File Mode (Legacy)
-
-When `sources` contains entries with `id_or_path`, the connector reads from local CSV files.
-
-**Configuration fields:**
-
-| Field | Required | Description |
-| --- | --- | --- |
-| `id_or_path` | yes | Absolute path or cloud identifier for the CSV payload. The connector skips entries that omit this value and records the failure in diagnostics. |
-| `name` | no | Friendly name used in logs and diagnostics. Defaults to the `id_or_path` when omitted. |
-| `type` | no | Source type. Only `file` is currently supported. |
-| `measure` | no | Set to `stock` (default) to derive flows or `flow` when the CSV already reports per-period movements. |
-
-**Diagnostics:** each run emits `diagnostics/ingestion/dtm_run.json` capturing the connector mode, trigger, filters, HTTP
-counts (`2xx`, `4xx`, `5xx`, `timeout`, `error`), and row totals (`admin0`, `admin1`, `admin2`, `total`). The file is
-informational and may change without schema guarantees.
-| `country_column`, `admin1_column`, `date_column`, `value_column`, `cause_column` | no | Optional overrides for column detection. When unspecified the connector infers columns using common aliases. The runtime validator confirms that the resolved `date_column` exists; sources with missing columns are listed under `diagnostics/ingestion/dtm_run.json` → `sources.invalid`. |
-
-When `LOG_LEVEL=DEBUG`, the resolved source list is mirrored to
-`diagnostics/ingestion/dtm_sources_resolved.json` for triage.
-
+**Diagnostics:** each run emits:
+- `diagnostics/ingestion/dtm_run.json` capturing the ingestion window, filters, HTTP status counts (`2xx`, `4xx`, `5xx`, `timeout`, `error`), and row totals (`admin0`, `admin1`, `admin2`, `total`).
+- `diagnostics/ingestion/dtm_api_request.json` summarising the requested admin levels, countries, operations, and date window.
+- `diagnostics/ingestion/dtm_api_response_sample.json` containing the first 100 standardized output rows for quick inspection.
 ### Output metadata
 
 - `data/staging/dtm_displacement.csv.meta.json` mirrors the CSV output and records:
@@ -337,28 +310,16 @@ When `LOG_LEVEL=DEBUG`, the resolved source list is mirrored to
 
 ```jsonc
 {
-  "window": {"start": "2023-01-01", "end": "2023-12-31", "disabled": false},
-  "outputs": {"csv": "…", "meta": "…"},
-  "sources": {
-    "valid": [
-      {"name": "…", "rows_before": 10, "rows_after": 8, "dropped": 2,
-       "parse_errors": 1, "min": "2023-01-01", "max": "2023-02-01"}
-    ],
-    "invalid": [
-      {"name": "missing-id", "reason": "missing id_or_path"},
-      {"name": "missing-date", "reason": "missing date_column"}
-    ]
-  },
-  "totals": {
-    "rows_before": 12,
-    "rows_after": 8,
-    "rows_written": 8,
-    "kept": 8,
-    "dropped": 4,
-    "parse_errors": 1,
-    "invalid_sources": 2
-  }
+  "mode": "api",
+  "trigger": "api-only",
+  "admin_levels": ["admin0", "admin1", "admin2"],
+  "countries": null,
+  "operations": null,
+  "window_start": "2024-01-01",
+  "window_end": "2024-02-01",
+  "http_counts": {"2xx": 3, "4xx": 0, "5xx": 0, "timeout": 0, "error": 0},
+  "row_counts": {"admin0": 1, "admin1": 1, "admin2": 0, "total": 2}
 }
 ```
 
-Runs that write no data rows are classified as **ok-empty** and emit reasons such as `header-only; 2 sources invalid; kept=0`. The connector summary reads the `totals.kept`, `totals.dropped`, and `totals.parse_errors` fields to populate the dedicated columns in the Markdown table.
+Runs that write no data rows are classified as **ok-empty** and emit the message `header-only; kept=0`. The connector summary reads the `row_counts.total` field to populate the Markdown table.
