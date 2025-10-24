@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
 
@@ -35,6 +36,16 @@ class DummyDTMApi:
     def get_idp_admin2_data(self, **params: Any) -> pd.DataFrame:
         self.calls.setdefault("admin2", params)
         return pd.DataFrame()
+
+
+@pytest.fixture(autouse=True)
+def patch_discovery_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    diagnostics_dir = tmp_path / "diagnostics"
+    monkeypatch.setattr(dtm_client, "DTM_DIAGNOSTICS_DIR", diagnostics_dir)
+    monkeypatch.setattr(dtm_client, "DISCOVERY_SNAPSHOT_PATH", diagnostics_dir / "discovery_countries.csv")
+    monkeypatch.setattr(dtm_client, "DISCOVERY_FAIL_PATH", diagnostics_dir / "discovery_fail.json")
+    monkeypatch.setattr(dtm_client, "REQUESTS_LOG_PATH", diagnostics_dir / "requests.jsonl")
+    return diagnostics_dir
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +124,31 @@ def test_discover_all_countries_normalizes(monkeypatch: pytest.MonkeyPatch) -> N
     api = SimpleNamespace(get_all_countries=lambda: frame)
     result = dtm_client._discover_all_countries(api)
     assert result == ["Kenya", "Somalia"]
+
+
+def test_discover_all_countries_writes_snapshot(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        [
+            {"CountryName": "Kenya"},
+            {"CountryName": "Somalia"},
+        ]
+    )
+    api = SimpleNamespace(get_all_countries=lambda: frame)
+    result = dtm_client._discover_all_countries(api)
+    assert result == ["Kenya", "Somalia"]
+    snapshot = dtm_client.DISCOVERY_SNAPSHOT_PATH
+    assert snapshot.exists()
+    saved = pd.read_csv(snapshot)
+    assert set(saved["CountryName"]) == {"Kenya", "Somalia"}
+
+
+def test_discover_all_countries_empty_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = SimpleNamespace(get_all_countries=lambda: pd.DataFrame(columns=["CountryName"]))
+    with pytest.raises(SystemExit) as excinfo:
+        dtm_client._discover_all_countries(api)
+    assert excinfo.value.code == 2
+    fail_path = dtm_client.DISCOVERY_FAIL_PATH
+    assert fail_path.exists()
 
 
 def test_discover_all_countries_invokes_sdk_catalog() -> None:

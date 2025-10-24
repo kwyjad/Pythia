@@ -29,10 +29,14 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
         "DEFAULT_OUTPUT": out_path,
         "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
+        "DTM_DIAGNOSTICS_DIR": diagnostics_dir / "dtm",
         "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
         "RUN_DETAILS_PATH": run_path,
         "API_REQUEST_PATH": api_request,
         "API_SAMPLE_PATH": sample_path,
+        "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
+        "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
+        "REQUESTS_LOG_PATH": diagnostics_dir / "dtm" / "requests.jsonl",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
@@ -152,3 +156,41 @@ def test_config_country_list_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     assert effective["countries"] == ["Ethiopia", "Somalia"]
     per_country = summary["extras"]["per_country_counts"]
     assert {entry["country"] for entry in per_country} == {"Ethiopia", "Somalia"}
+    assert summary["extras"]["discovery"]["total_countries"] == 2
+    diagnostics_payload = summary["extras"].get("diagnostics", {})
+    assert diagnostics_payload.get("requests_log")
+
+
+def test_discovery_empty_failfast(
+    monkeypatch: pytest.MonkeyPatch, patched_paths: Dict[str, Path]
+) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+
+    class EmptyDiscoveryClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.rate_limit_delay = 0
+            self.timeout = 0
+            self.client = SimpleNamespace(get_all_countries=lambda: pd.DataFrame(columns=["CountryName"]))
+
+        def get_idp_admin0(self, **__: object) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def get_idp_admin1(self, **__: object) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def get_idp_admin2(self, **__: object) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(dtm_client, "DTMApiClient", EmptyDiscoveryClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        dtm_client.build_rows(
+            {"enabled": True, "api": {"admin_levels": ["admin0"]}},
+            no_date_filter=False,
+            window_start=None,
+            window_end=None,
+            http_counts={},
+        )
+
+    assert excinfo.value.code == 2
+    assert patched_paths["DISCOVERY_FAIL_PATH"].exists()

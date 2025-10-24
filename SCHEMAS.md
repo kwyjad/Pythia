@@ -300,9 +300,13 @@ field_aliases:
 - `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
 - `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 - `diagnostics/ingestion/raw/dtm/<level>.<country>.head.csv` snapshots of the first successful fetch per level (up to 100 rows) for quick schema inspection.
+- `diagnostics/ingestion/dtm/discovery_countries.csv` — snapshot of the SDK catalog used for discovery with the original fields as returned by `get_all_countries()`.
+- `diagnostics/ingestion/dtm/requests.jsonl` — per-request ledger including `level`, `country`, optional `operation`, elapsed time, row count, and status (`ok`, `empty`, `error`).
+- `diagnostics/ingestion/dtm/sample_<level>.csv` — 50-row samples of the first non-empty response per admin level for schema reference.
+- `diagnostics/ingestion/dtm/discovery_fail.json` — emitted only when discovery yields zero selectors; captures SDK version, base URL, and timestamp to support fail-fast troubleshooting.
 
 **Output metadata:**
-- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), and any per-country failures recorded during the run (`failures`).
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), any per-country failures recorded during the run (`failures`), a `discovery` object (`total_countries`, `sdk_version`, `api_base`, `discovery_file`, `source`), and a `diagnostics` object (currently `requests_log` and `samples`).
 - `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
@@ -346,6 +350,17 @@ field_aliases:
       "no_date_filter": false,
       "per_page": 500,
       "max_pages": 3
+    },
+    "discovery": {
+      "total_countries": 45,
+      "sdk_version": "0.1.5",
+      "api_base": "https://dtmapi.iom.int",
+      "discovery_file": "diagnostics/ingestion/dtm/discovery_countries.csv",
+      "source": "countries"
+    },
+    "diagnostics": {
+      "requests_log": "diagnostics/ingestion/dtm/requests.jsonl",
+      "samples": ["diagnostics/ingestion/dtm/sample_admin0.csv", "diagnostics/ingestion/dtm/sample_admin1.csv"]
     },
     "per_country_counts": [
       {"country": "Kenya", "level": "admin0", "rows": 1180, "window": "2024-01-01->2024-02-01"}
