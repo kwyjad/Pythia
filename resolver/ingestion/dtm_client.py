@@ -170,7 +170,10 @@ class DTMApiClient:
             config: Configuration dictionary with 'api' settings.
         """
         api_cfg = config.get("api", {})
-        self.base_url = api_cfg.get("base_url", "https://dtm-apim-portal.iom.int/api/v3")
+        # CRITICAL FIX: Use the actual API gateway URL, not the portal URL
+        # The portal (dtm-apim-portal.iom.int) is for registration only
+        # The actual API gateway is at dtmapi.iom.int
+        self.base_url = api_cfg.get("base_url", "https://dtmapi.iom.int").rstrip("/")
         self.timeout = api_cfg.get("timeout", 30)
         self.rate_limit_delay = api_cfg.get("rate_limit_delay", 1.0)
 
@@ -191,7 +194,7 @@ class DTMApiClient:
         """Make authenticated request to DTM API.
 
         Args:
-            endpoint: API endpoint (e.g., "Countries", "IdpAdmin0Data")
+            endpoint: API endpoint (e.g., "v3/displacement/admin0")
             params: Query parameters
             http_counts: Dictionary to update with HTTP status counts
 
@@ -200,6 +203,7 @@ class DTMApiClient:
 
         Raises:
             requests.HTTPError: If request fails
+            ValueError: On unexpected responses or redirects
         """
         url = f"{self.base_url}/{endpoint}"
         headers = get_auth_headers()
@@ -212,7 +216,11 @@ class DTMApiClient:
 
         try:
             response = requests.get(
-                url, headers=headers, params=params, timeout=self.timeout
+                url,
+                headers=headers,
+                params=params,
+                timeout=self.timeout,
+                allow_redirects=False,  # IMPORTANT: Detect redirects early
             )
 
             # Update HTTP counts
@@ -226,15 +234,65 @@ class DTMApiClient:
                     http_counts["5xx"] = http_counts.get("5xx", 0) + 1
                 http_counts["last_status"] = status_code
 
-            response.raise_for_status()
-            data = response.json()
+            # Check for redirects (302, 301, etc.)
+            if 300 <= response.status_code < 400:
+                redirect_location = response.headers.get("Location", "unknown")
+                LOG.error(
+                    "DTM API returned redirect %s to %s. "
+                    "This usually means the base_url is incorrect. "
+                    "Current base_url: %s. "
+                    "Check https://dtm-apim-portal.iom.int/ for the correct API gateway URL.",
+                    response.status_code,
+                    redirect_location,
+                    self.base_url,
+                )
+                raise ValueError(
+                    f"API redirect detected ({response.status_code} -> {redirect_location}). "
+                    f"The base_url may be incorrect. Current: {self.base_url}"
+                )
 
-            # API returns different structures; handle both list and dict with 'data' key
-            if isinstance(data, list):
+            response.raise_for_status()
+
+            # Try to parse JSON
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                content_type = response.headers.get("Content-Type", "unknown")
+                content_preview = response.text[:200] if response.text else "(empty)"
+                LOG.error(
+                    "Failed to parse API response as JSON. "
+                    "Status: %s, Content-Type: %s, Preview: %s",
+                    response.status_code,
+                    content_type,
+                    content_preview,
+                )
+                raise ValueError(f"Invalid JSON response from {url}: {e}") from e
+
+            # Handle official DTM API response format: {"isSuccess": true, "result": [...]}
+            if isinstance(data, dict) and "isSuccess" in data:
+                if not data.get("isSuccess"):
+                    error_messages = data.get("errorMessages", ["Unknown error"])
+                    error_msg = "; ".join(str(e) for e in error_messages)
+                    raise ValueError(f"API returned error: {error_msg}")
+                result = data.get("result", [])
+                if not isinstance(result, list):
+                    result = [result] if result else []
+            # Legacy format support: handle various response structures
+            elif isinstance(data, list):
                 result = data
             elif isinstance(data, dict) and "data" in data:
                 result = data["data"]
+                if not isinstance(result, list):
+                    result = [result] if result else []
+            elif isinstance(data, dict) and "value" in data:  # OData format
+                result = data["value"]
+                if not isinstance(result, list):
+                    result = [result] if result else []
             elif isinstance(data, dict):
+                # Single object or unknown format
+                if "error" in data or "Error" in data:
+                    error_msg = data.get("error") or data.get("Error", "Unknown error")
+                    raise ValueError(f"API returned error: {error_msg}")
                 result = [data]
             else:
                 result = []
@@ -243,15 +301,19 @@ class DTMApiClient:
             return result
 
         except requests.exceptions.Timeout:
-            LOG.error("DTM API timeout for %s", endpoint)
+            LOG.error("DTM API timeout for %s after %ss", endpoint, self.timeout)
             raise
         except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response else "unknown"
             LOG.error(
                 "DTM API HTTP error for %s: %s (status=%s)",
                 endpoint,
                 exc,
-                exc.response.status_code if exc.response else "unknown",
+                status,
             )
+            raise
+        except requests.exceptions.ConnectionError as e:
+            LOG.error("Failed to connect to DTM API at %s: %s", url, e)
             raise
         except requests.exceptions.RequestException as exc:
             LOG.error("DTM API request failed for %s: %s", endpoint, exc)
@@ -268,7 +330,7 @@ class DTMApiClient:
         Returns:
             DataFrame with country information
         """
-        data = self._make_request("Countries", http_counts=http_counts)
+        data = self._make_request("v3/displacement/country-list", http_counts=http_counts)
         return pd.DataFrame(data)
 
     def get_idp_admin0(
@@ -305,7 +367,7 @@ class DTMApiClient:
         if to_round is not None:
             params["ToRoundNumber"] = to_round
 
-        data = self._make_request("IdpAdmin0Data", params, http_counts=http_counts)
+        data = self._make_request("v3/displacement/admin0", params, http_counts=http_counts)
         return pd.DataFrame(data)
 
     def get_idp_admin1(
@@ -338,7 +400,7 @@ class DTMApiClient:
         if to_date:
             params["ToReportingDate"] = to_date
 
-        data = self._make_request("IdpAdmin1Data", params, http_counts=http_counts)
+        data = self._make_request("v3/displacement/admin1", params, http_counts=http_counts)
         return pd.DataFrame(data)
 
     def get_idp_admin2(
@@ -371,7 +433,7 @@ class DTMApiClient:
         if to_date:
             params["ToReportingDate"] = to_date
 
-        data = self._make_request("IdpAdmin2Data", params, http_counts=http_counts)
+        data = self._make_request("v3/displacement/admin2", params, http_counts=http_counts)
         return pd.DataFrame(data)
 
 

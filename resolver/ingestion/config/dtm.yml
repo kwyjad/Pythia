@@ -1,13 +1,20 @@
 # DTM API Configuration
 # Displacement Tracking Matrix (IOM) - API v3
-# Registration: https://dtm-apim-portal.iom.int/
+# Registration Portal: https://dtm-apim-portal.iom.int/ (for getting API keys)
+# API Gateway: https://dtmapi.iom.int (for actual data requests)
 # Requires: DTM_API_KEY environment variable
+#
+# IMPORTANT: The portal URL and API gateway URL are different:
+#   - Portal: https://dtm-apim-portal.iom.int/ (registration, docs, key management)
+#   - API Gateway: https://dtmapi.iom.int (actual data endpoints)
 
 enabled: true
 
 # API connection settings
 api:
-  base_url: "https://dtm-apim-portal.iom.int/api/v3"
+  # CRITICAL: Use the API gateway URL, NOT the portal URL
+  # The portal will redirect to sign-in page and cause errors
+  base_url: "https://dtmapi.iom.int"
   rate_limit_delay: 1.0  # seconds between requests
   timeout: 30  # request timeout in seconds
 
