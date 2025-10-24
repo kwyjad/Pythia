@@ -13,6 +13,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -68,11 +69,25 @@ __all__ = [
     "CANONICAL_HEADERS",
     "SERIES_INCIDENT",
     "SERIES_CUMULATIVE",
+    "compute_monthly_deltas",
+    "rollup_subnational",
+    "infer_hazard",
     "load_config",
     "load_registries",
     "build_rows",
     "main",
 ]
+
+
+@dataclass(frozen=True)
+class Hazard:
+    code: str
+    label: str
+    hclass: str
+
+
+MULTI_HAZARD = Hazard("multi", "Multi-shock Displacement/Needs", "all")
+UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
 DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -299,6 +314,171 @@ def _parse_iso_date_or_none(value: Any) -> Optional[str]:
     return None
 
 
+def _coerce_numeric(value: Any) -> float:
+    parsed = _parse_float(value)
+    return float(parsed) if parsed is not None else 0.0
+
+
+def _normalize_series_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {SERIES_CUMULATIVE, SERIES_INCIDENT}:
+        return text
+    return SERIES_INCIDENT
+
+
+def rollup_subnational(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Aggregate subnational rows to country totals before delta logic.
+
+    The helper keeps legacy semantics used by notebooks and tests:
+
+    * rows are grouped by (iso3, hazard_code, metric, as_of_date, series_type, source_id)
+    * admin-level identifiers (admin1/admin2) are dropped from the output
+    * numeric values are summed, non-numeric fields keep their first occurrence
+    """
+
+    aggregated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row.get("iso3"),
+            row.get("hazard_code"),
+            row.get("metric"),
+            row.get("as_of_date"),
+            _normalize_series_type(row.get("series_type")),
+            row.get("source_id"),
+        )
+        current = aggregated.get(key)
+        if current is None:
+            current = dict(row)
+            current.pop("admin1", None)
+            current.pop("admin2", None)
+            current["series_type"] = key[4]
+            current["value"] = _coerce_numeric(row.get("value"))
+            aggregated[key] = current
+        else:
+            current["value"] = _coerce_numeric(current.get("value")) + _coerce_numeric(
+                row.get("value")
+            )
+    return list(aggregated.values())
+
+
+def compute_monthly_deltas(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    value_field: str = "value",
+    date_field: str = "as_of_date",
+    group_fields: Sequence[str] = ("iso3", "hazard_code", "metric", "source_id"),
+    allow_first_month: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    """Convert cumulative series to month-over-month deltas.
+
+    Incident (already-monthly) rows are passed through unchanged. Cumulative
+    series drop the first month unless `allow_first_month` (or the
+    `DTM_ALLOW_FIRST_MONTH` env flag) is enabled. Negative deltas are clipped to
+    zero to avoid spurious drops.
+    """
+
+    if allow_first_month is None:
+        allow_first_month = _env_bool("DTM_ALLOW_FIRST_MONTH", False)
+
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        key = tuple(row.get(field) for field in group_fields)
+        grouped[key].append(dict(row))
+
+    output: List[Dict[str, Any]] = []
+    for _, bucket in grouped.items():
+        bucket.sort(key=lambda item: str(item.get(date_field, "")))
+        series_type = _normalize_series_type(bucket[0].get("series_type"))
+        if series_type == SERIES_INCIDENT:
+            for item in bucket:
+                clone = dict(item)
+                parsed = _parse_float(clone.get(value_field))
+                if parsed is not None:
+                    clone[value_field] = parsed
+                output.append(clone)
+            continue
+
+        previous_value: Optional[float] = None
+        for idx, item in enumerate(bucket):
+            current_value = _parse_float(item.get(value_field))
+            if current_value is None:
+                continue
+            if previous_value is None:
+                previous_value = current_value
+                if allow_first_month:
+                    clone = dict(item)
+                    clone[value_field] = current_value
+                    clone["series_type"] = SERIES_INCIDENT
+                    output.append(clone)
+                continue
+            delta = max(current_value - previous_value, 0.0)
+            previous_value = current_value
+            if idx == 0 and not allow_first_month:
+                continue
+            clone = dict(item)
+            clone[value_field] = delta
+            clone["series_type"] = SERIES_INCIDENT
+            output.append(clone)
+
+    return output
+
+
+def infer_hazard(
+    texts: Iterable[str],
+    *,
+    shocks: Optional[pd.DataFrame],
+    keywords_cfg: Mapping[str, Sequence[str]] | None = None,
+    default_key: Optional[str] = "displacement_influx",
+) -> Hazard:
+    """Map free-form text snippets to a canonical hazard definition."""
+
+    combined = " ".join(str(text or "") for text in texts).lower()
+    keywords_cfg = keywords_cfg or {}
+    matched_keys: List[str] = []
+    for key, keywords in keywords_cfg.items():
+        for keyword in keywords or []:
+            needle = str(keyword or "").strip().lower()
+            if needle and needle in combined:
+                matched_keys.append(key)
+                break
+
+    if not matched_keys and default_key:
+        matched_keys.append(default_key)
+
+    # Deduplicate while preserving order
+    seen = set()
+    ordered_matches: List[str] = []
+    for key in matched_keys:
+        lowered = key.lower()
+        if lowered not in seen:
+            seen.add(lowered)
+            ordered_matches.append(key)
+
+    if not ordered_matches:
+        return UNKNOWN_HAZARD
+    if len(ordered_matches) > 1:
+        return MULTI_HAZARD
+
+    selected_key = ordered_matches[0]
+    if shocks is not None and not shocks.empty:
+        lowered_key = selected_key.lower()
+        mask = shocks.get("key", pd.Series(dtype=str)).str.lower() == lowered_key
+        if mask.any():
+            record = shocks.loc[mask].iloc[0]
+        else:
+            mask = shocks.get("code", pd.Series(dtype=str)).str.lower() == lowered_key
+            record = shocks.loc[mask].iloc[0] if mask.any() else None
+        if record is not None:
+            code = str(record.get("code") or record.get("key") or selected_key).strip() or "UNK"
+            label = str(record.get("name") or selected_key).strip() or code
+            hclass = str(record.get("hclass") or "all").strip() or "all"
+            return Hazard(code=code, label=label, hclass=hclass)
+
+    label = selected_key.replace("_", " ").title()
+    code = selected_key.upper()[:3] or "UNK"
+    return Hazard(code=code, label=label, hclass="all")
+
+
 def _is_candidate_newer(existing_iso: str, candidate_iso: str) -> bool:
     if not candidate_iso:
         return False
@@ -326,9 +506,20 @@ def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
     )
     shocks = pd.DataFrame(
         [
-            {"code": "DI", "key": "displacement_influx", "name": "Displacement influx"},
-            {"code": "FL", "key": "flood", "name": "Flood"},
-            {"code": "DR", "key": "drought", "name": "Drought"},
+            {
+                "code": "DI",
+                "key": "displacement_influx",
+                "name": "Displacement influx",
+                "hclass": "all",
+            },
+            {"code": "FL", "key": "flood", "name": "Flood", "hclass": "hydro"},
+            {"code": "DR", "key": "drought", "name": "Drought", "hclass": "climate"},
+            {
+                "code": "multi",
+                "key": "multi",
+                "name": "Multi-shock Displacement/Needs",
+                "hclass": "all",
+            },
         ]
     )
     return countries, shocks

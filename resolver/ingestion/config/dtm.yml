@@ -16,3 +16,21 @@ field_aliases:
   idp_count:
     - "TotalIDPs"
     - "IDPTotal"
+
+shock_keywords:
+  displacement_influx:
+    - "flow monitoring"
+    - "movement"
+  flood:
+    - "flood"
+  drought:
+    - "drought"
+  cyclone:
+    - "cyclone"
+    - "hurricane"
+    - "typhoon"
+    - "storm"
+  conflict:
+    - "conflict"
+    - "violence"
+    - "clashes"
