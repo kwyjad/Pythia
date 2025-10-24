@@ -86,7 +86,8 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -e .[db]
+          pip install -e .[db,connectors]
+          pip install "dtmapi>=0.1.5"
 
       - name: Compute backfill window
         id: window

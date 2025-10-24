@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -40,6 +41,51 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
     return mappings
+
+
+def test_preflight_missing_dep_marks_error(monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path]) -> None:
+    original_import = importlib.import_module
+
+    def fake_import(name: str, *args: object, **kwargs: object):
+        if name == "dtmapi":
+            raise ModuleNotFoundError("No module named 'dtmapi'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+
+    captured: Dict[str, Any] = {}
+    original_writer = dtm_client._write_connector_report
+
+    def spy_writer(**kwargs: Any) -> None:
+        captured.update(kwargs)
+        original_writer(**kwargs)
+
+    monkeypatch.setattr(dtm_client, "_write_connector_report", spy_writer)
+
+    rc = dtm_client.main([])
+    assert rc == 1
+
+    assert captured["status"] == "error"
+    assert "dependency-missing" in captured["reason"]
+
+    report_lines = patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
+    assert len(report_lines) == 1
+    report_payload = json.loads(report_lines[0])
+    assert report_payload["status"] == "error"
+    assert report_payload["reason"].startswith("dependency-missing: dtmapi")
+    assert report_payload["extras"]["exit_code"] == 1
+
+    summary_path = patch_paths["DIAGNOSTICS_DIR"] / "summary.md"
+    assert summary_path.exists()
+    assert "dependency-missing" in summary_path.read_text(encoding="utf-8")
+
+    run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["status"] == "error"
+    assert run_payload["reason"].startswith("dependency-missing: dtmapi")
+    assert "deps" in run_payload["extras"]
+
+    meta_manifest = json.loads(patch_paths["META_PATH"].read_text(encoding="utf-8"))
+    assert "deps" not in meta_manifest
 
 
 def test_canonical_headers_exported() -> None:
@@ -122,6 +168,14 @@ def test_main_writes_outputs_and_diagnostics(
     assert run_payload["args"]["strict_empty"] is False
     request = json.loads(patch_paths["API_REQUEST_PATH"].read_text(encoding="utf-8"))
     assert request["admin_levels"] == ["admin0"]
+    meta_payload = json.loads(patch_paths["META_PATH"].read_text(encoding="utf-8"))
+    assert "deps" in meta_payload
+    assert "effective_params" in meta_payload
+    assert "http_counters" in meta_payload
+    assert "timings_ms" in meta_payload
+    assert "timings_ms" in run_payload["extras"]
+    assert "effective_params" in run_payload["extras"]
+    assert "deps" in run_payload["extras"]
 
 
 def test_main_strict_empty_exits_nonzero(

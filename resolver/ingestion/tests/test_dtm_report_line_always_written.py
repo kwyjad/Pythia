@@ -60,9 +60,10 @@ def test_report_line_written_on_exception(patched_paths: Dict[str, Path], monkey
     assert exit_code == 1
     report = read_report(patched_paths["CONNECTORS_REPORT"])
     assert report["status"] == "error"
-    assert "kaboom" in report["reason"]
+    assert report["reason"] == "exception: RuntimeError"
     extras = report["extras"]
     assert extras["rows_total"] == 0
     run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["status"] == "error"
+    assert run_payload["reason"] == "exception: RuntimeError"
     assert run_payload["rows"]["written"] == 0

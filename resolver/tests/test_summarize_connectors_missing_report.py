@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from scripts.ci import summarize_connectors
@@ -23,6 +24,17 @@ def test_summarize_connectors_missing_report(tmp_path: Path, monkeypatch) -> Non
     )
     assert rc == 0
 
-    expected = summarize_connectors.MISSING_REPORT_SUMMARY
-    assert summary.read_text() == expected
-    assert step_summary.read_text().endswith(expected)
+    assert report.exists()
+    lines = report.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    stub = json.loads(lines[0])
+    assert stub["status"] == "error"
+    assert stub["reason"] == "missing-report"
+
+    content = summary.read_text(encoding="utf-8")
+    assert "# Connector Diagnostics" in content
+    assert "missing-report" in content
+    assert "error" in content
+
+    github_summary = step_summary.read_text(encoding="utf-8")
+    assert "missing-report" in github_summary

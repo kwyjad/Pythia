@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import json
 import logging
-import re
 import os
+import re
+import subprocess
+import sys
 import time
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,6 +102,114 @@ COLUMNS = CANONICAL_HEADERS
 DEFAULT_CAUSE = "unknown"
 HTTP_COUNT_KEYS = ("2xx", "4xx", "5xx", "timeout", "error")
 ROW_COUNT_KEYS = ("admin0", "admin1", "admin2", "total")
+
+
+def _preflight_dependencies() -> Tuple[Dict[str, Any], bool]:
+    info: Dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "executable": sys.executable,
+        "sys_path_entries": len(sys.path),
+        "sys_path_sample": [str(entry) for entry in sys.path[:3]],
+        "packages": [],
+        "missing": [],
+    }
+
+    required = ("dtmapi",)
+    for name in required:
+        try:
+            module = importlib.import_module(name)
+        except Exception:
+            info["missing"].append(name)
+            LOG.debug("dtm: dependency %s import failed", name, exc_info=True)
+        else:
+            version = getattr(module, "__version__", "unknown")
+            info["packages"].append({"name": name, "version": str(version)})
+
+    return info, not info["missing"]
+
+
+def _log_dependency_snapshot(info: Mapping[str, Any]) -> None:
+    LOG.info(
+        "Python runtime: %s (executable=%s)",
+        info.get("python", "unknown"),
+        info.get("executable", ""),
+    )
+    LOG.debug(
+        "sys.path entries=%s first=%s",
+        info.get("sys_path_entries"),
+        info.get("sys_path_sample"),
+    )
+    packages = info.get("packages") if isinstance(info.get("packages"), list) else []
+    if packages:
+        LOG.info(
+            "Dependency versions: %s",
+            ", ".join(f"{pkg.get('name')}={pkg.get('version')}" for pkg in packages),
+        )
+    missing = info.get("missing") if isinstance(info.get("missing"), list) else []
+    if missing:
+        LOG.error("Missing dependencies: %s", ", ".join(map(str, missing)))
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", "dtmapi"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("dtm: unable to collect pip metadata for dtmapi", exc_info=True)
+    else:
+        snippet = (result.stdout or result.stderr or "").strip()
+        if snippet:
+            for line in snippet.splitlines()[:10]:
+                LOG.debug("pip show dtmapi: %s", line.strip())
+
+
+def _write_connector_report(
+    *,
+    status: str,
+    reason: str,
+    extras: Optional[Mapping[str, Any]] = None,
+    http: Optional[Mapping[str, Any]] = None,
+    counts: Optional[Mapping[str, Any]] = None,
+) -> None:
+    payload: Dict[str, Any] = {
+        "connector_id": "dtm_client",
+        "mode": "real",
+        "status": status,
+        "reason": reason,
+        "http": dict(http or {}),
+        "counts": dict(counts or {}),
+        "extras": dict(extras or {}),
+    }
+    payload.setdefault("http", {})
+    http_payload = payload["http"]
+    for key in ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status"):
+        http_payload.setdefault(key, 0 if key != "last_status" else None)
+    count_payload = payload["counts"]
+    for key in ("fetched", "normalized", "written"):
+        count_payload.setdefault(key, 0)
+    extras_payload = payload["extras"]
+    extras_payload.setdefault("rows_total", 0)
+    extras_payload.setdefault("status_raw", status)
+    if "exit_code" not in extras_payload:
+        extras_payload["exit_code"] = 1 if status == "error" else 0
+    CONNECTORS_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    with CONNECTORS_REPORT.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str))
+        handle.write("\n")
+
+
+def _append_summary_stub_if_needed(message: str) -> None:
+    summary_path = DIAGNOSTICS_DIR / "summary.md"
+    if summary_path.exists():
+        return
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_content = (
+        "# Connector Diagnostics\n\n"
+        f"* dtm_client: {message} *\n"
+    )
+    summary_path.write_text(summary_content, encoding="utf-8")
 
 
 def _extract_status_code(exc: Exception) -> Optional[int]:
@@ -567,7 +679,15 @@ def _iter_level_pages(
     if level == "admin2":
         kwargs["operation"] = operation
     frame = fetcher(**kwargs)
+    safe_kwargs = {key: value for key, value in kwargs.items() if key != "http_counts"}
+    LOG.debug("dtm: fetched %s with params=%s", level, safe_kwargs)
     if frame is not None and not frame.empty:
+        LOG.debug(
+            "dtm: first page stats level=%s rows=%s cols=%s",
+            level,
+            int(frame.shape[0]),
+            list(frame.columns)[:6],
+        )
         yield frame
 
 
@@ -673,6 +793,31 @@ def _fetch_api_data(
         "requested_window": {"start": from_date, "end": to_date},
         "query_params": request_payload,
     }
+    LOG.info(
+        "DTM endpoint=%s window=%s→%s",
+        summary["api"]["endpoint"],
+        from_date or "-",
+        to_date or "-",
+    )
+    LOG.info(
+        "DTM request params: admin_levels=%s countries=%s operations=%s",
+        admin_levels,
+        request_payload.get("countries") or "all",
+        request_payload.get("operations") or "all",
+    )
+    effective_params = {
+        "resource": summary["api"]["endpoint"],
+        "admin_levels": admin_levels,
+        "countries_requested": requested_countries,
+        "countries_resolved": [] if resolved_countries == [None] else resolved_countries,
+        "operations": None if operations == [None] else operations,
+        "window_start": from_date,
+        "window_end": to_date,
+        "no_date_filter": bool(no_date_filter),
+        "per_page": None,
+        "max_pages": None,
+    }
+    summary.setdefault("extras", {})["effective_params"] = effective_params
 
     field_mapping = cfg.get("field_mapping", {})
     field_aliases = cfg.get("field_aliases", {})
@@ -821,6 +966,11 @@ def _fetch_api_data(
                     country_label,
                     range_label,
                 )
+
+    effective_params = summary.get("extras", {}).get("effective_params")
+    if isinstance(effective_params, MutableMapping):
+        effective_params["per_page"] = summary.get("paging", {}).get("page_size")
+        effective_params["max_pages"] = summary.get("paging", {}).get("pages")
 
     return all_records, summary
 
@@ -973,6 +1123,7 @@ def build_rows(
     write_sample: bool = False,
 ) -> Tuple[List[List[Any]], Dict[str, Any]]:
     http_stats = _ensure_http_counts(http_counts)
+    fetch_started = time.perf_counter()
     records, summary = _fetch_api_data(
         cfg,
         no_date_filter=no_date_filter,
@@ -980,7 +1131,13 @@ def build_rows(
         window_end=window_end,
         http_counts=http_stats,
     )
+    fetch_elapsed = time.perf_counter() - fetch_started
+    normalize_started = time.perf_counter()
     rows = _finalize_records(records, summary=summary, write_sample=write_sample)
+    normalize_elapsed = time.perf_counter() - normalize_started
+    timings = summary.setdefault("timings_ms", {})
+    timings["fetch_total"] = max(0, int(fetch_elapsed * 1000))
+    timings["normalize"] = max(0, int(normalize_elapsed * 1000))
     summary.setdefault("rows", {}).setdefault("written", 0)
     summary["rows"]["written"] = len(rows)
     summary.setdefault("http_counts", {})
@@ -1006,12 +1163,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _write_meta(rows: int, window_start: Optional[str], window_end: Optional[str]) -> None:
+def _write_meta(
+    rows: int,
+    window_start: Optional[str],
+    window_end: Optional[str],
+    *,
+    deps: Mapping[str, Any],
+    effective_params: Mapping[str, Any],
+    http_counters: Mapping[str, Any],
+    timings_ms: Mapping[str, Any],
+) -> None:
     payload: Dict[str, Any] = {"row_count": rows}
     if window_start:
         payload["backfill_start"] = window_start
     if window_end:
         payload["backfill_end"] = window_end
+    payload["deps"] = dict(deps)
+    payload["effective_params"] = dict(effective_params)
+    payload["http_counters"] = dict(http_counters)
+    payload["timings_ms"] = {key: int(value) for key, value in timings_ms.items()}
     write_json(META_PATH, payload)
 
 
@@ -1021,17 +1191,71 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=getattr(logging, log_level_name, logging.INFO), format="[%(levelname)s] %(message)s")
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
 
+    strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
+    no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
+
+    preflight_started = time.perf_counter()
+    dep_info, have_dtmapi = _preflight_dependencies()
+    timings_ms: Dict[str, int] = {"preflight": max(0, int((time.perf_counter() - preflight_started) * 1000))}
+    _log_dependency_snapshot(dep_info)
+
     api_key_configured = check_api_key_configured()
+    base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
+    base_http["rate_limit_remaining"] = None
+    base_http["retries"] = 0
+    base_http["last_status"] = None
+    base_extras: Dict[str, Any] = {
+        "api_key_configured": api_key_configured,
+        "deps": dep_info,
+        "strict_empty": strict_empty,
+        "no_date_filter": no_date_filter,
+        "timings_ms": dict(timings_ms),
+    }
+
+    if not have_dtmapi:
+        reason = "dependency-missing: dtmapi (install with: pip install 'dtmapi>=0.1.5')"
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = dict(base_extras)
+        extras_payload.update({"rows_total": 0, "exit_code": 1, "status_raw": "error"})
+        extras_payload["timings_ms"] = dict(timings_ms)
+        _write_connector_report(
+            status="error",
+            reason=reason,
+            extras=extras_payload,
+            http=dict(base_http),
+            counts=counts_payload,
+        )
+        _append_summary_stub_if_needed(reason)
+        ensure_header_only()
+        run_payload = {
+            "window": {"start": None, "end": None},
+            "countries": {},
+            "http": dict(base_http),
+            "paging": {"pages": 0, "page_size": None, "total_received": 0},
+            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
+            "totals": {"rows_written": 0},
+            "status": "error",
+            "reason": reason,
+            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+            "extras": {
+                "deps": dep_info,
+                "timings_ms": dict(timings_ms),
+                "strict_empty": strict_empty,
+                "no_date_filter": no_date_filter,
+            },
+            "args": vars(args),
+        }
+        write_json(RUN_DETAILS_PATH, run_payload)
+        LOG.error(reason)
+        return 1
+
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
     http_stats: MutableMapping[str, int] = _ensure_http_counts({})
-    extras: Dict[str, Any] = {"api_key_configured": api_key_configured}
+    extras: Dict[str, Any] = dict(base_extras)
 
     status = "ok"
     reason: Optional[str] = None
     exit_code = 0
-
-    strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
-    no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
 
     window_start_dt, window_end_dt = resolve_ingestion_window()
     window_start_iso = window_start_dt.isoformat() if window_start_dt else None
@@ -1065,11 +1289,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     write_sample=True,
                 )
                 rows_written = len(rows)
+                write_started = time.perf_counter()
                 if rows:
                     write_rows(rows)
                 else:
                     ensure_header_only()
-                _write_meta(rows_written, window_start_iso, window_end_iso)
+                timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status = "error"
@@ -1079,7 +1304,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:  # pragma: no cover - defensive guard
         LOG.exception("dtm: unexpected failure")
         status = "error"
-        reason = str(exc)
+        reason = f"exception: {type(exc).__name__}"
+        extras["exception"] = {"type": type(exc).__name__, "message": str(exc)}
+        extras["traceback"] = traceback.format_exc()
         exit_code = 1
         ensure_header_only()
 
@@ -1095,6 +1322,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         exit_code = 3
         LOG.error("dtm: strict-empty enabled; failing due to zero rows")
 
+    summary_timings = summary.get("timings_ms") if isinstance(summary, Mapping) else {}
+    if isinstance(summary_timings, Mapping):
+        for key, value in summary_timings.items():
+            timings_ms[key] = int(value)
+    for key in ("preflight", "fetch_total", "normalize", "write"):
+        timings_ms.setdefault(key, 0)
+
     extras.update(
         {
             "rows_total": rows_written,
@@ -1104,6 +1338,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "no_date_filter": no_date_filter,
             "exit_code": exit_code,
             "status_raw": status,
+            "timings_ms": dict(timings_ms),
         }
     )
     extras["api_attempted"] = bool(http_stats.get("last_status"))
@@ -1111,9 +1346,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     http_payload = {key: int(http_stats.get(key, 0)) for key in HTTP_COUNT_KEYS}
     http_payload["retries"] = int(http_stats.get("retries", 0))
     http_payload["last_status"] = http_stats.get("last_status")
+    http_payload["rate_limit_remaining"] = http_stats.get("rate_limit_remaining")
 
     rows_summary = summary.get("rows", {}) if isinstance(summary, Mapping) else {}
     summary_extras = dict(summary.get("extras", {})) if isinstance(summary, Mapping) else {}
+    summary_extras["timings_ms"] = dict(timings_ms)
+    summary_extras.setdefault("deps", dep_info)
     totals = {
         "rows_fetched": rows_summary.get("fetched", 0),
         "rows_normalized": rows_summary.get("normalized", rows_written),
@@ -1122,6 +1360,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "dropped": rows_summary.get("dropped", 0),
         "parse_errors": rows_summary.get("parse_errors", 0),
     }
+
+    effective_params: Mapping[str, Any]
+    raw_effective = summary_extras.get("effective_params")
+    if isinstance(raw_effective, Mapping):
+        effective_params = dict(raw_effective)
+    else:
+        effective_params = {}
+
+    _write_meta(
+        rows_written,
+        window_start_iso,
+        window_end_iso,
+        deps=dep_info,
+        effective_params=effective_params,
+        http_counters=http_payload,
+        timings_ms=timings_ms,
+    )
+
     run_payload = {
         "window": {"start": window_start_iso, "end": window_end_iso},
         "countries": summary.get("countries", {}),
@@ -1149,6 +1405,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     extras["meta_path"] = str(META_PATH)
     if API_SAMPLE_PATH.exists():
         extras["api_sample_path"] = str(API_SAMPLE_PATH)
+    extras.setdefault("effective_params", effective_params)
     diagnostics_result = diagnostics_finalize_run(
         diagnostics_ctx,
         status=status,
