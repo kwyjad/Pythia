@@ -31,7 +31,9 @@ import yaml
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion.dtm_auth import get_dtm_api_key
+from resolver.ingestion._shared.date_utils import parse_dates, window_mask
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
+from resolver.ingestion._shared.validation import validate_required_fields
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
     finalize_run as diagnostics_finalize_run,
@@ -230,6 +232,7 @@ __all__ = [
     "load_config",
     "ensure_header_only",
     "build_rows",
+    "build_rows_from_sources",
     "write_rows",
     "parse_args",
     "main",
@@ -856,8 +859,422 @@ def _resolve_cause(row: Mapping[str, Any], cause_map: Mapping[str, str]) -> str:
     return DEFAULT_CAUSE
 
 
+def _source_label(entry: Mapping[str, Any]) -> str:
+    return str(
+        entry.get("id")
+        or entry.get("name")
+        or entry.get("id_or_path")
+        or "dtm_source"
+    )
 
 
+def _column(row: Mapping[str, Any], *candidates: str) -> Optional[str]:
+    lowered = {col.lower(): col for col in row.keys()}
+    for candidate in candidates:
+        key = candidate.lower()
+        if key in lowered:
+            return lowered[key]
+    for candidate in candidates:
+        target = candidate.lower().replace(" ", "")
+        for col in row.keys():
+            if col.lower().replace(" ", "") == target:
+                return col
+    return None
+
+
+def _read_source(
+    entry: Mapping[str, Any],
+    cfg: Mapping[str, Any],
+    *,
+    no_date_filter: bool,
+    window_start: Optional[str],
+    window_end: Optional[str],
+) -> SourceResult:
+    source_label = _source_label(entry)
+    LOG.debug("dtm: begin source %s", source_label)
+
+    path = entry.get("id_or_path")
+    if not path:
+        LOG.warning("dtm: skipping source %s (missing id_or_path)", source_label)
+        return SourceResult(
+            source_name=source_label,
+            status="skipped",
+            skip_reason="missing id_or_path",
+        )
+
+    csv_path = Path(path)
+    if not csv_path.exists():
+        return SourceResult(
+            source_name=source_label,
+            status="error",
+            error=f"source not found: {csv_path}",
+        )
+
+    LOG.debug("dtm: resolved source %s path=%s", source_label, csv_path)
+    file_ctx = {"filename": csv_path.name, "path": str(csv_path)}
+    aliases = cfg.get("country_aliases") or {}
+    measure = str(entry.get("measure") or cfg.get("output", {}).get("measure") or "stock")
+    measure = measure.strip().lower()
+    cause_map = {
+        str(k).strip().lower(): str(v)
+        for k, v in (cfg.get("cause_map") or {}).items()
+    }
+
+    try:
+        frame = pd.read_csv(csv_path, dtype=object, keep_default_na=False)
+    except pd.errors.EmptyDataError:
+        frame = pd.DataFrame()
+
+    rows_before = int(frame.shape[0])
+    header_probe: MutableMapping[str, Any] = {str(col): None for col in frame.columns}
+
+    if rows_before == 0 or not header_probe:
+        LOG.debug("dtm: end source %s rows=0", source_label)
+        return SourceResult(
+            source_name=source_label,
+            records=[],
+            status="ok",
+            rows_before=rows_before,
+            rows_after=0,
+            dropped=rows_before,
+            parse_errors=0,
+        )
+
+    def _resolve_column(*candidates: Optional[str]) -> Optional[str]:
+        explicit = candidates[0] if candidates else None
+        if explicit:
+            resolved_explicit = _column(header_probe, str(explicit))
+            if resolved_explicit:
+                return resolved_explicit
+            return None
+        fallbacks = [str(name) for name in candidates[1:] if name]
+        if not fallbacks:
+            return None
+        return _column(header_probe, *fallbacks)
+
+    country_column = _resolve_column(entry.get("country_column"), "country_iso3", "iso3", "country")
+    admin1_column = _resolve_column(entry.get("admin1_column"), "admin1", "adm1", "province", "state")
+    date_column = _resolve_column(entry.get("date_column"), "date", "month", "period")
+    value_column = _resolve_column(entry.get("value_column"), "value", "count", "population", "total")
+    cause_column = _resolve_column(entry.get("cause_column"), "cause", "cause_category", "reason")
+
+    if not date_column:
+        LOG.warning("dtm: skipping source %s (missing date_column)", source_label)
+        return SourceResult(
+            source_name=source_label,
+            status="invalid",
+            skip_reason="missing date_column",
+            rows_before=rows_before,
+            rows_after=0,
+            dropped=rows_before,
+            parse_errors=0,
+        )
+
+    if not value_column or not country_column:
+        return SourceResult(
+            source_name=source_label,
+            status="invalid",
+            skip_reason="missing required columns",
+            rows_before=rows_before,
+            rows_after=0,
+            dropped=rows_before,
+            parse_errors=0,
+        )
+
+    fmt = str(entry.get("date_format")) if entry.get("date_format") else None
+    parsed_dates, parse_errors = parse_dates(frame[date_column], fmt)
+    valid_dates = parsed_dates.notna()
+    parsed_valid = parsed_dates[valid_dates]
+
+    min_iso: Optional[str] = None
+    max_iso: Optional[str] = None
+    if not parsed_valid.empty:
+        min_candidate = parsed_valid.min()
+        max_candidate = parsed_valid.max()
+        if isinstance(min_candidate, pd.Timestamp):
+            min_iso = min_candidate.date().isoformat()
+        elif isinstance(min_candidate, datetime):
+            min_iso = min_candidate.date().isoformat()
+        else:
+            min_iso = str(min_candidate)
+        if isinstance(max_candidate, pd.Timestamp):
+            max_iso = max_candidate.date().isoformat()
+        elif isinstance(max_candidate, datetime):
+            max_iso = max_candidate.date().isoformat()
+        else:
+            max_iso = str(max_candidate)
+
+    if not no_date_filter and (window_start or window_end):
+        mask = window_mask(parsed_dates, window_start, window_end)
+        frame = frame.loc[mask].copy()
+
+    rows_after_filter = int(frame.shape[0])
+    dropped = rows_before - rows_after_filter
+
+    idp_column = value_column
+    all_records: List[Dict[str, Any]] = []
+    for _, row in frame.iterrows():
+        iso = to_iso3(row.get(country_column), aliases)
+        if not iso:
+            continue
+        bucket = month_start(row.get(date_column))
+        if not bucket:
+            continue
+        admin1 = ""
+        if admin1_column in frame.columns:
+            admin1 = str(row.get(admin1_column) or "").strip()
+        value = _parse_float(row.get(idp_column))
+        if value is None or value < 0:
+            continue
+
+        record_as_of = _extract_record_as_of(row.to_dict(), file_ctx)
+        cause = DEFAULT_CAUSE
+        if cause_column:
+            cause = _resolve_cause({cause_column: row.get(cause_column)}, cause_map)
+
+        all_records.append(
+            {
+                "iso3": iso,
+                "admin1": admin1,
+                "month": bucket,
+                "value": float(value),
+                "cause": cause,
+                "measure": measure,
+                "source_id": source_label,
+                "as_of": record_as_of,
+            }
+        )
+
+    rows_after = len(all_records)
+    LOG.info(
+        "Processed %s: fetched=%s, kept=%s",
+        source_label,
+        rows_before,
+        rows_after,
+    )
+
+    return SourceResult(
+        source_name=source_label,
+        records=all_records,
+        status="ok",
+        rows_before=rows_before,
+        rows_after=rows_after,
+        dropped=dropped,
+        parse_errors=int(parse_errors or 0),
+        min_date=min_iso,
+        max_date=max_iso,
+    )
+
+
+def _finalize_records(
+    all_records: Sequence[Mapping[str, Any]],
+    *,
+    admin_mode: str,
+    diag_target: Optional[MutableMapping[str, Any]],
+    http_stats: Optional[Dict[str, int]] = None,
+    write_sample: bool = False,
+) -> List[List[Any]]:
+    if not all_records:
+        if write_sample:
+            try:
+                write_json(API_RESPONSE_SAMPLE_PATH, [])
+            except Exception:
+                LOG.debug("dtm: unable to write empty API sample", exc_info=True)
+        _log_as_of_fallbacks()
+        return []
+
+    run_date = datetime.now(timezone.utc).date().isoformat()
+    method = (
+        "dtm_stock_to_flow"
+        if any(rec.get("measure") == "stock" for rec in all_records)
+        else "dtm_flow"
+    )
+    dedup: dict[tuple[str, str, str, str], Dict[str, Any]] = {}
+    country_totals: dict[tuple[str, str, str], float] = defaultdict(float)
+    country_as_of: dict[tuple[str, str, str], str] = {}
+
+    for rec in all_records:
+        iso3 = rec["iso3"]
+        admin1 = rec.get("admin1") or ""
+        month = rec["month"]
+        month_iso = month.isoformat()
+        value = float(rec.get("value", 0.0))
+        record_as_of = rec.get("as_of") or run_date
+        if admin_mode in {"admin1", "both"} and admin1:
+            key = (iso3, admin1, month_iso, rec["source_id"])
+            event_id = f"{iso3}-displacement-{month.strftime('%Y%m')}-{stable_digest(key)}"
+            record = {
+                "source": "dtm",
+                "country_iso3": iso3,
+                "admin1": admin1,
+                "event_id": event_id,
+                "as_of": record_as_of,
+                "month_start": month_iso,
+                "value_type": "new_displaced",
+                "value": int(round(value)),
+                "unit": "people",
+                "method": method,
+                "confidence": DEFAULT_CAUSE,
+                "raw_event_id": f"{rec['source_id']}::{admin1 or 'country'}::{month.strftime('%Y%m')}",
+                "raw_fields_json": json.dumps(
+                    {
+                        "source_id": rec["source_id"],
+                        "admin1": admin1,
+                        "month": month_iso,
+                        "value": value,
+                        "cause": rec.get("cause", DEFAULT_CAUSE),
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+            existing = dedup.get(key)
+            if existing and not _is_candidate_newer(existing["as_of"], record["as_of"]):
+                continue
+            dedup[key] = record
+        if admin_mode in {"country", "both"}:
+            country_key = (iso3, month_iso, rec["source_id"])
+            country_totals[country_key] += value
+            existing_country_asof = country_as_of.get(country_key)
+            if not existing_country_asof or _is_candidate_newer(
+                existing_country_asof, record_as_of
+            ):
+                country_as_of[country_key] = record_as_of
+
+    rows = list(dedup.values())
+    if admin_mode in {"country", "both"}:
+        for (iso3, month_iso, source_id), total in country_totals.items():
+            if total <= 0:
+                continue
+            month = datetime.strptime(month_iso, "%Y-%m-%d").date()
+            event_id = f"{iso3}-displacement-{month.strftime('%Y%m')}-{stable_digest([iso3, month_iso, source_id])}"
+            rows.append(
+                {
+                    "source": "dtm",
+                    "country_iso3": iso3,
+                    "admin1": "",
+                    "event_id": event_id,
+                    "as_of": country_as_of.get((iso3, month_iso, source_id), run_date),
+                    "month_start": month_iso,
+                    "value_type": "new_displaced",
+                    "value": int(round(total)),
+                    "unit": "people",
+                    "method": method,
+                    "confidence": DEFAULT_CAUSE,
+                    "raw_event_id": f"{source_id}::country::{month.strftime('%Y%m')}",
+                    "raw_fields_json": json.dumps(
+                        {
+                            "source_id": source_id,
+                            "aggregation": "country",
+                            "total_value": total,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+
+    formatted = [
+        [
+            rec["source"],
+            rec["country_iso3"],
+            rec.get("admin1", ""),
+            rec["event_id"],
+            rec["as_of"],
+            rec["month_start"],
+            rec["value_type"],
+            rec["value"],
+            rec["unit"],
+            rec["method"],
+            rec["confidence"],
+            rec["raw_event_id"],
+            rec["raw_fields_json"],
+        ]
+        for rec in rows
+    ]
+    formatted.sort(key=lambda row: (row[1], row[2], row[5], row[3]))
+
+    if write_sample:
+        try:
+            write_json(API_RESPONSE_SAMPLE_PATH, formatted[:100])
+        except Exception:
+            LOG.debug("dtm: unable to persist API sample", exc_info=True)
+        else:
+            if diag_target is not None:
+                diag_target.setdefault("api", {})[
+                    "sample_path"
+                ] = str(API_RESPONSE_SAMPLE_PATH)
+
+    if diag_target is not None:
+        diag_rows = diag_target.get("row_counts") or _empty_row_counts()
+        diag_rows = {**_empty_row_counts(), **diag_rows}
+        diag_rows["total"] = len(formatted)
+        diag_target["row_counts"] = diag_rows
+        if http_stats is not None and "http_counts" not in diag_target:
+            diag_target["http_counts"] = {
+                key: int(http_stats.get(key, 0)) for key in HTTP_COUNT_KEYS
+            }
+
+    _log_as_of_fallbacks()
+    return formatted
+
+
+def build_rows_from_sources(
+    cfg: Mapping[str, Any],
+    *,
+    sources: Sequence[Mapping[str, Any]],
+    results: Optional[List[SourceResult]] = None,
+    no_date_filter: bool = False,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+    diagnostics: Optional[MutableMapping[str, Any]] = None,
+) -> List[List[Any]]:
+    admin_mode = str(cfg.get("admin_agg") or "both").strip().lower()
+    collected = results if results is not None else []
+    diag_target = diagnostics if diagnostics is not None else None
+
+    if diag_target is not None:
+        diag_target.setdefault("mode", "file")
+        diag_target.setdefault("trigger", "sources")
+        admin_levels_cfg = cfg.get("admin_levels")
+        if admin_levels_cfg:
+            diag_target.setdefault(
+                "admin_levels",
+                [str(level).strip().lower() for level in admin_levels_cfg],
+            )
+        diag_target.setdefault("countries", None)
+        diag_target.setdefault(
+            "window_start", None if no_date_filter else window_start
+        )
+        diag_target.setdefault("window_end", None if no_date_filter else window_end)
+        diag_target.setdefault("http_counts", _empty_http_counts())
+
+    all_records: List[Dict[str, Any]] = []
+    for entry in sources:
+        if not isinstance(entry, Mapping):
+            continue
+        result = _read_source(
+            entry,
+            cfg,
+            no_date_filter=no_date_filter,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        collected.append(result)
+        if result.records:
+            all_records.extend(result.records)
+
+    if diag_target is not None and "row_counts" not in diag_target:
+        diag_target["row_counts"] = {
+            **_empty_row_counts(),
+            "total": len(all_records),
+        }
+
+    return _finalize_records(
+        all_records,
+        admin_mode=admin_mode,
+        diag_target=diag_target,
+        http_stats=None,
+        write_sample=False,
+    )
 
 
 def _fetch_api_data(
@@ -879,6 +1296,7 @@ def _fetch_api_data(
     summary: Dict[str, Any] = {
         "row_counts": _empty_row_counts(),
         "http_counts": _empty_http_counts(),
+        "api": {},
     }
 
     if not check_api_key_configured():
@@ -936,6 +1354,15 @@ def _fetch_api_data(
         "window_end": to_date,
     }
     write_json(API_REQUEST_PATH, request_payload)
+
+    summary["api"] = {
+        "endpoint": str(cfg.get("api", {}).get("endpoint", "dtmapi")),
+        "requested_window": {
+            "start": from_date,
+            "end": to_date,
+        },
+        "query_params": request_payload,
+    }
 
     LOG.info(
         "Fetching DTM data: levels=%s, countries=%s, date_range=%s to %s",
@@ -1186,7 +1613,9 @@ def _fetch_api_data(
     summary["http_counts"] = {
         key: int(http_counter.get(key, 0)) for key in HTTP_COUNT_KEYS
     }
-    LOG.info("Total records fetched from API: %s", len(all_records))
+    total_rows = len(all_records)
+    summary.setdefault("api", {}).setdefault("response_len", total_rows)
+    LOG.info("Total records fetched from API: %s", total_rows)
     return all_records, summary
 
 
@@ -1254,124 +1683,16 @@ def build_rows(
         diag_target["http_counts"] = api_summary.get(
             "http_counts", _empty_http_counts()
         )
+        if api_summary.get("api"):
+            diag_target.setdefault("api", {}).update(api_summary["api"])
 
-    if not all_records:
-        _log_as_of_fallbacks()
-        return []
-    run_date = datetime.now(timezone.utc).date().isoformat()
-    method = "dtm_stock_to_flow" if any(rec.get("measure") == "stock" for rec in all_records) else "dtm_flow"
-    dedup: dict[tuple[str, str, str, str], Dict[str, Any]] = {}
-    country_totals: dict[tuple[str, str, str], float] = defaultdict(float)
-    country_as_of: dict[tuple[str, str, str], str] = {}
-    for rec in all_records:
-        iso3 = rec["iso3"]
-        admin1 = rec.get("admin1") or ""
-        month = rec["month"]
-        month_iso = month.isoformat()
-        value = float(rec.get("value", 0.0))
-        record_as_of = rec.get("as_of") or run_date
-        if admin_mode in {"admin1", "both"} and admin1:
-            key = (iso3, admin1, month_iso, rec["source_id"])
-            event_id = f"{iso3}-displacement-{month.strftime('%Y%m')}-{stable_digest(key)}"
-            record = {
-                "source": "dtm",
-                "country_iso3": iso3,
-                "admin1": admin1,
-                "event_id": event_id,
-                "as_of": record_as_of,
-                "month_start": month_iso,
-                "value_type": "new_displaced",
-                "value": int(round(value)),
-                "unit": "people",
-                "method": method,
-                "confidence": DEFAULT_CAUSE,
-                "raw_event_id": f"{rec['source_id']}::{admin1 or 'country'}::{month.strftime('%Y%m')}",
-                "raw_fields_json": json.dumps(
-                    {
-                        "source_id": rec["source_id"],
-                        "admin1": admin1,
-                        "month": month_iso,
-                        "value": value,
-                        "cause": rec.get("cause", DEFAULT_CAUSE),
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-            existing = dedup.get(key)
-            if existing and not _is_candidate_newer(existing["as_of"], record["as_of"]):
-                continue
-            dedup[key] = record
-        if admin_mode in {"country", "both"}:
-            country_key = (iso3, month_iso, rec["source_id"])
-            country_totals[country_key] += value
-            existing_country_asof = country_as_of.get(country_key)
-            if not existing_country_asof or _is_candidate_newer(existing_country_asof, record_as_of):
-                country_as_of[country_key] = record_as_of
-    rows = list(dedup.values())
-    if admin_mode in {"country", "both"}:
-        for (iso3, month_iso, source_id), total in country_totals.items():
-            if total <= 0:
-                continue
-            month = datetime.strptime(month_iso, "%Y-%m-%d").date()
-            event_id = f"{iso3}-displacement-{month.strftime('%Y%m')}-{stable_digest([iso3, month_iso, source_id])}"
-            rows.append(
-                {
-                    "source": "dtm",
-                    "country_iso3": iso3,
-                    "admin1": "",
-                    "event_id": event_id,
-                    "as_of": country_as_of.get((iso3, month_iso, source_id), run_date),
-                    "month_start": month_iso,
-                    "value_type": "new_displaced",
-                    "value": int(round(total)),
-                    "unit": "people",
-                    "method": method,
-                    "confidence": DEFAULT_CAUSE,
-                    "raw_event_id": f"{source_id}::country::{month.strftime('%Y%m')}",
-                    "raw_fields_json": json.dumps(
-                        {
-                            "source_id": source_id,
-                            "aggregation": "country",
-                            "total_value": total,
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
-            )
-    formatted = [
-        [
-            rec["source"],
-            rec["country_iso3"],
-            rec.get("admin1", ""),
-            rec["event_id"],
-            rec["as_of"],
-            rec["month_start"],
-            rec["value_type"],
-            rec["value"],
-            rec["unit"],
-            rec["method"],
-            rec["confidence"],
-            rec["raw_event_id"],
-            rec["raw_fields_json"],
-        ]
-        for rec in rows
-    ]
-    formatted.sort(key=lambda row: (row[1], row[2], row[5], row[3]))
-    try:
-        write_json(API_RESPONSE_SAMPLE_PATH, formatted[:100])
-    except Exception as exc:
-        LOG.warning('Failed to write DTM API response sample: %s', exc)
-    if diag_target is not None:
-        diag_rows = diag_target.get("row_counts") or _empty_row_counts()
-        diag_rows = {**_empty_row_counts(), **diag_rows}
-        diag_rows["total"] = len(formatted)
-        diag_target["row_counts"] = diag_rows
-        if "http_counts" not in diag_target:
-            diag_target["http_counts"] = {
-                key: int(http_stats.get(key, 0)) for key in HTTP_COUNT_KEYS
-            }
-    _log_as_of_fallbacks()
-    return formatted
+    return _finalize_records(
+        all_records,
+        admin_mode=admin_mode,
+        diag_target=diag_target,
+        http_stats=http_stats,
+        write_sample=True,
+    )
 
 
 def _log_as_of_fallbacks() -> None:
@@ -1418,6 +1739,11 @@ def write_rows(rows: List[List[Any]]) -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fail-on-missing-config",
+        action="store_true",
+        help="Exit with code 2 when any DTM source entry lacks id_or_path.",
+    )
     parser.add_argument(
         "--strict-empty",
         action="store_true",
@@ -1470,12 +1796,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     status_raw = "ok"
     reason: Optional[str] = None
     exit_code = 0
+    strict = args.fail_on_missing_config or _env_bool("DTM_STRICT", False)
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     window_start_dt, window_end_dt = resolve_ingestion_window()
     window_start_iso = window_start_dt.isoformat() if window_start_dt else None
     window_end_iso = window_end_dt.isoformat() if window_end_dt else None
     window_disabled = no_date_filter or not (window_start_iso and window_end_iso)
+    extras["strict_mode"] = strict
     extras["strict_empty"] = strict_empty
     extras["no_date_filter"] = no_date_filter
     if window_start_iso:
@@ -1488,6 +1816,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_diagnostics: Dict[str, Any] = {}
     rows_written = 0
     cfg: Mapping[str, Any] = {}
+    config_invalid_count = 0
+    runtime_invalid_count = 0
+    valid_sources: List[Mapping[str, Any]] = []
+    invalid_entries: List[Mapping[str, Any]] = []
+    invalid_names: List[str] = []
 
     try:
         if os.getenv("RESOLVER_SKIP_DTM"):
@@ -1505,29 +1838,115 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 filtered_cfg = dict(cfg)
                 sources_cfg = filtered_cfg.pop("sources", None)
-                if sources_cfg:
-                    LOG.warning("DTM is API-only; 'sources' section is ignored.")
-                rows = build_rows(
-                    filtered_cfg,
-                    results=source_results,
-                    no_date_filter=no_date_filter,
-                    window_start=window_start_iso,
-                    window_end=window_end_iso,
-                    http_counts=http_stats,
-                    diagnostics=run_diagnostics,
+                using_test_file_mode = bool(os.getenv("PYTEST_CURRENT_TEST")) or bool(
+                    sources_cfg
                 )
-                rows_written = len(rows)
-                counts["fetched"] = rows_written
-                counts["normalized"] = rows_written
-                extras["rows_total"] = rows_written
-                if rows:
-                    write_rows(rows)
-                    counts["written"] = rows_written
-                    LOG.info("dtm: wrote %s rows to %s", rows_written, OUT_PATH)
+                used_file_mode = bool(using_test_file_mode and sources_cfg)
+                rows: List[List[Any]] = []
+                if used_file_mode:
+                    LOG.warning(
+                        "DTM file-mode is DEPRECATED; using sources[] for tests/fixtures."
+                    )
+                    valid_sources_iter, invalid_iter = validate_required_fields(
+                        sources_cfg, required=("id_or_path",)
+                    )
+                    valid_sources = list(valid_sources_iter)
+                    invalid_entries = list(invalid_iter)
+                    config_invalid_count = len(invalid_entries)
+                    valid_count = len(valid_sources)
+                    run_diagnostics.setdefault("mode", "file")
+                    run_diagnostics.setdefault("trigger", "sources")
+                    config_timestamp = (
+                        datetime.now(timezone.utc)
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    issues_payload: Dict[str, Any] = {
+                        "generated_at": config_timestamp,
+                        "summary": {
+                            "invalid": config_invalid_count,
+                            "valid": valid_count,
+                        },
+                        "invalid": [],
+                    }
+                    for entry in invalid_entries:
+                        record = dict(entry)
+                        missing = list(record.pop("_missing_required", []))
+                        label = _source_label(record)
+                        if label:
+                            invalid_names.append(label)
+                        issues_payload["invalid"].append(
+                            {
+                                **record,
+                                "error": "missing id_or_path",
+                                "missing": missing,
+                            }
+                        )
+                        source_results.append(
+                            SourceResult(
+                                source_name=label or "dtm_source",
+                                status="invalid",
+                                skip_reason="missing id_or_path",
+                            )
+                        )
+                    write_json(CONFIG_ISSUES_PATH, issues_payload)
+                    extras["config_issues_path"] = str(CONFIG_ISSUES_PATH)
+                    extras["valid_sources"] = valid_count
+                    extras["invalid_sources"] = config_invalid_count
+                    if invalid_names:
+                        extras["invalid_source_names"] = invalid_names
+                        extras.setdefault("skipped_sources", [])
+                        extras["skipped_sources"].extend(
+                            {
+                                "name": name,
+                                "reason": "missing id_or_path",
+                            }
+                            for name in invalid_names
+                        )
+                    if config_invalid_count and strict:
+                        status_raw = "error"
+                        reason = "missing id_or_path"
+                        exit_code = 2
+                        ensure_header_only()
+                    else:
+                        filtered_cfg["sources"] = valid_sources
+                        rows = build_rows_from_sources(
+                            filtered_cfg,
+                            sources=valid_sources,
+                            results=source_results,
+                            no_date_filter=no_date_filter,
+                            window_start=window_start_iso,
+                            window_end=window_end_iso,
+                            diagnostics=run_diagnostics,
+                        )
                 else:
-                    write_json(API_RESPONSE_SAMPLE_PATH, [])
-                    ensure_header_only()
-                    LOG.info("dtm: no rows returned; wrote header only")
+                    if sources_cfg:
+                        LOG.warning("DTM is API-first; ignoring sources[].")
+                    rows = build_rows(
+                        filtered_cfg,
+                        results=source_results,
+                        no_date_filter=no_date_filter,
+                        window_start=window_start_iso,
+                        window_end=window_end_iso,
+                        http_counts=http_stats,
+                        diagnostics=run_diagnostics,
+                    )
+
+                if exit_code == 0:
+                    rows_written = len(rows)
+                    counts["fetched"] = rows_written
+                    counts["normalized"] = rows_written
+                    extras["rows_total"] = rows_written
+                    if rows:
+                        write_rows(rows)
+                        counts["written"] = rows_written
+                        LOG.info("dtm: wrote %s rows to %s", rows_written, OUT_PATH)
+                    else:
+                        if not used_file_mode:
+                            write_json(API_RESPONSE_SAMPLE_PATH, [])
+                        ensure_header_only()
+                        LOG.info("dtm: no rows returned; wrote header only")
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status_raw = "error"
@@ -1549,6 +1968,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         reason = str(exc)
         exit_code = 2
 
+    total_invalid_results = sum(1 for result in source_results if result.status == "invalid")
+    runtime_invalid_count = max(total_invalid_results - config_invalid_count, 0)
+    total_invalid = config_invalid_count + runtime_invalid_count
+    extras["invalid_sources"] = total_invalid
+    extras["valid_sources"] = max(len(source_results) - total_invalid, 0)
+    if invalid_names:
+        extras.setdefault("invalid_source_names", invalid_names)
+
+    skipped_from_run = [
+        {"name": res.source_name, "reason": res.skip_reason}
+        for res in source_results
+        if res.status == "skipped" and res.skip_reason
+    ]
+    if skipped_from_run:
+        extras.setdefault("skipped_sources", [])
+        extras["skipped_sources"].extend(skipped_from_run)
+
     actual_rows = rows_written
     if rows_written and exit_code == 0:
         extras["output_path"] = str(OUT_PATH)
@@ -1557,6 +1993,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             actual_rows = count_csv_rows(OUT_PATH)
         except OSError:
             actual_rows = 0
+
+    extras["rows_total"] = actual_rows
 
     meta_payload: Dict[str, Any] = {}
     try:
@@ -1580,10 +2018,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if status_raw not in {"error", "skipped"}:
         if actual_rows == 0:
             status_raw = "ok-empty"
-            reason = _header_only_reason(0, 0)
+            reason = _header_only_reason(total_invalid, actual_rows)
         else:
             status_raw = "ok"
-            reason = _nonempty_reason(actual_rows, 0, 0, 0)
+            reason = _nonempty_reason(actual_rows, 0, 0, total_invalid)
+
+    if total_invalid and status_raw in {"ok", "ok-empty"}:
+        reason = "missing id_or_path"
 
     if strict_empty and status_raw == "ok-empty" and exit_code == 0:
         exit_code = 3
@@ -1592,20 +2033,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     extras["status_raw"] = status_raw
     extras["exit_code"] = exit_code
 
-    diag_admin_levels = run_diagnostics.get("admin_levels") or [
+    diag_data: Mapping[str, Any] = run_diagnostics if isinstance(run_diagnostics, Mapping) else {}
+    cfg_levels: Sequence[Any] = []
+    if isinstance(cfg, Mapping):
+        cfg_levels = cfg.get("admin_levels") or []
+    diag_admin_levels = diag_data.get("admin_levels") or [
         str(level).strip().lower()
-        for level in (cfg.get("admin_levels") if 'cfg' in locals() and isinstance(cfg, Mapping) else ["admin0", "admin1", "admin2"])
+        for level in (cfg_levels or ["admin0", "admin1", "admin2"])
     ]
-    diag_countries = run_diagnostics.get("countries")
-    diag_operations = run_diagnostics.get("operations")
-    diag_http = _ensure_http_count_keys(run_diagnostics.get("http_counts"))
-    diag_rows = run_diagnostics.get("row_counts") or _empty_row_counts()
+    diag_countries = diag_data.get("countries")
+    diag_operations = diag_data.get("operations")
+    diag_http = _ensure_http_count_keys(diag_data.get("http_counts"))
+    diag_rows = diag_data.get("row_counts") or _empty_row_counts()
     diag_rows = {**_empty_row_counts(), **diag_rows}
     if not diag_rows.get("total"):
         diag_rows["total"] = actual_rows
     run_payload: Dict[str, Any] = {
-        "mode": run_diagnostics.get("mode", "api"),
-        "trigger": run_diagnostics.get("trigger"),
+        "mode": diag_data.get("mode", "api"),
+        "trigger": diag_data.get("trigger"),
         "admin_levels": diag_admin_levels,
         "countries": diag_countries,
         "operations": diag_operations,
@@ -1614,6 +2059,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "http_counts": {key: int(diag_http.get(key, 0)) for key in HTTP_COUNT_KEYS},
         "row_counts": {key: int(diag_rows.get(key, 0)) for key in ROW_COUNT_KEYS},
     }
+    api_diag = diag_data.get("api") if isinstance(diag_data.get("api"), Mapping) else None
+    if api_diag:
+        run_payload["api"] = dict(api_diag)
+        sample_path = api_diag.get("sample_path")
+        if sample_path:
+            extras.setdefault("api_sample_path", sample_path)
     write_json(RUN_DETAILS_PATH, run_payload)
     extras["run_details_path"] = str(RUN_DETAILS_PATH)
 
