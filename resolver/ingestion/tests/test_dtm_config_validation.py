@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict
 
+import pandas as pd
 import pytest
 import yaml
 
@@ -88,3 +90,62 @@ def test_env_skip_overrides(patched_paths: Dict[str, Path], monkeypatch: pytest.
     report = read_report(patched_paths["CONNECTORS_REPORT"])
     assert report["status"] == "skipped"
     assert report["reason"] == "disabled via RESOLVER_SKIP_DTM"
+
+
+def test_empty_country_list_discovers_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = {
+        "enabled": True,
+        "api": {"admin_levels": ["admin0"], "countries": []},
+    }
+
+    class DiscoveryClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.rate_limit_delay = 0
+            self.timeout = 0
+            self.client = SimpleNamespace(
+                get_all_countries=lambda: pd.DataFrame(
+                    [
+                        {"CountryName": "Somalia"},
+                        {"CountryName": "Ethiopia"},
+                        {"CountryName": "Somalia"},
+                    ]
+                )
+            )
+
+        def get_countries(self, *_: object, **__: object) -> pd.DataFrame:
+            return pd.DataFrame([{"CountryName": "Fallback"}])
+
+        def get_idp_admin0(self, **__: object) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "CountryName": ["Somalia"],
+                    "ReportingDate": ["2024-01-15"],
+                    "TotalIDPs": [50],
+                }
+            )
+
+        def get_idp_admin1(self, **__: object) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def get_idp_admin2(self, **__: object) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+    monkeypatch.setattr(dtm_client, "DTMApiClient", DiscoveryClient)
+    monkeypatch.setattr(dtm_client, "resolve_accept_names", lambda *_: [])
+
+    rows, summary = dtm_client.build_rows(
+        config,
+        no_date_filter=False,
+        window_start="2024-01-01",
+        window_end="2024-02-01",
+        http_counts={},
+    )
+
+    assert rows, "expected at least one row"
+    assert summary["countries"]["resolved"] == ["Ethiopia", "Somalia"]
+    effective = summary["extras"]["effective_params"]
+    assert effective["country_mode"] == "ALL"
+    assert effective["countries_count"] == 2
+    per_country = summary["extras"]["per_country_counts"]
+    assert {entry["country"] for entry in per_country} == {"Ethiopia", "Somalia"}

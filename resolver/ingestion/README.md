@@ -295,6 +295,13 @@ UNHCR’s public API exposes `/asylum-applications/`, `/population/`, `/asylum-d
 - `DTM_BASE=<url>` — override the base discovery endpoint (defaults to `https://data.humdata.org`).
 - `RELIEFWEB_APPNAME` — reused for User-Agent hints when hitting HDX mirrors.
 
+**API configuration tips:**
+
+- `api.countries: []` (or omitting the key) tells the connector to discover **all** countries exposed by the DTM SDK via `get_all_countries()`. The resolved list is logged (`"Discovered N countries"`) and captured in diagnostics.
+- `api.admin_levels` accepts `admin0`, `admin1`, and/or `admin2`. Multiple levels are queried sequentially using the official `dtmapi` endpoints (`get_idp_admin{0,1,2}_data`).
+- Date filters are passed as `FromReportingDate`/`ToReportingDate`. If the workflow does not supply a window, the client defaults to the previous 12 full months.
+- The diagnostics JSON now records dependency versions (`deps`), the effective parameters used (including `country_mode` and total discovered countries), per-country row counts, and any per-country failures so backfills can spot partial outages quickly.
+
 **Compatibility helpers:** The module continues to expose the historic
 `SERIES_INCIDENT`/`SERIES_CUMULATIVE` constants, `load_registries`,
 `rollup_subnational`, `compute_monthly_deltas`, and `infer_hazard` so legacy

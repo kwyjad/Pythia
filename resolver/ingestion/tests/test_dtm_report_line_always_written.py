@@ -1,10 +1,10 @@
-"""Ensure diagnostics are emitted even when the connector fails."""
+"""Ensure the DTM connector records diagnostics even when individual countries fail."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import pytest
 import yaml
@@ -35,7 +35,7 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
 
 
 def write_min_config(path: Path) -> None:
-    payload = {"enabled": True, "api": {}}
+    payload = {"enabled": True, "api": {"admin_levels": ["admin0"]}}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
@@ -46,24 +46,67 @@ def read_report(path: Path) -> dict:
     return json.loads(lines[-1])
 
 
-def test_report_line_written_on_exception(patched_paths: Dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_partial_failures_recorded(patched_paths: Dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     write_min_config(patched_paths["CONFIG_PATH"])
 
-    def explode(*_: object, **__: object) -> tuple[list[list[object]], dict]:
-        raise RuntimeError("kaboom")
+    row: List[object] = [
+        "dtm",
+        "SOM",
+        "",
+        "evt",
+        "2024-01-15",
+        "2024-01-01",
+        "flow",
+        25,
+        "people",
+        "method",
+        "medium",
+        "raw",
+        "{}",
+    ]
+
+    def fake_build_rows(*_: object, **__: object) -> tuple[list[List[object]], dict]:
+        summary = {
+            "extras": {
+                "effective_params": {
+                    "resource": "dtmapi",
+                    "admin_levels": ["admin0"],
+                    "countries_requested": [],
+                    "countries_resolved": ["Somalia"],
+                    "operations": None,
+                    "window_start": "2024-01-01",
+                    "window_end": "2024-02-01",
+                    "no_date_filter": False,
+                    "per_page": None,
+                    "max_pages": None,
+                    "country_mode": "ALL",
+                    "countries_count": 1,
+                },
+                "per_country_counts": [
+                    {"country": "Somalia", "level": "admin0", "rows": 1, "window": "2024-01-01->2024-02-01"}
+                ],
+                "failures": [
+                    {"country": "Kenya", "level": "admin0", "operation": None, "error": "RuntimeError"}
+                ],
+            },
+            "rows": {"fetched": 1, "normalized": 1, "written": 1},
+            "countries": {"requested": [], "resolved": ["Somalia"]},
+        }
+        return [row], summary
 
     monkeypatch.setenv("DTM_API_KEY", "dummy")
-    monkeypatch.setattr(dtm_client, "build_rows", explode)
+    monkeypatch.setattr(dtm_client, "build_rows", fake_build_rows)
 
     exit_code = dtm_client.main([])
 
-    assert exit_code == 1
+    assert exit_code == 0
     report = read_report(patched_paths["CONNECTORS_REPORT"])
-    assert report["status"] == "error"
-    assert report["reason"] == "exception: RuntimeError"
-    extras = report["extras"]
-    assert extras["rows_total"] == 0
-    run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["status"] == "error"
-    assert run_payload["reason"] == "exception: RuntimeError"
-    assert run_payload["rows"]["written"] == 0
+    assert report["status"].startswith("ok")
+    assert report["extras"]["failures"] == [
+        {"country": "Kenya", "level": "admin0", "operation": None, "error": "RuntimeError"}
+    ]
+    meta_payload = json.loads(patched_paths["META_PATH"].read_text(encoding="utf-8"))
+    assert meta_payload["failures"] == [
+        {"country": "Kenya", "level": "admin0", "operation": None, "error": "RuntimeError"}
+    ]
+    assert meta_payload["per_country_counts"][0]["country"] == "Somalia"
