@@ -24,6 +24,18 @@ def _ensure_dict(data: Any) -> Dict[str, Any]:
     return dict(data) if isinstance(data, Mapping) else {}
 
 
+def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, Mapping) else None
+
+
 def _coerce_int(value: Any) -> int:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -331,18 +343,14 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             )
         meta_path_raw = extras.get("meta_path")
         meta_cell = "—"
-        meta_row_count: int | None = None
+        meta_row_count: Any | None = None
         if meta_path_raw:
             meta_path = Path(str(meta_path_raw))
             if meta_path.exists():
                 meta_cell = str(meta_path)
-                meta_payload = _load_json(meta_path)
+                meta_payload = _safe_load_json(meta_path)
                 if isinstance(meta_payload, Mapping):
-                    row_count_value = meta_payload.get("row_count")
-                    try:
-                        meta_row_count = int(row_count_value) if row_count_value is not None else None
-                    except (TypeError, ValueError):
-                        meta_row_count = None
+                    meta_row_count = meta_payload.get("row_count")
         reason_text = entry.get("reason")
         status_text = str(entry.get("status"))
         kept_cell = "—"
@@ -391,13 +399,20 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             else:
                 reason_text = f"{status}: missing id_or_path"
         reason_cell = _format_reason(reason_text)
-        status_raw_normalized = str(extras.get("status_raw") or status_text).strip().lower()
+        status_raw_normalized = (
+            str(extras.get("status_raw") or entry.get("status_raw") or status_text)
+            .strip()
+            .lower()
+        )
         header_only = isinstance(reason_text, str) and reason_text.strip().lower().startswith("header-only")
         meta_rows_cell = "—"
         if (status_raw_normalized == "ok-empty" and header_only) or rows_written_value == 0:
             meta_rows_cell = "—"
         elif meta_row_count is not None:
-            meta_rows_cell = str(meta_row_count)
+            try:
+                meta_rows_cell = str(int(meta_row_count))
+            except (TypeError, ValueError):
+                meta_rows_cell = "—"
         rows.append(
             [
                 connector_id,
