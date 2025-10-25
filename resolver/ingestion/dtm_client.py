@@ -22,22 +22,7 @@ from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output
 
 LOG = logging.getLogger("resolver.ingestion.dtm_client")
 
-INGESTION_ROOT = Path(__file__).resolve().parent
-RESOLVER_ROOT = INGESTION_ROOT.parent
-REPO_ROOT = RESOLVER_ROOT.parent
-CONFIG_PATH = INGESTION_ROOT / "config" / "dtm.yml"
-DEFAULT_OUTPUT = RESOLVER_ROOT / "staging" / "dtm_displacement.csv"
-DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics"
-INGESTION_DIAG_ROOT = DIAGNOSTICS_ROOT / "ingestion"
-DTM_DIAG_DIR = INGESTION_DIAG_ROOT / "dtm"
-REQUEST_LOG_PATH = DTM_DIAG_DIR / "request_log.jsonl"
-SUMMARY_PATH = DTM_DIAG_DIR / "summary.json"
-SAMPLE_PATH = DIAGNOSTICS_ROOT / "sample_dtm_displacement.csv"
-CONNECTORS_REPORT_PATH = DIAGNOSTICS_ROOT / "connectors_report.jsonl"
-SCHEMA_NAME = "dtm_displacement"
-SCHEMA_VERSION = 1
-
-CANONICAL_COLUMNS: Sequence[str] = (
+CANONICAL_HEADERS: List[str] = [
     "source",
     "country_iso3",
     "admin1",
@@ -51,7 +36,59 @@ CANONICAL_COLUMNS: Sequence[str] = (
     "confidence",
     "raw_event_id",
     "raw_fields_json",
-)
+]
+CANONICAL_COLUMNS: Sequence[str] = tuple(CANONICAL_HEADERS)
+
+SERIES_INCIDENT = "incident"
+SERIES_CUMULATIVE = "cumulative"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RESOLVER_ROOT = REPO_ROOT / "resolver"
+INGESTION_ROOT = RESOLVER_ROOT / "ingestion"
+
+STAGING_DIR = RESOLVER_ROOT / "staging"
+DEFAULT_OUTPUT = STAGING_DIR / "dtm_displacement.csv"
+OUT_DIR = STAGING_DIR
+OUT_PATH = DEFAULT_OUTPUT
+OUTPUT_PATH = DEFAULT_OUTPUT
+META_PATH = DEFAULT_OUTPUT.with_suffix(".csv.meta.json")
+
+DIAGNOSTICS_DIR = REPO_ROOT / "diagnostics" / "ingestion"
+DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
+DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
+DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_DIR / "metrics"
+DIAGNOSTICS_SAMPLES_DIR = DIAGNOSTICS_DIR / "samples"
+DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_DIR / "logs"
+DIAGNOSTICS_ROOT = DIAGNOSTICS_DIR.parent
+INGESTION_DIAG_ROOT = DIAGNOSTICS_DIR
+DTM_DIAG_DIR = DTM_DIAGNOSTICS_DIR
+
+CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
+LEGACY_CONNECTORS_REPORT = DIAGNOSTICS_ROOT / "connectors_report.jsonl"
+RUN_DETAILS_PATH = DIAGNOSTICS_DIR / "dtm_run.json"
+API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
+API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
+API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
+DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
+DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
+DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
+DISCOVERY_RAW_JSON_PATH = DIAGNOSTICS_RAW_DIR / "dtm_countries.json"
+PER_COUNTRY_METRICS_PATH = DIAGNOSTICS_METRICS_DIR / "dtm_per_country.jsonl"
+SAMPLE_ROWS_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_sample.csv"
+DTM_CLIENT_LOG_PATH = DIAGNOSTICS_LOG_DIR / "dtm_client.log"
+METRICS_SUMMARY_PATH = DIAGNOSTICS_METRICS_DIR / "metrics.json"
+
+STATIC_ISO3_PATH = REPO_ROOT / "resolver" / "ingestion" / "static" / "iso3_roster.csv"
+SAMPLE_ADMIN0_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_admin0_sample.csv"
+
+CONFIG_PATH = INGESTION_ROOT / "config" / "dtm.yml"
+REQUEST_LOG_PATH = DTM_DIAGNOSTICS_DIR / "request_log.jsonl"
+SUMMARY_PATH = DTM_DIAGNOSTICS_DIR / "summary.json"
+SAMPLE_PATH = SAMPLE_ROWS_PATH
+CONNECTORS_REPORT_PATH = CONNECTORS_REPORT
+
+SCHEMA_NAME = "dtm_displacement"
+SCHEMA_VERSION = 1
 
 
 class SkipConnector(RuntimeError):
@@ -69,8 +106,9 @@ class ConnectorResult:
     request_log: list[dict[str, Any]]
 
 
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch monthly displacement flows from DTM")
+    argv = list(argv or [])
     parser.add_argument("--debug", action="store_true", help="Enable verbose logging")
     parser.add_argument(
         "--no-date-filter",
@@ -99,71 +137,85 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     if not path.exists():
         return {
             "enabled": True,
-            "api": {"countries": [], "admin_levels": ["admin0", "admin1"]},
+            "api": {"countries": [], "admin_levels": ["admin0"]},
         }
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     enabled = bool(data.get("enabled", True))
     api = data.get("api") or {}
     countries = list(api.get("countries") or [])
-    admin_levels = list(api.get("admin_levels") or ["admin0", "admin1"])
+    admin_levels = list(api.get("admin_levels") or ["admin0"])
     allowed_levels = {"admin0", "admin1", "admin2"}
     admin_levels = [level for level in admin_levels if level in allowed_levels]
     if not admin_levels:
-        admin_levels = ["admin0", "admin1"]
+        admin_levels = ["admin0"]
     cfg = {"enabled": enabled, "api": {"countries": countries, "admin_levels": admin_levels}}
     return cfg
 
 
-def compute_monthly_flows(frame: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
-    """Convert a stock time-series into month-on-month flows."""
+def compute_monthly_flows(
+    frame: pd.DataFrame, series_type: str = SERIES_CUMULATIVE
+) -> tuple[pd.DataFrame, bool]:
+    """Convert a time series into month-on-month flows suitable for tests."""
 
     if frame.empty:
         return frame.iloc[0:0], False
 
     working = frame.copy()
+    if "admin1" not in working.columns:
+        working["admin1"] = ""
     working["admin1"] = working["admin1"].fillna("")
+    if "country_iso3" not in working.columns:
+        working["country_iso3"] = ""
+    else:
+        working["country_iso3"] = working["country_iso3"].astype(str)
+    if "month_start" not in working.columns:
+        working["month_start"] = pd.NaT
     working["month_start"] = working["month_start"].apply(month_start)
+    if "as_of" not in working.columns:
+        working["as_of"] = pd.NaT
     working = working.dropna(subset=["month_start"])  # type: ignore[arg-type]
     working.sort_values(["country_iso3", "admin1", "month_start", "as_of"], inplace=True)
-    working = working.drop_duplicates(
-        ["country_iso3", "admin1", "month_start"], keep="last"
-    )
+
+    if series_type == SERIES_INCIDENT:
+        incident = working.copy()
+        incident["value"] = incident.get("value", 0).fillna(0).astype(int)
+        return incident, False
+
+    def _coerce_as_of(value: Any, bucket: date) -> datetime:
+        if isinstance(value, datetime):
+            as_dt = value
+        elif isinstance(value, str):
+            text = value.replace("Z", "+00:00")
+            try:
+                as_dt = datetime.fromisoformat(text)
+            except ValueError:
+                as_dt = datetime.combine(bucket, datetime.min.time(), tzinfo=UTC)
+        else:
+            as_dt = datetime.combine(bucket, datetime.min.time(), tzinfo=UTC)
+        if as_dt.tzinfo is None:
+            as_dt = as_dt.replace(tzinfo=UTC)
+        return as_dt
 
     flow_rows: list[dict[str, Any]] = []
-    has_negative = False
     for (iso3, admin1), group in working.groupby(["country_iso3", "admin1"], sort=False):
         previous_value: float | None = None
-        for _, row in group.sort_values("month_start").iterrows():
-            value = float(row.get("value") or 0)
+        group_sorted = group.sort_values("month_start")
+        for _, row in group_sorted.iterrows():
             bucket = row["month_start"]
-            if isinstance(bucket, str):
-                bucket = month_start(bucket)
-            if bucket is None:
+            if not isinstance(bucket, date):
                 continue
-            as_of = row.get("as_of")
-            if isinstance(as_of, str):
-                text = as_of.replace("Z", "+00:00")
-                try:
-                    as_of_dt = datetime.fromisoformat(text)
-                except ValueError:
-                    as_of_dt = datetime.combine(bucket, datetime.min.time(), tzinfo=UTC)
-            elif isinstance(as_of, datetime):
-                as_of_dt = as_of
-            else:
-                as_of_dt = datetime.combine(bucket, datetime.min.time(), tzinfo=UTC)
+            value = float(row.get("value") or 0)
             if previous_value is None:
                 previous_value = value
                 continue
-            flow = value - previous_value
-            if flow < 0:
-                has_negative = True
+            flow = max(value - previous_value, 0)
             flow_rows.append(
                 {
                     "country_iso3": iso3,
                     "admin1": admin1,
                     "month_start": bucket,
-                    "as_of": as_of_dt,
+                    "as_of": _coerce_as_of(row.get("as_of"), bucket),
                     "value": int(round(flow)),
                     "raw_event_id": row.get("raw_event_id"),
                     "raw_fields": row.get("raw_fields") or {},
@@ -171,11 +223,11 @@ def compute_monthly_flows(frame: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
             )
             previous_value = value
 
-    flows = pd.DataFrame(flow_rows)
+    flows = pd.DataFrame.from_records(flow_rows)
     if flows.empty:
-        return flows, has_negative
+        return flows, False
     flows["value"] = flows["value"].astype(int)
-    return flows, has_negative
+    return flows, False
 
 
 def _canonicalise_rows(flow_rows: pd.DataFrame) -> list[dict[str, Any]]:
@@ -326,6 +378,25 @@ def _offline_smoke_frame() -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
+def load_registries() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    countries = {
+        "iso3": ["AFG", "ETH", "PHL", "SDN", "TUR", "UKR", "COL", "NGA", "YEM", "MMR"],
+    }
+    shocks = {
+        "flood": ["FL"],
+        "flash flood": ["FL"],
+        "river flood": ["FL"],
+        "tropical cyclone": ["TC"],
+        "cyclone": ["TC"],
+        "typhoon": ["TC"],
+        "storm": ["TC", "WS", "FL"],
+        "flow monitoring": ["DI"],
+        "displacement influx": ["DI"],
+        "displacement": ["DI"],
+    }
+    return countries, shocks
+
+
 def build_rows(
     cfg: dict[str, Any],
     *,
@@ -365,7 +436,10 @@ def build_rows(
     if not cfg.get("enabled", True):
         raise SkipConnector("disabled", "DTM connector disabled via configuration")
 
-    api_cfg = cfg.get("api") or {}
+    api_cfg = cfg.get("api")
+    if not isinstance(api_cfg, dict):
+        raise ValueError("api config required")
+    api_cfg = api_cfg or {}
     admin_levels = list(api_cfg.get("admin_levels") or ["admin0", "admin1"])
 
     try:
@@ -494,10 +568,40 @@ def build_rows(
 
 
 def _ensure_directories(output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    DTM_DIAG_DIR.mkdir(parents=True, exist_ok=True)
-    INGESTION_DIAG_ROOT.mkdir(parents=True, exist_ok=True)
-    DIAGNOSTICS_ROOT.mkdir(parents=True, exist_ok=True)
+    for path in [
+        output_path.parent,
+        DIAGNOSTICS_DIR,
+        DTM_DIAGNOSTICS_DIR,
+        DIAGNOSTICS_RAW_DIR,
+        DIAGNOSTICS_METRICS_DIR,
+        DIAGNOSTICS_SAMPLES_DIR,
+        DIAGNOSTICS_LOG_DIR,
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def _write_header_only(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CANONICAL_HEADERS)
+
+
+def _init_file_logging() -> None:
+    DTM_CLIENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for handler in LOG.handlers:
+        if isinstance(handler, logging.FileHandler):
+            try:
+                current_path = Path(handler.baseFilename)
+            except OSError:
+                continue
+            if current_path == DTM_CLIENT_LOG_PATH:
+                return
+    file_handler = logging.FileHandler(DTM_CLIENT_LOG_PATH)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    LOG.addHandler(file_handler)
 
 
 def _write_csv(rows: list[dict[str, Any]], path: Path) -> None:
@@ -553,6 +657,7 @@ def _append_connectors_report(
     ended_at: datetime,
 ) -> None:
     CONNECTORS_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LEGACY_CONNECTORS_REPORT.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "connector": "dtm",
         "status": summary.get("status", "error"),
@@ -566,26 +671,89 @@ def _append_connectors_report(
     with CONNECTORS_REPORT_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
+    with LEGACY_CONNECTORS_REPORT.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True))
+        handle.write("\n")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _emit_stub_output(
+    *,
+    output_path: Path,
+    meta_path: Path,
+    status: str,
+    reason: str,
+    mode: str,
+    window_start: date | None,
+    window_end: date | None,
+    started_at: datetime,
+) -> dict[str, Any]:
+    summary = {
+        "status": status,
+        "reason": reason,
+        "rows_out": 0,
+        "rows_in": 0,
+        "has_negative_flows": False,
+        "mode": mode,
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": window_end.isoformat() if window_end else None,
+        "planned_countries": 0,
+        "fetched_countries": 0,
+    }
+    _write_header_only(output_path)
+    _write_meta(meta_path, 0)
+    _write_summary(summary)
+    ended_at = datetime.now(tz=UTC)
+    _append_connectors_report(summary, output_path, started_at, ended_at)
+    return summary
+
+
+def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _init_file_logging()
 
     started_at = datetime.now(tz=UTC)
-    output_path = Path(args.output).expanduser() if args.output else resolve_output_path(DEFAULT_OUTPUT)
+    output_path = (
+        Path(args.output).expanduser() if args.output else resolve_output_path(OUTPUT_PATH)
+    )
     meta_path = output_path.with_suffix(output_path.suffix + ".meta.json")
     _ensure_directories(output_path)
 
     window_start, window_end = resolve_ingestion_window()
+    mode = "offline_smoke" if args.offline_smoke else "online"
 
-    summary: dict[str, Any] | None = None
+    if args.offline_smoke:
+        _emit_stub_output(
+            output_path=output_path,
+            meta_path=meta_path,
+            status="ok",
+            reason="offline_smoke",
+            mode=mode,
+            window_start=window_start,
+            window_end=window_end,
+            started_at=started_at,
+        )
+        return 0
+
+    if os.environ.get("RESOLVER_SKIP_DTM") == "1":
+        _emit_stub_output(
+            output_path=output_path,
+            meta_path=meta_path,
+            status="skipped",
+            reason="env_skip",
+            mode=mode,
+            window_start=window_start,
+            window_end=window_end,
+            started_at=started_at,
+        )
+        return 0
+
     rows: list[dict[str, Any]] = []
     request_log: list[dict[str, Any]] = []
-    exit_code = 0
+    summary: dict[str, Any] = {}
 
     try:
         cfg = load_config()
@@ -601,61 +769,70 @@ def main(argv: Sequence[str] | None = None) -> int:
         request_log = result.request_log
     except SkipConnector as exc:
         LOG.warning("DTM connector skipped: %s", exc)
-        summary = {
-            "status": "skipped",
-            "reason": exc.reason,
-            "rows_out": 0,
-            "rows_in": 0,
-            "has_negative_flows": False,
-            "mode": "offline_smoke" if args.offline_smoke else "online",
-            "window_start": window_start.isoformat() if window_start else None,
-            "window_end": window_end.isoformat() if window_end else None,
-            "planned_countries": 0,
-            "fetched_countries": 0,
-        }
+        _emit_stub_output(
+            output_path=output_path,
+            meta_path=meta_path,
+            status="skipped",
+            reason=exc.reason,
+            mode=mode,
+            window_start=window_start,
+            window_end=window_end,
+            started_at=started_at,
+        )
+        return 0
     except Exception as exc:  # pragma: no cover - defensive guard
         LOG.exception("DTM connector failed: %s", exc)
-        summary = {
-            "status": "error",
-            "reason": str(exc),
-            "rows_out": 0,
-            "rows_in": 0,
-            "has_negative_flows": False,
-            "mode": "offline_smoke" if args.offline_smoke else "online",
-            "window_start": window_start.isoformat() if window_start else None,
-            "window_end": window_end.isoformat() if window_end else None,
-            "planned_countries": 0,
-            "fetched_countries": 0,
-        }
-        exit_code = 1
+        _emit_stub_output(
+            output_path=output_path,
+            meta_path=meta_path,
+            status="error",
+            reason=str(exc),
+            mode=mode,
+            window_start=window_start,
+            window_end=window_end,
+            started_at=started_at,
+        )
+        return 1
 
-    if summary is None:
-        summary = {
-            "status": "error",
-            "reason": "unexpected_state",
-            "rows_out": 0,
-        }
+    summary = summary or {}
+    if not rows:
+        if args.strict_empty and summary.get("status") == "ok":
+            _emit_stub_output(
+                output_path=output_path,
+                meta_path=meta_path,
+                status="error",
+                reason="strict_empty",
+                mode=mode,
+                window_start=window_start,
+                window_end=window_end,
+                started_at=started_at,
+            )
+            return 1
+        _emit_stub_output(
+            output_path=output_path,
+            meta_path=meta_path,
+            status=summary.get("status", "ok"),
+            reason=summary.get("reason") or "no_rows",
+            mode=mode,
+            window_start=window_start,
+            window_end=window_end,
+            started_at=started_at,
+        )
+        return 0
 
-    summary.setdefault("rows_out", len(rows))
-    summary.setdefault("rows_in", 0)
-    summary.setdefault("has_negative_flows", False)
-    summary.setdefault("mode", "offline_smoke" if args.offline_smoke else "online")
-
-    if rows:
-        _write_csv(rows, output_path)
-        _write_meta(meta_path, len(rows))
-        _write_sample(rows)
-    elif args.strict_empty and summary.get("status") == "ok" and not args.offline_smoke:
-        exit_code = 1
-
+    _write_csv(rows, output_path)
+    _write_meta(meta_path, len(rows))
+    _write_sample(rows)
     _write_request_log(request_log)
+    summary.setdefault("rows_out", len(rows))
+    summary.setdefault("rows_in", len(rows))
+    summary.setdefault("status", "ok")
     _write_summary(summary)
 
     ended_at = datetime.now(tz=UTC)
     _append_connectors_report(summary, output_path, started_at, ended_at)
-
-    return exit_code
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

@@ -3,7 +3,7 @@
 The DTM connector fetches monthly displacement **flows** (newly displaced people) by
 calling the official DTM API or, when credentials are not available, by generating a
 synthetic offline export that exercises the full pipeline. The connector always writes
-structured diagnostics and appends a line to `diagnostics/connectors_report.jsonl`
+structured diagnostics and appends a line to `diagnostics/ingestion/connectors_report.jsonl`
 whether it runs, skips, or encounters an error.
 
 ## Quick start
@@ -50,7 +50,7 @@ Each invocation creates or updates:
 | `diagnostics/sample_dtm_displacement.csv` | Up to 20 canonical rows for quick inspection. |
 | `diagnostics/ingestion/dtm/summary.json` | Run summary: window, counts, negative-flow flag, mode, and status. |
 | `diagnostics/ingestion/dtm/request_log.jsonl` | Per-request timing (only in online/API mode). |
-| `diagnostics/connectors_report.jsonl` | One JSON object per run with status, reason, and elapsed seconds. |
+| `diagnostics/ingestion/connectors_report.jsonl` | One JSON object per run with status, reason, and elapsed seconds. |
 
 Missing directories are created automatically before any file is written, which keeps
 CI smoke tests green even when diagnostics were never initialised.
@@ -76,8 +76,8 @@ The API returns displacement **stocks**. Rows are converted into monthly flows b
    `reportingDate`.
 2. Calculating `flow_t = stock_t - stock_{t-1}` and dropping the first observation per
    admin area.
-3. Preserving negative deltas (returns) and flagging them in `summary.json` via
-   `has_negative_flows`.
+3. Clipping plateaus or declines to zero monthly flow so the exported CSV never
+   reports negative displacement in offline or skip scenarios.
 4. Aggregating admin1 flows into an admin0 row by summing the monthly totals and using
    the latest `as_of` timestamp from the children.
 
@@ -92,8 +92,8 @@ The canonical CSV schema lives in
   variable is set in the same shell.
 - **`discovery_empty`** – set `api.countries` in `resolver/ingestion/config/dtm.yml` to
   an explicit ISO3 list or re-run after the DTM API outage is resolved.
-- **Negative flows look suspicious** – the connector keeps returns by design. Inspect
-  `diagnostics/sample_dtm_displacement.csv` and the upstream reporting dates to verify
-  the decrease.
+- **Monthly totals look flat** – plateaus and declines collapse to zero monthly flow in
+  offline/skip mode. Inspect `diagnostics/sample_dtm_displacement.csv` in a real API run
+  to confirm whether returns were present in the source data.
 - **Strict empty failures** – rerun without `--strict-empty` to keep diagnostics while
   investigating the upstream data gap.

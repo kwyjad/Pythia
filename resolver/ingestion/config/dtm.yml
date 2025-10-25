@@ -3,4 +3,3 @@ api:
   countries: []          # runtime discovery via dtmapi.get_all_countries()
   admin_levels:
     - admin0
-    - admin1

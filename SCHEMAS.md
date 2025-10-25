@@ -128,6 +128,12 @@ Example rows:
 | dtm | COL | Antioquia | 7c1e6ad5d2f4c3a1 | 2024-02-15T00:00:00Z | 2024-02-01 | new_displaced | 400 | people | dtm_stock_to_flow | medium | offline:COL:Antioquia:2024-02-01 |
 | dtm | COL |  | 5f6c9721bf93d8a0 | 2024-02-20T00:00:00Z | 2024-02-01 | new_displaced | 750 | people | dtm_stock_to_flow | medium | 5f6c9721bf93d8a0 |
 
+Canonical CSV header (mirrors `resolver.ingestion.dtm_client.CANONICAL_HEADERS`):
+
+```
+source,country_iso3,admin1,event_id,as_of,month_start,value_type,value,unit,method,confidence,raw_event_id,raw_fields_json
+```
+
 ## db.facts_raw
 
 Canonical facts written to DuckDB alongside CSV exports.

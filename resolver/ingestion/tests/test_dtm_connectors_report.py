@@ -10,6 +10,7 @@ from resolver.ingestion.dtm_client import CANONICAL_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONNECTORS_REPORT = REPO_ROOT / "diagnostics" / "connectors_report.jsonl"
+NEW_CONNECTORS_REPORT = REPO_ROOT / "diagnostics" / "ingestion" / "connectors_report.jsonl"
 STAGING_CSV = REPO_ROOT / "resolver" / "staging" / "dtm_displacement.csv"
 SUMMARY_PATH = REPO_ROOT / "diagnostics" / "ingestion" / "dtm" / "summary.json"
 
@@ -26,6 +27,7 @@ def _clean_environment() -> dict[str, str]:
 
 def test_connectors_report_entry_is_emitted() -> None:
     CONNECTORS_REPORT.unlink(missing_ok=True)
+    NEW_CONNECTORS_REPORT.unlink(missing_ok=True)
     SUMMARY_PATH.unlink(missing_ok=True)
     STAGING_CSV.unlink(missing_ok=True)
 

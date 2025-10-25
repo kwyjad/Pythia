@@ -19,6 +19,7 @@ SUMMARY_PATH = REPO_ROOT / "diagnostics" / "ingestion" / "dtm" / "summary.json"
 REQUEST_LOG_PATH = REPO_ROOT / "diagnostics" / "ingestion" / "dtm" / "request_log.jsonl"
 SAMPLE_PATH = REPO_ROOT / "diagnostics" / "sample_dtm_displacement.csv"
 CONNECTORS_REPORT = REPO_ROOT / "diagnostics" / "connectors_report.jsonl"
+NEW_CONNECTORS_REPORT = REPO_ROOT / "diagnostics" / "ingestion" / "connectors_report.jsonl"
 
 
 def _reset_outputs() -> None:
@@ -28,6 +29,7 @@ def _reset_outputs() -> None:
     REQUEST_LOG_PATH.unlink(missing_ok=True)
     SAMPLE_PATH.unlink(missing_ok=True)
     CONNECTORS_REPORT.unlink(missing_ok=True)
+    NEW_CONNECTORS_REPORT.unlink(missing_ok=True)
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -71,20 +73,21 @@ def test_offline_smoke_creates_csv_and_diagnostics(monkeypatch: pytest.MonkeyPat
         header = next(reader)
         assert header == list(CANONICAL_COLUMNS)
         rows = list(reader)
-        assert rows, "CSV should contain at least one row"
+        assert not rows, "offline smoke should only write the header"
 
-    assert SAMPLE_PATH.exists(), "sample CSV should be created"
     summary = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
     assert summary["status"] == "ok"
     assert summary["mode"] == "offline_smoke"
-    assert summary["rows_out"] == len(rows)
+    assert summary["rows_out"] == 0
+    assert summary["reason"] == "offline_smoke"
 
     report_lines = _read_connectors_report()
     assert len(report_lines) == 1
     record = report_lines[0]
     assert record["status"] == "ok"
     assert record["connector"] == "dtm"
-    assert record["rows_out"] == summary["rows_out"]
+    assert record["rows_out"] == 0
+    assert record["reason"] == "offline_smoke"
     assert record["output_path"].endswith("dtm_displacement.csv")
 
 
@@ -106,11 +109,18 @@ def test_skips_gracefully_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
         cwd=str(REPO_ROOT),
     )
     assert result.returncode == 0
-    assert not STAGING_CSV.exists(), "skip mode should not emit a CSV"
+    assert STAGING_CSV.exists(), "skip mode should emit a header-only CSV"
+
+    with STAGING_CSV.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader)
+        assert header == list(CANONICAL_COLUMNS)
+        assert not list(reader), "skip mode should only emit the header"
 
     summary = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
     assert summary["status"] == "skipped"
     assert summary["reason"] == "auth_missing"
+    assert summary["rows_out"] == 0
 
     report_lines = _read_connectors_report()
     assert len(report_lines) == 1

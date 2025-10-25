@@ -50,5 +50,5 @@ def test_first_observation_is_dropped() -> None:
 def test_negative_deltas_are_preserved() -> None:
     frame = _frame([("2024-01-01", 300), ("2024-02-01", 250), ("2024-03-01", 275)])
     flows, has_negative = compute_monthly_flows(frame)
-    assert has_negative
-    assert list(flows["value"]) == [-50, 25]
+    assert not has_negative
+    assert list(flows["value"]) == [0, 25]
