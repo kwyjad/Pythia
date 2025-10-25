@@ -131,7 +131,7 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples}
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
           DTM_ARGS=""
           if [ "${EMPTY_POLICY:-allow}" = "fail" ]; then
