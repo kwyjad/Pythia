@@ -72,7 +72,7 @@ def test_both_discovery_fail_uses_static(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     monkeypatch.setattr(dtm, "_get_country_list_via_http", always_timeout)
 
-    def fake_static() -> pd.DataFrame:
+    def fake_static(path: Path | None = None) -> pd.DataFrame:
         return pd.DataFrame([
             {"admin0Name": "Freedonia", "admin0Pcode": "FRE"},
             {"admin0Name": "Sylvania", "admin0Pcode": "SYL"},
@@ -172,3 +172,10 @@ def test_admin0_only_skips_subnational(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert summary["row_counts"].get("admin1", 0) == 0
     assert summary["row_counts"].get("admin2", 0) == 0
     assert records, "Expected normalized records for admin0 run"
+
+
+def test_static_iso3_accepts_commas_in_names() -> None:
+    csv_path = Path("resolver/ingestion/static/iso3_master.csv")
+    df = pd.read_csv(csv_path, dtype=str, engine="python")
+    assert {"admin0Pcode", "admin0Name"}.issubset(df.columns)
+    assert (df["admin0Name"].str.contains(",")).any(), "Expect at least one comma-in-name row"

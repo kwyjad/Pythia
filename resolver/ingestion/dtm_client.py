@@ -292,6 +292,7 @@ def _write_discovery_failure(
         "attempts": {},
         "latency_ms": {},
         "used_stage": None,
+        "reason": reason,
     }
     _persist_discovery_payload(baseline)
 
@@ -305,6 +306,10 @@ def _write_discovery_report(report: Mapping[str, Any]) -> None:
         "latency_ms": dict(report.get("latency_ms", {})),
         "used_stage": report.get("used_stage"),
     }
+    if "reason" in report:
+        payload["reason"] = report["reason"]
+    elif DISCOVERY_ERROR_LOG:
+        payload["reason"] = DISCOVERY_ERROR_LOG[-1].get("reason")
     _persist_discovery_payload(payload)
 
 
@@ -594,16 +599,32 @@ def _normalize_discovery_frame(raw: Any) -> pd.DataFrame:
     return frame[["admin0Name", "admin0Pcode"]]
 
 
-def _load_static_iso3() -> pd.DataFrame:
-    if not STATIC_ISO3_PATH.exists():
-        LOG.warning("Static ISO3 roster missing at %s", STATIC_ISO3_PATH)
-        return pd.DataFrame(columns=["admin0Name", "admin0Pcode"])
+def _load_static_iso3(path: Path | None = None) -> pd.DataFrame:
+    roster_path = Path(path or STATIC_ISO3_PATH)
+    if not roster_path.exists():
+        LOG.warning("Static ISO3 roster missing at %s", roster_path)
+        raise FileNotFoundError(f"Static ISO3 roster missing at {roster_path}")
     try:
-        frame = pd.read_csv(STATIC_ISO3_PATH)
+        frame = pd.read_csv(
+            roster_path,
+            dtype=str,
+            keep_default_na=False,
+            engine="python",
+            quoting=csv.QUOTE_MINIMAL,
+        )
     except Exception as exc:  # pragma: no cover - defensive guard
-        LOG.error("Failed to load static ISO3 roster: %s", exc)
-        return pd.DataFrame(columns=["admin0Name", "admin0Pcode"])
-    return _normalize_discovery_frame(frame)
+        LOG.error("Failed to load static ISO3 roster from %s: %s", roster_path, exc)
+        raise
+    required = {"admin0Pcode", "admin0Name"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Static ISO3 roster missing columns {sorted(missing)}")
+    frame["admin0Pcode"] = frame["admin0Pcode"].astype(str).str.strip()
+    frame["admin0Name"] = frame["admin0Name"].astype(str).str.strip()
+    frame = frame[(frame["admin0Pcode"] != "") & (frame["admin0Name"] != "")]
+    if len(frame) < 180:
+        raise ValueError(f"Static ISO3 roster unexpectedly small: {len(frame)} rows")
+    return frame[["admin0Pcode", "admin0Name"]]
 
 
 def _perform_discovery(
@@ -615,6 +636,71 @@ def _perform_discovery(
     _ensure_diagnostics_scaffolding()
 
     api_cfg = cfg.get("api", {}) if isinstance(cfg.get("api"), Mapping) else {}
+    requested_countries_raw = api_cfg.get("countries")
+    if isinstance(requested_countries_raw, (list, tuple)):
+        requested_countries = [
+            str(country).strip()
+            for country in requested_countries_raw
+            if str(country).strip()
+        ]
+    else:
+        requested_countries = []
+    if requested_countries:
+        LOG.info(
+            "Config requested countries=%s -> using explicit list (discovery bypassed)",
+            requested_countries,
+        )
+        alias_map = cfg.get("country_aliases") or {}
+        normalized_records = []
+        for country in requested_countries:
+            iso_candidate = to_iso3(country, alias_map) or country
+            iso_value = str(iso_candidate or "").strip().upper()
+            if len(iso_value) != 3 or not iso_value.isalpha():
+                letters_only = "".join(ch for ch in country.upper() if ch.isalpha())
+                iso_value = letters_only[:3]
+                if len(iso_value) != 3:
+                    iso_value = iso_value.ljust(3, "X")
+            normalized_records.append(
+                {"admin0Name": country, "admin0Pcode": iso_value or None}
+            )
+        discovered = pd.DataFrame(normalized_records, columns=["admin0Name", "admin0Pcode"])
+        discovered = _normalize_discovery_frame(discovered)
+        stage_entry = {
+            "stage": "explicit_list",
+            "status": "ok" if not discovered.empty else "empty",
+            "rows": int(discovered.shape[0]),
+            "attempts": 1,
+            "latency_ms": 0,
+        }
+        report = {
+            "stages": [stage_entry],
+            "errors": []
+            if not discovered.empty
+            else [{"stage": "explicit_list", "message": "empty_result"}],
+            "attempts": {"explicit_list": 1},
+            "latency_ms": {"explicit_list": 0},
+            "used_stage": "explicit_list",
+        }
+        _write_discovery_report(report)
+        try:
+            diagnostics_dump_json(discovered.to_dict(orient="records"), DISCOVERY_RAW_JSON_PATH)
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
+        try:
+            DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            discovered.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery snapshot", exc_info=True)
+        if metrics is not None:
+            metrics["countries_attempted"] = len(requested_countries)
+            metrics["stage_used"] = "explicit_list"
+            _write_metrics_summary_file(metrics)
+        return DiscoveryResult(
+            countries=requested_countries,
+            frame=discovered,
+            stage_used="explicit_list",
+            report=report,
+        )
     timeouts = api_cfg.get("timeouts", {}) if isinstance(api_cfg.get("timeouts"), Mapping) else {}
     retries_cfg = api_cfg.get("retries", {}) if isinstance(api_cfg.get("retries"), Mapping) else {}
     connect_timeout = float(timeouts.get("connect_seconds", 5))
@@ -2349,10 +2435,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     ensure_header_only()
                 timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except DTMZeroRowsError as exc:
-        LOG.error("dtm: zero rows reason=%s", exc.zero_rows_reason)
-        status = "error"
+        LOG.warning("dtm: zero rows reason=%s", exc.zero_rows_reason)
+        status = "ok-empty"
         reason = str(exc)
-        exit_code = 2
+        exit_code = 0
         extras["zero_rows_reason"] = exc.zero_rows_reason
         extras.setdefault("diagnostics", {})["zero_rows_reason"] = exc.zero_rows_reason
         ensure_header_only()
@@ -2360,7 +2446,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.error("dtm: %s", exc)
         status = "error"
         reason = str(exc)
-        exit_code = 2
+        exit_code = 1
         ensure_header_only()
     except Exception as exc:  # pragma: no cover - defensive guard
         LOG.exception("dtm: unexpected failure")
@@ -2379,10 +2465,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             extras["rows_total"] = 0
         else:
             reason = f"wrote {rows_written} rows"
-
-    if status == "ok-empty" and strict_empty and exit_code == 0:
-        exit_code = 3
-        LOG.error("dtm: strict-empty enabled; failing due to zero rows")
+    elif status == "ok-empty":
+        extras["rows_total"] = rows_written
+        if strict_empty:
+            status = "error"
+            exit_code = 2
+            LOG.error("dtm: strict-empty enabled; failing due to zero rows")
+        else:
+            reason = reason or "header-only (0 rows)"
 
     summary_timings = summary.get("timings_ms") if isinstance(summary, Mapping) else {}
     if isinstance(summary_timings, Mapping):
