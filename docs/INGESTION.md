@@ -32,6 +32,7 @@ API exposes multiple programmes for a given country.
 python -m resolver.ingestion.dtm_client \
   --strict-empty            # exit with code 3 when zero rows are written (optional) \
   --no-date-filter          # ignore RESOLVER_START_ISO/RESOLVER_END_ISO (optional)
+  --offline-smoke           # short-circuit for fast tests; exits 0 without hitting the API
 ```
 
 Environment variables:
@@ -39,6 +40,7 @@ Environment variables:
 * `RESOLVER_START_ISO` / `RESOLVER_END_ISO` define the inclusive window passed to the API.
 * `DTM_NO_DATE_FILTER=1` mirrors `--no-date-filter`.
 * `DTM_STRICT_EMPTY=1` mirrors `--strict-empty`.
+* `DTM_OFFLINE_SMOKE=1` mirrors `--offline-smoke` for CI fast tests.
 
 ### Diagnostics
 
@@ -53,6 +55,7 @@ Every run emits the following diagnostics under `diagnostics/ingestion/`:
 * `dtm/discovery_fail.json` — populated when discovery fails or returns zero countries (reasons include `missing_key`,
   `invalid_key`, `empty_discovery`).
 * `dtm/dtm_http.ndjson` — trace of every SDK request made by the connector.
+* `dtm_client.log` — enriched log stream including `api_base_url`, `resolved_country_count`, `resolved_admin_levels`, `date_window`, `request_params_clean`, and (when applicable) `zero_rows_reason`.
 
 The connectors report (`diagnostics/ingestion/connectors_report.jsonl`) mirrors the status (`ok`, `ok-empty`, `error`,
 `skipped`) and includes the reason string surfaced by `dtm_client`.
@@ -66,5 +69,4 @@ causes include:
 * Window out of range — the requested `window.start` / `window.end` may pre-date the API dataset.
 * Missing operation filter — admin2 pulls require explicit `operations` when the API exposes multiple programmes.
 
-Use `--strict-empty` or set `DTM_STRICT_EMPTY=1` in CI to fail builds when the connector writes zero rows. Zero-row runs are
-reported as `ok-empty` with reason `"header-only (0 rows)"` in both the run diagnostics and connectors report.
+Use `--strict-empty` or set `DTM_STRICT_EMPTY=1` in CI to fail builds when the connector writes zero rows. Real runs now exit with code `2` when the API returns no rows; the diagnostics and connectors report include a `zero_rows_reason` (`empty_country_list`, `invalid_indicator`, `api_empty_response`, or `filter_excluded_all`). Pass `--offline-smoke` (or set `DTM_OFFLINE_SMOKE=1`) to produce header-only diagnostics with exit code `0` without requiring credentials.

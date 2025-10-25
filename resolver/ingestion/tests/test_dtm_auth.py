@@ -6,10 +6,12 @@ import pytest
 from resolver.ingestion.dtm_auth import get_dtm_api_key
 
 
-def test_missing_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_key_returns_none(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
-    with pytest.raises(RuntimeError):
-        get_dtm_api_key()
+    with caplog.at_level("DEBUG"):
+        key = get_dtm_api_key()
+    assert key is None
+    assert "not present" in caplog.text
 
 
 def test_key_is_logged_masked(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:

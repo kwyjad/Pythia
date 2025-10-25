@@ -297,15 +297,19 @@ field_aliases:
 **Diagnostics:** each execution writes:
 - `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
 - `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
-- `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
+- `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows.
 - `diagnostics/ingestion/raw/dtm/<level>.<country>.head.csv` snapshots of the first successful fetch per level (up to 100 rows) for quick schema inspection.
+- `diagnostics/ingestion/raw/dtm_countries.json` — JSON dump of the discovery payload returned by `DTMApi.get_all_countries()`.
+- `diagnostics/ingestion/metrics/dtm_per_country.jsonl` — JSONL ledger with per-country/per-level row counts and elapsed timings for each request.
+- `diagnostics/ingestion/samples/dtm_sample.csv` — up to 200 normalized rows across all countries and admin levels.
+- `diagnostics/ingestion/logs/dtm_client.log` — enriched connector log including masked key suffix, window, country counts, per-level totals, and retry snapshots.
 - `diagnostics/ingestion/dtm/discovery_countries.csv` — snapshot of the SDK catalog used for discovery with the original fields as returned by `get_all_countries()`.
 - `diagnostics/ingestion/dtm/dtm_http.ndjson` — per-request ledger including `level`, `country`, optional `operation`, elapsed time, row count, and status (`ok`, `empty`, `error`).
 - `diagnostics/ingestion/dtm/sample_<level>.csv` — 50-row samples of the first non-empty response per admin level for schema reference.
 - `diagnostics/ingestion/dtm/discovery_fail.json` — emitted when discovery fails or returns zero selectors; captures SDK version, base URL, reason (`missing_key`, `invalid_key`, `empty_discovery`, `exception`), message, optional hint, and timestamp to support fail-fast troubleshooting.
 
 **Output metadata:**
-- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), any per-country failures recorded during the run (`failures`), a `discovery` object (`total_countries`, `sdk_version`, `api_base`, `discovery_file`, `source`), and a `diagnostics` object (currently `http_trace` and `samples`).
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), any per-country failures recorded during the run (`failures`), a `discovery` object (`total_countries`, `sdk_version`, `api_base`, `discovery_file`, `source`), and a `diagnostics` object (`http_trace`, `samples`, `raw_countries`, `metrics`, `sample`, `log`, `no_data_combos`).
 - `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc
@@ -383,3 +387,4 @@ field_aliases:
 | `skipped` | `skipped` | `RESOLVER_SKIP_DTM=1` or connector disabled in config. |
 
 Zero-row runs are marked `ok-empty` with reason `"header-only (0 rows)"`; `dtm_api_sample.json` captures the API response sample to help diagnose the cause.
+- **Note:** The ingestion window is derived from `BACKFILL_START_ISO` and `BACKFILL_END_ISO`. If either discovery returns zero countries or every request yields zero rows within that window the connector raises a `RuntimeError`, surfaces the reason in `dtm_run.json`, and exits with a non-zero status.

@@ -107,6 +107,8 @@ jobs:
         env:
           RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
           RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
+          BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
+          BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
           ONLY_CONNECTOR: ${{ inputs.only_connector }}
           LOG_LEVEL: ${{ inputs.log_level }}
           EMPTY_POLICY: ${{ inputs.empty_policy }}
@@ -169,6 +171,30 @@ jobs:
           path: |
             diagnostics/ingestion/
           retention-days: 30
+
+      - name: Upload DTM raw diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtm-diagnostics-raw
+          path: diagnostics/ingestion/raw/
+          if-no-files-found: warn
+
+      - name: Upload DTM metrics diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtm-diagnostics-metrics
+          path: diagnostics/ingestion/metrics/
+          if-no-files-found: warn
+
+      - name: Upload DTM samples diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtm-diagnostics-samples
+          path: diagnostics/ingestion/samples/
+          if-no-files-found: warn
 
       - name: Upload ingestion outputs
         uses: actions/upload-artifact@v4
