@@ -328,7 +328,7 @@ field_aliases:
 - `diagnostics/ingestion/dtm/dtm_http.ndjson` — per-request ledger including `level`, `country`, optional `operation`, elapsed time, row count, and status (`ok`, `empty`, `error`).
 - `diagnostics/ingestion/dtm/sample_<level>.csv` — 50-row samples of the first non-empty response per admin level for schema reference.
 - `diagnostics/ingestion/dtm/discovery_fail.json` — always written; records `stages` (per-discovery attempt status, latency, and row counts), `errors` (any exception details), `attempts` (by stage), `latency_ms`, and `used_stage` (`explicit_list`, `countries`, `operations`, or `static_iso3`). A static ISO-3 roster ships with the connector and is used when both HTTP discovery stages fail.
-- `diagnostics/ingestion/metrics/metrics.json` — summary payload with `countries_attempted`, `countries_ok`, `rows_fetched`, `duration_sec`, and `stage_used` for each run (updated even on failure).
+- `diagnostics/ingestion/metrics/metrics.json` — summary payload with `countries_attempted`, `countries_ok`, `countries_skipped_no_match`, `countries_failed_other`, `rows_fetched`, `duration_sec`, and `stage_used` for each run (updated even on failure).
 - `diagnostics/ingestion/samples/sample_admin0.csv` — per-run CSV with headers and up to five Admin0 samples; always present so CI uploads succeed even when discovery fails.
 
 The static fallback roster lives at `resolver/ingestion/static/iso3_master.csv` and contains exactly two UTF-8 columns (`admin0Pcode`, `admin0Name`). Country names containing commas **must** be quoted (RFC 4180) so pandas can read the file without ambiguity. The helper `resolver/ingestion/static/iso3_master.validate.py` can be invoked locally or in CI to sanity-check edits.

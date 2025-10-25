@@ -151,6 +151,8 @@ DEFAULT_CAUSE = "unknown"
 HTTP_COUNT_KEYS = ("2xx", "4xx", "5xx", "timeout", "error")
 ROW_COUNT_KEYS = ("admin0", "admin1", "admin2", "total")
 
+NO_MATCH_MSG = "No Country found matching your query."
+
 ADMIN_METHODS = {
     "admin0": "get_idp_admin0",
     "admin1": "get_idp_admin1",
@@ -327,6 +329,8 @@ def _init_metrics_summary() -> Dict[str, Any]:
     return {
         "countries_attempted": 0,
         "countries_ok": 0,
+        "countries_skipped_no_match": 0,
+        "countries_failed_other": 0,
         "rows_fetched": 0,
         "duration_sec": 0.0,
         "stage_used": None,
@@ -1013,6 +1017,7 @@ class DTMApiClient:
         api_cfg = config.get("api", {})
         self.rate_limit_delay = float(api_cfg.get("rate_limit_delay", 1.0))
         self.timeout = int(api_cfg.get("timeout", 60))
+        self._http_counts: Dict[str, int] = {}
 
     def _record_success(self, http_counts: Optional[MutableMapping[str, int]], status: int) -> None:
         if http_counts is None:
@@ -1073,6 +1078,17 @@ class DTMApiClient:
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
             return frame
+        except ValueError as exc:
+            message = str(exc).strip()
+            if NO_MATCH_MSG in message:
+                if http_counts is not None:
+                    http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
+                self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
+                LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
+                return None
+            LOG.error("Admin0 request failed: %s", exc)
+            self._record_failure(exc, http_counts)
+            raise
         except Exception as exc:
             LOG.error("Admin0 request failed: %s", exc)
             self._record_failure(exc, http_counts)
@@ -1096,6 +1112,17 @@ class DTMApiClient:
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
             return frame
+        except ValueError as exc:
+            message = str(exc).strip()
+            if NO_MATCH_MSG in message:
+                if http_counts is not None:
+                    http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
+                self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
+                LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
+                return None
+            LOG.error("Admin1 request failed: %s", exc)
+            self._record_failure(exc, http_counts)
+            raise
         except Exception as exc:
             LOG.error("Admin1 request failed: %s", exc)
             self._record_failure(exc, http_counts)
@@ -1123,6 +1150,17 @@ class DTMApiClient:
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
             return frame
+        except ValueError as exc:
+            message = str(exc).strip()
+            if NO_MATCH_MSG in message:
+                if http_counts is not None:
+                    http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
+                self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
+                LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
+                return None
+            LOG.error("Admin2 request failed: %s", exc)
+            self._record_failure(exc, http_counts)
+            raise
         except Exception as exc:
             LOG.error("Admin2 request failed: %s", exc)
             self._record_failure(exc, http_counts)
@@ -1141,6 +1179,7 @@ def _ensure_http_counts(counts: Optional[MutableMapping[str, int]]) -> MutableMa
     for key in HTTP_COUNT_KEYS:
         base.setdefault(key, 0)
     base.setdefault("retries", 0)
+    base.setdefault("skip_no_match", 0)
     base.setdefault("last_status", None)
     return base
 
@@ -1743,6 +1782,8 @@ def _fetch_api_data(
 
     all_records: List[Dict[str, Any]] = []
     head_written_levels: Set[str] = set()
+    country_rollup: Dict[Optional[str], Dict[str, Any]] = {}
+    unsupported_countries: Set[Optional[str]] = set()
 
     effective_params_ref = summary.get("extras", {}).get("effective_params")
     if isinstance(effective_params_ref, MutableMapping):
@@ -1752,6 +1793,12 @@ def _fetch_api_data(
 
     for level in admin_levels:
         for country_name in resolved_countries:
+            status_entry = country_rollup.setdefault(
+                country_name,
+                {"rows": 0, "errors": False, "skip_no_match": False},
+            )
+            if country_name in unsupported_countries or status_entry.get("skip_no_match"):
+                continue
             for operation in (operations if level == "admin2" else [None]):
                 combo_count = 0
                 country_label = country_name or "all countries"
@@ -1765,6 +1812,7 @@ def _fetch_api_data(
                     op_suffix,
                 )
                 failed = False
+                skip_before = http_counter.get("skip_no_match", 0)
                 with diagnostics_timing(f"{country_label}|{level}") as timing_result:
                     try:
                         pages, _ = _fetch_level_pages_with_logging(
@@ -1811,128 +1859,141 @@ def _fetch_api_data(
                                 "message": str(exc),
                             }
                         )
+                        status_entry["errors"] = True
                         failed = True
                         pages = []
-                    if failed:
+                skip_after = http_counter.get("skip_no_match", 0)
+                if skip_after > skip_before:
+                    if not status_entry.get("skip_no_match"):
+                        metrics_summary["countries_skipped_no_match"] += 1
+                    status_entry["skip_no_match"] = True
+                    unsupported_countries.add(country_name)
+                    LOG.info(
+                        "Skipping unsupported country after no-match response: %s",
+                        country_label,
+                    )
+                    break
+                if failed:
+                    continue
+
+                for page in pages:
+                    summary["paging"]["pages"] += 1
+                    summary["paging"]["total_received"] += int(page.shape[0])
+                    if page.shape[0]:
+                        size = int(page.shape[0])
+                        current = summary["paging"]["page_size"] or 0
+                        summary["paging"]["page_size"] = max(current, size)
+                    if page.empty:
                         continue
-
-                    for page in pages:
-                        summary["paging"]["pages"] += 1
-                        summary["paging"]["total_received"] += int(page.shape[0])
-                        if page.shape[0]:
-                            size = int(page.shape[0])
-                            current = summary["paging"]["page_size"] or 0
-                            summary["paging"]["page_size"] = max(current, size)
-                        if page.empty:
-                            continue
-                        LOG.debug(
-                            "all columns (n=%d): %s",
-                            len(page.columns),
-                            list(page.columns),
+                    LOG.debug(
+                        "all columns (n=%d): %s",
+                        len(page.columns),
+                        list(page.columns),
+                    )
+                    idp_column = _resolve_idp_value_column(page, idp_candidates)
+                    LOG.info("resolved value column: idp_count_col=%r", idp_column)
+                    if not idp_column:
+                        LOG.warning(
+                            "no value column matched; aliases=%s; rows=%d",
+                            idp_candidates,
+                            len(page),
                         )
-                        idp_column = _resolve_idp_value_column(page, idp_candidates)
-                        LOG.info("resolved value column: idp_count_col=%r", idp_column)
-                        if not idp_column:
-                            LOG.warning(
-                                "no value column matched; aliases=%s; rows=%d",
-                                idp_candidates,
-                                len(page),
-                            )
-                            failures.append(
-                                {
-                                    "country": country_label,
-                                    "level": level,
-                                    "operation": operation,
-                                    "error": "MissingValueColumn",
-                                    "message": "aliases=%s columns=%s"
-                                    % (idp_candidates, list(page.columns)),
-                                }
-                            )
-                            continue
-                        if level not in head_written_levels:
-                            try:
-                                _dump_head(page, level, country_label)
-                            except Exception:  # pragma: no cover - diagnostics only
-                                LOG.debug(
-                                    "failed to write raw head for level=%s country=%s",
-                                    level,
-                                    country_label,
-                                    exc_info=True,
-                                )
-                            else:
-                                head_written_levels.add(level)
+                        status_entry["errors"] = True
+                        failures.append(
+                            {
+                                "country": country_label,
+                                "level": level,
+                                "operation": operation,
+                                "error": "MissingValueColumn",
+                                "message": "aliases=%s columns=%s"
+                                % (idp_candidates, list(page.columns)),
+                            }
+                        )
+                        continue
+                    if level not in head_written_levels:
                         try:
-                            _write_level_sample(page, level)
+                            _dump_head(page, level, country_label)
                         except Exception:  # pragma: no cover - diagnostics only
-                            LOG.debug("failed to write sample rows", exc_info=True)
-                        page = page.rename(columns={idp_column: "idp_count"})
-                        if level == "admin0":
-                            try:
-                                _record_admin0_sample(page, operation=operation)
-                            except Exception:  # pragma: no cover - diagnostics only
-                                LOG.debug("Unable to update admin0 sample", exc_info=True)
+                            LOG.debug(
+                                "failed to write raw head for level=%s country=%s",
+                                level,
+                                country_label,
+                                exc_info=True,
+                            )
+                        else:
+                            head_written_levels.add(level)
+                    try:
+                        _write_level_sample(page, level)
+                    except Exception:  # pragma: no cover - diagnostics only
+                        LOG.debug("failed to write sample rows", exc_info=True)
+                    page = page.rename(columns={idp_column: "idp_count"})
+                    if level == "admin0":
+                        try:
+                            _record_admin0_sample(page, operation=operation)
+                        except Exception:  # pragma: no cover - diagnostics only
+                            LOG.debug("Unable to update admin0 sample", exc_info=True)
 
-                        per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
-                        per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
-                        causes: Dict[Tuple[str, str], str] = {}
+                    per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
+                    per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
+                    causes: Dict[Tuple[str, str], str] = {}
 
-                        for _, row in page.iterrows():
-                            iso = to_iso3(row.get(country_column), aliases)
-                            if not iso:
-                                continue
-                            bucket = month_start(row.get(date_column))
-                            if not bucket:
-                                continue
-                            admin1 = ""
-                            if admin1_column in page.columns:
-                                admin1 = str(row.get(admin1_column) or "").strip()
-                            if level == "admin2" and admin2_column in page.columns:
-                                admin2 = str(row.get(admin2_column) or "").strip()
-                                if admin2:
-                                    admin1 = f"{admin1}/{admin2}" if admin1 else admin2
-                            value = _parse_float(row.get("idp_count"))
+                    for _, row in page.iterrows():
+                        iso = to_iso3(row.get(country_column), aliases)
+                        if not iso:
+                            continue
+                        bucket = month_start(row.get(date_column))
+                        if not bucket:
+                            continue
+                        admin1 = ""
+                        if admin1_column in page.columns:
+                            admin1 = str(row.get(admin1_column) or "").strip()
+                        if level == "admin2" and admin2_column in page.columns:
+                            admin2 = str(row.get(admin2_column) or "").strip()
+                            if admin2:
+                                admin1 = f"{admin1}/{admin2}" if admin1 else admin2
+                        value = _parse_float(row.get("idp_count"))
+                        if value is None or value <= 0:
+                            continue
+                        per_admin[(iso, admin1)][bucket] = float(value)
+                        as_of_value = _parse_iso_date_or_none(row.get(date_column))
+                        if not as_of_value:
+                            as_of_value = datetime.now(timezone.utc).date().isoformat()
+                        existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
+                        if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
+                            per_admin_asof[(iso, admin1)][bucket] = as_of_value
+                        cause_key = str(row.get("Cause", "")).strip().lower()
+                        causes[(iso, admin1)] = cause_map.get(cause_key, DEFAULT_CAUSE)
+
+                    for key, series in per_admin.items():
+                        iso, admin1 = key
+                        if measure == "stock":
+                            flows = flow_from_stock(series)
+                        else:
+                            flows = {month_start(date): float(val) for date, val in series.items() if month_start(date)}
+                        for bucket, value in flows.items():
                             if value is None or value <= 0:
                                 continue
-                            per_admin[(iso, admin1)][bucket] = float(value)
-                            as_of_value = _parse_iso_date_or_none(row.get(date_column))
-                            if not as_of_value:
-                                as_of_value = datetime.now(timezone.utc).date().isoformat()
-                            existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
-                            if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
-                                per_admin_asof[(iso, admin1)][bucket] = as_of_value
-                            cause_key = str(row.get("Cause", "")).strip().lower()
-                            causes[(iso, admin1)] = cause_map.get(cause_key, DEFAULT_CAUSE)
-
-                        for key, series in per_admin.items():
-                            iso, admin1 = key
-                            if measure == "stock":
-                                flows = flow_from_stock(series)
-                            else:
-                                flows = {month_start(date): float(val) for date, val in series.items() if month_start(date)}
-                            for bucket, value in flows.items():
-                                if value is None or value <= 0:
-                                    continue
-                                record_as_of = (
-                                    per_admin_asof.get(key, {}).get(bucket)
-                                    or datetime.now(timezone.utc).date().isoformat()
-                                )
-                                all_records.append(
-                                    {
-                                        "iso3": iso,
-                                        "admin1": admin1,
-                                        "month_start": bucket,
-                                        "value": float(value),
-                                        "series_type": SERIES_INCIDENT,
-                                        "cause": causes.get(key, DEFAULT_CAUSE),
-                                        "measure": measure,
-                                        "source_id": f"dtm_api::{level}",
-                                        "as_of": record_as_of,
-                                    }
-                                )
-                                combo_count += 1
-                                summary["row_counts"][level] += 1
-                                summary["row_counts"]["total"] += 1
-                                summary["rows"]["fetched"] += 1
+                            record_as_of = (
+                                per_admin_asof.get(key, {}).get(bucket)
+                                or datetime.now(timezone.utc).date().isoformat()
+                            )
+                            all_records.append(
+                                {
+                                    "iso3": iso,
+                                    "admin1": admin1,
+                                    "month_start": bucket,
+                                    "value": float(value),
+                                    "series_type": SERIES_INCIDENT,
+                                    "cause": causes.get(key, DEFAULT_CAUSE),
+                                    "measure": measure,
+                                    "source_id": f"dtm_api::{level}",
+                                    "as_of": record_as_of,
+                                }
+                            )
+                            combo_count += 1
+                            summary["row_counts"][level] += 1
+                            summary["row_counts"]["total"] += 1
+                            summary["rows"]["fetched"] += 1
 
                 if failed:
                     continue
@@ -1968,8 +2029,36 @@ def _fetch_api_data(
                     summary["rows"]["fetched"],
                     elapsed_ms,
                 )
+                status_entry["rows"] += combo_count
+            if status_entry.get("skip_no_match"):
+                continue
+
+    def _update_country_metrics() -> None:
+        attempted = len(country_rollup)
+        if not attempted:
+            attempted = len(resolved_countries)
+        metrics_summary["countries_attempted"] = attempted
+        metrics_summary["countries_skipped_no_match"] = sum(
+            1 for entry in country_rollup.values() if entry.get("skip_no_match")
+        )
+        metrics_summary["countries_failed_other"] = sum(
+            1
+            for entry in country_rollup.values()
+            if entry.get("errors")
+            and not entry.get("skip_no_match")
+            and entry.get("rows", 0) == 0
+        )
+        metrics_summary["countries_ok"] = sum(
+            1
+            for entry in country_rollup.values()
+            if not entry.get("skip_no_match")
+            and (entry.get("rows", 0) > 0 or not entry.get("errors"))
+        )
+
+    _update_country_metrics()
 
     diagnostics_payload["no_data_combos"] = no_data_combos
+    summary.setdefault("http_counts", {})["skip_no_match"] = int(http_counter.get("skip_no_match", 0))
 
     sample_files = [str(path) for path in sorted(DTM_DIAGNOSTICS_DIR.glob("sample_*.csv"))]
     if sample_files:
@@ -1978,7 +2067,9 @@ def _fetch_api_data(
     total_rows = int(summary.get("row_counts", {}).get("total", 0))
     if total_rows == 0:
         zero_reason = "api_empty_response"
-        if not resolved_countries:
+        if metrics_summary.get("countries_skipped_no_match"):
+            zero_reason = "unsupported_countries"
+        elif not resolved_countries:
             zero_reason = "empty_country_list"
         elif failures:
             zero_reason = "invalid_indicator"
@@ -1987,17 +2078,27 @@ def _fetch_api_data(
         diagnostics_payload["zero_rows_reason"] = zero_reason
         summary_extras["zero_rows_reason"] = zero_reason
         window_label = f"{from_date or '-'}..{to_date or '-'}"
+        _update_country_metrics()
+        metrics_summary["rows_fetched"] = int(total_rows)
+        metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
+        _write_metrics_summary_file(metrics_summary)
+        skip_only = (
+            metrics_summary.get("countries_attempted", 0) > 0
+            and metrics_summary.get("countries_skipped_no_match", 0)
+            >= metrics_summary.get("countries_attempted", 0)
+            and metrics_summary.get("countries_failed_other", 0) == 0
+        )
+        if skip_only:
+            LOG.info(
+                "dtm: all %d countries skipped due to unsupported selectors",
+                metrics_summary.get("countries_skipped_no_match", 0),
+            )
+            return all_records, summary
         LOG.error(
             "dtm: zero rows produced for window %s zero_rows_reason=%s",
             window_label,
             zero_reason,
         )
-        metrics_summary["countries_ok"] = sum(
-            1 for entry in per_country_counts if int(entry.get("rows", 0)) > 0
-        )
-        metrics_summary["rows_fetched"] = int(total_rows)
-        metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
-        _write_metrics_summary_file(metrics_summary)
         raise DTMZeroRowsError(window_label, zero_reason)
 
     effective_params = summary.get("extras", {}).get("effective_params")
@@ -2005,9 +2106,7 @@ def _fetch_api_data(
         effective_params["per_page"] = summary.get("paging", {}).get("page_size")
         effective_params["max_pages"] = summary.get("paging", {}).get("pages")
 
-    metrics_summary["countries_ok"] = sum(
-        1 for entry in per_country_counts if int(entry.get("rows", 0)) > 0
-    )
+    _update_country_metrics()
     metrics_summary["rows_fetched"] = int(summary.get("rows", {}).get("fetched", 0))
     metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
     _write_metrics_summary_file(metrics_summary)
@@ -2185,6 +2284,7 @@ def build_rows(
     for key in HTTP_COUNT_KEYS:
         summary["http_counts"][key] = int(http_stats.get(key, 0))
     summary["http_counts"]["retries"] = int(http_stats.get("retries", 0))
+    summary["http_counts"]["skip_no_match"] = int(http_stats.get("skip_no_match", 0))
     summary["http_counts"]["last_status"] = http_stats.get("last_status")
     return rows, summary
 

@@ -156,6 +156,14 @@ jobs:
           touch diagnostics/ingestion/samples/.keep
           exit ${CONNECTOR_EXIT}
 
+      - name: Ensure diagnostics dirs exist (post-run)
+        if: always()
+        run: |
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
+          touch diagnostics/ingestion/raw/.keep
+          touch diagnostics/ingestion/metrics/.keep
+          touch diagnostics/ingestion/samples/.keep
+
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
 

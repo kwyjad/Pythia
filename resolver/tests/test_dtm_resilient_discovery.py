@@ -174,6 +174,65 @@ def test_admin0_only_skips_subnational(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert records, "Expected normalized records for admin0 run"
 
 
+def test_soft_skip_no_country_match(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _patch_diagnostics(monkeypatch, tmp_path)
+    monkeypatch.setenv("DTM_API_KEY", "test-key")
+
+    class MockSDKClient:
+        def get_idp_admin0_data(self, **kwargs: object) -> pd.DataFrame:
+            raise ValueError("No Country found matching your query.")
+
+    def fake_init(self, config: dict, *, subscription_key: str | None = None) -> None:
+        self.config = config
+        self.client = MockSDKClient()
+        self.rate_limit_delay = 0.0
+        self.timeout = 60
+        self._http_counts = {}
+
+    monkeypatch.setattr(dtm.DTMApiClient, "__init__", fake_init, raising=False)
+
+    def fake_discovery(
+        cfg: dict,
+        *,
+        metrics: dict | None = None,
+        api_key: str | None = None,
+    ) -> dtm.DiscoveryResult:
+        frame = pd.DataFrame([
+            {"admin0Name": "Atlantis", "admin0Pcode": "ATL"},
+        ])
+        result = dtm.DiscoveryResult(
+            countries=["Atlantis"],
+            frame=frame,
+            stage_used="static_iso3",
+            report={"stages": [], "errors": [], "attempts": {}, "latency_ms": {}, "used_stage": "static_iso3"},
+        )
+        return result
+
+    monkeypatch.setattr(dtm, "_perform_discovery", fake_discovery)
+
+    cfg = dtm.load_config()
+    cfg.setdefault("api", {})["admin_levels"] = ["admin0"]
+
+    http_counts: dict = {}
+    records, summary = dtm._fetch_api_data(
+        cfg,
+        no_date_filter=True,
+        window_start=None,
+        window_end=None,
+        http_counts=http_counts,
+    )
+
+    assert records == []
+    assert summary["rows"]["fetched"] == 0
+    assert summary["http_counts"].get("skip_no_match") == 1
+    assert summary.get("extras", {}).get("zero_rows_reason") == "unsupported_countries"
+
+    metrics_payload = json.loads(dtm.METRICS_SUMMARY_PATH.read_text(encoding="utf-8"))
+    assert metrics_payload["countries_skipped_no_match"] == 1
+    assert metrics_payload["rows_fetched"] == 0
+    assert metrics_payload["countries_failed_other"] == 0
+
+
 def test_static_iso3_accepts_commas_in_names() -> None:
     csv_path = Path("resolver/ingestion/static/iso3_master.csv")
     df = pd.read_csv(csv_path, dtype=str, engine="python")
