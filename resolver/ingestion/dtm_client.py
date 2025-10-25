@@ -30,7 +30,7 @@ from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
 )
-from resolver.ingestion.dtm_auth import check_api_key_configured, get_dtm_api_key
+from resolver.ingestion.dtm_auth import get_dtm_api_key
 from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest, to_iso3
 from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
 
@@ -51,7 +51,7 @@ API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
 API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
 DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
 DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
-REQUESTS_LOG_PATH = DTM_DIAGNOSTICS_DIR / "requests.jsonl"
+DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
 
 CANONICAL_HEADERS = [
     "source",
@@ -202,11 +202,57 @@ def _dtm_sdk_version() -> str:
         return str(getattr(module, "__version__", "unknown"))
 
 
+def _write_discovery_failure(
+    reason: str,
+    *,
+    message: str,
+    hint: Optional[str] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> None:
+    payload: Dict[str, Any] = {
+        "timestamp": time.time(),
+        "reason": reason,
+        "message": message,
+    }
+    if hint:
+        payload["hint"] = hint
+    if extra:
+        payload.update(dict(extra))
+
+    try:
+        DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DISCOVERY_FAIL_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+
+
 def _discover_all_countries(api: Any) -> List[str]:
     """Return a sorted list of country names discovered via the DTM SDK."""
 
     LOG.info("Discovering countries via dtmapi.get_all_countries() ...")
-    frame = api.get_all_countries()
+    try:
+        frame = api.get_all_countries()
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        reason = "exception"
+        hint: Optional[str] = None
+        if status in {401, 403} or any(token in lowered for token in ("401", "403", "unauthorized", "forbidden")):
+            reason = "invalid_key"
+            hint = "Verify DTM_API_KEY validity. Invalid or expired keys are rejected with 401/403."
+        _write_discovery_failure(
+            reason,
+            message=message or reason,
+            hint=hint,
+            extra={
+                "sdk_version": _dtm_sdk_version(),
+                "api_base": getattr(api, "base_url", getattr(api, "_base_url", "unknown")),
+            },
+        )
+        LOG.exception("Country discovery failed; see discovery_fail.json")
+        raise
+
     if not isinstance(frame, pd.DataFrame):
         frame = pd.DataFrame(frame or [])
 
@@ -236,20 +282,16 @@ def _discover_all_countries(api: Any) -> List[str]:
     LOG.info("Discovered %d countries", len(names))
 
     if len(names) == 0:
-        diag = {
-            "timestamp": time.time(),
-            "reason": "discovery-empty",
-            "sdk_version": _dtm_sdk_version(),
-            "api_base": getattr(api, "base_url", getattr(api, "_base_url", "unknown")),
-        }
-        try:
-            DISCOVERY_FAIL_PATH.write_text(json.dumps(diag, indent=2), encoding="utf-8")
-        except Exception:  # pragma: no cover - diagnostics only
-            LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
-        LOG.error(
-            "No countries discovered; aborting DTM run. See %s",
-            DISCOVERY_FAIL_PATH,
+        _write_discovery_failure(
+            "empty_discovery",
+            message="Country catalog returned zero rows",
+            hint="Verify DTM_API_KEY validity. Empty list may indicate expired or invalid key.",
+            extra={
+                "sdk_version": _dtm_sdk_version(),
+                "api_base": getattr(api, "base_url", getattr(api, "_base_url", "unknown")),
+            },
         )
+        LOG.error("Discovery returned 0 countries; aborting.")
         sys.exit(2)
     return names
 
@@ -311,8 +353,8 @@ def _write_level_sample(df: pd.DataFrame, level: str, limit: int = 50) -> None:
 
 def _append_request_log(entry: Mapping[str, Any]) -> None:
     try:
-        REQUESTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with REQUESTS_LOG_PATH.open("a", encoding="utf-8") as handle:
+        DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with DTM_HTTP_LOG_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, default=str))
             handle.write("\n")
     except Exception:  # pragma: no cover - diagnostics only
@@ -420,13 +462,16 @@ class DTMApiClient:
                 "dtmapi package not installed. Run: pip install dtmapi>=0.1.5",
             ) from exc
 
-        api_key = subscription_key.strip() if subscription_key else None
-        if not api_key:
-            api_key = get_dtm_api_key()
-        if not api_key:
-            raise ValueError("DTM API key not configured")
+        raw_key = (subscription_key or "").strip()
+        api_key = raw_key or get_dtm_api_key()
 
         self.client = DTMApi(subscription_key=api_key)
+        LOG.info(
+            "DTM SDK initialized | python=%s | dtmapi=%s | base_url=%s",
+            sys.version.split()[0],
+            getattr(DTMApi, "__version__", "unknown"),
+            getattr(self.client, "base_url", getattr(self.client, "_base_url", "unknown")),
+        )
         self.config = config
         api_cfg = config.get("api", {})
         self.rate_limit_delay = float(api_cfg.get("rate_limit_delay", 1.0))
@@ -902,6 +947,9 @@ def _fetch_level_pages_with_logging(
     rows = sum(int(page.shape[0]) for page in pages if hasattr(page, "shape"))
     context.update({"status": "ok" if rows > 0 else "empty", "rows": rows, "elapsed_ms": elapsed_ms})
     _append_request_log(context)
+    country_label = country or "all countries"
+    op_suffix = f" / operation={operation}" if operation else ""
+    LOG.info("Fetched %d rows for %s (%s%s)", rows, country_label, level, op_suffix)
     return pages, rows
 
 
@@ -959,10 +1007,17 @@ def _fetch_api_data(
     summary_extras["per_country_counts"] = per_country_counts
     summary_extras["failures"] = failures
 
-    primary_key = os.getenv("DTM_API_PRIMARY_KEY") or os.getenv("DTM_API_KEY")
-    secondary_key = os.getenv("DTM_API_SECONDARY_KEY") or None
-
-    client = DTMApiClient(cfg, subscription_key=primary_key)
+    try:
+        client = DTMApiClient(cfg)
+    except RuntimeError as exc:
+        message = str(exc)
+        _write_discovery_failure(
+            "missing_key",
+            message=message or "DTM_API_KEY missing",
+            hint="Set DTM_API_KEY to the IOM DTM subscription key before running the connector.",
+            extra={"sdk_version": _dtm_sdk_version()},
+        )
+        raise ValueError(message) from exc
 
     admin_levels = _resolve_admin_levels(cfg)
     api_cfg = cfg.get("api", {})
@@ -988,17 +1043,16 @@ def _fetch_api_data(
         discovery_source = "operations" if resolved_countries else "none"
 
     if not resolved_countries:
-        diag = {
-            "timestamp": time.time(),
-            "reason": "discovery-empty",
-            "sdk_version": _dtm_sdk_version(),
-            "api_base": getattr(target, "base_url", getattr(target, "_base_url", "unknown")),
-            "discovery_source": discovery_source,
-        }
-        try:
-            DISCOVERY_FAIL_PATH.write_text(json.dumps(diag, indent=2), encoding="utf-8")
-        except Exception:  # pragma: no cover - diagnostics only
-            LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+        _write_discovery_failure(
+            "empty_discovery",
+            message="Discovery returned no valid selectors",
+            hint="Verify DTM_API_KEY validity. Empty results may indicate an expired or invalid key.",
+            extra={
+                "sdk_version": _dtm_sdk_version(),
+                "api_base": getattr(target, "base_url", getattr(target, "_base_url", "unknown")),
+                "discovery_source": discovery_source,
+            },
+        )
         LOG.error("Discovery yielded no valid selectors; aborting connector")
         sys.exit(2)
 
@@ -1010,6 +1064,8 @@ def _fetch_api_data(
 
     operations = requested_operations if requested_operations else [None]
 
+    LOG.info("Fetching data for %d countries across %s", discovered_count, admin_levels)
+
     discovery_info = {
         "total_countries": discovered_count,
         "sdk_version": _dtm_sdk_version(),
@@ -1019,14 +1075,14 @@ def _fetch_api_data(
     }
     summary_extras["discovery"] = discovery_info
     diagnostics_payload = summary_extras.setdefault("diagnostics", {})
-    diagnostics_payload["requests_log"] = str(REQUESTS_LOG_PATH)
+    diagnostics_payload["http_trace"] = str(DTM_HTTP_LOG_PATH)
 
     from_date = window_start if not no_date_filter else None
     to_date = window_end if not no_date_filter else None
 
     try:
-        REQUESTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        REQUESTS_LOG_PATH.write_text("", encoding="utf-8")
+        DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DTM_HTTP_LOG_PATH.write_text("", encoding="utf-8")
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to reset DTM requests log", exc_info=True)
 
@@ -1103,7 +1159,6 @@ def _fetch_api_data(
     }
 
     all_records: List[Dict[str, Any]] = []
-    used_secondary = False
     head_written_levels: Set[str] = set()
 
     effective_params_ref = summary.get("extras", {}).get("effective_params")
@@ -1135,47 +1190,25 @@ def _fetch_api_data(
                         http_counts=http_counter,
                     )
                 except DTMHttpError as exc:
-                    if (
-                        isinstance(exc, DTMUnauthorizedError)
-                        or exc.status_code in {401, 403}
-                    ) and secondary_key and not used_secondary:
-                        http_counter["retries"] += 1
-                        LOG.warning("Retrying DTM API request with secondary key")
-                        client = DTMApiClient(cfg, subscription_key=secondary_key)
-                        used_secondary = True
-                        try:
-                            pages, _ = _fetch_level_pages_with_logging(
-                                client,
-                                level,
-                                country=country_name,
-                                operation=operation,
-                                from_date=from_date,
-                                to_date=to_date,
-                                http_counts=http_counter,
-                            )
-                        except Exception as retry_exc:
-                            LOG.error(
-                                "Failed after retry for country=%s level=%s: %s",
-                                country_label,
-                                level,
-                                retry_exc,
-                                exc_info=True,
-                            )
-                            failures.append(
-                                {
-                                    "country": country_label,
-                                    "level": level,
-                                    "operation": operation,
-                                    "error": type(retry_exc).__name__,
-                                    "message": str(retry_exc),
-                                }
-                            )
-                            continue
-                    else:
-                        raise
+                    status = getattr(exc, "status_code", None)
+                    if status in {401, 403} or isinstance(exc, DTMUnauthorizedError):
+                        _write_discovery_failure(
+                            "invalid_key",
+                            message=str(exc),
+                            hint="Verify DTM_API_KEY validity. Invalid or expired keys cause 401/403 responses.",
+                            extra={
+                                "sdk_version": _dtm_sdk_version(),
+                                "api_base": getattr(
+                                    target,
+                                    "base_url",
+                                    getattr(target, "_base_url", "unknown"),
+                                ),
+                            },
+                        )
+                    raise
                 except Exception as exc:
                     LOG.error(
-                        "country fetch failed: country=%s level=%s%s error=%s",
+                        "Fetch failed for %s (%s%s): %s",
                         country_label,
                         level,
                         op_suffix,
@@ -1587,7 +1620,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         deps_payload["requests"],
     )
 
-    api_key_configured = check_api_key_configured()
+    api_key_configured = bool((os.getenv("DTM_API_KEY") or "").strip())
     base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     base_http["rate_limit_remaining"] = None
     base_http["retries"] = 0

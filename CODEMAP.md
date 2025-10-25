@@ -34,7 +34,7 @@ flowchart LR
 | Command | Purpose | Key Environment/Inputs |
 | --- | --- | --- |
 | `python resolver/ingestion/run_all_stubs.py --retries 2` | Generate staging CSVs using offline fixtures (no network). | Applies smoke defaults (`RESOLVER_MAX_RESULTS`, `RESOLVER_WINDOW_DAYS`, etc.) unless overridden. |
-| `python resolver/ingestion/<connector>_client.py` | Run a specific connector against live APIs. | Source-specific tokens such as `ACLED_REFRESH_TOKEN`, `DTM_API_PRIMARY_KEY`, `GO_API_TOKEN`, `RELIEFWEB_APPNAME`, toggles like `RESOLVER_SKIP_<SOURCE>`, `RESOLVER_DEBUG=1` for verbose logging. |
+| `python resolver/ingestion/<connector>_client.py` | Run a specific connector against live APIs. | Source-specific tokens such as `ACLED_REFRESH_TOKEN`, `DTM_API_KEY`, `GO_API_TOKEN`, `RELIEFWEB_APPNAME`, toggles like `RESOLVER_SKIP_<SOURCE>`, `RESOLVER_DEBUG=1` for verbose logging. |
 | `python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports` | Map staging columns to canonical facts. | Optional `--config resolver/tools/export_config.yml` for custom mappings. |
 | `python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv` | Enforce schema, registry, and enum rules before precedence. | Requires registries in `resolver/data/` and schema definition `resolver/tools/schema.yml`. |
 | `python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff 2025-09-30` | Apply precedence tiers to produce `resolved.csv/jsonl` plus diagnostics. | Configuration in `resolver/tools/precedence_config.yml`; uses Istanbul timezone lag logic. |
@@ -93,7 +93,7 @@ Series semantics for both CSV exports and DuckDB writes are derived by [`resolve
 5. Regenerate docs/tests: `python resolver/tools/generate_schemas_md.py --in resolver/tools/schema.yml --out SCHEMAS.md --sort` and `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py`.
 
 ### Daily run (live connectors)
-1. Export credentials to the shell or CI secrets (`ACLED_REFRESH_TOKEN`, `DTM_API_PRIMARY_KEY`, `GO_API_TOKEN`, etc.).
+1. Export credentials to the shell or CI secrets (`ACLED_REFRESH_TOKEN`, `DTM_API_KEY`, `GO_API_TOKEN`, etc.).
 2. Run live connectors (optionally in parallel) with `RESOLVER_DEBUG=1` for richer logs:
    ```bash
    python resolver/ingestion/acled_client.py

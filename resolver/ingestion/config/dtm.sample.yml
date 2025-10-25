@@ -1,9 +1,6 @@
 enabled: true
 api:
   admin_levels: [admin0, admin1, admin2]
-  countries: []
-  operations: []
+  countries: []  # always overridden: connector fetches all countries via discovery
 output:
   measure: stock
-field_aliases:
-  idp_count: ["TotalIDPs", "IDPTotal"]

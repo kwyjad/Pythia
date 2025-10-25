@@ -269,8 +269,7 @@ Example JSONL entry:
 The DTM connector is API-only and always calls the official DTM API via the `dtmapi` package.
 
 **Secrets:**
-- `DTM_API_PRIMARY_KEY` or legacy `DTM_API_KEY` (required).
-- `DTM_API_SECONDARY_KEY` (optional) retried on authentication failures.
+- `DTM_API_KEY` (required) — single IOM DTM subscription key used for all authenticated calls.
 
 **Configuration fields:**
 
@@ -301,12 +300,12 @@ field_aliases:
 - `diagnostics/ingestion/dtm_api_sample.json` (and the legacy `dtm_api_response_sample.json`) containing up to 100 standardized rows. Always present when the run produced zero rows.
 - `diagnostics/ingestion/raw/dtm/<level>.<country>.head.csv` snapshots of the first successful fetch per level (up to 100 rows) for quick schema inspection.
 - `diagnostics/ingestion/dtm/discovery_countries.csv` — snapshot of the SDK catalog used for discovery with the original fields as returned by `get_all_countries()`.
-- `diagnostics/ingestion/dtm/requests.jsonl` — per-request ledger including `level`, `country`, optional `operation`, elapsed time, row count, and status (`ok`, `empty`, `error`).
+- `diagnostics/ingestion/dtm/dtm_http.ndjson` — per-request ledger including `level`, `country`, optional `operation`, elapsed time, row count, and status (`ok`, `empty`, `error`).
 - `diagnostics/ingestion/dtm/sample_<level>.csv` — 50-row samples of the first non-empty response per admin level for schema reference.
-- `diagnostics/ingestion/dtm/discovery_fail.json` — emitted only when discovery yields zero selectors; captures SDK version, base URL, and timestamp to support fail-fast troubleshooting.
+- `diagnostics/ingestion/dtm/discovery_fail.json` — emitted when discovery fails or returns zero selectors; captures SDK version, base URL, reason (`missing_key`, `invalid_key`, `empty_discovery`, `exception`), message, optional hint, and timestamp to support fail-fast troubleshooting.
 
 **Output metadata:**
-- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), any per-country failures recorded during the run (`failures`), a `discovery` object (`total_countries`, `sdk_version`, `api_base`, `discovery_file`, `source`), and a `diagnostics` object (currently `requests_log` and `samples`).
+- `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), any per-country failures recorded during the run (`failures`), a `discovery` object (`total_countries`, `sdk_version`, `api_base`, `discovery_file`, `source`), and a `diagnostics` object (currently `http_trace` and `samples`).
 - `diagnostics/ingestion/dtm_run.json` now has the shape:
 
 ```jsonc

@@ -17,8 +17,6 @@ from resolver.ingestion import dtm_client
 @pytest.fixture(autouse=True)
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
-    monkeypatch.delenv("DTM_API_PRIMARY_KEY", raising=False)
-    monkeypatch.delenv("DTM_API_SECONDARY_KEY", raising=False)
     monkeypatch.delenv("RESOLVER_START_ISO", raising=False)
     monkeypatch.delenv("RESOLVER_END_ISO", raising=False)
 
@@ -41,7 +39,7 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
         "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
         "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
         "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
-        "REQUESTS_LOG_PATH": diagnostics_dir / "dtm" / "requests.jsonl",
+        "DTM_HTTP_LOG_PATH": diagnostics_dir / "dtm" / "dtm_http.ndjson",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
@@ -222,7 +220,7 @@ def test_main_writes_outputs_and_diagnostics(
     assert meta_payload["discovery"]["total_countries"] == 2
     assert meta_payload["discovery"]["source"] == "countries"
     assert "diagnostics" in meta_payload
-    assert meta_payload["diagnostics"]["requests_log"] == str(patch_paths["REQUESTS_LOG_PATH"])
+    assert meta_payload["diagnostics"]["http_trace"] == str(patch_paths["DTM_HTTP_LOG_PATH"])
     assert any(
         str(path).endswith("sample_admin0.csv")
         for path in meta_payload["diagnostics"].get("samples", [])
@@ -234,11 +232,11 @@ def test_main_writes_outputs_and_diagnostics(
     assert discovery_snapshot.exists()
     snapshot_df = pd.read_csv(discovery_snapshot)
     assert set(snapshot_df["CountryName"]) == {"Ethiopia", "Somalia"}
-    requests_log = patch_paths["REQUESTS_LOG_PATH"]
-    assert requests_log.exists()
+    http_trace = patch_paths["DTM_HTTP_LOG_PATH"]
+    assert http_trace.exists()
     request_entries = [
         json.loads(line)
-        for line in requests_log.read_text(encoding="utf-8").splitlines()
+        for line in http_trace.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     assert request_entries
@@ -253,7 +251,7 @@ def test_main_writes_outputs_and_diagnostics(
     assert "discovery" in run_payload["extras"]
     assert run_payload["extras"]["discovery"]["total_countries"] == 2
     assert "diagnostics" in run_payload["extras"]
-    assert run_payload["extras"]["diagnostics"]["requests_log"] == str(requests_log)
+    assert run_payload["extras"]["diagnostics"]["http_trace"] == str(http_trace)
 
 
 def test_main_strict_empty_exits_nonzero(
@@ -359,15 +357,14 @@ def test_main_zero_rows_reason_and_totals(
     assert report["reason"] == "header-only (0 rows)"
 
 
-def test_main_retries_with_secondary_key(
+def test_main_invalid_key_aborts(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("DTM_API_PRIMARY_KEY", "primary")
-    monkeypatch.setenv("DTM_API_SECONDARY_KEY", "secondary")
+    monkeypatch.setenv("DTM_API_KEY", "invalid")
 
     attempt = {"count": 0}
 
-    class FailingClient:
+    class UnauthorizedClient:
         def __init__(self, *_: Any, subscription_key: Optional[str] = None) -> None:
             self.subscription_key = subscription_key
             self.rate_limit_delay = 0
@@ -378,15 +375,7 @@ def test_main_retries_with_secondary_key(
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
             attempt["count"] += 1
-            if self.subscription_key == "primary":
-                raise dtm_client.DTMUnauthorizedError(401, "unauthorized")
-            return pd.DataFrame(
-                {
-                    "CountryName": ["Kenya"],
-                    "ReportingDate": ["2024-06-01"],
-                    "TotalIDPs": [25],
-                }
-            )
+            raise dtm_client.DTMUnauthorizedError(401, "unauthorized")
 
         def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
@@ -394,7 +383,7 @@ def test_main_retries_with_secondary_key(
         def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
 
-    monkeypatch.setattr(dtm_client, "DTMApiClient", FailingClient)
+    monkeypatch.setattr(dtm_client, "DTMApiClient", UnauthorizedClient)
     monkeypatch.setattr(dtm_client, "load_config", lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}})
     monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
     monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
@@ -402,13 +391,17 @@ def test_main_retries_with_secondary_key(
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main([])
-    assert rc == 0
-    assert attempt["count"] == 2
+    assert rc == 1
+    assert attempt["count"] == 1
+    fail_path = patch_paths["DISCOVERY_FAIL_PATH"]
+    assert fail_path.exists()
+    payload = json.loads(fail_path.read_text(encoding="utf-8"))
+    assert payload["reason"] == "invalid_key"
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["http"]["retries"] == 1
+    assert run_payload["status"] == "error"
 
 
-def test_requests_log_written(
+def test_http_trace_written(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
 ) -> None:
     monkeypatch.setenv("DTM_API_KEY", "primary")
@@ -445,7 +438,7 @@ def test_requests_log_written(
 
     rc = dtm_client.main([])
     assert rc == 0
-    log_file = patch_paths["REQUESTS_LOG_PATH"]
+    log_file = patch_paths["DTM_HTTP_LOG_PATH"]
     assert log_file.exists()
     lines = [
         json.loads(line)
