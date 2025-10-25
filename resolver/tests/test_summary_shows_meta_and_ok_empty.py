@@ -40,4 +40,5 @@ def test_summary_table_includes_meta_column(tmp_path: Path) -> None:
     assert cells[7] == "—"
     assert cells[8] == "—"
     assert cells[9] == "—"
+    assert cells[-2] == "—"
     assert cells[-1] == str(meta_path)
