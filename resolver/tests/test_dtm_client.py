@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import importlib
-import json
 import csv
 import logging
+import importlib
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
 import pytest
+import requests
 
 from resolver.ingestion import dtm_client
 
@@ -169,6 +170,14 @@ def test_main_writes_outputs_and_diagnostics(
                         "total_people_idp": [95],
                     }
                 )
+            if country == "Kenya":
+                return pd.DataFrame(
+                    {
+                        "CountryName": ["Kenya"],
+                        "ReportingDate": ["2024-05-15"],
+                        "TotalIDPs": [135],
+                    }
+                )
             return pd.DataFrame()
 
         def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
@@ -211,8 +220,7 @@ def test_main_writes_outputs_and_diagnostics(
             else None
             for row in reader
         }
-    assert 120 in value_samples
-    assert 95 in value_samples
+    assert 135 in value_samples
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["rows"]["written"] > 0
     assert run_payload["rows"]["fetched"] > 0
@@ -231,12 +239,12 @@ def test_main_writes_outputs_and_diagnostics(
     assert "failures" in meta_payload
     assert isinstance(meta_payload["failures"], list)
     assert meta_payload["effective_params"]["country_mode"] == "ALL"
-    assert meta_payload["effective_params"]["discovered_countries_count"] == 2
+    assert meta_payload["effective_params"]["discovered_countries_count"] == 1
     assert meta_payload["effective_params"]["countries_requested"] == ["Kenya"]
     assert meta_payload["effective_params"]["idp_aliases"]
     assert "discovery" in meta_payload
-    assert meta_payload["discovery"]["total_countries"] == 2
-    assert meta_payload["discovery"]["source"] == "countries"
+    assert meta_payload["discovery"]["total_countries"] == 1
+    assert meta_payload["discovery"]["source"] == "explicit_list"
     assert "diagnostics" in meta_payload
     assert meta_payload["diagnostics"]["http_trace"] == str(patch_paths["DTM_HTTP_LOG_PATH"])
     assert meta_payload["diagnostics"]["raw_countries"] == str(patch_paths["DISCOVERY_RAW_JSON_PATH"])
@@ -253,11 +261,12 @@ def test_main_writes_outputs_and_diagnostics(
     discovery_snapshot = patch_paths["DISCOVERY_SNAPSHOT_PATH"]
     assert discovery_snapshot.exists()
     snapshot_df = pd.read_csv(discovery_snapshot)
-    assert set(snapshot_df["CountryName"]) == {"Ethiopia", "Somalia"}
+    assert set(snapshot_df["admin0Name"]) == {"Kenya"}
     discovery_raw = patch_paths["DISCOVERY_RAW_JSON_PATH"]
     assert discovery_raw.exists()
     raw_payload = json.loads(discovery_raw.read_text(encoding="utf-8"))
     assert isinstance(raw_payload, list)
+    assert any(entry.get("admin0Name") == "Kenya" for entry in raw_payload)
     metrics_path = patch_paths["PER_COUNTRY_METRICS_PATH"]
     assert metrics_path.exists()
     metrics_lines = [
@@ -288,7 +297,8 @@ def test_main_writes_outputs_and_diagnostics(
     assert "per_country_counts" in run_payload["extras"]
     assert "failures" in run_payload["extras"]
     assert "discovery" in run_payload["extras"]
-    assert run_payload["extras"]["discovery"]["total_countries"] == 2
+    assert run_payload["extras"]["discovery"]["total_countries"] == 1
+    assert run_payload["extras"]["discovery"]["source"] == "explicit_list"
     assert "diagnostics" in run_payload["extras"]
     assert run_payload["extras"]["diagnostics"]["http_trace"] == str(http_trace)
     assert run_payload["extras"]["diagnostics"]["log"] == str(log_path)
@@ -390,17 +400,18 @@ def test_main_zero_rows_reason_and_totals(
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main([])
-    assert rc == 2
+    assert rc == 0
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["status"] == "error"
+    assert run_payload["status"] == "ok-empty"
     assert "0 rows" in run_payload["reason"]
     assert run_payload["extras"]["zero_rows_reason"] == "filter_excluded_all"
     report_lines = patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
     assert report_lines
     report = json.loads(report_lines[-1])
-    assert report["status"] == "error"
+    assert report["status"] == "ok-empty"
     assert "0 rows" in report["reason"]
     assert report["extras"]["zero_rows_reason"] == "filter_excluded_all"
+    assert report["extras"]["exit_code"] == 0
 
 
 def test_main_invalid_key_aborts(
@@ -479,6 +490,16 @@ def test_discovery_empty_hard_fail(
     monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
     monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
+    monkeypatch.setattr(
+        dtm_client,
+        "_get_country_list_via_http",
+        lambda *_, **__: (_ for _ in ()).throw(requests.exceptions.Timeout("discovery timeout")),
+    )
+    monkeypatch.setattr(
+        dtm_client,
+        "_load_static_iso3",
+        lambda *_: pd.DataFrame(columns=["admin0Name", "admin0Pcode"]),
+    )
 
     rc = dtm_client.main([])
     assert rc == 1

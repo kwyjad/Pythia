@@ -9,6 +9,8 @@ import importlib
 import json
 import logging
 import os
+import pathlib
+import random
 import re
 import subprocess
 import sys
@@ -22,6 +24,14 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 
 import pandas as pd
 import yaml
+import requests
+from tenacity import (
+    RetryError,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
@@ -65,6 +75,10 @@ DISCOVERY_RAW_JSON_PATH = DIAGNOSTICS_RAW_DIR / "dtm_countries.json"
 PER_COUNTRY_METRICS_PATH = DIAGNOSTICS_METRICS_DIR / "dtm_per_country.jsonl"
 SAMPLE_ROWS_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_sample.csv"
 DTM_CLIENT_LOG_PATH = DIAGNOSTICS_LOG_DIR / "dtm_client.log"
+STATIC_DATA_DIR = pathlib.Path(__file__).resolve().parent / "static"
+STATIC_ISO3_PATH = STATIC_DATA_DIR / "iso3_master.csv"
+METRICS_SUMMARY_PATH = DIAGNOSTICS_METRICS_DIR / "metrics.json"
+SAMPLE_ADMIN0_PATH = DIAGNOSTICS_SAMPLES_DIR / "sample_admin0.csv"
 
 CANONICAL_HEADERS = [
     "source",
@@ -106,6 +120,14 @@ class Hazard:
     hclass: str
 
 
+@dataclass
+class DiscoveryResult:
+    countries: List[str]
+    frame: pd.DataFrame
+    stage_used: Optional[str]
+    report: Dict[str, Any]
+
+
 MULTI_HAZARD = Hazard("multi", "Multi-shock Displacement/Needs", "all")
 UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
@@ -134,6 +156,15 @@ ADMIN_METHODS = {
     "admin1": "get_idp_admin1",
     "admin2": "get_idp_admin2",
 }
+
+
+DISCOVERY_ERROR_LOG: List[Dict[str, Any]] = []
+_ADMIN0_SAMPLE_LIMIT = 5
+_ADMIN0_SAMPLE_WRITTEN = 0
+RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+)
 
 
 class ConfigDict(dict):
@@ -224,6 +255,18 @@ def _dtm_sdk_version() -> str:
         return str(getattr(module, "__version__", "unknown"))
 
 
+def _persist_discovery_payload(payload: Mapping[str, Any]) -> None:
+    try:
+        DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DISCOVERY_FAIL_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+
+
+def _clear_discovery_error_log() -> None:
+    DISCOVERY_ERROR_LOG.clear()
+
+
 def _write_discovery_failure(
     reason: str,
     *,
@@ -231,21 +274,43 @@ def _write_discovery_failure(
     hint: Optional[str] = None,
     extra: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    payload: Dict[str, Any] = {
+    entry: Dict[str, Any] = {
         "timestamp": time.time(),
         "reason": reason,
         "message": message,
     }
     if hint:
-        payload["hint"] = hint
+        entry["hint"] = hint
     if extra:
-        payload.update(dict(extra))
+        entry["extra"] = dict(extra)
 
-    try:
-        DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        DISCOVERY_FAIL_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:  # pragma: no cover - diagnostics only
-        LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+    DISCOVERY_ERROR_LOG.append(entry)
+    baseline = {
+        "timestamp": time.time(),
+        "stages": [],
+        "errors": list(DISCOVERY_ERROR_LOG),
+        "attempts": {},
+        "latency_ms": {},
+        "used_stage": None,
+        "reason": reason,
+    }
+    _persist_discovery_payload(baseline)
+
+
+def _write_discovery_report(report: Mapping[str, Any]) -> None:
+    payload = {
+        "timestamp": time.time(),
+        "stages": list(report.get("stages", [])),
+        "errors": list(DISCOVERY_ERROR_LOG) + list(report.get("errors", [])),
+        "attempts": dict(report.get("attempts", {})),
+        "latency_ms": dict(report.get("latency_ms", {})),
+        "used_stage": report.get("used_stage"),
+    }
+    if "reason" in report:
+        payload["reason"] = report["reason"]
+    elif DISCOVERY_ERROR_LOG:
+        payload["reason"] = DISCOVERY_ERROR_LOG[-1].get("reason")
+    _persist_discovery_payload(payload)
 
 
 def _append_metrics(entry: Mapping[str, Any]) -> None:
@@ -256,6 +321,202 @@ def _append_metrics(entry: Mapping[str, Any]) -> None:
             handle.write("\n")
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to append metrics entry", exc_info=True)
+
+
+def _init_metrics_summary() -> Dict[str, Any]:
+    return {
+        "countries_attempted": 0,
+        "countries_ok": 0,
+        "rows_fetched": 0,
+        "duration_sec": 0.0,
+        "stage_used": None,
+    }
+
+
+def _write_metrics_summary_file(summary: Mapping[str, Any]) -> None:
+    try:
+        METRICS_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        METRICS_SUMMARY_PATH.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist metrics summary", exc_info=True)
+
+
+def _reset_admin0_sample_counter() -> None:
+    global _ADMIN0_SAMPLE_WRITTEN
+    _ADMIN0_SAMPLE_WRITTEN = 0
+
+
+def _ensure_sample_headers() -> None:
+    SAMPLE_ADMIN0_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with SAMPLE_ADMIN0_PATH.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["operation", "admin0Name", "admin0Pcode", "reportingDate", "idp_count"])
+    _reset_admin0_sample_counter()
+
+
+def _ensure_diagnostics_scaffolding() -> None:
+    for directory in (
+        DIAGNOSTICS_DIR,
+        DTM_DIAGNOSTICS_DIR,
+        DIAGNOSTICS_RAW_DIR,
+        DIAGNOSTICS_METRICS_DIR,
+        DIAGNOSTICS_SAMPLES_DIR,
+        DIAGNOSTICS_LOG_DIR,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    _clear_discovery_error_log()
+    _ensure_sample_headers()
+    _write_metrics_summary_file(_init_metrics_summary())
+    _write_discovery_report({})
+    try:
+        DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DTM_HTTP_LOG_PATH.write_text("", encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to reset DTM HTTP log", exc_info=True)
+
+
+def _record_admin0_sample(df: pd.DataFrame, *, operation: Optional[str] = None) -> None:
+    global _ADMIN0_SAMPLE_WRITTEN
+    if df is None or df.empty:
+        return
+    limit = _ADMIN0_SAMPLE_LIMIT - _ADMIN0_SAMPLE_WRITTEN
+    if limit <= 0:
+        return
+    rows: List[List[str]] = []
+    for record in df.head(limit).to_dict("records"):
+        op_value = operation or record.get("Operation") or record.get("operation") or ""
+        name = (
+            record.get("admin0Name")
+            or record.get("Admin0Name")
+            or record.get("CountryName")
+            or record.get("country")
+            or ""
+        )
+        code = (
+            record.get("admin0Pcode")
+            or record.get("Admin0Pcode")
+            or record.get("CountryPcode")
+            or record.get("CountryISO3")
+            or record.get("ISO3")
+            or record.get("iso3")
+            or ""
+        )
+        iso = to_iso3(code, {}) if code else to_iso3(name, {})
+        iso_value = (iso or str(code or "")).upper()
+        report_date = (
+            record.get("ReportingDate")
+            or record.get("reportingDate")
+            or record.get("ReportDate")
+            or record.get("Date")
+            or ""
+        )
+        idp_value = (
+            record.get("idp_count")
+            or record.get("TotalIDPs")
+            or record.get("IDPTotal")
+            or record.get("totalIdp")
+            or record.get("Total")
+            or ""
+        )
+        rows.append([str(op_value or ""), str(name or ""), iso_value, str(report_date or ""), str(idp_value or "")])
+    if not rows:
+        return
+    SAMPLE_ADMIN0_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with SAMPLE_ADMIN0_PATH.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(rows)
+    _ADMIN0_SAMPLE_WRITTEN += len(rows)
+
+
+def _dtm_http_get(
+    path: str,
+    key: str,
+    *,
+    params: Optional[Mapping[str, Any]] = None,
+    timeout: Tuple[float, float],
+) -> Any:
+    base_url = "https://dtmapi.iom.int"
+    url = f"{base_url}{path}"
+    headers = {"Ocp-Apim-Subscription-Key": key}
+    started = time.perf_counter()
+    entry: Dict[str, Any] = {"ts": time.time(), "url": url, "ok": False, "nonce": round(random.random(), 6)}
+    if params:
+        entry["params"] = dict(params)
+    response: Optional[requests.Response] = None
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        entry["status"] = response.status_code
+        response.raise_for_status()
+        payload = response.json()
+        entry["ok"] = True
+        return payload
+    except requests.exceptions.Timeout as exc:
+        entry["error"] = str(exc)
+        entry["timeout"] = True
+        raise
+    except Exception as exc:
+        entry["error"] = str(exc)
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            entry["status"] = status
+        raise
+    finally:
+        entry["elapsed_ms"] = int(max(0.0, (time.perf_counter() - started) * 1000))
+        try:
+            DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with DTM_HTTP_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, default=str))
+                handle.write("\n")
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to append DTM HTTP log entry", exc_info=True)
+
+
+def _get_country_list_via_http(
+    path: str,
+    key: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    connect_timeout: float = 5.0,
+    read_timeout: float = 30.0,
+    retries: int = 3,
+    backoff: float = 1.5,
+) -> pd.DataFrame:
+
+    @retry(
+        stop=stop_after_attempt(max(1, int(retries))),
+        wait=wait_exponential_jitter(max(0.0, float(backoff))),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        reraise=True,
+    )
+    def _call(
+        path: str,
+        key: str,
+        params: Optional[Mapping[str, Any]],
+        connect_timeout: float,
+        read_timeout: float,
+    ) -> pd.DataFrame:
+        payload = _dtm_http_get(
+            path,
+            key,
+            params=params,
+            timeout=(connect_timeout, read_timeout),
+        )
+        if isinstance(payload, pd.DataFrame):
+            return payload
+        return pd.DataFrame(payload or [])
+
+    try:
+        frame = _call(path, key, params, connect_timeout, read_timeout)
+        attempts = int(_call.retry.statistics.get("attempt_number", 1))
+    except RetryError as exc:
+        attempts = exc.last_attempt.attempt_number if exc.last_attempt else int(retries)
+        _get_country_list_via_http.last_attempts = int(attempts)
+        raise
+    _get_country_list_via_http.last_attempts = int(attempts)
+    return frame
+
+
+_get_country_list_via_http.last_attempts = 0  # type: ignore[attr-defined]
 
 
 def _setup_file_logging() -> None:
@@ -273,117 +534,322 @@ def _setup_file_logging() -> None:
     _FILE_LOGGING_INITIALIZED = True
 
 
-def _discover_all_countries(api: Any) -> List[str]:
-    """Return a sorted list of country names discovered via the DTM SDK."""
+def _normalize_discovery_frame(raw: Any) -> pd.DataFrame:
+    frame = raw if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw or [])
+    if frame.empty:
+        return pd.DataFrame(columns=["admin0Name", "admin0Pcode"])
 
-    LOG.info("Discovering countries via dtmapi.get_all_countries() ...")
+    rename_map: Dict[str, str] = {}
+    for column in frame.columns:
+        key = str(column)
+        lowered = key.strip().lower()
+        if lowered in {
+            "countryname",
+            "admin0name",
+            "operationname",
+            "country",
+            "admin0",
+        }:
+            rename_map[key] = "admin0Name"
+        elif lowered in {
+            "admin0pcode",
+            "countrypcode",
+            "countryiso3",
+            "iso3",
+            "operationiso3",
+            "operationadmin0pcode",
+        }:
+            rename_map[key] = "admin0Pcode"
+    if rename_map:
+        frame = frame.rename(columns=rename_map)
+
+    if "admin0Name" not in frame.columns:
+        for candidate in ("CountryName", "OperationName", "country", "Country"):
+            if candidate in frame.columns:
+                frame["admin0Name"] = frame[candidate]
+                break
+    if "admin0Name" not in frame.columns:
+        frame["admin0Name"] = ""
+
+    if "admin0Pcode" not in frame.columns:
+        for candidate in (
+            "CountryISO3",
+            "CountryPcode",
+            "ISO3",
+            "iso3",
+            "Admin0Pcode",
+            "OperationISO3",
+        ):
+            if candidate in frame.columns:
+                frame["admin0Pcode"] = frame[candidate]
+                break
+    if "admin0Pcode" not in frame.columns:
+        frame["admin0Pcode"] = ""
+
+    frame["admin0Name"] = frame["admin0Name"].astype(str).str.strip()
+    codes: List[str] = []
+    for name, code in zip(frame["admin0Name"], frame["admin0Pcode"].astype(str)):
+        iso = str(code or "").strip().upper()
+        if len(iso) != 3 or not iso.isalpha():
+            iso = (to_iso3(name, {}) or iso).upper()
+        codes.append(iso)
+    frame["admin0Pcode"] = codes
+    frame = frame[(frame["admin0Name"] != "") & (frame["admin0Pcode"] != "")]
+    frame = frame.drop_duplicates(subset=["admin0Name", "admin0Pcode"]).reset_index(drop=True)
+    return frame[["admin0Name", "admin0Pcode"]]
+
+
+def _load_static_iso3(path: Path | None = None) -> pd.DataFrame:
+    roster_path = Path(path or STATIC_ISO3_PATH)
+    if not roster_path.exists():
+        LOG.warning("Static ISO3 roster missing at %s", roster_path)
+        raise FileNotFoundError(f"Static ISO3 roster missing at {roster_path}")
     try:
-        frame = api.get_all_countries()
-    except Exception as exc:
-        message = str(exc)
-        lowered = message.lower()
-        status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-        reason = "exception"
-        hint: Optional[str] = None
-        if status in {401, 403} or any(token in lowered for token in ("401", "403", "unauthorized", "forbidden")):
-            reason = "invalid_key"
-            hint = "Verify DTM_API_KEY validity. Invalid or expired keys are rejected with 401/403."
-        _write_discovery_failure(
-            reason,
-            message=message or reason,
-            hint=hint,
-            extra={
-                "sdk_version": _dtm_sdk_version(),
-                "api_base": getattr(api, "base_url", getattr(api, "_base_url", "unknown")),
-            },
+        frame = pd.read_csv(
+            roster_path,
+            dtype=str,
+            keep_default_na=False,
+            engine="python",
+            quoting=csv.QUOTE_MINIMAL,
         )
-        LOG.exception("Country discovery failed; see discovery_fail.json")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOG.error("Failed to load static ISO3 roster from %s: %s", roster_path, exc)
         raise
+    required = {"admin0Pcode", "admin0Name"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Static ISO3 roster missing columns {sorted(missing)}")
+    frame["admin0Pcode"] = frame["admin0Pcode"].astype(str).str.strip()
+    frame["admin0Name"] = frame["admin0Name"].astype(str).str.strip()
+    frame = frame[(frame["admin0Pcode"] != "") & (frame["admin0Name"] != "")]
+    if len(frame) < 180:
+        raise ValueError(f"Static ISO3 roster unexpectedly small: {len(frame)} rows")
+    return frame[["admin0Pcode", "admin0Name"]]
 
-    if not isinstance(frame, pd.DataFrame):
-        frame = pd.DataFrame(frame or [])
 
-    try:
-        diagnostics_dump_json(frame.to_dict(orient="records"), DISCOVERY_RAW_JSON_PATH)
-    except Exception:  # pragma: no cover - diagnostics only
-        LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
+def _perform_discovery(
+    cfg: Mapping[str, Any],
+    *,
+    metrics: Optional[MutableMapping[str, Any]] = None,
+    api_key: Optional[str] = None,
+) -> DiscoveryResult:
+    _ensure_diagnostics_scaffolding()
 
-    values: List[str] = []
-    if "CountryName" in frame.columns:
-        values = [
-            str(name).strip()
-            for name in frame["CountryName"].dropna().astype(str).tolist()
-            if str(name).strip()
+    api_cfg = cfg.get("api", {}) if isinstance(cfg.get("api"), Mapping) else {}
+    requested_countries_raw = api_cfg.get("countries")
+    if isinstance(requested_countries_raw, (list, tuple)):
+        requested_countries = [
+            str(country).strip()
+            for country in requested_countries_raw
+            if str(country).strip()
         ]
     else:
-        values = [
-            str(item.get("CountryName", "")).strip()
-            for item in frame.to_dict("records")
-            if str(item.get("CountryName", "")).strip()
-        ]
+        requested_countries = []
+    if requested_countries:
+        LOG.info(
+            "Config requested countries=%s -> using explicit list (discovery bypassed)",
+            requested_countries,
+        )
+        alias_map = cfg.get("country_aliases") or {}
+        normalized_records = []
+        for country in requested_countries:
+            iso_candidate = to_iso3(country, alias_map) or country
+            iso_value = str(iso_candidate or "").strip().upper()
+            if len(iso_value) != 3 or not iso_value.isalpha():
+                letters_only = "".join(ch for ch in country.upper() if ch.isalpha())
+                iso_value = letters_only[:3]
+                if len(iso_value) != 3:
+                    iso_value = iso_value.ljust(3, "X")
+            normalized_records.append(
+                {"admin0Name": country, "admin0Pcode": iso_value or None}
+            )
+        discovered = pd.DataFrame(normalized_records, columns=["admin0Name", "admin0Pcode"])
+        discovered = _normalize_discovery_frame(discovered)
+        stage_entry = {
+            "stage": "explicit_list",
+            "status": "ok" if not discovered.empty else "empty",
+            "rows": int(discovered.shape[0]),
+            "attempts": 1,
+            "latency_ms": 0,
+        }
+        report = {
+            "stages": [stage_entry],
+            "errors": []
+            if not discovered.empty
+            else [{"stage": "explicit_list", "message": "empty_result"}],
+            "attempts": {"explicit_list": 1},
+            "latency_ms": {"explicit_list": 0},
+            "used_stage": "explicit_list",
+        }
+        _write_discovery_report(report)
+        try:
+            diagnostics_dump_json(discovered.to_dict(orient="records"), DISCOVERY_RAW_JSON_PATH)
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
+        try:
+            DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            discovered.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery snapshot", exc_info=True)
+        if metrics is not None:
+            metrics["countries_attempted"] = len(requested_countries)
+            metrics["stage_used"] = "explicit_list"
+            _write_metrics_summary_file(metrics)
+        return DiscoveryResult(
+            countries=requested_countries,
+            frame=discovered,
+            stage_used="explicit_list",
+            report=report,
+        )
+    timeouts = api_cfg.get("timeouts", {}) if isinstance(api_cfg.get("timeouts"), Mapping) else {}
+    retries_cfg = api_cfg.get("retries", {}) if isinstance(api_cfg.get("retries"), Mapping) else {}
+    connect_timeout = float(timeouts.get("connect_seconds", 5))
+    read_timeout = float(timeouts.get("read_seconds", 30))
+    retry_attempts = int(retries_cfg.get("attempts", 3))
+    backoff_seconds = float(retries_cfg.get("backoff_seconds", 1.5))
+    discovery_order = api_cfg.get("discovery_order") or ["countries", "operations", "static_iso3"]
+    if not isinstance(discovery_order, Iterable):
+        discovery_order = ["countries", "operations", "static_iso3"]
+    order = [str(stage).strip().lower() for stage in discovery_order if str(stage).strip()]
+    if "static_iso3" not in order:
+        order.append("static_iso3")
 
-    names = sorted(set(values))
+    key = (api_key or get_dtm_api_key() or "").strip()
+    if not key:
+        raise RuntimeError("Missing DTM_API_KEY environment variable.")
+
+    stage_entries: List[Dict[str, Any]] = []
+    stage_errors: List[Dict[str, Any]] = []
+    attempts_map: Dict[str, int] = {}
+    latency_map: Dict[str, int] = {}
+    discovered = pd.DataFrame(columns=["admin0Name", "admin0Pcode"])
+    used_stage: Optional[str] = None
+
+    for stage in order:
+        started = time.perf_counter()
+        stage_name = stage
+        try:
+            if stage == "countries":
+                raw = _get_country_list_via_http(
+                    "/v3/displacement/country-list",
+                    key,
+                    connect_timeout=connect_timeout,
+                    read_timeout=read_timeout,
+                    retries=retry_attempts,
+                    backoff=backoff_seconds,
+                )
+                attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
+            elif stage == "operations":
+                raw = _get_country_list_via_http(
+                    "/v3/displacement/operations-list",
+                    key,
+                    connect_timeout=connect_timeout,
+                    read_timeout=read_timeout,
+                    retries=retry_attempts,
+                    backoff=backoff_seconds,
+                )
+                attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
+            elif stage == "static_iso3":
+                raw = _load_static_iso3()
+                attempts = 1
+            else:
+                LOG.debug("Skipping unknown discovery stage %s", stage)
+                continue
+            frame = _normalize_discovery_frame(raw)
+            latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+            attempts_map[stage_name] = int(attempts)
+            latency_map[stage_name] = latency_ms
+            status = "ok" if not frame.empty else "empty"
+            stage_entry = {
+                "stage": stage_name,
+                "status": status,
+                "rows": int(frame.shape[0]),
+                "attempts": int(attempts),
+                "latency_ms": latency_ms,
+            }
+            stage_entries.append(stage_entry)
+            if frame.empty and stage != "static_iso3":
+                stage_errors.append({"stage": stage_name, "message": "empty_result"})
+                continue
+            if frame.empty and stage == "static_iso3":
+                stage_errors.append({"stage": stage_name, "message": "static_roster_empty"})
+            discovered = frame
+            used_stage = stage_name
+            break
+        except RetryError as exc:
+            attempts = exc.last_attempt.attempt_number if exc.last_attempt else retry_attempts
+            latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+            stage_entries.append(
+                {
+                    "stage": stage_name,
+                    "status": "error",
+                    "rows": 0,
+                    "attempts": int(attempts),
+                    "latency_ms": latency_ms,
+                }
+            )
+            attempts_map[stage_name] = int(attempts)
+            latency_map[stage_name] = latency_ms
+            error_message = str(exc.last_attempt.exception()) if exc.last_attempt else str(exc)
+            stage_errors.append({"stage": stage_name, "message": error_message})
+            continue
+        except Exception as exc:
+            latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+            attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
+            stage_entries.append(
+                {
+                    "stage": stage_name,
+                    "status": "error",
+                    "rows": 0,
+                    "attempts": attempts,
+                    "latency_ms": latency_ms,
+                }
+            )
+            attempts_map[stage_name] = attempts
+            latency_map[stage_name] = latency_ms
+            stage_errors.append({"stage": stage_name, "message": str(exc)})
+            continue
+
+    if used_stage is None and stage_entries:
+        used_stage = stage_entries[-1]["stage"]
+
+    countries = sorted(
+        {
+            str(name).strip()
+            for name in discovered.get("admin0Name", pd.Series(dtype=str)).dropna().astype(str)
+            if str(name).strip()
+        }
+    )
+
+    report = {
+        "stages": stage_entries,
+        "errors": stage_errors,
+        "attempts": attempts_map,
+        "latency_ms": latency_map,
+        "used_stage": used_stage,
+    }
+    _write_discovery_report(report)
 
     try:
+        diagnostics_dump_json(discovered.to_dict(orient="records"), DISCOVERY_RAW_JSON_PATH)
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
+    try:
         DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
-        LOG.info("Discovery snapshot saved to %s", DISCOVERY_SNAPSHOT_PATH)
+        discovered.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to persist discovery snapshot", exc_info=True)
 
     LOG.info(
-        "Discovered %d countries (top 10=%s)",
-        len(names),
-        ", ".join(names[:10]),
+        "Discovery stages complete | used_stage=%s countries=%d", used_stage, len(countries)
     )
 
-    if len(names) == 0:
-        _write_discovery_failure(
-            "empty_discovery",
-            message="Country catalog returned zero rows",
-            hint="Verify DTM_API_KEY validity. Empty list may indicate expired or invalid key.",
-            extra={
-                "sdk_version": _dtm_sdk_version(),
-                "api_base": getattr(api, "base_url", getattr(api, "_base_url", "unknown")),
-            },
-        )
-        LOG.error("Discovery returned 0 countries; aborting.")
-        raise RuntimeError("DTM: 0 countries discovered, aborting")
-    return names
+    if metrics is not None:
+        metrics["countries_attempted"] = len(countries)
+        metrics["stage_used"] = used_stage
+        _write_metrics_summary_file(metrics)
 
-
-def _fallback_discover_operations(api: Any) -> List[str]:
-    """Discover selectors via operations when countries endpoint fails."""
-
-    try:
-        ops = api.get_all_operations()
-    except Exception as exc:  # pragma: no cover - defensive guard
-        LOG.error("Fallback operations discovery failed: %s", exc)
-        return []
-
-    if not isinstance(ops, pd.DataFrame):
-        ops = pd.DataFrame(ops or [])
-
-    if "OperationName" in ops.columns:
-        values = [
-            str(name).strip()
-            for name in ops["OperationName"].dropna().astype(str).tolist()
-            if str(name).strip()
-        ]
-    else:
-        values = [
-            str(item.get("OperationName", "")).strip()
-            for item in ops.to_dict("records")
-            if str(item.get("OperationName", "")).strip()
-        ]
-
-    names = sorted(set(values))
-    if names:
-        LOG.warning(
-            "Country discovery empty; falling back to operations (%d found)",
-            len(names),
-        )
-    return names
+    return DiscoveryResult(countries=countries, frame=discovered, stage_used=used_stage, report=report)
 
 
 def _dump_head(df: pd.DataFrame, level: str, country: str, limit: int = 100) -> None:
@@ -1072,6 +1538,9 @@ def _fetch_api_data(
         "countries": {"requested": [], "resolved": []},
     }
 
+    run_started = time.perf_counter()
+    metrics_summary = _init_metrics_summary()
+    _ensure_diagnostics_scaffolding()
     summary_extras = summary.setdefault("extras", {})
     per_country_counts: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -1096,6 +1565,8 @@ def _fetch_api_data(
             hint="Set DTM_API_KEY to the IOM DTM subscription key before running the connector.",
             extra={"sdk_version": _dtm_sdk_version()},
         )
+        metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
+        _write_metrics_summary_file(metrics_summary)
         raise ValueError(message) from exc
 
     admin_levels = _resolve_admin_levels(cfg)
@@ -1111,15 +1582,10 @@ def _fetch_api_data(
         )
 
     target = client.client if hasattr(client, "client") else client
-    discovery_source = "countries"
-    try:
-        resolved_countries = _discover_all_countries(target)
-    except RuntimeError:
-        raise
-    except Exception:
-        LOG.exception("Primary discovery failed; trying fallback operations")
-        resolved_countries = _fallback_discover_operations(target)
-        discovery_source = "operations" if resolved_countries else "none"
+    discovery_result = _perform_discovery(cfg, metrics=metrics_summary)
+    resolved_countries = discovery_result.countries
+    discovery_source = discovery_result.stage_used or "none"
+    metrics_summary["stage_used"] = discovery_source
 
     if not resolved_countries:
         _write_discovery_failure(
@@ -1151,6 +1617,7 @@ def _fetch_api_data(
         "api_base": getattr(target, "base_url", getattr(target, "_base_url", "unknown")),
         "discovery_file": str(DISCOVERY_SNAPSHOT_PATH),
         "source": discovery_source,
+        "stages": discovery_result.report.get("stages", []),
     }
     summary_extras["discovery"] = discovery_info
     diagnostics_payload = summary_extras.setdefault("diagnostics", {})
@@ -1159,6 +1626,8 @@ def _fetch_api_data(
     diagnostics_payload["metrics"] = str(PER_COUNTRY_METRICS_PATH)
     diagnostics_payload["sample"] = str(SAMPLE_ROWS_PATH)
     diagnostics_payload["log"] = str(DTM_CLIENT_LOG_PATH)
+    diagnostics_payload["discovery_fail"] = str(DISCOVERY_FAIL_PATH)
+    diagnostics_payload["discovery_used_stage"] = discovery_source
     diagnostics_payload["no_data_combos"] = 0
 
     api_base_url = discovery_info["api_base"]
@@ -1397,6 +1866,11 @@ def _fetch_api_data(
                         except Exception:  # pragma: no cover - diagnostics only
                             LOG.debug("failed to write sample rows", exc_info=True)
                         page = page.rename(columns={idp_column: "idp_count"})
+                        if level == "admin0":
+                            try:
+                                _record_admin0_sample(page, operation=operation)
+                            except Exception:  # pragma: no cover - diagnostics only
+                                LOG.debug("Unable to update admin0 sample", exc_info=True)
 
                         per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
                         per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
@@ -1518,12 +1992,25 @@ def _fetch_api_data(
             window_label,
             zero_reason,
         )
+        metrics_summary["countries_ok"] = sum(
+            1 for entry in per_country_counts if int(entry.get("rows", 0)) > 0
+        )
+        metrics_summary["rows_fetched"] = int(total_rows)
+        metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
+        _write_metrics_summary_file(metrics_summary)
         raise DTMZeroRowsError(window_label, zero_reason)
 
     effective_params = summary.get("extras", {}).get("effective_params")
     if isinstance(effective_params, MutableMapping):
         effective_params["per_page"] = summary.get("paging", {}).get("page_size")
         effective_params["max_pages"] = summary.get("paging", {}).get("pages")
+
+    metrics_summary["countries_ok"] = sum(
+        1 for entry in per_country_counts if int(entry.get("rows", 0)) > 0
+    )
+    metrics_summary["rows_fetched"] = int(summary.get("rows", {}).get("fetched", 0))
+    metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
+    _write_metrics_summary_file(metrics_summary)
 
     return all_records, summary
 
@@ -1948,10 +2435,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     ensure_header_only()
                 timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except DTMZeroRowsError as exc:
-        LOG.error("dtm: zero rows reason=%s", exc.zero_rows_reason)
-        status = "error"
+        LOG.warning("dtm: zero rows reason=%s", exc.zero_rows_reason)
+        status = "ok-empty"
         reason = str(exc)
-        exit_code = 2
+        exit_code = 0
         extras["zero_rows_reason"] = exc.zero_rows_reason
         extras.setdefault("diagnostics", {})["zero_rows_reason"] = exc.zero_rows_reason
         ensure_header_only()
@@ -1959,7 +2446,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.error("dtm: %s", exc)
         status = "error"
         reason = str(exc)
-        exit_code = 2
+        exit_code = 1
         ensure_header_only()
     except Exception as exc:  # pragma: no cover - defensive guard
         LOG.exception("dtm: unexpected failure")
@@ -1978,10 +2465,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             extras["rows_total"] = 0
         else:
             reason = f"wrote {rows_written} rows"
-
-    if status == "ok-empty" and strict_empty and exit_code == 0:
-        exit_code = 3
-        LOG.error("dtm: strict-empty enabled; failing due to zero rows")
+    elif status == "ok-empty":
+        extras["rows_total"] = rows_written
+        if strict_empty:
+            status = "error"
+            exit_code = 2
+            LOG.error("dtm: strict-empty enabled; failing due to zero rows")
+        else:
+            reason = reason or "header-only (0 rows)"
 
     summary_timings = summary.get("timings_ms") if isinstance(summary, Mapping) else {}
     if isinstance(summary_timings, Mapping):

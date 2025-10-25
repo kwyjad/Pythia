@@ -184,6 +184,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     logs_dir = root / LOGS_DIR
     report_path = root / REPORT_PATH
 
+    diag_base = root / "diagnostics" / "ingestion"
+    for sub in ("logs", "raw", "metrics", "samples", "dtm"):
+        (diag_base / sub).mkdir(parents=True, exist_ok=True)
+    for sub in ("raw", "metrics", "samples"):
+        keep = diag_base / sub / ".keep"
+        if not keep.exists():
+            try:
+                keep.touch()
+            except OSError:
+                pass
+
     logs_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -235,6 +246,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         diagnostics_append_jsonl(report_path, result)
+        for sub in ("raw", "metrics", "samples"):
+            keep = diag_base / sub / ".keep"
+            try:
+                keep.touch()
+            except OSError:
+                pass
         print(f"=== DONE {name} (rc={rc}) ===")
         if rc != 0 and overall_rc == 0:
             overall_rc = rc

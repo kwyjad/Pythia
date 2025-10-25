@@ -276,7 +276,7 @@ The DTM connector is API-only and always calls the official DTM API via the `dtm
 | Field | Required | Description |
 | --- | --- | --- |
 | `api.admin_levels` | no | Levels to fetch (`admin0`, `admin1`, `admin2`). Defaults to `admin0`. |
-| `api.countries` | no | Optional hint of ISO3 codes or country names. Leave empty (default) to fetch the full catalog at runtime. |
+| `api.countries` | no | Optional list of ISO3 codes or country names. When provided the connector skips discovery and uses the explicit list in order. |
 | `api.operations` | no | Operation names for admin2 pulls. |
 | `api.discovery_order` | no | Discovery strategy order. Defaults to `[countries, operations, static_iso3]`. |
 | `api.timeouts` | no | HTTP connect/read timeouts in seconds. Defaults to `5` connect / `30` read. |
@@ -324,10 +324,14 @@ field_aliases:
 - `diagnostics/ingestion/metrics/dtm_per_country.jsonl` — JSONL ledger with per-country/per-level row counts and elapsed timings for each request.
 - `diagnostics/ingestion/samples/dtm_sample.csv` — up to 200 normalized rows across all countries and admin levels.
 - `diagnostics/ingestion/logs/dtm_client.log` — enriched connector log including masked key suffix, window, country counts, per-level totals, and retry snapshots.
-- `diagnostics/ingestion/dtm/discovery_countries.csv` — snapshot of the SDK catalog used for discovery with the original fields as returned by `get_all_countries()`.
+- `diagnostics/ingestion/dtm/discovery_countries.csv` — snapshot of the selectors used for the run (SDK payload when discovery succeeds, or the explicit/static roster used as fallback).
 - `diagnostics/ingestion/dtm/dtm_http.ndjson` — per-request ledger including `level`, `country`, optional `operation`, elapsed time, row count, and status (`ok`, `empty`, `error`).
 - `diagnostics/ingestion/dtm/sample_<level>.csv` — 50-row samples of the first non-empty response per admin level for schema reference.
-- `diagnostics/ingestion/dtm/discovery_fail.json` — emitted when discovery fails or returns zero selectors; captures SDK version, base URL, reason (`missing_key`, `invalid_key`, `empty_discovery`, `exception`), message, optional hint, and timestamp to support fail-fast troubleshooting.
+- `diagnostics/ingestion/dtm/discovery_fail.json` — always written; records `stages` (per-discovery attempt status, latency, and row counts), `errors` (any exception details), `attempts` (by stage), `latency_ms`, and `used_stage` (`explicit_list`, `countries`, `operations`, or `static_iso3`). A static ISO-3 roster ships with the connector and is used when both HTTP discovery stages fail.
+- `diagnostics/ingestion/metrics/metrics.json` — summary payload with `countries_attempted`, `countries_ok`, `rows_fetched`, `duration_sec`, and `stage_used` for each run (updated even on failure).
+- `diagnostics/ingestion/samples/sample_admin0.csv` — per-run CSV with headers and up to five Admin0 samples; always present so CI uploads succeed even when discovery fails.
+
+The static fallback roster lives at `resolver/ingestion/static/iso3_master.csv` and contains exactly two UTF-8 columns (`admin0Pcode`, `admin0Name`). Country names containing commas **must** be quoted (RFC 4180) so pandas can read the file without ambiguity. The helper `resolver/ingestion/static/iso3_master.validate.py` can be invoked locally or in CI to sanity-check edits.
 
 **Output metadata:**
 - `data/staging/dtm_displacement.csv.meta.json` captures the CSV row count, resolved ingestion window, the dependency snapshot (`deps` with `python`, `executable`, `dtmapi`, `pandas`, `requests`), effective query parameters (`effective_params` with `from`, `to`, `admin_levels`, `country_mode`, `discovered_countries_count`, `idp_aliases`, paging stats, and country echoes), HTTP counters (`http_counters`), timing information (`timings_ms`), a per-country row breakdown (`per_country_counts`), any per-country failures recorded during the run (`failures`), a `discovery` object (`total_countries`, `sdk_version`, `api_base`, `discovery_file`, `source`), and a `diagnostics` object (`http_trace`, `samples`, `raw_countries`, `metrics`, `sample`, `log`, `no_data_combos`).

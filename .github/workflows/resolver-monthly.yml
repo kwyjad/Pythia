@@ -171,7 +171,7 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples}
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
           mkdir -p .ci/diagnostics .ci/exitcodes || true
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors || CONNECTOR_EXIT=$?
