@@ -24,11 +24,40 @@ def _ensure_dict(data: Any) -> Dict[str, Any]:
     return dict(data) if isinstance(data, Mapping) else {}
 
 
+def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, Mapping) else None
+
+
 def _coerce_int(value: Any) -> int:
     try:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
+
+
+def _format_meta_cell(
+    extras: Mapping[str, Any] | None,
+    meta_json: Mapping[str, Any] | None,
+) -> str:
+    """Render the Meta cell value applying ok-empty and missing-count rules."""
+    try:
+        status_raw = (extras or {}).get("status_raw")
+        if status_raw == "ok-empty":
+            return "—"
+        row_count = (meta_json or {}).get("row_count")
+        if row_count in (None, ""):
+            return "—"
+        return str(int(row_count))
+    except Exception:
+        return "—"
 
 
 def _normalise_samples(values: Any) -> List[Tuple[str, int]]:
@@ -302,6 +331,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         "Coverage (ym)",
         "Coverage (as_of)",
         "Logs",
+        "Meta rows",
         "Meta",
     ]
     logs_dir = Path("diagnostics/ingestion/logs")
@@ -313,6 +343,12 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         connector_id = str(entry.get("connector_id"))
         log_path = logs_dir / f"{connector_id}.log"
         extras = _ensure_dict(entry.get("extras"))
+        counts_map = _ensure_dict(entry.get("counts"))
+        rows_written_extra = extras.get("rows_written")
+        if rows_written_extra is not None:
+            rows_written_value = _coerce_int(rows_written_extra)
+        else:
+            rows_written_value = _coerce_int(counts_map.get("written"))
         config_issues_path = extras.get("config_issues_path")
         log_cell = str(log_path) if log_path.exists() else "—"
         if connector_id == "dtm_client" and config_issues_path:
@@ -324,10 +360,14 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             )
         meta_path_raw = extras.get("meta_path")
         meta_cell = "—"
+        meta_payload: Mapping[str, Any] | None = None
         if meta_path_raw:
             meta_path = Path(str(meta_path_raw))
             if meta_path.exists():
                 meta_cell = str(meta_path)
+                loaded = _safe_load_json(meta_path)
+                if isinstance(loaded, Mapping):
+                    meta_payload = loaded
         reason_text = entry.get("reason")
         status_text = str(entry.get("status"))
         kept_cell = "—"
@@ -335,11 +375,6 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
         parse_cell = "—"
         if connector_id == "dtm_client":
             status_raw = str(extras.get("status_raw") or status_text)
-            rows_written_extra = extras.get("rows_written")
-            if rows_written_extra is not None:
-                rows_written_value = _coerce_int(rows_written_extra)
-            else:
-                rows_written_value = _coerce_int(entry.get("counts", {}).get("written"))
             if status_raw == "ok-empty" or rows_written_value == 0:
                 status_text = "ok-empty"
                 if not reason_text:
@@ -381,6 +416,12 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             else:
                 reason_text = f"{status}: missing id_or_path"
         reason_cell = _format_reason(reason_text)
+        status_raw_normalized = (
+            str(extras.get("status_raw") or entry.get("status_raw") or status_text)
+            .strip()
+            .lower()
+        )
+        meta_rows_cell = _format_meta_cell(extras, meta_payload)
         rows.append(
             [
                 connector_id,
@@ -396,6 +437,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 _format_coverage(coverage.get("ym_min"), coverage.get("ym_max")),
                 _format_coverage(coverage.get("as_of_min"), coverage.get("as_of_max")),
                 log_cell,
+                meta_rows_cell,
                 meta_cell,
             ]
         )
