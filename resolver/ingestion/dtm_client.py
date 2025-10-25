@@ -50,6 +50,7 @@ from resolver.scripts.ingestion._dtm_debug_utils import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
 STAGING = ROOT / "staging"
 CONFIG_PATH = ROOT / "ingestion" / "config" / "dtm.yml"
 DEFAULT_OUTPUT = ROOT / "staging" / "dtm_displacement.csv"
@@ -57,7 +58,7 @@ OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
-DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
+DIAGNOSTICS_DIR = REPO_ROOT / "diagnostics" / "ingestion"
 DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
 DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
 DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_DIR / "metrics"
@@ -140,6 +141,22 @@ for directory in (
     DIAGNOSTICS_LOG_DIR,
 ):
     directory.mkdir(parents=True, exist_ok=True)
+
+_LEGACY_DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
+
+
+def _mirror_legacy_diagnostics() -> None:
+    try:
+        _LEGACY_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+        for path in (RUN_DETAILS_PATH, CONNECTORS_REPORT):
+            if path.exists():
+                target = _LEGACY_DIAGNOSTICS_DIR / path.name
+                target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        LOG.debug(
+            "Compat mirror to resolver/diagnostics failed (non-fatal)",
+            exc_info=True,
+        )
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
@@ -934,6 +951,7 @@ def _write_connector_report(
     with CONNECTORS_REPORT.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, default=str))
         handle.write("\n")
+    _mirror_legacy_diagnostics()
 
 
 def _append_summary_stub_if_needed(message: str) -> None:
@@ -2444,6 +2462,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "args": vars(args),
         }
         write_json(RUN_DETAILS_PATH, run_payload)
+        _mirror_legacy_diagnostics()
         print("DTM offline diagnostics: offline-smoke mode active (DTM_API_KEY not required)")
         return 0
 
@@ -2481,6 +2500,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "args": vars(args),
         }
         write_json(RUN_DETAILS_PATH, run_payload)
+        _mirror_legacy_diagnostics()
         LOG.error(reason)
         return 1
 
@@ -2664,6 +2684,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_payload["extras"]["api_sample_path"] = str(API_SAMPLE_PATH)
 
     write_json(RUN_DETAILS_PATH, run_payload)
+    _mirror_legacy_diagnostics()
     extras["run_details_path"] = str(RUN_DETAILS_PATH)
     extras["meta_path"] = str(META_PATH)
     if API_SAMPLE_PATH.exists():
@@ -2680,6 +2701,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         extras=extras,
     )
     diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+    _mirror_legacy_diagnostics()
 
     return exit_code
 
