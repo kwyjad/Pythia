@@ -1,25 +1,41 @@
 enabled: true
 api:
-  countries: []            # empty ⇒ discover all countries at runtime
-  admin_levels: [admin0]   # limit to admin0 for now
+  countries: []
+  admin_levels:
+    - admin0
   operations: []
-  indicators: ["idps"]
-  discovery_order: ["countries","operations","static_iso3"]  # discovery stages (static roster is last resort)
+  indicators:
+    - idps
+  discovery_order:
+    - countries
+    - operations
+    - static_iso3
   timeouts:
-    connect_seconds: 5   # HTTP connect timeout (seconds)
-    read_seconds: 30     # HTTP read timeout (seconds)
+    connect_seconds: 5
+    read_seconds: 30
   retries:
-    attempts: 3          # max retry attempts for discovery endpoints
-    backoff_seconds: 1.5 # base for exponential jitter between retries
+    attempts: 3
+    backoff_seconds: 1.5
 output:
   measure: stock
-
 field_aliases:
-  idp_count: ["TotalIDPs","IDPTotal"]
-
+  idp_count:
+    - TotalIDPs
+    - IDPTotal
 shock_keywords:
-  displacement_influx: ["flow monitoring","movement"]
-  flood: ["flood"]
-  drought: ["drought"]
-  cyclone: ["cyclone","hurricane","typhoon","storm"]
-  conflict: ["conflict","violence","clashes"]
+  displacement_influx:
+    - flow monitoring
+    - movement
+  flood:
+    - flood
+  drought:
+    - drought
+  cyclone:
+    - cyclone
+    - hurricane
+    - typhoon
+    - storm
+  conflict:
+    - conflict
+    - violence
+    - clashes

@@ -50,6 +50,10 @@ alongside the resolver by running `pip install -e .[connectors]` (preferred) or
 `pip install "dtmapi>=0.1.5"` inside your virtual environment before invoking
 `resolver/ingestion/dtm_client.py`.
 
+When the connector runs without network access (e.g. `--offline-smoke`, missing API
+credentials, or `RESOLVER_SKIP_DTM=1`), it still creates the staging file with just the
+canonical header row and appends a diagnostics entry to `diagnostics/ingestion/connectors_report.jsonl`.
+
 ## Connector toggles & outputs
 
 | Connector | Enabled via | Primary source | Monthly allocation | Dedup strategy | Output |

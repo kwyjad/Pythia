@@ -1456,200 +1456,6 @@ def ensure_header_only() -> None:
     ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
 
 
-def _previous_month(month_start_dt: datetime) -> datetime:
-    year = month_start_dt.year
-    month = month_start_dt.month
-    if month == 1:
-        year -= 1
-        month = 12
-    else:
-        month -= 1
-    return month_start_dt.replace(year=year, month=month)
-
-
-def _generate_offline_rows(reference: Optional[datetime] = None) -> List[List[Any]]:
-    now = reference or datetime.now(timezone.utc)
-    as_of_iso = now.isoformat()
-    current_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-    previous_month = _previous_month(current_month)
-
-    samples = [
-        {"iso3": "ETH", "admin1": "Amhara", "month": previous_month, "value": 120},
-        {"iso3": "ETH", "admin1": "Amhara", "month": current_month, "value": 95},
-        {"iso3": "PHL", "admin1": "Western Visayas", "month": previous_month, "value": 80},
-        {"iso3": "PHL", "admin1": "Western Visayas", "month": current_month, "value": 105},
-    ]
-
-    rows: List[List[Any]] = []
-    country_totals: Dict[Tuple[str, str], int] = defaultdict(int)
-
-    for entry in samples:
-        iso3 = entry["iso3"]
-        admin1 = entry["admin1"]
-        month_value: datetime = entry["month"]
-        month_iso = month_value.date().isoformat()
-        value = int(entry["value"])
-        country_totals[(iso3, month_iso)] += value
-        event_key = (iso3, admin1, month_iso, "offline-smoke")
-        event_id = f"{iso3}-offline-{stable_digest(event_key)}"
-        raw_event_id = f"offline::{iso3}::{admin1 or 'country'}::{month_iso}"
-        payload = [
-            "dtm",
-            iso3,
-            admin1,
-            event_id,
-            as_of_iso,
-            month_iso,
-            "new_displaced",
-            value,
-            "people",
-            "dtm_stock_to_flow",
-            DEFAULT_CAUSE,
-            raw_event_id,
-            json.dumps(
-                {
-                    "mode": "offline-smoke",
-                    "iso3": iso3,
-                    "admin1": admin1,
-                    "month_start": month_iso,
-                    "value": value,
-                },
-                ensure_ascii=False,
-            ),
-        ]
-        rows.append(payload)
-
-    for (iso3, month_iso), total in country_totals.items():
-        if total <= 0:
-            continue
-        event_key = (iso3, "", month_iso, "offline-smoke-country")
-        event_id = f"{iso3}-offline-{stable_digest(event_key)}"
-        raw_event_id = f"offline::{iso3}::country::{month_iso}"
-        payload = [
-            "dtm",
-            iso3,
-            "",
-            event_id,
-            as_of_iso,
-            month_iso,
-            "new_displaced",
-            int(total),
-            "people",
-            "dtm_stock_to_flow",
-            DEFAULT_CAUSE,
-            raw_event_id,
-            json.dumps(
-                {
-                    "mode": "offline-smoke",
-                    "iso3": iso3,
-                    "aggregation": "country",
-                    "month_start": month_iso,
-                    "value": int(total),
-                },
-                ensure_ascii=False,
-            ),
-        ]
-        rows.append(payload)
-
-    rows.sort(key=lambda row: (row[1], row[2], row[5], row[3]))
-    return rows
-
-
-def _run_offline_smoke(*, no_date_filter: bool, strict_empty: bool, args: argparse.Namespace) -> int:
-    LOG.info("dtm: offline-smoke mode enabled; generating synthetic data without network calls")
-    generate_started = time.perf_counter()
-    rows = _generate_offline_rows()
-    timings_ms: Dict[str, int] = {}
-    timings_ms["generate"] = max(0, int((time.perf_counter() - generate_started) * 1000))
-
-    write_started = time.perf_counter()
-    write_rows(rows)
-    timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
-
-    sample_records = [dict(zip(COLUMNS, row)) for row in rows]
-    try:
-        write_json(API_SAMPLE_PATH, sample_records[:20])
-        write_json(API_RESPONSE_SAMPLE_PATH, sample_records[:20])
-        diagnostics_write_sample_csv(pd.DataFrame(sample_records, columns=COLUMNS), SAMPLE_ROWS_PATH)
-    except Exception:  # pragma: no cover - defensive diagnostics
-        LOG.debug("dtm: unable to persist offline smoke samples", exc_info=True)
-
-    deps_payload = {
-        "python": sys.version.split()[0],
-        "executable": sys.executable,
-        "dtmapi": "skipped-offline",
-        "pandas": _package_version("pandas"),
-        "requests": _package_version("requests"),
-    }
-
-    http_payload: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
-    http_payload["retries"] = 0
-    http_payload["last_status"] = None
-    http_payload["rate_limit_remaining"] = None
-
-    counts_payload = {"fetched": 0, "normalized": len(rows), "written": len(rows)}
-    reason = f"offline-smoke wrote {len(rows)} rows"
-    extras_payload: Dict[str, Any] = {
-        "mode": "offline-smoke",
-        "rows_total": len(rows),
-        "status_raw": "ok",
-        "exit_code": 0,
-        "strict_empty": strict_empty,
-        "no_date_filter": no_date_filter,
-        "offline_smoke": True,
-        "timings_ms": dict(timings_ms),
-    }
-
-    _write_connector_report(
-        status="ok",
-        reason=reason,
-        extras=extras_payload,
-        http=http_payload,
-        counts=counts_payload,
-    )
-
-    _write_meta(
-        len(rows),
-        None,
-        None,
-        deps=deps_payload,
-        effective_params={},
-        http_counters=http_payload,
-        timings_ms=timings_ms,
-        diagnostics={"mode": "offline-smoke"},
-    )
-
-    run_payload = {
-        "window": {"start": None, "end": None},
-        "countries": {},
-        "http": dict(http_payload),
-        "paging": {"pages": 0, "page_size": None, "total_received": 0},
-        "rows": {
-            "fetched": 0,
-            "normalized": len(rows),
-            "written": len(rows),
-            "kept": len(rows),
-            "dropped": 0,
-        },
-        "totals": {"rows_written": len(rows)},
-        "status": "ok",
-        "reason": reason,
-        "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
-        "extras": {
-            "mode": "offline-smoke",
-            "timings_ms": dict(timings_ms),
-            "deps": deps_payload,
-            "rows_total": len(rows),
-        },
-        "args": vars(args),
-    }
-
-    write_json(RUN_DETAILS_PATH, run_payload)
-    _mirror_legacy_diagnostics()
-    print("DTM offline diagnostics: offline-smoke mode wrote sample data (DTM_API_KEY not required)")
-    return 0
-
-
 def write_rows(rows: Sequence[Sequence[Any]]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", encoding="utf-8", newline="") as handle:
@@ -2559,7 +2365,7 @@ def _write_meta(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(list(argv) if argv is not None else None)
+    args = parse_args(argv or ())
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
         log_level_name = "DEBUG"
@@ -2573,10 +2379,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
-
-    if offline_smoke:
-        LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")
-        return _run_offline_smoke(no_date_filter=no_date_filter, strict_empty=strict_empty, args=args)
 
     preflight_started = time.perf_counter()
     dep_info, have_dtmapi = _preflight_dependencies()
@@ -2614,6 +2416,55 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "offline_smoke": offline_smoke,
         "timings_ms": dict(timings_ms),
     }
+
+    if offline_smoke:
+        LOG.info("dtm: offline smoke mode enabled; skipping network calls")
+        ensure_header_only()
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = dict(base_extras)
+        extras_payload.update(
+            {
+                "rows_total": 0,
+                "exit_code": 0,
+                "status_raw": "offline",
+                "mode": "offline-smoke",
+            }
+        )
+        extras_payload["timings_ms"] = dict(timings_ms)
+        _write_connector_report(
+            status="skipped",
+            reason="offline-smoke mode",
+            extras=extras_payload,
+            http=dict(base_http),
+            counts=counts_payload,
+        )
+        _write_meta(
+            0,
+            None,
+            None,
+            deps=deps_payload,
+            effective_params={},
+            http_counters=base_http,
+            timings_ms=timings_ms,
+            diagnostics={"mode": "offline-smoke"},
+        )
+        run_payload = {
+            "window": {"start": None, "end": None},
+            "countries": {},
+            "http": dict(base_http),
+            "paging": {"pages": 0, "page_size": None, "total_received": 0},
+            "rows": dict(counts_payload, kept=0, dropped=0),
+            "totals": {"rows_written": 0},
+            "status": "offline",
+            "reason": "offline-smoke mode",
+            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+            "extras": extras_payload,
+            "args": vars(args),
+        }
+        write_json(RUN_DETAILS_PATH, run_payload)
+        _mirror_legacy_diagnostics()
+        print("DTM offline diagnostics: offline-smoke mode active (DTM_API_KEY not required)")
+        return 0
 
     if not have_dtmapi:
         reason = "dependency-missing: dtmapi (install with: pip install 'dtmapi>=0.1.5')"
