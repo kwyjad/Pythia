@@ -32,8 +32,7 @@ pull data for every published country.
 
 ### Required secrets
 
-* `DTM_API_PRIMARY_KEY` (preferred) or `DTM_API_KEY` — primary subscription key from <https://dtm-apim-portal.iom.int/>.
-* `DTM_API_SECONDARY_KEY` (optional) — secondary key retried automatically when the primary key returns `401/403`.
+* `DTM_API_KEY` — subscription key from <https://dtm-apim-portal.iom.int/> required by the IOM DTM SDK.
 
 ### Running locally
 

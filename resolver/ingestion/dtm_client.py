@@ -43,11 +43,16 @@ OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
 DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
+DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
 CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 RUN_DETAILS_PATH = DIAGNOSTICS_DIR / "dtm_run.json"
 API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
 API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
 API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
+DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
+DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
+REQUESTS_LOG_PATH = DTM_DIAGNOSTICS_DIR / "requests.jsonl"
+HTTP_TRACE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
 
 CANONICAL_HEADERS = [
     "source",
@@ -93,6 +98,7 @@ MULTI_HAZARD = Hazard("multi", "Multi-shock Displacement/Needs", "all")
 UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
 DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+DTM_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
@@ -184,20 +190,133 @@ def _package_version(name: str) -> str:
     return str(getattr(module, "__version__", "unknown"))
 
 
-def _discover_all_countries(api: Any) -> List[str]:
+def _dtm_sdk_version() -> str:
+    try:
+        from dtmapi import DTMApi
+
+        return str(getattr(DTMApi, "__version__", "unknown"))
+    except Exception:  # pragma: no cover - diagnostics only
+        try:
+            module = importlib.import_module("dtmapi")
+        except Exception:
+            return "unknown"
+        return str(getattr(module, "__version__", "unknown"))
+
+
+def _resolve_base_url(api: Any) -> str:
+    target = getattr(api, "client", api)
+    return str(getattr(target, "base_url", getattr(target, "_base_url", "unknown")))
+
+
+def _discover_all_countries(
+    api: Any, *, http_counts: Optional[MutableMapping[str, int]] = None
+) -> List[str]:
     """Return a sorted list of country names discovered via the DTM SDK."""
 
-    frame = api.get_all_countries()
-    if not isinstance(frame, pd.DataFrame):
-        frame = pd.DataFrame(frame)
-
-    names = sorted(
-        {
-            str(row["CountryName"]).strip()
-            for _, row in frame.iterrows()
-            if row.get("CountryName")
+    LOG.info("Discovering countries via dtmapi.get_all_countries() ...")
+    try:
+        if hasattr(api, "get_countries"):
+            frame = api.get_countries(http_counts=http_counts)
+        else:
+            frame = api.get_all_countries()
+    except DTMUnauthorizedError as exc:
+        payload = {
+            "timestamp": time.time(),
+            "reason": "invalid_key",
+            "message": str(exc),
+            "status_code": getattr(exc, "status_code", None),
+            "sdk_version": _dtm_sdk_version(),
+            "api_base": _resolve_base_url(api),
+            "hint": "Verify DTM_API_KEY validity or refresh the key via the DTM portal.",
         }
-    )
+        try:
+            DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            DISCOVERY_FAIL_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+        LOG.error("Country discovery failed due to authentication; see %s", DISCOVERY_FAIL_PATH)
+        raise
+    except Exception as exc:
+        payload = {
+            "timestamp": time.time(),
+            "reason": "exception",
+            "message": str(exc),
+            "sdk_version": _dtm_sdk_version(),
+            "api_base": _resolve_base_url(api),
+        }
+        try:
+            DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            DISCOVERY_FAIL_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+        LOG.exception("Country discovery failed; see %s", DISCOVERY_FAIL_PATH)
+        raise
+
+    if not isinstance(frame, pd.DataFrame):
+        frame = pd.DataFrame(frame or [])
+
+    if "CountryName" in frame.columns:
+        values = [
+            str(name).strip()
+            for name in frame["CountryName"].dropna().astype(str).tolist()
+            if str(name).strip()
+        ]
+    else:
+        values = [
+            str(item.get("CountryName", "")).strip()
+            for item in frame.to_dict("records")
+            if str(item.get("CountryName", "")).strip()
+        ]
+
+    names = sorted(set(values))
+
+    try:
+        DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
+        LOG.info("Discovery snapshot saved to %s", DISCOVERY_SNAPSHOT_PATH)
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist discovery snapshot", exc_info=True)
+
+    LOG.info("Discovered %d countries", len(names))
+    return names
+
+
+def _fallback_discover_operations(
+    api: Any, *, http_counts: Optional[MutableMapping[str, int]] = None
+) -> List[str]:
+    """Discover selectors via operations when countries endpoint fails."""
+
+    try:
+        if hasattr(api, "get_operations"):
+            ops = api.get_operations(http_counts=http_counts)
+        else:
+            ops = api.get_all_operations()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOG.error("Fallback operations discovery failed: %s", exc)
+        return []
+
+    if not isinstance(ops, pd.DataFrame):
+        ops = pd.DataFrame(ops or [])
+
+    if "OperationName" in ops.columns:
+        values = [
+            str(name).strip()
+            for name in ops["OperationName"].dropna().astype(str).tolist()
+            if str(name).strip()
+        ]
+    else:
+        values = [
+            str(item.get("OperationName", "")).strip()
+            for item in ops.to_dict("records")
+            if str(item.get("OperationName", "")).strip()
+        ]
+
+    names = sorted(set(values))
+    if names:
+        LOG.warning(
+            "Country discovery empty; falling back to operations (%d found)",
+            len(names),
+        )
     return names
 
 
@@ -208,6 +327,38 @@ def _dump_head(df: pd.DataFrame, level: str, country: str, limit: int = 100) -> 
     path = out_dir / f"{level}.{safe_country}.head.csv"
     df.head(limit).to_csv(path, index=False)
     LOG.info("raw head written: %s (rows=%d)", path, min(limit, len(df)))
+
+
+def _write_level_sample(df: pd.DataFrame, level: str, limit: int = 50) -> None:
+    sample_path = DTM_DIAGNOSTICS_DIR / f"sample_{level}.csv"
+    if sample_path.exists():
+        return
+    try:
+        sample_path.parent.mkdir(parents=True, exist_ok=True)
+        df.head(limit).to_csv(sample_path, index=False)
+        LOG.info("Sample rows written to %s", sample_path)
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist sample rows", exc_info=True)
+
+
+def _append_request_log(entry: Mapping[str, Any]) -> None:
+    try:
+        REQUESTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REQUESTS_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, default=str))
+            handle.write("\n")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to append DTM request log entry", exc_info=True)
+
+
+def _append_http_trace(entry: Mapping[str, Any]) -> None:
+    try:
+        HTTP_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with HTTP_TRACE_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, default=str))
+            handle.write("\n")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to append DTM HTTP trace entry", exc_info=True)
 
 
 def _resolve_idp_value_column(df: pd.DataFrame, aliases: Sequence[str]) -> Optional[str]:
@@ -314,26 +465,50 @@ class DTMApiClient:
         api_key = subscription_key.strip() if subscription_key else None
         if not api_key:
             api_key = get_dtm_api_key()
-        if not api_key:
-            raise ValueError("DTM API key not configured")
 
         self.client = DTMApi(subscription_key=api_key)
         self.config = config
         api_cfg = config.get("api", {})
         self.rate_limit_delay = float(api_cfg.get("rate_limit_delay", 1.0))
         self.timeout = int(api_cfg.get("timeout", 60))
+        sdk_version = str(getattr(DTMApi, "__version__", "unknown"))
+        self.base_url = _resolve_base_url(self.client)
+        LOG.info(
+            "DTM SDK initialized | python=%s | dtmapi=%s | base_url=%s",
+            sys.version.split()[0],
+            sdk_version,
+            self.base_url,
+        )
 
-    def _record_success(self, http_counts: Optional[MutableMapping[str, int]], status: int) -> None:
-        if http_counts is None:
-            return
-        http_counts["last_status"] = status
-        bucket = "2xx" if 200 <= status < 300 else "4xx" if 400 <= status < 500 else "5xx"
-        http_counts[bucket] = http_counts.get(bucket, 0) + 1
+    def _record_success(
+        self,
+        http_counts: Optional[MutableMapping[str, int]],
+        status: int,
+        endpoint: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        if http_counts is not None:
+            http_counts["last_status"] = status
+            bucket = "2xx" if 200 <= status < 300 else "4xx" if 400 <= status < 500 else "5xx"
+            http_counts[bucket] = http_counts.get(bucket, 0) + 1
+        entry: Dict[str, Any] = {
+            "timestamp": time.time(),
+            "endpoint": endpoint,
+            "status": status,
+            "result": "success",
+        }
+        if params:
+            entry["params"] = {k: v for k, v in params.items() if v is not None}
+        _append_http_trace(entry)
 
     def _record_failure(
         self,
         exc: Exception,
         http_counts: Optional[MutableMapping[str, int]],
+        endpoint: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
     ) -> None:
         message = str(exc).lower()
         key = "error"
@@ -345,9 +520,20 @@ class DTMApiClient:
             key = "4xx"
         elif "500" in message or "server" in message:
             key = "5xx"
+        status = _extract_status_code(exc)
         if http_counts is not None:
             http_counts[key] = http_counts.get(key, 0) + 1
-        status = _extract_status_code(exc)
+            http_counts["last_status"] = status
+        entry: Dict[str, Any] = {
+            "timestamp": time.time(),
+            "endpoint": endpoint,
+            "status": status,
+            "result": "error",
+            "error": str(exc),
+        }
+        if params:
+            entry["params"] = {k: v for k, v in params.items() if v is not None}
+        _append_http_trace(entry)
         if status in {401, 403}:
             raise DTMUnauthorizedError(status, str(exc)) from exc
         if status:
@@ -355,14 +541,26 @@ class DTMApiClient:
         raise DTMHttpError(0, str(exc)) from exc
 
     def get_countries(self, http_counts: Optional[MutableMapping[str, int]] = None) -> pd.DataFrame:
+        params: Dict[str, Any] = {}
         try:
             df = self.client.get_all_countries()
-            self._record_success(http_counts, 200)
-            return df
         except Exception as exc:
             LOG.error("Failed to fetch countries: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
+            self._record_failure(exc, http_counts, "get_all_countries", params=params)
+        else:
+            self._record_success(http_counts, 200, "get_all_countries", params=params)
+            return df
+
+    def get_operations(self, http_counts: Optional[MutableMapping[str, int]] = None) -> pd.DataFrame:
+        params: Dict[str, Any] = {}
+        try:
+            df = self.client.get_all_operations()
+        except Exception as exc:
+            LOG.error("Failed to fetch operations: %s", exc)
+            self._record_failure(exc, http_counts, "get_all_operations", params=params)
+        else:
+            self._record_success(http_counts, 200, "get_all_operations", params=params)
+            return df
 
     def get_idp_admin0(
         self,
@@ -372,20 +570,22 @@ class DTMApiClient:
         to_date: Optional[str] = None,
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
+        params = {
+            "CountryName": country,
+            "FromReportingDate": from_date,
+            "ToReportingDate": to_date,
+        }
+        sdk_params = dict(params)
         try:
-            frame = self.client.get_idp_admin0_data(
-                CountryName=country,
-                FromReportingDate=from_date,
-                ToReportingDate=to_date,
-            )
-            self._record_success(http_counts, 200)
+            frame = self.client.get_idp_admin0_data(**sdk_params)
+        except Exception as exc:
+            LOG.error("Admin0 request failed: %s", exc)
+            self._record_failure(exc, http_counts, "get_idp_admin0_data", params=params)
+        else:
+            self._record_success(http_counts, 200, "get_idp_admin0_data", params=params)
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
             return frame
-        except Exception as exc:
-            LOG.error("Admin0 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
 
     def get_idp_admin1(
         self,
@@ -395,20 +595,22 @@ class DTMApiClient:
         to_date: Optional[str] = None,
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
+        params = {
+            "CountryName": country,
+            "FromReportingDate": from_date,
+            "ToReportingDate": to_date,
+        }
+        sdk_params = dict(params)
         try:
-            frame = self.client.get_idp_admin1_data(
-                CountryName=country,
-                FromReportingDate=from_date,
-                ToReportingDate=to_date,
-            )
-            self._record_success(http_counts, 200)
+            frame = self.client.get_idp_admin1_data(**sdk_params)
+        except Exception as exc:
+            LOG.error("Admin1 request failed: %s", exc)
+            self._record_failure(exc, http_counts, "get_idp_admin1_data", params=params)
+        else:
+            self._record_success(http_counts, 200, "get_idp_admin1_data", params=params)
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
             return frame
-        except Exception as exc:
-            LOG.error("Admin1 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
 
     def get_idp_admin2(
         self,
@@ -419,23 +621,25 @@ class DTMApiClient:
         to_date: Optional[str] = None,
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
+        params = {
+            "CountryName": country,
+            "Operation": operation,
+            "FromReportingDate": from_date,
+            "ToReportingDate": to_date,
+        }
+        sdk_params = dict(params)
+        if sdk_params.get("Operation") is None:
+            sdk_params.pop("Operation", None)
         try:
-            params = {
-                "CountryName": country,
-                "FromReportingDate": from_date,
-                "ToReportingDate": to_date,
-            }
-            if operation:
-                params["Operation"] = operation
-            frame = self.client.get_idp_admin2_data(**params)
-            self._record_success(http_counts, 200)
+            frame = self.client.get_idp_admin2_data(**sdk_params)
+        except Exception as exc:
+            LOG.error("Admin2 request failed: %s", exc)
+            self._record_failure(exc, http_counts, "get_idp_admin2_data", params=params)
+        else:
+            self._record_success(http_counts, 200, "get_idp_admin2_data", params=params)
             if self.rate_limit_delay:
                 time.sleep(self.rate_limit_delay)
             return frame
-        except Exception as exc:
-            LOG.error("Admin2 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -753,6 +957,49 @@ def _iter_level_pages(
         yield frame
 
 
+def _fetch_level_pages_with_logging(
+    client: DTMApiClient,
+    level: str,
+    *,
+    country: Optional[str],
+    operation: Optional[str],
+    from_date: Optional[str],
+    to_date: Optional[str],
+    http_counts: MutableMapping[str, int],
+) -> Tuple[List[pd.DataFrame], int]:
+    context = {
+        "level": level,
+        "country": country,
+        "operation": operation,
+        "from": from_date,
+        "to": to_date,
+    }
+    started = time.perf_counter()
+    try:
+        pages = list(
+            _iter_level_pages(
+                client,
+                level,
+                country=country,
+                operation=operation,
+                from_date=from_date,
+                to_date=to_date,
+                http_counts=http_counts,
+            )
+        )
+    except Exception as exc:
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        context.update({"status": "error", "error": str(exc), "elapsed_ms": elapsed_ms})
+        _append_request_log(context)
+        raise
+
+    elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+    rows = sum(int(page.shape[0]) for page in pages if hasattr(page, "shape"))
+    context.update({"status": "ok" if rows > 0 else "empty", "rows": rows, "elapsed_ms": elapsed_ms})
+    _append_request_log(context)
+    return pages, rows
+
+
 def _resolve_admin_levels(cfg: Mapping[str, Any]) -> List[str]:
     api_cfg = cfg.get("api", {})
     configured = api_cfg.get("admin_levels") or cfg.get("admin_levels")
@@ -807,10 +1054,23 @@ def _fetch_api_data(
     summary_extras["per_country_counts"] = per_country_counts
     summary_extras["failures"] = failures
 
-    primary_key = os.getenv("DTM_API_PRIMARY_KEY") or os.getenv("DTM_API_KEY")
-    secondary_key = os.getenv("DTM_API_SECONDARY_KEY") or None
-
-    client = DTMApiClient(cfg, subscription_key=primary_key)
+    try:
+        client = DTMApiClient(cfg)
+    except RuntimeError as exc:
+        diag = {
+            "timestamp": time.time(),
+            "reason": "missing_key",
+            "message": str(exc),
+            "hint": "Set DTM_API_KEY to a valid IOM DTM subscription key.",
+            "sdk_version": _dtm_sdk_version(),
+        }
+        try:
+            DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            DISCOVERY_FAIL_PATH.write_text(json.dumps(diag, indent=2), encoding="utf-8")
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+        LOG.error("DTM API key missing; aborting connector. See %s", DISCOVERY_FAIL_PATH)
+        raise ValueError(str(exc)) from exc
 
     admin_levels = _resolve_admin_levels(cfg)
     api_cfg = cfg.get("api", {})
@@ -824,25 +1084,62 @@ def _fetch_api_data(
             requested_countries,
         )
 
-    target = client.client if hasattr(client, "client") else client
+    discovery_source = "countries"
     try:
-        resolved_countries = _discover_all_countries(target)
-    except Exception as exc:
-        LOG.error("Failed to auto-discover countries: %s", exc)
-        resolved_countries = []
+        resolved_countries = _discover_all_countries(client, http_counts=http_counter)
+    except DTMUnauthorizedError as exc:
+        LOG.error("DTM discovery rejected the provided key")
+        raise ValueError("DTM_API_KEY rejected by the DTM API") from exc
+    except Exception:
+        LOG.exception("Primary discovery failed; trying fallback operations")
+        resolved_countries = _fallback_discover_operations(client, http_counts=http_counter)
+        discovery_source = "operations" if resolved_countries else "none"
+
+    if not resolved_countries:
+        diag = {
+            "timestamp": time.time(),
+            "reason": "empty_discovery",
+            "hint": "Verify DTM_API_KEY validity. Empty discovery often indicates an invalid or expired key.",
+            "sdk_version": _dtm_sdk_version(),
+            "api_base": _resolve_base_url(client),
+            "discovery_source": discovery_source,
+        }
+        try:
+            DISCOVERY_FAIL_PATH.write_text(json.dumps(diag, indent=2), encoding="utf-8")
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
+        LOG.error("Discovery returned 0 countries; aborting connector")
+        sys.exit(2)
 
     discovered_count = len(resolved_countries)
-    LOG.info("Discovered %d countries from DTM catalog", discovered_count)
+    LOG.info("Final discovery list contains %d selectors", discovered_count)
     summary["countries"]["resolved"] = resolved_countries
 
     country_mode = "ALL"
-    if not resolved_countries:
-        resolved_countries = [None]
 
     operations = requested_operations if requested_operations else [None]
 
+    discovery_info = {
+        "total_countries": discovered_count,
+        "sdk_version": _dtm_sdk_version(),
+        "api_base": _resolve_base_url(client),
+        "discovery_file": str(DISCOVERY_SNAPSHOT_PATH),
+        "source": discovery_source,
+    }
+    summary_extras["discovery"] = discovery_info
+    diagnostics_payload = summary_extras.setdefault("diagnostics", {})
+    diagnostics_payload["requests_log"] = str(REQUESTS_LOG_PATH)
+    diagnostics_payload["http_trace"] = str(HTTP_TRACE_PATH)
+
     from_date = window_start if not no_date_filter else None
     to_date = window_end if not no_date_filter else None
+
+    for path in (REQUESTS_LOG_PATH, HTTP_TRACE_PATH):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        except Exception:  # pragma: no cover - diagnostics only
+            LOG.debug("Unable to reset %s", path, exc_info=True)
 
     request_payload = {
         "admin_levels": admin_levels,
@@ -917,7 +1214,6 @@ def _fetch_api_data(
     }
 
     all_records: List[Dict[str, Any]] = []
-    used_secondary = False
     head_written_levels: Set[str] = set()
 
     effective_params_ref = summary.get("extras", {}).get("effective_params")
@@ -939,58 +1235,34 @@ def _fetch_api_data(
                     op_suffix,
                 )
                 try:
-                    pages = list(
-                        _iter_level_pages(
-                            client,
-                            level,
-                            country=country_name,
-                            operation=operation,
-                            from_date=from_date,
-                            to_date=to_date,
-                            http_counts=http_counter,
-                        )
+                    pages, _ = _fetch_level_pages_with_logging(
+                        client,
+                        level,
+                        country=country_name,
+                        operation=operation,
+                        from_date=from_date,
+                        to_date=to_date,
+                        http_counts=http_counter,
                     )
                 except DTMHttpError as exc:
-                    if (
-                        isinstance(exc, DTMUnauthorizedError)
-                        or exc.status_code in {401, 403}
-                    ) and secondary_key and not used_secondary:
-                        http_counter["retries"] += 1
-                        LOG.warning("Retrying DTM API request with secondary key")
-                        client = DTMApiClient(cfg, subscription_key=secondary_key)
-                        used_secondary = True
+                    if isinstance(exc, DTMUnauthorizedError) or getattr(exc, "status_code", None) in {401, 403}:
+                        diag = {
+                            "timestamp": time.time(),
+                            "reason": "invalid_key",
+                            "status_code": getattr(exc, "status_code", None),
+                            "message": str(exc),
+                            "sdk_version": _dtm_sdk_version(),
+                            "api_base": _resolve_base_url(client),
+                            "context": {"country": country_label, "level": level},
+                        }
                         try:
-                            pages = list(
-                                _iter_level_pages(
-                                    client,
-                                    level,
-                                    country=country_name,
-                                    operation=operation,
-                                    from_date=from_date,
-                                    to_date=to_date,
-                                    http_counts=http_counter,
-                                )
-                            )
-                        except Exception as retry_exc:
-                            LOG.error(
-                                "Failed after retry for country=%s level=%s: %s",
-                                country_label,
-                                level,
-                                retry_exc,
-                                exc_info=True,
-                            )
-                            failures.append(
-                                {
-                                    "country": country_label,
-                                    "level": level,
-                                    "operation": operation,
-                                    "error": type(retry_exc).__name__,
-                                    "message": str(retry_exc),
-                                }
-                            )
-                            continue
-                    else:
-                        raise
+                            DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                            DISCOVERY_FAIL_PATH.write_text(json.dumps(diag, indent=2), encoding="utf-8")
+                        except Exception:  # pragma: no cover - diagnostics only
+                            LOG.debug("Unable to persist invalid-key diagnostics", exc_info=True)
+                        LOG.error("DTM API rejected the key during data fetch; aborting")
+                        raise ValueError("DTM_API_KEY rejected by the DTM API") from exc
+                    raise
                 except Exception as exc:
                     LOG.error(
                         "country fetch failed: country=%s level=%s%s error=%s",
@@ -1049,13 +1321,17 @@ def _fetch_api_data(
                             _dump_head(page, level, country_label)
                         except Exception:  # pragma: no cover - diagnostics only
                             LOG.debug(
-                                "failed to write raw head for level=%s country=%s", 
+                                "failed to write raw head for level=%s country=%s",
                                 level,
                                 country_label,
                                 exc_info=True,
                             )
                         else:
                             head_written_levels.add(level)
+                    try:
+                        _write_level_sample(page, level)
+                    except Exception:  # pragma: no cover - diagnostics only
+                        LOG.debug("failed to write sample rows", exc_info=True)
                     page = page.rename(columns={idp_column: "idp_count"})
 
                     per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
@@ -1136,6 +1412,10 @@ def _fetch_api_data(
                     combo_count,
                     summary["rows"]["fetched"],
                 )
+
+    sample_files = [str(path) for path in sorted(DTM_DIAGNOSTICS_DIR.glob("sample_*.csv"))]
+    if sample_files:
+        diagnostics_payload["samples"] = sample_files
 
     effective_params = summary.get("extras", {}).get("effective_params")
     if isinstance(effective_params, MutableMapping):
@@ -1344,6 +1624,8 @@ def _write_meta(
     timings_ms: Mapping[str, Any],
     per_country_counts: Sequence[Mapping[str, Any]] = (),
     failures: Sequence[Mapping[str, Any]] = (),
+    discovery: Optional[Mapping[str, Any]] = None,
+    diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> None:
     payload: Dict[str, Any] = {"row_count": rows}
     if window_start:
@@ -1356,6 +1638,10 @@ def _write_meta(
     payload["timings_ms"] = {key: int(value) for key, value in timings_ms.items()}
     payload["per_country_counts"] = list(per_country_counts)
     payload["failures"] = list(failures)
+    if discovery is not None:
+        payload["discovery"] = dict(discovery)
+    if diagnostics is not None:
+        payload["diagnostics"] = dict(diagnostics)
     write_json(META_PATH, payload)
 
 
@@ -1579,6 +1865,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         timings_ms=timings_ms,
         per_country_counts=per_country_counts_payload,
         failures=failures_payload,
+        discovery=summary_extras.get("discovery"),
+        diagnostics=summary_extras.get("diagnostics"),
     )
 
     run_payload = {

@@ -16,9 +16,15 @@ from resolver.ingestion import dtm_client
 class DummyClient:
     def __init__(self, config: dict, *, subscription_key: str | None = None) -> None:
         self.config = config
+        self.rate_limit_delay = 0
+        self.timeout = 0
+        self.base_url = "https://example.test"
 
-    def get_all_countries(self, *_: object, **__: object) -> pd.DataFrame:
+    def get_countries(self, **_: object) -> pd.DataFrame:
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
+
+    def get_operations(self, **_: object) -> pd.DataFrame:
+        return pd.DataFrame()
 
     def get_idp_admin0(self, **_: object) -> pd.DataFrame:
         return pd.DataFrame()
@@ -47,6 +53,10 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
         "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
         "API_RESPONSE_SAMPLE_PATH": diagnostics_dir / "dtm_api_response_sample.json",
+        "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
+        "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
+        "REQUESTS_LOG_PATH": diagnostics_dir / "dtm" / "requests.jsonl",
+        "HTTP_TRACE_PATH": diagnostics_dir / "dtm" / "dtm_http.ndjson",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
 
@@ -22,6 +24,10 @@ class DummyDTMApi:
         self.calls.setdefault("countries", {})
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
+    def get_all_operations(self) -> pd.DataFrame:
+        self.calls.setdefault("operations", {})
+        return pd.DataFrame()
+
     def get_idp_admin0_data(self, **params: Any) -> pd.DataFrame:
         self.calls.setdefault("admin0", params)
         return pd.DataFrame(
@@ -35,6 +41,17 @@ class DummyDTMApi:
     def get_idp_admin2_data(self, **params: Any) -> pd.DataFrame:
         self.calls.setdefault("admin2", params)
         return pd.DataFrame()
+
+
+@pytest.fixture(autouse=True)
+def patch_discovery_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    diagnostics_dir = tmp_path / "diagnostics"
+    monkeypatch.setattr(dtm_client, "DTM_DIAGNOSTICS_DIR", diagnostics_dir)
+    monkeypatch.setattr(dtm_client, "DISCOVERY_SNAPSHOT_PATH", diagnostics_dir / "discovery_countries.csv")
+    monkeypatch.setattr(dtm_client, "DISCOVERY_FAIL_PATH", diagnostics_dir / "discovery_fail.json")
+    monkeypatch.setattr(dtm_client, "REQUESTS_LOG_PATH", diagnostics_dir / "requests.jsonl")
+    monkeypatch.setattr(dtm_client, "HTTP_TRACE_PATH", diagnostics_dir / "dtm_http.ndjson")
+    return diagnostics_dir
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +69,7 @@ def config() -> dict:
 
 def test_init_requires_key(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
-    with pytest.raises(ValueError):
+    with pytest.raises(RuntimeError):
         DTMApiClient(config)
 
 
@@ -115,6 +132,30 @@ def test_discover_all_countries_normalizes(monkeypatch: pytest.MonkeyPatch) -> N
     assert result == ["Kenya", "Somalia"]
 
 
+def test_discover_all_countries_writes_snapshot(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        [
+            {"CountryName": "Kenya"},
+            {"CountryName": "Somalia"},
+        ]
+    )
+    api = SimpleNamespace(get_all_countries=lambda: frame)
+    result = dtm_client._discover_all_countries(api)
+    assert result == ["Kenya", "Somalia"]
+    snapshot = dtm_client.DISCOVERY_SNAPSHOT_PATH
+    assert snapshot.exists()
+    saved = pd.read_csv(snapshot)
+    assert set(saved["CountryName"]) == {"Kenya", "Somalia"}
+
+
+def test_discover_all_countries_empty_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = SimpleNamespace(get_all_countries=lambda: pd.DataFrame(columns=["CountryName"]))
+    result = dtm_client._discover_all_countries(api)
+    assert result == []
+    fail_path = dtm_client.DISCOVERY_FAIL_PATH
+    assert not fail_path.exists()
+
+
 def test_discover_all_countries_invokes_sdk_catalog() -> None:
     class FakeApi:
         def __init__(self) -> None:
@@ -133,3 +174,15 @@ def test_discover_all_countries_invokes_sdk_catalog() -> None:
     names = dtm_client._discover_all_countries(api)
     assert names == ["Ethiopia", "Somalia"]
     assert api.calls == 1
+
+
+def test_discover_all_countries_invalid_key_records_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class UnauthorizedApi:
+        def get_all_countries(self) -> pd.DataFrame:
+            raise dtm_client.DTMUnauthorizedError(401, "unauthorized")
+
+    api = UnauthorizedApi()
+    with pytest.raises(dtm_client.DTMUnauthorizedError):
+        dtm_client._discover_all_countries(api)
+    payload = json.loads(dtm_client.DISCOVERY_FAIL_PATH.read_text(encoding="utf-8"))
+    assert payload["reason"] == "invalid_key"

@@ -3,56 +3,33 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional
 
 LOG = logging.getLogger(__name__)
 
 
-def get_dtm_api_key() -> Optional[str]:
-    """Return the DTM API subscription key from environment variables.
+def get_dtm_api_key() -> str:
+    """Return the required DTM API subscription key.
 
-    Returns:
-        The API key from DTM_API_KEY environment variable, or None if not set.
+    Raises:
+        RuntimeError: If the ``DTM_API_KEY`` environment variable is missing or empty.
     """
-    api_key = os.environ.get("DTM_API_KEY", "").strip()
 
+    raw = os.getenv("DTM_API_KEY")
+    api_key = raw.strip() if raw else ""
     if not api_key:
-        LOG.warning(
-            "DTM_API_KEY environment variable not set. "
-            "Register at https://dtm-apim-portal.iom.int/ and "
-            "subscribe to API-V3 to get a subscription key."
+        message = (
+            "DTM_API_KEY not set. Please add it to GitHub secrets or the local env. "
+            "Without it, discovery and data fetch will fail."
         )
-        return None
+        LOG.error(message)
+        raise RuntimeError(message)
 
-    LOG.info("DTM API key found (length: %d characters)", len(api_key))
+    masked = f"...{api_key[-4:]}" if len(api_key) > 4 else "***"
+    LOG.info("Using DTM_API_KEY ending with %s", masked)
     return api_key
 
 
-def get_auth_headers() -> Dict[str, str]:
-    """Return authentication headers for DTM API requests.
-
-    Returns:
-        Dictionary with Ocp-Apim-Subscription-Key header.
-
-    Raises:
-        RuntimeError: If DTM_API_KEY environment variable is not set.
-    """
-    api_key = get_dtm_api_key()
-
-    if not api_key:
-        raise RuntimeError(
-            "DTM authentication failed: DTM_API_KEY environment variable not set. "
-            "Register at https://dtm-apim-portal.iom.int/ and "
-            "subscribe to API-V3 to get a subscription key."
-        )
-
-    return {"Ocp-Apim-Subscription-Key": api_key}
-
-
 def check_api_key_configured() -> bool:
-    """Check if DTM API key is configured (for diagnostics).
+    """Return ``True`` when ``DTM_API_KEY`` is present and non-empty."""
 
-    Returns:
-        True if key is set and non-empty, False otherwise.
-    """
-    return bool(os.environ.get("DTM_API_KEY", "").strip())
+    return bool(os.getenv("DTM_API_KEY", "").strip())

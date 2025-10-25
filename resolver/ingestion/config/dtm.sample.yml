@@ -1,8 +1,7 @@
 enabled: true
 api:
   admin_levels: [admin0, admin1, admin2]
-  countries: []
-  operations: []
+  countries: []  # optional hint; discovery via SDK always fetches the full catalog
 output:
   measure: stock
 field_aliases:
