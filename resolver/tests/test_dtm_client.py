@@ -327,10 +327,11 @@ def test_main_strict_empty_exits_nonzero(
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main(["--strict-empty"])
-    assert rc == 1
+    assert rc == 2
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["status"] == "error"
     assert "0 rows" in run_payload["reason"]
+    assert run_payload["extras"]["zero_rows_reason"] == "filter_excluded_all"
 
 
 def test_main_zero_rows_reason_and_totals(
@@ -389,15 +390,17 @@ def test_main_zero_rows_reason_and_totals(
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main([])
-    assert rc == 1
+    assert rc == 2
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["status"] == "error"
     assert "0 rows" in run_payload["reason"]
+    assert run_payload["extras"]["zero_rows_reason"] == "filter_excluded_all"
     report_lines = patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
     assert report_lines
     report = json.loads(report_lines[-1])
     assert report["status"] == "error"
     assert "0 rows" in report["reason"]
+    assert report["extras"]["zero_rows_reason"] == "filter_excluded_all"
 
 
 def test_main_invalid_key_aborts(

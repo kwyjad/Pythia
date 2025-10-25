@@ -121,6 +121,8 @@ for directory in (
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
+_FILE_LOGGING_INITIALIZED = False
+
 COLUMNS = CANONICAL_HEADERS
 
 DEFAULT_CAUSE = "unknown"
@@ -502,6 +504,15 @@ class DTMUnauthorizedError(DTMHttpError):
         super().__init__(status_code, message)
 
 
+class DTMZeroRowsError(RuntimeError):
+    """Raised when the API returns zero rows for the requested window."""
+
+    def __init__(self, window_label: str, reason: str):
+        super().__init__(f"DTM: All requests returned 0 rows in window {window_label}")
+        self.window_label = window_label
+        self.zero_rows_reason = reason
+
+
 class DTMApiClient:
     """Minimal wrapper around the official dtmapi client used by the connector."""
 
@@ -517,7 +528,10 @@ class DTMApiClient:
             ) from exc
 
         raw_key = (subscription_key or "").strip()
-        api_key = raw_key or get_dtm_api_key()
+        env_key = get_dtm_api_key()
+        api_key = raw_key or (env_key or "")
+        if not api_key:
+            raise RuntimeError("Missing DTM_API_KEY environment variable.")
 
         _setup_file_logging()
         masked_suffix = f"...{api_key[-4:]}" if api_key else "<missing>"
@@ -1147,6 +1161,14 @@ def _fetch_api_data(
     diagnostics_payload["log"] = str(DTM_CLIENT_LOG_PATH)
     diagnostics_payload["no_data_combos"] = 0
 
+    api_base_url = discovery_info["api_base"]
+    LOG.info(
+        "diagnostics: api_base_url=%s resolved_country_count=%d sample=%s",
+        api_base_url,
+        discovered_count,
+        resolved_countries[:5],
+    )
+
     from_date = window_start if not no_date_filter else None
     to_date = window_end if not no_date_filter else None
 
@@ -1182,6 +1204,28 @@ def _fetch_api_data(
         admin_levels,
         request_payload.get("countries") or "all",
         request_payload.get("operations") or "all",
+    )
+    LOG.info(
+        "diagnostics: resolved_admin_levels=%s date_window=%s..%s",
+        admin_levels,
+        from_date or "-",
+        to_date or "-",
+    )
+    request_params_clean = {
+        "admin_levels": list(admin_levels),
+        "countries": request_payload.get("countries"),
+        "operations": request_payload.get("operations"),
+        "window": {"start": from_date, "end": to_date},
+    }
+    LOG.info("diagnostics: request_params_clean=%s", request_params_clean)
+    diagnostics_payload.update(
+        {
+            "api_base_url": api_base_url,
+            "resolved_country_count": discovered_count,
+            "resolved_admin_levels": list(admin_levels),
+            "date_window": {"start": from_date, "end": to_date},
+            "request_params_clean": request_params_clean,
+        }
     )
     effective_params = {
         "resource": summary["api"]["endpoint"],
@@ -1459,8 +1503,22 @@ def _fetch_api_data(
 
     total_rows = int(summary.get("row_counts", {}).get("total", 0))
     if total_rows == 0:
+        zero_reason = "api_empty_response"
+        if not resolved_countries:
+            zero_reason = "empty_country_list"
+        elif failures:
+            zero_reason = "invalid_indicator"
+        elif no_data_combos:
+            zero_reason = "filter_excluded_all"
+        diagnostics_payload["zero_rows_reason"] = zero_reason
+        summary_extras["zero_rows_reason"] = zero_reason
         window_label = f"{from_date or '-'}..{to_date or '-'}"
-        raise RuntimeError(f"DTM: All requests returned 0 rows in window {window_label}")
+        LOG.error(
+            "dtm: zero rows produced for window %s zero_rows_reason=%s",
+            window_label,
+            zero_reason,
+        )
+        raise DTMZeroRowsError(window_label, zero_reason)
 
     effective_params = summary.get("extras", {}).get("effective_params")
     if isinstance(effective_params, MutableMapping):
@@ -1656,6 +1714,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Disable the ingestion window filter when pulling from the API.",
     )
+    parser.add_argument(
+        "--offline-smoke",
+        action="store_true",
+        help="Skip API calls and exit successfully for offline smoke tests.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging and force file logging for troubleshooting.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1694,12 +1762,18 @@ def _write_meta(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv or ())
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
-    logging.basicConfig(level=getattr(logging, log_level_name, logging.INFO), format="[%(levelname)s] %(message)s")
+    if args.debug:
+        log_level_name = "DEBUG"
+    logging.basicConfig(
+        level=getattr(logging, log_level_name, logging.INFO),
+        format="[%(levelname)s] %(message)s",
+    )
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
     _setup_file_logging()
 
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
+    offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
 
     preflight_started = time.perf_counter()
     dep_info, have_dtmapi = _preflight_dependencies()
@@ -1734,8 +1808,57 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "deps": deps_payload,
         "strict_empty": strict_empty,
         "no_date_filter": no_date_filter,
+        "offline_smoke": offline_smoke,
         "timings_ms": dict(timings_ms),
     }
+
+    if offline_smoke:
+        LOG.info("dtm: offline smoke mode enabled; skipping network calls")
+        ensure_header_only()
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = dict(base_extras)
+        extras_payload.update(
+            {
+                "rows_total": 0,
+                "exit_code": 0,
+                "status_raw": "offline",
+                "mode": "offline-smoke",
+            }
+        )
+        extras_payload["timings_ms"] = dict(timings_ms)
+        _write_connector_report(
+            status="skipped",
+            reason="offline-smoke mode",
+            extras=extras_payload,
+            http=dict(base_http),
+            counts=counts_payload,
+        )
+        _write_meta(
+            0,
+            None,
+            None,
+            deps=deps_payload,
+            effective_params={},
+            http_counters=base_http,
+            timings_ms=timings_ms,
+            diagnostics={"mode": "offline-smoke"},
+        )
+        run_payload = {
+            "window": {"start": None, "end": None},
+            "countries": {},
+            "http": dict(base_http),
+            "paging": {"pages": 0, "page_size": None, "total_received": 0},
+            "rows": dict(counts_payload, kept=0, dropped=0),
+            "totals": {"rows_written": 0},
+            "status": "offline",
+            "reason": "offline-smoke mode",
+            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+            "extras": extras_payload,
+            "args": vars(args),
+        }
+        write_json(RUN_DETAILS_PATH, run_payload)
+        print("DTM offline diagnostics: offline-smoke mode active (DTM_API_KEY not required)")
+        return 0
 
     if not have_dtmapi:
         reason = "dependency-missing: dtmapi (install with: pip install 'dtmapi>=0.1.5')"
@@ -1824,6 +1947,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else:
                     ensure_header_only()
                 timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
+    except DTMZeroRowsError as exc:
+        LOG.error("dtm: zero rows reason=%s", exc.zero_rows_reason)
+        status = "error"
+        reason = str(exc)
+        exit_code = 2
+        extras["zero_rows_reason"] = exc.zero_rows_reason
+        extras.setdefault("diagnostics", {})["zero_rows_reason"] = exc.zero_rows_reason
+        ensure_header_only()
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status = "error"
@@ -1936,6 +2067,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "extras": summary_extras,
         "args": vars(args),
     }
+    if extras.get("zero_rows_reason") and "zero_rows_reason" not in run_payload["extras"]:
+        run_payload["extras"]["zero_rows_reason"] = extras["zero_rows_reason"]
     if rows_written == 0 and "api_sample_path" not in run_payload["extras"] and API_SAMPLE_PATH.exists():
         run_payload["extras"]["api_sample_path"] = str(API_SAMPLE_PATH)
 
@@ -1962,5 +2095,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-_FILE_LOGGING_INITIALIZED = False
 

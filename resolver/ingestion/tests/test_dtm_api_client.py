@@ -64,8 +64,9 @@ def config() -> dict:
 
 def test_init_requires_key(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         DTMApiClient(config)
+    assert "Missing DTM_API_KEY" in str(excinfo.value)
 
 
 def test_get_countries(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
@@ -73,6 +74,7 @@ def test_get_countries(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
     client = DTMApiClient(config)
     df = client.get_countries()
     assert list(df["CountryName"]) == ["Kenya"]
+    assert client.client.subscription_key == "primary"
 
 
 def test_get_idp_admin0_updates_http_counts(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
@@ -145,9 +147,9 @@ def test_discover_all_countries_writes_snapshot(tmp_path: Path) -> None:
 
 def test_discover_all_countries_empty_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     api = SimpleNamespace(get_all_countries=lambda: pd.DataFrame(columns=["CountryName"]))
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(RuntimeError) as excinfo:
         dtm_client._discover_all_countries(api)
-    assert excinfo.value.code == 2
+    assert "0 countries" in str(excinfo.value)
     fail_path = dtm_client.DISCOVERY_FAIL_PATH
     assert fail_path.exists()
     payload = json.loads(fail_path.read_text())
