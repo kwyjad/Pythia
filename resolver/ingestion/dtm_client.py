@@ -33,6 +33,11 @@ from resolver.ingestion.diagnostics_emitter import (
 from resolver.ingestion.dtm_auth import get_dtm_api_key
 from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest, to_iso3
 from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
+from resolver.scripts.ingestion._dtm_debug_utils import (
+    dump_json as diagnostics_dump_json,
+    timing as diagnostics_timing,
+    write_sample_csv as diagnostics_write_sample_csv,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGING = ROOT / "staging"
@@ -44,6 +49,10 @@ OUTPUT_PATH = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
 DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
 DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
+DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
+DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_DIR / "metrics"
+DIAGNOSTICS_SAMPLES_DIR = DIAGNOSTICS_DIR / "samples"
+DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_DIR / "logs"
 CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 RUN_DETAILS_PATH = DIAGNOSTICS_DIR / "dtm_run.json"
 API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
@@ -52,6 +61,10 @@ API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
 DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
 DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
 DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
+DISCOVERY_RAW_JSON_PATH = DIAGNOSTICS_RAW_DIR / "dtm_countries.json"
+PER_COUNTRY_METRICS_PATH = DIAGNOSTICS_METRICS_DIR / "dtm_per_country.jsonl"
+SAMPLE_ROWS_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_sample.csv"
+DTM_CLIENT_LOG_PATH = DIAGNOSTICS_LOG_DIR / "dtm_client.log"
 
 CANONICAL_HEADERS = [
     "source",
@@ -98,6 +111,13 @@ UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
 DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 DTM_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+for directory in (
+    DIAGNOSTICS_RAW_DIR,
+    DIAGNOSTICS_METRICS_DIR,
+    DIAGNOSTICS_SAMPLES_DIR,
+    DIAGNOSTICS_LOG_DIR,
+):
+    directory.mkdir(parents=True, exist_ok=True)
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
@@ -226,6 +246,31 @@ def _write_discovery_failure(
         LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
 
 
+def _append_metrics(entry: Mapping[str, Any]) -> None:
+    try:
+        PER_COUNTRY_METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with PER_COUNTRY_METRICS_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, default=str))
+            handle.write("\n")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to append metrics entry", exc_info=True)
+
+
+def _setup_file_logging() -> None:
+    global _FILE_LOGGING_INITIALIZED
+    if _FILE_LOGGING_INITIALIZED:
+        return
+    try:
+        DTM_CLIENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(DTM_CLIENT_LOG_PATH, mode="w", encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to initialize DTM client file handler", exc_info=True)
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    LOG.addHandler(handler)
+    _FILE_LOGGING_INITIALIZED = True
+
+
 def _discover_all_countries(api: Any) -> List[str]:
     """Return a sorted list of country names discovered via the DTM SDK."""
 
@@ -256,6 +301,11 @@ def _discover_all_countries(api: Any) -> List[str]:
     if not isinstance(frame, pd.DataFrame):
         frame = pd.DataFrame(frame or [])
 
+    try:
+        diagnostics_dump_json(frame.to_dict(orient="records"), DISCOVERY_RAW_JSON_PATH)
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
+
     values: List[str] = []
     if "CountryName" in frame.columns:
         values = [
@@ -279,7 +329,11 @@ def _discover_all_countries(api: Any) -> List[str]:
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to persist discovery snapshot", exc_info=True)
 
-    LOG.info("Discovered %d countries", len(names))
+    LOG.info(
+        "Discovered %d countries (top 10=%s)",
+        len(names),
+        ", ".join(names[:10]),
+    )
 
     if len(names) == 0:
         _write_discovery_failure(
@@ -292,7 +346,7 @@ def _discover_all_countries(api: Any) -> List[str]:
             },
         )
         LOG.error("Discovery returned 0 countries; aborting.")
-        sys.exit(2)
+        raise RuntimeError("DTM: 0 countries discovered, aborting")
     return names
 
 
@@ -465,12 +519,15 @@ class DTMApiClient:
         raw_key = (subscription_key or "").strip()
         api_key = raw_key or get_dtm_api_key()
 
+        _setup_file_logging()
+        masked_suffix = f"...{api_key[-4:]}" if api_key else "<missing>"
         self.client = DTMApi(subscription_key=api_key)
         LOG.info(
-            "DTM SDK initialized | python=%s | dtmapi=%s | base_url=%s",
+            "DTM SDK initialized | python=%s | dtmapi=%s | base_url=%s | key_suffix=%s",
             sys.version.split()[0],
             getattr(DTMApi, "__version__", "unknown"),
             getattr(self.client, "base_url", getattr(self.client, "_base_url", "unknown")),
+            masked_suffix,
         )
         self.config = config
         api_cfg = config.get("api", {})
@@ -1008,6 +1065,14 @@ def _fetch_api_data(
     summary_extras["failures"] = failures
 
     try:
+        PER_COUNTRY_METRICS_PATH.unlink(missing_ok=True)  # type: ignore[arg-type]
+    except TypeError:  # pragma: no cover - Python < 3.8 compatibility
+        if PER_COUNTRY_METRICS_PATH.exists():
+            PER_COUNTRY_METRICS_PATH.unlink()
+    except Exception:  # pragma: no cover - diagnostics only
+        LOG.debug("Unable to reset metrics file", exc_info=True)
+
+    try:
         client = DTMApiClient(cfg)
     except RuntimeError as exc:
         message = str(exc)
@@ -1035,7 +1100,7 @@ def _fetch_api_data(
     discovery_source = "countries"
     try:
         resolved_countries = _discover_all_countries(target)
-    except SystemExit:
+    except RuntimeError:
         raise
     except Exception:
         LOG.exception("Primary discovery failed; trying fallback operations")
@@ -1054,7 +1119,7 @@ def _fetch_api_data(
             },
         )
         LOG.error("Discovery yielded no valid selectors; aborting connector")
-        sys.exit(2)
+        raise RuntimeError("DTM: 0 countries discovered, aborting")
 
     discovered_count = len(resolved_countries)
     LOG.info("Final discovery list contains %d selectors", discovered_count)
@@ -1076,6 +1141,11 @@ def _fetch_api_data(
     summary_extras["discovery"] = discovery_info
     diagnostics_payload = summary_extras.setdefault("diagnostics", {})
     diagnostics_payload["http_trace"] = str(DTM_HTTP_LOG_PATH)
+    diagnostics_payload["raw_countries"] = str(DISCOVERY_RAW_JSON_PATH)
+    diagnostics_payload["metrics"] = str(PER_COUNTRY_METRICS_PATH)
+    diagnostics_payload["sample"] = str(SAMPLE_ROWS_PATH)
+    diagnostics_payload["log"] = str(DTM_CLIENT_LOG_PATH)
+    diagnostics_payload["no_data_combos"] = 0
 
     from_date = window_start if not no_date_filter else None
     to_date = window_end if not no_date_filter else None
@@ -1165,6 +1235,8 @@ def _fetch_api_data(
     if isinstance(effective_params_ref, MutableMapping):
         effective_params_ref["idp_aliases"] = list(idp_candidates)
 
+    no_data_combos = 0
+
     for level in admin_levels:
         for country_name in resolved_countries:
             for operation in (operations if level == "admin2" else [None]):
@@ -1179,164 +1251,173 @@ def _fetch_api_data(
                     to_date or "-",
                     op_suffix,
                 )
-                try:
-                    pages, _ = _fetch_level_pages_with_logging(
-                        client,
-                        level,
-                        country=country_name,
-                        operation=operation,
-                        from_date=from_date,
-                        to_date=to_date,
-                        http_counts=http_counter,
-                    )
-                except DTMHttpError as exc:
-                    status = getattr(exc, "status_code", None)
-                    if status in {401, 403} or isinstance(exc, DTMUnauthorizedError):
-                        _write_discovery_failure(
-                            "invalid_key",
-                            message=str(exc),
-                            hint="Verify DTM_API_KEY validity. Invalid or expired keys cause 401/403 responses.",
-                            extra={
-                                "sdk_version": _dtm_sdk_version(),
-                                "api_base": getattr(
-                                    target,
-                                    "base_url",
-                                    getattr(target, "_base_url", "unknown"),
-                                ),
-                            },
+                failed = False
+                with diagnostics_timing(f"{country_label}|{level}") as timing_result:
+                    try:
+                        pages, _ = _fetch_level_pages_with_logging(
+                            client,
+                            level,
+                            country=country_name,
+                            operation=operation,
+                            from_date=from_date,
+                            to_date=to_date,
+                            http_counts=http_counter,
                         )
-                    raise
-                except Exception as exc:
-                    LOG.error(
-                        "Fetch failed for %s (%s%s): %s",
-                        country_label,
-                        level,
-                        op_suffix,
-                        exc,
-                        exc_info=True,
-                    )
-                    failures.append(
-                        {
-                            "country": country_label,
-                            "level": level,
-                            "operation": operation,
-                            "error": type(exc).__name__,
-                            "message": str(exc),
-                        }
-                    )
-                    continue
-
-                for page in pages:
-                    summary["paging"]["pages"] += 1
-                    summary["paging"]["total_received"] += int(page.shape[0])
-                    if page.shape[0]:
-                        size = int(page.shape[0])
-                        current = summary["paging"]["page_size"] or 0
-                        summary["paging"]["page_size"] = max(current, size)
-                    if page.empty:
-                        continue
-                    LOG.debug(
-                        "all columns (n=%d): %s",
-                        len(page.columns),
-                        list(page.columns),
-                    )
-                    idp_column = _resolve_idp_value_column(page, idp_candidates)
-                    LOG.info("resolved value column: idp_count_col=%r", idp_column)
-                    if not idp_column:
-                        LOG.warning(
-                            "no value column matched; aliases=%s; rows=%d",
-                            idp_candidates,
-                            len(page),
+                    except DTMHttpError as exc:
+                        status = getattr(exc, "status_code", None)
+                        if status in {401, 403} or isinstance(exc, DTMUnauthorizedError):
+                            _write_discovery_failure(
+                                "invalid_key",
+                                message=str(exc),
+                                hint="Verify DTM_API_KEY validity. Invalid or expired keys cause 401/403 responses.",
+                                extra={
+                                    "sdk_version": _dtm_sdk_version(),
+                                    "api_base": getattr(
+                                        target,
+                                        "base_url",
+                                        getattr(target, "_base_url", "unknown"),
+                                    ),
+                                },
+                            )
+                        raise
+                    except Exception as exc:
+                        LOG.error(
+                            "Fetch failed for %s (%s%s): %s",
+                            country_label,
+                            level,
+                            op_suffix,
+                            exc,
+                            exc_info=True,
                         )
                         failures.append(
                             {
                                 "country": country_label,
                                 "level": level,
                                 "operation": operation,
-                                "error": "MissingValueColumn",
-                                "message": "aliases=%s columns=%s"
-                                % (idp_candidates, list(page.columns)),
+                                "error": type(exc).__name__,
+                                "message": str(exc),
                             }
                         )
+                        failed = True
+                        pages = []
+                    if failed:
                         continue
-                    if level not in head_written_levels:
-                        try:
-                            _dump_head(page, level, country_label)
-                        except Exception:  # pragma: no cover - diagnostics only
-                            LOG.debug(
-                                "failed to write raw head for level=%s country=%s",
-                                level,
-                                country_label,
-                                exc_info=True,
+
+                    for page in pages:
+                        summary["paging"]["pages"] += 1
+                        summary["paging"]["total_received"] += int(page.shape[0])
+                        if page.shape[0]:
+                            size = int(page.shape[0])
+                            current = summary["paging"]["page_size"] or 0
+                            summary["paging"]["page_size"] = max(current, size)
+                        if page.empty:
+                            continue
+                        LOG.debug(
+                            "all columns (n=%d): %s",
+                            len(page.columns),
+                            list(page.columns),
+                        )
+                        idp_column = _resolve_idp_value_column(page, idp_candidates)
+                        LOG.info("resolved value column: idp_count_col=%r", idp_column)
+                        if not idp_column:
+                            LOG.warning(
+                                "no value column matched; aliases=%s; rows=%d",
+                                idp_candidates,
+                                len(page),
                             )
-                        else:
-                            head_written_levels.add(level)
-                    try:
-                        _write_level_sample(page, level)
-                    except Exception:  # pragma: no cover - diagnostics only
-                        LOG.debug("failed to write sample rows", exc_info=True)
-                    page = page.rename(columns={idp_column: "idp_count"})
-
-                    per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
-                    per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
-                    causes: Dict[Tuple[str, str], str] = {}
-
-                    for _, row in page.iterrows():
-                        iso = to_iso3(row.get(country_column), aliases)
-                        if not iso:
-                            continue
-                        bucket = month_start(row.get(date_column))
-                        if not bucket:
-                            continue
-                        admin1 = ""
-                        if admin1_column in page.columns:
-                            admin1 = str(row.get(admin1_column) or "").strip()
-                        if level == "admin2" and admin2_column in page.columns:
-                            admin2 = str(row.get(admin2_column) or "").strip()
-                            if admin2:
-                                admin1 = f"{admin1}/{admin2}" if admin1 else admin2
-                        value = _parse_float(row.get("idp_count"))
-                        if value is None or value <= 0:
-                            continue
-                        per_admin[(iso, admin1)][bucket] = float(value)
-                        as_of_value = _parse_iso_date_or_none(row.get(date_column))
-                        if not as_of_value:
-                            as_of_value = datetime.now(timezone.utc).date().isoformat()
-                        existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
-                        if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
-                            per_admin_asof[(iso, admin1)][bucket] = as_of_value
-                        cause_key = str(row.get("Cause", "")).strip().lower()
-                        causes[(iso, admin1)] = cause_map.get(cause_key, DEFAULT_CAUSE)
-
-                    for key, series in per_admin.items():
-                        iso, admin1 = key
-                        if measure == "stock":
-                            flows = flow_from_stock(series)
-                        else:
-                            flows = {month_start(date): float(val) for date, val in series.items() if month_start(date)}
-                        for bucket, value in flows.items():
-                            if value is None or value <= 0:
-                                continue
-                            record_as_of = (
-                                per_admin_asof.get(key, {}).get(bucket)
-                                or datetime.now(timezone.utc).date().isoformat()
-                            )
-                            all_records.append(
+                            failures.append(
                                 {
-                                    "iso3": iso,
-                                    "admin1": admin1,
-                                    "month": bucket,
-                                    "value": float(value),
-                                    "cause": causes.get(key, DEFAULT_CAUSE),
-                                    "measure": measure,
-                                    "source_id": f"dtm_api::{level}",
-                                    "as_of": record_as_of,
+                                    "country": country_label,
+                                    "level": level,
+                                    "operation": operation,
+                                    "error": "MissingValueColumn",
+                                    "message": "aliases=%s columns=%s"
+                                    % (idp_candidates, list(page.columns)),
                                 }
                             )
-                            combo_count += 1
-                            summary["row_counts"][level] += 1
-                            summary["row_counts"]["total"] += 1
-                            summary["rows"]["fetched"] += 1
+                            continue
+                        if level not in head_written_levels:
+                            try:
+                                _dump_head(page, level, country_label)
+                            except Exception:  # pragma: no cover - diagnostics only
+                                LOG.debug(
+                                    "failed to write raw head for level=%s country=%s",
+                                    level,
+                                    country_label,
+                                    exc_info=True,
+                                )
+                            else:
+                                head_written_levels.add(level)
+                        try:
+                            _write_level_sample(page, level)
+                        except Exception:  # pragma: no cover - diagnostics only
+                            LOG.debug("failed to write sample rows", exc_info=True)
+                        page = page.rename(columns={idp_column: "idp_count"})
+
+                        per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
+                        per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
+                        causes: Dict[Tuple[str, str], str] = {}
+
+                        for _, row in page.iterrows():
+                            iso = to_iso3(row.get(country_column), aliases)
+                            if not iso:
+                                continue
+                            bucket = month_start(row.get(date_column))
+                            if not bucket:
+                                continue
+                            admin1 = ""
+                            if admin1_column in page.columns:
+                                admin1 = str(row.get(admin1_column) or "").strip()
+                            if level == "admin2" and admin2_column in page.columns:
+                                admin2 = str(row.get(admin2_column) or "").strip()
+                                if admin2:
+                                    admin1 = f"{admin1}/{admin2}" if admin1 else admin2
+                            value = _parse_float(row.get("idp_count"))
+                            if value is None or value <= 0:
+                                continue
+                            per_admin[(iso, admin1)][bucket] = float(value)
+                            as_of_value = _parse_iso_date_or_none(row.get(date_column))
+                            if not as_of_value:
+                                as_of_value = datetime.now(timezone.utc).date().isoformat()
+                            existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
+                            if not existing_asof or _is_candidate_newer(existing_asof, as_of_value):
+                                per_admin_asof[(iso, admin1)][bucket] = as_of_value
+                            cause_key = str(row.get("Cause", "")).strip().lower()
+                            causes[(iso, admin1)] = cause_map.get(cause_key, DEFAULT_CAUSE)
+
+                        for key, series in per_admin.items():
+                            iso, admin1 = key
+                            if measure == "stock":
+                                flows = flow_from_stock(series)
+                            else:
+                                flows = {month_start(date): float(val) for date, val in series.items() if month_start(date)}
+                            for bucket, value in flows.items():
+                                if value is None or value <= 0:
+                                    continue
+                                record_as_of = (
+                                    per_admin_asof.get(key, {}).get(bucket)
+                                    or datetime.now(timezone.utc).date().isoformat()
+                                )
+                                all_records.append(
+                                    {
+                                        "iso3": iso,
+                                        "admin1": admin1,
+                                        "month_start": bucket,
+                                        "value": float(value),
+                                        "series_type": SERIES_INCIDENT,
+                                        "cause": causes.get(key, DEFAULT_CAUSE),
+                                        "measure": measure,
+                                        "source_id": f"dtm_api::{level}",
+                                        "as_of": record_as_of,
+                                    }
+                                )
+                                combo_count += 1
+                                summary["row_counts"][level] += 1
+                                summary["row_counts"]["total"] += 1
+                                summary["rows"]["fetched"] += 1
+
+                if failed:
+                    continue
 
                 range_label = f"{from_date or '-'}->{to_date or '-'}"
                 per_country_counts.append(
@@ -1348,17 +1429,38 @@ def _fetch_api_data(
                         "window": range_label,
                     }
                 )
+                if combo_count == 0:
+                    no_data_combos += 1
+                elapsed_ms = timing_result.elapsed_ms or 0
+                _append_metrics(
+                    {
+                        "country": country_label,
+                        "level": level,
+                        "operation": operation,
+                        "rows": combo_count,
+                        "elapsed_ms": elapsed_ms,
+                        "window": {"start": from_date, "end": to_date},
+                    }
+                )
                 LOG.info(
-                    "country=%s level=%s rows=%s total_so_far=%s",
+                    "country=%s level=%s rows=%s total_so_far=%s elapsed_ms=%s",
                     country_label if not operation else f"{country_label} (operation={operation})",
                     level,
                     combo_count,
                     summary["rows"]["fetched"],
+                    elapsed_ms,
                 )
+
+    diagnostics_payload["no_data_combos"] = no_data_combos
 
     sample_files = [str(path) for path in sorted(DTM_DIAGNOSTICS_DIR.glob("sample_*.csv"))]
     if sample_files:
         diagnostics_payload["samples"] = sample_files
+
+    total_rows = int(summary.get("row_counts", {}).get("total", 0))
+    if total_rows == 0:
+        window_label = f"{from_date or '-'}..{to_date or '-'}"
+        raise RuntimeError(f"DTM: All requests returned 0 rows in window {window_label}")
 
     effective_params = summary.get("extras", {}).get("effective_params")
     if isinstance(effective_params, MutableMapping):
@@ -1396,7 +1498,7 @@ def _finalize_records(
     for rec in records:
         iso3 = rec["iso3"]
         admin1 = rec.get("admin1") or ""
-        month = rec["month"]
+        month = rec.get("month_start", rec.get("month"))
         if hasattr(month, "date"):
             month = month.date()
         month_iso = month.isoformat() if hasattr(month, "isoformat") else str(month)
@@ -1496,6 +1598,7 @@ def _finalize_records(
         try:
             write_json(API_SAMPLE_PATH, formatted[:100])
             write_json(API_RESPONSE_SAMPLE_PATH, formatted[:100])
+            diagnostics_write_sample_csv(pd.DataFrame(formatted, columns=COLUMNS), SAMPLE_ROWS_PATH)
         except Exception:
             LOG.debug("dtm: unable to persist API sample", exc_info=True)
         else:
@@ -1593,6 +1696,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     logging.basicConfig(level=getattr(logging, log_level_name, logging.INFO), format="[%(levelname)s] %(message)s")
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
+    _setup_file_logging()
 
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
@@ -1729,8 +1833,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:  # pragma: no cover - defensive guard
         LOG.exception("dtm: unexpected failure")
         status = "error"
-        reason = f"exception: {type(exc).__name__}"
-        extras["exception"] = {"type": type(exc).__name__, "message": str(exc)}
+        message = str(exc) or f"exception: {type(exc).__name__}"
+        reason = message
+        extras["exception"] = {"type": type(exc).__name__, "message": message}
         extras["traceback"] = traceback.format_exc()
         exit_code = 1
         ensure_header_only()
@@ -1857,3 +1962,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+_FILE_LOGGING_INITIALIZED = False
+

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import csv
+import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -33,6 +34,10 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
         "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
         "DTM_DIAGNOSTICS_DIR": diagnostics_dir / "dtm",
+        "DIAGNOSTICS_RAW_DIR": diagnostics_dir / "raw",
+        "DIAGNOSTICS_METRICS_DIR": diagnostics_dir / "metrics",
+        "DIAGNOSTICS_SAMPLES_DIR": diagnostics_dir / "samples",
+        "DIAGNOSTICS_LOG_DIR": diagnostics_dir / "logs",
         "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
         "RUN_DETAILS_PATH": diagnostics_dir / "dtm_run.json",
         "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
@@ -40,9 +45,22 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
         "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
         "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
         "DTM_HTTP_LOG_PATH": diagnostics_dir / "dtm" / "dtm_http.ndjson",
+        "DISCOVERY_RAW_JSON_PATH": diagnostics_dir / "raw" / "dtm_countries.json",
+        "PER_COUNTRY_METRICS_PATH": diagnostics_dir / "metrics" / "dtm_per_country.jsonl",
+        "SAMPLE_ROWS_PATH": diagnostics_dir / "samples" / "dtm_sample.csv",
+        "DTM_CLIENT_LOG_PATH": diagnostics_dir / "logs" / "dtm_client.log",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
+    # Reset file logging so tests capture the patched log path.
+    for handler in list(dtm_client.LOG.handlers):
+        if isinstance(handler, logging.FileHandler):
+            dtm_client.LOG.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+    monkeypatch.setattr(dtm_client, "_FILE_LOGGING_INITIALIZED", False)
     return mappings
 
 
@@ -221,6 +239,10 @@ def test_main_writes_outputs_and_diagnostics(
     assert meta_payload["discovery"]["source"] == "countries"
     assert "diagnostics" in meta_payload
     assert meta_payload["diagnostics"]["http_trace"] == str(patch_paths["DTM_HTTP_LOG_PATH"])
+    assert meta_payload["diagnostics"]["raw_countries"] == str(patch_paths["DISCOVERY_RAW_JSON_PATH"])
+    assert meta_payload["diagnostics"]["metrics"] == str(patch_paths["PER_COUNTRY_METRICS_PATH"])
+    assert meta_payload["diagnostics"]["sample"] == str(patch_paths["SAMPLE_ROWS_PATH"])
+    assert meta_payload["diagnostics"]["log"] == str(patch_paths["DTM_CLIENT_LOG_PATH"])
     assert any(
         str(path).endswith("sample_admin0.csv")
         for path in meta_payload["diagnostics"].get("samples", [])
@@ -232,6 +254,19 @@ def test_main_writes_outputs_and_diagnostics(
     assert discovery_snapshot.exists()
     snapshot_df = pd.read_csv(discovery_snapshot)
     assert set(snapshot_df["CountryName"]) == {"Ethiopia", "Somalia"}
+    discovery_raw = patch_paths["DISCOVERY_RAW_JSON_PATH"]
+    assert discovery_raw.exists()
+    raw_payload = json.loads(discovery_raw.read_text(encoding="utf-8"))
+    assert isinstance(raw_payload, list)
+    metrics_path = patch_paths["PER_COUNTRY_METRICS_PATH"]
+    assert metrics_path.exists()
+    metrics_lines = [
+        json.loads(line)
+        for line in metrics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert metrics_lines
+    assert any(line.get("rows", 0) > 0 for line in metrics_lines)
     http_trace = patch_paths["DTM_HTTP_LOG_PATH"]
     assert http_trace.exists()
     request_entries = [
@@ -243,6 +278,10 @@ def test_main_writes_outputs_and_diagnostics(
     assert all("country" in entry for entry in request_entries)
     sample_path = patch_paths["DTM_DIAGNOSTICS_DIR"] / "sample_admin0.csv"
     assert sample_path.exists()
+    sample_rows_path = patch_paths["SAMPLE_ROWS_PATH"]
+    assert sample_rows_path.exists()
+    log_path = patch_paths["DTM_CLIENT_LOG_PATH"]
+    assert log_path.exists()
     assert "timings_ms" in run_payload["extras"]
     assert "effective_params" in run_payload["extras"]
     assert "deps" in run_payload["extras"]
@@ -252,6 +291,10 @@ def test_main_writes_outputs_and_diagnostics(
     assert run_payload["extras"]["discovery"]["total_countries"] == 2
     assert "diagnostics" in run_payload["extras"]
     assert run_payload["extras"]["diagnostics"]["http_trace"] == str(http_trace)
+    assert run_payload["extras"]["diagnostics"]["log"] == str(log_path)
+    assert run_payload["extras"]["diagnostics"]["sample"] == str(sample_rows_path)
+    assert run_payload["extras"]["diagnostics"]["metrics"] == str(metrics_path)
+    assert run_payload["extras"]["diagnostics"]["raw_countries"] == str(discovery_raw)
 
 
 def test_main_strict_empty_exits_nonzero(
@@ -284,7 +327,10 @@ def test_main_strict_empty_exits_nonzero(
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main(["--strict-empty"])
-    assert rc == 3
+    assert rc == 1
+    run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["status"] == "error"
+    assert "0 rows" in run_payload["reason"]
 
 
 def test_main_zero_rows_reason_and_totals(
@@ -343,18 +389,15 @@ def test_main_zero_rows_reason_and_totals(
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
 
     rc = dtm_client.main([])
-    assert rc == 0
+    assert rc == 1
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["status"] == "ok-empty"
-    assert run_payload["reason"] == "header-only (0 rows)"
-    assert run_payload["totals"]["rows_written"] == 0
-    assert run_payload["totals"]["rows_fetched"] == 0
-    assert run_payload["args"]["strict_empty"] is False
+    assert run_payload["status"] == "error"
+    assert "0 rows" in run_payload["reason"]
     report_lines = patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
     assert report_lines
     report = json.loads(report_lines[-1])
-    assert report["status"] == "ok-empty"
-    assert report["reason"] == "header-only (0 rows)"
+    assert report["status"] == "error"
+    assert "0 rows" in report["reason"]
 
 
 def test_main_invalid_key_aborts(
@@ -400,6 +443,45 @@ def test_main_invalid_key_aborts(
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["status"] == "error"
 
+
+def test_discovery_empty_hard_fail(
+    monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DTM_API_KEY", "primary")
+
+    class DiscoveryClient:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            self.rate_limit_delay = 0
+            self.timeout = 0
+
+        def get_all_countries(self) -> pd.DataFrame:
+            return pd.DataFrame(columns=["CountryName", "ISO3"])
+
+        def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
+            raise AssertionError("Should not fetch admin data when discovery fails")
+
+        def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def get_idp_admin2(self, **_: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    monkeypatch.setattr(dtm_client, "DTMApiClient", DiscoveryClient)
+    monkeypatch.setattr(
+        dtm_client,
+        "load_config",
+        lambda: {"enabled": True, "api": {"admin_levels": ["admin0"]}},
+    )
+    monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_, **__: object())
+    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_, **__: {})
+    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_, **__: None)
+    monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
+
+    rc = dtm_client.main([])
+    assert rc == 1
+    run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
+    assert run_payload["status"] == "error"
+    assert "0 countries" in run_payload["reason"]
 
 def test_http_trace_written(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
