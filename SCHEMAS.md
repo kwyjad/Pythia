@@ -8,6 +8,7 @@
 - [staging.reliefweb_pdf](#stagingreliefwebpdf)
 - [staging.unhcr_odp](#stagingunhcrodp)
 - [staging.worldpop](#stagingworldpop)
+- [staging.dtm_displacement](#stagingdtm_displacement)
 - [db.facts_raw](#dbfactsraw)
 - [db.facts_resolved](#dbfactsresolved)
 - [db.facts_deltas](#dbfactsdeltas)
@@ -99,6 +100,33 @@ WorldPop denominators staging output.
 | download_date | date | yes |  |  |
 | source_url | string | yes |  |  |
 | notes | string | no |  |  |
+
+## staging.dtm_displacement
+
+Monthly displacement flows generated from the DTM connector.
+
+| Name | Type | Required | Enum/Format | Description |
+| --- | --- | --- | --- | --- |
+| source | string | yes |  | Constant `dtm`. |
+| country_iso3 | string | yes |  | ISO3 country code. |
+| admin1 | string | no |  | First-level administrative name (blank for admin0 rollup). |
+| event_id | string | yes |  | Deterministic hash of country/admin/month. |
+| as_of | timestamp | yes |  | Timestamp of latest reporting for the month. |
+| month_start | date | yes |  | Month bucket in `YYYY-MM-01`. |
+| value_type | enum | yes | new_displaced | Semantic for the displacement value. |
+| value | integer | yes |  | Monthly new displaced people (can be negative for returns). |
+| unit | enum | yes | people | Unit of measure. |
+| method | enum | yes | dtm_stock_to_flow | Transformation applied to convert stock to flow. |
+| confidence | enum | yes | low, medium, high | Analyst confidence score (defaults to `medium`). |
+| raw_event_id | string | yes |  | Source identifier if present. |
+| raw_fields_json | string | yes |  | Compact JSON snapshot of key API fields. |
+
+Example rows:
+
+| source | country_iso3 | admin1 | event_id | as_of | month_start | value_type | value | unit | method | confidence | raw_event_id |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| dtm | COL | Antioquia | 7c1e6ad5d2f4c3a1 | 2024-02-15T00:00:00Z | 2024-02-01 | new_displaced | 400 | people | dtm_stock_to_flow | medium | offline:COL:Antioquia:2024-02-01 |
+| dtm | COL |  | 5f6c9721bf93d8a0 | 2024-02-20T00:00:00Z | 2024-02-01 | new_displaced | 750 | people | dtm_stock_to_flow | medium | 5f6c9721bf93d8a0 |
 
 ## db.facts_raw
 
