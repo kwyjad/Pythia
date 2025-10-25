@@ -1,36 +1,25 @@
 enabled: true
-
 api:
-  countries:
-    - "Sudan"
-    - "Ethiopia"
-    - "Somalia"
-  admin_levels: [admin0, admin1]
+  countries: []            # empty ⇒ discover all countries at runtime
+  admin_levels: [admin0]   # limit to admin0 for now
   operations: []
   indicators: ["idps"]
-
+  discovery_order: ["countries","operations","static_iso3"]
+  timeouts:
+    connect_seconds: 5
+    read_seconds: 30
+  retries:
+    attempts: 3
+    backoff_seconds: 1.5
 output:
   measure: stock
 
 field_aliases:
-  idp_count:
-    - "TotalIDPs"
-    - "IDPTotal"
+  idp_count: ["TotalIDPs","IDPTotal"]
 
 shock_keywords:
-  displacement_influx:
-    - "flow monitoring"
-    - "movement"
-  flood:
-    - "flood"
-  drought:
-    - "drought"
-  cyclone:
-    - "cyclone"
-    - "hurricane"
-    - "typhoon"
-    - "storm"
-  conflict:
-    - "conflict"
-    - "violence"
-    - "clashes"
+  displacement_influx: ["flow monitoring","movement"]
+  flood: ["flood"]
+  drought: ["drought"]
+  cyclone: ["cyclone","hurricane","typhoon","storm"]
+  conflict: ["conflict","violence","clashes"]

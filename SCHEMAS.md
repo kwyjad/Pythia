@@ -275,9 +275,12 @@ The DTM connector is API-only and always calls the official DTM API via the `dtm
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `api.admin_levels` | no | Levels to fetch (`admin0`, `admin1`, `admin2`). Defaults to `admin1` and `admin0`. |
-| `api.countries` | no | Ignored hint of ISO3 codes or country names. Discovery always fetches the full catalog but the provided list is echoed in diagnostics. |
+| `api.admin_levels` | no | Levels to fetch (`admin0`, `admin1`, `admin2`). Defaults to `admin0`. |
+| `api.countries` | no | Optional hint of ISO3 codes or country names. Leave empty (default) to fetch the full catalog at runtime. |
 | `api.operations` | no | Operation names for admin2 pulls. |
+| `api.discovery_order` | no | Discovery strategy order. Defaults to `[countries, operations, static_iso3]`. |
+| `api.timeouts` | no | HTTP connect/read timeouts in seconds. Defaults to `5` connect / `30` read. |
+| `api.retries` | no | Retry attempts/backoff seconds. Defaults to `3` attempts, `1.5` seconds. |
 | `field_mapping` | no | Overrides for API column names (rarely needed). |
 | `field_aliases.idp_count` | no | Candidate columns containing the IDP total. |
 | `output.measure` | no | `stock` (default) converts cumulative totals to flows; `flow` keeps month deltas. |
@@ -286,13 +289,31 @@ The DTM connector is API-only and always calls the official DTM API via the `dtm
 ```yaml
 enabled: true
 api:
-  admin_levels: [admin1, admin0]
+  countries: []
+  admin_levels: [admin0]
   operations: []
+  indicators: ["idps"]
+  discovery_order: ["countries", "operations", "static_iso3"]
+  timeouts:
+    connect_seconds: 5
+    read_seconds: 30
+  retries:
+    attempts: 3
+    backoff_seconds: 1.5
 output:
   measure: stock
 field_aliases:
   idp_count: ["TotalIDPs", "IDPTotal"]
 ```
+
+**Ingestion diagnostics scaffolding:** every workflow run publishes the shared artifacts:
+- `diagnostics/ingestion/summary.md` — Markdown dashboard rendered from connector telemetry.
+- `diagnostics/ingestion/connectors_report.jsonl` — machine-readable ledger of connector outcomes.
+- `diagnostics/ingestion/logs/` — per-connector log files (always present, `.keep` seeded when empty).
+- `diagnostics/ingestion/raw/` — raw payloads collected during connector execution.
+- `diagnostics/ingestion/metrics/` — numeric rollups or per-request metrics emitted by connectors.
+- `diagnostics/ingestion/samples/` — sampled rows preserved for schema inspection.
+- `diagnostics/ingestion/dtm/` — discovery probes and HTTP traces from the DTM client, including `discovery_fail.json` when discovery fails.
 
 **Diagnostics:** each execution writes:
 - `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
