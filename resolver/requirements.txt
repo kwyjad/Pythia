@@ -4,5 +4,5 @@ pandas>=2.0
 pyarrow>=15.0
 pyyaml>=6.0
 python-dateutil>=2.9
-dtmapi>=0.1.5
+dtmapi>=0.1.5,<0.2
 requests>=2.31

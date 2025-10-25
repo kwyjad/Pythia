@@ -129,6 +129,21 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
   - When zero rows are returned the diagnostics include a `zero_rows_reason` (`empty_country_list`, `invalid_indicator`, `api_empty_response`, or `filter_excluded_all`) and the CLI exits with code `2`. Offline smoke runs (`--offline-smoke` or `DTM_OFFLINE_SMOKE=1`) emit a header-only CSV, print a one-line `offline-smoke mode active` message, and exit `0` without requiring `DTM_API_KEY`.
   The connector fails fast with actionable messages when discovery yields zero countries or every country-level request returns zero rows inside the configured window (`BACKFILL_START_ISO`…`BACKFILL_END_ISO`).
 
+  **Quick local smoke test**
+
+  ```bash
+  pip install -r resolver/requirements.txt
+  export DTM_API_KEY="YOUR_KEY"
+  python - <<'PY'
+  import os
+  from dtmapi import DTMApi
+
+  api = DTMApi(subscription_key=os.environ["DTM_API_KEY"])
+  print("Countries:", len(api.get_all_countries()))
+  print(api.get_idp_admin0_data(CountryName="Ethiopia").head(3))
+  PY
+  ```
+
 #### DTM ok-empty troubleshooting
 
 - The connector now raises an error when the API returns zero countries or zero rows for the requested backfill window. Historical diagnostics that expected **`ok-empty`** runs remain available for reference, but in normal operation you should expect a non-zero row count or an explicit failure reason (for example `DTM: All requests returned 0 rows in window 2023-07-01..2024-06-30`).
