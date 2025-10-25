@@ -43,6 +43,23 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
+def _format_meta_cell(
+    extras: Mapping[str, Any] | None,
+    meta_json: Mapping[str, Any] | None,
+) -> str:
+    """Render the Meta cell value applying ok-empty and missing-count rules."""
+    try:
+        status_raw = (extras or {}).get("status_raw")
+        if status_raw == "ok-empty":
+            return "—"
+        row_count = (meta_json or {}).get("row_count")
+        if row_count in (None, ""):
+            return "—"
+        return str(int(row_count))
+    except Exception:
+        return "—"
+
+
 def _normalise_samples(values: Any) -> List[Tuple[str, int]]:
     results: List[Tuple[str, int]] = []
     if not isinstance(values, Iterable) or isinstance(values, (str, bytes)):
@@ -343,14 +360,14 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             )
         meta_path_raw = extras.get("meta_path")
         meta_cell = "—"
-        meta_row_count: Any | None = None
+        meta_payload: Mapping[str, Any] | None = None
         if meta_path_raw:
             meta_path = Path(str(meta_path_raw))
             if meta_path.exists():
                 meta_cell = str(meta_path)
-                meta_payload = _safe_load_json(meta_path)
-                if isinstance(meta_payload, Mapping):
-                    meta_row_count = meta_payload.get("row_count")
+                loaded = _safe_load_json(meta_path)
+                if isinstance(loaded, Mapping):
+                    meta_payload = loaded
         reason_text = entry.get("reason")
         status_text = str(entry.get("status"))
         kept_cell = "—"
@@ -404,15 +421,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             .strip()
             .lower()
         )
-        header_only = isinstance(reason_text, str) and reason_text.strip().lower().startswith("header-only")
-        meta_rows_cell = "—"
-        if (status_raw_normalized == "ok-empty" and header_only) or rows_written_value == 0:
-            meta_rows_cell = "—"
-        elif meta_row_count is not None:
-            try:
-                meta_rows_cell = str(int(meta_row_count))
-            except (TypeError, ValueError):
-                meta_rows_cell = "—"
+        meta_rows_cell = _format_meta_cell(extras, meta_payload)
         rows.append(
             [
                 connector_id,
