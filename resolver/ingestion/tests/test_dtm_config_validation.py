@@ -36,7 +36,7 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
         "API_SAMPLE_PATH": sample_path,
         "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
         "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
-        "REQUESTS_LOG_PATH": diagnostics_dir / "dtm" / "requests.jsonl",
+        "DTM_HTTP_LOG_PATH": diagnostics_dir / "dtm" / "dtm_http.ndjson",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
@@ -158,7 +158,7 @@ def test_config_country_list_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     assert {entry["country"] for entry in per_country} == {"Ethiopia", "Somalia"}
     assert summary["extras"]["discovery"]["total_countries"] == 2
     diagnostics_payload = summary["extras"].get("diagnostics", {})
-    assert diagnostics_payload.get("requests_log")
+    assert diagnostics_payload.get("http_trace")
 
 
 def test_discovery_empty_failfast(

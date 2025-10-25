@@ -13,27 +13,16 @@ import yaml
 from resolver.ingestion import dtm_client
 
 
-class FailThenSucceedClient:
+class UnauthorizedClient:
     def __init__(self, config: dict, *, subscription_key: str | None = None) -> None:
         self.config = config
         self.subscription_key = subscription_key
-        self._failed = False
 
     def get_all_countries(self, *_: object, **__: object) -> pd.DataFrame:
         return pd.DataFrame([{"CountryName": "Kenya", "ISO3": "KEN"}])
 
     def get_idp_admin0(self, **_: object) -> pd.DataFrame:
-        if self.subscription_key == "primary":
-            raise dtm_client.DTMUnauthorizedError(401, "unauthorized")
-        return pd.DataFrame(
-            [
-                {
-                    "CountryName": "Kenya",
-                    "ReportingDate": "2024-04-15",
-                    "TotalIDPs": 40,
-                }
-            ]
-        )
+        raise dtm_client.DTMUnauthorizedError(401, "unauthorized")
 
     def get_idp_admin1(self, **_: object) -> pd.DataFrame:
         return pd.DataFrame()
@@ -59,6 +48,9 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
         "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
         "API_RESPONSE_SAMPLE_PATH": diagnostics_dir / "dtm_api_response_sample.json",
+        "DTM_DIAGNOSTICS_DIR": diagnostics_dir / "dtm",
+        "DISCOVERY_FAIL_PATH": diagnostics_dir / "dtm" / "discovery_fail.json",
+        "DTM_HTTP_LOG_PATH": diagnostics_dir / "dtm" / "dtm_http.ndjson",
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
@@ -75,17 +67,18 @@ def write_config(path: Path) -> None:
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
 
-def test_retry_secondary_key(monkeypatch: pytest.MonkeyPatch, patched_paths: Dict[str, Path]) -> None:
+def test_invalid_key_records_failure(monkeypatch: pytest.MonkeyPatch, patched_paths: Dict[str, Path]) -> None:
     write_config(patched_paths["CONFIG_PATH"])
-    monkeypatch.setenv("DTM_API_PRIMARY_KEY", "primary")
-    monkeypatch.setenv("DTM_API_SECONDARY_KEY", "secondary")
-    monkeypatch.setattr(dtm_client, "DTMApiClient", FailThenSucceedClient)
+    monkeypatch.setenv("DTM_API_KEY", "invalid")
+    monkeypatch.setattr(dtm_client, "DTMApiClient", UnauthorizedClient)
 
     exit_code = dtm_client.main([])
 
-    assert exit_code == 0
-    run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["http"]["retries"] == 1
+    assert exit_code == 1
+    fail_path = patched_paths["DISCOVERY_FAIL_PATH"]
+    assert fail_path.exists()
+    payload = json.loads(fail_path.read_text(encoding="utf-8"))
+    assert payload["reason"] == "invalid_key"
     report_lines = patched_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
     report = json.loads(report_lines[-1])
-    assert report["status"] == "ok"
+    assert report["status"] == "error"

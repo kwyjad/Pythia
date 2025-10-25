@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -44,7 +45,7 @@ def patch_discovery_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     monkeypatch.setattr(dtm_client, "DTM_DIAGNOSTICS_DIR", diagnostics_dir)
     monkeypatch.setattr(dtm_client, "DISCOVERY_SNAPSHOT_PATH", diagnostics_dir / "discovery_countries.csv")
     monkeypatch.setattr(dtm_client, "DISCOVERY_FAIL_PATH", diagnostics_dir / "discovery_fail.json")
-    monkeypatch.setattr(dtm_client, "REQUESTS_LOG_PATH", diagnostics_dir / "requests.jsonl")
+    monkeypatch.setattr(dtm_client, "DTM_HTTP_LOG_PATH", diagnostics_dir / "dtm_http.ndjson")
     return diagnostics_dir
 
 
@@ -63,7 +64,7 @@ def config() -> dict:
 
 def test_init_requires_key(monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
-    with pytest.raises(ValueError):
+    with pytest.raises(RuntimeError):
         DTMApiClient(config)
 
 
@@ -149,6 +150,8 @@ def test_discover_all_countries_empty_exit(monkeypatch: pytest.MonkeyPatch) -> N
     assert excinfo.value.code == 2
     fail_path = dtm_client.DISCOVERY_FAIL_PATH
     assert fail_path.exists()
+    payload = json.loads(fail_path.read_text())
+    assert payload["reason"] == "empty_discovery"
 
 
 def test_discover_all_countries_invokes_sdk_catalog() -> None:

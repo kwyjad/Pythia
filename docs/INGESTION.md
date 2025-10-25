@@ -11,29 +11,20 @@ The DTM connector exclusively uses the official IOM DTM API via the `dtmapi` pac
 enabled: true
 
 api:
-  countries:
-    - "Sudan"
-    - "Ethiopia"
-    - "Somalia"
-  admin_levels: [admin1, admin0]
-  operations: []         # optional; required when fetching admin2 data
-  indicators: ["idps"]
+  admin_levels: [admin0, admin1, admin2]
+  countries: []          # discovery always fetches the full catalog
 
 output:
   measure: stock         # or "flow" for month-over-month deltas
-
-field_aliases:
-  idp_count: ["TotalIDPs", "IDPTotal"]
 ```
 
-Adjust `admin_levels`, `countries`, or `operations` to scope the fetch. Provide ISO3 codes or country names in
-`countries`; the connector resolves them to the accepted API form at runtime. Leave `countries` empty (or omit the key) to
-pull data for every published country.
+Adjust `admin_levels` to scope the fetch. The connector ignores any configured `countries` list and automatically
+discovers the full catalog each run. Admin2 pulls may require the caller to specify `operations` via CLI or config when the
+API exposes multiple programmes for a given country.
 
 ### Required secrets
 
-* `DTM_API_PRIMARY_KEY` (preferred) or `DTM_API_KEY` — primary subscription key from <https://dtm-apim-portal.iom.int/>.
-* `DTM_API_SECONDARY_KEY` (optional) — secondary key retried automatically when the primary key returns `401/403`.
+* `DTM_API_KEY` — IOM DTM subscription key from <https://dtm-apim-portal.iom.int/>. Store this in GitHub secrets for CI.
 
 ### Running locally
 
@@ -58,6 +49,10 @@ Every run emits the following diagnostics under `diagnostics/ingestion/`:
 * `dtm_api_request.json` — sanitized API payload (admin levels, countries, operations, window).
 * `dtm_api_sample.json` — the first 100 standardized output rows; always written when zero rows are produced.
 * `dtm_api_response_sample.json` — kept for backwards compatibility; mirrors `dtm_api_sample.json`.
+* `dtm/discovery_countries.csv` — snapshot of the SDK discovery response.
+* `dtm/discovery_fail.json` — populated when discovery fails or returns zero countries (reasons include `missing_key`,
+  `invalid_key`, `empty_discovery`).
+* `dtm/dtm_http.ndjson` — trace of every SDK request made by the connector.
 
 The connectors report (`diagnostics/ingestion/connectors_report.jsonl`) mirrors the status (`ok`, `ok-empty`, `error`,
 `skipped`) and includes the reason string surfaced by `dtm_client`.
