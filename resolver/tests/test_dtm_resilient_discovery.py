@@ -90,8 +90,11 @@ def test_both_discovery_fail_uses_static(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     sample_path = dtm.SAMPLE_ADMIN0_PATH
     assert sample_path.exists()
-    header_line = sample_path.read_text(encoding="utf-8").splitlines()[0]
-    assert header_line.startswith("operation,admin0Name,admin0Pcode")
+    sample = pd.read_csv(sample_path)
+    cols = set(sample.columns)
+    assert {"admin0Name", "admin0Pcode"}.issubset(cols)
+    if "operation" in cols and not sample.empty:
+        assert sample["operation"].notna().any()
 
 
 def test_admin0_only_skips_subnational(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -121,6 +121,15 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 - The workflow also publishes a `connector-diagnostics` artifact containing both `diagnostics/ingestion/summary.md` (human-readable) and the raw `diagnostics/ingestion/connectors_report.jsonl` (machine-readable). Use the Markdown for quick triage and feed the JSONL into ad-hoc notebooks when you need to chart retries, coverage drift, or rate-limit exhaustion across runs.
 - Reasons such as `disabled: config`, `missing secret`, or upstream HTTP errors are normalised in the summary so repeated skips bubble to the top of the reason histogram. Coverage columns render the year-month window (`ym_min → ym_max`) alongside the earliest/latest `as_of` dates, making it easy to confirm a connector backfilled the intended period.
 
+### Fast-suite expectations
+
+The resolver fast tests exercise connectors without network access. To keep those runs reliable while still enforcing the offline contract, ensure the following when working on `resolver.ingestion.dtm_client`:
+
+- Skipped or offline smoke runs must still write a header-only `resolver/staging/dtm_displacement.csv` using the canonical column order.
+- The static ISO3 roster at `resolver/ingestion/static/iso3_master.csv` must provide `admin0Pcode` and `admin0Name` columns and include key countries (e.g., ETH, SDN, PHL, UKR, TUR) even if the total row count drifts slightly.
+- Stock-to-flow conversion in fast mode intentionally drops the first observation and clips negative deltas to zero for determinism; production ingestion can opt into richer semantics as needed.
+- Discovery fallbacks that rely on the static roster may omit an `operation` column—the fast suite accepts either shape so long as the admin0 columns are present.
+
 ### DTM connector quick start
 
 The refactored DTM connector now focuses on API-first ingestion with a streamlined diagnostics footprint. See [`docs/ingestion/dtm.md`](docs/ingestion/dtm.md) for:
