@@ -126,6 +126,7 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 The resolver fast tests exercise connectors without network access. To keep those runs reliable while still enforcing the offline contract, ensure the following when working on `resolver.ingestion.dtm_client`:
 
 - Skipped or offline smoke runs must still write a header-only `resolver/staging/dtm_displacement.csv` using the canonical column order.
+- The `--offline-smoke` flag requires no API key and never touches the network; rely on it for local verification when credentials are unavailable.
 - The static ISO3 roster at `resolver/ingestion/static/iso3_master.csv` must provide `admin0Pcode` and `admin0Name` columns and include key countries (e.g., ETH, SDN, PHL, UKR, TUR) even if the total row count drifts slightly.
 - Stock-to-flow conversion in fast mode intentionally drops the first observation and clips negative deltas to zero for determinism; production ingestion can opt into richer semantics as needed.
 - Discovery fallbacks that rely on the static roster may omit an `operation` column—the fast suite accepts either shape so long as the admin0 columns are present.
