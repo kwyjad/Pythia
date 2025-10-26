@@ -186,6 +186,53 @@ RETRYABLE_EXCEPTIONS = (
 )
 
 
+def _ensure_out_dir_exists(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _write_header_only_csv(path: Path, headers: Sequence[str]) -> None:
+    _ensure_out_dir_exists(path.parent)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(",".join(headers))
+        handle.write("\n")
+
+
+def _append_connectors_report(
+    *,
+    mode: str,
+    status: str,
+    rows: int,
+    reason: Optional[str] = None,
+    extras: Optional[Mapping[str, Any]] = None,
+    http: Optional[Mapping[str, Any]] = None,
+    counts: Optional[Mapping[str, Any]] = None,
+) -> None:
+    http_payload: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
+    http_payload["retries"] = 0
+    http_payload["last_status"] = None
+    http_payload["rate_limit_remaining"] = None
+    http_payload.update(http or {})
+
+    counts_payload: Dict[str, Any] = {"fetched": 0, "normalized": rows, "written": rows}
+    counts_payload.update(counts or {})
+
+    extras_payload: Dict[str, Any] = {
+        "mode": mode,
+        "rows_total": rows,
+        "status_raw": status,
+        "exit_code": 0,
+    }
+    extras_payload.update(extras or {})
+
+    _write_connector_report(
+        status=status,
+        reason=reason or f"{mode}: {status}",
+        extras=extras_payload,
+        http=http_payload,
+        counts=counts_payload,
+    )
+
+
 class ConfigDict(dict):
     """Dictionary subclass that retains the source path for logging."""
 
@@ -1555,7 +1602,13 @@ def _generate_offline_rows(reference: Optional[datetime] = None) -> List[List[An
     return rows
 
 
-def _run_offline_smoke(*, no_date_filter: bool, strict_empty: bool, args: argparse.Namespace) -> int:
+def _run_offline_smoke(
+    *,
+    no_date_filter: bool,
+    strict_empty: bool,
+    args: argparse.Namespace,
+    record_connector: bool = True,
+) -> Tuple[int, str, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     LOG.info("dtm: offline-smoke mode enabled; generating synthetic data without network calls")
     generate_started = time.perf_counter()
     rows = _generate_offline_rows()
@@ -1600,14 +1653,6 @@ def _run_offline_smoke(*, no_date_filter: bool, strict_empty: bool, args: argpar
         "timings_ms": dict(timings_ms),
     }
 
-    _write_connector_report(
-        status="ok",
-        reason=reason,
-        extras=extras_payload,
-        http=http_payload,
-        counts=counts_payload,
-    )
-
     _write_meta(
         len(rows),
         None,
@@ -1646,26 +1691,36 @@ def _run_offline_smoke(*, no_date_filter: bool, strict_empty: bool, args: argpar
 
     write_json(RUN_DETAILS_PATH, run_payload)
     _mirror_legacy_diagnostics()
+    if record_connector:
+        _append_connectors_report(
+            mode="offline_smoke",
+            status="ok",
+            rows=len(rows),
+            reason=reason,
+            extras=extras_payload,
+            http=http_payload,
+            counts=counts_payload,
+        )
+
     print("DTM offline diagnostics: offline-smoke mode wrote sample data (DTM_API_KEY not required)")
-    return 0
+    return len(rows), reason, extras_payload, http_payload, counts_payload
 
 
-def _short_circuit_skip(
+def _finalize_skip_run(
     *,
     reason: str,
     strict_empty: bool,
     no_date_filter: bool,
     args: argparse.Namespace,
-) -> int:
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     LOG.info("dtm: RESOLVER_SKIP_DTM detected; emitting header-only CSV and exiting")
-    ensure_header_only()
 
     http_payload: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     http_payload["retries"] = 0
     http_payload["last_status"] = None
     http_payload["rate_limit_remaining"] = None
 
-    counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+    counts_payload: Dict[str, Any] = {"fetched": 0, "normalized": 0, "written": 0}
 
     extras_payload: Dict[str, Any] = {
         "mode": "skip",
@@ -1676,14 +1731,6 @@ def _short_circuit_skip(
         "no_date_filter": no_date_filter,
         "offline_smoke": False,
     }
-
-    _write_connector_report(
-        status="skipped",
-        reason=reason,
-        extras=extras_payload,
-        http=http_payload,
-        counts=counts_payload,
-    )
 
     deps_payload = {
         "python": sys.version.split()[0],
@@ -1731,7 +1778,7 @@ def _short_circuit_skip(
 
     write_json(RUN_DETAILS_PATH, run_payload)
     _mirror_legacy_diagnostics()
-    return 0
+    return extras_payload, http_payload, counts_payload
 
 
 def write_rows(rows: Sequence[Sequence[Any]]) -> None:
@@ -2607,7 +2654,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging and force file logging for troubleshooting.",
     )
-    argv_list = list(argv) if argv is not None else []
+    if argv is None:
+        argv = []
+    argv_list = list(argv)
     return parser.parse_args(argv_list)
 
 
@@ -2644,7 +2693,7 @@ def _write_meta(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(list(argv) if argv is not None else None)
+    args = parse_args(list(argv) if argv else [])
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
         log_level_name = "DEBUG"
@@ -2661,20 +2710,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
 
     if skip_requested:
-        return _short_circuit_skip(
-            reason="disabled via RESOLVER_SKIP_DTM",
+        LOG.info("RESOLVER_SKIP_DTM set: writing header-only CSV and exiting 0")
+        _ensure_out_dir_exists(OUT_DIR)
+        _write_header_only_csv(OUT_PATH, CANONICAL_HEADERS)
+        ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
+        reason = "disabled via RESOLVER_SKIP_DTM"
+        extras_payload, http_payload, counts_payload = _finalize_skip_run(
+            reason=reason,
             strict_empty=strict_empty,
             no_date_filter=no_date_filter,
             args=args,
         )
+        _append_connectors_report(
+            mode="skip",
+            status="skipped",
+            rows=0,
+            reason=reason,
+            extras=extras_payload,
+            http=http_payload,
+            counts=counts_payload,
+        )
+        return 0
 
     if offline_smoke:
-        LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")
-        return _run_offline_smoke(no_date_filter=no_date_filter, strict_empty=strict_empty, args=args)
-
-    if offline_smoke:
-        LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")
-        return _run_offline_smoke(no_date_filter=no_date_filter, strict_empty=strict_empty, args=args)
+        LOG.info("offline-smoke: no network, no key; generating synthetic sample")
+        _ensure_out_dir_exists(OUT_DIR)
+        (
+            rows_written,
+            reason,
+            extras_payload,
+            http_payload,
+            counts_payload,
+        ) = _run_offline_smoke(
+            no_date_filter=no_date_filter,
+            strict_empty=strict_empty,
+            args=args,
+            record_connector=False,
+        )
+        _append_connectors_report(
+            mode="offline_smoke",
+            status="ok",
+            rows=rows_written,
+            reason=reason,
+            extras=extras_payload,
+            http=http_payload,
+            counts=counts_payload,
+        )
+        return 0
 
     preflight_started = time.perf_counter()
     dep_info, have_dtmapi = _preflight_dependencies()
