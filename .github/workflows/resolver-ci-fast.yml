@@ -35,9 +35,8 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -e .
-          if [ -f resolver/requirements.txt ]; then pip install -r resolver/requirements.txt; fi
-          pip install pytest 'duckdb>=1.0,<2.0'
+          pip install -c constraints-ci.txt -e '.[dev,tests,db]'
+          if [ -f resolver/requirements.txt ]; then pip install -c constraints-ci.txt -r resolver/requirements.txt; fi
 
       - name: Ensure CI helpers are executable
         run: |

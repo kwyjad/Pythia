@@ -24,13 +24,10 @@ pydantic = ">=2.6,<3.0"
 duckdb = {version = ">=1.0,<2.0", optional = true}
 httpx = {version = ">=0.27,<1.0", optional = true}
 pytest = {version = ">=8.2,<9.0", optional = true}
-dtmapi = {version = ">=0.1.5,<0.2.0", optional = true}
+dtmapi = {version = ">=0.1.5,<1.0", optional = true}
 pandas = {version = ">=2.2", optional = true}
 python-dateutil = {version = ">=2.9", optional = true}
-
-[tool.poetry.group.dev.dependencies]
-ipykernel = "^6.29.5"
-duckdb = ">=1.0,<2.0"
+ipykernel = {version = "^6.29.5", optional = true}
 
 [build-system]
 requires = ["poetry-core>=1.6.0"]
@@ -38,6 +35,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.extras]
 db = ["duckdb"]
-test = ["duckdb", "httpx", "pytest"]
-connectors = ["dtmapi>=0.1.5,<0.2.0"]
-ingestion = ["dtmapi>=0.1.5,<0.2.0", "pandas", "python-dateutil"]
+dev = ["ipykernel"]
+tests = ["duckdb", "httpx", "pytest"]
+connectors = ["dtmapi>=0.1.5,<1.0"]
+ingestion = ["dtmapi>=0.1.5,<1.0", "pandas", "python-dateutil"]
