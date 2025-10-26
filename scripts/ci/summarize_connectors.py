@@ -60,8 +60,12 @@ def _format_meta_cell(
 ) -> str:
     """Render the Meta cell value applying ok-empty and missing-count rules."""
     try:
-        raw_status = status_raw or (extras or {}).get("status_raw")
+        extras_map: Mapping[str, Any] = extras or {}
+        raw_status = status_raw or extras_map.get("status_raw")
         if isinstance(raw_status, str) and raw_status.strip().lower() == "ok-empty":
+            return "—"
+        rows_written = extras_map.get("rows_written")
+        if rows_written is not None and _coerce_int(rows_written) == 0:
             return "—"
         row_count = (meta_json or {}).get("row_count")
         return _fmt_count(row_count)
@@ -388,6 +392,9 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 status_text = "ok-empty"
                 if not reason_text:
                     reason_text = "header-only (0 rows)"
+                kept_cell = "—"
+                dropped_cell = "—"
+                parse_cell = "—"
             elif status_raw:
                 status_text = status_raw
             run_details_raw = extras.get("run_details_path")
@@ -403,16 +410,17 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             kept_value = totals.get("kept")
             dropped_value = totals.get("dropped")
             parse_value = totals.get("parse_errors")
-            if kept_value is not None:
-                kept_cell = _format_optional_int(kept_value)
-            elif totals.get("rows_after") is not None:
-                kept_cell = _format_optional_int(totals.get("rows_after"))
-            elif totals.get("rows_written") is not None:
-                kept_cell = _format_optional_int(totals.get("rows_written"))
-            if dropped_value is not None:
-                dropped_cell = _format_optional_int(dropped_value)
-            if parse_value is not None:
-                parse_cell = _format_optional_int(parse_value)
+            if status_text != "ok-empty":
+                if kept_value is not None:
+                    kept_cell = _format_optional_int(kept_value)
+                elif totals.get("rows_after") is not None:
+                    kept_cell = _format_optional_int(totals.get("rows_after"))
+                elif totals.get("rows_written") is not None:
+                    kept_cell = _format_optional_int(totals.get("rows_written"))
+                if dropped_value is not None:
+                    dropped_cell = _format_optional_int(dropped_value)
+                if parse_value is not None:
+                    parse_cell = _format_optional_int(parse_value)
         if (
             connector_id == "dtm_client"
             and isinstance(reason_text, str)
