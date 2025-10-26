@@ -13,7 +13,11 @@ import pandas as pd
 
 from resolver.db import duckdb_io
 from resolver.db.conn_shared import normalize_duckdb_url
-from resolver.db.runtime_flags import FAST_FIXTURES_ENV, resolve_fast_fixtures_mode
+from resolver.db.runtime_flags import (
+    FAST_FIXTURES_ENV,
+    USE_DUCKDB,
+    resolve_fast_fixtures_mode,
+)
 from resolver.diag.diagnostics import (
     get_logger as get_diag_logger,
     log_json,
@@ -23,11 +27,14 @@ from resolver.io import files_locator
 # --- begin duckdb import guard ---
 try:
     import duckdb  # type: ignore
+except Exception:
+    duckdb = None  # type: ignore[assignment]
+    DUCKDB_AVAILABLE = False
+    DuckDBError = Exception
+else:
+    DUCKDB_AVAILABLE = True
     # Some test shims provide a minimal 'duckdb' without the Error attribute.
     DuckDBError = getattr(duckdb, "Error", Exception)
-except Exception:
-    duckdb = None  # type: ignore
-    DuckDBError = Exception
 # --- end duckdb import guard ---
 
 LOGGER = logging.getLogger(__name__)
@@ -245,7 +252,7 @@ def load_series_from_db(
     LOGGER.debug("load_series_from_db called ym=%s series=%s", ym, normalized_series)
 
     mode, auto_fallback, fallback_reason = resolve_fast_fixtures_mode()
-    if mode != "duckdb":
+    if not USE_DUCKDB:
         if auto_fallback and fallback_reason:
             reason = f"duckdb unavailable ({fallback_reason})"
         elif auto_fallback:
