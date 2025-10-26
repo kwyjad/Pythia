@@ -48,7 +48,7 @@ def test_dtm_deep_dive_renders_sections(tmp_path):
             ],
             "used_stage": "sdk",
             "reason": None,
-            "snapshot_path": "diagnostics/ingestion/dtm/discovery_snapshot.csv",
+            "snapshot_path": "diagnostics/ingestion/dtm/discovery_countries.csv",
             "first_fail_path": str(discovery_fail),
             "total_countries": 2,
         },

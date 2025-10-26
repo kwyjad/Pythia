@@ -19,7 +19,7 @@ def _patch_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "DTM_LOG_DIR": root / "dtm" / "logs",
         "CONNECTORS_REPORT": root / "connectors_report.jsonl",
         "RUN_DETAILS_PATH": root / "dtm" / "dtm_run.json",
-        "DISCOVERY_SNAPSHOT_PATH": root / "dtm" / "discovery_snapshot.csv",
+        "DISCOVERY_SNAPSHOT_PATH": root / "dtm" / "discovery_countries.csv",
         "DISCOVERY_FAIL_PATH": root / "dtm" / "discovery_fail.json",
         "DTM_HTTP_LOG_PATH": root / "dtm" / "dtm_http.ndjson",
         "DISCOVERY_RAW_JSON_PATH": root / "dtm" / "raw" / "dtm_countries.json",

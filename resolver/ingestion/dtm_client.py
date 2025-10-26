@@ -43,42 +43,52 @@ from resolver.ingestion.diagnostics_emitter import (
 from resolver.ingestion.dtm_auth import build_discovery_header_variants, get_dtm_api_key
 from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest
 from resolver.ingestion.utils.iso_normalize import resolve_iso3 as resolve_iso3_fields, to_iso3
-from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
+from resolver.ingestion.utils.io import resolve_ingestion_window
 from resolver.scripts.ingestion._dtm_debug_utils import (
     dump_json as diagnostics_dump_json,
     timing as diagnostics_timing,
     write_sample_csv as diagnostics_write_sample_csv,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = ROOT.parent
-STAGING = ROOT / "staging"
-CONFIG_PATH = ROOT / "ingestion" / "config" / "dtm.yml"
-DEFAULT_OUTPUT = ROOT / "staging" / "dtm_displacement.csv"
-OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
-OUT_DIR = OUT_PATH.parent
-OUTPUT_PATH = OUT_PATH
-META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
-HTTP_TRACE_PATH = OUT_DIR / "dtm_http.ndjson"
-DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
-DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_ROOT / "dtm"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RESOLVER_ROOT = REPO_ROOT / "resolver"
+CONFIG_PATH = RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml"
+
+# Diagnostics (repo-root)
+DIAGNOSTICS_DIR = REPO_ROOT / "diagnostics" / "ingestion"
+DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
 DTM_RAW_DIR = DTM_DIAGNOSTICS_DIR / "raw"
 DTM_METRICS_DIR = DTM_DIAGNOSTICS_DIR / "metrics"
 DTM_SAMPLES_DIR = DTM_DIAGNOSTICS_DIR / "samples"
 DTM_LOG_DIR = DTM_DIAGNOSTICS_DIR / "logs"
-CONNECTORS_REPORT = DIAGNOSTICS_ROOT / "connectors_report.jsonl"
+DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
+DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_DIR / "metrics"
+DIAGNOSTICS_SAMPLES_DIR = DIAGNOSTICS_DIR / "samples"
+DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_DIR / "logs"
+
+# Standard filenames under those dirs
+CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 RUN_DETAILS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_run.json"
-API_REQUEST_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_request.json"
-API_SAMPLE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_sample.json"
-API_RESPONSE_SAMPLE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
-DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_snapshot.csv"
-DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
 DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
-DISCOVERY_RAW_JSON_PATH = DTM_RAW_DIR / "dtm_countries.json"
-PER_COUNTRY_METRICS_PATH = DTM_METRICS_DIR / "dtm_per_country.jsonl"
-SAMPLE_ROWS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_sample.csv"
-DTM_CLIENT_LOG_PATH = DTM_LOG_DIR / "dtm_client.log"
+DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
+DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
+DISCOVERY_RAW_JSON_PATH = DIAGNOSTICS_RAW_DIR / "dtm_countries.json"
+PER_COUNTRY_METRICS_PATH = DIAGNOSTICS_METRICS_DIR / "dtm_per_country.jsonl"
+SAMPLE_ROWS_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_sample.csv"
+DTM_CLIENT_LOG_PATH = DIAGNOSTICS_LOG_DIR / "dtm_client.log"
+API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
+API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
+API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
+
+# Staging outputs (repo-root)
+OUT_DIR = RESOLVER_ROOT / "staging"
+OUT_PATH = OUT_DIR / "dtm_displacement.csv"
+OUTPUT_PATH = OUT_PATH
+DEFAULT_OUTPUT = OUT_PATH
+META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
+HTTP_TRACE_PATH = DTM_HTTP_LOG_PATH
 RESCUE_PROBE_PATH = DTM_DIAGNOSTICS_DIR / "rescue_probe.json"
+
 STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
     ("South Sudan", "SSD"),
     ("Nigeria", "NGA"),
@@ -144,17 +154,22 @@ class DiscoveryResult:
 MULTI_HAZARD = Hazard("multi", "Multi-shock Displacement/Needs", "all")
 UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
-DIAGNOSTICS_ROOT.mkdir(parents=True, exist_ok=True)
 for directory in (
+    DIAGNOSTICS_DIR,
     DTM_DIAGNOSTICS_DIR,
     DTM_RAW_DIR,
     DTM_METRICS_DIR,
     DTM_SAMPLES_DIR,
     DTM_LOG_DIR,
+    DIAGNOSTICS_RAW_DIR,
+    DIAGNOSTICS_METRICS_DIR,
+    DIAGNOSTICS_SAMPLES_DIR,
+    DIAGNOSTICS_LOG_DIR,
+    OUT_DIR,
 ):
     directory.mkdir(parents=True, exist_ok=True)
 
-_LEGACY_DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion"
+_LEGACY_DIAGNOSTICS_DIR = RESOLVER_ROOT / "diagnostics" / "ingestion"
 
 
 def _mirror_legacy_diagnostics() -> None:
@@ -1296,7 +1311,7 @@ def _write_connector_report(
 
 
 def _append_summary_stub_if_needed(message: str) -> None:
-    summary_path = DIAGNOSTICS_ROOT / "summary.md"
+    summary_path = DIAGNOSTICS_DIR / "summary.md"
     if summary_path.exists():
         return
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1776,16 +1791,38 @@ def _is_candidate_newer(existing_iso: str, candidate_iso: str) -> bool:
     return candidate_iso > existing_iso
 
 
+def _maybe_override_from_env(cfg: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    """Apply optional environment overrides for countries and admin levels."""
+
+    api_cfg = cfg.setdefault("api", {})  # type: ignore[arg-type]
+
+    countries_env = os.getenv("DTM_COUNTRIES", "").strip()
+    if countries_env:
+        overrides = [country.strip() for country in countries_env.split(",") if country.strip()]
+        if overrides:
+            LOG.debug("dtm: overriding countries via env (DTM_COUNTRIES)")
+            api_cfg["countries"] = overrides
+
+    levels_env = os.getenv("DTM_ADMIN_LEVELS", "").strip()
+    if levels_env:
+        overrides = [level.strip() for level in levels_env.split(",") if level.strip()]
+        if overrides:
+            LOG.debug("dtm: overriding admin levels via env (DTM_ADMIN_LEVELS)")
+            api_cfg["admin_levels"] = overrides
+
+    return cfg
+
+
 def load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
         cfg = ConfigDict()
         cfg._source_path = str(CONFIG_PATH)
-        return cfg
+        return _maybe_override_from_env(cfg)
     with CONFIG_PATH.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     cfg = ConfigDict(data if isinstance(data, dict) else {})
     cfg._source_path = str(CONFIG_PATH)
-    return cfg
+    return _maybe_override_from_env(cfg)
 
 
 def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -3154,6 +3191,7 @@ def _write_meta(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
         log_level_name = "DEBUG"
@@ -3163,6 +3201,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
     _setup_file_logging()
+    LOG.debug(
+        "dtm: path constants -> diagnostics=%s dtm_diagnostics=%s staging=%s output=%s",
+        DIAGNOSTICS_DIR,
+        DTM_DIAGNOSTICS_DIR,
+        OUT_DIR,
+        OUT_PATH,
+    )
 
     try:
         DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -3170,13 +3215,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception:  # pragma: no cover - diagnostics helper
         LOG.debug("dtm: unable to initialise diagnostics HTTP trace", exc_info=True)
 
-    global OUT_DIR, OUTPUT_PATH, META_PATH, HTTP_TRACE_PATH, OFFLINE
     OUT_DIR = Path(OUT_PATH).parent
     OUTPUT_PATH = OUT_PATH
     META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
-    HTTP_TRACE_PATH = OUT_DIR / "dtm_http.ndjson"
     LOG.debug("dtm: canonical headers=%s", CANONICAL_HEADERS)
-    LOG.debug("dtm: outputs -> csv=%s meta=%s http_trace=%s", OUT_PATH, META_PATH, HTTP_TRACE_PATH)
+    LOG.debug(
+        "dtm: outputs -> csv=%s meta=%s http_trace=%s",
+        OUT_PATH,
+        META_PATH,
+        HTTP_TRACE_PATH,
+    )
 
     strict_empty = (
         args.strict_empty
@@ -3612,6 +3660,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "snapshot_path": str(DISCOVERY_SNAPSHOT_PATH),
         "first_fail_path": str(DISCOVERY_FAIL_PATH),
         "total_countries": discovery_info.get("total_countries"),
+        "source": discovery_info.get("source"),
         "configured_labels": configured_labels,
         "unresolved_labels": unresolved_labels,
     }

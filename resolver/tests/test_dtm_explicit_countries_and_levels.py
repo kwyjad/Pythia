@@ -24,7 +24,7 @@ def _redirect_dtm_paths(tmp_path, monkeypatch):
         "API_REQUEST_PATH": dtm_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": dtm_dir / "dtm_api_sample.json",
         "API_RESPONSE_SAMPLE_PATH": dtm_dir / "dtm_api_response_sample.json",
-        "DISCOVERY_SNAPSHOT_PATH": dtm_dir / "discovery_snapshot.csv",
+        "DISCOVERY_SNAPSHOT_PATH": dtm_dir / "discovery_countries.csv",
         "DISCOVERY_FAIL_PATH": dtm_dir / "discovery_fail.json",
         "DTM_HTTP_LOG_PATH": dtm_dir / "dtm_http.ndjson",
         "DISCOVERY_RAW_JSON_PATH": dtm_dir / "raw" / "dtm_countries.json",

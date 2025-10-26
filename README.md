@@ -149,10 +149,18 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
 - Credential setup (`DTM_API_KEY` or `DTM_SUBSCRIPTION_KEY`).
 - Expected diagnostics outputs and skip reasons (`sdk_missing`, `auth_missing`, `discovery_empty`).
 - Troubleshooting tips for zero-row exports and negative monthly flows.
-- Configuration guidance for targeted runs: when `resolver/ingestion/config/dtm.yml` specifies a non-empty `api.countries` list,
-  the connector skips SDK/HTTP discovery entirely, treats that list as authoritative, and records `countries_mode=explicit_config`
-  in the diagnostics. Admin-level selection is also honoured—include `admin1` alongside `admin0` to fetch both tiers in a single
-  run (per-level counts and timings surface in `diagnostics/ingestion/dtm/dtm_run.json`). A representative snippet:
+- Configuration defaults keep `api.countries: []` and `admin_levels: ["admin0"]` so discovery stays enabled for fast tests. To
+  target a curated geography list without editing the YAML, export environment overrides before invoking the connector:
+
+  ```
+  export DTM_COUNTRIES="South Sudan,Nigeria,Somalia,Ethiopia,Sudan,DR Congo,Yemen"
+  export DTM_ADMIN_LEVELS="admin0,admin1"
+  ```
+
+- When the resulting configuration (YAML or env overrides) specifies a non-empty `api.countries`, the connector skips SDK/HTTP
+  discovery, treats that list as authoritative, and records `countries_mode=explicit_config` in diagnostics. Admin-level
+  selection is honoured—include `admin1` alongside `admin0` to fetch both tiers in a single run (per-level counts and timings
+  surface in `diagnostics/ingestion/dtm/dtm_run.json`). A representative snippet:
 
   ```yaml
   enabled: true
