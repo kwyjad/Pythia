@@ -10,6 +10,7 @@ import threading
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
+from resolver.db._duckdb_available import get_duckdb
 from resolver.diag.diagnostics import get_logger as get_diag_logger, log_json
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ class ConnectionWrapper:
 
 
 def _open_new(path: str, url: str) -> ConnectionWrapper:
-    import duckdb
+    duckdb = get_duckdb()
 
     raw = duckdb.connect(database=path, read_only=False)
     wrapper = ConnectionWrapper(path, url, raw)

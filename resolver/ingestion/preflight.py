@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from resolver.ingestion._fast_fixtures import (
+    FAST_FIXTURES_ENV,
+    resolve_fast_fixtures_mode,
+)
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
     finalize_run as diagnostics_finalize_run,
@@ -85,15 +89,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reason = "dependencies ok"
     extras: Dict[str, Any] = {"checks": []}
 
+    mode, auto_fallback, fallback_reason = resolve_fast_fixtures_mode()
+    extras["fast_fixtures_mode"] = mode
+    extras["fast_fixtures_auto_fallback"] = auto_fallback
+    if fallback_reason:
+        extras["fast_fixtures_reason"] = fallback_reason
+
+    if mode != "duckdb":
+        if auto_fallback:
+            LOG.warning(
+                "Fast fixtures running in noop mode because DuckDB is unavailable (%s)",
+                fallback_reason,
+            )
+        else:
+            LOG.info(
+                "Fast fixtures noop mode requested via %s", FAST_FIXTURES_ENV
+            )
+
     if not args.skip_duckdb:
         ok, details, error_reason = _check_duckdb()
         extras["checks"].append(details)
         if ok:
             extras["duckdb_version"] = details.get("version")
         else:
-            status = "error"
-            reason = error_reason or "missing_dependency: duckdb"
-
+            extras["duckdb_error"] = error_reason
+            if mode == "duckdb":
+                status = "error"
+                reason = error_reason or "missing_dependency: duckdb"
+            else:
+                reason = "duckdb unavailable; noop mode active"
+            LOG.warning("DuckDB dependency unavailable: %s", error_reason)
+    else:
+        extras["checks"].append(
+            {"dependency": "duckdb", "status": "skipped", "reason": "--skip-duckdb"}
+        )
+    
     exit_code = 0 if status == "ok" else 1
     extras["exit_code"] = exit_code
     extras["status_raw"] = status

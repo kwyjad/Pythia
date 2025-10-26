@@ -16,12 +16,36 @@ from typing import Iterable, Iterator, Mapping, Sequence
 
 import pandas as pd
 
-try:  # pragma: no cover - import guard for optional dependency
-    import duckdb
-except ImportError as exc:  # pragma: no cover - guidance for operators
-    raise RuntimeError(
-        "DuckDB is required for database-backed resolver operations. Install 'duckdb'."
-    ) from exc
+from resolver.db._duckdb_available import (
+    DUCKDB_AVAILABLE,
+    duckdb_unavailable_reason,
+    get_duckdb,
+)
+
+if DUCKDB_AVAILABLE:  # pragma: no branch - cache the imported module once
+    duckdb = get_duckdb()
+else:  # pragma: no cover - exercised in environments without DuckDB
+
+    class _DuckDBStub:
+        """Minimal stub that exposes DuckDB exception attributes for typing."""
+
+        __slots__ = ()
+        __version__ = "unavailable"
+        Error = Exception
+        CatalogException = Exception
+        DependencyException = Exception
+        ConnectionException = Exception
+        NotImplementedException = Exception
+        ParserException = Exception
+        TransactionException = Exception
+
+        def __getattr__(self, name: str) -> object:
+            raise RuntimeError(
+                "DuckDB is required for this operation but is not installed. "
+                f"Attempted to access attribute '{name}'."
+            )
+
+    duckdb = _DuckDBStub()
 
 _DUCKDB_ERROR = getattr(duckdb, "Error", Exception)
 _CATALOG_EXC = getattr(duckdb, "CatalogException", _DUCKDB_ERROR)
@@ -116,6 +140,8 @@ if diag_enabled():
             python=sys.version.split()[0],
             platform=platform.platform(),
             duckdb_version=getattr(duckdb, "__version__", "unknown"),
+            duckdb_available=DUCKDB_AVAILABLE,
+            duckdb_error=duckdb_unavailable_reason() if not DUCKDB_AVAILABLE else None,
         )
     except Exception as exc:  # pragma: no cover - diagnostics only
         log_json(
@@ -1212,7 +1238,7 @@ def upsert_dataframe(
     if df is None or df.empty:
         return 0
 
-    import duckdb  # keep inside function to avoid module-top import churn
+    duckdb = get_duckdb()
 
     frame = df.copy()
     coerced = _coerce_numeric(frame, table)
