@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -11,6 +12,14 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+
+from resolver.ingestion._fast_fixtures import resolve_fast_fixtures_mode
+
+LOGGER = logging.getLogger(__name__)
+if not LOGGER.handlers:  # pragma: no cover - keep logging quiet in libraries
+    LOGGER.addHandler(logging.NullHandler())
+
+_NOOP_BOOTSTRAP_DONE = False
 
 PERIOD_LABEL = "2024Q1"
 
@@ -76,6 +85,24 @@ def _run_load_and_derive(staging_root: Path, snapshots_root: Path, db_path: Path
 
 @lru_cache(maxsize=1)
 def build_fast_exports() -> FastExports:
+    mode, auto_fallback, reason = resolve_fast_fixtures_mode()
+    if mode != "duckdb":
+        if auto_fallback:
+            extra = f" (missing DuckDB: {reason})" if reason else ""
+            LOGGER.warning(
+                "Fast fixtures disabled%s; running offline-smoke fallback only",
+                extra,
+            )
+        else:
+            LOGGER.info(
+                "Fast fixtures disabled via RESOLVER_FAST_FIXTURES_MODE=noop; running offline-smoke fallback"
+            )
+        _run_offline_smoke_fallback()
+        raise RuntimeError(
+            "Fast fixtures bootstrap is unavailable in noop mode. Install DuckDB and "
+            "set RESOLVER_FAST_FIXTURES_MODE=duckdb to enable full fixtures."
+        )
+
     repo = _repo_root()
     canonical_source = (
         repo
@@ -121,3 +148,20 @@ def build_fast_exports() -> FastExports:
 
 
 __all__ = ["FastExports", "build_fast_exports"]
+
+
+def _run_offline_smoke_fallback() -> None:
+    """Ensure the offline-smoke bootstrap has been executed once."""
+
+    global _NOOP_BOOTSTRAP_DONE
+    if _NOOP_BOOTSTRAP_DONE:
+        return
+
+    from resolver.ingestion import dtm_client
+
+    exit_code = dtm_client.main(["--offline-smoke"])
+    if exit_code != 0:
+        raise RuntimeError(
+            f"Offline smoke fallback failed with exit code {exit_code}"
+        )
+    _NOOP_BOOTSTRAP_DONE = True
