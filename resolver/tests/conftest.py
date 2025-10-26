@@ -13,6 +13,11 @@ import pytest
 from . import _synthetic_testdata
 from resolver.tests.fixtures.bootstrap_fast_exports import FastExports, build_fast_exports
 
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Set default skip flag for DTM tests unless the runner overrides it."""
+    os.environ.setdefault("RESOLVER_SKIP_DTM", "1")
+
 CI_ENV_VAR = "GITHUB_ACTIONS"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPORTS_DIR = REPO_ROOT / "exports"

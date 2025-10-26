@@ -1,0 +1,4 @@
+duckdb>=0.10,<1.2
+pyarrow>=15,<18
+pandas>=2.2,<3
+pytest>=7
