@@ -1650,6 +1650,90 @@ def _run_offline_smoke(*, no_date_filter: bool, strict_empty: bool, args: argpar
     return 0
 
 
+def _short_circuit_skip(
+    *,
+    reason: str,
+    strict_empty: bool,
+    no_date_filter: bool,
+    args: argparse.Namespace,
+) -> int:
+    LOG.info("dtm: RESOLVER_SKIP_DTM detected; emitting header-only CSV and exiting")
+    ensure_header_only()
+
+    http_payload: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
+    http_payload["retries"] = 0
+    http_payload["last_status"] = None
+    http_payload["rate_limit_remaining"] = None
+
+    counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+
+    extras_payload: Dict[str, Any] = {
+        "mode": "skip",
+        "rows_total": 0,
+        "status_raw": "skipped",
+        "exit_code": 0,
+        "strict_empty": strict_empty,
+        "no_date_filter": no_date_filter,
+        "offline_smoke": False,
+    }
+
+    _write_connector_report(
+        status="skipped",
+        reason=reason,
+        extras=extras_payload,
+        http=http_payload,
+        counts=counts_payload,
+    )
+
+    deps_payload = {
+        "python": sys.version.split()[0],
+        "executable": sys.executable,
+        "dtmapi": "skipped",
+        "pandas": _package_version("pandas"),
+        "requests": _package_version("requests"),
+    }
+
+    _write_meta(
+        0,
+        None,
+        None,
+        deps=deps_payload,
+        effective_params={},
+        http_counters=http_payload,
+        timings_ms={},
+        diagnostics={"mode": "skip", "reason": reason},
+    )
+
+    run_payload = {
+        "window": {"start": None, "end": None},
+        "countries": {},
+        "http": dict(http_payload),
+        "paging": {"pages": 0, "page_size": None, "total_received": 0},
+        "rows": {
+            "fetched": 0,
+            "normalized": 0,
+            "written": 0,
+            "kept": 0,
+            "dropped": 0,
+        },
+        "totals": {"rows_written": 0},
+        "status": "skipped",
+        "reason": reason,
+        "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+        "extras": {
+            "mode": "skip",
+            "strict_empty": strict_empty,
+            "no_date_filter": no_date_filter,
+            "offline_smoke": False,
+        },
+        "args": vars(args),
+    }
+
+    write_json(RUN_DETAILS_PATH, run_payload)
+    _mirror_legacy_diagnostics()
+    return 0
+
+
 def write_rows(rows: Sequence[Sequence[Any]]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", encoding="utf-8", newline="") as handle:
@@ -2523,7 +2607,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging and force file logging for troubleshooting.",
     )
-    return parser.parse_args(argv)
+    argv_list = list(argv) if argv is not None else []
+    return parser.parse_args(argv_list)
 
 
 def _write_meta(
@@ -2573,6 +2658,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
+    skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
+
+    if skip_requested:
+        return _short_circuit_skip(
+            reason="disabled via RESOLVER_SKIP_DTM",
+            strict_empty=strict_empty,
+            no_date_filter=no_date_filter,
+            args=args,
+        )
+
+    if offline_smoke:
+        LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")
+        return _run_offline_smoke(no_date_filter=no_date_filter, strict_empty=strict_empty, args=args)
 
     if offline_smoke:
         LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")
@@ -2669,40 +2767,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     summary: Dict[str, Any] = {}
 
     try:
-        if os.getenv("RESOLVER_SKIP_DTM"):
+        cfg = load_config()
+        LOG.info(
+            "config_loaded_from=%s",
+            getattr(cfg, "_source_path", "<unknown>"),
+        )
+        if not cfg.get("enabled", True):
             status = "skipped"
-            reason = "disabled via RESOLVER_SKIP_DTM"
+            reason = "disabled via config"
             ensure_header_only()
-        else:
-            cfg = load_config()
-            LOG.info(
-                "config_loaded_from=%s",
-                getattr(cfg, "_source_path", "<unknown>"),
+        elif "api" not in cfg:
+            raise ValueError(
+                "Config error: DTM is API-only; provide 'api:' in resolver/ingestion/config/dtm.yml",
             )
-            if not cfg.get("enabled", True):
-                status = "skipped"
-                reason = "disabled via config"
-                ensure_header_only()
-            elif "api" not in cfg:
-                raise ValueError(
-                    "Config error: DTM is API-only; provide 'api:' in resolver/ingestion/config/dtm.yml",
-                )
+        else:
+            rows, summary = build_rows(
+                cfg,
+                no_date_filter=no_date_filter,
+                window_start=window_start_iso,
+                window_end=window_end_iso,
+                http_counts=http_stats,
+                write_sample=True,
+            )
+            rows_written = len(rows)
+            write_started = time.perf_counter()
+            if rows:
+                write_rows(rows)
             else:
-                rows, summary = build_rows(
-                    cfg,
-                    no_date_filter=no_date_filter,
-                    window_start=window_start_iso,
-                    window_end=window_end_iso,
-                    http_counts=http_stats,
-                    write_sample=True,
-                )
-                rows_written = len(rows)
-                write_started = time.perf_counter()
-                if rows:
-                    write_rows(rows)
-                else:
-                    ensure_header_only()
-                timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
+                ensure_header_only()
+            timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except DTMZeroRowsError as exc:
         LOG.warning("dtm: zero rows reason=%s", exc.zero_rows_reason)
         status = "ok-empty"
@@ -2856,5 +2949,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
 
