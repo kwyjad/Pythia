@@ -2748,6 +2748,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
     _setup_file_logging()
 
+    try:
+        DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DTM_HTTP_LOG_PATH.touch(exist_ok=True)
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: unable to initialise diagnostics HTTP trace", exc_info=True)
+
     global OUT_DIR, OUTPUT_PATH, META_PATH, HTTP_TRACE_PATH, OFFLINE
     OUT_DIR = Path(OUT_PATH).parent
     OUTPUT_PATH = OUT_PATH
@@ -2756,7 +2762,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     LOG.debug("dtm: canonical headers=%s", CANONICAL_HEADERS)
     LOG.debug("dtm: outputs -> csv=%s meta=%s http_trace=%s", OUT_PATH, META_PATH, HTTP_TRACE_PATH)
 
-    strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
+    strict_empty = (
+        args.strict_empty
+        or _env_bool("DTM_STRICT_EMPTY", False)
+        or _env_bool("RESOLVER_STRICT_EMPTY", False)
+    )
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
     skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
@@ -3034,22 +3044,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         exit_code = 1
         ensure_zero_row_outputs(offline=OFFLINE)
 
-    if status == "ok":
-        if rows_written == 0:
-            status = "ok-empty"
-            reason = "header-only (0 rows)"
-            extras["rows_total"] = 0
-        else:
-            reason = f"wrote {rows_written} rows"
-    elif status == "ok-empty":
-        extras["rows_total"] = rows_written
-        if strict_empty:
-            status = "error"
-            exit_code = 2
-            LOG.error("dtm: strict-empty enabled; failing due to zero rows")
-        else:
-            reason = reason or "header-only (0 rows)"
-
     if skip_requested:
         extras["skip_reason"] = "RESOLVER_SKIP_DTM"
         if rows_written == 0 and exit_code == 0:
@@ -3095,6 +3089,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "dropped": rows_summary.get("dropped", 0),
         "parse_errors": rows_summary.get("parse_errors", 0),
     }
+
+    kept_count = int(totals.get("kept") or 0)
+    zero_rows_reason = (
+        extras.get("zero_rows_reason")
+        or summary_extras.get("zero_rows_reason")
+        or None
+    )
+    if status in {"ok", "ok-empty"}:
+        if kept_count == 0:
+            ensure_header_only()
+            totals["rows_written"] = 0
+            totals["kept"] = 0
+            extras["rows_total"] = 0
+            if zero_rows_reason:
+                extras.setdefault("zero_rows_reason", zero_rows_reason)
+                diagnostics_payload = extras.get("diagnostics")
+                if isinstance(diagnostics_payload, Mapping):
+                    diagnostics_map = dict(diagnostics_payload)
+                else:
+                    diagnostics_map = {}
+                diagnostics_map["zero_rows_reason"] = zero_rows_reason
+                extras["diagnostics"] = diagnostics_map
+                summary_extras.setdefault("zero_rows_reason", zero_rows_reason)
+            if strict_empty:
+                status = "error"
+                exit_code = 2
+                reason = f"strict-empty; kept={kept_count} (0 rows)"
+                LOG.error("dtm: strict-empty enabled; failing due to zero rows")
+            else:
+                status = "ok-empty"
+                reason = f"header-only; kept={kept_count} (0 rows)"
+        else:
+            extras["rows_total"] = kept_count
+            if status == "ok":
+                reason = f"wrote {kept_count} rows"
+
+    extras["status_raw"] = status
+    extras["exit_code"] = exit_code
 
     effective_params: Mapping[str, Any]
     raw_effective = summary_extras.get("effective_params")
