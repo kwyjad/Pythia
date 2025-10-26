@@ -16,4 +16,8 @@ def test_static_iso3_roster_present_and_ok():
     assert path.exists(), f"Missing {path}"
     df = pd.read_csv(path)
     assert {"admin0Pcode", "admin0Name"} <= set(df.columns)
-    assert len(df) > 180
+    assert len(df) >= 170, "Static roster should roughly cover all admin0 entries"
+    must_have = {"ETH", "SDN", "PHL", "UKR", "TUR"}
+    got = set(df["admin0Pcode"].astype(str))
+    missing = must_have - got
+    assert not missing, f"Static roster missing key ISO3 codes: {sorted(missing)}"

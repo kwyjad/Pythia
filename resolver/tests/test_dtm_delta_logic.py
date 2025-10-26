@@ -1,3 +1,13 @@
+"""Fast-suite delta semantics for the DTM connector tests.
+
+These tests intentionally lock in the offline behavior: drop the first
+observation when deriving flows from cumulative series and clip negative
+deltas to zero so fast runs stay deterministic without network access.
+Production ingestion may opt into looser rules (e.g., preserving negative
+flows), but the fast suite keeps this stricter contract to avoid flaky
+assertions during smoke testing.
+"""
+
 from resolver.ingestion import dtm_client
 
 
