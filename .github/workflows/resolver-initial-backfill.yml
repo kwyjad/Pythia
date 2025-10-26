@@ -84,8 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -e '.[db,connectors]'
-          pip install "dtmapi>=0.1.5"
+          pip install -c constraints-ci.txt -e '.[db,connectors]'
 
       - name: Compute backfill window
         id: window

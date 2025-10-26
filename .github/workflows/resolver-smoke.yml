@@ -51,10 +51,17 @@ jobs:
       - name: Install resolver dependencies
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install -r resolver/requirements.txt
-          pip install 'duckdb>=1.0,<2.0'
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c constraints-ci.txt -e '.[db,ingestion]'
+          if [ -f resolver/requirements.txt ]; then
+            pip install -c constraints-ci.txt -r resolver/requirements.txt
+          fi
+
+      - name: Smoke ingestion preflight (offline)
+        run: |
+          set -euo pipefail
+          python -m resolver.ingestion.preflight
+          RESOLVER_STRICT_EMPTY=1 python -m resolver.ingestion.dtm_client --offline-smoke
 
       - name: Snapshot environment (pip freeze)
         run: |
