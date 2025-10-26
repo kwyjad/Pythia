@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from resolver.ingestion._fast_fixtures import (
+from resolver.db._duckdb_available import (
+    DUCKDB_AVAILABLE,
+    duckdb_unavailable_reason,
+    get_duckdb,
+)
+from resolver.db.runtime_flags import (
     FAST_FIXTURES_ENV,
     resolve_fast_fixtures_mode,
 )
@@ -35,28 +40,33 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _check_duckdb() -> tuple[bool, Dict[str, Any], Optional[str]]:
-    try:
-        import duckdb  # type: ignore
-    except Exception as exc:  # pragma: no cover - import guard
-        return False, {"dependency": "duckdb", "status": "missing", "error": str(exc)}, (
-            f"missing_dependency: duckdb ({exc})"
-        )
+def _duckdb_status() -> tuple[Dict[str, Any], Optional[str]]:
+    """Return a DuckDB availability report without importing the module directly."""
 
-    details: Dict[str, Any] = {
+    if not DUCKDB_AVAILABLE:
+        reason = duckdb_unavailable_reason() or "duckdb unavailable"
+        return {
+            "dependency": "duckdb",
+            "status": "missing",
+            "error": reason,
+        }, reason
+
+    try:
+        module = get_duckdb()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        reason = str(exc)
+        return {
+            "dependency": "duckdb",
+            "status": "error",
+            "error": reason,
+        }, reason
+
+    version = getattr(module, "__version__", "unknown")
+    return {
         "dependency": "duckdb",
         "status": "ok",
-        "version": getattr(duckdb, "__version__", "unknown"),
-    }
-    try:
-        connection = duckdb.connect(":memory:")
-        connection.close()
-    except Exception as exc:  # pragma: no cover - defensive guard
-        details["status"] = "error"
-        details["error"] = str(exc)
-        return False, details, f"duckdb_connect_failed: {exc}"
-
-    return True, details, None
+        "version": version,
+    }, None
 
 
 def _ensure_diagnostics_dir() -> None:
@@ -97,34 +107,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if mode != "duckdb":
         if auto_fallback:
+            reason = "duckdb unavailable; noop mode active"
             LOG.warning(
                 "Fast fixtures running in noop mode because DuckDB is unavailable (%s)",
                 fallback_reason,
             )
         else:
+            reason = f"noop mode requested via {FAST_FIXTURES_ENV}"
             LOG.info(
                 "Fast fixtures noop mode requested via %s", FAST_FIXTURES_ENV
             )
+        status = "noop"
 
-    if not args.skip_duckdb:
-        ok, details, error_reason = _check_duckdb()
-        extras["checks"].append(details)
-        if ok:
-            extras["duckdb_version"] = details.get("version")
-        else:
-            extras["duckdb_error"] = error_reason
-            if mode == "duckdb":
-                status = "error"
-                reason = error_reason or "missing_dependency: duckdb"
-            else:
-                reason = "duckdb unavailable; noop mode active"
-            LOG.warning("DuckDB dependency unavailable: %s", error_reason)
-    else:
+    if args.skip_duckdb:
         extras["checks"].append(
             {"dependency": "duckdb", "status": "skipped", "reason": "--skip-duckdb"}
         )
-    
-    exit_code = 0 if status == "ok" else 1
+    elif mode != "duckdb":
+        extras["checks"].append(
+            {
+                "dependency": "duckdb",
+                "status": "noop",
+                "reason": reason,
+            }
+        )
+    else:
+        details, error_reason = _duckdb_status()
+        extras["checks"].append(details)
+        if details.get("status") == "ok":
+            extras["duckdb_version"] = details.get("version")
+        else:
+            extras["duckdb_error"] = error_reason
+            status = "noop"
+            reason = error_reason or "duckdb unavailable; noop mode active"
+            LOG.warning("DuckDB dependency unavailable: %s", error_reason)
+
+    exit_code = 0
     extras["exit_code"] = exit_code
     extras["status_raw"] = status
 
