@@ -53,7 +53,9 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
           pip install -c constraints-ci.txt -e '.[db,ingestion]'
-          pip install -c constraints-ci.txt -r resolver/requirements.txt
+          if [ -f resolver/requirements.txt ]; then
+            pip install -c constraints-ci.txt -r resolver/requirements.txt
+          fi
 
       - name: Smoke ingestion preflight (offline)
         run: |
