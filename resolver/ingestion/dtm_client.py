@@ -50,35 +50,43 @@ from resolver.scripts.ingestion._dtm_debug_utils import (
     write_sample_csv as diagnostics_write_sample_csv,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = _REPO_ROOT
 RESOLVER_ROOT = REPO_ROOT / "resolver"
 CONFIG_PATH = RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml"
 
 # Diagnostics (repo-root)
-DIAGNOSTICS_DIR = REPO_ROOT / "diagnostics" / "ingestion"
-DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
+DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
+DIAGNOSTICS_DIR = DIAGNOSTICS_ROOT  # Back-compat alias expected by older tests
+DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_ROOT / "dtm"
+
+# Per-subdir directories (monkeypatchable in tests)
 DTM_RAW_DIR = DTM_DIAGNOSTICS_DIR / "raw"
 DTM_METRICS_DIR = DTM_DIAGNOSTICS_DIR / "metrics"
 DTM_SAMPLES_DIR = DTM_DIAGNOSTICS_DIR / "samples"
 DTM_LOG_DIR = DTM_DIAGNOSTICS_DIR / "logs"
-DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
-DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_DIR / "metrics"
-DIAGNOSTICS_SAMPLES_DIR = DIAGNOSTICS_DIR / "samples"
-DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_DIR / "logs"
+DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_ROOT / "raw"
+DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_ROOT / "metrics"
+DIAGNOSTICS_SAMPLES_DIR = DIAGNOSTICS_ROOT / "samples"
+DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_ROOT / "logs"
 
 # Standard filenames under those dirs
-CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
+CONNECTORS_REPORT = DIAGNOSTICS_ROOT / "connectors_report.jsonl"
 RUN_DETAILS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_run.json"
 DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
+HTTP_TRACE_PATH = DTM_HTTP_LOG_PATH
 DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
 DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
-DISCOVERY_RAW_JSON_PATH = DIAGNOSTICS_RAW_DIR / "dtm_countries.json"
-PER_COUNTRY_METRICS_PATH = DIAGNOSTICS_METRICS_DIR / "dtm_per_country.jsonl"
-SAMPLE_ROWS_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_sample.csv"
-DTM_CLIENT_LOG_PATH = DIAGNOSTICS_LOG_DIR / "dtm_client.log"
-API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
-API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
-API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
+DISCOVERY_RAW_JSON_PATH = DTM_RAW_DIR / "dtm_countries.json"
+PER_COUNTRY_METRICS_PATH = DTM_METRICS_DIR / "dtm_per_country.jsonl"
+SAMPLE_ROWS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_sample.csv"
+DTM_CLIENT_LOG_PATH = DTM_LOG_DIR / "dtm_client.log"
+API_REQUEST_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_request.json"
+API_SAMPLE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_sample.json"
+API_RESPONSE_SAMPLE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
+RESCUE_PROBE_PATH = DTM_DIAGNOSTICS_DIR / "rescue_probe.json"
+METRICS_SUMMARY_PATH = DTM_METRICS_DIR / "metrics.json"
+SAMPLE_ADMIN0_PATH = DTM_SAMPLES_DIR / "admin0_head.csv"
 
 # Staging outputs (repo-root)
 OUT_DIR = RESOLVER_ROOT / "staging"
@@ -86,8 +94,6 @@ OUT_PATH = OUT_DIR / "dtm_displacement.csv"
 OUTPUT_PATH = OUT_PATH
 DEFAULT_OUTPUT = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
-HTTP_TRACE_PATH = DTM_HTTP_LOG_PATH
-RESCUE_PROBE_PATH = DTM_DIAGNOSTICS_DIR / "rescue_probe.json"
 
 STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
     ("South Sudan", "SSD"),
@@ -100,8 +106,6 @@ STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
 ]
 STATIC_DATA_DIR = pathlib.Path(__file__).resolve().parent / "static"
 STATIC_ISO3_PATH = STATIC_DATA_DIR / "iso3_master.csv"
-METRICS_SUMMARY_PATH = DTM_METRICS_DIR / "metrics.json"
-SAMPLE_ADMIN0_PATH = DTM_SAMPLES_DIR / "admin0_head.csv"
 
 CANONICAL_HEADERS = [
     "source",
@@ -155,7 +159,7 @@ MULTI_HAZARD = Hazard("multi", "Multi-shock Displacement/Needs", "all")
 UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
 for directory in (
-    DIAGNOSTICS_DIR,
+    DIAGNOSTICS_ROOT,
     DTM_DIAGNOSTICS_DIR,
     DTM_RAW_DIR,
     DTM_METRICS_DIR,
@@ -169,7 +173,7 @@ for directory in (
 ):
     directory.mkdir(parents=True, exist_ok=True)
 
-_LEGACY_DIAGNOSTICS_DIR = RESOLVER_ROOT / "diagnostics" / "ingestion"
+_LEGACY_DIAGNOSTICS_DIR = _REPO_ROOT / "legacy_diagnostics"
 
 
 def _mirror_legacy_diagnostics() -> None:

@@ -140,6 +140,7 @@ The resolver fast tests exercise connectors without network access. To keep thos
 - The static ISO3 roster at `resolver/ingestion/static/iso3_master.csv` must provide `admin0Pcode` and `admin0Name` columns and include key countries (e.g., ETH, SDN, PHL, UKR, TUR) even if the total row count drifts slightly.
 - Stock-to-flow conversion in fast mode intentionally drops the first observation and clips negative deltas to zero for determinism; production ingestion can opt into richer semantics as needed.
 - Discovery fallbacks that rely on the static roster may omit an `operation` column—the fast suite accepts either shape so long as the admin0 columns are present.
+- Module-level path constants such as `DIAGNOSTICS_ROOT`, `DTM_DIAGNOSTICS_DIR`, and `HTTP_TRACE_PATH` remain import-time attributes and are referenced throughout `resolver.ingestion.dtm_client`; tests monkeypatch these to stage diagnostics inside temporary directories.
 
 ### DTM connector quick start
 
