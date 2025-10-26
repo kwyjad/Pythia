@@ -54,13 +54,14 @@ def _fmt_count(value: Any) -> str:
 
 
 def _format_meta_cell(
+    status_raw: Any,
     extras: Mapping[str, Any] | None,
     meta_json: Mapping[str, Any] | None,
 ) -> str:
     """Render the Meta cell value applying ok-empty and missing-count rules."""
     try:
-        status_raw = (extras or {}).get("status_raw")
-        if status_raw == "ok-empty":
+        raw_status = status_raw or (extras or {}).get("status_raw")
+        if isinstance(raw_status, str) and raw_status.strip().lower() == "ok-empty":
             return "—"
         row_count = (meta_json or {}).get("row_count")
         return _fmt_count(row_count)
@@ -429,7 +430,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
             .strip()
             .lower()
         )
-        meta_rows_cell = _format_meta_cell(extras, meta_payload)
+        meta_rows_cell = _format_meta_cell(status_raw_normalized, extras, meta_payload)
         rows.append(
             [
                 connector_id,
