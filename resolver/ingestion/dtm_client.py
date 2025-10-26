@@ -58,6 +58,7 @@ OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
+HTTP_TRACE_PATH = OUT_DIR / "dtm_http.ndjson"
 DIAGNOSTICS_DIR = REPO_ROOT / "diagnostics" / "ingestion"
 DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
 DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
@@ -162,6 +163,8 @@ LOG = logging.getLogger("resolver.ingestion.dtm")
 
 _FILE_LOGGING_INITIALIZED = False
 
+OFFLINE = False
+
 COLUMNS = CANONICAL_HEADERS
 
 DEFAULT_CAUSE = "unknown"
@@ -195,6 +198,27 @@ def _write_header_only_csv(path: Path, headers: Sequence[str]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         handle.write(",".join(headers))
         handle.write("\n")
+
+
+def _write_http_trace_placeholder(path: Path, *, offline: bool) -> None:
+    payload = {
+        "offline": bool(offline),
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "note": "placeholder trace for tests",
+    }
+    try:
+        _ensure_out_dir_exists(path.parent)
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload))
+            handle.write("\n")
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: unable to persist HTTP trace placeholder", exc_info=True)
+
+
+def ensure_zero_row_outputs(*, offline: bool) -> None:
+    ensure_header_only()
+    trace_path = Path(HTTP_TRACE_PATH)
+    _write_http_trace_placeholder(trace_path, offline=offline)
 
 
 def _append_connectors_report(
@@ -512,6 +536,12 @@ def _dtm_http_get(
         entry["params"] = dict(params)
     response: Optional[requests.Response] = None
     try:
+        if OFFLINE:
+            entry["offline"] = True
+            entry["ok"] = True
+            entry["status"] = None
+            LOG.debug("dtm: offline skip for HTTP GET %s", url)
+            return []
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
         entry["status"] = response.status_code
         response.raise_for_status()
@@ -783,7 +813,7 @@ def _perform_discovery(
         order.append("static_iso3")
 
     key = (api_key or get_dtm_api_key() or "").strip()
-    if not key:
+    if not key and not OFFLINE:
         raise RuntimeError("Missing DTM_API_KEY environment variable.")
 
     stage_entries: List[Dict[str, Any]] = []
@@ -1039,6 +1069,16 @@ class DTMUnauthorizedError(DTMHttpError):
         super().__init__(status_code, message)
 
 
+def _auth_probe(api_key: str, *, offline: bool = False) -> None:
+    key = (api_key or "").strip()
+    if key:
+        return
+    if offline:
+        LOG.debug("dtm: offline auth probe skipped (no API key present)")
+        return
+    raise DTMUnauthorizedError(401, "Missing DTM_API_KEY or DTM_SUBSCRIPTION_KEY")
+
+
 class DTMZeroRowsError(RuntimeError):
     """Raised when the API returns zero rows for the requested window."""
 
@@ -1065,19 +1105,27 @@ class DTMApiClient:
         raw_key = (subscription_key or "").strip()
         env_key = get_dtm_api_key()
         api_key = raw_key or (env_key or "")
-        if not api_key:
+        if not api_key and not OFFLINE:
             raise RuntimeError("Missing DTM_API_KEY environment variable.")
 
         _setup_file_logging()
-        masked_suffix = f"...{api_key[-4:]}" if api_key else "<missing>"
-        self.client = DTMApi(subscription_key=api_key)
-        LOG.info(
-            "DTM SDK initialized | python=%s | dtmapi=%s | base_url=%s | key_suffix=%s",
-            sys.version.split()[0],
-            getattr(DTMApi, "__version__", "unknown"),
-            getattr(self.client, "base_url", getattr(self.client, "_base_url", "unknown")),
-            masked_suffix,
-        )
+        if OFFLINE:
+            self.client = type("OfflineDTM", (), {})()
+            LOG.info(
+                "DTM SDK offline stub initialized | python=%s | offline=%s",
+                sys.version.split()[0],
+                True,
+            )
+        else:
+            masked_suffix = f"...{api_key[-4:]}" if api_key else "<missing>"
+            self.client = DTMApi(subscription_key=api_key)
+            LOG.info(
+                "DTM SDK initialized | python=%s | dtmapi=%s | base_url=%s | key_suffix=%s",
+                sys.version.split()[0],
+                getattr(DTMApi, "__version__", "unknown"),
+                getattr(self.client, "base_url", getattr(self.client, "_base_url", "unknown")),
+                masked_suffix,
+            )
         self.config = config
         api_cfg = config.get("api", {})
         self.rate_limit_delay = float(api_cfg.get("rate_limit_delay", 1.0))
@@ -1116,6 +1164,9 @@ class DTMApiClient:
         raise DTMHttpError(0, str(exc)) from exc
 
     def get_countries(self, http_counts: Optional[MutableMapping[str, int]] = None) -> pd.DataFrame:
+        if OFFLINE:
+            LOG.debug("dtm: offline skip for get_all_countries")
+            return pd.DataFrame()
         try:
             df = self.client.get_all_countries()
             self._record_success(http_counts, 200)
@@ -1133,6 +1184,9 @@ class DTMApiClient:
         to_date: Optional[str] = None,
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
+        if OFFLINE:
+            LOG.debug("dtm: offline skip for get_idp_admin0 country=%s", country)
+            return pd.DataFrame()
         try:
             frame = self.client.get_idp_admin0_data(
                 CountryName=country,
@@ -1167,6 +1221,9 @@ class DTMApiClient:
         to_date: Optional[str] = None,
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
+        if OFFLINE:
+            LOG.debug("dtm: offline skip for get_idp_admin1 country=%s", country)
+            return pd.DataFrame()
         try:
             frame = self.client.get_idp_admin1_data(
                 CountryName=country,
@@ -1202,6 +1259,9 @@ class DTMApiClient:
         to_date: Optional[str] = None,
         http_counts: Optional[MutableMapping[str, int]] = None,
     ) -> pd.DataFrame:
+        if OFFLINE:
+            LOG.debug("dtm: offline skip for get_idp_admin2 country=%s operation=%s", country, operation)
+            return pd.DataFrame()
         try:
             params = {
                 "CountryName": country,
@@ -1609,24 +1669,10 @@ def _run_offline_smoke(
     args: argparse.Namespace,
     record_connector: bool = True,
 ) -> Tuple[int, str, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    LOG.info("dtm: offline-smoke mode enabled; generating synthetic data without network calls")
-    generate_started = time.perf_counter()
-    rows = _generate_offline_rows()
-    timings_ms: Dict[str, int] = {}
-    timings_ms["generate"] = max(0, int((time.perf_counter() - generate_started) * 1000))
+    LOG.info("offline-smoke: skip network -> rows=0 offline=True")
+    ensure_zero_row_outputs(offline=True)
 
-    write_started = time.perf_counter()
-    write_rows(rows)
-    timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
-
-    sample_records = [dict(zip(COLUMNS, row)) for row in rows]
-    try:
-        write_json(API_SAMPLE_PATH, sample_records[:20])
-        write_json(API_RESPONSE_SAMPLE_PATH, sample_records[:20])
-        diagnostics_write_sample_csv(pd.DataFrame(sample_records, columns=COLUMNS), SAMPLE_ROWS_PATH)
-    except Exception:  # pragma: no cover - defensive diagnostics
-        LOG.debug("dtm: unable to persist offline smoke samples", exc_info=True)
-
+    timings_ms: Dict[str, int] = {"write": 0}
     deps_payload = {
         "python": sys.version.split()[0],
         "executable": sys.executable,
@@ -1640,28 +1686,29 @@ def _run_offline_smoke(
     http_payload["last_status"] = None
     http_payload["rate_limit_remaining"] = None
 
-    counts_payload = {"fetched": 0, "normalized": len(rows), "written": len(rows)}
-    reason = f"offline-smoke wrote {len(rows)} rows"
+    counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+    reason = "offline_smoke"
     extras_payload: Dict[str, Any] = {
         "mode": "offline-smoke",
-        "rows_total": len(rows),
+        "rows_total": 0,
         "status_raw": "ok",
         "exit_code": 0,
         "strict_empty": strict_empty,
         "no_date_filter": no_date_filter,
         "offline_smoke": True,
         "timings_ms": dict(timings_ms),
+        "offline": True,
     }
 
     _write_meta(
-        len(rows),
+        0,
         None,
         None,
         deps=deps_payload,
         effective_params={},
         http_counters=http_payload,
         timings_ms=timings_ms,
-        diagnostics={"mode": "offline-smoke"},
+        diagnostics={"mode": "offline-smoke", "offline": True},
     )
 
     run_payload = {
@@ -1671,12 +1718,12 @@ def _run_offline_smoke(
         "paging": {"pages": 0, "page_size": None, "total_received": 0},
         "rows": {
             "fetched": 0,
-            "normalized": len(rows),
-            "written": len(rows),
-            "kept": len(rows),
+            "normalized": 0,
+            "written": 0,
+            "kept": 0,
             "dropped": 0,
         },
-        "totals": {"rows_written": len(rows)},
+        "totals": {"rows_written": 0},
         "status": "ok",
         "reason": reason,
         "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
@@ -1684,7 +1731,8 @@ def _run_offline_smoke(
             "mode": "offline-smoke",
             "timings_ms": dict(timings_ms),
             "deps": deps_payload,
-            "rows_total": len(rows),
+            "rows_total": 0,
+            "offline": True,
         },
         "args": vars(args),
     }
@@ -1695,15 +1743,14 @@ def _run_offline_smoke(
         _append_connectors_report(
             mode="offline_smoke",
             status="ok",
-            rows=len(rows),
+            rows=0,
             reason=reason,
             extras=extras_payload,
             http=http_payload,
             counts=counts_payload,
         )
 
-    print("DTM offline diagnostics: offline-smoke mode wrote sample data (DTM_API_KEY not required)")
-    return len(rows), reason, extras_payload, http_payload, counts_payload
+    return 0, reason, extras_payload, http_payload, counts_payload
 
 
 def _finalize_skip_run(
@@ -2637,7 +2684,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--strict-empty",
         action="store_true",
-        help="Exit with code 3 when the connector writes zero rows.",
+        help="Exit with code 2 when the connector writes zero rows.",
     )
     parser.add_argument(
         "--no-date-filter",
@@ -2654,10 +2701,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging and force file logging for troubleshooting.",
     )
-    if argv is None:
-        argv = []
-    argv_list = list(argv)
-    return parser.parse_args(argv_list)
+    return parser.parse_args(list(argv or []))
 
 
 def _write_meta(
@@ -2693,7 +2737,7 @@ def _write_meta(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(list(argv) if argv else [])
+    args = parse_args(argv)
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
         log_level_name = "DEBUG"
@@ -2704,36 +2748,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
     _setup_file_logging()
 
+    global OUT_DIR, OUTPUT_PATH, META_PATH, HTTP_TRACE_PATH, OFFLINE
+    OUT_DIR = Path(OUT_PATH).parent
+    OUTPUT_PATH = OUT_PATH
+    META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
+    HTTP_TRACE_PATH = OUT_DIR / "dtm_http.ndjson"
+    LOG.debug("dtm: canonical headers=%s", CANONICAL_HEADERS)
+    LOG.debug("dtm: outputs -> csv=%s meta=%s http_trace=%s", OUT_PATH, META_PATH, HTTP_TRACE_PATH)
+
     strict_empty = args.strict_empty or _env_bool("DTM_STRICT_EMPTY", False)
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
     skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
-
+    offline_mode = skip_requested or bool(offline_smoke)
+    OFFLINE = offline_mode
     if skip_requested:
-        LOG.info("RESOLVER_SKIP_DTM set: writing header-only CSV and exiting 0")
-        _ensure_out_dir_exists(OUT_DIR)
-        _write_header_only_csv(OUT_PATH, CANONICAL_HEADERS)
-        ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
-        reason = "disabled via RESOLVER_SKIP_DTM"
-        extras_payload, http_payload, counts_payload = _finalize_skip_run(
-            reason=reason,
-            strict_empty=strict_empty,
-            no_date_filter=no_date_filter,
-            args=args,
-        )
-        _append_connectors_report(
-            mode="skip",
-            status="skipped",
-            rows=0,
-            reason=reason,
-            extras=extras_payload,
-            http=http_payload,
-            counts=counts_payload,
-        )
-        return 0
+        LOG.info("Skip mode: no real network calls; writing header & trace placeholder")
+    if OFFLINE:
+        LOG.debug("dtm: offline gating enabled (skip=%s offline_smoke=%s)", skip_requested, offline_smoke)
 
     if offline_smoke:
-        LOG.info("offline-smoke: no network, no key; generating synthetic sample")
+        LOG.info("offline-smoke: header-only output (no API key required)")
         _ensure_out_dir_exists(OUT_DIR)
         (
             rows_written,
@@ -2781,7 +2816,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         deps_payload["requests"],
     )
 
-    api_key_configured = bool((os.getenv("DTM_API_KEY") or "").strip())
+    api_key_configured = bool((os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip())
     base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     base_http["rate_limit_remaining"] = None
     base_http["retries"] = 0
@@ -2792,6 +2827,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "strict_empty": strict_empty,
         "no_date_filter": no_date_filter,
         "offline_smoke": offline_smoke,
+        "offline": OFFLINE,
         "timings_ms": dict(timings_ms),
     }
 
@@ -2809,7 +2845,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             counts=counts_payload,
         )
         _append_summary_stub_if_needed(reason)
-        ensure_header_only()
+        ensure_zero_row_outputs(offline=OFFLINE)
         run_payload = {
             "window": {"start": None, "end": None},
             "countries": {},
@@ -2833,9 +2869,105 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.error(reason)
         return 1
 
+    raw_auth_key = (os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip()
+    try:
+        _auth_probe(raw_auth_key, offline=OFFLINE)
+    except DTMUnauthorizedError as exc:
+        reason = f"auth: {exc}"
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = dict(base_extras)
+        extras_payload.update(
+            {
+                "rows_total": 0,
+                "exit_code": 1,
+                "status_raw": "error",
+                "auth_error": "unauthorized",
+            }
+        )
+        extras_payload["timings_ms"] = dict(timings_ms)
+        _write_connector_report(
+            status="error",
+            reason=reason,
+            extras=extras_payload,
+            http=dict(base_http),
+            counts=counts_payload,
+        )
+        ensure_zero_row_outputs(offline=OFFLINE)
+        run_payload = {
+            "window": {"start": None, "end": None},
+            "countries": {},
+            "http": dict(base_http),
+            "paging": {"pages": 0, "page_size": None, "total_received": 0},
+            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
+            "totals": {"rows_written": 0},
+            "status": "error",
+            "reason": reason,
+            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+            "extras": {
+                "deps": deps_payload,
+                "timings_ms": dict(timings_ms),
+                "strict_empty": strict_empty,
+                "no_date_filter": no_date_filter,
+                "offline": OFFLINE,
+                "auth_error": "unauthorized",
+            },
+            "args": vars(args),
+        }
+        write_json(RUN_DETAILS_PATH, run_payload)
+        _mirror_legacy_diagnostics()
+        LOG.error("dtm: auth probe failed: %s", exc)
+        return 1
+    except Exception as exc:
+        reason = f"auth: {exc}" if str(exc) else "auth: error"
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = dict(base_extras)
+        extras_payload.update(
+            {
+                "rows_total": 0,
+                "exit_code": 1,
+                "status_raw": "error",
+                "auth_error": "exception",
+            }
+        )
+        extras_payload["timings_ms"] = dict(timings_ms)
+        _write_connector_report(
+            status="error",
+            reason=reason,
+            extras=extras_payload,
+            http=dict(base_http),
+            counts=counts_payload,
+        )
+        ensure_zero_row_outputs(offline=OFFLINE)
+        run_payload = {
+            "window": {"start": None, "end": None},
+            "countries": {},
+            "http": dict(base_http),
+            "paging": {"pages": 0, "page_size": None, "total_received": 0},
+            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
+            "totals": {"rows_written": 0},
+            "status": "error",
+            "reason": reason,
+            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+            "extras": {
+                "deps": deps_payload,
+                "timings_ms": dict(timings_ms),
+                "strict_empty": strict_empty,
+                "no_date_filter": no_date_filter,
+                "offline": OFFLINE,
+                "auth_error": "exception",
+            },
+            "args": vars(args),
+        }
+        write_json(RUN_DETAILS_PATH, run_payload)
+        _mirror_legacy_diagnostics()
+        LOG.error("dtm: auth probe error: %s", exc)
+        return 1
+
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
     http_stats: MutableMapping[str, int] = _ensure_http_counts({})
     extras: Dict[str, Any] = dict(base_extras)
+    extras["mode"] = "skip" if skip_requested else extras.get("mode", "real")
+    extras["skip_requested"] = skip_requested
 
     status = "ok"
     reason: Optional[str] = None
@@ -2857,7 +2989,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not cfg.get("enabled", True):
             status = "skipped"
             reason = "disabled via config"
-            ensure_header_only()
+            ensure_zero_row_outputs(offline=OFFLINE)
         elif "api" not in cfg:
             raise ValueError(
                 "Config error: DTM is API-only; provide 'api:' in resolver/ingestion/config/dtm.yml",
@@ -2876,7 +3008,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if rows:
                 write_rows(rows)
             else:
-                ensure_header_only()
+                ensure_zero_row_outputs(offline=OFFLINE)
             timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except DTMZeroRowsError as exc:
         LOG.warning("dtm: zero rows reason=%s", exc.zero_rows_reason)
@@ -2885,13 +3017,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         exit_code = 0
         extras["zero_rows_reason"] = exc.zero_rows_reason
         extras.setdefault("diagnostics", {})["zero_rows_reason"] = exc.zero_rows_reason
-        ensure_header_only()
+        ensure_zero_row_outputs(offline=OFFLINE)
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status = "error"
         reason = str(exc)
         exit_code = 1
-        ensure_header_only()
+        ensure_zero_row_outputs(offline=OFFLINE)
     except Exception as exc:  # pragma: no cover - defensive guard
         LOG.exception("dtm: unexpected failure")
         status = "error"
@@ -2900,7 +3032,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         extras["exception"] = {"type": type(exc).__name__, "message": message}
         extras["traceback"] = traceback.format_exc()
         exit_code = 1
-        ensure_header_only()
+        ensure_zero_row_outputs(offline=OFFLINE)
 
     if status == "ok":
         if rows_written == 0:
@@ -2917,6 +3049,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             LOG.error("dtm: strict-empty enabled; failing due to zero rows")
         else:
             reason = reason or "header-only (0 rows)"
+
+    if skip_requested:
+        extras["skip_reason"] = "RESOLVER_SKIP_DTM"
+        if rows_written == 0 and exit_code == 0:
+            status = "skipped"
+            reason = "disabled via RESOLVER_SKIP_DTM"
+            extras["status_raw"] = "skipped"
 
     summary_timings = summary.get("timings_ms") if isinstance(summary, Mapping) else {}
     if isinstance(summary_timings, Mapping):
