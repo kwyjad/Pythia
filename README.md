@@ -126,6 +126,10 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 - The workflow also publishes a `connector-diagnostics` artifact containing both `diagnostics/ingestion/summary.md` (human-readable) and the raw `diagnostics/ingestion/connectors_report.jsonl` (machine-readable). Use the Markdown for quick triage and feed the JSONL into ad-hoc notebooks when you need to chart retries, coverage drift, or rate-limit exhaustion across runs.
 - Reasons such as `disabled: config`, `missing secret`, or upstream HTTP errors are normalised in the summary so repeated skips bubble to the top of the reason histogram. Coverage columns render the year-month window (`ym_min → ym_max`) alongside the earliest/latest `as_of` dates, making it easy to confirm a connector backfilled the intended period.
 
+#### DTM Deep Dive diagnostics
+
+- DTM-specific runs also emit structured artifacts under `diagnostics/ingestion/dtm/`, including a machine-readable `dtm_run.json`, the raw HTTP trace (`dtm_http.ndjson`), discovery outcomes, and sample rows from the admin0 feed. When `scripts/ci/summarize_connectors.py` renders `diagnostics/ingestion/summary.md`, it appends a **DTM Deep Dive** section that highlights the SDK/base URL, discovery stages and failure payloads, the effective configuration window, HTTP roll-ups, fetch/normalization counts (with drop-reason breakdowns), a sample of the raw admin0 data, and any automatic “zero rows rescue” probes for Nigeria/South Sudan. Use this block to decide whether to re-run with new aliases, adjust the ingestion window, or request discovery access when you see 401/403 discovery errors.
+
 ### Fast-suite expectations
 
 The resolver fast tests exercise connectors without network access. To keep those runs reliable while still enforcing the offline contract, ensure the following when working on `resolver.ingestion.dtm_client`:
@@ -145,6 +149,17 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
 - Credential setup (`DTM_API_KEY` or `DTM_SUBSCRIPTION_KEY`).
 - Expected diagnostics outputs and skip reasons (`sdk_missing`, `auth_missing`, `discovery_empty`).
 - Troubleshooting tips for zero-row exports and negative monthly flows.
+- Configuration guidance for targeted runs: when `resolver/ingestion/config/dtm.yml` specifies a non-empty `api.countries` list,
+  the connector skips SDK/HTTP discovery entirely, treats that list as authoritative, and records `countries_mode=explicit_config`
+  in the diagnostics. Admin-level selection is also honoured—include `admin1` alongside `admin0` to fetch both tiers in a single
+  run (per-level counts and timings surface in `diagnostics/ingestion/dtm/dtm_run.json`). A representative snippet:
+
+  ```yaml
+  enabled: true
+  api:
+    countries: ["South Sudan", "Nigeria", "Somalia", "Ethiopia", "Sudan", "DR Congo", "Yemen"]
+    admin_levels: ["admin0", "admin1"]
+  ```
 
 ### CI diagnostics & what to share
 

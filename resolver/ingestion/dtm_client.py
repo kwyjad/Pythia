@@ -40,8 +40,9 @@ from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
 )
-from resolver.ingestion.dtm_auth import get_dtm_api_key
-from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest, to_iso3
+from resolver.ingestion.dtm_auth import build_discovery_header_variants, get_dtm_api_key
+from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest
+from resolver.ingestion.utils.iso_normalize import resolve_iso3 as resolve_iso3_fields, to_iso3
 from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
 from resolver.scripts.ingestion._dtm_debug_utils import (
     dump_json as diagnostics_dump_json,
@@ -59,28 +60,38 @@ OUT_DIR = OUT_PATH.parent
 OUTPUT_PATH = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
 HTTP_TRACE_PATH = OUT_DIR / "dtm_http.ndjson"
-DIAGNOSTICS_DIR = REPO_ROOT / "diagnostics" / "ingestion"
-DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_DIR / "dtm"
-DIAGNOSTICS_RAW_DIR = DIAGNOSTICS_DIR / "raw"
-DIAGNOSTICS_METRICS_DIR = DIAGNOSTICS_DIR / "metrics"
-DIAGNOSTICS_SAMPLES_DIR = DIAGNOSTICS_DIR / "samples"
-DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_DIR / "logs"
-CONNECTORS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
-RUN_DETAILS_PATH = DIAGNOSTICS_DIR / "dtm_run.json"
-API_REQUEST_PATH = DIAGNOSTICS_DIR / "dtm_api_request.json"
-API_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_sample.json"
-API_RESPONSE_SAMPLE_PATH = DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
-DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
+DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
+DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_ROOT / "dtm"
+DTM_RAW_DIR = DTM_DIAGNOSTICS_DIR / "raw"
+DTM_METRICS_DIR = DTM_DIAGNOSTICS_DIR / "metrics"
+DTM_SAMPLES_DIR = DTM_DIAGNOSTICS_DIR / "samples"
+DTM_LOG_DIR = DTM_DIAGNOSTICS_DIR / "logs"
+CONNECTORS_REPORT = DIAGNOSTICS_ROOT / "connectors_report.jsonl"
+RUN_DETAILS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_run.json"
+API_REQUEST_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_request.json"
+API_SAMPLE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_sample.json"
+API_RESPONSE_SAMPLE_PATH = DTM_DIAGNOSTICS_DIR / "dtm_api_response_sample.json"
+DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_snapshot.csv"
 DISCOVERY_FAIL_PATH = DTM_DIAGNOSTICS_DIR / "discovery_fail.json"
 DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
-DISCOVERY_RAW_JSON_PATH = DIAGNOSTICS_RAW_DIR / "dtm_countries.json"
-PER_COUNTRY_METRICS_PATH = DIAGNOSTICS_METRICS_DIR / "dtm_per_country.jsonl"
-SAMPLE_ROWS_PATH = DIAGNOSTICS_SAMPLES_DIR / "dtm_sample.csv"
-DTM_CLIENT_LOG_PATH = DIAGNOSTICS_LOG_DIR / "dtm_client.log"
+DISCOVERY_RAW_JSON_PATH = DTM_RAW_DIR / "dtm_countries.json"
+PER_COUNTRY_METRICS_PATH = DTM_METRICS_DIR / "dtm_per_country.jsonl"
+SAMPLE_ROWS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_sample.csv"
+DTM_CLIENT_LOG_PATH = DTM_LOG_DIR / "dtm_client.log"
+RESCUE_PROBE_PATH = DTM_DIAGNOSTICS_DIR / "rescue_probe.json"
+STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
+    ("South Sudan", "SSD"),
+    ("Nigeria", "NGA"),
+    ("Somalia", "SOM"),
+    ("Ethiopia", "ETH"),
+    ("Sudan", "SDN"),
+    ("DR Congo", "COD"),
+    ("Yemen", "YEM"),
+]
 STATIC_DATA_DIR = pathlib.Path(__file__).resolve().parent / "static"
 STATIC_ISO3_PATH = STATIC_DATA_DIR / "iso3_master.csv"
-METRICS_SUMMARY_PATH = DIAGNOSTICS_METRICS_DIR / "metrics.json"
-SAMPLE_ADMIN0_PATH = DIAGNOSTICS_SAMPLES_DIR / "sample_admin0.csv"
+METRICS_SUMMARY_PATH = DTM_METRICS_DIR / "metrics.json"
+SAMPLE_ADMIN0_PATH = DTM_SAMPLES_DIR / "admin0_head.csv"
 
 CANONICAL_HEADERS = [
     "source",
@@ -133,13 +144,13 @@ class DiscoveryResult:
 MULTI_HAZARD = Hazard("multi", "Multi-shock Displacement/Needs", "all")
 UNKNOWN_HAZARD = Hazard("UNK", "Unknown / Unspecified", "all")
 
-DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
-DTM_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+DIAGNOSTICS_ROOT.mkdir(parents=True, exist_ok=True)
 for directory in (
-    DIAGNOSTICS_RAW_DIR,
-    DIAGNOSTICS_METRICS_DIR,
-    DIAGNOSTICS_SAMPLES_DIR,
-    DIAGNOSTICS_LOG_DIR,
+    DTM_DIAGNOSTICS_DIR,
+    DTM_RAW_DIR,
+    DTM_METRICS_DIR,
+    DTM_SAMPLES_DIR,
+    DTM_LOG_DIR,
 ):
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -186,6 +197,19 @@ def _is_no_country_match_error(err: BaseException) -> bool:
         return "no country found matching your query" in message
     except Exception:
         return False
+
+
+def _countries_mode_from_stage(stage: Optional[str]) -> str:
+    if not stage:
+        return "discovered"
+    lowered = str(stage).strip().lower()
+    if "sdk" in lowered:
+        return "sdk"
+    if "explicit" in lowered:
+        return "explicit_config"
+    if "static" in lowered or "iso3" in lowered:
+        return "static_iso3"
+    return "discovered"
 
 
 DISCOVERY_ERROR_LOG: List[Dict[str, Any]] = []
@@ -356,7 +380,11 @@ def _dtm_sdk_version() -> str:
 def _persist_discovery_payload(payload: Mapping[str, Any]) -> None:
     try:
         DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        DISCOVERY_FAIL_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        serializable = dict(payload)
+        errors = serializable.get("errors")
+        if isinstance(errors, list):
+            serializable["errors"] = errors[:3]
+        DISCOVERY_FAIL_PATH.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to persist discovery failure diagnostics", exc_info=True)
 
@@ -450,18 +478,26 @@ def _ensure_sample_headers() -> None:
     SAMPLE_ADMIN0_PATH.parent.mkdir(parents=True, exist_ok=True)
     with SAMPLE_ADMIN0_PATH.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["operation", "admin0Name", "admin0Pcode", "reportingDate", "idp_count"])
+        writer.writerow(
+            [
+                "Operation",
+                "admin0Name",
+                "admin0Pcode",
+                "CountryISO3",
+                "ReportingDate",
+                "idp_count",
+            ]
+        )
     _reset_admin0_sample_counter()
 
 
 def _ensure_diagnostics_scaffolding() -> None:
     for directory in (
-        DIAGNOSTICS_DIR,
         DTM_DIAGNOSTICS_DIR,
-        DIAGNOSTICS_RAW_DIR,
-        DIAGNOSTICS_METRICS_DIR,
-        DIAGNOSTICS_SAMPLES_DIR,
-        DIAGNOSTICS_LOG_DIR,
+        DTM_RAW_DIR,
+        DTM_METRICS_DIR,
+        DTM_SAMPLES_DIR,
+        DTM_LOG_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
     _clear_discovery_error_log()
@@ -502,7 +538,8 @@ def _record_admin0_sample(df: pd.DataFrame, *, operation: Optional[str] = None) 
             or ""
         )
         iso = to_iso3(code, {}) if code else to_iso3(name, {})
-        iso_value = (iso or str(code or "")).upper()
+        code_value = str(code or "").upper()
+        iso_value = (iso or code_value).upper()
         report_date = (
             record.get("ReportingDate")
             or record.get("reportingDate")
@@ -518,7 +555,16 @@ def _record_admin0_sample(df: pd.DataFrame, *, operation: Optional[str] = None) 
             or record.get("Total")
             or ""
         )
-        rows.append([str(op_value or ""), str(name or ""), iso_value, str(report_date or ""), str(idp_value or "")])
+        rows.append(
+            [
+                str(op_value or ""),
+                str(name or ""),
+                code_value,
+                iso_value,
+                str(report_date or ""),
+                str(idp_value or ""),
+            ]
+        )
     if not rows:
         return
     SAMPLE_ADMIN0_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -528,21 +574,35 @@ def _record_admin0_sample(df: pd.DataFrame, *, operation: Optional[str] = None) 
     _ADMIN0_SAMPLE_WRITTEN += len(rows)
 
 
+def _sanitize_error_snippet(body: str, key: str) -> str:
+    token = (key or "").strip()
+    text = body[:1024]
+    if token and token in text:
+        text = text.replace(token, "***")
+    return text
+
+
 def _dtm_http_get(
     path: str,
     key: str,
     *,
     params: Optional[Mapping[str, Any]] = None,
     timeout: Tuple[float, float],
+    headers_override: Optional[Mapping[str, str]] = None,
+    capture_error_body: bool = False,
 ) -> Any:
     base_url = "https://dtmapi.iom.int"
     url = f"{base_url}{path}"
-    headers = {"Ocp-Apim-Subscription-Key": key}
+    headers = dict(headers_override) if headers_override else {"Ocp-Apim-Subscription-Key": key}
     started = time.perf_counter()
     entry: Dict[str, Any] = {"ts": time.time(), "url": url, "ok": False, "nonce": round(random.random(), 6)}
     if params:
         entry["params"] = dict(params)
+    entry["header_variant"] = ",".join(sorted(headers.keys()))
     response: Optional[requests.Response] = None
+    _dtm_http_get.last_status = None  # type: ignore[attr-defined]
+    _dtm_http_get.last_error_payload = None  # type: ignore[attr-defined]
+    _dtm_http_get.last_headers = dict(headers)  # type: ignore[attr-defined]
     try:
         if OFFLINE:
             entry["offline"] = True
@@ -552,6 +612,7 @@ def _dtm_http_get(
             return []
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
         entry["status"] = response.status_code
+        _dtm_http_get.last_status = response.status_code  # type: ignore[attr-defined]
         response.raise_for_status()
         payload = response.json()
         entry["ok"] = True
@@ -565,6 +626,14 @@ def _dtm_http_get(
         status = getattr(response, "status_code", None)
         if status is not None:
             entry["status"] = status
+            _dtm_http_get.last_status = status  # type: ignore[attr-defined]
+            if capture_error_body and status in {401, 403} and response is not None:
+                try:
+                    body_text = response.text
+                except Exception:
+                    body_text = ""
+                if body_text:
+                    _dtm_http_get.last_error_payload = _sanitize_error_snippet(body_text, key)  # type: ignore[attr-defined]
         raise
     finally:
         entry["elapsed_ms"] = int(max(0.0, (time.perf_counter() - started) * 1000))
@@ -577,6 +646,11 @@ def _dtm_http_get(
             LOG.debug("Unable to append DTM HTTP log entry", exc_info=True)
 
 
+_dtm_http_get.last_status = None  # type: ignore[attr-defined]
+_dtm_http_get.last_error_payload = None  # type: ignore[attr-defined]
+_dtm_http_get.last_headers = {}  # type: ignore[attr-defined]
+
+
 def _get_country_list_via_http(
     path: str,
     key: str,
@@ -586,6 +660,8 @@ def _get_country_list_via_http(
     read_timeout: float = 30.0,
     retries: int = 3,
     backoff: float = 1.5,
+    headers_variants: Optional[Sequence[Mapping[str, str]]] = None,
+    capture_error_body: bool = False,
 ) -> pd.DataFrame:
 
     @retry(
@@ -600,29 +676,61 @@ def _get_country_list_via_http(
         params: Optional[Mapping[str, Any]],
         connect_timeout: float,
         read_timeout: float,
+        headers: Optional[Mapping[str, str]],
     ) -> pd.DataFrame:
         payload = _dtm_http_get(
             path,
             key,
             params=params,
             timeout=(connect_timeout, read_timeout),
+            headers_override=headers,
+            capture_error_body=capture_error_body,
         )
         if isinstance(payload, pd.DataFrame):
             return payload
         return pd.DataFrame(payload or [])
 
-    try:
-        frame = _call(path, key, params, connect_timeout, read_timeout)
-        attempts = int(_call.retry.statistics.get("attempt_number", 1))
-    except RetryError as exc:
-        attempts = exc.last_attempt.attempt_number if exc.last_attempt else int(retries)
-        _get_country_list_via_http.last_attempts = int(attempts)
-        raise
-    _get_country_list_via_http.last_attempts = int(attempts)
-    return frame
+    variants: Sequence[Optional[Mapping[str, str]]] = list(headers_variants or [None])
+    last_exc: Optional[Exception] = None
+    for index, header_variant in enumerate(variants):
+        try:
+            frame = _call(path, key, params, connect_timeout, read_timeout, header_variant)
+            attempts = int(_call.retry.statistics.get("attempt_number", 1))
+            _get_country_list_via_http.last_attempts = int(attempts)
+            _get_country_list_via_http.last_status = getattr(_dtm_http_get, "last_status", None)
+            if capture_error_body:
+                _get_country_list_via_http.last_error_payload = getattr(_dtm_http_get, "last_error_payload", None)
+            return frame
+        except RetryError as exc:
+            attempts = exc.last_attempt.attempt_number if exc.last_attempt else int(retries)
+            _get_country_list_via_http.last_attempts = int(attempts)
+            _get_country_list_via_http.last_status = getattr(_dtm_http_get, "last_status", None)
+            if capture_error_body:
+                _get_country_list_via_http.last_error_payload = getattr(_dtm_http_get, "last_error_payload", None)
+            last_exc = exc
+            status = getattr(_dtm_http_get, "last_status", None)
+            if status in {401, 403} and index + 1 < len(variants):
+                continue
+            raise
+        except Exception as exc:
+            attempts = int(getattr(_call.retry, "statistics", {}).get("attempt_number", 1))
+            _get_country_list_via_http.last_attempts = int(attempts)
+            _get_country_list_via_http.last_status = getattr(_dtm_http_get, "last_status", None)
+            if capture_error_body:
+                _get_country_list_via_http.last_error_payload = getattr(_dtm_http_get, "last_error_payload", None)
+            status = getattr(_dtm_http_get, "last_status", None)
+            if status in {401, 403} and index + 1 < len(variants):
+                last_exc = exc
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("DTM discovery HTTP fallback exhausted all header variants")
 
 
 _get_country_list_via_http.last_attempts = 0  # type: ignore[attr-defined]
+_get_country_list_via_http.last_status = None  # type: ignore[attr-defined]
+_get_country_list_via_http.last_error_payload = None  # type: ignore[attr-defined]
 
 
 def _setup_file_logging() -> None:
@@ -738,6 +846,7 @@ def _perform_discovery(
     *,
     metrics: Optional[MutableMapping[str, Any]] = None,
     api_key: Optional[str] = None,
+    client: Optional[Any] = None,
 ) -> DiscoveryResult:
     _ensure_diagnostics_scaffolding()
 
@@ -757,35 +866,50 @@ def _perform_discovery(
             requested_countries,
         )
         alias_map = cfg.get("country_aliases") or {}
-        normalized_records = []
+        normalized_records: List[Dict[str, Any]] = []
+        snapshot_records: List[Dict[str, Any]] = []
+        resolved_selectors: List[str] = []
+        unresolved_labels: List[str] = []
         for country in requested_countries:
-            iso_candidate = to_iso3(country, alias_map) or country
-            iso_value = str(iso_candidate or "").strip().upper()
-            if len(iso_value) != 3 or not iso_value.isalpha():
-                letters_only = "".join(ch for ch in country.upper() if ch.isalpha())
-                iso_value = letters_only[:3]
-                if len(iso_value) != 3:
-                    iso_value = iso_value.ljust(3, "X")
+            iso_candidate = to_iso3(country, alias_map)
+            selector = iso_candidate or str(country)
+            if not iso_candidate:
+                unresolved_labels.append(str(country))
             normalized_records.append(
-                {"admin0Name": country, "admin0Pcode": iso_value or None}
+                {
+                    "admin0Name": str(country),
+                    "admin0Pcode": str(selector),
+                }
             )
+            snapshot_records.append(
+                {
+                    "country_label": str(country),
+                    "selector": str(selector),
+                    "resolved_iso3": str(iso_candidate or ""),
+                    "source": "explicit_config",
+                }
+            )
+            resolved_selectors.append(str(selector))
         discovered = pd.DataFrame(normalized_records, columns=["admin0Name", "admin0Pcode"])
-        discovered = _normalize_discovery_frame(discovered)
         stage_entry = {
-            "stage": "explicit_list",
+            "stage": "explicit_config",
             "status": "ok" if not discovered.empty else "empty",
             "rows": int(discovered.shape[0]),
             "attempts": 1,
             "latency_ms": 0,
+            "http_code": None,
         }
         report = {
             "stages": [stage_entry],
             "errors": []
             if not discovered.empty
-            else [{"stage": "explicit_list", "message": "empty_result"}],
-            "attempts": {"explicit_list": 1},
-            "latency_ms": {"explicit_list": 0},
-            "used_stage": "explicit_list",
+            else [{"stage": "explicit_config", "message": "empty_result"}],
+            "attempts": {"explicit_config": 1},
+            "latency_ms": {"explicit_config": 0},
+            "used_stage": "explicit_config",
+            "configured_labels": list(requested_countries),
+            "resolved": list(resolved_selectors),
+            "unresolved_labels": list(unresolved_labels),
         }
         _write_discovery_report(report)
         try:
@@ -794,17 +918,29 @@ def _perform_discovery(
             LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
         try:
             DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            discovered.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
+            snapshot_frame = pd.DataFrame(snapshot_records)
+            if snapshot_frame.empty:
+                snapshot_frame = pd.DataFrame(
+                    [
+                        {
+                            "country_label": "",
+                            "selector": "",
+                            "resolved_iso3": "",
+                            "source": "explicit_config",
+                        }
+                    ]
+                ).iloc[0:0]
+            snapshot_frame.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
         except Exception:  # pragma: no cover - diagnostics only
             LOG.debug("Unable to persist discovery snapshot", exc_info=True)
         if metrics is not None:
-            metrics["countries_attempted"] = len(requested_countries)
-            metrics["stage_used"] = "explicit_list"
+            metrics["countries_attempted"] = len(resolved_selectors)
+            metrics["stage_used"] = "explicit_config"
             _write_metrics_summary_file(metrics)
         return DiscoveryResult(
-            countries=requested_countries,
+            countries=resolved_selectors,
             frame=discovered,
-            stage_used="explicit_list",
+            stage_used="explicit_config",
             report=report,
         )
     timeouts = api_cfg.get("timeouts", {}) if isinstance(api_cfg.get("timeouts"), Mapping) else {}
@@ -813,108 +949,185 @@ def _perform_discovery(
     read_timeout = float(timeouts.get("read_seconds", 30))
     retry_attempts = int(retries_cfg.get("attempts", 3))
     backoff_seconds = float(retries_cfg.get("backoff_seconds", 1.5))
-    discovery_order = api_cfg.get("discovery_order") or ["countries", "operations", "static_iso3"]
-    if not isinstance(discovery_order, Iterable):
-        discovery_order = ["countries", "operations", "static_iso3"]
-    order = [str(stage).strip().lower() for stage in discovery_order if str(stage).strip()]
-    if "static_iso3" not in order:
-        order.append("static_iso3")
 
     key = (api_key or get_dtm_api_key() or "").strip()
     if not key and not OFFLINE:
         raise RuntimeError("Missing DTM_API_KEY environment variable.")
+
+    header_variants = build_discovery_header_variants(key)
+    if not header_variants:
+        header_variants = [{"Ocp-Apim-Subscription-Key": key}] if key else []
 
     stage_entries: List[Dict[str, Any]] = []
     stage_errors: List[Dict[str, Any]] = []
     attempts_map: Dict[str, int] = {}
     latency_map: Dict[str, int] = {}
     discovered = pd.DataFrame(columns=["admin0Name", "admin0Pcode"])
+    snapshot_override: Optional[pd.DataFrame] = None
     used_stage: Optional[str] = None
+    reason: Optional[str] = None
+    first_fail_captured = False
 
-    for stage in order:
+    sdk_client = client
+
+    def _header_label(headers: Optional[Mapping[str, str]]) -> str:
+        if not headers:
+            return "default"
+        lowered = {str(key).strip().lower() for key in headers.keys()}
+        if "x-api-key" in lowered:
+            return "x_api"
+        if "ocp-apim-subscription-key" in lowered:
+            return "ocp"
+        return "_".join(sorted(lowered))
+
+    def _capture_http_failure(stage_name: str, path: str, status: Optional[int]) -> None:
+        nonlocal first_fail_captured
+        if first_fail_captured:
+            return
+        if status not in {401, 403}:
+            return
+        payload = getattr(_get_country_list_via_http, "last_error_payload", None)
+        snippet = None
+        if isinstance(payload, str):
+            snippet = payload
+        elif payload is not None:
+            try:
+                snippet = json.dumps(payload)
+            except Exception:
+                snippet = str(payload)
+        _write_discovery_failure(
+            f"http_{status}",
+            message=f"{path} returned {status}",
+            extra={"stage": stage_name, "status": status, "path": path, "body": snippet},
+        )
+        first_fail_captured = True
+
+    if not requested_countries and sdk_client is not None:
+        stage_name = "sdk"
         started = time.perf_counter()
-        stage_name = stage
+        http_counts: Dict[str, int] = {}
         try:
-            if stage == "countries":
-                raw = _get_country_list_via_http(
-                    "/v3/displacement/country-list",
-                    key,
-                    connect_timeout=connect_timeout,
-                    read_timeout=read_timeout,
-                    retries=retry_attempts,
-                    backoff=backoff_seconds,
-                )
-                attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
-            elif stage == "operations":
-                raw = _get_country_list_via_http(
-                    "/v3/displacement/operations-list",
-                    key,
-                    connect_timeout=connect_timeout,
-                    read_timeout=read_timeout,
-                    retries=retry_attempts,
-                    backoff=backoff_seconds,
-                )
-                attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
-            elif stage == "static_iso3":
-                raw = _load_static_iso3()
-                attempts = 1
-            else:
-                LOG.debug("Skipping unknown discovery stage %s", stage)
-                continue
-            frame = _normalize_discovery_frame(raw)
+            raw_frame = sdk_client.get_countries(http_counts=http_counts)
             latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
-            attempts_map[stage_name] = int(attempts)
+            frame = _normalize_discovery_frame(raw_frame)
+            attempts_map[stage_name] = 1
             latency_map[stage_name] = latency_ms
+            http_code = http_counts.get("last_status")
             status = "ok" if not frame.empty else "empty"
             stage_entry = {
                 "stage": stage_name,
                 "status": status,
                 "rows": int(frame.shape[0]),
-                "attempts": int(attempts),
+                "attempts": 1,
                 "latency_ms": latency_ms,
+                "http_code": http_code,
             }
             stage_entries.append(stage_entry)
-            if frame.empty and stage != "static_iso3":
+            if frame.empty:
                 stage_errors.append({"stage": stage_name, "message": "empty_result"})
-                continue
-            if frame.empty and stage == "static_iso3":
-                stage_errors.append({"stage": stage_name, "message": "static_roster_empty"})
-            discovered = frame
-            used_stage = stage_name
-            break
-        except RetryError as exc:
-            attempts = exc.last_attempt.attempt_number if exc.last_attempt else retry_attempts
+            else:
+                discovered = frame
+                used_stage = stage_name
+        except DTMUnauthorizedError as exc:
             latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+            http_code = getattr(exc, "status", getattr(exc, "status_code", None))
+            attempts_map[stage_name] = 1
+            latency_map[stage_name] = latency_ms
             stage_entries.append(
                 {
                     "stage": stage_name,
                     "status": "error",
                     "rows": 0,
-                    "attempts": int(attempts),
+                    "attempts": 1,
                     "latency_ms": latency_ms,
+                    "http_code": http_code,
                 }
             )
-            attempts_map[stage_name] = int(attempts)
-            latency_map[stage_name] = latency_ms
-            error_message = str(exc.last_attempt.exception()) if exc.last_attempt else str(exc)
-            stage_errors.append({"stage": stage_name, "message": error_message})
-            continue
+            stage_errors.append({"stage": stage_name, "message": str(exc)})
         except Exception as exc:
             latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
-            attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
+            attempts_map[stage_name] = 1
+            latency_map[stage_name] = latency_ms
             stage_entries.append(
                 {
                     "stage": stage_name,
                     "status": "error",
                     "rows": 0,
-                    "attempts": attempts,
+                    "attempts": 1,
                     "latency_ms": latency_ms,
+                    "http_code": http_counts.get("last_status"),
                 }
             )
-            attempts_map[stage_name] = attempts
-            latency_map[stage_name] = latency_ms
             stage_errors.append({"stage": stage_name, "message": str(exc)})
-            continue
+
+    if not requested_countries and used_stage is None:
+        http_paths = [
+            ("http_country", "/v3/displacement/country-list"),
+            ("http_operations", "/v3/displacement/operations-list"),
+        ]
+        for base_stage, path_suffix in http_paths:
+            if used_stage:
+                break
+            for headers in header_variants or [None]:
+                started = time.perf_counter()
+                header_label = _header_label(headers)
+                stage_name = f"{base_stage}_{header_label}" if header_label else base_stage
+                try:
+                    raw = _get_country_list_via_http(
+                        path_suffix,
+                        key,
+                        connect_timeout=connect_timeout,
+                        read_timeout=read_timeout,
+                        retries=retry_attempts,
+                        backoff=backoff_seconds,
+                        headers_variants=[headers] if headers else None,
+                        capture_error_body=True,
+                    )
+                    latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+                    attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1))
+                    status_code = getattr(_get_country_list_via_http, "last_status", None)
+                    frame = _normalize_discovery_frame(raw)
+                    attempts_map[stage_name] = attempts
+                    latency_map[stage_name] = latency_ms
+                    status_text = "ok" if not frame.empty else "empty"
+                    stage_entry = {
+                        "stage": stage_name,
+                        "status": status_text,
+                        "rows": int(frame.shape[0]),
+                        "attempts": attempts,
+                        "latency_ms": latency_ms,
+                        "http_code": status_code,
+                    }
+                    stage_entries.append(stage_entry)
+                    if status_code in {401, 403}:
+                        _capture_http_failure(stage_name, path_suffix, status_code)
+                        stage_errors.append({"stage": stage_name, "message": f"http_{status_code}"})
+                        continue
+                    if frame.empty:
+                        stage_errors.append({"stage": stage_name, "message": "empty_result"})
+                        continue
+                    discovered = frame
+                    used_stage = stage_name
+                    break
+                except Exception as exc:
+                    latency_ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+                    attempts = int(getattr(_get_country_list_via_http, "last_attempts", 1)) or 1
+                    status_code = getattr(_get_country_list_via_http, "last_status", None)
+                    attempts_map[stage_name] = attempts
+                    latency_map[stage_name] = latency_ms
+                    stage_entries.append(
+                        {
+                            "stage": stage_name,
+                            "status": "error",
+                            "rows": 0,
+                            "attempts": attempts,
+                            "latency_ms": latency_ms,
+                            "http_code": status_code,
+                        }
+                    )
+                    stage_errors.append({"stage": stage_name, "message": str(exc)})
+                    _capture_http_failure(stage_name, path_suffix, status_code)
+                    continue
 
     if used_stage is None and stage_entries:
         used_stage = stage_entries[-1]["stage"]
@@ -927,12 +1140,54 @@ def _perform_discovery(
         }
     )
 
+    if not countries:
+        fallback_records = [
+            {"admin0Name": name, "admin0Pcode": code}
+            for name, code in STATIC_MINIMAL_FALLBACK
+        ]
+        discovered = pd.DataFrame(fallback_records, columns=["admin0Name", "admin0Pcode"])
+        countries = [record["admin0Name"] for record in fallback_records]
+        used_stage = "static_iso3_minimal"
+        reason = "static_iso3_minimal_fallback"
+        snapshot_override = pd.DataFrame(
+            [
+                {
+                    "country_label": name,
+                    "selector": code,
+                    "resolved_iso3": code,
+                    "source": "static_iso3_minimal",
+                }
+                for name, code in STATIC_MINIMAL_FALLBACK
+            ]
+        )
+        stage_entries.append(
+            {
+                "stage": used_stage,
+                "status": "fallback",
+                "rows": int(discovered.shape[0]),
+                "attempts": 1,
+                "latency_ms": 0,
+                "http_code": None,
+            }
+        )
+        attempts_map[used_stage] = 1
+        latency_map[used_stage] = 0
+        stage_errors.append({"stage": used_stage, "message": "http_discovery_failed"})
+        if not first_fail_captured:
+            _write_discovery_failure(
+                "http_discovery_failed",
+                message="Discovery failed via SDK and HTTP; using minimal static ISO3 allowlist",
+                extra={"fallback": [name for name, _ in STATIC_MINIMAL_FALLBACK]},
+            )
+            first_fail_captured = True
+
     report = {
         "stages": stage_entries,
         "errors": stage_errors,
         "attempts": attempts_map,
         "latency_ms": latency_map,
         "used_stage": used_stage,
+        "reason": reason,
     }
     _write_discovery_report(report)
 
@@ -942,7 +1197,8 @@ def _perform_discovery(
         LOG.debug("Unable to persist discovery JSON snapshot", exc_info=True)
     try:
         DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        discovered.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
+        snapshot_frame = snapshot_override if snapshot_override is not None else discovered
+        snapshot_frame.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to persist discovery snapshot", exc_info=True)
 
@@ -959,7 +1215,7 @@ def _perform_discovery(
 
 
 def _dump_head(df: pd.DataFrame, level: str, country: str, limit: int = 100) -> None:
-    out_dir = DIAGNOSTICS_DIR / "raw" / "dtm"
+    out_dir = DTM_RAW_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_country = country.replace("/", "-").replace(" ", "_")
     path = out_dir / f"{level}.{safe_country}.head.csv"
@@ -1040,7 +1296,7 @@ def _write_connector_report(
 
 
 def _append_summary_stub_if_needed(message: str) -> None:
-    summary_path = DIAGNOSTICS_DIR / "summary.md"
+    summary_path = DIAGNOSTICS_ROOT / "summary.md"
     if summary_path.exists():
         return
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1888,12 +2144,15 @@ def _fetch_level_pages_with_logging(
     to_date: Optional[str],
     http_counts: MutableMapping[str, int],
 ) -> Tuple[List[pd.DataFrame], int]:
+    method_name = ADMIN_METHODS.get(level, level)
     context = {
         "level": level,
         "country": country,
         "operation": operation,
         "from": from_date,
         "to": to_date,
+        "method": "GET",
+        "path": f"/{method_name}",
     }
     started = time.perf_counter()
     try:
@@ -1910,13 +2169,35 @@ def _fetch_level_pages_with_logging(
         )
     except Exception as exc:
         elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
-        context.update({"status": "error", "error": str(exc), "elapsed_ms": elapsed_ms})
+        context.update(
+            {
+                "status": "error",
+                "error": str(exc),
+                "elapsed_ms": elapsed_ms,
+                "status_code": http_counts.get("last_status"),
+            }
+        )
         _append_request_log(context)
         raise
 
     elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
     rows = sum(int(page.shape[0]) for page in pages if hasattr(page, "shape"))
-    context.update({"status": "ok" if rows > 0 else "empty", "rows": rows, "elapsed_ms": elapsed_ms})
+    size_bytes = 0
+    for page in pages:
+        if hasattr(page, "memory_usage"):
+            try:
+                size_bytes += int(page.memory_usage(deep=True).sum())
+            except Exception:
+                size_bytes += 0
+    context.update(
+        {
+            "status": "ok" if rows > 0 else "empty",
+            "rows": rows,
+            "elapsed_ms": elapsed_ms,
+            "status_code": http_counts.get("last_status"),
+            "size_bytes": size_bytes,
+        }
+    )
     _append_request_log(context)
     country_label = country or "all countries"
     op_suffix = f" / operation={operation}" if operation else ""
@@ -1928,13 +2209,15 @@ def _resolve_admin_levels(cfg: Mapping[str, Any]) -> List[str]:
     api_cfg = cfg.get("api", {})
     configured = api_cfg.get("admin_levels") or cfg.get("admin_levels")
     if not configured:
-        return ["admin1", "admin0"]
+        return ["admin0"]
     levels = []
+    seen: Set[str] = set()
     for item in configured:
         text = str(item).strip().lower()
-        if text in {"admin0", "admin1", "admin2"}:
+        if text in {"admin0", "admin1", "admin2"} and text not in seen:
             levels.append(text)
-    return levels or ["admin1", "admin0"]
+            seen.add(text)
+    return levels or ["admin0"]
 
 
 def _normalize_list(value: Any) -> List[str]:
@@ -1980,6 +2263,16 @@ def _fetch_api_data(
     failures: List[Dict[str, Any]] = []
     summary_extras["per_country_counts"] = per_country_counts
     summary_extras["failures"] = failures
+    drop_reasons_counter = {
+        "no_country_match": 0,
+        "no_iso3": 0,
+        "no_value_col": 0,
+        "date_out_of_window": 0,
+        "other": 0,
+    }
+    summary_extras["drop_reasons_counter"] = drop_reasons_counter
+    value_column_usage: Dict[str, int] = {}
+    summary_extras["value_column_usage"] = value_column_usage
 
     try:
         PER_COUNTRY_METRICS_PATH.unlink(missing_ok=True)  # type: ignore[arg-type]
@@ -2010,16 +2303,19 @@ def _fetch_api_data(
 
     summary["countries"]["requested"] = requested_countries
     if requested_countries:
-        LOG.info(
-            "Config requested countries=%s but discovery mode is enforced; ignoring list",
-            requested_countries,
-        )
+        LOG.info("Config requested countries=%s", requested_countries)
 
     target = client.client if hasattr(client, "client") else client
-    discovery_result = _perform_discovery(cfg, metrics=metrics_summary)
+    discovery_result = _perform_discovery(cfg, metrics=metrics_summary, client=client)
     resolved_countries = discovery_result.countries
     discovery_source = discovery_result.stage_used or "none"
     metrics_summary["stage_used"] = discovery_source
+    explicit_unresolved = []
+    report_payload = discovery_result.report or {}
+    if isinstance(report_payload, Mapping):
+        unresolved_candidates = report_payload.get("unresolved_labels", [])
+        if isinstance(unresolved_candidates, (list, tuple)):
+            explicit_unresolved = [str(item) for item in unresolved_candidates if str(item).strip()]
 
     if not resolved_countries:
         _write_discovery_failure(
@@ -2039,7 +2335,7 @@ def _fetch_api_data(
     LOG.info("Final discovery list contains %d selectors", discovered_count)
     summary["countries"]["resolved"] = resolved_countries
 
-    country_mode = "ALL"
+    country_mode = _countries_mode_from_stage(discovery_source)
 
     operations = requested_operations if requested_operations else [None]
 
@@ -2052,6 +2348,10 @@ def _fetch_api_data(
         "discovery_file": str(DISCOVERY_SNAPSHOT_PATH),
         "source": discovery_source,
         "stages": discovery_result.report.get("stages", []),
+        "report": discovery_result.report,
+        "configured_countries": list(requested_countries),
+        "resolved": list(resolved_countries),
+        "unresolved_labels": explicit_unresolved,
     }
     summary_extras["discovery"] = discovery_info
     diagnostics_payload = summary_extras.setdefault("diagnostics", {})
@@ -2062,6 +2362,8 @@ def _fetch_api_data(
     diagnostics_payload["log"] = str(DTM_CLIENT_LOG_PATH)
     diagnostics_payload["discovery_fail"] = str(DISCOVERY_FAIL_PATH)
     diagnostics_payload["discovery_used_stage"] = discovery_source
+    if explicit_unresolved:
+        diagnostics_payload["unresolved_countries"] = explicit_unresolved
     diagnostics_payload["no_data_combos"] = 0
 
     api_base_url = discovery_info["api_base"]
@@ -2185,6 +2487,7 @@ def _fetch_api_data(
         effective_params_ref["idp_aliases"] = list(idp_candidates)
 
     no_data_combos = 0
+    level_rollup: Dict[str, Dict[str, int]] = defaultdict(lambda: {"calls": 0, "rows": 0, "elapsed_ms": 0})
 
     for level in admin_levels:
         for country_name in resolved_countries:
@@ -2261,6 +2564,7 @@ def _fetch_api_data(
                 if skip_after > skip_before:
                     if not status_entry.get("skip_no_match"):
                         metrics_summary["countries_skipped_no_match"] += 1
+                    drop_reasons_counter["no_country_match"] += 1
                     status_entry["skip_no_match"] = True
                     unsupported_countries.add(country_name)
                     LOG.info(
@@ -2293,6 +2597,7 @@ def _fetch_api_data(
                             idp_candidates,
                             len(page),
                         )
+                        drop_reasons_counter["no_value_col"] += int(page.shape[0])
                         status_entry["errors"] = True
                         failures.append(
                             {
@@ -2305,6 +2610,9 @@ def _fetch_api_data(
                             }
                         )
                         continue
+                    value_column_usage[idp_column] = value_column_usage.get(idp_column, 0) + int(
+                        page[idp_column].notna().sum()
+                    )
                     if level not in head_written_levels:
                         try:
                             _dump_head(page, level, country_label)
@@ -2333,11 +2641,23 @@ def _fetch_api_data(
                     causes: Dict[Tuple[str, str], str] = {}
 
                     for _, row in page.iterrows():
-                        iso = to_iso3(row.get(country_column), aliases)
+                        iso, iso_reason = resolve_iso3_fields(
+                            row,
+                            aliases=aliases,
+                            name_keys=(country_column,),
+                        )
                         if not iso:
+                            drop_reasons_counter["no_iso3"] += 1
+                            if iso_reason:
+                                LOG.debug(
+                                    "dtm: unable to resolve ISO3 (reason=%s) for %r",
+                                    iso_reason,
+                                    row.get(country_column),
+                                )
                             continue
                         bucket = month_start(row.get(date_column))
                         if not bucket:
+                            drop_reasons_counter["date_out_of_window"] += 1
                             continue
                         admin1 = ""
                         if admin1_column in page.columns:
@@ -2348,6 +2668,7 @@ def _fetch_api_data(
                                 admin1 = f"{admin1}/{admin2}" if admin1 else admin2
                         value = _parse_float(row.get("idp_count"))
                         if value is None or value <= 0:
+                            drop_reasons_counter["other"] += 1
                             continue
                         per_admin[(iso, admin1)][bucket] = float(value)
                         as_of_value = _parse_iso_date_or_none(row.get(date_column))
@@ -2406,6 +2727,10 @@ def _fetch_api_data(
                 if combo_count == 0:
                     no_data_combos += 1
                 elapsed_ms = timing_result.elapsed_ms or 0
+                bucket = level_rollup[level]
+                bucket["calls"] += 1
+                bucket["rows"] += int(combo_count)
+                bucket["elapsed_ms"] += int(elapsed_ms)
                 _append_metrics(
                     {
                         "country": country_label,
@@ -2496,6 +2821,17 @@ def _fetch_api_data(
         metrics_summary["rows_fetched"] = int(total_rows)
         metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
         _write_metrics_summary_file(metrics_summary)
+
+        rescue = _run_rescue_probe(
+            client,
+            aliases=aliases,
+            idp_candidates=idp_candidates,
+            countries=["Nigeria", "South Sudan"],
+        )
+        if rescue:
+            summary_extras["rescue_probe"] = rescue
+            diagnostics_payload = summary_extras.setdefault("diagnostics", {})
+            diagnostics_payload["rescue_probe"] = rescue
 
         skip_only = (
             metrics_summary.get("countries_attempted", 0) > 0
@@ -2702,6 +3038,61 @@ def build_rows(
     summary["http_counts"]["skip_no_match"] = int(http_stats.get("skip_no_match", 0))
     summary["http_counts"]["last_status"] = http_stats.get("last_status")
     return rows, summary
+
+
+def _run_rescue_probe(
+    client: DTMApiClient,
+    *,
+    aliases: Mapping[str, str],
+    idp_candidates: Sequence[str],
+    countries: Sequence[str],
+) -> Optional[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for country in countries:
+        probe_counts = _ensure_http_counts({})
+        try:
+            frame = client.get_idp_admin0(
+                country=country,
+                from_date=None,
+                to_date=None,
+                http_counts=probe_counts,
+            )
+        except Exception as exc:  # pragma: no cover - network contingency
+            results.append(
+                {
+                    "country": country,
+                    "window": "no_date_filter",
+                    "rows": 0,
+                    "error": str(exc),
+                }
+            )
+            continue
+        if frame is None or frame.empty:
+            results.append({"country": country, "window": "no_date_filter", "rows": 0})
+            continue
+        idp_column = _resolve_idp_value_column(frame, idp_candidates)
+        rows_count = 0
+        if idp_column:
+            renamed = frame.rename(columns={idp_column: "idp_count"})
+            normalized: Set[Tuple[str, str, str]] = set()
+            for _, row in renamed.iterrows():
+                iso, _ = resolve_iso3_fields(row, aliases=aliases, name_keys=("CountryName",))
+                if not iso:
+                    continue
+                bucket = month_start(row.get("ReportingDate"))
+                if not bucket:
+                    continue
+                value = _parse_float(row.get("idp_count"))
+                if value is None or value <= 0:
+                    continue
+                normalized.add((str(iso).upper(), bucket, "dtm_api::admin0"))
+            rows_count = len(normalized)
+        results.append({"country": country, "window": "no_date_filter", "rows": rows_count})
+    if not results:
+        return None
+    payload = {"timestamp": time.time(), "tried": results}
+    write_json(RESCUE_PROBE_PATH, payload)
+    return {"tried": results, "path": str(RESCUE_PROBE_PATH)}
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -3019,6 +3410,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rows_written = 0
     summary: Dict[str, Any] = {}
+    config_source_path = str(CONFIG_PATH)
 
     try:
         cfg = load_config()
@@ -3026,6 +3418,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "config_loaded_from=%s",
             getattr(cfg, "_source_path", "<unknown>"),
         )
+        config_source_path = getattr(cfg, "_source_path", config_source_path)
         if not cfg.get("enabled", True):
             status = "skipped"
             reason = "disabled via config"
@@ -3172,6 +3565,151 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     summary_extras["per_country_counts"] = per_country_counts_payload
     summary_extras["failures"] = failures_payload
 
+    discovery_info_raw = summary_extras.get("discovery")
+    discovery_info = dict(discovery_info_raw) if isinstance(discovery_info_raw, Mapping) else {}
+    discovery_report = discovery_info.get("report") if isinstance(discovery_info.get("report"), Mapping) else {}
+    stages_source = []
+    if isinstance(discovery_report, Mapping):
+        stages_source = discovery_report.get("stages") or []
+    if not stages_source and isinstance(discovery_info.get("stages"), list):
+        stages_source = discovery_info.get("stages") or []
+    stage_attempts = discovery_report.get("attempts", {}) if isinstance(discovery_report, Mapping) else {}
+    stage_latencies = discovery_report.get("latency_ms", {}) if isinstance(discovery_report, Mapping) else {}
+    formatted_stages: List[Dict[str, Any]] = []
+    for stage in stages_source:
+        if not isinstance(stage, Mapping):
+            continue
+        name = stage.get("stage") or stage.get("name")
+        entry = {
+            "name": name,
+            "status": stage.get("status"),
+            "http_code": stage.get("http_status") or stage.get("code"),
+            "attempts": stage.get("attempts"),
+            "latency_ms": stage.get("latency_ms"),
+        }
+        if entry["attempts"] is None and isinstance(stage_attempts, Mapping) and name in stage_attempts:
+            entry["attempts"] = stage_attempts.get(name)
+        if entry["latency_ms"] is None and isinstance(stage_latencies, Mapping) and name in stage_latencies:
+            entry["latency_ms"] = stage_latencies.get(name)
+        formatted_stages.append(entry)
+    used_stage = discovery_report.get("used_stage") if isinstance(discovery_report, Mapping) else None
+    if not used_stage:
+        used_stage = discovery_info.get("source")
+    configured_labels = []
+    if isinstance(discovery_report, Mapping):
+        raw_configured = discovery_report.get("configured_labels")
+        if isinstance(raw_configured, (list, tuple)):
+            configured_labels = [str(item) for item in raw_configured]
+    unresolved_labels = []
+    if isinstance(discovery_report, Mapping):
+        raw_unresolved = discovery_report.get("unresolved_labels")
+        if isinstance(raw_unresolved, (list, tuple)):
+            unresolved_labels = [str(item) for item in raw_unresolved]
+    discovery_extras = {
+        "stages": formatted_stages,
+        "used_stage": used_stage,
+        "reason": discovery_report.get("reason") if isinstance(discovery_report, Mapping) else discovery_info.get("reason"),
+        "snapshot_path": str(DISCOVERY_SNAPSHOT_PATH),
+        "first_fail_path": str(DISCOVERY_FAIL_PATH),
+        "total_countries": discovery_info.get("total_countries"),
+        "configured_labels": configured_labels,
+        "unresolved_labels": unresolved_labels,
+    }
+    summary_extras["discovery"] = discovery_extras
+
+    drop_counts_raw = summary_extras.get("drop_reasons_counter", {})
+    drop_counts = {key: int(value) for key, value in drop_counts_raw.items()} if isinstance(drop_counts_raw, Mapping) else {}
+    value_usage_raw = summary_extras.get("value_column_usage", {})
+    value_usage = (
+        {str(key): int(value) for key, value in value_usage_raw.items()}
+        if isinstance(value_usage_raw, Mapping)
+        else {}
+    )
+    chosen_value_columns = [
+        {"column": column, "count": count}
+        for column, count in sorted(value_usage.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    summary_extras.pop("drop_reasons_counter", None)
+    summary_extras.pop("value_column_usage", None)
+
+    resolved_countries = []
+    countries_info = summary.get("countries") if isinstance(summary, Mapping) else {}
+    if isinstance(countries_info, Mapping):
+        resolved_raw = countries_info.get("resolved", [])
+        if isinstance(resolved_raw, list):
+            resolved_countries = [item for item in resolved_raw if item]
+
+    summary_extras["dtm"] = {
+        "sdk_version": discovery_info.get("sdk_version") or _dtm_sdk_version(),
+        "base_url": discovery_info.get("api_base"),
+        "python_version": deps_payload.get("python"),
+    }
+
+    effective_admin_levels = effective_params.get("admin_levels") if isinstance(effective_params, Mapping) else []
+    if isinstance(effective_admin_levels, (list, tuple)):
+        admin_levels_list = list(effective_admin_levels)
+    else:
+        admin_levels_list = list(effective_params.get("admin_levels", []))
+    countries_mode = _countries_mode_from_stage(used_stage)
+    summary_extras["config"] = {
+        "config_path_used": config_source_path,
+        "admin_levels": admin_levels_list,
+        "countries_mode": countries_mode,
+        "countries_count": len(resolved_countries),
+        "no_date_filter": 1 if no_date_filter else 0,
+    }
+
+    summary_extras["window"] = {"start_iso": window_start_iso, "end_iso": window_end_iso}
+
+    summary_extras["http"] = {
+        "count_2xx": int(http_payload.get("2xx", 0)),
+        "count_4xx": int(http_payload.get("4xx", 0)),
+        "count_5xx": int(http_payload.get("5xx", 0)),
+        "retries": int(http_payload.get("retries", 0)),
+        "timeouts": int(http_payload.get("timeout", 0)),
+        "last_status": http_payload.get("last_status"),
+        "endpoints_top": [],
+    }
+
+    paging_info = summary.get("paging", {}) if isinstance(summary, Mapping) else {}
+    fetch_extras_source = {}
+    if isinstance(summary, Mapping):
+        extras_ref = summary.get("extras")
+        if isinstance(extras_ref, Mapping):
+            fetch_extras_source = extras_ref.get("fetch", {}) if isinstance(extras_ref.get("fetch"), Mapping) else {}
+    level_rollup_summary = []
+    if isinstance(fetch_extras_source, Mapping):
+        levels_value = fetch_extras_source.get("levels")
+        if isinstance(levels_value, list):
+            level_rollup_summary = [dict(entry) for entry in levels_value if isinstance(entry, Mapping)]
+    summary_extras["fetch"] = {
+        "pages": int(paging_info.get("pages", 0)) if isinstance(paging_info, Mapping) else 0,
+        "max_page_size": paging_info.get("page_size") if isinstance(paging_info, Mapping) else None,
+        "total_received": int(paging_info.get("total_received", 0)) if isinstance(paging_info, Mapping) else 0,
+        "levels": level_rollup_summary,
+    }
+
+    summary_extras["normalize"] = {
+        "rows_fetched": int(rows_summary.get("fetched", 0)),
+        "rows_normalized": int(rows_summary.get("normalized", rows_written)),
+        "rows_written": rows_written,
+        "drop_reasons": drop_counts,
+        "chosen_value_columns": chosen_value_columns,
+    }
+
+    rescue_info = summary_extras.get("rescue_probe")
+    if isinstance(rescue_info, Mapping):
+        rescue_info.setdefault("path", str(RESCUE_PROBE_PATH))
+
+    summary_extras["artifacts"] = {
+        "run_json": str(RUN_DETAILS_PATH),
+        "http_trace": str(DTM_HTTP_LOG_PATH),
+        "samples": str(SAMPLE_ADMIN0_PATH),
+    }
+    summary_extras["staging_csv"] = str(OUT_PATH)
+    summary_extras["staging_meta"] = str(META_PATH)
+    summary_extras["diagnostics_dir"] = str(DTM_DIAGNOSTICS_DIR)
+
     _write_meta(
         rows_written,
         window_start_iso,
@@ -3216,6 +3754,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     extras["meta_path"] = str(META_PATH)
     if API_SAMPLE_PATH.exists():
         extras["api_sample_path"] = str(API_SAMPLE_PATH)
+    extras["dtm"] = summary_extras.get("dtm")
+    extras["config"] = summary_extras.get("config")
+    extras["window"] = summary_extras.get("window")
+    extras["discovery"] = summary_extras.get("discovery")
+    extras["http"] = summary_extras.get("http")
+    extras["fetch"] = summary_extras.get("fetch")
+    extras["normalize"] = summary_extras.get("normalize")
+    if summary_extras.get("rescue_probe"):
+        extras["rescue_probe"] = summary_extras.get("rescue_probe")
+    extras["artifacts"] = summary_extras.get("artifacts")
+    extras["staging_csv"] = str(OUT_PATH)
+    extras["staging_meta"] = str(META_PATH)
+    extras["diagnostics_dir"] = str(DTM_DIAGNOSTICS_DIR)
     extras.setdefault("effective_params", effective_params)
     extras.setdefault("per_country_counts", per_country_counts_payload)
     extras.setdefault("failures", failures_payload)

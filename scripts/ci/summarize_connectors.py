@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -41,6 +43,13 @@ def _coerce_int(value: Any) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _fmt_count(value: Any) -> str:
@@ -329,6 +338,285 @@ def _render_details(entry: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    ordered = sorted(values)
+    rank = (percentile / 100.0) * (len(ordered) - 1)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return float(ordered[int(rank)])
+    frac = rank - lower
+    return float(ordered[lower] + (ordered[upper] - ordered[lower]) * frac)
+
+
+def _load_ndjson(path: Path) -> List[Mapping[str, Any]]:
+    entries: List[Mapping[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, Mapping):
+                    entries.append(payload)
+    except OSError:
+        return []
+    return entries
+
+
+def _aggregate_http_endpoints(trace_path: Path) -> List[Dict[str, Any]]:
+    entries = _load_ndjson(trace_path)
+    buckets: Dict[str, List[float]] = {}
+    for entry in entries:
+        path_value = str(entry.get("path") or entry.get("endpoint") or "").strip()
+        if not path_value:
+            continue
+        latency = entry.get("elapsed_ms") or entry.get("latency_ms")
+        parsed = _coerce_float(latency)
+        if parsed is None:
+            continue
+        buckets.setdefault(path_value, []).append(parsed)
+    results: List[Dict[str, Any]] = []
+    for endpoint, latencies in buckets.items():
+        if not latencies:
+            continue
+        ordered = sorted(latencies)
+        results.append(
+            {
+                "path": endpoint,
+                "count": len(ordered),
+                "p50_ms": int(round(_percentile(ordered, 50))),
+                "p95_ms": int(round(_percentile(ordered, 95))),
+                "max_ms": int(round(max(ordered))),
+            }
+        )
+    results.sort(key=lambda item: (-item["count"], item["path"]))
+    return results[:5]
+
+
+def _read_sample_rows(path: Path, limit: int = 10) -> Tuple[List[str], List[List[str]]]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            headers = next(reader, [])
+            rows = []
+            for idx, row in enumerate(reader):
+                if idx >= limit:
+                    break
+                rows.append([str(cell) for cell in row])
+    except OSError:
+        return [], []
+    return [str(header) for header in headers], rows
+
+
+def _format_markdown_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> List[str]:
+    if not headers or not rows:
+        return []
+    normalized_rows = [["" if cell is None else str(cell) for cell in row] for row in rows]
+    lines = ["| " + " | ".join(str(header) for header in headers) + " |"]
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    for row in normalized_rows:
+        lines.append("| " + " | ".join(row[: len(headers)]) + " |")
+    return lines
+
+
+def _load_discovery_errors(path: Path, limit: int = 2) -> List[str]:
+    payload = _safe_load_json(path)
+    if not payload:
+        return []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return []
+    snippets: List[str] = []
+    for entry in errors[:limit]:
+        if isinstance(entry, Mapping):
+            try:
+                snippet = json.dumps(entry, ensure_ascii=False)
+            except (TypeError, ValueError):
+                snippet = str(entry)
+        else:
+            snippet = str(entry)
+        snippets.append(snippet)
+    return snippets
+
+
+def _render_dtm_deep_dive(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    dtm = _ensure_dict(extras.get("dtm"))
+    config = _ensure_dict(extras.get("config"))
+    window = _ensure_dict(extras.get("window"))
+    discovery = _ensure_dict(extras.get("discovery"))
+    http_summary = _ensure_dict(extras.get("http"))
+    fetch = _ensure_dict(extras.get("fetch"))
+    normalize = _ensure_dict(extras.get("normalize"))
+    rescue = extras.get("rescue_probe")
+    rescue_entries = rescue.get("tried", []) if isinstance(rescue, Mapping) else []
+    artifacts = _ensure_dict(extras.get("artifacts"))
+
+    lines: List[str] = ["## DTM Deep Dive", ""]
+
+    lines.append("### Auth & SDK")
+    sdk_line = f"- **SDK Version:** `{dtm.get('sdk_version', 'unknown')}`"
+    base_line = f"- **Base URL:** `{dtm.get('base_url', 'unknown')}`"
+    python_line = f"- **Python:** `{dtm.get('python_version', 'unknown')}`"
+    lines.extend([sdk_line, base_line, python_line, ""])
+
+    lines.append("### Discovery")
+    stage_rows: List[List[str]] = []
+    for stage in discovery.get("stages", []):
+        if not isinstance(stage, Mapping):
+            continue
+        stage_rows.append(
+            [
+                str(stage.get("name") or stage.get("stage") or "—"),
+                str(stage.get("status") or "—"),
+                str(stage.get("http_code") or "—"),
+                str(stage.get("attempts") or "—"),
+                str(stage.get("latency_ms") or "—"),
+            ]
+        )
+    if stage_rows:
+        lines.extend(_format_markdown_table(["Stage", "Status", "HTTP", "Attempts", "Latency (ms)"], stage_rows))
+    else:
+        lines.append("_No discovery stages recorded._")
+    used_stage = discovery.get("used_stage") or "—"
+    reason = discovery.get("reason")
+    reason_text = f" (reason: {reason})" if reason else ""
+    lines.append(f"- **Used stage:** `{used_stage}`{reason_text}")
+    error_path = discovery.get("first_fail_path")
+    if isinstance(error_path, str) and error_path:
+        snippets = _load_discovery_errors(Path(error_path))
+        if snippets:
+            lines.append("- **Discovery errors:**")
+            for snippet in snippets:
+                lines.append(f"  - `{snippet}`")
+    lines.append("")
+
+    lines.append("### Effective Config")
+    countries_mode = config.get("countries_mode", "discovered")
+    lines.extend(
+        [
+            f"- **Config path:** `{config.get('config_path_used', 'unknown')}`",
+            f"- **Admin levels:** {', '.join(config.get('admin_levels', []) or ['—'])}",
+            f"- **Countries mode:** `{countries_mode}` ({config.get('countries_count', 0)} selectors)",
+            f"- **No date filter:** {config.get('no_date_filter', 0)}",
+            f"- **Window:** {window.get('start_iso') or '—'} → {window.get('end_iso') or '—'}",
+        ]
+    )
+    lines.append("")
+
+    lines.append("### HTTP Roll-up")
+    lines.extend(
+        [
+            f"- **2xx/4xx/5xx:** {http_summary.get('count_2xx', 0)}/"
+            f"{http_summary.get('count_4xx', 0)}/{http_summary.get('count_5xx', 0)}",
+            f"- **Retries:** {http_summary.get('retries', 0)}",
+            f"- **Timeouts:** {http_summary.get('timeouts', 0)}",
+            f"- **Last status:** {http_summary.get('last_status', '—')}",
+        ]
+    )
+    http_trace_path = artifacts.get("http_trace")
+    if isinstance(http_trace_path, str) and http_trace_path:
+        top_endpoints = _aggregate_http_endpoints(Path(http_trace_path))
+    else:
+        top_endpoints = []
+    if not top_endpoints:
+        top_endpoints = [item for item in http_summary.get("endpoints_top", []) if isinstance(item, Mapping)]
+    if top_endpoints:
+        endpoint_rows = [
+            [
+                str(item.get("path", "—")),
+                str(item.get("count", 0)),
+                str(item.get("p50_ms", "—")),
+                str(item.get("p95_ms", "—")),
+                str(item.get("max_ms", "—")),
+            ]
+            for item in top_endpoints
+        ]
+        lines.extend(_format_markdown_table(["Path", "Count", "p50 (ms)", "p95 (ms)", "Max (ms)"], endpoint_rows))
+    lines.append("")
+
+    lines.append("### Fetch Metrics")
+    lines.extend(
+        [
+            f"- **Pages:** {fetch.get('pages', 0)}",
+            f"- **Max page size:** {fetch.get('max_page_size') or '—'}",
+            f"- **Total rows received:** {fetch.get('total_received', 0)}",
+        ]
+    )
+    lines.append("")
+
+    lines.append("### Normalization")
+    lines.extend(
+        [
+            f"- **Rows fetched/normalized/written:** {normalize.get('rows_fetched', 0)}/"
+            f"{normalize.get('rows_normalized', 0)}/{normalize.get('rows_written', 0)}",
+        ]
+    )
+    drop_reasons = normalize.get("drop_reasons")
+    if isinstance(drop_reasons, Mapping) and drop_reasons:
+        drop_rows = [[str(reason), str(drop_reasons.get(reason, 0))] for reason in sorted(drop_reasons.keys())]
+        lines.extend(_format_markdown_table(["Reason", "Count"], drop_rows))
+    chosen_columns = normalize.get("chosen_value_columns")
+    if isinstance(chosen_columns, list) and chosen_columns:
+        chosen_rows = [
+            [str(item.get("column", "—")), str(item.get("count", 0))]
+            for item in chosen_columns
+            if isinstance(item, Mapping)
+        ]
+        if chosen_rows:
+            lines.extend(_format_markdown_table(["Value column", "Rows"], chosen_rows))
+    lines.append("")
+
+    samples_path = artifacts.get("samples")
+    if isinstance(samples_path, str) and samples_path:
+        headers, sample_rows = _read_sample_rows(Path(samples_path))
+        if sample_rows:
+            lines.append("### Sample rows")
+            lines.extend(_format_markdown_table(headers, sample_rows))
+            lines.append("")
+
+    if rescue_entries:
+        lines.append("### Zero-rows rescue")
+        rescue_rows = [
+            [str(item.get("country", "—")), str(item.get("window", "—")), str(item.get("rows", 0)), str(item.get("error", ""))]
+            for item in rescue_entries
+            if isinstance(item, Mapping)
+        ]
+        if rescue_rows:
+            lines.extend(_format_markdown_table(["Country", "Window", "Rows", "Error"], rescue_rows))
+        lines.append("")
+
+    lines.append("### Actionable next steps")
+    actions: List[str] = []
+    if any(str(stage.get("http_code")) in {"401", "403"} for stage in discovery.get("stages", []) if isinstance(stage, Mapping)):
+        actions.append("- Verify DTM API key permissions or request access for discovery endpoints (HTTP 401/403).")
+    drop_counts = normalize.get("drop_reasons") if isinstance(normalize.get("drop_reasons"), Mapping) else {}
+    if drop_counts and drop_counts.get("no_country_match"):
+        actions.append("- Review country aliases or explicit selectors; discovery skipped some countries.")
+    if drop_counts and drop_counts.get("no_iso3"):
+        actions.append("- Update ISO3 mapping/aliases; many rows lacked a resolvable ISO3 code.")
+    reason_text_lower = str(discovery.get("reason") or "").lower()
+    used_stage_text = str(discovery.get("used_stage") or "").lower()
+    if "static_iso3_minimal" in used_stage_text or "minimal" in reason_text_lower:
+        actions.append("- **Discovery fallback active:** Provide explicit `api.countries` or request discovery access to avoid the minimal static allowlist.")
+    if normalize.get("rows_written", 0) == 0:
+        actions.append("- Connector wrote zero rows; inspect window and rescue probe results for active countries.")
+    if not actions:
+        actions.append("- _No immediate blockers detected._")
+    lines.extend(actions)
+    lines.append("")
+    return lines
+
+
 def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
     headers = [
         "Connector",
@@ -486,6 +774,10 @@ def build_markdown(entries: Sequence[Mapping[str, Any]]) -> str:
     for entry in sorted_entries:
         lines.append(_render_details(entry))
         lines.append("")
+    dtm_entry = next((entry for entry in sorted_entries if entry.get("connector_id") == "dtm_client"), None)
+    if dtm_entry:
+        lines.append("")
+        lines.extend(_render_dtm_deep_dive(dtm_entry))
     return "\n".join(lines).strip() + "\n"
 
 

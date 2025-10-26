@@ -434,6 +434,16 @@ The static fallback roster lives at `resolver/ingestion/static/iso3_master.csv` 
 }
 ```
 
+The connectors report (`diagnostics/ingestion/connectors_report.jsonl`) mirrors these
+values and now surfaces additional normalization telemetry:
+
+- `extras.normalize.drop_reasons` — counts per drop category (`no_iso3`,
+  `no_value_col`, `date_out_of_window`, `no_country_match`, `other`).
+- `extras.normalize.chosen_value_columns` — list of the IDP value columns used,
+  including the number of non-null observations per column, ordered by
+  frequency. This makes it clear when normalization fails because no value
+  column matched or when unexpected ISO3 values cause records to be dropped.
+
 **Exit codes:**
 
 | Exit code | Status | Description |

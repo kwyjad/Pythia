@@ -1,8 +1,16 @@
 enabled: true
 api:
-  countries: []
+  countries:
+    - South Sudan
+    - Nigeria
+    - Somalia
+    - Ethiopia
+    - Sudan
+    - DR Congo
+    - Yemen
   admin_levels:
     - admin0
+    - admin1
   operations: []
   indicators:
     - idps
