@@ -2644,7 +2644,7 @@ def _write_meta(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(argv)
+    args = parse_args(list(argv) if argv is not None else None)
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
         log_level_name = "DEBUG"
@@ -2667,6 +2667,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             no_date_filter=no_date_filter,
             args=args,
         )
+
+    if offline_smoke:
+        LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")
+        return _run_offline_smoke(no_date_filter=no_date_filter, strict_empty=strict_empty, args=args)
 
     if offline_smoke:
         LOG.info("dtm: offline smoke mode requested; bypassing SDK/key preflight")

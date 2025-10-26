@@ -146,3 +146,8 @@ data/tmp/
 *.swp
 .DS_Store
 Thumbs.db
+diagnostics/
+resolver/diagnostics/
+${RESOLVER_DATA_DIR}/
+**/staging/**/raw/
+**/*.meta.json
