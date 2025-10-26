@@ -3,32 +3,18 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional, Tuple
 
-from resolver.db._duckdb_available import DUCKDB_AVAILABLE, duckdb_unavailable_reason
-
-FAST_FIXTURES_ENV = "RESOLVER_FAST_FIXTURES_MODE"
-_VALID_MODES = {"duckdb", "noop"}
+from resolver.db.runtime_flags import (
+    FAST_FIXTURES_ENV,
+    resolve_fast_fixtures_mode as _resolve_fast_fixtures_mode,
+)
 
 
 def resolve_fast_fixtures_mode() -> Tuple[str, bool, Optional[str]]:
-    """Return (mode, auto_fallback, reason) for fast-fixtures bootstrap."""
+    """Delegate to :mod:`resolver.db.runtime_flags` for the resolved mode."""
 
-    raw = os.getenv(FAST_FIXTURES_ENV, "duckdb")
-    mode = raw.strip().lower() or "duckdb"
-    if mode not in _VALID_MODES:
-        mode = "duckdb"
-
-    auto_fallback = False
-    reason = None
-
-    if mode == "duckdb" and not DUCKDB_AVAILABLE:
-        auto_fallback = True
-        mode = "noop"
-        reason = duckdb_unavailable_reason() or "duckdb unavailable"
-
-    return mode, auto_fallback, reason
+    return _resolve_fast_fixtures_mode()
 
 
 def log_fast_fixture_mode(logger: logging.Logger) -> str:

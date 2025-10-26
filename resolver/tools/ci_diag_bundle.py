@@ -269,8 +269,12 @@ def _inspect_db(path: Path, expected_keys: Mapping[str, Sequence[str]], zip_file
         return report
 
     try:
-        import duckdb
+        import duckdb  # type: ignore
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        report.error = f"import failed: {exc}"
+        return report
 
+    try:
         conn = duckdb.connect(database=str(path), read_only=True)
     except Exception as exc:  # pragma: no cover - diagnostics only
         report.error = f"connect failed: {exc}"

@@ -13,6 +13,7 @@ import pandas as pd
 
 from resolver.db import duckdb_io
 from resolver.db.conn_shared import normalize_duckdb_url
+from resolver.db.runtime_flags import FAST_FIXTURES_ENV, resolve_fast_fixtures_mode
 from resolver.diag.diagnostics import (
     get_logger as get_diag_logger,
     log_json,
@@ -242,6 +243,21 @@ def load_series_from_db(
     ym: str, normalized_series: str
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     LOGGER.debug("load_series_from_db called ym=%s series=%s", ym, normalized_series)
+
+    mode, auto_fallback, fallback_reason = resolve_fast_fixtures_mode()
+    if mode != "duckdb":
+        if auto_fallback and fallback_reason:
+            reason = f"duckdb unavailable ({fallback_reason})"
+        elif auto_fallback:
+            reason = "duckdb unavailable"
+        else:
+            reason = f"{FAST_FIXTURES_ENV}=noop"
+        LOGGER.debug(
+            "DuckDB disabled for fast fixtures (reason=%s); returning noop result",
+            reason,
+        )
+        return None, "", normalized_series
+
     db_url = os.environ.get("RESOLVER_DB_URL")
     if not db_url:
         return None, "", normalized_series
