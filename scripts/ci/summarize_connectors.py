@@ -43,6 +43,16 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
+def _fmt_count(value: Any) -> str:
+    try:
+        if value in (None, ""):
+            return "—"
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "—"
+    return "—" if number == 0 else str(number)
+
+
 def _format_meta_cell(
     extras: Mapping[str, Any] | None,
     meta_json: Mapping[str, Any] | None,
@@ -53,9 +63,7 @@ def _format_meta_cell(
         if status_raw == "ok-empty":
             return "—"
         row_count = (meta_json or {}).get("row_count")
-        if row_count in (None, ""):
-            return "—"
-        return str(int(row_count))
+        return _fmt_count(row_count)
     except Exception:
         return "—"
 
