@@ -36,6 +36,6 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.extras]
 db = ["duckdb"]
 dev = ["ipykernel"]
-tests = ["duckdb", "httpx", "pytest"]
+test = ["duckdb", "httpx", "pytest"]
 connectors = ["dtmapi>=0.1.5,<1.0"]
 ingestion = ["dtmapi>=0.1.5,<1.0", "pandas", "python-dateutil"]

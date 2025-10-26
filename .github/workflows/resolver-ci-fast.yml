@@ -34,8 +34,8 @@ jobs:
       - name: Install dependencies (fast)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -c constraints-ci.txt -e '.[dev,tests,db]'
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c constraints-ci.txt -e '.[db,test]'
           if [ -f resolver/requirements.txt ]; then pip install -c constraints-ci.txt -r resolver/requirements.txt; fi
 
       - name: Ensure CI helpers are executable
