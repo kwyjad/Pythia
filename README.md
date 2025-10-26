@@ -102,6 +102,7 @@ Run the command locally before pushing when editing workflows to surface parser 
 
 - `pytest` runs happily in both single-process and multi-process modes. Passing `-n auto` asks [`pytest-xdist`](https://pypi.org/project/pytest-xdist/) to parallelise across every available core, but when that plugin is missing (for example inside Codex sandboxes that block network installs) the repo-level `conftest.py` prints a short note and silently drops the flag so tests fall back to a single worker.
 - Commands such as `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -n auto resolver/ingestion/tests/test_run_all_stubs_enablement.py` therefore succeed even if `pytest-xdist` cannot be imported.
+- `python -m resolver.ingestion.dtm_client --offline-smoke` runs entirely offline, requires no API key, and now ignores ambient test runner flags so you can invoke it directly from pytest without argparse collisions.
 - **Runner exit policy:** the ingestion runner exits with code `0` whenever at least one connector runs _or_ every connector was intentionally skipped (for example via `enable: false` in config or a CI-only disable). Missing secrets, unexpected skips, or connector crashes still emit a non-zero exit, and the summary table now logs per-status counts plus a short explanation of the final decision.
 
 ### Fast-test fixtures
