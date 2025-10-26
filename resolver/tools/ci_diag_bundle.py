@@ -17,6 +17,16 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 from zipfile import ZIP_DEFLATED, ZipFile
 
+try:
+    import duckdb  # type: ignore
+except Exception as exc:  # pragma: no cover - optional dependency for diagnostics
+    duckdb = None  # type: ignore[assignment]
+    DUCKDB_AVAILABLE = False
+    _DUCKDB_IMPORT_ERROR: Exception | None = exc
+else:  # pragma: no branch - cache import result
+    DUCKDB_AVAILABLE = True
+    _DUCKDB_IMPORT_ERROR = None
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUNDLE_NAME = "diagnostics.zip"
 FILES_TO_STAMP: tuple[tuple[str, str], ...] = (
@@ -268,10 +278,11 @@ def _inspect_db(path: Path, expected_keys: Mapping[str, Sequence[str]], zip_file
         report.error = "file not found"
         return report
 
-    try:
-        import duckdb  # type: ignore
-    except Exception as exc:  # pragma: no cover - diagnostics only
-        report.error = f"import failed: {exc}"
+    if not DUCKDB_AVAILABLE or duckdb is None:
+        reason = "duckdb import failed"
+        if _DUCKDB_IMPORT_ERROR is not None:
+            reason = f"duckdb import failed: {_DUCKDB_IMPORT_ERROR}"
+        report.error = reason
         return report
 
     try:

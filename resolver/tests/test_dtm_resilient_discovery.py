@@ -228,7 +228,7 @@ def test_soft_skip_no_country_match(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert records == []
     assert summary["rows"]["fetched"] == 0
     assert summary["http_counts"].get("skip_no_match") == 1
-    assert summary.get("extras", {}).get("zero_rows_reason") == "unsupported_countries"
+    assert summary.get("extras", {}).get("zero_rows_reason") == "no_country_match"
 
     metrics_payload = json.loads(dtm.METRICS_SUMMARY_PATH.read_text(encoding="utf-8"))
     assert metrics_payload["countries_skipped_no_match"] == 1

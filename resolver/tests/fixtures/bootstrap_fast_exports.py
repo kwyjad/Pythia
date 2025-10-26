@@ -13,6 +13,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from resolver.db.runtime_flags import USE_DUCKDB
 from resolver.ingestion._fast_fixtures import resolve_fast_fixtures_mode
 
 LOGGER = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ def _run_load_and_derive(staging_root: Path, snapshots_root: Path, db_path: Path
 @lru_cache(maxsize=1)
 def build_fast_exports() -> FastExports:
     mode, auto_fallback, reason = resolve_fast_fixtures_mode()
-    if mode != "duckdb":
+    if not USE_DUCKDB:
         if auto_fallback:
             extra = f" (missing DuckDB: {reason})" if reason else ""
             LOGGER.warning(

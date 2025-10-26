@@ -171,13 +171,21 @@ DEFAULT_CAUSE = "unknown"
 HTTP_COUNT_KEYS = ("2xx", "4xx", "5xx", "timeout", "error")
 ROW_COUNT_KEYS = ("admin0", "admin1", "admin2", "total")
 
-NO_MATCH_MSG = "No Country found matching your query."
-
 ADMIN_METHODS = {
     "admin0": "get_idp_admin0",
     "admin1": "get_idp_admin1",
     "admin2": "get_idp_admin2",
 }
+
+
+def _is_no_country_match_error(err: BaseException) -> bool:
+    """Return ``True`` when *err* carries the discovery soft-skip signature."""
+
+    try:
+        message = str(err).lower()
+        return "no country found matching your query" in message
+    except Exception:
+        return False
 
 
 DISCOVERY_ERROR_LOG: List[Dict[str, Any]] = []
@@ -1198,8 +1206,7 @@ class DTMApiClient:
                 time.sleep(self.rate_limit_delay)
             return frame
         except ValueError as exc:
-            message = str(exc).strip()
-            if NO_MATCH_MSG in message:
+            if _is_no_country_match_error(exc):
                 if http_counts is not None:
                     http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
                 self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
@@ -1235,8 +1242,7 @@ class DTMApiClient:
                 time.sleep(self.rate_limit_delay)
             return frame
         except ValueError as exc:
-            message = str(exc).strip()
-            if NO_MATCH_MSG in message:
+            if _is_no_country_match_error(exc):
                 if http_counts is not None:
                     http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
                 self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
@@ -1276,8 +1282,7 @@ class DTMApiClient:
                 time.sleep(self.rate_limit_delay)
             return frame
         except ValueError as exc:
-            message = str(exc).strip()
-            if NO_MATCH_MSG in message:
+            if _is_no_country_match_error(exc):
                 if http_counts is not None:
                     http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
                 self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
@@ -2447,6 +2452,14 @@ def _fetch_api_data(
 
     _update_country_metrics()
 
+    skip_count = int(http_counter.get("skip_no_match", 0))
+    fallback_skip = int(getattr(client, "_http_counts", {}).get("skip_no_match", 0))
+    if fallback_skip > skip_count:
+        http_counter["skip_no_match"] = fallback_skip
+        summary.setdefault("http_counts", {})["skip_no_match"] = fallback_skip
+        if metrics_summary.get("countries_skipped_no_match", 0) < fallback_skip:
+            metrics_summary["countries_skipped_no_match"] = fallback_skip
+
     diagnostics_payload["no_data_combos"] = no_data_combos
     summary.setdefault("http_counts", {})["skip_no_match"] = int(http_counter.get("skip_no_match", 0))
 
@@ -2457,21 +2470,33 @@ def _fetch_api_data(
     total_rows = int(summary.get("row_counts", {}).get("total", 0))
     if total_rows == 0:
         zero_reason = "api_empty_response"
-        if metrics_summary.get("countries_skipped_no_match"):
-            zero_reason = "unsupported_countries"
+        if metrics_summary.get("countries_skipped_no_match") or http_counter.get("skip_no_match"):
+            zero_reason = "no_country_match"
         elif not resolved_countries:
             zero_reason = "empty_country_list"
         elif failures:
             zero_reason = "invalid_indicator"
         elif no_data_combos:
             zero_reason = "filter_excluded_all"
+
         diagnostics_payload["zero_rows_reason"] = zero_reason
         summary_extras["zero_rows_reason"] = zero_reason
+        summary.setdefault("rows", {}).setdefault("fetched", 0)
+        summary["rows"].setdefault("normalized", 0)
+        summary["rows"]["kept"] = 0
+        summary["rows"]["written"] = 0
+        summary.setdefault("row_counts", _empty_row_counts())
+        summary_extras.setdefault("rows_written", 0)
+        summary_extras.setdefault("rows_total", 0)
+        summary_extras.setdefault("status_raw", "ok-empty")
+        summary["reason"] = summary.get("reason") or "header-only; kept=0"
+
         window_label = f"{from_date or '-'}..{to_date or '-'}"
         _update_country_metrics()
         metrics_summary["rows_fetched"] = int(total_rows)
         metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
         _write_metrics_summary_file(metrics_summary)
+
         skip_only = (
             metrics_summary.get("countries_attempted", 0) > 0
             and metrics_summary.get("countries_skipped_no_match", 0)
@@ -2483,13 +2508,13 @@ def _fetch_api_data(
                 "dtm: all %d countries skipped due to unsupported selectors",
                 metrics_summary.get("countries_skipped_no_match", 0),
             )
-            return all_records, summary
-        LOG.error(
-            "dtm: zero rows produced for window %s zero_rows_reason=%s",
-            window_label,
-            zero_reason,
-        )
-        raise DTMZeroRowsError(window_label, zero_reason)
+        else:
+            LOG.warning(
+                "dtm: zero rows produced for window %s zero_rows_reason=%s",
+                window_label,
+                zero_reason,
+            )
+        return all_records, summary
 
     effective_params = summary.get("extras", {}).get("effective_params")
     if isinstance(effective_params, MutableMapping):
@@ -2771,6 +2796,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
     skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
     offline_mode = skip_requested or bool(offline_smoke)
+    previous_offline = OFFLINE
     OFFLINE = offline_mode
     if skip_requested:
         LOG.info("Skip mode: no real network calls; writing header & trace placeholder")
@@ -2801,6 +2827,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             http=http_payload,
             counts=counts_payload,
         )
+        OFFLINE = previous_offline
         return 0
 
     preflight_started = time.perf_counter()
@@ -2877,6 +2904,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_json(RUN_DETAILS_PATH, run_payload)
         _mirror_legacy_diagnostics()
         LOG.error(reason)
+        OFFLINE = previous_offline
         return 1
 
     raw_auth_key = (os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip()
@@ -2926,6 +2954,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_json(RUN_DETAILS_PATH, run_payload)
         _mirror_legacy_diagnostics()
         LOG.error("dtm: auth probe failed: %s", exc)
+        OFFLINE = previous_offline
         return 1
     except Exception as exc:
         reason = f"auth: {exc}" if str(exc) else "auth: error"
@@ -2971,6 +3000,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_json(RUN_DETAILS_PATH, run_payload)
         _mirror_legacy_diagnostics()
         LOG.error("dtm: auth probe error: %s", exc)
+        OFFLINE = previous_offline
         return 1
 
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
@@ -3020,14 +3050,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 ensure_zero_row_outputs(offline=OFFLINE)
             timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
-    except DTMZeroRowsError as exc:
-        LOG.warning("dtm: zero rows reason=%s", exc.zero_rows_reason)
-        status = "ok-empty"
-        reason = str(exc)
-        exit_code = 0
-        extras["zero_rows_reason"] = exc.zero_rows_reason
-        extras.setdefault("diagnostics", {})["zero_rows_reason"] = exc.zero_rows_reason
-        ensure_zero_row_outputs(offline=OFFLINE)
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status = "error"
@@ -3046,10 +3068,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if skip_requested:
         extras["skip_reason"] = "RESOLVER_SKIP_DTM"
-        if rows_written == 0 and exit_code == 0:
-            status = "skipped"
-            reason = "disabled via RESOLVER_SKIP_DTM"
-            extras["status_raw"] = "skipped"
+        if "zero_rows_reason" not in extras:
+            extras["zero_rows_reason"] = summary.get("extras", {}).get("zero_rows_reason") or "skip_requested"
+        zero_reason = extras.get("zero_rows_reason")
+        if zero_reason:
+            summary.setdefault("extras", {}).setdefault("zero_rows_reason", zero_reason)
 
     summary_timings = summary.get("timings_ms") if isinstance(summary, Mapping) else {}
     if isinstance(summary_timings, Mapping):
@@ -3096,12 +3119,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         or summary_extras.get("zero_rows_reason")
         or None
     )
-    if status in {"ok", "ok-empty"}:
-        if kept_count == 0:
-            ensure_header_only()
+    zero_rows = status != "error" and kept_count == 0
+    if status != "error":
+        if zero_rows:
+            ensure_zero_row_outputs(offline=OFFLINE)
             totals["rows_written"] = 0
             totals["kept"] = 0
             extras["rows_total"] = 0
+            extras["rows_written"] = 0
+            summary_extras["rows_written"] = 0
             if zero_rows_reason:
                 extras.setdefault("zero_rows_reason", zero_rows_reason)
                 diagnostics_payload = extras.get("diagnostics")
@@ -3112,21 +3138,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 diagnostics_map["zero_rows_reason"] = zero_rows_reason
                 extras["diagnostics"] = diagnostics_map
                 summary_extras.setdefault("zero_rows_reason", zero_rows_reason)
-            if strict_empty:
-                status = "error"
-                exit_code = 2
-                reason = f"strict-empty; kept={kept_count} (0 rows)"
-                LOG.error("dtm: strict-empty enabled; failing due to zero rows")
-            else:
-                status = "ok-empty"
-                reason = f"header-only; kept={kept_count} (0 rows)"
+            reason = summary.get("reason") or reason or "header-only; kept=0"
+            status = "ok-empty"
         else:
             extras["rows_total"] = kept_count
-            if status == "ok":
+            extras["rows_written"] = rows_written
+            summary_extras["rows_written"] = rows_written
+            if status == "ok" and not reason:
                 reason = f"wrote {kept_count} rows"
+    else:
+        extras["rows_total"] = kept_count
+        extras["rows_written"] = rows_written
+        summary_extras["rows_written"] = rows_written
+
+    if strict_empty and zero_rows and exit_code == 0:
+        exit_code = 2
+        LOG.error("dtm: strict-empty enabled; exiting with code 2 for zero rows")
 
     extras["status_raw"] = status
     extras["exit_code"] = exit_code
+    summary_extras.setdefault("status_raw", status)
+    summary_extras["exit_code"] = exit_code
 
     effective_params: Mapping[str, Any]
     raw_effective = summary_extras.get("effective_params")
@@ -3198,6 +3230,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
     _mirror_legacy_diagnostics()
 
+    OFFLINE = previous_offline
     return exit_code
 
 
