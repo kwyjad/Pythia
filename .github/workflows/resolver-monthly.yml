@@ -50,6 +50,7 @@ jobs:
       UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
       LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
       DTM_CONFIG_PATH: resolver/config/dtm.yml
+      RESOLVER_OUTPUT_DIR: resolver/staging
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
