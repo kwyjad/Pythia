@@ -7,7 +7,7 @@ import logging
 import importlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import pytest
@@ -566,3 +566,52 @@ def test_http_trace_written(
     ]
     assert lines
     assert all("country" in entry for entry in lines)
+
+
+def test_country_kwargs_switch_on_iso3() -> None:
+    assert dtm_client._country_kwargs("SSD") == {"CountryISO3": "SSD"}
+    assert dtm_client._country_kwargs("South Sudan") == {"CountryName": "South Sudan"}
+    assert dtm_client._country_kwargs("  ") == {}
+
+
+def test_admin0_fallback_retries_with_name() -> None:
+    class FakeSdk:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        def get_idp_admin0_data(self, **kwargs: Any) -> pd.DataFrame:
+            self.calls.append(kwargs)
+            if "CountryISO3" in kwargs:
+                raise ValueError("No country found matching your query")
+            return pd.DataFrame(
+                {
+                    "CountryName": ["South Sudan"],
+                    "ReportingDate": ["2024-05-15"],
+                    "numPresentIdpInd": [10],
+                }
+            )
+
+    fake_sdk = FakeSdk()
+    client = object.__new__(dtm_client.DTMApiClient)
+    client.client = fake_sdk  # type: ignore[attr-defined]
+    client.rate_limit_delay = 0
+    client.timeout = 0
+    client._http_counts = {}  # type: ignore[attr-defined]
+    client._last_param_used = None  # type: ignore[attr-defined]
+
+    http_counts: Dict[str, int] = {}
+    frame = dtm_client.DTMApiClient.get_idp_admin0(  # type: ignore[misc]
+        client,
+        country="SSD",
+        from_date=None,
+        to_date=None,
+        http_counts=http_counts,
+    )
+
+    assert isinstance(frame, pd.DataFrame)
+    assert not frame.empty
+    assert len(fake_sdk.calls) == 2
+    assert fake_sdk.calls[0]["CountryISO3"] == "SSD"
+    assert fake_sdk.calls[1]["CountryName"] == "SSD"
+    assert client._last_param_used == "name"  # type: ignore[attr-defined]
+    assert http_counts.get("skip_no_match") in (None, 0)

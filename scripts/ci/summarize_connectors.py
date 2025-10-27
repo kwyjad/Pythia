@@ -849,6 +849,51 @@ def _render_staging_readiness(entry: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _render_dtm_per_country(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    per_country_raw = extras.get("per_country")
+    if not isinstance(per_country_raw, list) or not per_country_raw:
+        return []
+
+    rows: List[List[str]] = []
+    for item in per_country_raw:
+        if not isinstance(item, Mapping):
+            continue
+        country = str(item.get("country") or "—")
+        level = str(item.get("level") or "—")
+        param = str(item.get("param") or "")
+        if param.lower() == "iso3":
+            param = "CountryISO3"
+        elif param.lower() == "name":
+            param = "CountryName"
+        pages = _coerce_int(item.get("pages"))
+        rows_count = _coerce_int(item.get("rows"))
+        skipped = bool(item.get("skipped_no_match"))
+        reason = str(item.get("reason") or "")
+        skipped_text = reason if skipped and reason else ("yes" if skipped else "")
+        rows.append(
+            [
+                country,
+                level,
+                param or "—",
+                str(pages),
+                str(rows_count),
+                skipped_text,
+            ]
+        )
+    if not rows:
+        return []
+
+    header = ["Country", "Level", "Param", "Pages", "Rows", "Skipped"]
+    lines = ["## DTM per-country results", ""]
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
+    return lines
+
+
 def _render_zero_row_root_cause(entry: Mapping[str, Any]) -> List[str]:
     extras = _ensure_dict(entry.get("extras"))
     counts = _ensure_dict(entry.get("counts"))
@@ -1231,6 +1276,9 @@ def build_markdown(
         staging_section = _render_staging_readiness(dtm_entry)
         if staging_section:
             lines.extend(staging_section)
+        per_country_section = _render_dtm_per_country(dtm_entry)
+        if per_country_section:
+            lines.extend(per_country_section)
         sample_section = _render_source_sample_quick_checks()
         if sample_section:
             lines.extend(sample_section)
