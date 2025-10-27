@@ -51,6 +51,21 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
    tables and constraints defined in [`resolver/db/schema.sql`](db/schema.sql),
    so reruns always observe the same structure.
 
+## DTM configuration & diagnostics
+
+- `resolver/ingestion/dtm_client.py` looks for the connector config in this order:
+  an explicit `DTM_CONFIG_PATH`, then `resolver/config/dtm.yml`, and finally the
+  legacy `resolver/ingestion/config/dtm.yml`. The active path and a short SHA256
+  prefix are recorded in the ingestion extras.
+- Use `DTM_SOFT_TIMEOUTS=1` or the `--soft-timeouts` flag to tolerate blocked
+  network egress by treating connect timeouts as "ok-empty" runs. Combine with
+  `DTM_NO_DATE_FILTER=1` (or `--no-date-filter`) when you need to expand the
+  window beyond the scheduled monthly range.
+- CI and local runs write a canonical `diagnostics/ingestion/summary.md`
+  containing the config metadata, resolved countries/admin levels, HTTP totals,
+  reachability probe results, and a staging snapshot. This summary replaces the
+  previous "no files found" warnings with explicit "not present" markers.
+
 ## Codex / CI setup
 
 When running resolver tests in the Codex environment (or any fresh CI runner),
