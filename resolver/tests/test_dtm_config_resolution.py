@@ -21,7 +21,9 @@ def _prepare_repo(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
     monkeypatch.setattr(dtm_client, "_REPO_ROOT", repo_root, raising=False)
     monkeypatch.setattr(dtm_client, "REPO_ROOT", repo_root, raising=False)
     monkeypatch.setattr(dtm_client, "RESOLVER_ROOT", resolver_root, raising=False)
-    monkeypatch.setattr(dtm_client, "CONFIG_PATH", (ingestion_config / "dtm.yml").resolve(), raising=False)
+    ingestion_default = (ingestion_config / "dtm.yml").resolve()
+    monkeypatch.setattr(dtm_client, "LEGACY_CONFIG_PATH", ingestion_default, raising=False)
+    monkeypatch.setattr(dtm_client, "CONFIG_PATH", ingestion_default, raising=False)
 
 
 def test_load_config_honours_search_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

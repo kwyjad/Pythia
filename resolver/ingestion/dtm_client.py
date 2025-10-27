@@ -54,7 +54,44 @@ from resolver.scripts.ingestion._dtm_debug_utils import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = _REPO_ROOT
 RESOLVER_ROOT = REPO_ROOT / "resolver"
-CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
+LEGACY_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
+SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
+
+
+def _config_candidate_paths() -> List[Path]:
+    candidates: List[Path] = []
+    env_value = os.getenv("DTM_CONFIG_PATH", "").strip()
+    if env_value:
+        env_path = Path(env_value).expanduser()
+        if not env_path.is_absolute():
+            env_path = (REPO_ROOT / env_path).resolve()
+        else:
+            env_path = env_path.resolve()
+        candidates.append(env_path)
+
+    resolver_config = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
+    if resolver_config not in candidates:
+        candidates.append(resolver_config)
+
+    legacy_config = LEGACY_CONFIG_PATH
+    if legacy_config not in candidates:
+        candidates.append(legacy_config)
+
+    return candidates
+
+
+def _resolve_config_path() -> Tuple[Path, bool]:
+    candidates = _config_candidate_paths()
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate, True
+    if not candidates:
+        return LEGACY_CONFIG_PATH, LEGACY_CONFIG_PATH.exists()
+    fallback = candidates[-1]
+    return fallback, fallback.exists()
+
+
+CONFIG_PATH, _ = _resolve_config_path()
 
 # Diagnostics (repo-root)
 DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
@@ -1838,36 +1875,45 @@ def _maybe_override_from_env(cfg: MutableMapping[str, Any]) -> MutableMapping[st
     return cfg
 
 
-def _config_candidate_paths() -> List[Path]:
-    candidates: List[Path] = []
-    env_value = os.getenv("DTM_CONFIG_PATH", "").strip()
-    if env_value:
-        env_path = Path(env_value).expanduser()
-        if not env_path.is_absolute():
-            env_path = (_REPO_ROOT / env_path).resolve()
+def _normalize_keyword_mapping(raw: Mapping[str, Any]) -> Dict[str, List[str]]:
+    normalized: Dict[str, List[str]] = {}
+    for key, value in raw.items():
+        key_text = str(key)
+        items: List[str] = []
+        if isinstance(value, str):
+            tokens = [value]
+        elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+            tokens = list(value)
         else:
-            env_path = env_path.resolve()
-        candidates.append(env_path)
-
-    default_config = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
-    if default_config not in candidates:
-        candidates.append(default_config)
-
-    if CONFIG_PATH not in candidates:
-        candidates.append(CONFIG_PATH)
-
-    return candidates
+            tokens = []
+        for token in tokens:
+            token_text = str(token).strip()
+            if token_text:
+                items.append(token_text)
+        if items:
+            normalized[key_text] = items
+    return normalized
 
 
-def _resolve_config_path() -> Tuple[Path, bool]:
-    candidates = _config_candidate_paths()
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate, True
-    if candidates:
-        # Fall back to the last candidate when none exist (in-code defaults)
-        return candidates[-1], False
-    return CONFIG_PATH, False
+def _load_series_semantics_keywords() -> Dict[str, List[str]]:
+    try:
+        with SERIES_SEMANTICS_PATH.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except FileNotFoundError:
+        LOG.debug("dtm: series_semantics.yml not present; using fallback keywords")
+        data = {}
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: failed to load series_semantics.yml", exc_info=True)
+        data = {}
+
+    keywords_raw = data.get("shock_keywords") if isinstance(data, Mapping) else {}
+    if isinstance(keywords_raw, Mapping):
+        keywords = _normalize_keyword_mapping(keywords_raw)
+        if keywords:
+            return keywords
+
+    # Minimal safe defaults required by tests
+    return {"flood": ["flood"], "drought": ["drought"]}
 
 
 def load_config() -> Dict[str, Any]:
@@ -1881,6 +1927,14 @@ def load_config() -> Dict[str, Any]:
         parsed = yaml.safe_load(text) or {}
         if isinstance(parsed, dict):
             data = parsed
+    semantics_keywords = _load_series_semantics_keywords()
+    existing_keywords = data.get("shock_keywords") if isinstance(data, dict) else {}
+    merged_keywords = dict(semantics_keywords)
+    if isinstance(existing_keywords, Mapping):
+        merged_keywords.update(_normalize_keyword_mapping(existing_keywords))
+    if not merged_keywords:
+        merged_keywords = {"flood": ["flood"], "drought": ["drought"]}
+    data["shock_keywords"] = merged_keywords
     cfg = ConfigDict(data)
     cfg._source_path = str(path.resolve())
     cfg._source_exists = bool(exists)
@@ -3528,7 +3582,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rows_written = 0
     summary: Dict[str, Any] = {}
-    config_source_path = str(CONFIG_PATH)
+    config_source_path = str(_resolve_config_path()[0])
     config_exists_flag = False
     config_sha_prefix: Optional[str] = None
 

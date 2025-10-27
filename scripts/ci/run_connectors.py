@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
@@ -133,11 +134,42 @@ def _quoted(cmd: Iterable[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
+def _as_jsonable(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _as_jsonable(item) for key, item in value.items()}
+    if dataclasses.is_dataclass(value):  # pragma: no branch - trivial checks
+        return _as_jsonable(dataclasses.asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        else:
+            return _as_jsonable(dumped)
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()  # type: ignore[call-arg]
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        else:
+            return _as_jsonable(dumped)
+    if hasattr(value, "_asdict"):
+        try:
+            dumped = value._asdict()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        else:
+            return _as_jsonable(dumped)
+    if isinstance(value, (list, tuple, set)):
+        return [_as_jsonable(item) for item in value]
+    return value
+
+
 def _write_report(path: Path, entries: Iterable[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for entry in entries:
-            handle.write(json.dumps(entry))
+            handle.write(json.dumps(_as_jsonable(entry), default=str))
             handle.write("\n")
 
 
