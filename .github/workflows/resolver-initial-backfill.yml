@@ -69,6 +69,7 @@ jobs:
       LOG_LEVEL: ${{ inputs.log_level }}
       EMPTY_POLICY: ${{ inputs.empty_policy }}
       NO_DATE_FILTER: ${{ inputs.no_date_filter }}
+      DTM_CONFIG_PATH: resolver/config/dtm.yml
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

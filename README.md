@@ -158,12 +158,13 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
   export DTM_ADMIN_LEVELS="admin0,admin1"
   ```
 
-- Configuration search order is `DTM_CONFIG_PATH` (absolute or repo-relative) → `resolver/config/dtm.yml` →
-  `resolver/ingestion/config/dtm.yml`. The connector records the absolute path used, whether the file existed, and a short
-  SHA-256 digest in `diagnostics/ingestion/summary.md` under **Config used** alongside the final admin levels, mode
-  (`explicit_config`, `discovered`, or `static_iso3_minimal`), selector counts, and a preview of the first five selectors.
-  Environment overrides (`DTM_COUNTRIES`, `DTM_ADMIN_LEVELS`) apply *after* the YAML is parsed so you can tweak selectors
-  without touching the file.
+- Configuration search order is `DTM_CONFIG_PATH` (absolute or repo-relative) →
+  `resolver/ingestion/config/dtm.yml` → `resolver/config/dtm.yml`. The connector records the absolute path used, whether the
+  file existed, and a short SHA-256 digest in `diagnostics/ingestion/summary.md` under **Config used** alongside the final
+  admin levels, mode (`explicit_config`, `discovered`, or `static_iso3_minimal`), selector counts, and a preview of the first
+  five selectors. Environment overrides (`DTM_COUNTRIES`, `DTM_ADMIN_LEVELS`) apply *after* the YAML is parsed so you can tweak
+  selectors without touching the file. GitHub Actions workflows set `DTM_CONFIG_PATH=resolver/config/dtm.yml` so production
+  runs keep the curated geography list without affecting fast-test defaults.
 - Use `--soft-timeouts` (or `DTM_SOFT_TIMEOUTS=1`) when running behind strict egress rules. Connect timeouts to
   `dtmapi.iom.int` are treated as `status=ok-empty` with `zero_rows_reason=http_connect_timeout`, allowing workflows with
   `EMPTY_POLICY=allow` to succeed while you request firewall exceptions. The initial-backfill and monthly workflows pass this

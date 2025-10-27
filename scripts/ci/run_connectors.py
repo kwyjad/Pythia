@@ -141,35 +141,35 @@ def _as_jsonable(value: object) -> object:
         return _as_jsonable(dataclasses.asdict(value))
     if hasattr(value, "model_dump"):
         try:
-            dumped = value.model_dump()
+            return _as_jsonable(value.model_dump())
         except Exception:  # pragma: no cover - defensive
-            dumped = None
-        else:
-            return _as_jsonable(dumped)
+            pass
     if hasattr(value, "dict"):
         try:
-            dumped = value.dict()  # type: ignore[call-arg]
+            return _as_jsonable(value.dict())  # type: ignore[call-arg]
         except Exception:  # pragma: no cover - defensive
-            dumped = None
-        else:
-            return _as_jsonable(dumped)
+            pass
     if hasattr(value, "_asdict"):
         try:
-            dumped = value._asdict()
+            return _as_jsonable(value._asdict())
         except Exception:  # pragma: no cover - defensive
-            dumped = None
-        else:
-            return _as_jsonable(dumped)
+            pass
     if isinstance(value, (list, tuple, set)):
         return [_as_jsonable(item) for item in value]
-    return value
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:  # pragma: no cover - defensive
+        return str(value)
 
 
 def _write_report(path: Path, entries: Iterable[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    with path.open("a", encoding="utf-8") as handle:
         for entry in entries:
-            handle.write(json.dumps(_as_jsonable(entry), default=str))
+            payload: object = dict(entry) if isinstance(entry, Mapping) else entry
+            handle.write(json.dumps(_as_jsonable(payload), default=str))
             handle.write("\n")
 
 
@@ -293,7 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         records[name] = result
-        _write_report(report_path, records.values())
+        _write_report(report_path, [result])
         for sub in ("raw", "metrics", "samples"):
             keep = diag_base / sub / ".keep"
             try:
