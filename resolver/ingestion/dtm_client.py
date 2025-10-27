@@ -64,10 +64,10 @@ def _resolve_config_path() -> Path:
     if env_value:
         env_path = Path(env_value).expanduser()
         if not env_path.is_absolute():
-            env_path = REPO_ROOT / env_path
-        env_resolved = env_path.resolve()
-        if env_resolved.exists():
-            return env_resolved
+            env_path = (REPO_ROOT / env_path).resolve()
+        else:
+            env_path = env_path.resolve()
+        return env_path
 
     repo_cfg = REPO_CONFIG_PATH
     if repo_cfg.exists():

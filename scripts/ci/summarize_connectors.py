@@ -7,12 +7,13 @@ import csv
 import json
 import math
 import os
-import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import certifi
+
+REASON_HISTOGRAM_LIMIT = 5
 
 DEFAULT_HTTP_KEYS = ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status")
 SUMMARY_TITLE = "# Connector Diagnostics"
@@ -232,22 +233,24 @@ def load_report(path: Path) -> List[Dict[str, Any]]:
     return entries
 
 
-def deduplicate_entries(entries: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    grouped: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+def deduplicate_entries(entries: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[Tuple[str, str], int]]:
+    grouped: Dict[Tuple[str, str], List[Tuple[int, Dict[str, Any]]]] = {}
     for index, entry in enumerate(entries):
         connector_id = str(entry.get("connector_id") or "unknown")
-        grouped.setdefault(connector_id, []).append((index, dict(entry)))
+        mode = str(entry.get("mode") or "real")
+        key = (connector_id, mode)
+        grouped.setdefault(key, []).append((index, dict(entry)))
 
     deduped: List[Tuple[int, Dict[str, Any]]] = []
-    duplicates: Dict[str, int] = {}
-    for connector_id, records in grouped.items():
+    duplicates: Dict[Tuple[str, str], int] = {}
+    for key, records in grouped.items():
         if len(records) == 1:
             deduped.append(records[0])
             continue
         records.sort(key=lambda item: ((item[1].get("started_at_utc") or ""), item[0]))
         chosen = records[-1]
         deduped.append(chosen)
-        duplicates[connector_id] = len(records) - 1
+        duplicates[key] = len(records) - 1
 
     deduped.sort(key=lambda item: item[0])
     return [entry for _, entry in deduped], duplicates
@@ -269,8 +272,17 @@ def _format_reason_counts(entries: Sequence[Mapping[str, Any]]) -> str:
             counter[str(reason)] += 1
     if not counter:
         return "none"
-    parts = [f"{reason}={count}" for reason, count in sorted(counter.items())]
+    most_common = counter.most_common(REASON_HISTOGRAM_LIMIT)
+    parts = [f"{reason}={count}" for reason, count in most_common]
     return ", ".join(parts)
+
+
+def _truncate_text(value: Any, *, limit: int = 2048) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
 
 
 def _format_duration(duration_ms: int) -> str:
@@ -886,9 +898,11 @@ def _extract_common_name(subject: Any) -> str:
 
 
 def _render_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
-    if not reachability:
-        return []
     lines = ["## DTM Reachability", ""]
+    if not reachability:
+        lines.append("- **diagnostics/ingestion/dtm/reachability.json:** not present")
+        lines.append("")
+        return lines
     target = reachability.get("target_host", "dtmapi.iom.int")
     port = reachability.get("target_port", 443)
     lines.append(f"- **Target:** `{target}:{port}`")
@@ -964,7 +978,7 @@ def _render_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
     if curl.get("exit_code") is not None:
         curl_line += f" [exit={curl.get('exit_code')}]"
     if curl.get("stderr"):
-        curl_line += f" (stderr={curl.get('stderr')})"
+        curl_line += f" (stderr={_truncate_text(curl.get('stderr'))})"
     lines.append(curl_line)
 
     egress = _ensure_dict(reachability.get("egress"))
@@ -1127,7 +1141,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
 def build_markdown(
     entries: Sequence[Mapping[str, Any]],
     *,
-    dedupe_notes: Mapping[str, int] | None = None,
+    dedupe_notes: Mapping[Tuple[str, str], int] | None = None,
     reachability: Mapping[str, Any] | None = None,
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
@@ -1166,9 +1180,11 @@ def build_markdown(
     lines.extend(_build_table(sorted_entries))
     lines.append("")
     if dedupe_notes:
-        for connector_id, count in dedupe_notes.items():
+        for (connector_id, mode), count in dedupe_notes.items():
             if count:
-                lines.append(f"(deduplicated {count} duplicate entries for {connector_id})")
+                lines.append(
+                    f"(deduplicated {count} duplicate entries for {connector_id} ({mode}))"
+                )
         if any(count for count in dedupe_notes.values()):
             lines.append("")
     for entry in sorted_entries:
@@ -1215,7 +1231,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = Path(args.report)
     out_path = Path(args.out)
-    created_stub = False
     if not report_path.exists():
         stub = {
             "connector_id": "unknown",
@@ -1235,16 +1250,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         with report_path.open("w", encoding="utf-8") as handle:
             handle.write(json.dumps(stub))
             handle.write("\n")
-        created_stub = True
+    load_error: str | None = None
     try:
         entries = load_report(report_path)
     except Exception as exc:
-        print(f"summarize_connectors: {exc}", file=sys.stderr)
-        if created_stub:
-            write_markdown(out_path, MISSING_REPORT_SUMMARY)
-            if args.github_step_summary:
-                append_to_summary(MISSING_REPORT_SUMMARY)
-        return 1
+        load_error = str(exc)
+        stub_entry = {
+            "connector_id": "summarizer",
+            "mode": "real",
+            "status": "error",
+            "status_raw": "error",
+            "reason": f"summarizer-error: {load_error}",
+            "http": {},
+            "counts": {},
+            "extras": {"exit_code": 1, "status_raw": "error", "hint": "summarizer encountered an error"},
+        }
+        entries = [stub_entry]
     deduped_entries, dedupe_notes = deduplicate_entries(entries)
     reachability_path = Path("diagnostics/ingestion/dtm/reachability.json")
     reachability_payload = _safe_load_json(reachability_path) or {}
@@ -1252,7 +1273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     write_markdown(out_path, markdown)
     if args.github_step_summary:
         append_to_summary(markdown)
-    return 0
+    return 0 if load_error is None else 1
 
 
 if __name__ == "__main__":
