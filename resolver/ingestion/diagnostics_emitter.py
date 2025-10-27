@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, Literal, Mapping, Optional
 from .diagnostics_schema import ConnectorRunResult, to_jsonl
 
 SENSITIVE_KEYWORDS = ("token", "key", "password", "authorization")
+SAFE_KEY_FIELDS = {"api_key_configured", "config_keys_found"}
+SAFE_KEY_FIELDS_LOWER = {field.lower() for field in SAFE_KEY_FIELDS}
 REDACT_TOKEN = "***"
 
 
@@ -77,6 +79,8 @@ def safe_redact_env(mapping: Mapping[str, Any]) -> Dict[str, Any]:
 
     def _redact_value(key: str, value: Any) -> Any:
         lowered = key.lower()
+        if lowered in SAFE_KEY_FIELDS_LOWER:
+            return value
         if any(token in lowered for token in SENSITIVE_KEYWORDS):
             return REDACT_TOKEN
         if isinstance(value, Mapping):

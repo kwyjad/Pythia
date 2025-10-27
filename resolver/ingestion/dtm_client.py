@@ -257,17 +257,45 @@ def _country_kwargs(country: Optional[str]) -> Dict[str, str]:
     return {"CountryName": text}
 
 
-def _sdk_call_with_arg_shim(client: Any, method_name: str, **kwargs: Any) -> Any:
+def _country_filter(country: Optional[str]) -> Dict[str, str]:
+    """Return DTM SDK selector kwargs using Admin0Pcode or CountryName."""
+
+    if not country:
+        return {}
+    text = str(country).strip()
+    if not text:
+        return {}
+    if len(text) == 3 and text.isalpha() and text.upper() == text:
+        return {"Admin0Pcode": text}
+    return {"CountryName": text}
+
+
+def _sdk_call_with_arg_shim(
+    client: Any,
+    method_name: str,
+    *,
+    country_filter: Optional[Mapping[str, str]] = None,
+    **kwargs: Any,
+) -> Any:
     """Invoke *method_name* on *client*, remapping ISO3 selector keys if needed."""
 
     method = getattr(client, method_name)
     try:
         return method(**kwargs)
     except TypeError as exc:
-        message = str(exc)
-        if "CountryISO3" in kwargs and "unexpected keyword" in message.lower():
+        message = str(exc).lower()
+        if "CountryISO3" in kwargs and "unexpected keyword" in message:
             remapped = dict(kwargs)
-            remapped["Admin0Pcode"] = remapped.pop("CountryISO3")
+            iso_value = remapped.pop("CountryISO3", None)
+            shim_kwargs: Dict[str, str] = {}
+            if isinstance(country_filter, Mapping):
+                shim_kwargs.update({str(k): str(v) for k, v in country_filter.items() if str(k)})
+            if not shim_kwargs and iso_value:
+                shim_kwargs = _country_filter(str(iso_value))
+            if shim_kwargs:
+                remapped.update(shim_kwargs)
+            else:
+                remapped["Admin0Pcode"] = str(iso_value) if iso_value else ""
             return method(**remapped)
         raise
 
@@ -1572,10 +1600,19 @@ class DTMApiClient:
         last_param: Optional[str] = None
         for idx, (payload, param_used) in enumerate(attempts):
             last_param = param_used
+            filter_target: Optional[str]
+            if "CountryISO3" in payload:
+                filter_target = payload.get("CountryISO3")
+            elif "CountryName" in payload:
+                filter_target = payload.get("CountryName")
+            else:
+                filter_target = country
+            filter_kwargs = _country_filter(filter_target)
             try:
                 frame = _sdk_call_with_arg_shim(
                     self.client,
                     "get_idp_admin0_data",
+                    country_filter=filter_kwargs,
                     **payload,
                 )
             except ValueError as exc:
@@ -1654,10 +1691,19 @@ class DTMApiClient:
         last_param: Optional[str] = None
         for idx, (payload, param_used) in enumerate(attempts):
             last_param = param_used
+            filter_target: Optional[str]
+            if "CountryISO3" in payload:
+                filter_target = payload.get("CountryISO3")
+            elif "CountryName" in payload:
+                filter_target = payload.get("CountryName")
+            else:
+                filter_target = country
+            filter_kwargs = _country_filter(filter_target)
             try:
                 frame = _sdk_call_with_arg_shim(
                     self.client,
                     "get_idp_admin1_data",
+                    country_filter=filter_kwargs,
                     **payload,
                 )
             except ValueError as exc:
@@ -1741,10 +1787,19 @@ class DTMApiClient:
         last_param: Optional[str] = None
         for idx, (payload, param_used) in enumerate(attempts):
             last_param = param_used
+            filter_target: Optional[str]
+            if "CountryISO3" in payload:
+                filter_target = payload.get("CountryISO3")
+            elif "CountryName" in payload:
+                filter_target = payload.get("CountryName")
+            else:
+                filter_target = country
+            filter_kwargs = _country_filter(filter_target)
             try:
                 frame = _sdk_call_with_arg_shim(
                     self.client,
                     "get_idp_admin2_data",
+                    country_filter=filter_kwargs,
                     **payload,
                 )
             except ValueError as exc:
@@ -4174,6 +4229,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not selected_preview_values:
         selected_preview_values = [str(item) for item in resolved_countries if str(item)]
         summary_extras["selected_iso3_preview"] = selected_preview_values[:10]
+    if not selected_preview_values:
+        api_section = cfg.get("api") if isinstance(cfg, Mapping) else {}
+        if isinstance(api_section, Mapping):
+            raw_config_countries = api_section.get("countries")
+            if isinstance(raw_config_countries, Iterable) and not isinstance(raw_config_countries, (str, bytes)):
+                selected_preview_values = [
+                    str(item)
+                    for item in raw_config_countries
+                    if str(item)
+                ]
+        if selected_preview_values and not summary_extras.get("selected_iso3_preview"):
+            summary_extras["selected_iso3_preview"] = selected_preview_values[:10]
     config_extras.update(
         {
             "config_path_used": str(config_source_path),
