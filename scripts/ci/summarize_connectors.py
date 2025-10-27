@@ -23,6 +23,8 @@ MISSING_REPORT_SUMMARY = (
     "Check earlier steps in the job log.\n"
 )
 
+STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
+
 
 def _ensure_dict(data: Any) -> Dict[str, Any]:
     return dict(data) if isinstance(data, Mapping) else {}
@@ -62,6 +64,47 @@ def _fmt_count(value: Any) -> str:
     except (TypeError, ValueError):
         return "—"
     return "—" if number == 0 else str(number)
+
+
+def _format_bytes(size: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{size} B"
+
+
+def _collect_staging_inventory(path: Path) -> Dict[str, Any]:
+    files: List[Tuple[str, int]] = []
+    total_size = 0
+    count = 0
+    try:
+        if path.exists():
+            for entry in path.rglob("*"):
+                if not entry.is_file():
+                    continue
+                if entry.suffix.lower() not in STAGING_EXTENSIONS:
+                    continue
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    size = 0
+                files.append((entry.relative_to(path).as_posix(), size))
+                total_size += size
+                count += 1
+    except OSError:
+        pass
+    files.sort(key=lambda item: (-item[1], item[0]))
+    return {
+        "exists": path.exists(),
+        "count": count,
+        "total_size": total_size,
+        "files": files[:5],
+    }
 
 
 def _format_meta_cell(
@@ -685,6 +728,115 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _format_staging_line(label: str, stats: Mapping[str, Any]) -> str:
+    if not stats.get("exists"):
+        return f"- **{label}:** not present"
+    count = _coerce_int(stats.get("count"))
+    size_text = _format_bytes(int(stats.get("total_size", 0))) if count else "0 B"
+    if count == 0:
+        return f"- **{label}:** empty (0 files)"
+    files = stats.get("files") if isinstance(stats.get("files"), list) else []
+    if files:
+        preview = ", ".join(
+            f"{name} ({_format_bytes(size)})" for name, size in files if isinstance(name, str)
+        )
+        if preview:
+            return f"- **{label}:** {count} files ({size_text}) — top: {preview}"
+    return f"- **{label}:** {count} files ({size_text})"
+
+
+def _render_staging_readiness(entry: Mapping[str, Any]) -> List[str]:
+    resolver_path = Path("resolver/staging")
+    legacy_path = Path("data/staging")
+    resolver_stats = _collect_staging_inventory(resolver_path)
+    legacy_stats = _collect_staging_inventory(legacy_path)
+
+    lines = ["## Staging readiness", ""]
+    lines.append(_format_staging_line("resolver/staging", resolver_stats))
+    lines.append(_format_staging_line("data/staging", legacy_stats))
+
+    resolver_count = _coerce_int(resolver_stats.get("count"))
+    legacy_count = _coerce_int(legacy_stats.get("count"))
+    if resolver_count == 0 and legacy_count > 0:
+        lines.append("")
+        lines.append(
+            "**Export reads `resolver/staging` but ingest wrote to `data/staging`. "
+            "Fix: set `RESOLVER_OUTPUT_DIR=resolver/staging` in the ingest job.**"
+        )
+    elif resolver_count == 0 and legacy_count == 0:
+        lines.append("")
+        lines.append("**No staging inputs found; derive/export will have nothing to process.**")
+    lines.append("")
+    return lines
+
+
+def _render_zero_row_root_cause(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    counts = _ensure_dict(entry.get("counts"))
+    rows_written = _coerce_int(counts.get("written")) or _coerce_int(extras.get("rows_written"))
+    if rows_written:
+        return []
+
+    reason = extras.get("zero_rows_reason") or extras.get("status_raw") or entry.get("status_raw")
+    normalize = _ensure_dict(extras.get("normalize"))
+    drop_reasons = _ensure_dict(normalize.get("drop_reasons"))
+    sorted_reasons = sorted(
+        ((str(key), _coerce_int(value)) for key, value in drop_reasons.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    top_reasons = [f"{label} ({count})" for label, count in sorted_reasons if count][:3]
+
+    per_country = extras.get("per_country_counts")
+    total_selectors = 0
+    selectors_with_rows = 0
+    if isinstance(per_country, list):
+        for item in per_country:
+            if not isinstance(item, Mapping):
+                continue
+            total_selectors += 1
+            if _coerce_int(item.get("rows")) > 0:
+                selectors_with_rows += 1
+
+    discovery = _ensure_dict(extras.get("discovery"))
+    fetch = _ensure_dict(extras.get("fetch"))
+
+    bullets: List[str] = []
+    if reason:
+        bullets.append(f"- **Primary reason:** {reason}")
+    if top_reasons:
+        bullets.append(f"- **Top drop reasons:** {', '.join(top_reasons)}")
+    if total_selectors:
+        bullets.append(
+            f"- **Selectors with rows:** {selectors_with_rows}/{total_selectors}"
+        )
+    discovery_stage = discovery.get("used_stage") if discovery else None
+    discovery_reason = discovery.get("reason") if discovery else None
+    report = discovery.get("report") if isinstance(discovery, Mapping) else None
+    if isinstance(report, Mapping):
+        discovery_stage = discovery_stage or report.get("used_stage")
+        discovery_reason = discovery_reason or report.get("reason")
+    if discovery_stage or discovery_reason:
+        stage_text = discovery_stage or "—"
+        if discovery_reason:
+            bullets.append(f"- **Discovery:** stage={stage_text} reason={discovery_reason}")
+        else:
+            bullets.append(f"- **Discovery stage:** {stage_text}")
+    total_received = _coerce_int(fetch.get("total_received")) if fetch else 0
+    pages = _coerce_int(fetch.get("pages")) if fetch else 0
+    if total_received or pages:
+        bullets.append(
+            f"- **Fetch totals:** rows_received={total_received} pages={pages}"
+        )
+
+    if not bullets:
+        return []
+
+    lines = ["## Zero-row root cause", ""]
+    lines.extend(bullets)
+    lines.append("")
+    return lines
+
+
 def _render_selector_effectiveness(entry: Mapping[str, Any]) -> List[str]:
     extras = _ensure_dict(entry.get("extras"))
     counts_raw = extras.get("per_country_counts")
@@ -995,6 +1147,12 @@ def build_markdown(
         config_section = _render_config_section(dtm_entry)
         if config_section:
             lines.extend(config_section)
+        staging_section = _render_staging_readiness(dtm_entry)
+        if staging_section:
+            lines.extend(staging_section)
+        zero_rows_section = _render_zero_row_root_cause(dtm_entry)
+        if zero_rows_section:
+            lines.extend(zero_rows_section)
         selector_section = _render_selector_effectiveness(dtm_entry)
         if selector_section:
             lines.extend(selector_section)

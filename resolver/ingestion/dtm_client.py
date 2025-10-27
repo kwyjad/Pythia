@@ -55,6 +55,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = _REPO_ROOT
 RESOLVER_ROOT = REPO_ROOT / "resolver"
 LEGACY_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
+REPO_CONFIG_PATH = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
 SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
 
 
@@ -64,14 +65,19 @@ def _resolve_config_path() -> Path:
         env_path = Path(env_value).expanduser()
         if not env_path.is_absolute():
             env_path = REPO_ROOT / env_path
-        return env_path.resolve()
+        env_resolved = env_path.resolve()
+        if env_resolved.exists():
+            return env_resolved
+
+    repo_cfg = REPO_CONFIG_PATH
+    if repo_cfg.exists():
+        return repo_cfg
 
     ingestion_cfg = LEGACY_CONFIG_PATH
     if ingestion_cfg.exists():
         return ingestion_cfg
 
-    repo_cfg = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
-    return repo_cfg
+    return ingestion_cfg
 
 
 CONFIG_PATH = _resolve_config_path()
@@ -3404,6 +3410,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     base_http["rate_limit_remaining"] = None
     base_http["retries"] = 0
     base_http["last_status"] = None
+
+    config_candidate = _resolve_config_path()
+    config_exists_initial = config_candidate.exists()
+    try:
+        config_sha_initial = hashlib.sha256(config_candidate.read_bytes()).hexdigest()[:12] if config_exists_initial else None
+    except Exception:  # pragma: no cover - diagnostics helper
+        config_sha_initial = None
     base_extras: Dict[str, Any] = {
         "api_key_configured": api_key_configured,
         "deps": deps_payload,
@@ -3413,6 +3426,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "offline": OFFLINE,
         "timings_ms": dict(timings_ms),
         "soft_timeouts": soft_timeouts,
+    }
+    base_extras["config"] = {
+        "config_path_used": str(config_candidate),
+        "config_exists": bool(config_exists_initial),
+        "config_sha256": config_sha_initial or "n/a",
+        "countries_mode": None,
+        "countries_count": 0,
+        "countries_preview": [],
+        "admin_levels": [],
+        "no_date_filter": 1 if no_date_filter else 0,
     }
 
     if not have_dtmapi:
@@ -3579,6 +3602,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config_source_path = getattr(cfg, "_source_path", config_source_path)
         config_exists_flag = bool(getattr(cfg, "_source_exists", config_exists_flag))
         config_sha_prefix = getattr(cfg, "_source_sha256", config_sha_prefix)
+        config_extras = base_extras.setdefault("config", {})
+        config_extras.update(
+            {
+                "config_path_used": str(config_source_path),
+                "config_exists": bool(config_exists_flag),
+                "config_sha256": config_sha_prefix or "n/a",
+            }
+        )
         if not cfg.get("enabled", True):
             status = "skipped"
             reason = "disabled via config"
@@ -3837,16 +3868,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         admin_levels_list = list(effective_params.get("admin_levels", []))
     countries_mode = _countries_mode_from_stage(used_stage)
-    summary_extras["config"] = {
-        "config_path_used": config_source_path,
-        "config_exists": bool(config_exists_flag),
-        "config_sha256": config_sha_prefix or "n/a",
-        "admin_levels": admin_levels_list,
-        "countries_mode": countries_mode,
-        "countries_count": len(resolved_countries),
-        "countries_preview": [str(item) for item in resolved_countries[:5]],
-        "no_date_filter": 1 if no_date_filter else 0,
-    }
+    config_extras = base_extras.setdefault("config", {})
+    config_extras.update(
+        {
+            "config_path_used": str(config_source_path),
+            "config_exists": bool(config_exists_flag),
+            "config_sha256": config_sha_prefix or "n/a",
+            "admin_levels": admin_levels_list,
+            "countries_mode": countries_mode,
+            "countries_count": len(resolved_countries),
+            "countries_preview": [str(item) for item in resolved_countries[:5]],
+            "no_date_filter": 1 if no_date_filter else 0,
+        }
+    )
+    summary_extras["config"] = dict(config_extras)
 
     summary_extras["window"] = {"start_iso": window_start_iso, "end_iso": window_end_iso}
 
