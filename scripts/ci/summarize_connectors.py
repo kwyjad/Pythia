@@ -755,6 +755,10 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
         admin_parse_line = f"- **Admin levels parse:** api.admin_levels: found ([{levels_repr}])"
     else:
         admin_parse_line = "- **Admin levels parse:** api.admin_levels: missing or empty"
+    keys_line = "- **Config keys found:** countries={0}, admin_levels={1}".format(
+        str(bool(config_keys_found.get("countries"))).lower(),
+        str(bool(config_keys_found.get("admin_levels"))).lower(),
+    )
     countries_mode = str(config.get("countries_mode", "discovered")).strip().lower()
     warn_unapplied = bool(config_keys_found.get("countries")) and countries_mode == "discovered"
     lines = [
@@ -771,6 +775,7 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
         f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
         countries_parse_line,
         admin_parse_line,
+        keys_line,
     ]
     if warn_unapplied:
         lines.append("- ⚠ config had api.countries but selector list not applied (check loader/version).")

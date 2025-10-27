@@ -244,17 +244,32 @@ def _is_no_country_match_error(err: BaseException) -> bool:
         return False
 
 
-def _country_filter(country: Optional[str]) -> Dict[str, str]:
-    """Return the appropriate DTM API selector payload for *country*."""
+def _country_kwargs(country: Optional[str]) -> Dict[str, str]:
+    """Return selector kwargs honoring the fast-test contract."""
 
     if not country:
         return {}
-    text = str(country or "").strip()
+    text = str(country).strip()
     if not text:
         return {}
     if len(text) == 3 and text.isalpha() and text.upper() == text:
-        return {"Admin0Pcode": text}
+        return {"CountryISO3": text}
     return {"CountryName": text}
+
+
+def _sdk_call_with_arg_shim(client: Any, method_name: str, **kwargs: Any) -> Any:
+    """Invoke *method_name* on *client*, remapping ISO3 selector keys if needed."""
+
+    method = getattr(client, method_name)
+    try:
+        return method(**kwargs)
+    except TypeError as exc:
+        message = str(exc)
+        if "CountryISO3" in kwargs and "unexpected keyword" in message.lower():
+            remapped = dict(kwargs)
+            remapped["Admin0Pcode"] = remapped.pop("CountryISO3")
+            return method(**remapped)
+        raise
 
 
 def _countries_mode_from_stage(stage: Optional[str]) -> str:
@@ -1522,7 +1537,7 @@ class DTMApiClient:
             return pd.DataFrame()
         trimmed = str(country).strip() if country else ""
         self._last_param_used = None
-        base_country = _country_filter(country)
+        base_country = _country_kwargs(country)
         attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
         base_kwargs: Dict[str, Any] = {**base_country}
         base_kwargs["FromReportingDate"] = from_date
@@ -1530,31 +1545,46 @@ class DTMApiClient:
         attempts.append(
             (
                 base_kwargs,
-                "iso3" if "Admin0Pcode" in base_country else "name" if base_country else None,
+                "iso3" if "CountryISO3" in base_country else "name" if base_country else None,
             )
         )
         if trimmed and base_country:
-            if "Admin0Pcode" in base_country:
-                fallback_country = {"CountryName": trimmed}
+            if "CountryISO3" in base_country:
+                fallback_country = {"CountryName": trimmed or base_country["CountryISO3"]}
                 fallback_param = "name"
             else:
-                fallback_country = {"Admin0Pcode": trimmed}
-                fallback_param = "iso3"
-            fallback_kwargs: Dict[str, Any] = {**fallback_country}
-            fallback_kwargs["FromReportingDate"] = from_date
-            fallback_kwargs["ToReportingDate"] = to_date
-            if fallback_kwargs != base_kwargs:
-                attempts.append((fallback_kwargs, fallback_param))
+                iso_guess = to_iso3(trimmed) or (trimmed.upper() if trimmed else "")
+                iso_guess = (iso_guess or "").strip().upper()[:3]
+                if iso_guess:
+                    fallback_country = {"CountryISO3": iso_guess}
+                    fallback_param = "iso3"
+                else:
+                    fallback_country = {}
+                    fallback_param = None
+            if fallback_country:
+                fallback_kwargs: Dict[str, Any] = {**fallback_country}
+                fallback_kwargs["FromReportingDate"] = from_date
+                fallback_kwargs["ToReportingDate"] = to_date
+                if fallback_kwargs != base_kwargs:
+                    attempts.append((fallback_kwargs, fallback_param))
 
         last_no_match = False
         last_param: Optional[str] = None
-        for payload, param_used in attempts:
+        for idx, (payload, param_used) in enumerate(attempts):
             last_param = param_used
             try:
-                frame = self.client.get_idp_admin0_data(**payload)
+                frame = _sdk_call_with_arg_shim(
+                    self.client,
+                    "get_idp_admin0_data",
+                    **payload,
+                )
             except ValueError as exc:
                 if _is_no_country_match_error(exc):
                     last_no_match = True
+                    if idx + 1 < len(attempts):
+                        if http_counts is not None:
+                            http_counts["retries"] = http_counts.get("retries", 0) + 1
+                        self._http_counts["retries"] = self._http_counts.get("retries", 0) + 1
                     continue
                 LOG.error("Admin0 request failed: %s", exc)
                 self._record_failure(exc, http_counts)
@@ -1589,7 +1619,7 @@ class DTMApiClient:
             return pd.DataFrame()
         trimmed = str(country).strip() if country else ""
         self._last_param_used = None
-        base_country = _country_filter(country)
+        base_country = _country_kwargs(country)
         attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
         base_kwargs: Dict[str, Any] = {**base_country}
         base_kwargs["FromReportingDate"] = from_date
@@ -1597,31 +1627,46 @@ class DTMApiClient:
         attempts.append(
             (
                 base_kwargs,
-                "iso3" if "Admin0Pcode" in base_country else "name" if base_country else None,
+                "iso3" if "CountryISO3" in base_country else "name" if base_country else None,
             )
         )
         if trimmed and base_country:
-            if "Admin0Pcode" in base_country:
-                fallback_country = {"CountryName": trimmed}
+            if "CountryISO3" in base_country:
+                fallback_country = {"CountryName": trimmed or base_country["CountryISO3"]}
                 fallback_param = "name"
             else:
-                fallback_country = {"Admin0Pcode": trimmed}
-                fallback_param = "iso3"
-            fallback_kwargs = {**fallback_country}
-            fallback_kwargs["FromReportingDate"] = from_date
-            fallback_kwargs["ToReportingDate"] = to_date
-            if fallback_kwargs != base_kwargs:
-                attempts.append((fallback_kwargs, fallback_param))
+                iso_guess = to_iso3(trimmed) or (trimmed.upper() if trimmed else "")
+                iso_guess = (iso_guess or "").strip().upper()[:3]
+                if iso_guess:
+                    fallback_country = {"CountryISO3": iso_guess}
+                    fallback_param = "iso3"
+                else:
+                    fallback_country = {}
+                    fallback_param = None
+            if fallback_country:
+                fallback_kwargs = {**fallback_country}
+                fallback_kwargs["FromReportingDate"] = from_date
+                fallback_kwargs["ToReportingDate"] = to_date
+                if fallback_kwargs != base_kwargs:
+                    attempts.append((fallback_kwargs, fallback_param))
 
         last_no_match = False
         last_param: Optional[str] = None
-        for payload, param_used in attempts:
+        for idx, (payload, param_used) in enumerate(attempts):
             last_param = param_used
             try:
-                frame = self.client.get_idp_admin1_data(**payload)
+                frame = _sdk_call_with_arg_shim(
+                    self.client,
+                    "get_idp_admin1_data",
+                    **payload,
+                )
             except ValueError as exc:
                 if _is_no_country_match_error(exc):
                     last_no_match = True
+                    if idx + 1 < len(attempts):
+                        if http_counts is not None:
+                            http_counts["retries"] = http_counts.get("retries", 0) + 1
+                        self._http_counts["retries"] = self._http_counts.get("retries", 0) + 1
                     continue
                 LOG.error("Admin1 request failed: %s", exc)
                 self._record_failure(exc, http_counts)
@@ -1657,7 +1702,7 @@ class DTMApiClient:
             return pd.DataFrame()
         trimmed = str(country).strip() if country else ""
         self._last_param_used = None
-        base_country = _country_filter(country)
+        base_country = _country_kwargs(country)
         attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
         base_kwargs: Dict[str, Any] = {**base_country}
         base_kwargs["FromReportingDate"] = from_date
@@ -1667,33 +1712,48 @@ class DTMApiClient:
         attempts.append(
             (
                 base_kwargs,
-                "iso3" if "Admin0Pcode" in base_country else "name" if base_country else None,
+                "iso3" if "CountryISO3" in base_country else "name" if base_country else None,
             )
         )
         if trimmed and base_country:
-            if "Admin0Pcode" in base_country:
-                fallback_country = {"CountryName": trimmed}
+            if "CountryISO3" in base_country:
+                fallback_country = {"CountryName": trimmed or base_country["CountryISO3"]}
                 fallback_param = "name"
             else:
-                fallback_country = {"Admin0Pcode": trimmed}
-                fallback_param = "iso3"
-            fallback_kwargs: Dict[str, Any] = {**fallback_country}
-            fallback_kwargs["FromReportingDate"] = from_date
-            fallback_kwargs["ToReportingDate"] = to_date
-            if operation:
-                fallback_kwargs["Operation"] = operation
-            if fallback_kwargs != base_kwargs:
-                attempts.append((fallback_kwargs, fallback_param))
+                iso_guess = to_iso3(trimmed) or (trimmed.upper() if trimmed else "")
+                iso_guess = (iso_guess or "").strip().upper()[:3]
+                if iso_guess:
+                    fallback_country = {"CountryISO3": iso_guess}
+                    fallback_param = "iso3"
+                else:
+                    fallback_country = {}
+                    fallback_param = None
+            if fallback_country:
+                fallback_kwargs: Dict[str, Any] = {**fallback_country}
+                fallback_kwargs["FromReportingDate"] = from_date
+                fallback_kwargs["ToReportingDate"] = to_date
+                if operation:
+                    fallback_kwargs["Operation"] = operation
+                if fallback_kwargs != base_kwargs:
+                    attempts.append((fallback_kwargs, fallback_param))
 
         last_no_match = False
         last_param: Optional[str] = None
-        for payload, param_used in attempts:
+        for idx, (payload, param_used) in enumerate(attempts):
             last_param = param_used
             try:
-                frame = self.client.get_idp_admin2_data(**payload)
+                frame = _sdk_call_with_arg_shim(
+                    self.client,
+                    "get_idp_admin2_data",
+                    **payload,
+                )
             except ValueError as exc:
                 if _is_no_country_match_error(exc):
                     last_no_match = True
+                    if idx + 1 < len(attempts):
+                        if http_counts is not None:
+                            http_counts["retries"] = http_counts.get("retries", 0) + 1
+                        self._http_counts["retries"] = self._http_counts.get("retries", 0) + 1
                     continue
                 LOG.error("Admin2 request failed: %s", exc)
                 self._record_failure(exc, http_counts)
