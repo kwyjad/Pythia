@@ -244,16 +244,16 @@ def _is_no_country_match_error(err: BaseException) -> bool:
         return False
 
 
-def _country_kwargs(country: Optional[str]) -> Dict[str, str]:
+def _country_filter(country: Optional[str]) -> Dict[str, str]:
     """Return the appropriate DTM API selector payload for *country*."""
 
     if not country:
         return {}
-    text = str(country).strip()
+    text = str(country or "").strip()
     if not text:
         return {}
     if len(text) == 3 and text.isalpha() and text.upper() == text:
-        return {"CountryISO3": text}
+        return {"Admin0Pcode": text}
     return {"CountryName": text}
 
 
@@ -1522,20 +1522,23 @@ class DTMApiClient:
             return pd.DataFrame()
         trimmed = str(country).strip() if country else ""
         self._last_param_used = None
-        base_country = _country_kwargs(country)
+        base_country = _country_filter(country)
         attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
         base_kwargs: Dict[str, Any] = {**base_country}
         base_kwargs["FromReportingDate"] = from_date
         base_kwargs["ToReportingDate"] = to_date
         attempts.append(
-            (base_kwargs, "iso3" if "CountryISO3" in base_country else "name" if base_country else None)
+            (
+                base_kwargs,
+                "iso3" if "Admin0Pcode" in base_country else "name" if base_country else None,
+            )
         )
         if trimmed and base_country:
-            if "CountryISO3" in base_country:
+            if "Admin0Pcode" in base_country:
                 fallback_country = {"CountryName": trimmed}
                 fallback_param = "name"
             else:
-                fallback_country = {"CountryISO3": trimmed}
+                fallback_country = {"Admin0Pcode": trimmed}
                 fallback_param = "iso3"
             fallback_kwargs: Dict[str, Any] = {**fallback_country}
             fallback_kwargs["FromReportingDate"] = from_date
@@ -1586,20 +1589,23 @@ class DTMApiClient:
             return pd.DataFrame()
         trimmed = str(country).strip() if country else ""
         self._last_param_used = None
-        base_country = _country_kwargs(country)
+        base_country = _country_filter(country)
         attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
         base_kwargs: Dict[str, Any] = {**base_country}
         base_kwargs["FromReportingDate"] = from_date
         base_kwargs["ToReportingDate"] = to_date
         attempts.append(
-            (base_kwargs, "iso3" if "CountryISO3" in base_country else "name" if base_country else None)
+            (
+                base_kwargs,
+                "iso3" if "Admin0Pcode" in base_country else "name" if base_country else None,
+            )
         )
         if trimmed and base_country:
-            if "CountryISO3" in base_country:
+            if "Admin0Pcode" in base_country:
                 fallback_country = {"CountryName": trimmed}
                 fallback_param = "name"
             else:
-                fallback_country = {"CountryISO3": trimmed}
+                fallback_country = {"Admin0Pcode": trimmed}
                 fallback_param = "iso3"
             fallback_kwargs = {**fallback_country}
             fallback_kwargs["FromReportingDate"] = from_date
@@ -1651,7 +1657,7 @@ class DTMApiClient:
             return pd.DataFrame()
         trimmed = str(country).strip() if country else ""
         self._last_param_used = None
-        base_country = _country_kwargs(country)
+        base_country = _country_filter(country)
         attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
         base_kwargs: Dict[str, Any] = {**base_country}
         base_kwargs["FromReportingDate"] = from_date
@@ -1659,14 +1665,17 @@ class DTMApiClient:
         if operation:
             base_kwargs["Operation"] = operation
         attempts.append(
-            (base_kwargs, "iso3" if "CountryISO3" in base_country else "name" if base_country else None)
+            (
+                base_kwargs,
+                "iso3" if "Admin0Pcode" in base_country else "name" if base_country else None,
+            )
         )
         if trimmed and base_country:
-            if "CountryISO3" in base_country:
+            if "Admin0Pcode" in base_country:
                 fallback_country = {"CountryName": trimmed}
                 fallback_param = "name"
             else:
-                fallback_country = {"CountryISO3": trimmed}
+                fallback_country = {"Admin0Pcode": trimmed}
                 fallback_param = "iso3"
             fallback_kwargs: Dict[str, Any] = {**fallback_country}
             fallback_kwargs["FromReportingDate"] = from_date
@@ -2033,10 +2042,52 @@ def load_config() -> Dict[str, Any]:
     if not merged_keywords:
         merged_keywords = {"flood": ["flood"], "drought": ["drought"]}
     data["shock_keywords"] = merged_keywords
+
+    api_cfg = data.get("api") if isinstance(data.get("api"), Mapping) else {}
+    countries: List[str] = []
+    admin_levels: List[str] = []
+    if isinstance(api_cfg, Mapping):
+        raw_countries = api_cfg.get("countries")
+        if isinstance(raw_countries, str):
+            raw_items: Iterable[Any] = [raw_countries]
+        elif isinstance(raw_countries, Iterable):
+            raw_items = raw_countries
+        else:
+            raw_items = []
+        for item in raw_items:
+            text = str(item).strip()
+            if text:
+                countries.append(text)
+
+        raw_levels = api_cfg.get("admin_levels")
+        if isinstance(raw_levels, str):
+            level_items: Iterable[Any] = [raw_levels]
+        elif isinstance(raw_levels, Iterable):
+            level_items = raw_levels
+        else:
+            level_items = []
+        seen_levels: Set[str] = set()
+        for level in level_items:
+            token = str(level).strip().lower()
+            if token in {"admin0", "admin1", "admin2"} and token not in seen_levels:
+                admin_levels.append(token)
+                seen_levels.add(token)
+
+    config_keys_found = {"countries": bool(countries), "admin_levels": bool(admin_levels)}
+    config_parse = {
+        "countries": list(countries),
+        "countries_count": len(countries),
+        "countries_preview": list(countries[:5]),
+        "countries_mode": "explicit_config" if countries else "discovered",
+        "admin_levels": list(admin_levels),
+        "config_keys_found": dict(config_keys_found),
+    }
+
     cfg = ConfigDict(data)
     cfg._source_path = str(path.resolve())
     cfg._source_exists = bool(exists)
     cfg._source_sha256 = sha_prefix
+    cfg._config_parse = config_parse
     return _maybe_override_from_env(cfg)
 
 
@@ -2443,7 +2494,7 @@ def _fetch_level_pages_with_logging(
                 size_bytes += 0
     param_mode = getattr(client, "_last_param_used", None)
     if param_mode == "iso3":
-        context["param"] = "CountryISO3"
+        context["param"] = "Admin0Pcode"
     elif param_mode == "name":
         context["param"] = "CountryName"
     elif param_mode:
@@ -3587,6 +3638,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "admin_levels": [],
         "selected_iso3_preview": [],
         "no_date_filter": 1 if no_date_filter else 0,
+        "config_parse": {"countries": [], "admin_levels": []},
+        "config_keys_found": {"countries": False, "admin_levels": False},
+        "config_countries_count": 0,
     }
 
     if not have_dtmapi:
@@ -3761,6 +3815,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "config_sha256": config_sha_prefix or "n/a",
             }
         )
+        config_parse = getattr(cfg, "_config_parse", {})
+        if isinstance(config_parse, Mapping):
+            parsed_countries = [
+                str(item)
+                for item in config_parse.get("countries", [])
+                if str(item).strip()
+            ]
+            parsed_admin_levels = [
+                str(item)
+                for item in config_parse.get("admin_levels", [])
+                if str(item).strip()
+            ]
+            config_extras["config_parse"] = {
+                "countries": parsed_countries,
+                "admin_levels": parsed_admin_levels,
+            }
+            config_extras["config_keys_found"] = {
+                "countries": bool(parsed_countries),
+                "admin_levels": bool(parsed_admin_levels),
+            }
+            config_extras["config_countries_count"] = int(
+                config_parse.get("countries_count", len(parsed_countries))
+            )
+            if parsed_countries and not config_extras.get("countries_preview"):
+                config_extras["countries_preview"] = parsed_countries[:5]
+            if parsed_admin_levels and not config_extras.get("admin_levels"):
+                config_extras["admin_levels"] = parsed_admin_levels
+            if (
+                config_parse.get("countries_mode")
+                and not config_extras.get("countries_mode")
+            ):
+                config_extras["countries_mode"] = str(config_parse.get("countries_mode"))
         if not cfg.get("enabled", True):
             status = "skipped"
             reason = "disabled via config"

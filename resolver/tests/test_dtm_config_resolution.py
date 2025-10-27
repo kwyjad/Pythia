@@ -33,6 +33,54 @@ def _prepare_repo(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
     monkeypatch.setattr(dtm_client, "CONFIG_PATH", ingestion_default, raising=False)
 
 
+def test_load_config_records_api_selectors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    _prepare_repo(monkeypatch, repo_root)
+
+    resolver_config = repo_root / "resolver" / "config" / "dtm.yml"
+    resolver_config.write_text(
+        "\n".join(
+            [
+                "enabled: true",
+                "api:",
+                "  countries: [SSD, ETH, SOM]",
+                "  admin_levels: [admin0, admin1]",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = dtm_client.load_config()
+    config_parse = getattr(cfg, "_config_parse", {})
+    assert config_parse["countries_mode"] == "explicit_config"
+    assert config_parse["countries_count"] == 3
+    assert config_parse["countries_preview"] == ["SSD", "ETH", "SOM"]
+    assert config_parse["admin_levels"] == ["admin0", "admin1"]
+    assert config_parse["config_keys_found"] == {"countries": True, "admin_levels": True}
+
+    resolver_config.write_text(
+        "\n".join(
+            [
+                "enabled: true",
+                "api:",
+                "  countries: []",
+                "  admin_levels: []",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = dtm_client.load_config()
+    config_parse = getattr(cfg, "_config_parse", {})
+    assert config_parse["countries_mode"] == "discovered"
+    assert config_parse["countries_count"] == 0
+    assert config_parse["countries_preview"] == []
+    assert config_parse["admin_levels"] == []
+    assert config_parse["config_keys_found"] == {"countries": False, "admin_levels": False}
+
+
 def test_load_config_honours_search_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     _prepare_repo(monkeypatch, repo_root)
@@ -209,3 +257,7 @@ def test_connector_report_includes_config_extras(
     assert config["config_sha256"] == hashlib.sha256(resolver_config.read_bytes()).hexdigest()[:12]
     assert config["countries_count"] == 3
     assert config["selected_iso3_preview"][:3] == ["SSD", "ETH", "SOM"]
+    assert config["config_countries_count"] == 3
+    assert config["config_keys_found"] == {"countries": True, "admin_levels": True}
+    assert config["config_parse"]["countries"] == ["SSD", "ETH", "SOM"]
+    assert config["config_parse"]["admin_levels"] == ["admin0", "admin1"]

@@ -158,6 +158,10 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
   export DTM_ADMIN_LEVELS="admin0,admin1"
   ```
 
+- The official SDK expects ISO-3 selectors via the `Admin0Pcode` argument (not `CountryISO3`). The connector reads
+  country selectors from the `api.countries` list and admin levels from `api.admin_levels` inside `resolver/config/dtm.yml`
+  (or whichever config path you supply via `DTM_CONFIG_PATH`).
+
 - Configuration search order is `DTM_CONFIG_PATH` (absolute or repo-relative) →
   `resolver/config/dtm.yml` → `resolver/ingestion/config/dtm.yml`. The connector records the absolute path used, whether the
   file existed, a short SHA-256 digest, and both the configured selector preview plus the `selected_iso3_preview` (first ten

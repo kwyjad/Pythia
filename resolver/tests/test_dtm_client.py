@@ -133,6 +133,14 @@ def test_canonical_headers_exported() -> None:
     ]
 
 
+def test_country_filter_uses_admin0_pcode_for_iso3() -> None:
+    assert dtm_client._country_filter("SSD") == {"Admin0Pcode": "SSD"}
+
+
+def test_country_filter_uses_country_name_when_not_iso3() -> None:
+    assert dtm_client._country_filter("South Sudan") == {"CountryName": "South Sudan"}
+
+
 def test_build_rows_requires_api_config() -> None:
     with pytest.raises(ValueError) as excinfo:
         dtm_client.build_rows({}, no_date_filter=False, window_start=None, window_end=None)
