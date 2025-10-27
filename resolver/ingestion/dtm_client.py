@@ -44,7 +44,7 @@ from resolver.ingestion.diagnostics_emitter import (
 from resolver.ingestion.dtm_auth import build_discovery_header_variants, get_dtm_api_key
 from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest
 from resolver.ingestion.utils.iso_normalize import resolve_iso3 as resolve_iso3_fields, to_iso3
-from resolver.ingestion.utils.io import resolve_ingestion_window
+from resolver.ingestion.utils.io import resolve_ingestion_window, resolve_output_path
 from resolver.scripts.ingestion._dtm_debug_utils import (
     dump_json as diagnostics_dump_json,
     timing as diagnostics_timing,
@@ -60,23 +60,22 @@ SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").reso
 
 
 def _resolve_config_path() -> Path:
+    repo_root = Path(REPO_ROOT)
+    resolver_root = repo_root / "resolver"
     env_value = os.getenv("DTM_CONFIG_PATH", "").strip()
     if env_value:
-        env_path = Path(env_value).expanduser()
-        if not env_path.is_absolute():
-            env_path = (REPO_ROOT / env_path).resolve()
+        candidate = pathlib.Path(env_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = (repo_root / candidate).resolve()
         else:
-            env_path = env_path.resolve()
-        return env_path
+            candidate = candidate.resolve()
+        return candidate
 
-    repo_cfg = REPO_CONFIG_PATH
+    repo_cfg = (resolver_root / "config" / "dtm.yml").resolve()
     if repo_cfg.exists():
         return repo_cfg
 
-    ingestion_cfg = LEGACY_CONFIG_PATH
-    if ingestion_cfg.exists():
-        return ingestion_cfg
-
+    ingestion_cfg = (resolver_root / "ingestion" / "config" / "dtm.yml").resolve()
     return ingestion_cfg
 
 
@@ -2479,6 +2478,9 @@ def _fetch_api_data(
     LOG.info("Final discovery list contains %d selectors", discovered_count)
     summary["countries"]["resolved"] = resolved_countries
 
+    selected_preview = [str(item) for item in resolved_countries if str(item).strip()][:10]
+    summary_extras["selected_iso3_preview"] = selected_preview
+
     country_mode = _countries_mode_from_stage(discovery_source)
 
     operations = requested_operations if requested_operations else [None]
@@ -3303,7 +3305,7 @@ def _write_meta(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE
+    global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE, OUT_PATH
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
         log_level_name = "DEBUG"
@@ -3313,6 +3315,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     LOG.setLevel(getattr(logging, log_level_name, logging.INFO))
     _setup_file_logging()
+    OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
+    OUT_DIR = Path(OUT_PATH).parent
+    OUTPUT_PATH = OUT_PATH
+    META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
     LOG.debug(
         "dtm: path constants -> diagnostics=%s dtm_diagnostics=%s staging=%s output=%s",
         DIAGNOSTICS_DIR,
@@ -3326,10 +3332,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         DTM_HTTP_LOG_PATH.touch(exist_ok=True)
     except Exception:  # pragma: no cover - diagnostics helper
         LOG.debug("dtm: unable to initialise diagnostics HTTP trace", exc_info=True)
-
-    OUT_DIR = Path(OUT_PATH).parent
-    OUTPUT_PATH = OUT_PATH
-    META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
     LOG.debug("dtm: canonical headers=%s", CANONICAL_HEADERS)
     LOG.debug(
         "dtm: outputs -> csv=%s meta=%s http_trace=%s",
@@ -3412,9 +3414,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     base_http["last_status"] = None
 
     config_candidate = _resolve_config_path()
+    config_path_text = str(config_candidate.resolve())
     config_exists_initial = config_candidate.exists()
     try:
-        config_sha_initial = hashlib.sha256(config_candidate.read_bytes()).hexdigest()[:12] if config_exists_initial else None
+        config_sha_initial = (
+            hashlib.sha256(config_candidate.read_bytes()).hexdigest()[:12]
+            if config_exists_initial
+            else None
+        )
     except Exception:  # pragma: no cover - diagnostics helper
         config_sha_initial = None
     base_extras: Dict[str, Any] = {
@@ -3428,13 +3435,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "soft_timeouts": soft_timeouts,
     }
     base_extras["config"] = {
-        "config_path_used": str(config_candidate),
+        "config_path_used": config_path_text,
         "config_exists": bool(config_exists_initial),
         "config_sha256": config_sha_initial or "n/a",
         "countries_mode": None,
         "countries_count": 0,
         "countries_preview": [],
         "admin_levels": [],
+        "selected_iso3_preview": [],
         "no_date_filter": 1 if no_date_filter else 0,
     }
 
@@ -3869,6 +3877,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         admin_levels_list = list(effective_params.get("admin_levels", []))
     countries_mode = _countries_mode_from_stage(used_stage)
     config_extras = base_extras.setdefault("config", {})
+    selected_preview_list = summary_extras.get("selected_iso3_preview")
+    if isinstance(selected_preview_list, Iterable) and not isinstance(selected_preview_list, (str, bytes)):
+        selected_preview_values = [str(item) for item in selected_preview_list if str(item)]
+    else:
+        selected_preview_values = []
+    if not selected_preview_values:
+        selected_preview_values = [str(item) for item in resolved_countries if str(item)]
+        summary_extras["selected_iso3_preview"] = selected_preview_values[:10]
     config_extras.update(
         {
             "config_path_used": str(config_source_path),
@@ -3878,6 +3894,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "countries_mode": countries_mode,
             "countries_count": len(resolved_countries),
             "countries_preview": [str(item) for item in resolved_countries[:5]],
+            "selected_iso3_preview": selected_preview_values[:10],
             "no_date_filter": 1 if no_date_filter else 0,
         }
     )

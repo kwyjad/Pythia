@@ -731,6 +731,11 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
         preview_text = ", ".join(str(item) for item in list(preview_values)[:5] if str(item)) or "—"
     else:
         preview_text = "—"
+    selected_values = config.get("selected_iso3_preview")
+    if isinstance(selected_values, Iterable) and not isinstance(selected_values, (str, bytes)):
+        selected_text = ", ".join(str(item) for item in list(selected_values)[:10] if str(item)) or "—"
+    else:
+        selected_text = "—"
     lines = [
         "## Config used",
         "",
@@ -740,9 +745,64 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
         f"- **Countries mode:** `{config.get('countries_mode', 'discovered')}`",
         f"- **Countries count:** {config.get('countries_count', 0)}",
         f"- **Countries preview:** {preview_text}",
+        f"- **Selected ISO3 preview:** {selected_text}",
         f"- **Admin levels:** {admin_text}",
         f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
     ]
+    lines.append("")
+    return lines
+
+
+def _render_source_sample_quick_checks() -> List[str]:
+    sample_path = Path("diagnostics/ingestion/dtm/samples/admin0_head.csv")
+    lines = ["## Source sample: quick checks", ""]
+    if not sample_path.exists():
+        lines.append("- **admin0_head.csv:** not present")
+        lines.append("")
+        return lines
+
+    iso_counter: Counter[str] = Counter()
+    name_counter: Counter[str] = Counter()
+    has_iso_column = False
+    has_admin_column = False
+    try:
+        with sample_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = [str(field).strip() for field in (reader.fieldnames or [])]
+            has_iso_column = "CountryISO3" in fieldnames
+            has_admin_column = "admin0Name" in fieldnames
+            for row in reader:
+                if not isinstance(row, Mapping):
+                    continue
+                if has_iso_column:
+                    iso_value = str(row.get("CountryISO3") or "").strip()
+                    if iso_value:
+                        iso_counter[iso_value] += 1
+                if has_admin_column:
+                    name_value = str(row.get("admin0Name") or "").strip()
+                    if name_value:
+                        name_counter[name_value] += 1
+    except Exception:
+        lines.append("- **admin0_head.csv:** unable to read (see artifact)")
+        lines.append("")
+        return lines
+
+    if not has_iso_column:
+        lines.append("- **CountryISO3 top 5:** column not present")
+    elif iso_counter:
+        top_iso = ", ".join(f"{code} ({count})" for code, count in iso_counter.most_common(5))
+        lines.append(f"- **CountryISO3 top 5:** {top_iso}")
+    else:
+        lines.append("- **CountryISO3 top 5:** —")
+
+    if not has_admin_column:
+        lines.append("- **admin0Name top 5:** column not present")
+    elif name_counter:
+        top_names = ", ".join(f"{name} ({count})" for name, count in name_counter.most_common(5))
+        lines.append(f"- **admin0Name top 5:** {top_names}")
+    else:
+        lines.append("- **admin0Name top 5:** —")
+
     lines.append("")
     return lines
 
@@ -1171,6 +1231,9 @@ def build_markdown(
         staging_section = _render_staging_readiness(dtm_entry)
         if staging_section:
             lines.extend(staging_section)
+        sample_section = _render_source_sample_quick_checks()
+        if sample_section:
+            lines.extend(sample_section)
         zero_rows_section = _render_zero_row_root_cause(dtm_entry)
         if zero_rows_section:
             lines.extend(zero_rows_section)
