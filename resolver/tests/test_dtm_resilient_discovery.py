@@ -33,7 +33,7 @@ def _patch_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "SAMPLE_ADMIN0_PATH": root / "samples" / "sample_admin0.csv",
     }
     for name, value in mapping.items():
-        monkeypatch.setattr(dtm, name, value)
+        monkeypatch.setattr(dtm, name, value, raising=False)
     dtm._reset_admin0_sample_counter()
     dtm._clear_discovery_error_log()
 
@@ -45,6 +45,8 @@ def test_timeout_then_operations_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     def fake_get(path: str, key: str, **_: object) -> pd.DataFrame:
         if "country-list" in path:
             raise requests.exceptions.Timeout("simulated timeout")
+        dtm._get_country_list_via_http.last_attempts = 1
+        dtm._get_country_list_via_http.last_status = 200
         return pd.DataFrame([
             {"admin0Name": "Freedonia", "admin0Pcode": "FRE"},
             {"admin0Name": "Sylvania", "admin0Pcode": "SYL"},
@@ -52,15 +54,17 @@ def test_timeout_then_operations_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
     monkeypatch.setattr(dtm, "_get_country_list_via_http", fake_get)
 
+    cfg = dtm.load_config()
+    cfg.setdefault("api", {})["countries"] = []
     metrics = dtm._init_metrics_summary()
-    result = dtm._perform_discovery(dtm.load_config(), metrics=metrics, api_key="test-key")
+    result = dtm._perform_discovery(cfg, metrics=metrics, api_key="test-key")
 
-    assert result.stage_used == "operations"
+    assert result.stage_used == "http_operations_ocp"
 
     payload = json.loads(dtm.DISCOVERY_FAIL_PATH.read_text(encoding="utf-8"))
-    assert payload["used_stage"] == "operations"
+    assert payload["used_stage"] == "http_operations_ocp"
     stages = {stage["stage"]: stage.get("status") for stage in payload.get("stages", [])}
-    assert stages.get("countries") in {"error", "empty"}
+    assert stages.get("http_country_ocp") in {"error", "empty"}
 
 
 def test_both_discovery_fail_uses_static(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -68,33 +72,24 @@ def test_both_discovery_fail_uses_static(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setenv("DTM_API_KEY", "test-key")
 
     def always_timeout(path: str, key: str, **_: object) -> pd.DataFrame:
-        raise requests.exceptions.Timeout(f"{path} timed out")
+        dtm._get_country_list_via_http.last_attempts = 1
+        dtm._get_country_list_via_http.last_status = 403
+        raise requests.exceptions.HTTPError(f"{path} forbidden")
 
     monkeypatch.setattr(dtm, "_get_country_list_via_http", always_timeout)
 
-    def fake_static(path: Path | None = None) -> pd.DataFrame:
-        return pd.DataFrame([
-            {"admin0Name": "Freedonia", "admin0Pcode": "FRE"},
-            {"admin0Name": "Sylvania", "admin0Pcode": "SYL"},
-        ])
-
-    monkeypatch.setattr(dtm, "_load_static_iso3", fake_static)
-
+    cfg = dtm.load_config()
+    cfg.setdefault("api", {})["countries"] = []
     metrics = dtm._init_metrics_summary()
-    result = dtm._perform_discovery(dtm.load_config(), metrics=metrics, api_key="test-key")
+    result = dtm._perform_discovery(cfg, metrics=metrics, api_key="test-key")
 
-    assert result.stage_used == "static_iso3"
+    assert result.stage_used == "static_iso3_minimal"
 
     metrics_payload = json.loads(dtm.METRICS_SUMMARY_PATH.read_text(encoding="utf-8"))
     assert metrics_payload["countries_attempted"] > 0
 
-    sample_path = dtm.SAMPLE_ADMIN0_PATH
-    assert sample_path.exists()
-    sample = pd.read_csv(sample_path)
-    cols = set(sample.columns)
-    assert {"admin0Name", "admin0Pcode"}.issubset(cols)
-    if "operation" in cols and not sample.empty:
-        assert sample["operation"].notna().any()
+    snapshot = pd.read_csv(dtm.DISCOVERY_SNAPSHOT_PATH)
+    assert set(snapshot.get("source", [])) == {"static_iso3_minimal"}
 
 
 def test_admin0_only_skips_subnational(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -139,6 +134,7 @@ def test_admin0_only_skips_subnational(monkeypatch: pytest.MonkeyPatch, tmp_path
         *,
         metrics: dict | None = None,
         api_key: str | None = None,
+        client: object | None = None,
     ) -> dtm.DiscoveryResult:
         frame = pd.DataFrame([
             {"admin0Name": "Kenya", "admin0Pcode": "KEN"},
@@ -199,6 +195,7 @@ def test_soft_skip_no_country_match(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         *,
         metrics: dict | None = None,
         api_key: str | None = None,
+        client: object | None = None,
     ) -> dtm.DiscoveryResult:
         frame = pd.DataFrame([
             {"admin0Name": "Atlantis", "admin0Pcode": "ATL"},

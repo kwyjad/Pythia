@@ -126,6 +126,10 @@ Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and wr
 - The workflow also publishes a `connector-diagnostics` artifact containing both `diagnostics/ingestion/summary.md` (human-readable) and the raw `diagnostics/ingestion/connectors_report.jsonl` (machine-readable). Use the Markdown for quick triage and feed the JSONL into ad-hoc notebooks when you need to chart retries, coverage drift, or rate-limit exhaustion across runs.
 - Reasons such as `disabled: config`, `missing secret`, or upstream HTTP errors are normalised in the summary so repeated skips bubble to the top of the reason histogram. Coverage columns render the year-month window (`ym_min → ym_max`) alongside the earliest/latest `as_of` dates, making it easy to confirm a connector backfilled the intended period.
 
+#### DTM Deep Dive diagnostics
+
+- DTM-specific runs also emit structured artifacts under `diagnostics/ingestion/dtm/`, including a machine-readable `dtm_run.json`, the raw HTTP trace (`dtm_http.ndjson`), discovery outcomes, and sample rows from the admin0 feed. When `scripts/ci/summarize_connectors.py` renders `diagnostics/ingestion/summary.md`, it appends a **DTM Deep Dive** section that highlights the SDK/base URL, discovery stages and failure payloads, the effective configuration window, HTTP roll-ups, fetch/normalization counts (with drop-reason breakdowns), a sample of the raw admin0 data, and any automatic “zero rows rescue” probes for Nigeria/South Sudan. Use this block to decide whether to re-run with new aliases, adjust the ingestion window, or request discovery access when you see 401/403 discovery errors.
+
 ### Fast-suite expectations
 
 The resolver fast tests exercise connectors without network access. To keep those runs reliable while still enforcing the offline contract, ensure the following when working on `resolver.ingestion.dtm_client`:
@@ -136,6 +140,7 @@ The resolver fast tests exercise connectors without network access. To keep thos
 - The static ISO3 roster at `resolver/ingestion/static/iso3_master.csv` must provide `admin0Pcode` and `admin0Name` columns and include key countries (e.g., ETH, SDN, PHL, UKR, TUR) even if the total row count drifts slightly.
 - Stock-to-flow conversion in fast mode intentionally drops the first observation and clips negative deltas to zero for determinism; production ingestion can opt into richer semantics as needed.
 - Discovery fallbacks that rely on the static roster may omit an `operation` column—the fast suite accepts either shape so long as the admin0 columns are present.
+- Module-level path constants such as `DIAGNOSTICS_ROOT`, `DTM_DIAGNOSTICS_DIR`, and `HTTP_TRACE_PATH` remain import-time attributes and are referenced throughout `resolver.ingestion.dtm_client`; tests monkeypatch these to stage diagnostics inside temporary directories.
 
 ### DTM connector quick start
 
@@ -145,6 +150,25 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
 - Credential setup (`DTM_API_KEY` or `DTM_SUBSCRIPTION_KEY`).
 - Expected diagnostics outputs and skip reasons (`sdk_missing`, `auth_missing`, `discovery_empty`).
 - Troubleshooting tips for zero-row exports and negative monthly flows.
+- Configuration defaults keep `api.countries: []` and `admin_levels: ["admin0"]` so discovery stays enabled for fast tests. To
+  target a curated geography list without editing the YAML, export environment overrides before invoking the connector:
+
+  ```
+  export DTM_COUNTRIES="South Sudan,Nigeria,Somalia,Ethiopia,Sudan,DR Congo,Yemen"
+  export DTM_ADMIN_LEVELS="admin0,admin1"
+  ```
+
+- When the resulting configuration (YAML or env overrides) specifies a non-empty `api.countries`, the connector skips SDK/HTTP
+  discovery, treats that list as authoritative, and records `countries_mode=explicit_config` in diagnostics. Admin-level
+  selection is honoured—include `admin1` alongside `admin0` to fetch both tiers in a single run (per-level counts and timings
+  surface in `diagnostics/ingestion/dtm/dtm_run.json`). A representative snippet:
+
+  ```yaml
+  enabled: true
+  api:
+    countries: ["South Sudan", "Nigeria", "Somalia", "Ethiopia", "Sudan", "DR Congo", "Yemen"]
+    admin_levels: ["admin0", "admin1"]
+  ```
 
 ### CI diagnostics & what to share
 

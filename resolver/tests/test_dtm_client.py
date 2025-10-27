@@ -21,6 +21,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
     monkeypatch.delenv("RESOLVER_START_ISO", raising=False)
     monkeypatch.delenv("RESOLVER_END_ISO", raising=False)
+    monkeypatch.delenv("RESOLVER_SKIP_DTM", raising=False)
 
 
 @pytest.fixture()
@@ -35,12 +36,16 @@ def patch_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Pa
         "META_PATH": out_path.with_suffix(out_path.suffix + ".meta.json"),
         "DIAGNOSTICS_DIR": diagnostics_dir,
         "DTM_DIAGNOSTICS_DIR": diagnostics_dir / "dtm",
+        "DTM_RAW_DIR": diagnostics_dir / "dtm" / "raw",
+        "DTM_METRICS_DIR": diagnostics_dir / "dtm" / "metrics",
+        "DTM_SAMPLES_DIR": diagnostics_dir / "dtm" / "samples",
+        "DTM_LOG_DIR": diagnostics_dir / "dtm" / "logs",
         "DIAGNOSTICS_RAW_DIR": diagnostics_dir / "raw",
         "DIAGNOSTICS_METRICS_DIR": diagnostics_dir / "metrics",
         "DIAGNOSTICS_SAMPLES_DIR": diagnostics_dir / "samples",
         "DIAGNOSTICS_LOG_DIR": diagnostics_dir / "logs",
         "CONNECTORS_REPORT": diagnostics_dir / "connectors_report.jsonl",
-        "RUN_DETAILS_PATH": diagnostics_dir / "dtm_run.json",
+        "RUN_DETAILS_PATH": diagnostics_dir / "dtm" / "dtm_run.json",
         "API_REQUEST_PATH": diagnostics_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": diagnostics_dir / "dtm_api_sample.json",
         "DISCOVERY_SNAPSHOT_PATH": diagnostics_dir / "dtm" / "discovery_countries.csv",
@@ -154,7 +159,7 @@ def test_main_writes_outputs_and_diagnostics(
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
             country = _.get("country")
-            if country == "Ethiopia":
+            if country in {"Ethiopia", "ETH"}:
                 return pd.DataFrame(
                     {
                         "CountryName": ["Ethiopia"],
@@ -162,7 +167,7 @@ def test_main_writes_outputs_and_diagnostics(
                         "numPresentIdpInd": [120],
                     }
                 )
-            if country == "Somalia":
+            if country in {"Somalia", "SOM"}:
                 return pd.DataFrame(
                     {
                         "CountryName": ["Somalia"],
@@ -170,7 +175,7 @@ def test_main_writes_outputs_and_diagnostics(
                         "total_people_idp": [95],
                     }
                 )
-            if country == "Kenya":
+            if country in {"Kenya", "KEN"}:
                 return pd.DataFrame(
                     {
                         "CountryName": ["Kenya"],
@@ -228,7 +233,7 @@ def test_main_writes_outputs_and_diagnostics(
     assert run_payload["args"]["strict_empty"] is False
     request = json.loads(patch_paths["API_REQUEST_PATH"].read_text(encoding="utf-8"))
     assert request["admin_levels"] == ["admin0"]
-    assert request["country_mode"] == "ALL"
+    assert request["country_mode"] == "explicit_config"
     meta_payload = json.loads(patch_paths["META_PATH"].read_text(encoding="utf-8"))
     assert "deps" in meta_payload
     assert "effective_params" in meta_payload
@@ -238,13 +243,13 @@ def test_main_writes_outputs_and_diagnostics(
     assert isinstance(meta_payload["per_country_counts"], list)
     assert "failures" in meta_payload
     assert isinstance(meta_payload["failures"], list)
-    assert meta_payload["effective_params"]["country_mode"] == "ALL"
+    assert meta_payload["effective_params"]["country_mode"] == "explicit_config"
     assert meta_payload["effective_params"]["discovered_countries_count"] == 1
     assert meta_payload["effective_params"]["countries_requested"] == ["Kenya"]
     assert meta_payload["effective_params"]["idp_aliases"]
     assert "discovery" in meta_payload
     assert meta_payload["discovery"]["total_countries"] == 1
-    assert meta_payload["discovery"]["source"] == "explicit_list"
+    assert meta_payload["discovery"]["source"] == "explicit_config"
     assert "diagnostics" in meta_payload
     assert meta_payload["diagnostics"]["http_trace"] == str(patch_paths["DTM_HTTP_LOG_PATH"])
     assert meta_payload["diagnostics"]["raw_countries"] == str(patch_paths["DISCOVERY_RAW_JSON_PATH"])
@@ -255,13 +260,13 @@ def test_main_writes_outputs_and_diagnostics(
         str(path).endswith("sample_admin0.csv")
         for path in meta_payload["diagnostics"].get("samples", [])
     )
-    raw_dir = patch_paths["DIAGNOSTICS_DIR"] / "raw" / "dtm"
+    raw_dir = patch_paths["DTM_DIAGNOSTICS_DIR"] / "raw"
     assert raw_dir.exists()
     assert any(child.name.startswith("admin0.") for child in raw_dir.iterdir())
     discovery_snapshot = patch_paths["DISCOVERY_SNAPSHOT_PATH"]
     assert discovery_snapshot.exists()
     snapshot_df = pd.read_csv(discovery_snapshot)
-    assert set(snapshot_df["admin0Name"]) == {"Kenya"}
+    assert set(snapshot_df["country_label"]) == {"Kenya"}
     discovery_raw = patch_paths["DISCOVERY_RAW_JSON_PATH"]
     assert discovery_raw.exists()
     raw_payload = json.loads(discovery_raw.read_text(encoding="utf-8"))
@@ -298,7 +303,7 @@ def test_main_writes_outputs_and_diagnostics(
     assert "failures" in run_payload["extras"]
     assert "discovery" in run_payload["extras"]
     assert run_payload["extras"]["discovery"]["total_countries"] == 1
-    assert run_payload["extras"]["discovery"]["source"] == "explicit_list"
+    assert run_payload["extras"]["discovery"]["source"] == "explicit_config"
     assert "diagnostics" in run_payload["extras"]
     assert run_payload["extras"]["diagnostics"]["http_trace"] == str(http_trace)
     assert run_payload["extras"]["diagnostics"]["log"] == str(log_path)
@@ -466,6 +471,8 @@ def test_discovery_empty_hard_fail(
 ) -> None:
     monkeypatch.setenv("DTM_API_KEY", "primary")
 
+    fetch_calls: list[str] = []
+
     class DiscoveryClient:
         def __init__(self, *_: Any, **__: Any) -> None:
             self.rate_limit_delay = 0
@@ -475,7 +482,8 @@ def test_discovery_empty_hard_fail(
             return pd.DataFrame(columns=["CountryName", "ISO3"])
 
         def get_idp_admin0(self, **_: Any) -> pd.DataFrame:
-            raise AssertionError("Should not fetch admin data when discovery fails")
+            fetch_calls.append(str(_.get("country")))
+            return pd.DataFrame()
 
         def get_idp_admin1(self, **_: Any) -> pd.DataFrame:
             return pd.DataFrame()
@@ -505,10 +513,12 @@ def test_discovery_empty_hard_fail(
     )
 
     rc = dtm_client.main([])
-    assert rc == 1
+    assert rc == 0
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["status"] == "error"
-    assert "0 countries" in run_payload["reason"]
+    assert run_payload["status"] in {"ok", "ok-empty"}
+    assert run_payload["extras"].get("zero_rows_reason")
+    assert fetch_calls  # minimal fallback attempted fetches
+    assert set(fetch_calls).issuperset({name for name, _ in dtm_client.STATIC_MINIMAL_FALLBACK})
 
 def test_http_trace_written(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
