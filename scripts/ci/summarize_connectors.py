@@ -12,6 +12,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+import certifi
+
 DEFAULT_HTTP_KEYS = ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status")
 SUMMARY_TITLE = "# Connector Diagnostics"
 MISSING_REPORT_SUMMARY = (
@@ -185,6 +187,27 @@ def load_report(path: Path) -> List[Dict[str, Any]]:
             if isinstance(payload, Mapping):
                 entries.append(_normalise_entry(payload))
     return entries
+
+
+def deduplicate_entries(entries: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    grouped: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    for index, entry in enumerate(entries):
+        connector_id = str(entry.get("connector_id") or "unknown")
+        grouped.setdefault(connector_id, []).append((index, dict(entry)))
+
+    deduped: List[Tuple[int, Dict[str, Any]]] = []
+    duplicates: Dict[str, int] = {}
+    for connector_id, records in grouped.items():
+        if len(records) == 1:
+            deduped.append(records[0])
+            continue
+        records.sort(key=lambda item: ((item[1].get("started_at_utc") or ""), item[0]))
+        chosen = records[-1]
+        deduped.append(chosen)
+        duplicates[connector_id] = len(records) - 1
+
+    deduped.sort(key=lambda item: item[0])
+    return [entry for _, entry in deduped], duplicates
 
 
 def _format_status_counts(entries: Sequence[Mapping[str, Any]]) -> str:
@@ -505,8 +528,11 @@ def _render_dtm_deep_dive(entry: Mapping[str, Any]) -> List[str]:
     lines.extend(
         [
             f"- **Config path:** `{config.get('config_path_used', 'unknown')}`",
+            f"- **Config exists:** {'yes' if config.get('config_exists') else 'no'}",
+            f"- **Config sha:** `{config.get('config_sha256', 'n/a')}`",
             f"- **Admin levels:** {', '.join(config.get('admin_levels', []) or ['—'])}",
             f"- **Countries mode:** `{countries_mode}` ({config.get('countries_count', 0)} selectors)",
+            f"- **Countries preview:** {', '.join(str(item) for item in config.get('countries_preview', []) or ['—'])}",
             f"- **No date filter:** {config.get('no_date_filter', 0)}",
             f"- **Window:** {window.get('start_iso') or '—'} → {window.get('end_iso') or '—'}",
         ]
@@ -613,6 +639,197 @@ def _render_dtm_deep_dive(entry: Mapping[str, Any]) -> List[str]:
     if not actions:
         actions.append("- _No immediate blockers detected._")
     lines.extend(actions)
+    lines.append("")
+    return lines
+
+
+def _format_yes_no(value: Any) -> str:
+    truthy = {"1", "true", "y", "yes", "on"}
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return "yes" if value else "no"
+    if isinstance(value, str):
+        return "yes" if value.strip().lower() in truthy else "no"
+    return "yes" if value else "no"
+
+
+def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    config = _ensure_dict(extras.get("config"))
+    if not config:
+        return []
+    admin_levels = config.get("admin_levels")
+    if isinstance(admin_levels, Iterable) and not isinstance(admin_levels, (str, bytes)):
+        admin_text = ", ".join(str(item) for item in admin_levels if str(item)) or "—"
+    else:
+        admin_text = "—"
+    preview_values = config.get("countries_preview")
+    if isinstance(preview_values, Iterable) and not isinstance(preview_values, (str, bytes)):
+        preview_text = ", ".join(str(item) for item in list(preview_values)[:5] if str(item)) or "—"
+    else:
+        preview_text = "—"
+    lines = [
+        "## Config used",
+        "",
+        f"- **Path:** `{config.get('config_path_used', 'unknown')}`",
+        f"- **Exists:** {_format_yes_no(config.get('config_exists'))}",
+        f"- **SHA256:** `{config.get('config_sha256', 'n/a')}`",
+        f"- **Countries mode:** `{config.get('countries_mode', 'discovered')}`",
+        f"- **Countries count:** {config.get('countries_count', 0)}",
+        f"- **Countries preview:** {preview_text}",
+        f"- **Admin levels:** {admin_text}",
+        f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
+    ]
+    lines.append("")
+    return lines
+
+
+def _render_selector_effectiveness(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    counts_raw = extras.get("per_country_counts")
+    if not isinstance(counts_raw, list) or not counts_raw:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in counts_raw:
+        if not isinstance(item, Mapping):
+            continue
+        normalized.append(
+            {
+                "country": str(item.get("country") or item.get("selector") or item.get("iso3") or "unknown"),
+                "rows": _coerce_int(item.get("rows")),
+                "level": str(item.get("level") or "—"),
+                "operation": str(item.get("operation") or "—"),
+            }
+        )
+    if not normalized:
+        return []
+    total = len(normalized)
+    with_rows = sum(1 for entry in normalized if entry["rows"] > 0)
+    hit_rate = f"{with_rows}/{total}"
+    top = sorted(normalized, key=lambda item: (-item["rows"], item["country"]))[:5]
+    lines = ["## Selector effectiveness", ""]
+    lines.append(f"- **Selectors attempted:** {total}")
+    lines.append(f"- **Selectors with rows:** {with_rows}")
+    lines.append(f"- **Hit rate:** {hit_rate}")
+    if top:
+        lines.append("- **Top selectors by rows:**")
+        for entry in top:
+            operation = entry["operation"] if entry["operation"] not in {"", "—"} else "all"
+            lines.append(
+                f"  - `{entry['country']}` level={entry['level']} rows={entry['rows']} (operation={operation})"
+            )
+    lines.append("")
+    return lines
+
+
+def _extract_common_name(subject: Any) -> str:
+    if isinstance(subject, (list, tuple)):
+        for group in subject:
+            if isinstance(group, (list, tuple)):
+                for key, value in group:
+                    if str(key).lower() in {"commonname", "cn"}:
+                        return str(value)
+    return ""
+
+
+def _render_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
+    if not reachability:
+        return []
+    lines = ["## DTM Reachability", ""]
+    target = reachability.get("target_host", "dtmapi.iom.int")
+    port = reachability.get("target_port", 443)
+    lines.append(f"- **Target:** `{target}:{port}`")
+    captured_start = reachability.get("generated_at")
+    captured_end = reachability.get("completed_at")
+    if captured_start or captured_end:
+        lines.append(f"- **Captured:** {captured_start or '—'} → {captured_end or '—'}")
+
+    dns = _ensure_dict(reachability.get("dns"))
+    dns_records = []
+    for entry in dns.get("records", []):
+        if isinstance(entry, Mapping):
+            address = entry.get("address")
+            family = entry.get("family")
+            if address:
+                dns_records.append(f"{address}{f' ({family})' if family else ''}")
+    if dns.get("error"):
+        dns_line = f"- **DNS:** error={dns.get('error')}"
+    else:
+        dns_line = f"- **DNS:** {', '.join(dns_records) if dns_records else '—'}"
+    if dns.get("elapsed_ms") is not None:
+        dns_line += f" ({dns.get('elapsed_ms')}ms)"
+    lines.append(dns_line)
+
+    tcp = _ensure_dict(reachability.get("tcp"))
+    if tcp.get("ok"):
+        peer = tcp.get("peer")
+        if isinstance(peer, (list, tuple)):
+            peer_text = ":".join(str(part) for part in peer)
+        else:
+            peer_text = str(peer or "")
+        tcp_line = "- **TCP:** ok"
+        if tcp.get("elapsed_ms") is not None:
+            tcp_line += f" in {tcp.get('elapsed_ms')}ms"
+        if peer_text:
+            tcp_line += f" (peer={peer_text})"
+    else:
+        tcp_line = "- **TCP:** failed"
+        if tcp.get("error"):
+            tcp_line += f" ({tcp.get('error')})"
+        if tcp.get("elapsed_ms") is not None:
+            tcp_line += f" after {tcp.get('elapsed_ms')}ms"
+    lines.append(tcp_line)
+
+    tls = _ensure_dict(reachability.get("tls"))
+    if tls.get("ok"):
+        tls_line = "- **TLS:** ok"
+        if tls.get("elapsed_ms") is not None:
+            tls_line += f" in {tls.get('elapsed_ms')}ms"
+        subject_cn = _extract_common_name(tls.get("subject"))
+        issuer_cn = _extract_common_name(tls.get("issuer"))
+        details: List[str] = []
+        if subject_cn:
+            details.append(f"CN={subject_cn}")
+        if issuer_cn:
+            details.append(f"issuer={issuer_cn}")
+        if tls.get("not_after"):
+            details.append(f"expires={tls.get('not_after')}")
+        if details:
+            tls_line += f" ({', '.join(details)})"
+    else:
+        tls_line = "- **TLS:** failed"
+        if tls.get("error"):
+            tls_line += f" ({tls.get('error')})"
+    lines.append(tls_line)
+
+    curl = _ensure_dict(reachability.get("curl_head"))
+    if curl.get("error"):
+        curl_line = f"- **HTTP HEAD (curl):** error={curl.get('error')}"
+    else:
+        status_line = curl.get("status_line") or "n/a"
+        curl_line = f"- **HTTP HEAD (curl):** {status_line}"
+    if curl.get("exit_code") is not None:
+        curl_line += f" [exit={curl.get('exit_code')}]"
+    if curl.get("stderr"):
+        curl_line += f" (stderr={curl.get('stderr')})"
+    lines.append(curl_line)
+
+    egress = _ensure_dict(reachability.get("egress"))
+    egress_parts: List[str] = []
+    for key, value in egress.items():
+        info = _ensure_dict(value)
+        if info.get("error"):
+            display = f"error={info.get('error')}"
+        else:
+            text = info.get("text") or info.get("status_code") or "n/a"
+            display = str(text)
+        egress_parts.append(f"{key}={display}")
+    if egress_parts:
+        lines.append(f"- **Egress IPs:** {', '.join(egress_parts)}")
+
+    lines.append(f"- **CA bundle:** {reachability.get('ca_bundle', certifi.where())}")
+    lines.append(f"- **Python/requests:** {reachability.get('python_version', 'unknown')} / {reachability.get('requests_version', 'unknown')}")
     lines.append("")
     return lines
 
@@ -755,10 +972,16 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
     return lines
 
 
-def build_markdown(entries: Sequence[Mapping[str, Any]]) -> str:
+def build_markdown(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    dedupe_notes: Mapping[str, int] | None = None,
+    reachability: Mapping[str, Any] | None = None,
+) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
     total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
     total_written = sum(entry.get("counts", {}).get("written", 0) for entry in sorted_entries)
+    dtm_entry = next((entry for entry in sorted_entries if entry.get("connector_id") == "dtm_client"), None)
 
     lines = [SUMMARY_TITLE, "", "## Run Summary", ""]
     lines.append(f"* **Connectors:** {len(sorted_entries)}")
@@ -767,14 +990,32 @@ def build_markdown(entries: Sequence[Mapping[str, Any]]) -> str:
     lines.append(f"* **Rows fetched:** {total_fetched}")
     lines.append(f"* **Rows written:** {total_written}")
     lines.append("")
+
+    if dtm_entry:
+        config_section = _render_config_section(dtm_entry)
+        if config_section:
+            lines.extend(config_section)
+        selector_section = _render_selector_effectiveness(dtm_entry)
+        if selector_section:
+            lines.extend(selector_section)
+
+    reachability_section = _render_reachability_section(reachability or {})
+    if reachability_section:
+        lines.extend(reachability_section)
+
     lines.append("## Per-Connector Table")
     lines.append("")
     lines.extend(_build_table(sorted_entries))
     lines.append("")
+    if dedupe_notes:
+        for connector_id, count in dedupe_notes.items():
+            if count:
+                lines.append(f"(deduplicated {count} duplicate entries for {connector_id})")
+        if any(count for count in dedupe_notes.values()):
+            lines.append("")
     for entry in sorted_entries:
         lines.append(_render_details(entry))
         lines.append("")
-    dtm_entry = next((entry for entry in sorted_entries if entry.get("connector_id") == "dtm_client"), None)
     if dtm_entry:
         lines.append("")
         lines.extend(_render_dtm_deep_dive(dtm_entry))
@@ -846,7 +1087,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.github_step_summary:
                 append_to_summary(MISSING_REPORT_SUMMARY)
         return 1
-    markdown = build_markdown(entries)
+    deduped_entries, dedupe_notes = deduplicate_entries(entries)
+    reachability_path = Path("diagnostics/ingestion/dtm/reachability.json")
+    reachability_payload = _safe_load_json(reachability_path) or {}
+    markdown = build_markdown(deduped_entries, dedupe_notes=dedupe_notes, reachability=reachability_payload)
     write_markdown(out_path, markdown)
     if args.github_step_summary:
         append_to_summary(markdown)

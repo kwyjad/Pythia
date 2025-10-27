@@ -148,18 +148,11 @@ jobs:
                   print(f"{key}={value} ({state})")
           PY
 
-      - name: Reachability probes (DNS + HTTPS to dtmapi)
+      - name: Probe DTM reachability
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p diagnostics/ingestion/dtm
-          python - <<'PY'
-          import json, socket, time
-          t = time.time()
-          addrs = socket.getaddrinfo("dtmapi.iom.int", 443)
-          print(json.dumps({"dns_ok": True, "addresses": addrs, "elapsed": time.time() - t}))
-          PY
-          curl -I --max-time 10 https://dtmapi.iom.int || true
+          python -m scripts.ci.probe_dtm_reachability || true
 
       - name: Run live connectors (with per-connector log tee)
         env:
@@ -174,8 +167,9 @@ jobs:
           fi
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
           mkdir -p .ci/diagnostics .ci/exitcodes || true
+          CMD_ARGS=(--extra-args "dtm_client=--soft-timeouts" --extra-env "dtm_client=DTM_SOFT_TIMEOUTS=1")
           CONNECTOR_EXIT=0
-          python -m scripts.ci.run_connectors || CONNECTOR_EXIT=$?
+          python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
           touch diagnostics/ingestion/logs/.keep
           touch diagnostics/ingestion/raw/.keep
           touch diagnostics/ingestion/metrics/.keep

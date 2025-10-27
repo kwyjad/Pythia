@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from resolver.ingestion.diagnostics_emitter import (
-    append_jsonl as diagnostics_append_jsonl,
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
 )
@@ -133,6 +134,45 @@ def _quoted(cmd: Iterable[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
+def _as_jsonable(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _as_jsonable(item) for key, item in value.items()}
+    if dataclasses.is_dataclass(value):  # pragma: no branch - trivial checks
+        return _as_jsonable(dataclasses.asdict(value))
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        else:
+            return _as_jsonable(dumped)
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()  # type: ignore[call-arg]
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        else:
+            return _as_jsonable(dumped)
+    if hasattr(value, "_asdict"):
+        try:
+            dumped = value._asdict()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        else:
+            return _as_jsonable(dumped)
+    if isinstance(value, (list, tuple, set)):
+        return [_as_jsonable(item) for item in value]
+    return value
+
+
+def _write_report(path: Path, entries: Iterable[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for entry in entries:
+            handle.write(json.dumps(_as_jsonable(entry), default=str))
+            handle.write("\n")
+
+
 def tee_run(cmd: List[str], log_path: Path, env: Dict[str, str], *, append: bool = False) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if append and log_path.exists() else "w"
@@ -197,12 +237,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     logs_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    reset_message = "initialised"
     try:
-        report_path.unlink()
-    except FileNotFoundError:
-        pass
+        report_path.write_text("", encoding="utf-8")
+        reset_message = "reset"
     except OSError:
-        pass
+        try:
+            report_path.unlink()
+            report_path.touch()
+            reset_message = "reset"
+        except OSError:
+            pass
+    print(f"{reset_message} connectors report at {report_path}")
 
     env = os.environ.copy()
     if env.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
@@ -216,6 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     python_exe = sys.executable
     overall_rc = 0
+    records: Dict[str, Mapping[str, Any]] = {}
 
     for connector in connectors:
         name = connector.strip()
@@ -245,7 +292,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "log_path": str(log_path),
             },
         )
-        diagnostics_append_jsonl(report_path, result)
+        records[name] = result
+        _write_report(report_path, records.values())
         for sub in ("raw", "metrics", "samples"):
             keep = diag_base / sub / ".keep"
             try:
@@ -255,6 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"=== DONE {name} (rc={rc}) ===")
         if rc != 0 and overall_rc == 0:
             overall_rc = rc
+    print(f"connectors_report entries written: {len(records)}")
     return overall_rc
 
 

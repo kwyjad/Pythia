@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib
+import hashlib
 import json
 import logging
 import os
@@ -53,7 +54,44 @@ from resolver.scripts.ingestion._dtm_debug_utils import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = _REPO_ROOT
 RESOLVER_ROOT = REPO_ROOT / "resolver"
-CONFIG_PATH = RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml"
+LEGACY_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
+SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
+
+
+def _config_candidate_paths() -> List[Path]:
+    candidates: List[Path] = []
+    env_value = os.getenv("DTM_CONFIG_PATH", "").strip()
+    if env_value:
+        env_path = Path(env_value).expanduser()
+        if not env_path.is_absolute():
+            env_path = (REPO_ROOT / env_path).resolve()
+        else:
+            env_path = env_path.resolve()
+        candidates.append(env_path)
+
+    resolver_config = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
+    if resolver_config not in candidates:
+        candidates.append(resolver_config)
+
+    legacy_config = LEGACY_CONFIG_PATH
+    if legacy_config not in candidates:
+        candidates.append(legacy_config)
+
+    return candidates
+
+
+def _resolve_config_path() -> Tuple[Path, bool]:
+    candidates = _config_candidate_paths()
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate, True
+    if not candidates:
+        return LEGACY_CONFIG_PATH, LEGACY_CONFIG_PATH.exists()
+    fallback = candidates[-1]
+    return fallback, fallback.exists()
+
+
+CONFIG_PATH, _ = _resolve_config_path()
 
 # Diagnostics (repo-root)
 DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
@@ -222,12 +260,10 @@ def _countries_mode_from_stage(stage: Optional[str]) -> str:
     if not stage:
         return "discovered"
     lowered = str(stage).strip().lower()
-    if "sdk" in lowered:
-        return "sdk"
     if "explicit" in lowered:
         return "explicit_config"
-    if "static" in lowered or "iso3" in lowered:
-        return "static_iso3"
+    if "static" in lowered or "iso3" in lowered or "minimal" in lowered:
+        return "static_iso3_minimal"
     return "discovered"
 
 
@@ -309,9 +345,11 @@ def _append_connectors_report(
 
 
 class ConfigDict(dict):
-    """Dictionary subclass that retains the source path for logging."""
+    """Dictionary subclass that retains the source metadata for logging."""
 
     _source_path: Optional[str] = None
+    _source_exists: bool = False
+    _source_sha256: Optional[str] = None
 
 
 def _preflight_dependencies() -> Tuple[Dict[str, Any], bool]:
@@ -1589,6 +1627,26 @@ def _ensure_http_counts(counts: Optional[MutableMapping[str, int]]) -> MutableMa
     return base
 
 
+def _is_connect_timeout_error(exc: BaseException) -> bool:
+    visited: Set[int] = set()
+    current: Optional[BaseException] = exc
+    while isinstance(current, BaseException) and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, requests.exceptions.ConnectTimeout):
+            return True
+        name = type(current).__name__.lower()
+        if "connecttimeout" in name:
+            return True
+        message = str(current).lower()
+        if "connect timeout" in message or "timed out while connecting" in message:
+            return True
+        next_exc = getattr(current, "__cause__", None)
+        if not isinstance(next_exc, BaseException):
+            next_exc = getattr(current, "__context__", None)
+        current = next_exc
+    return False
+
+
 def _empty_row_counts() -> Dict[str, int]:
     return {key: 0 for key in ROW_COUNT_KEYS}
 
@@ -1817,15 +1875,70 @@ def _maybe_override_from_env(cfg: MutableMapping[str, Any]) -> MutableMapping[st
     return cfg
 
 
+def _normalize_keyword_mapping(raw: Mapping[str, Any]) -> Dict[str, List[str]]:
+    normalized: Dict[str, List[str]] = {}
+    for key, value in raw.items():
+        key_text = str(key)
+        items: List[str] = []
+        if isinstance(value, str):
+            tokens = [value]
+        elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+            tokens = list(value)
+        else:
+            tokens = []
+        for token in tokens:
+            token_text = str(token).strip()
+            if token_text:
+                items.append(token_text)
+        if items:
+            normalized[key_text] = items
+    return normalized
+
+
+def _load_series_semantics_keywords() -> Dict[str, List[str]]:
+    try:
+        with SERIES_SEMANTICS_PATH.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except FileNotFoundError:
+        LOG.debug("dtm: series_semantics.yml not present; using fallback keywords")
+        data = {}
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: failed to load series_semantics.yml", exc_info=True)
+        data = {}
+
+    keywords_raw = data.get("shock_keywords") if isinstance(data, Mapping) else {}
+    if isinstance(keywords_raw, Mapping):
+        keywords = _normalize_keyword_mapping(keywords_raw)
+        if keywords:
+            return keywords
+
+    # Minimal safe defaults required by tests
+    return {"flood": ["flood"], "drought": ["drought"]}
+
+
 def load_config() -> Dict[str, Any]:
-    if not CONFIG_PATH.exists():
-        cfg = ConfigDict()
-        cfg._source_path = str(CONFIG_PATH)
-        return _maybe_override_from_env(cfg)
-    with CONFIG_PATH.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    cfg = ConfigDict(data if isinstance(data, dict) else {})
-    cfg._source_path = str(CONFIG_PATH)
+    path, exists = _resolve_config_path()
+    data: Dict[str, Any] = {}
+    sha_prefix: Optional[str] = None
+    if exists:
+        raw_bytes = path.read_bytes()
+        sha_prefix = hashlib.sha256(raw_bytes).hexdigest()[:12]
+        text = raw_bytes.decode("utf-8")
+        parsed = yaml.safe_load(text) or {}
+        if isinstance(parsed, dict):
+            data = parsed
+    semantics_keywords = _load_series_semantics_keywords()
+    existing_keywords = data.get("shock_keywords") if isinstance(data, dict) else {}
+    merged_keywords = dict(semantics_keywords)
+    if isinstance(existing_keywords, Mapping):
+        merged_keywords.update(_normalize_keyword_mapping(existing_keywords))
+    if not merged_keywords:
+        merged_keywords = {"flood": ["flood"], "drought": ["drought"]}
+    data["shock_keywords"] = merged_keywords
+    cfg = ConfigDict(data)
+    cfg._source_path = str(path.resolve())
+    cfg._source_exists = bool(exists)
+    cfg._source_sha256 = sha_prefix
     return _maybe_override_from_env(cfg)
 
 
@@ -3154,6 +3267,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Skip API calls and exit successfully for offline smoke tests.",
     )
     parser.add_argument(
+        "--soft-timeouts",
+        action="store_true",
+        help="Treat connect timeouts as ok-empty instead of hard failures.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging and force file logging for troubleshooting.",
@@ -3236,6 +3354,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         or _env_bool("RESOLVER_STRICT_EMPTY", False)
     )
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
+    soft_timeouts = args.soft_timeouts or _env_bool("DTM_SOFT_TIMEOUTS", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
     skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
     offline_mode = skip_requested or bool(offline_smoke)
@@ -3309,6 +3428,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "offline_smoke": offline_smoke,
         "offline": OFFLINE,
         "timings_ms": dict(timings_ms),
+        "soft_timeouts": soft_timeouts,
     }
 
     if not have_dtmapi:
@@ -3462,7 +3582,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rows_written = 0
     summary: Dict[str, Any] = {}
-    config_source_path = str(CONFIG_PATH)
+    config_source_path = str(_resolve_config_path()[0])
+    config_exists_flag = False
+    config_sha_prefix: Optional[str] = None
 
     try:
         cfg = load_config()
@@ -3471,6 +3593,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             getattr(cfg, "_source_path", "<unknown>"),
         )
         config_source_path = getattr(cfg, "_source_path", config_source_path)
+        config_exists_flag = bool(getattr(cfg, "_source_exists", config_exists_flag))
+        config_sha_prefix = getattr(cfg, "_source_sha256", config_sha_prefix)
         if not cfg.get("enabled", True):
             status = "skipped"
             reason = "disabled via config"
@@ -3495,6 +3619,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 ensure_zero_row_outputs(offline=OFFLINE)
             timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+        if soft_timeouts and _is_connect_timeout_error(exc):
+            LOG.error("dtm: connect timeout detected (%s); treating as ok-empty", exc)
+            http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
+            if not http_stats.get("last_status"):
+                http_stats["last_status"] = 0
+            status = "ok"
+            reason = "http_connect_timeout"
+            extras.setdefault("zero_rows_reason", reason)
+            extras["soft_timeout_applied"] = True
+            summary.setdefault("extras", {}).setdefault("zero_rows_reason", reason)
+            ensure_zero_row_outputs(offline=OFFLINE)
+        else:
+            LOG.error("dtm: HTTP failure detected (%s)", exc)
+            http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
+            if not http_stats.get("last_status"):
+                http_stats["last_status"] = 0
+            status = "error"
+            reason = str(exc) or "http_error"
+            exit_code = 1
+            extras.setdefault(
+                "exception",
+                {"type": type(exc).__name__, "message": str(exc)},
+            )
+            ensure_zero_row_outputs(offline=OFFLINE)
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status = "error"
@@ -3596,7 +3745,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         extras["rows_written"] = rows_written
         summary_extras["rows_written"] = rows_written
 
-    if strict_empty and zero_rows and exit_code == 0:
+    if strict_empty and zero_rows and exit_code == 0 and zero_rows_reason != "http_connect_timeout":
         exit_code = 2
         LOG.error("dtm: strict-empty enabled; exiting with code 2 for zero rows")
 
@@ -3706,9 +3855,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     countries_mode = _countries_mode_from_stage(used_stage)
     summary_extras["config"] = {
         "config_path_used": config_source_path,
+        "config_exists": bool(config_exists_flag),
+        "config_sha256": config_sha_prefix or "n/a",
         "admin_levels": admin_levels_list,
         "countries_mode": countries_mode,
         "countries_count": len(resolved_countries),
+        "countries_preview": [str(item) for item in resolved_countries[:5]],
         "no_date_filter": 1 if no_date_filter else 0,
     }
 

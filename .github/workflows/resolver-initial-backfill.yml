@@ -100,18 +100,11 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
-      - name: Reachability probes (DNS + HTTPS to dtmapi)
+      - name: Probe DTM reachability
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p diagnostics/ingestion/dtm
-          python - <<'PY'
-          import json, socket, time
-          t = time.time()
-          addrs = socket.getaddrinfo("dtmapi.iom.int", 443)
-          print(json.dumps({"dns_ok": True, "addresses": addrs, "elapsed": time.time() - t}))
-          PY
-          curl -I --max-time 10 https://dtmapi.iom.int || true
+          python -m scripts.ci.probe_dtm_reachability || true
 
       - name: Run connectors (with per-connector log tee)
         env:
@@ -143,9 +136,19 @@ jobs:
               DTM_ARGS="--no-date-filter"
             fi
           fi
+          if [ "${EMPTY_POLICY:-allow}" = "allow" ]; then
+            if [ -n "${DTM_ARGS}" ]; then
+              DTM_ARGS="${DTM_ARGS} --soft-timeouts"
+            else
+              DTM_ARGS="--soft-timeouts"
+            fi
+          fi
           CMD_ARGS=(--extra-args "dtm_client=${DTM_ARGS}")
           if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
             CMD_ARGS+=(--extra-env "dtm_client=DTM_NO_DATE_FILTER=1")
+          fi
+          if [ "${EMPTY_POLICY:-allow}" = "allow" ]; then
+            CMD_ARGS+=(--extra-env "dtm_client=DTM_SOFT_TIMEOUTS=1")
           fi
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?

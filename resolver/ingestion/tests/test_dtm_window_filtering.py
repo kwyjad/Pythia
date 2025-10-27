@@ -44,6 +44,7 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
     out_path = tmp_path / "outputs" / "dtm.csv"
     mappings = {
         "CONFIG_PATH": tmp_path / "dtm.yml",
+        "LEGACY_CONFIG_PATH": tmp_path / "dtm.yml",
         "OUT_PATH": out_path,
         "OUT_DIR": out_path.parent,
         "OUTPUT_PATH": out_path,
@@ -58,6 +59,7 @@ def patched_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, 
     }
     for name, value in mappings.items():
         monkeypatch.setattr(dtm_client, name, value)
+    monkeypatch.setenv("DTM_CONFIG_PATH", str(mappings["CONFIG_PATH"]))
     return mappings
 
 
