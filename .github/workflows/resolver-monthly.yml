@@ -172,19 +172,12 @@ jobs:
           CMD_ARGS=(--extra-args "dtm_client=--soft-timeouts" --extra-env "dtm_client=DTM_SOFT_TIMEOUTS=1")
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
-          touch diagnostics/ingestion/logs/.keep
-          touch diagnostics/ingestion/raw/.keep
-          touch diagnostics/ingestion/metrics/.keep
-          touch diagnostics/ingestion/samples/.keep
           exit ${CONNECTOR_EXIT}
 
       - name: Ensure diagnostics dirs exist (post-run)
         if: always()
         run: |
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
-          touch diagnostics/ingestion/raw/.keep
-          touch diagnostics/ingestion/metrics/.keep
-          touch diagnostics/ingestion/samples/.keep
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
@@ -202,6 +195,14 @@ jobs:
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary
+
+      - name: Prime ingestion artifact placeholders
+        if: always()
+        run: |
+          mkdir -p diagnostics/ingestion/{raw,metrics,samples,dtm}
+          echo "placeholder" > diagnostics/ingestion/raw/KEEP.txt
+          echo "placeholder" > diagnostics/ingestion/metrics/KEEP.txt
+          echo "placeholder" > diagnostics/ingestion/samples/KEEP.txt
 
       - name: Upload connector logs
         if: always()

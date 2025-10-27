@@ -72,6 +72,20 @@ def test_load_config_honours_search_order(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert cfg.get("api") == {}
 
 
+def test_load_config_supports_relative_env_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    _prepare_repo(monkeypatch, repo_root)
+
+    relative_config = Path("configs") / "custom.yml"
+    absolute_config = repo_root / relative_config
+    absolute_config.parent.mkdir(parents=True, exist_ok=True)
+    absolute_config.write_text("enabled: true\n", encoding="utf-8")
+
+    monkeypatch.setenv("DTM_CONFIG_PATH", str(relative_config))
+    resolved = dtm_client._resolve_config_path()
+    assert resolved == absolute_config.resolve()
+
+
 def test_connector_report_includes_config_extras(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -194,3 +208,4 @@ def test_connector_report_includes_config_extras(
     assert config["config_exists"] is True
     assert config["config_sha256"] == hashlib.sha256(resolver_config.read_bytes()).hexdigest()[:12]
     assert config["countries_count"] == 3
+    assert config["selected_iso3_preview"][:3] == ["SSD", "ETH", "SOM"]
