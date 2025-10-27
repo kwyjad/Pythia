@@ -721,6 +721,8 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
     config = _ensure_dict(extras.get("config"))
     if not config:
         return []
+    config_parse = _ensure_dict(config.get("config_parse"))
+    config_keys_found = _ensure_dict(config.get("config_keys_found"))
     admin_levels = config.get("admin_levels")
     if isinstance(admin_levels, Iterable) and not isinstance(admin_levels, (str, bytes)):
         admin_text = ", ".join(str(item) for item in admin_levels if str(item)) or "—"
@@ -736,6 +738,29 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
         selected_text = ", ".join(str(item) for item in list(selected_values)[:10] if str(item)) or "—"
     else:
         selected_text = "—"
+    parse_countries = []
+    raw_countries = config_parse.get("countries")
+    if isinstance(raw_countries, Iterable) and not isinstance(raw_countries, (str, bytes)):
+        parse_countries = [str(item) for item in raw_countries if str(item)]
+    parsed_admin_levels = []
+    raw_levels = config_parse.get("admin_levels")
+    if isinstance(raw_levels, Iterable) and not isinstance(raw_levels, (str, bytes)):
+        parsed_admin_levels = [str(item) for item in raw_levels if str(item)]
+    if parse_countries:
+        countries_parse_line = f"- **Countries parse:** api.countries: found ({len(parse_countries)})"
+    else:
+        countries_parse_line = "- **Countries parse:** api.countries: missing or empty"
+    if parsed_admin_levels:
+        levels_repr = ", ".join(parsed_admin_levels)
+        admin_parse_line = f"- **Admin levels parse:** api.admin_levels: found ([{levels_repr}])"
+    else:
+        admin_parse_line = "- **Admin levels parse:** api.admin_levels: missing or empty"
+    keys_line = "- **Config keys found:** countries={0}, admin_levels={1}".format(
+        str(bool(config_keys_found.get("countries"))).lower(),
+        str(bool(config_keys_found.get("admin_levels"))).lower(),
+    )
+    countries_mode = str(config.get("countries_mode", "discovered")).strip().lower()
+    warn_unapplied = bool(config_keys_found.get("countries")) and countries_mode == "discovered"
     lines = [
         "## Config used",
         "",
@@ -748,7 +773,12 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
         f"- **Selected ISO3 preview:** {selected_text}",
         f"- **Admin levels:** {admin_text}",
         f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
+        countries_parse_line,
+        admin_parse_line,
+        keys_line,
     ]
+    if warn_unapplied:
+        lines.append("- ⚠ config had api.countries but selector list not applied (check loader/version).")
     lines.append("")
     return lines
 

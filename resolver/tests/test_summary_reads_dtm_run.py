@@ -54,3 +54,64 @@ def test_summary_uses_dtm_run_totals(tmp_path: Path) -> None:
     assert cells[7] == "2"
     assert cells[8] == "1"
     assert cells[9] == "1"
+
+
+def test_config_section_renders_parse_lines_and_warning(tmp_path: Path) -> None:
+    diagnostics = tmp_path / "diagnostics" / "ingestion"
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    report_path = diagnostics / "connectors_report.jsonl"
+    config_payload = {
+        "connector_id": "dtm_client",
+        "mode": "real",
+        "status": "ok",
+        "reason": None,
+        "duration_ms": 0,
+        "http": {
+            "2xx": 1,
+            "4xx": 0,
+            "5xx": 0,
+            "retries": 0,
+            "rate_limit_remaining": None,
+            "last_status": 200,
+        },
+        "counts": {"fetched": 10, "normalized": 10, "written": 10},
+        "extras": {
+            "status_raw": "ok",
+            "rows_written": 10,
+            "config": {
+                "config_path_used": "resolver/config/dtm.yml",
+                "config_exists": True,
+                "config_sha256": "abcdef123456",
+                "countries_mode": "discovered",
+                "countries_count": 7,
+                "countries_preview": ["SSD", "ETH", "SOM", "NGA", "SUD"],
+                "selected_iso3_preview": ["SSD", "ETH", "SOM"],
+                "admin_levels": ["admin0", "admin1"],
+                "no_date_filter": 0,
+                "config_parse": {
+                    "countries": [
+                        "SSD",
+                        "ETH",
+                        "SOM",
+                        "NGA",
+                        "SUD",
+                        "YEM",
+                        "COD",
+                    ],
+                    "admin_levels": ["admin0", "admin1"],
+                },
+                "config_keys_found": {"countries": True, "admin_levels": True},
+                "config_countries_count": 7,
+            },
+        },
+    }
+    report_path.write_text(json.dumps(config_payload) + "\n", encoding="utf-8")
+
+    entries = summarize_connectors.load_report(report_path)
+    markdown = summarize_connectors.build_markdown(entries)
+    assert "- **Countries parse:** api.countries: found (7)" in markdown
+    assert "- **Admin levels parse:** api.admin_levels: found ([admin0, admin1])" in markdown
+    assert (
+        "- ⚠ config had api.countries but selector list not applied (check loader/version)."
+        in markdown
+    )
