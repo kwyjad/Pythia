@@ -50,7 +50,7 @@ def test_load_config_honours_search_order(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     monkeypatch.delenv("DTM_CONFIG_PATH", raising=False)
     cfg = dtm_client.load_config()
-    assert Path(getattr(cfg, "_source_path")).resolve() == resolver_config.resolve()
+    assert Path(getattr(cfg, "_source_path")).resolve() == ingestion_config.resolve()
     assert getattr(cfg, "_source_exists") is True
 
     resolver_config.unlink()
@@ -60,6 +60,6 @@ def test_load_config_honours_search_order(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     ingestion_config.unlink()
     cfg = dtm_client.load_config()
-    assert Path(getattr(cfg, "_source_path")).resolve() == ingestion_config.resolve()
+    assert Path(getattr(cfg, "_source_path")).resolve() == resolver_config.resolve()
     assert getattr(cfg, "_source_exists") is False
     assert cfg.get("api") == {}

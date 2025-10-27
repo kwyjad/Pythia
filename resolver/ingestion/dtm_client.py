@@ -58,40 +58,23 @@ LEGACY_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolv
 SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
 
 
-def _config_candidate_paths() -> List[Path]:
-    candidates: List[Path] = []
+def _resolve_config_path() -> Path:
     env_value = os.getenv("DTM_CONFIG_PATH", "").strip()
     if env_value:
         env_path = Path(env_value).expanduser()
         if not env_path.is_absolute():
-            env_path = (REPO_ROOT / env_path).resolve()
-        else:
-            env_path = env_path.resolve()
-        candidates.append(env_path)
+            env_path = REPO_ROOT / env_path
+        return env_path.resolve()
 
-    resolver_config = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
-    if resolver_config not in candidates:
-        candidates.append(resolver_config)
+    ingestion_cfg = LEGACY_CONFIG_PATH
+    if ingestion_cfg.exists():
+        return ingestion_cfg
 
-    legacy_config = LEGACY_CONFIG_PATH
-    if legacy_config not in candidates:
-        candidates.append(legacy_config)
-
-    return candidates
+    repo_cfg = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
+    return repo_cfg
 
 
-def _resolve_config_path() -> Tuple[Path, bool]:
-    candidates = _config_candidate_paths()
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate, True
-    if not candidates:
-        return LEGACY_CONFIG_PATH, LEGACY_CONFIG_PATH.exists()
-    fallback = candidates[-1]
-    return fallback, fallback.exists()
-
-
-CONFIG_PATH, _ = _resolve_config_path()
+CONFIG_PATH = _resolve_config_path()
 
 # Diagnostics (repo-root)
 DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
@@ -1917,7 +1900,8 @@ def _load_series_semantics_keywords() -> Dict[str, List[str]]:
 
 
 def load_config() -> Dict[str, Any]:
-    path, exists = _resolve_config_path()
+    path = _resolve_config_path()
+    exists = path.exists()
     data: Dict[str, Any] = {}
     sha_prefix: Optional[str] = None
     if exists:
@@ -3582,7 +3566,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     rows_written = 0
     summary: Dict[str, Any] = {}
-    config_source_path = str(_resolve_config_path()[0])
+    config_source_path = str(_resolve_config_path())
     config_exists_flag = False
     config_sha_prefix: Optional[str] = None
 
