@@ -233,7 +233,9 @@ def load_report(path: Path) -> List[Dict[str, Any]]:
     return entries
 
 
-def deduplicate_entries(entries: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[Tuple[str, str], int]]:
+def deduplicate_entries(
+    entries: Sequence[Mapping[str, Any]]
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     grouped: Dict[Tuple[str, str], List[Tuple[int, Dict[str, Any]]]] = {}
     for index, entry in enumerate(entries):
         connector_id = str(entry.get("connector_id") or "unknown")
@@ -242,7 +244,7 @@ def deduplicate_entries(entries: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict
         grouped.setdefault(key, []).append((index, dict(entry)))
 
     deduped: List[Tuple[int, Dict[str, Any]]] = []
-    duplicates: Dict[Tuple[str, str], int] = {}
+    duplicates: Dict[str, int] = {}
     for key, records in grouped.items():
         if len(records) == 1:
             deduped.append(records[0])
@@ -250,7 +252,8 @@ def deduplicate_entries(entries: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict
         records.sort(key=lambda item: ((item[1].get("started_at_utc") or ""), item[0]))
         chosen = records[-1]
         deduped.append(chosen)
-        duplicates[key] = len(records) - 1
+        connector_id, _mode = key
+        duplicates[connector_id] = duplicates.get(connector_id, 0) + len(records) - 1
 
     deduped.sort(key=lambda item: item[0])
     return [entry for _, entry in deduped], duplicates
@@ -264,16 +267,20 @@ def _format_status_counts(entries: Sequence[Mapping[str, Any]]) -> str:
     return ", ".join(parts) if parts else "none"
 
 
-def _format_reason_counts(entries: Sequence[Mapping[str, Any]]) -> str:
+def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
     counter: Counter[str] = Counter()
     for entry in entries:
         reason = entry.get("reason")
-        if reason:
-            counter[str(reason)] += 1
+        if not reason:
+            continue
+        cleaned = str(reason).strip()
+        if cleaned:
+            counter[cleaned] += 1
     if not counter:
-        return "none"
-    most_common = counter.most_common(REASON_HISTOGRAM_LIMIT)
-    parts = [f"{reason}={count}" for reason, count in most_common]
+        return "—"
+    limited = list(counter.items())
+    limited.sort(key=lambda item: item[0])
+    parts = [f"{reason}={count}" for reason, count in limited[:REASON_HISTOGRAM_LIMIT]]
     return ", ".join(parts)
 
 
@@ -1141,7 +1148,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
 def build_markdown(
     entries: Sequence[Mapping[str, Any]],
     *,
-    dedupe_notes: Mapping[Tuple[str, str], int] | None = None,
+    dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
@@ -1152,7 +1159,7 @@ def build_markdown(
     lines = [SUMMARY_TITLE, "", "## Run Summary", ""]
     lines.append(f"* **Connectors:** {len(sorted_entries)}")
     lines.append(f"* **Status counts:** {_format_status_counts(sorted_entries)}")
-    lines.append(f"* **Reason histogram:** {_format_reason_counts(sorted_entries)}")
+    lines.append(f"* **Reason histogram:** {_format_reason_histogram(sorted_entries)}")
     lines.append(f"* **Rows fetched:** {total_fetched}")
     lines.append(f"* **Rows written:** {total_written}")
     lines.append("")
@@ -1180,11 +1187,10 @@ def build_markdown(
     lines.extend(_build_table(sorted_entries))
     lines.append("")
     if dedupe_notes:
-        for (connector_id, mode), count in dedupe_notes.items():
+        for connector_id in sorted(dedupe_notes):
+            count = dedupe_notes[connector_id]
             if count:
-                lines.append(
-                    f"(deduplicated {count} duplicate entries for {connector_id} ({mode}))"
-                )
+                lines.append(f"(deduplicated {count} duplicate entries for {connector_id})")
         if any(count for count in dedupe_notes.values()):
             lines.append("")
     for entry in sorted_entries:
