@@ -244,6 +244,19 @@ def _is_no_country_match_error(err: BaseException) -> bool:
         return False
 
 
+def _country_kwargs(country: Optional[str]) -> Dict[str, str]:
+    """Return the appropriate DTM API selector payload for *country*."""
+
+    if not country:
+        return {}
+    text = str(country).strip()
+    if not text:
+        return {}
+    if len(text) == 3 and text.isalpha() and text.upper() == text:
+        return {"CountryISO3": text}
+    return {"CountryName": text}
+
+
 def _countries_mode_from_stage(stage: Optional[str]) -> str:
     if not stage:
         return "discovered"
@@ -1440,6 +1453,7 @@ class DTMApiClient:
         self.rate_limit_delay = float(api_cfg.get("rate_limit_delay", 1.0))
         self.timeout = int(api_cfg.get("timeout", 60))
         self._http_counts: Dict[str, int] = {}
+        self._last_param_used: Optional[str] = None
 
     def _record_success(self, http_counts: Optional[MutableMapping[str, int]], status: int) -> None:
         if http_counts is None:
@@ -1472,6 +1486,16 @@ class DTMApiClient:
             raise DTMHttpError(status, str(exc)) from exc
         raise DTMHttpError(0, str(exc)) from exc
 
+    def _mark_skip_no_match(
+        self,
+        country: Optional[str],
+        http_counts: Optional[MutableMapping[str, int]],
+    ) -> None:
+        if http_counts is not None:
+            http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
+        self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
+        LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
+
     def get_countries(self, http_counts: Optional[MutableMapping[str, int]] = None) -> pd.DataFrame:
         if OFFLINE:
             LOG.debug("dtm: offline skip for get_all_countries")
@@ -1496,30 +1520,58 @@ class DTMApiClient:
         if OFFLINE:
             LOG.debug("dtm: offline skip for get_idp_admin0 country=%s", country)
             return pd.DataFrame()
-        try:
-            frame = self.client.get_idp_admin0_data(
-                CountryName=country,
-                FromReportingDate=from_date,
-                ToReportingDate=to_date,
-            )
-            self._record_success(http_counts, 200)
-            if self.rate_limit_delay:
-                time.sleep(self.rate_limit_delay)
-            return frame
-        except ValueError as exc:
-            if _is_no_country_match_error(exc):
-                if http_counts is not None:
-                    http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
-                self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
-                LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
-                return None
-            LOG.error("Admin0 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
-        except Exception as exc:
-            LOG.error("Admin0 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
+        trimmed = str(country).strip() if country else ""
+        self._last_param_used = None
+        base_country = _country_kwargs(country)
+        attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
+        base_kwargs: Dict[str, Any] = {**base_country}
+        base_kwargs["FromReportingDate"] = from_date
+        base_kwargs["ToReportingDate"] = to_date
+        attempts.append(
+            (base_kwargs, "iso3" if "CountryISO3" in base_country else "name" if base_country else None)
+        )
+        if trimmed and base_country:
+            if "CountryISO3" in base_country:
+                fallback_country = {"CountryName": trimmed}
+                fallback_param = "name"
+            else:
+                fallback_country = {"CountryISO3": trimmed}
+                fallback_param = "iso3"
+            fallback_kwargs: Dict[str, Any] = {**fallback_country}
+            fallback_kwargs["FromReportingDate"] = from_date
+            fallback_kwargs["ToReportingDate"] = to_date
+            if fallback_kwargs != base_kwargs:
+                attempts.append((fallback_kwargs, fallback_param))
+
+        last_no_match = False
+        last_param: Optional[str] = None
+        for payload, param_used in attempts:
+            last_param = param_used
+            try:
+                frame = self.client.get_idp_admin0_data(**payload)
+            except ValueError as exc:
+                if _is_no_country_match_error(exc):
+                    last_no_match = True
+                    continue
+                LOG.error("Admin0 request failed: %s", exc)
+                self._record_failure(exc, http_counts)
+                raise
+            except Exception as exc:
+                LOG.error("Admin0 request failed: %s", exc)
+                self._record_failure(exc, http_counts)
+                raise
+            else:
+                self._record_success(http_counts, 200)
+                if self.rate_limit_delay:
+                    time.sleep(self.rate_limit_delay)
+                self._last_param_used = param_used
+                return frame
+
+        if last_no_match:
+            self._mark_skip_no_match(country, http_counts)
+            self._last_param_used = last_param
+            return None
+        return None
 
     def get_idp_admin1(
         self,
@@ -1532,30 +1584,58 @@ class DTMApiClient:
         if OFFLINE:
             LOG.debug("dtm: offline skip for get_idp_admin1 country=%s", country)
             return pd.DataFrame()
-        try:
-            frame = self.client.get_idp_admin1_data(
-                CountryName=country,
-                FromReportingDate=from_date,
-                ToReportingDate=to_date,
-            )
-            self._record_success(http_counts, 200)
-            if self.rate_limit_delay:
-                time.sleep(self.rate_limit_delay)
-            return frame
-        except ValueError as exc:
-            if _is_no_country_match_error(exc):
-                if http_counts is not None:
-                    http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
-                self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
-                LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
-                return None
-            LOG.error("Admin1 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
-        except Exception as exc:
-            LOG.error("Admin1 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
+        trimmed = str(country).strip() if country else ""
+        self._last_param_used = None
+        base_country = _country_kwargs(country)
+        attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
+        base_kwargs: Dict[str, Any] = {**base_country}
+        base_kwargs["FromReportingDate"] = from_date
+        base_kwargs["ToReportingDate"] = to_date
+        attempts.append(
+            (base_kwargs, "iso3" if "CountryISO3" in base_country else "name" if base_country else None)
+        )
+        if trimmed and base_country:
+            if "CountryISO3" in base_country:
+                fallback_country = {"CountryName": trimmed}
+                fallback_param = "name"
+            else:
+                fallback_country = {"CountryISO3": trimmed}
+                fallback_param = "iso3"
+            fallback_kwargs = {**fallback_country}
+            fallback_kwargs["FromReportingDate"] = from_date
+            fallback_kwargs["ToReportingDate"] = to_date
+            if fallback_kwargs != base_kwargs:
+                attempts.append((fallback_kwargs, fallback_param))
+
+        last_no_match = False
+        last_param: Optional[str] = None
+        for payload, param_used in attempts:
+            last_param = param_used
+            try:
+                frame = self.client.get_idp_admin1_data(**payload)
+            except ValueError as exc:
+                if _is_no_country_match_error(exc):
+                    last_no_match = True
+                    continue
+                LOG.error("Admin1 request failed: %s", exc)
+                self._record_failure(exc, http_counts)
+                raise
+            except Exception as exc:
+                LOG.error("Admin1 request failed: %s", exc)
+                self._record_failure(exc, http_counts)
+                raise
+            else:
+                self._record_success(http_counts, 200)
+                if self.rate_limit_delay:
+                    time.sleep(self.rate_limit_delay)
+                self._last_param_used = param_used
+                return frame
+
+        if last_no_match:
+            self._mark_skip_no_match(country, http_counts)
+            self._last_param_used = last_param
+            return None
+        return None
 
     def get_idp_admin2(
         self,
@@ -1569,33 +1649,62 @@ class DTMApiClient:
         if OFFLINE:
             LOG.debug("dtm: offline skip for get_idp_admin2 country=%s operation=%s", country, operation)
             return pd.DataFrame()
-        try:
-            params = {
-                "CountryName": country,
-                "FromReportingDate": from_date,
-                "ToReportingDate": to_date,
-            }
+        trimmed = str(country).strip() if country else ""
+        self._last_param_used = None
+        base_country = _country_kwargs(country)
+        attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
+        base_kwargs: Dict[str, Any] = {**base_country}
+        base_kwargs["FromReportingDate"] = from_date
+        base_kwargs["ToReportingDate"] = to_date
+        if operation:
+            base_kwargs["Operation"] = operation
+        attempts.append(
+            (base_kwargs, "iso3" if "CountryISO3" in base_country else "name" if base_country else None)
+        )
+        if trimmed and base_country:
+            if "CountryISO3" in base_country:
+                fallback_country = {"CountryName": trimmed}
+                fallback_param = "name"
+            else:
+                fallback_country = {"CountryISO3": trimmed}
+                fallback_param = "iso3"
+            fallback_kwargs: Dict[str, Any] = {**fallback_country}
+            fallback_kwargs["FromReportingDate"] = from_date
+            fallback_kwargs["ToReportingDate"] = to_date
             if operation:
-                params["Operation"] = operation
-            frame = self.client.get_idp_admin2_data(**params)
-            self._record_success(http_counts, 200)
-            if self.rate_limit_delay:
-                time.sleep(self.rate_limit_delay)
-            return frame
-        except ValueError as exc:
-            if _is_no_country_match_error(exc):
-                if http_counts is not None:
-                    http_counts["skip_no_match"] = http_counts.get("skip_no_match", 0) + 1
-                self._http_counts["skip_no_match"] = self._http_counts.get("skip_no_match", 0) + 1
-                LOG.warning("Skipping unsupported country (no match): %s", country or "<unspecified>")
-                return None
-            LOG.error("Admin2 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
-        except Exception as exc:
-            LOG.error("Admin2 request failed: %s", exc)
-            self._record_failure(exc, http_counts)
-            raise
+                fallback_kwargs["Operation"] = operation
+            if fallback_kwargs != base_kwargs:
+                attempts.append((fallback_kwargs, fallback_param))
+
+        last_no_match = False
+        last_param: Optional[str] = None
+        for payload, param_used in attempts:
+            last_param = param_used
+            try:
+                frame = self.client.get_idp_admin2_data(**payload)
+            except ValueError as exc:
+                if _is_no_country_match_error(exc):
+                    last_no_match = True
+                    continue
+                LOG.error("Admin2 request failed: %s", exc)
+                self._record_failure(exc, http_counts)
+                raise
+            except Exception as exc:
+                LOG.error("Admin2 request failed: %s", exc)
+                self._record_failure(exc, http_counts)
+                raise
+            else:
+                self._record_success(http_counts, 200)
+                if self.rate_limit_delay:
+                    time.sleep(self.rate_limit_delay)
+                self._last_param_used = param_used
+                return frame
+
+        if last_no_match:
+            self._mark_skip_no_match(country, http_counts)
+            self._last_param_used = last_param
+            return None
+        return None
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -2286,7 +2395,7 @@ def _fetch_level_pages_with_logging(
     from_date: Optional[str],
     to_date: Optional[str],
     http_counts: MutableMapping[str, int],
-) -> Tuple[List[pd.DataFrame], int]:
+) -> Tuple[List[pd.DataFrame], int, Optional[str]]:
     method_name = ADMIN_METHODS.get(level, level)
     context = {
         "level": level,
@@ -2332,6 +2441,13 @@ def _fetch_level_pages_with_logging(
                 size_bytes += int(page.memory_usage(deep=True).sum())
             except Exception:
                 size_bytes += 0
+    param_mode = getattr(client, "_last_param_used", None)
+    if param_mode == "iso3":
+        context["param"] = "CountryISO3"
+    elif param_mode == "name":
+        context["param"] = "CountryName"
+    elif param_mode:
+        context["param"] = str(param_mode)
     context.update(
         {
             "status": "ok" if rows > 0 else "empty",
@@ -2345,7 +2461,7 @@ def _fetch_level_pages_with_logging(
     country_label = country or "all countries"
     op_suffix = f" / operation={operation}" if operation else ""
     LOG.info("Fetched %d rows for %s (%s%s)", rows, country_label, level, op_suffix)
-    return pages, rows
+    return pages, rows, param_mode
 
 
 def _resolve_admin_levels(cfg: Mapping[str, Any]) -> List[str]:
@@ -2403,8 +2519,10 @@ def _fetch_api_data(
     _ensure_diagnostics_scaffolding()
     summary_extras = summary.setdefault("extras", {})
     per_country_counts: List[Dict[str, Any]] = []
+    per_country_diagnostics: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
     summary_extras["per_country_counts"] = per_country_counts
+    summary_extras["per_country"] = per_country_diagnostics
     summary_extras["failures"] = failures
     drop_reasons_counter = {
         "no_country_match": 0,
@@ -2656,10 +2774,14 @@ def _fetch_api_data(
                     op_suffix,
                 )
                 failed = False
+                failure_reason: Optional[str] = None
                 skip_before = http_counter.get("skip_no_match", 0)
+                pages: List[pd.DataFrame] = []
+                raw_rows = 0
+                param_mode: Optional[str] = None
                 with diagnostics_timing(f"{country_label}|{level}") as timing_result:
                     try:
-                        pages, _ = _fetch_level_pages_with_logging(
+                        pages, raw_rows, param_mode = _fetch_level_pages_with_logging(
                             client,
                             level,
                             country=country_name,
@@ -2705,7 +2827,18 @@ def _fetch_api_data(
                         )
                         status_entry["errors"] = True
                         failed = True
+                        failure_reason = type(exc).__name__
                         pages = []
+                if param_mode is None:
+                    param_mode = getattr(client, "_last_param_used", None)
+                per_country_entry: Dict[str, Any] = {
+                    "country": country_label,
+                    "level": level,
+                    "operation": operation,
+                    "param": param_mode,
+                    "pages": len(pages),
+                    "rows": int(raw_rows),
+                }
                 skip_after = http_counter.get("skip_no_match", 0)
                 if skip_after > skip_before:
                     if not status_entry.get("skip_no_match"):
@@ -2717,8 +2850,15 @@ def _fetch_api_data(
                         "Skipping unsupported country after no-match response: %s",
                         country_label,
                     )
+                    per_country_entry["skipped_no_match"] = True
+                    per_country_entry["reason"] = "no_country_match"
+                    per_country_diagnostics.append(per_country_entry)
                     break
                 if failed:
+                    per_country_entry["skipped_no_match"] = False
+                    if failure_reason:
+                        per_country_entry["reason"] = failure_reason
+                    per_country_diagnostics.append(per_country_entry)
                     continue
 
                 for page in pages:
@@ -2861,6 +3001,9 @@ def _fetch_api_data(
                     continue
 
                 range_label = f"{from_date or '-'}->{to_date or '-'}"
+                per_country_entry["skipped_no_match"] = False
+                per_country_entry.setdefault("reason", "")
+                per_country_diagnostics.append(per_country_entry)
                 per_country_counts.append(
                     {
                         "country": country_label,
