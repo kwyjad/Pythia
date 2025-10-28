@@ -11,7 +11,7 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     df.to_csv(path, index=False)
 
 
-def test_export_skips_meta_json_and_uses_csv(tmp_path, monkeypatch):
+def test_export_source_specific_dtm_mapping(tmp_path, monkeypatch):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     staging_dir = tmp_path / "staging"
     staging_dir.mkdir()
@@ -20,85 +20,7 @@ def test_export_skips_meta_json_and_uses_csv(tmp_path, monkeypatch):
         csv_path,
         [
             {"CountryISO3": "nga", "ReportingDate": "2024-01-01", "idp_count": 100},
-            {"CountryISO3": "ner", "ReportingDate": "2024-01-05", "idp_count": 50},
-        ],
-    )
-    meta_path = staging_dir / "dtm_displacement.csv.meta.json"
-    meta_path.write_text("", encoding="utf-8")
-
-    out_dir = tmp_path / "exports"
-    result = export_facts(
-        inp=staging_dir,
-        config_path=DEFAULT_CONFIG,
-        out_dir=out_dir,
-        write_db="0",
-    )
-
-    assert result.rows == 2
-    assert result.csv_path.exists()
-
-    meta_entries = [detail for detail in result.sources if detail.path == meta_path]
-    assert meta_entries, "meta json should be recorded as skipped"
-    assert meta_entries[0].strategy == "meta-skip"
-    assert meta_entries[0].rows_out == 0
-
-    used_paths = {detail.path for detail in result.sources if detail.rows_out > 0}
-    assert csv_path in used_paths
-
-
-def test_export_report_written(tmp_path, monkeypatch):
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    staging_dir = tmp_path / "staging"
-    staging_dir.mkdir()
-    csv_path = staging_dir / "dtm_displacement.csv"
-    _write_csv(
-        csv_path,
-        [
-            {"CountryISO3": "uga", "ReportingDate": "2024-01-10", "idp_count": 25},
-        ],
-    )
-    bad_json = staging_dir / "bad.json"
-    bad_json.write_text("not json", encoding="utf-8")
-
-    out_dir = tmp_path / "exports"
-    result = export_facts(
-        inp=staging_dir,
-        config_path=DEFAULT_CONFIG,
-        out_dir=out_dir,
-        write_db="0",
-    )
-
-    report_json = out_dir / "export_report.json"
-    report_md = out_dir / "export_report.md"
-
-    assert result.rows == 1
-    assert report_json.exists()
-    assert report_md.exists()
-
-    report_data = json.loads(report_json.read_text(encoding="utf-8"))
-    assert report_data["rows_exported"] == 1
-    assert str(csv_path) in report_data["inputs_used"]
-    skipped = {entry["path"]: entry for entry in report_data["inputs_skipped"]}
-    assert str(bad_json) in skipped
-    assert skipped[str(bad_json)]["strategy"] in {"empty-input", "read-failed"}
-    assert report_data["sample_head"]
-
-    md_contents = report_md.read_text(encoding="utf-8")
-    assert "Export Report" in md_contents
-    assert "bad.json" in md_contents
-
-
-def test_dtm_source_mapping_applies(tmp_path, monkeypatch):
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    staging_dir = tmp_path / "staging"
-    staging_dir.mkdir()
-    csv_path = staging_dir / "dtm_displacement.csv"
-    _write_csv(
-        csv_path,
-        [
-            {"CountryISO3": "nga", "ReportingDate": "2024-01-05", "idp_count": 100},
-            {"CountryISO3": "NGA", "ReportingDate": "2024-01-05", "idp_count": 120},
-            {"CountryISO3": "ner", "ReportingDate": "2024-01-07", "idp_count": 40},
+            {"CountryISO3": "Ner", "ReportingDate": "2024-01-05", "idp_count": 50},
         ],
     )
 
@@ -111,12 +33,121 @@ def test_dtm_source_mapping_applies(tmp_path, monkeypatch):
     )
 
     df = result.dataframe
-    assert {"NGA", "NER"} == set(df["iso3"])
-    nga_row = df[df["iso3"] == "NGA"].iloc[0]
-    assert nga_row["value"] == "120"
-    assert nga_row["metric"] == "idps"
-    assert nga_row["ym"] == "2024-01"
-    assert nga_row["semantics"] == "stock"
+    assert result.rows == 2
+    assert {"iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"}.issubset(
+        set(df.columns)
+    )
+    assert set(df["iso3"]) == {"NGA", "NER"}
+    assert set(df["metric"]) == {"idps"}
+    assert set(df["semantics"]) == {"stock"}
+    assert set(df["source"]) == {"IOM DTM"}
+    assert all(value.endswith("01") or value.endswith("05") for value in df["as_of_date"])
 
-    assert len(df[df["iso3"] == "NGA"]) == 1
+    matched = result.report["matched_files"]
+    assert len(matched) == 1
+    assert matched[0]["source"] == "dtm_displacement_admin0"
+    assert matched[0]["rows_in"] == 2
+
+
+def test_export_filters_and_dedupe(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    csv_path = staging_dir / "dtm_displacement.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"CountryISO3": "uga", "ReportingDate": "2024-02-01", "idp_count": 5},
+            {"CountryISO3": "uga", "ReportingDate": "2024-02-01", "idp_count": 10},
+            {"CountryISO3": "uga", "ReportingDate": "2024-02-02", "idp_count": 0},
+        ],
+    )
+
+    out_dir = tmp_path / "exports"
+    result = export_facts(
+        inp=staging_dir,
+        config_path=DEFAULT_CONFIG,
+        out_dir=out_dir,
+        write_db="0",
+    )
+
+    df = result.dataframe
+    assert result.rows == 1
+    assert df.iloc[0]["value"] == "10"
+    assert result.report["dropped_by_filter"] == {"keep_if_positive": 1}
+    assert result.report["dedupe_keys"] == ["iso3", "as_of_date", "metric"]
+    assert result.report["dedupe_keep"] == ["last"]
+
+    matched = result.report["matched_files"][0]
+    assert matched["rows_in"] == 3
+    assert matched["rows_after_filters"] == 2
+    assert matched["rows_after_dedupe"] == 1
+
+
+def test_export_report_written_and_appended(tmp_path, monkeypatch):
+    gh_summary = tmp_path / "gh_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(gh_summary))
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    csv_path = staging_dir / "dtm_displacement.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"CountryISO3": "cod", "ReportingDate": "2024-03-15", "idp_count": 75},
+        ],
+    )
+
+    out_dir = tmp_path / "exports"
+    summary_path = tmp_path / "summary.md"
+    result = export_facts(
+        inp=staging_dir,
+        config_path=DEFAULT_CONFIG,
+        out_dir=out_dir,
+        write_db="0",
+        append_summary_path=summary_path,
+    )
+
+    report_json = out_dir / "export_report.json"
+    report_md = out_dir / "export_report.md"
+
+    assert report_json.exists()
+    assert report_md.exists()
+    assert summary_path.exists()
+    assert gh_summary.exists()
+
+    report_data = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report_data["rows_exported"] == 1
+    assert report_data["matched_files"][0]["path"].endswith("dtm_displacement.csv")
+    assert report_data["filters_applied"] == ["keep_if_not_null", "keep_if_positive"]
+
+    md_contents = report_md.read_text(encoding="utf-8")
+    assert "## Export Facts" in md_contents
+    assert "Matched files" in md_contents
+    assert "dtm_displacement.csv" in md_contents
+
+    summary_contents = summary_path.read_text(encoding="utf-8")
+    assert md_contents.strip() in summary_contents
+    gh_contents = gh_summary.read_text(encoding="utf-8")
+    assert "## Export Facts" in gh_contents
+
+
+def test_export_handles_unmatched_files_gracefully(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    unknown_path = staging_dir / "unknown.csv"
+    _write_csv(unknown_path, [{"foo": "bar"}])
+
+    out_dir = tmp_path / "exports"
+    result = export_facts(
+        inp=staging_dir,
+        config_path=DEFAULT_CONFIG,
+        out_dir=out_dir,
+        write_db="0",
+    )
+
+    assert result.rows == 0
+    assert result.report["rows_exported"] == 0
+    assert result.report["matched_files"] == []
+    assert any(unknown_path.name in path for path in result.report["unmatched_files"])
     assert (out_dir / "facts.csv").exists()

@@ -277,10 +277,12 @@ jobs:
             export PYTHONWARNINGS=default
           fi
           mkdir -p resolver/exports/backfill
+          mkdir -p diagnostics/ingestion
           python -m resolver.tools.export_facts \
             --in resolver/staging \
             --out resolver/exports/backfill \
-            --config resolver/tools/export_config.yml
+            --config resolver/tools/export_config.yml \
+            --append-summary diagnostics/ingestion/summary.md
 
       - name: Derive and freeze monthly snapshots
         env:
