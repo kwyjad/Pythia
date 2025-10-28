@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import numbers
 import os
 import re
 import sys
@@ -91,6 +92,132 @@ REQUIRED = [
 
 CANONICAL_CORE = {"iso3", "metric", "value", "as_of_date"}
 
+
+def _normalize_export_df(df: "pd.DataFrame") -> "pd.DataFrame":
+    if df is None or df.empty:
+        return df
+
+    required = ["iso3", "as_of_date", "metric", "value"]
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    df["iso3"] = df["iso3"].astype(str).str.strip().str.upper()
+    df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df["metric"] = df["metric"].astype(str).str.strip()
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    df = df.dropna(subset=["iso3", "as_of_date", "metric", "value"])
+    df = df[df["iso3"].str.len() == 3]
+    df = df[df["value"] > 0]
+
+    return df
+
+
+def _format_numeric_string(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, numbers.Number):
+        float_val = float(value)
+        if float_val.is_integer():
+            return str(int(float_val))
+        return str(float_val)
+    return str(value)
+
+
+def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dict[str, Any]]:
+    cols = {"CountryISO3", "ReportingDate", "idp_count"}
+    metadata = {
+        "rows_after_filters": 0,
+        "rows_after_aggregate": 0,
+        "rows_after_dedupe": 0,
+        "filters_applied": ["keep_if_not_null", "keep_if_positive"],
+        "drop_histogram": {"keep_if_not_null": 0, "keep_if_positive": 0},
+        "aggregate_keys": ["iso3", "as_of_date", "metric"],
+        "aggregate_funcs": {"value": "max"},
+        "aggregate_rows_before": 0,
+    }
+
+    empty_df = pd.DataFrame(
+        columns=["iso3", "as_of_date", "metric", "value", "series_semantics", "semantics", "source", "ym"]
+    )
+
+    if frame is None or frame.empty or not cols.issubset(set(frame.columns)):
+        return empty_df, metadata
+
+    iso_series = frame["CountryISO3"].astype(str).str.strip().str.upper()
+    parsed_dates = pd.to_datetime(frame["ReportingDate"], errors="coerce")
+    value_series = pd.to_numeric(frame["idp_count"], errors="coerce")
+
+    valid_iso = iso_series.str.len() == 3
+    valid_dates = parsed_dates.notna()
+    valid_values = value_series.notna()
+    not_null_mask = valid_iso & valid_dates & valid_values
+    positive_mask = value_series > 0
+    filters_mask = not_null_mask & positive_mask
+
+    metadata["drop_histogram"]["keep_if_not_null"] = int((~not_null_mask).sum())
+    metadata["drop_histogram"]["keep_if_positive"] = int((not_null_mask & ~positive_mask).sum())
+
+    if not filters_mask.any():
+        return empty_df, metadata
+
+    filtered = pd.DataFrame(
+        {
+            "iso3": iso_series[filters_mask],
+            "as_of_date": parsed_dates[filters_mask],
+            "metric": "idps_stock",
+            "value": value_series[filters_mask],
+        }
+    )
+    filtered["series_semantics"] = "stock"
+    filtered["semantics"] = "stock"
+    filtered["source"] = "IOM DTM"
+
+    normalized = _normalize_export_df(filtered)
+    metadata["rows_after_filters"] = int(len(normalized))
+    metadata["aggregate_rows_before"] = metadata["rows_after_filters"]
+
+    if normalized.empty:
+        return empty_df, metadata
+
+    aggregated = (
+        normalized.groupby(["iso3", "as_of_date", "metric"], as_index=False, sort=False)
+        .agg({"value": "max"})
+        .reset_index(drop=True)
+    )
+    aggregated["series_semantics"] = "stock"
+    aggregated["semantics"] = "stock"
+    aggregated["source"] = "IOM DTM"
+    aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce").dt.strftime(
+        "%Y-%m-%d"
+    )
+    aggregated["ym"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce").dt.strftime("%Y-%m")
+    aggregated["value"] = aggregated["value"].apply(_format_numeric_string)
+
+    for column in REQUIRED:
+        if column not in aggregated.columns:
+            aggregated[column] = ""
+
+    metadata["rows_after_aggregate"] = int(len(aggregated))
+    metadata["rows_after_dedupe"] = int(len(aggregated))
+
+    ordered_columns = [
+        "iso3",
+        "as_of_date",
+        "ym",
+        "metric",
+        "value",
+        "semantics",
+        "series_semantics",
+        "source",
+    ]
+    existing = [col for col in ordered_columns if col in aggregated.columns]
+    remaining = [col for col in aggregated.columns if col not in existing]
+    aggregated = aggregated[existing + remaining]
+
+    return aggregated.reset_index(drop=True), metadata
+
 def _load_config(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -130,6 +257,16 @@ def _collect_inputs(inp: Path) -> tuple[List[Path], List[Path]]:
     if inp.name.endswith(".meta.json"):
         return [], [inp]
     return [inp], []
+
+
+def _relativize_path(path: Path) -> str:
+    candidates = [ROOT.parent, Path.cwd()]
+    for base in candidates:
+        try:
+            return path.resolve().relative_to(base.resolve()).as_posix()
+        except ValueError:
+            continue
+    return path.resolve().as_posix()
 
 
 @dataclass
@@ -415,46 +552,105 @@ def _apply_dedupe(
     return deduped, keys, keep_arg, removed
 
 
-def _source_matches(path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, Any]) -> bool:
+def _source_matches(
+    path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, Any]
+) -> tuple[bool, Dict[str, Any]]:
     match_cfg = source_cfg.get("match") if isinstance(source_cfg, Mapping) else None
     if not isinstance(match_cfg, Mapping):
-        return True
+        return True, {"regex_miss": False, "regex_checked": False, "missing_columns": []}
+    reasons: Dict[str, Any] = {
+        "regex_miss": False,
+        "regex_checked": False,
+        "missing_columns": [],
+        "missing_required_any": [],
+    }
     filename_regex = match_cfg.get("filename_regex")
     if filename_regex:
         try:
             pattern = str(filename_regex)
             target = path.as_posix()
-            if not re.search(pattern, target):
-                if not re.search(pattern, path.name):
-                    return False
-        except re.error:
-            return False
+            reasons["regex_checked"] = True
+            if not re.search(pattern, target) and not re.search(pattern, path.name):
+                reasons["regex_miss"] = True
+                return False, reasons
+        except re.error as exc:
+            reasons["regex_checked"] = True
+            reasons["regex_miss"] = True
+            reasons["regex_error"] = str(exc)
+            return False, reasons
     required = match_cfg.get("required_columns")
     if required:
         required_columns = {str(column) for column in _ensure_iterable(required)}
         if not required_columns.issubset(set(frame.columns)):
-            return False
+            reasons["missing_columns"] = sorted(
+                required_columns.difference(set(frame.columns))
+            )
+            return False, reasons
     required_any = match_cfg.get("required_any")
     if isinstance(required_any, Mapping):
         available = {str(column) for column in frame.columns}
+        missing_groups: List[str] = []
         for aliases in required_any.values():
             alias_group = [str(alias) for alias in _ensure_iterable(aliases) if str(alias)]
             if alias_group and not any(alias in available for alias in alias_group):
-                return False
-    return True
+                missing_groups.append(
+                    "/".join(alias_group)
+                    if len(alias_group) > 1
+                    else (alias_group[0] if alias_group else "")
+                )
+        if missing_groups:
+            reasons["missing_required_any"] = [group for group in missing_groups if group]
+            return False, reasons
+    return True, reasons
 
 
 def _find_source_for_file(
     path: Path,
     frame: "pd.DataFrame",
     sources_cfg: Sequence[Mapping[str, Any]],
-) -> Optional[Mapping[str, Any]]:
+) -> tuple[Optional[Mapping[str, Any]], List[Dict[str, Any]]]:
+    attempts: List[Dict[str, Any]] = []
     for source in sources_cfg:
         if not isinstance(source, Mapping):
             continue
-        if _source_matches(path, frame, source):
-            return source
-    return None
+        matched, reasons = _source_matches(path, frame, source)
+        attempt = {
+            "name": str(source.get("name") or path.name),
+            "matched": matched,
+            "reasons": reasons,
+        }
+        attempts.append(attempt)
+        if matched:
+            return source, attempts
+    return None, attempts
+
+
+def _summarize_match_attempts(attempts: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    regex_checked = False
+    regex_success = False
+    missing_columns: set[str] = set()
+    missing_required_any: set[str] = set()
+    for attempt in attempts:
+        raw_reasons = attempt.get("reasons")
+        reasons = raw_reasons if isinstance(raw_reasons, Mapping) else {}
+        if reasons.get("regex_checked"):
+            regex_checked = True
+            if not reasons.get("regex_miss"):
+                regex_success = True
+        for column in reasons.get("missing_columns") or []:
+            missing_columns.add(str(column))
+        for group in reasons.get("missing_required_any") or []:
+            missing_required_any.add(str(group))
+    if regex_checked:
+        summary["regex_miss"] = not regex_success
+    else:
+        summary["regex_miss"] = False
+    if missing_columns:
+        summary["missing_columns"] = sorted(missing_columns)
+    if missing_required_any:
+        summary["missing_required_any"] = sorted(missing_required_any)
+    return summary
 
 
 def _auto_detect_dtm_source(frame: "pd.DataFrame") -> Optional[Dict[str, Any]]:
@@ -1105,6 +1301,7 @@ def export_facts(
 
     warnings: List[str] = []
     source_details: List[SourceApplication] = []
+    debug_records: List[Dict[str, Any]] = []
 
     for meta_path in skipped_meta:
         message = f"Skipped metadata file {meta_path.name}"
@@ -1132,12 +1329,25 @@ def export_facts(
         mapped_frames: List[pd.DataFrame] = []
         sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
         raw_frames: List[tuple[Path, "pd.DataFrame"]] = []
+        dtm_frame: Optional["pd.DataFrame"] = None
+        dtm_detail: Optional[SourceApplication] = None
+        dtm_yaml_rows: Optional[int] = None
+        dtm_debug_entry: Optional[Dict[str, Any]] = None
         for file_path in files:
             try:
                 frame = _read_one(file_path)
             except Exception as exc:
                 warning = f"Failed to read {file_path.name}: {exc}"
                 warnings.append(warning)
+                debug_records.append(
+                    {
+                        "file": _relativize_path(file_path),
+                        "matched": False,
+                        "used_mapping": None,
+                        "columns": [],
+                        "reasons": {"read_error": str(exc)},
+                    }
+                )
                 source_details.append(
                     SourceApplication(
                         name=file_path.name,
@@ -1153,6 +1363,15 @@ def export_facts(
             if frame.empty:
                 warning = f"{file_path.name}: no rows parsed (empty or invalid file)"
                 warnings.append(warning)
+                debug_records.append(
+                    {
+                        "file": _relativize_path(file_path),
+                        "matched": False,
+                        "used_mapping": None,
+                        "columns": [],
+                        "reasons": {"empty_input": True},
+                    }
+                )
                 source_details.append(
                     SourceApplication(
                         name=file_path.name,
@@ -1166,8 +1385,17 @@ def export_facts(
                 continue
 
             raw_frames.append((file_path, frame))
-            matched_cfg = _find_source_for_file(file_path, frame, sources_cfg)
+            relative_path = _relativize_path(file_path)
+            columns = [str(col) for col in frame.columns]
+            if file_path.name == "dtm_displacement.csv":
+                dtm_frame = frame
+            debug_entry: Dict[str, Any] = {
+                "file": relative_path,
+                "columns": columns,
+            }
+            matched_cfg, attempts = _find_source_for_file(file_path, frame, sources_cfg)
             strategy = "config"
+            attempt_summary = _summarize_match_attempts(attempts)
             if matched_cfg is None:
                 auto_cfg = _auto_detect_dtm_source(frame)
                 if auto_cfg is not None:
@@ -1185,6 +1413,14 @@ def export_facts(
                         strategy="canonical-passthrough",
                     )
                     source_details.append(detail)
+                    debug_entry.update(
+                        {
+                            "matched": True,
+                            "used_mapping": "canonical-passthrough",
+                            "strategy": "canonical-passthrough",
+                        }
+                    )
+                    debug_records.append(debug_entry)
                     if not mapped.empty:
                         mapped_frames.append(mapped)
                     continue
@@ -1201,6 +1437,17 @@ def export_facts(
                             warnings=[warning],
                         )
                     )
+                    reasons = attempt_summary or {}
+                    if "regex_miss" not in reasons:
+                        reasons["regex_miss"] = False
+                    debug_entry.update(
+                        {
+                            "matched": False,
+                            "used_mapping": None,
+                            "reasons": reasons,
+                        }
+                    )
+                    debug_records.append(debug_entry)
                     continue
 
             mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
@@ -1208,8 +1455,72 @@ def export_facts(
             if detail.warnings:
                 warnings.extend(detail.warnings)
             source_details.append(detail)
+            if file_path.name == "dtm_displacement.csv":
+                dtm_yaml_rows = len(mapped)
+                dtm_detail = detail
             if not mapped.empty:
                 mapped_frames.append(mapped)
+            mapping_name = str(matched_cfg.get("name") or file_path.name)
+            debug_entry.update(
+                {
+                    "matched": True,
+                    "used_mapping": mapping_name,
+                    "strategy": strategy,
+                }
+            )
+            if detail.dedupe_keys:
+                debug_entry["dedupe"] = {
+                    "keys": detail.dedupe_keys,
+                    "keep": detail.dedupe_keep,
+                }
+            debug_records.append(debug_entry)
+            if file_path.name == "dtm_displacement.csv":
+                dtm_debug_entry = debug_entry
+
+        if dtm_yaml_rows == 0 and dtm_frame is not None:
+            fallback, fallback_meta = _map_dtm_admin0_fallback(dtm_frame)
+            if fallback is not None and not fallback.empty:
+                if "series_semantics" not in fallback.columns:
+                    fallback["series_semantics"] = "stock"
+                mapped_frames.append(fallback)
+                warning_msg = (
+                    "dtm_displacement.csv: YAML mapping yielded 0 rows; applied admin0 fallback"
+                )
+                warnings.append(warning_msg)
+                LOGGER.warning(
+                    "Export mapping warning: YAML mapping yielded 0 rows; applied dtm_admin0 fallback: %s rows",
+                    len(fallback),
+                )
+                if dtm_detail is not None:
+                    dtm_detail.rows_mapped = fallback_meta.get("rows_after_filters", len(fallback))
+                    dtm_detail.rows_after_filters = fallback_meta.get("rows_after_filters", len(fallback))
+                    dtm_detail.rows_after_aggregate = fallback_meta.get("rows_after_aggregate", len(fallback))
+                    dtm_detail.rows_after_dedupe = fallback_meta.get("rows_after_dedupe", len(fallback))
+                    dtm_detail.dedupe_keys = ["iso3", "as_of_date", "metric"]
+                    dtm_detail.dedupe_keep = "last"
+                    dtm_detail.aggregate_keys = fallback_meta.get("aggregate_keys", [])
+                    dtm_detail.aggregate_funcs = fallback_meta.get("aggregate_funcs", {})
+                    dtm_detail.drop_histogram = fallback_meta.get("drop_histogram", {})
+                    dtm_detail.filters_applied = fallback_meta.get("filters_applied", [])
+                    metric_details = dtm_detail.mapping_details.get("metric")
+                    if isinstance(metric_details, dict):
+                        metric_details["const"] = "idps_stock"
+                    detail_warning = (
+                        "YAML mapping yielded 0 rows; applied dtm_admin0 fallback"
+                    )
+                    if detail_warning not in dtm_detail.warnings:
+                        dtm_detail.warnings.append(detail_warning)
+                if dtm_debug_entry is not None:
+                    dtm_debug_entry["fallback"] = {
+                        "applied": True,
+                        "rows": int(len(fallback)),
+                        "rows_after_filters": int(
+                            fallback_meta.get("rows_after_filters", len(fallback))
+                        ),
+                        "rows_after_aggregate": int(
+                            fallback_meta.get("rows_after_aggregate", len(fallback))
+                        ),
+                    }
 
         if not mapped_frames and raw_frames:
             staging_frames = [frame for _, frame in raw_frames]
@@ -1238,6 +1549,11 @@ def export_facts(
                 strategy="legacy-fallback",
             )
             source_details.append(detail)
+            fallback_warning = (
+                "Legacy fallback applied: "
+                f"{len(staging)} staging rows → {len(fallback)} exported rows"
+            )
+            warnings.append(fallback_warning)
             if not fallback.empty:
                 mapped_frames.append(fallback)
 
@@ -1399,6 +1715,16 @@ def export_facts(
         "meta_files_skipped": [str(path) for path in skipped_meta],
         "monthly_summary": monthly_summary,
     }
+
+    debug_dir = Path("diagnostics/ingestion/export_preview")
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_path = debug_dir / "mapping_debug.jsonl"
+        with open(debug_path, "w", encoding="utf-8") as fh:
+            for record in debug_records:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        LOGGER.warning("Failed to write mapping debug file: %s", exc)
 
     report_json_path = report_json_path or (out_dir / "export_report.json")
     report_json_path.parent.mkdir(parents=True, exist_ok=True)

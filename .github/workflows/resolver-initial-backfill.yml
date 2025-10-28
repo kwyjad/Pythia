@@ -158,7 +158,12 @@ jobs:
       - name: Ensure diagnostics dirs exist (post-run)
         if: always()
         run: |
-          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm,export_preview}
+          : > diagnostics/ingestion/raw/KEEP.txt
+          : > diagnostics/ingestion/metrics/KEEP.txt
+          : > diagnostics/ingestion/samples/KEEP.txt
+          : > diagnostics/ingestion/export_preview/KEEP.txt
+          : > diagnostics/ingestion/dtm/KEEP.txt
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
@@ -180,11 +185,12 @@ jobs:
       - name: Prime ingestion artifact placeholders
         if: always()
         run: |
-          mkdir -p diagnostics/ingestion/{raw,metrics,samples,dtm}
-          echo "placeholder" > diagnostics/ingestion/raw/KEEP.txt
-          echo "placeholder" > diagnostics/ingestion/metrics/KEEP.txt
-          echo "placeholder" > diagnostics/ingestion/samples/KEEP.txt
-          echo "placeholder" > diagnostics/ingestion/dtm/KEEP.txt
+          mkdir -p diagnostics/ingestion/{raw,metrics,samples,dtm,export_preview}
+          : > diagnostics/ingestion/raw/KEEP.txt
+          : > diagnostics/ingestion/metrics/KEEP.txt
+          : > diagnostics/ingestion/samples/KEEP.txt
+          : > diagnostics/ingestion/dtm/KEEP.txt
+          : > diagnostics/ingestion/export_preview/KEEP.txt
 
       - name: Upload connector logs
         if: always()

@@ -44,6 +44,25 @@ def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
     return data if isinstance(data, Mapping) else None
 
 
+def _load_mapping_debug(path: Path) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, Mapping):
+                    records.append(dict(parsed))
+    except OSError:
+        return []
+    return records
+
+
 def _coerce_int(value: Any) -> int:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -1408,11 +1427,13 @@ def build_markdown(
     dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
+    mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
     total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
     total_written = sum(entry.get("counts", {}).get("written", 0) for entry in sorted_entries)
     dtm_entry = next((entry for entry in sorted_entries if entry.get("connector_id") == "dtm_client"), None)
+    mapping_debug_records = list(mapping_debug or [])
 
     lines = [SUMMARY_TITLE, "", "## Run Summary", ""]
     lines.append(f"* **Connectors:** {len(sorted_entries)}")
@@ -1424,12 +1445,12 @@ def build_markdown(
 
     export_info = export_summary or {}
     export_error = export_info.get("error")
-    if export_info or export_error:
+    if export_info or export_error or mapping_debug_records:
         lines.append("## Export Facts")
         lines.append("")
         if export_error:
             lines.append(f"- **Status:** {export_error}")
-        else:
+        elif export_info:
             rows_written = export_info.get("rows", 0)
             csv_path = export_info.get("csv_path")
             lines.append(f"- **facts.csv rows:** {rows_written}")
@@ -1463,6 +1484,74 @@ def build_markdown(
                         if joined:
                             summary_line += f" — warnings: {joined}"
                     lines.append(summary_line)
+        else:
+            lines.append("- **Status:** export summary unavailable")
+
+        if mapping_debug_records:
+            lines.append("")
+            lines.append("### Export mapping debug")
+            lines.append("")
+            limit = min(10, len(mapping_debug_records))
+            for record in mapping_debug_records[:limit]:
+                record_map = dict(record)
+                file_path = str(record_map.get("file") or "?")
+                matched = bool(record_map.get("matched"))
+                used_mapping = record_map.get("used_mapping")
+                lines.append(f"- `{file_path}`")
+                if matched:
+                    if used_mapping:
+                        lines.append(f"  - Matched: yes (`{used_mapping}`)")
+                    else:
+                        lines.append("  - Matched: yes")
+                else:
+                    lines.append("  - Matched: no")
+                    reasons = record_map.get("reasons")
+                    reason_parts: List[str] = []
+                    if isinstance(reasons, Mapping):
+                        if reasons.get("regex_miss"):
+                            reason_parts.append("regex_miss")
+                        missing_cols = reasons.get("missing_columns") or []
+                        if missing_cols:
+                            cols_joined = ", ".join(str(col) for col in missing_cols)
+                            reason_parts.append(f"missing_columns=[{cols_joined}]")
+                        missing_any = reasons.get("missing_required_any") or []
+                        if missing_any:
+                            any_joined = ", ".join(str(group) for group in missing_any)
+                            reason_parts.append(f"missing_required_any=[{any_joined}]")
+                        extra_keys = [
+                            key
+                            for key in reasons
+                            if key
+                            not in {"regex_miss", "missing_columns", "missing_required_any"}
+                        ]
+                        for key in extra_keys:
+                            value = reasons.get(key)
+                            reason_parts.append(f"{key}={value}")
+                    if reason_parts:
+                        lines.append(f"  - Reason: {', '.join(reason_parts)}")
+                    else:
+                        lines.append("  - Reason: unknown")
+                dedupe_info = record_map.get("dedupe")
+                if isinstance(dedupe_info, Mapping):
+                    keys = dedupe_info.get("keys") or []
+                    keep_value = dedupe_info.get("keep")
+                    key_list = [str(key) for key in keys]
+                    if key_list or keep_value:
+                        keys_display = ", ".join(key_list) if key_list else "∅"
+                        keep_display = str(keep_value) if keep_value else "last"
+                        lines.append(f"  - Dedupe: keys={keys_display} (keep={keep_display})")
+                raw_columns = record_map.get("columns")
+                if isinstance(raw_columns, Sequence) and not isinstance(raw_columns, (str, bytes)):
+                    columns_list = [str(col) for col in list(raw_columns)]
+                elif raw_columns not in (None, ""):
+                    columns_list = [str(raw_columns)]
+                else:
+                    columns_list = []
+                first_cols = columns_list[:6]
+                columns_display = ", ".join(first_cols) if first_cols else "∅"
+                lines.append(f"  - Columns: {columns_display}")
+            if len(mapping_debug_records) > limit:
+                lines.append(f"(showing {limit} of {len(mapping_debug_records)} files)")
         lines.append("")
 
     if dtm_entry:
@@ -1588,6 +1677,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         Path("resolver/tools/export_config.yml"),
         Path("diagnostics/ingestion/export_preview"),
     )
+    mapping_debug_records = _load_mapping_debug(
+        Path("diagnostics/ingestion/export_preview/mapping_debug.jsonl")
+    )
     reachability_path = Path("diagnostics/ingestion/dtm/reachability.json")
     reachability_payload = _safe_load_json(reachability_path) or {}
     markdown = build_markdown(
@@ -1595,6 +1687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dedupe_notes=dedupe_notes,
         reachability=reachability_payload,
         export_summary=export_summary,
+        mapping_debug=mapping_debug_records,
     )
     write_markdown(out_path, markdown)
     if args.github_step_summary:
