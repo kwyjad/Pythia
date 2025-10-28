@@ -125,7 +125,6 @@ def _map_dtm_displacement_admin0(
                 "ym",
                 "metric",
                 "value",
-                "semantics",
                 "series_semantics",
                 "source",
             ]
@@ -139,7 +138,6 @@ def _map_dtm_displacement_admin0(
 
     working = filtered.copy()
     working["metric"] = "idp_displacement_stock_dtm"
-    working["semantics"] = "stock"
     working["series_semantics"] = "stock"
     working["source"] = "IOM DTM"
 
@@ -151,7 +149,6 @@ def _map_dtm_displacement_admin0(
         .reset_index(drop=True)
     )
     aggregated["value"] = aggregated["value"].map(_format_numeric_string)
-    aggregated["semantics"] = "stock"
     aggregated["series_semantics"] = "stock"
     aggregated["source"] = "IOM DTM"
     aggregated["ym"] = pd.to_datetime(
@@ -164,7 +161,6 @@ def _map_dtm_displacement_admin0(
         "ym",
         "metric",
         "value",
-        "semantics",
         "series_semantics",
         "source",
     ]
@@ -276,7 +272,7 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
     }
 
     empty_df = pd.DataFrame(
-        columns=["iso3", "as_of_date", "metric", "value", "series_semantics", "semantics", "source", "ym"]
+        columns=["iso3", "as_of_date", "metric", "value", "series_semantics", "source", "ym"]
     )
 
     if frame is None or frame.empty or not cols.issubset(set(frame.columns)):
@@ -308,7 +304,6 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
         }
     )
     filtered["series_semantics"] = "stock"
-    filtered["semantics"] = "stock"
     filtered["source"] = "IOM DTM"
 
     normalized = _normalize_export_df(filtered)
@@ -324,7 +319,6 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
         .reset_index(drop=True)
     )
     aggregated["series_semantics"] = "stock"
-    aggregated["semantics"] = "stock"
     aggregated["source"] = "IOM DTM"
     aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce").dt.strftime(
         "%Y-%m-%d"
@@ -345,7 +339,6 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
         "ym",
         "metric",
         "value",
-        "semantics",
         "series_semantics",
         "source",
     ]
@@ -1859,6 +1852,32 @@ def export_facts(
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
     pq_path = out_dir / "facts.parquet"
+
+    # === PATCH START: export_facts canonical outbound schema ===
+    # Ensure we never leak "semantics" to disk; snapshots expect "series_semantics".
+    if "semantics" in facts.columns and "series_semantics" not in facts.columns:
+        facts = facts.rename(columns={"semantics": "series_semantics"})
+
+    # Ensure required columns exist with canonical names.
+    required_cols = ["iso3", "as_of_date", "metric", "value", "series_semantics"]
+    for col in required_cols:
+        if col not in facts.columns:
+            # Create empty if missing — better than exploding; downstream guards will handle empties.
+            facts[col] = pd.NA
+
+    # Compute ym if missing (YYYY-MM) from as_of_date; keep YYYY-MM for compact partitioning.
+    if "ym" not in facts.columns:
+        _asof = pd.to_datetime(facts["as_of_date"], errors="coerce")
+        facts["ym"] = _asof.dt.strftime("%Y-%m")
+
+    # Include source if you surface it in previews; default to "IOM DTM" for this mapper.
+    if "source" not in facts.columns:
+        facts["source"] = pd.NA
+
+    # Final column order for disk — must be canonical for downstream:
+    facts = facts[["iso3", "as_of_date", "ym", "metric", "value", "series_semantics", "source"]]
+    # === PATCH END: export_facts canonical outbound schema ===
+
     facts.to_csv(csv_path, index=False)
 
     parquet_written: Optional[Path] = None
