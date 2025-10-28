@@ -469,11 +469,15 @@ Zero-row runs are marked `ok-empty` with reason `"header-only (0 rows)"`; `dtm_a
 | `name` | yes | Identifier for logs and diagnostics. |
 | `match.filename_regex` | no | Case-insensitive regex applied to the filename; when omitted any file may match. |
 | `match.required_columns` | no | List of source columns that must exist for the mapping to apply. |
+| `match.required_any` | no | Map canonical fields to alias lists; require at least one column per alias group. |
 | `map.<target>.from` | no | Source column (or previously-derived target) to transform into the canonical column. |
+| `map.<target>.from_any` | no | Ordered list of candidate columns/targets to try; the first available value is used. |
 | `map.<target>.const` | no | Constant value used when no source column is required. |
 | `map.<target>.ops` | no | Ordered list of operations applied to the series (see below). |
 | `filters.keep_if_not_null` | no | Drop rows where any listed column is blank or null after mapping. |
 | `filters.keep_if_positive` | no | Drop rows where any listed column is ≤ 0 after numeric coercion. |
+| `aggregate.keys` | no | Columns to group by before deduplication (e.g., `iso3`, `as_of_date`, `metric`). |
+| `aggregate.funcs` | no | Aggregation applied per column within each group (e.g., `value: max`). |
 | `dedupe.keys` | no | Columns used for row-level deduplication (e.g., `iso3`, `as_of_date`, `metric`). |
 | `dedupe.keep` | no | `first` or `last` row to keep during deduplication (defaults to `last`). |
 
@@ -485,10 +489,12 @@ Supported `ops` values:
 - `to_ym` — derive `YYYY-MM` from a date-like column.
 - `to_number` — coerce values into numeric strings (dropping non-numeric rows when paired with `keep_if_positive`).
 
-When no configured source matches a file, the exporter auto-detects DTM displacement CSVs that expose
-`CountryISO3`, `ReportingDate`, and `idp_count` columns and applies the same mapping as
-`dtm_displacement_admin0`. Files that already provide every canonical column fall back to a
-pass-through mapping.
+The exporter groups rows via the optional `aggregate` block before deduplication, letting mappings
+collapse duplicates deterministically (for example, keeping the monthly maximum stock figure per
+`iso3`/`as_of_date`/`metric`). When no configured source matches a file, the exporter auto-detects
+DTM displacement CSVs that expose `CountryISO3`, `ReportingDate`, and `idp_count` columns and
+applies the same mapping as `dtm_displacement_admin0`. Files that already provide every canonical
+column fall back to a pass-through mapping.
 
 ### Export report artifacts
 
@@ -499,7 +505,8 @@ when running inside Actions):
 - `export_report.json` — machine-readable metadata with:
   - `inputs_scanned`: total number of files inspected under the `--in` path (metadata included).
   - `matched_files`: objects containing `path`, `source`, `strategy`, `rows_in`,
-    `rows_after_filters`, `rows_after_dedupe`, and any rule-level drop histogram or warnings.
+    `rows_after_filters`, `rows_after_aggregate`, `rows_after_dedupe`, per-source mapping details,
+    and any rule-level drop histogram or warnings.
   - `unmatched_files`: files that were discovered but produced no rows (unmapped, empty, or read
     failures).
   - `rows_exported`: final row count written to `facts.csv`.
@@ -509,8 +516,10 @@ when running inside Actions):
   - `preview`: first five exported rows serialized as dictionaries for quick inspection.
   - `warnings`: de-duplicated warning strings surfaced during mapping.
   - `meta_files_skipped`: metadata companions (`*.meta.json`) ignored during the run.
+- `monthly_summary`: per-month row counts across the exported facts (based on `as_of_date`).
 - `export_report.md` — Markdown rendering of the same payload with bullet highlights, a matched-file
-  table, and a four-column preview (iso3, as_of_date, metric, value) of the exported facts.
+  table, mapping/aggregation annotations, a monthly summary, and a four-column preview (iso3,
+  as_of_date, metric, value) of the exported facts.
 
 Empty or invalid inputs no longer halt the export; instead they surface warnings, appear under
 `unmatched_files`, and allow remaining files to map successfully.

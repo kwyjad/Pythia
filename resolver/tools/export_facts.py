@@ -139,6 +139,7 @@ class SourceApplication:
     rows_in: int
     rows_mapped: int = 0
     rows_after_filters: int = 0
+    rows_after_aggregate: int = 0
     rows_after_dedupe: int = 0
     strategy: str = ""
     warnings: List[str] = field(default_factory=list)
@@ -146,6 +147,9 @@ class SourceApplication:
     drop_histogram: Dict[str, int] = field(default_factory=dict)
     dedupe_keys: List[str] = field(default_factory=list)
     dedupe_keep: str = "last"
+    aggregate_keys: List[str] = field(default_factory=list)
+    aggregate_funcs: Dict[str, str] = field(default_factory=dict)
+    mapping_details: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @property
     def rows_out(self) -> int:
@@ -159,6 +163,7 @@ class SourceApplication:
             "rows_in": self.rows_in,
             "rows_mapped": self.rows_mapped,
             "rows_after_filters": self.rows_after_filters,
+            "rows_after_aggregate": self.rows_after_aggregate or self.rows_after_filters,
             "rows_after_dedupe": self.rows_after_dedupe,
             "filters": list(dict.fromkeys(self.filters_applied)),
             "dedupe": {
@@ -167,10 +172,19 @@ class SourceApplication:
             }
             if self.dedupe_keys
             else None,
+            "aggregate": {
+                "keys": self.aggregate_keys,
+                "funcs": self.aggregate_funcs,
+                "rows_before": self.rows_after_filters,
+                "rows_after": self.rows_after_aggregate or self.rows_after_filters,
+            }
+            if self.aggregate_keys or self.aggregate_funcs
+            else None,
             "drop_histogram": {
                 key: int(value) for key, value in (self.drop_histogram or {}).items()
             },
             "warnings": list(self.warnings or []),
+            "mapping": self.mapping_details,
         }
 
 
@@ -228,26 +242,62 @@ def _resolve_mapping_series(
     mapping: Mapping[str, Any],
     *,
     length: int,
-) -> "pd.Series":
+) -> tuple["pd.Series", Dict[str, Any]]:
     if "const" in mapping:
         value = mapping.get("const", "")
-        return pd.Series([value] * length, index=frame.index, dtype="object").astype(str)
+        series = pd.Series([value] * length, index=frame.index, dtype="object").astype(str)
+        return series, {"const": str(value)}
 
-    source_key = mapping.get("from")
-    if source_key is None:
+    chosen_series: Optional["pd.Series"] = None
+    chosen_key: Optional[str] = None
+    from_context = False
+
+    for candidate in _ensure_iterable(mapping.get("from_any")):
+        candidate_key = str(candidate)
+        if candidate_key in context:
+            chosen_series = context[candidate_key]
+            chosen_key = candidate_key
+            from_context = True
+            break
+        if candidate_key in frame.columns:
+            chosen_series = frame[candidate_key]
+            chosen_key = candidate_key
+            break
+
+    if chosen_series is None:
+        source_key = mapping.get("from")
+        if source_key is not None:
+            source_key = str(source_key)
+            if source_key in context:
+                chosen_series = context[source_key]
+                chosen_key = source_key
+                from_context = True
+            elif source_key in frame.columns:
+                chosen_series = frame[source_key]
+                chosen_key = source_key
+
+    if chosen_series is None:
         series = pd.Series([""] * length, index=frame.index, dtype="object")
     else:
-        if source_key in context:
-            series = context[source_key]
-        elif source_key in frame.columns:
-            series = frame[source_key]
-        else:
-            series = pd.Series([""] * length, index=frame.index, dtype="object")
+        series = chosen_series
 
     series = _coerce_string_series(series)
-    for op in _ensure_iterable(mapping.get("ops")):
-        series = _apply_op(series, str(op))
-    return series
+    ops_applied = [str(op) for op in _ensure_iterable(mapping.get("ops")) if str(op)]
+    for op in ops_applied:
+        series = _apply_op(series, op)
+
+    info: Dict[str, Any] = {}
+    if chosen_key is not None:
+        info["source"] = chosen_key
+        if from_context:
+            info["from_context"] = True
+    else:
+        info["source"] = None
+        info["missing"] = True
+    if ops_applied:
+        info["ops"] = ops_applied
+
+    return series, info
 
 
 def _apply_filters(
@@ -292,6 +342,63 @@ def _apply_filters(
     return filtered, {key: int(value) for key, value in histogram.items()}, applied
 
 
+def _apply_aggregate(
+    frame: "pd.DataFrame", aggregate_cfg: Mapping[str, Any] | None
+) -> tuple["pd.DataFrame", List[str], Dict[str, str], int]:
+    if not isinstance(aggregate_cfg, Mapping):
+        return frame, [], {}, 0
+
+    keys = [str(col) for col in _ensure_iterable(aggregate_cfg.get("keys")) if str(col)]
+    funcs_cfg = aggregate_cfg.get("funcs")
+    configured_funcs: Dict[str, str] = {}
+    if isinstance(funcs_cfg, Mapping):
+        for column, func in funcs_cfg.items():
+            column_name = str(column)
+            func_name = str(func)
+            if column_name:
+                configured_funcs[column_name] = func_name
+
+    if not keys:
+        return frame, [], configured_funcs, 0
+
+    agg_map: Dict[str, Any] = {}
+    working = frame
+    numeric_funcs = {"max", "min", "sum", "mean", "median"}
+    for column, func in configured_funcs.items():
+        if column in frame.columns:
+            agg_map[column] = func
+            func_normalized = str(func).strip().lower()
+            if func_normalized in numeric_funcs:
+                converted = pd.to_numeric(frame[column], errors="coerce")
+                if not converted.isna().all():
+                    if working is frame:
+                        working = frame.copy()
+                    working[column] = converted
+
+    other_columns = [
+        column
+        for column in frame.columns
+        if column not in keys and column not in agg_map
+    ]
+    for column in other_columns:
+        agg_map[column] = "first"
+
+    grouped = working.groupby(keys, dropna=False, sort=False)
+    aggregated = grouped.agg(agg_map)
+    if isinstance(aggregated.columns, pd.MultiIndex):
+        aggregated.columns = [
+            "_".join(str(part) for part in col if str(part)) for col in aggregated.columns
+        ]
+    aggregated = aggregated.reset_index()
+
+    column_order = [column for column in frame.columns if column in aggregated.columns]
+    if column_order:
+        aggregated = aggregated[column_order]
+
+    reduction = max(len(frame) - len(aggregated), 0)
+    return aggregated, keys, configured_funcs, reduction
+
+
 def _apply_dedupe(
     frame: "pd.DataFrame", dedupe_cfg: Mapping[str, Any] | None
 ) -> tuple["pd.DataFrame", List[str], str, int]:
@@ -315,8 +422,11 @@ def _source_matches(path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, 
     filename_regex = match_cfg.get("filename_regex")
     if filename_regex:
         try:
-            if not re.search(str(filename_regex), path.name):
-                return False
+            pattern = str(filename_regex)
+            target = path.as_posix()
+            if not re.search(pattern, target):
+                if not re.search(pattern, path.name):
+                    return False
         except re.error:
             return False
     required = match_cfg.get("required_columns")
@@ -324,6 +434,13 @@ def _source_matches(path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, 
         required_columns = {str(column) for column in _ensure_iterable(required)}
         if not required_columns.issubset(set(frame.columns)):
             return False
+    required_any = match_cfg.get("required_any")
+    if isinstance(required_any, Mapping):
+        available = {str(column) for column in frame.columns}
+        for aliases in required_any.values():
+            alias_group = [str(alias) for alias in _ensure_iterable(aliases) if str(alias)]
+            if alias_group and not any(alias in available for alias in alias_group):
+                return False
     return True
 
 
@@ -403,20 +520,38 @@ def _apply_source(
 
     context: Dict[str, "pd.Series"] = {}
     out = pd.DataFrame(index=frame.index)
+    mapping_details: Dict[str, Dict[str, Any]] = {}
     for target, instructions in map_cfg.items():
         if not isinstance(instructions, Mapping):
             continue
-        series = _resolve_mapping_series(frame, context, instructions, length=len(frame))
+        series, mapping_info = _resolve_mapping_series(
+            frame, context, instructions, length=len(frame)
+        )
         out[target] = series
         context[target] = series
+        if isinstance(instructions, Mapping):
+            candidates = [
+                str(value)
+                for value in _ensure_iterable(instructions.get("from_any"))
+                if str(value)
+            ]
+            if candidates:
+                mapping_info.setdefault("candidates", candidates)
+            if instructions.get("from") is not None:
+                mapping_info.setdefault("candidate", str(instructions.get("from")))
+        mapping_details[target] = mapping_info
 
     rows_mapped = len(out)
     filtered, drop_histogram, filters_applied = _apply_filters(
         out, source_cfg.get("filters", [])
     )
     rows_after_filters = len(filtered)
+    aggregated, aggregate_keys, aggregate_funcs, _ = _apply_aggregate(
+        filtered, source_cfg.get("aggregate")
+    )
+    rows_after_aggregate = len(aggregated)
     deduped, dedupe_keys, dedupe_keep, _ = _apply_dedupe(
-        filtered, source_cfg.get("dedupe")
+        aggregated, source_cfg.get("dedupe")
     )
     out = deduped
 
@@ -437,6 +572,7 @@ def _apply_source(
         rows_in=len(frame),
         rows_mapped=rows_mapped,
         rows_after_filters=rows_after_filters,
+        rows_after_aggregate=rows_after_aggregate,
         rows_after_dedupe=len(out),
         strategy=str(source_cfg.get("name") or "config"),
         warnings=warnings,
@@ -444,6 +580,9 @@ def _apply_source(
         drop_histogram=drop_histogram,
         dedupe_keys=dedupe_keys,
         dedupe_keep=dedupe_keep,
+        aggregate_keys=aggregate_keys,
+        aggregate_funcs=aggregate_funcs,
+        mapping_details=mapping_details,
     )
     return out.reset_index(drop=True), applied
 
@@ -819,6 +958,7 @@ def _render_markdown_report(report: Mapping[str, Any]) -> str:
     warnings_list: List[str] = [
         str(msg) for msg in (report.get("warnings") or []) if str(msg)
     ]
+    monthly_summary: List[Mapping[str, Any]] = list(report.get("monthly_summary") or [])
 
     lines: List[str] = ["## Export Facts"]
     lines.append(f"- **Inputs scanned:** {inputs_scanned}")
@@ -858,18 +998,82 @@ def _render_markdown_report(report: Mapping[str, Any]) -> str:
     if matched_files:
         lines.append("")
         lines.append("### Matched files")
-        lines.append("| File | Source | Rows in | After filters | After dedupe | Strategy |")
-        lines.append("| --- | --- | ---: | ---: | ---: | --- |")
+        lines.append("| File | Source | Rows in | After filters | After agg | After dedupe | Strategy |")
+        lines.append("| --- | --- | ---: | ---: | ---: | ---: | --- |")
         for entry in matched_files:
             file_name = Path(str(entry.get("path", ""))).name or str(entry.get("path", ""))
             source_name = str(entry.get("source") or "")
             rows_in = entry.get("rows_in") or 0
             rows_filtered = entry.get("rows_after_filters") or 0
+            rows_aggregate = entry.get("rows_after_aggregate") or rows_filtered
             rows_dedupe = entry.get("rows_after_dedupe") or 0
             strategy = str(entry.get("strategy") or "")
             lines.append(
-                f"| {file_name} | {source_name} | {rows_in} | {rows_filtered} | {rows_dedupe} | {strategy} |"
+                f"| {file_name} | {source_name} | {rows_in} | {rows_filtered} | {rows_aggregate} | {rows_dedupe} | {strategy} |"
             )
+
+        lines.append("")
+        lines.append("#### Mapping & aggregation")
+        for entry in matched_files:
+            file_name = Path(str(entry.get("path", ""))).name or str(entry.get("path", ""))
+            source_name = str(entry.get("source") or "")
+            lines.append(f"- **{file_name}** → {source_name or '(source not named)'}")
+            mapping_details = entry.get("mapping") or {}
+            mapping_parts: List[str] = []
+            for target, info in mapping_details.items():
+                if not isinstance(info, Mapping):
+                    continue
+                if "const" in info:
+                    mapping_parts.append(f"{target} ← const({info['const']})")
+                    continue
+                source_label = info.get("source")
+                if not source_label:
+                    source_label = "∅"
+                if info.get("from_context"):
+                    source_label = f"{source_label} (mapped)"
+                mapping_str = f"{target} ← {source_label}"
+                ops = info.get("ops") or []
+                if ops:
+                    mapping_str += f" (ops: {', '.join(ops)})"
+                if info.get("missing"):
+                    mapping_str += " [missing]"
+                mapping_parts.append(mapping_str)
+            if mapping_parts:
+                lines.append(f"  - Mapping: {', '.join(mapping_parts)}")
+            aggregate_info = entry.get("aggregate") or {}
+            aggregate_keys = aggregate_info.get("keys") or []
+            aggregate_funcs = aggregate_info.get("funcs") or {}
+            if aggregate_keys or aggregate_funcs:
+                agg_parts: List[str] = []
+                if aggregate_keys:
+                    agg_parts.append(f"keys={', '.join(aggregate_keys)}")
+                if aggregate_funcs:
+                    func_parts = [f"{col}:{func}" for col, func in aggregate_funcs.items()]
+                    agg_parts.append(f"funcs={', '.join(func_parts)}")
+                rows_before = aggregate_info.get("rows_before")
+                rows_after = aggregate_info.get("rows_after")
+                if rows_before is not None and rows_after is not None:
+                    agg_parts.append(f"rows {rows_before}→{rows_after}")
+                lines.append(f"  - Aggregate: {'; '.join(agg_parts)}")
+            dedupe_info = entry.get("dedupe") or {}
+            dedupe_keys_entry = dedupe_info.get("keys") or []
+            dedupe_keep_entry = dedupe_info.get("keep") or "last"
+            if dedupe_keys_entry:
+                lines.append(
+                    f"  - Dedupe: keys={', '.join(dedupe_keys_entry)} (keep={dedupe_keep_entry})"
+                )
+            else:
+                lines.append("  - Dedupe: (none)")
+
+    if monthly_summary:
+        lines.append("")
+        lines.append("### Monthly summary")
+        lines.append("| Month | Rows |")
+        lines.append("| --- | ---: |")
+        for entry in monthly_summary:
+            month = str(entry.get("month") or entry.get("ym") or "")
+            rows = int(entry.get("rows") or 0)
+            lines.append(f"| {month} | {rows} |")
 
     preview_rows: List[Mapping[str, Any]] = list(report.get("preview") or [])
     if preview_rows:
@@ -1132,6 +1336,19 @@ def export_facts(
 
     result_rows = len(facts)
 
+    monthly_summary: List[Dict[str, Any]] = []
+    if isinstance(facts, pd.DataFrame) and not facts.empty:
+        if "as_of_date" in facts.columns:
+            months = facts["as_of_date"].astype(str).str.slice(0, 7)
+            valid = months.str.strip().ne("")
+            month_counts = (
+                months[valid]
+                .value_counts()
+                .sort_index()
+            )
+            for month, count in month_counts.items():
+                monthly_summary.append({"month": str(month), "rows": int(count)})
+
     filters_ordered: List[str] = []
     dedupe_keys_ordered: List[str] = []
     dedupe_keep_values: set[str] = set()
@@ -1180,6 +1397,7 @@ def export_facts(
         "preview": facts.head(5).to_dict(orient="records"),
         "warnings": warnings,
         "meta_files_skipped": [str(path) for path in skipped_meta],
+        "monthly_summary": monthly_summary,
     }
 
     report_json_path = report_json_path or (out_dir / "export_report.json")

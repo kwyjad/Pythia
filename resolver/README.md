@@ -224,22 +224,24 @@ If you see validation errors, fix the staging inputs or tweak resolver/tools/exp
 
 - `resolver/tools/export_config.yml` defines source-aware mappings for canonical `facts.csv`. The
   DTM displacement file (`resolver/staging/dtm_displacement.csv`) matches the
-  `dtm_displacement_admin0` entry, which maps `CountryISO3` → `iso3`, parses `ReportingDate` to
-  `as_of_date`/`ym`, coerces `idp_count` into `value`, and tags rows with
-  `metric=idps`, `semantics=stock`, and `source=IOM DTM`.
+  `dtm_displacement_admin0` entry, which accepts either normalized (`iso3`, `as_of_date`,
+  `idp_count`) or raw (`CountryISO3`, `ReportingDate`, `numPresentIdpInd`) headers, trims/uppercases
+  ISO3 codes, parses dates, aggregates duplicate rows per `(iso3, as_of_date, metric)` using `max`,
+  and tags rows with `metric=idps_stock`, `semantics=stock`, and `source=IOM DTM`.
 - When the workflow encounters a displacement CSV that didn’t match the config, the exporter
   auto-detects the DTM columns and applies the same mapping so facts are still produced.
 - `scripts/ci/summarize_connectors.py` now runs the exporter against `resolver/staging/` during CI
   and writes a preview to `diagnostics/ingestion/export_preview/facts.csv`. The rendered
   `diagnostics/ingestion/summary.md` gains an **Export Facts** section with the row count, matched
-  files, applied filters/dedupe keys, and a 5-row sample of
+  sources, per-source mapping/aggregation notes, a monthly row summary, and a 5-row sample of
   `iso3/as_of_date/metric/value`. The same Markdown block is appended to the GitHub job summary when
   available.
 - Every export writes `resolver/exports/backfill/export_report.json` and
   `resolver/exports/backfill/export_report.md` (or the paths you pass via `--report-*`). The JSON
-  captures inputs scanned, matched files with their row counts, unmatched files, filters, dedupe
-  choices, drop histograms, warnings, and a 5-row preview; the Markdown mirrors the content for quick
-  sharing and is also appended to `diagnostics/ingestion/summary.md` when `--append-summary` is used.
+  captures inputs scanned, matched files with their row counts, unmatched files, filters, aggregate
+  keys/funcs, dedupe choices, drop histograms, warnings, a monthly summary, and a 5-row preview; the
+  Markdown mirrors the content for quick sharing and is also appended to
+  `diagnostics/ingestion/summary.md` when `--append-summary` is used.
 - Diagnostics artifacts for `diagnostics/ingestion/{raw,metrics,samples,dtm}` include `KEEP.txt`
   placeholders so empty bundles no longer trigger "No files were found" warnings in CI.
 
