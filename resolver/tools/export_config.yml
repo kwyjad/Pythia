@@ -47,7 +47,7 @@ dates:
 sources:
   - name: dtm_displacement_admin0
     match:
-      filename_regex: "(?i)dtm.*displacement.*\\.csv$"
+      filename_regex: "^dtm_displacement\\.csv$"
       required_columns: [CountryISO3, ReportingDate, idp_count]
     map:
       iso3:
@@ -69,7 +69,7 @@ sources:
       source:
         const: IOM DTM
     filters:
-      - keep_if_not_null: [CountryISO3, ReportingDate, idp_count]
+      - keep_if_not_null: [iso3, as_of_date, value]
       - keep_if_positive: [value]
     dedupe:
       keys: [iso3, as_of_date, metric]

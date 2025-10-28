@@ -212,6 +212,14 @@ python resolver/tools/freeze_snapshot.py \
 
 If you see validation errors, fix the staging inputs or tweak resolver/tools/export_config.yml.
 
+#### If export fails
+
+- Inspect `resolver/exports/backfill/export_report.md` (or the path you passed via `--out`) for a
+  summary of which inputs were used, which ones were skipped, and why.
+- The companion `export_report.json` is structured for scripts/CI to parse and mirrors the Markdown
+  content. Empty or invalid `.json/.jsonl` inputs and `.meta.json` files are now skipped with
+  warnings instead of aborting the export.
+
 ### DTM displacement exports & diagnostics
 
 - `resolver/tools/export_config.yml` defines source-aware mappings for canonical `facts.csv`. The

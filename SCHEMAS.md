@@ -489,3 +489,24 @@ When no configured source matches a file, the exporter auto-detects DTM displace
 `CountryISO3`, `ReportingDate`, and `idp_count` columns and applies the same mapping as
 `dtm_displacement_admin0`. Files that already provide every canonical column fall back to a
 pass-through mapping.
+
+### Export report artifacts
+
+Successful runs now emit lightweight diagnostics alongside `facts.csv` in the export directory:
+
+- `export_report.json` — machine-readable metadata with:
+  - `inputs_scanned`: total number of data and metadata files discovered beneath the `--in` path.
+  - `inputs_used`: paths that produced rows (ignoring skipped metadata and failed reads).
+  - `inputs_skipped`: structured objects describing files that produced zero rows (e.g.,
+    metadata files, empty inputs, or read failures) and any associated warnings.
+  - `rows_exported`: final row count written to `facts.csv`.
+  - `warnings`: de-duplicated warning strings surfaced during mapping.
+  - `sample_head`: first five exported rows serialized as dictionaries for quick inspection.
+- `export_report.md` — human-friendly summary mirroring the JSON payload with counts, bullet
+  lists of used/skipped files, and a five-row CSV preview.
+
+Metadata files ending in `.meta.json` are skipped automatically and logged in the report with the
+`meta-skip` strategy. Empty or invalid JSON inputs no longer halt the export; instead they surface a
+warning, appear under `inputs_skipped`, and allow the remaining files to map successfully. When the
+workflow runs inside GitHub Actions the same summary is appended to the job log via the
+`GITHUB_STEP_SUMMARY` artifact.

@@ -101,17 +101,34 @@ def _read_one(path: Path) -> pd.DataFrame:
     if ext == ".parquet":
         return pd.read_parquet(path)
     if ext in [".json", ".jsonl"]:
-        return pd.read_json(path, lines=True, dtype_backend="pyarrow").astype(str).fillna("")
+        try:
+            frame = pd.read_json(path, lines=True, dtype_backend="pyarrow")
+        except ValueError:
+            try:
+                frame = pd.read_json(path, lines=False, dtype_backend="pyarrow")
+            except ValueError:
+                return pd.DataFrame()
+        if frame is None:
+            return pd.DataFrame()
+        if isinstance(frame, pd.Series):
+            frame = frame.to_frame().T
+        return frame.astype(str).fillna("")
     raise SystemExit(f"Unsupported input extension: {ext}")
 
-def _collect_inputs(inp: Path) -> List[Path]:
+def _collect_inputs(inp: Path) -> tuple[List[Path], List[Path]]:
+    skipped_meta: List[Path] = []
     if inp.is_dir():
         files: List[Path] = []
         for p in inp.rglob("*"):
-            if p.suffix.lower() in (".csv",".tsv",".parquet",".json",".jsonl"):
+            if p.name.endswith(".meta.json"):
+                skipped_meta.append(p)
+                continue
+            if p.suffix.lower() in (".csv", ".tsv", ".parquet", ".json", ".jsonl"):
                 files.append(p)
-        return files
-    return [inp]
+        return files, skipped_meta
+    if inp.name.endswith(".meta.json"):
+        return [], [inp]
+    return [inp], []
 
 
 @dataclass
@@ -702,14 +719,29 @@ def export_facts(
     if not config_path.exists():
         raise ExportError(f"Config not found: {config_path}")
 
-    files = _collect_inputs(inp)
+    files, skipped_meta = _collect_inputs(inp)
+
+    warnings: List[str] = []
+    source_details: List[SourceApplication] = []
+
+    for meta_path in skipped_meta:
+        message = f"Skipped metadata file {meta_path.name}"
+        warnings.append(message)
+        source_details.append(
+            SourceApplication(
+                name=meta_path.name,
+                path=meta_path,
+                rows_in=0,
+                rows_out=0,
+                strategy="meta-skip",
+                warnings=[message],
+            )
+        )
+
     if not files:
         raise ExportError(f"No supported files found under {inp}")
 
     cfg = _load_config(config_path)
-
-    warnings: List[str] = []
-    source_details: List[SourceApplication] = []
 
     use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
 
@@ -717,8 +749,26 @@ def export_facts(
         mapped_frames: List[pd.DataFrame] = []
         sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
         for file_path in files:
-            frame = _read_one(file_path)
+            try:
+                frame = _read_one(file_path)
+            except Exception as exc:
+                warning = f"Failed to read {file_path.name}: {exc}"
+                warnings.append(warning)
+                source_details.append(
+                    SourceApplication(
+                        name=file_path.name,
+                        path=file_path,
+                        rows_in=0,
+                        rows_out=0,
+                        strategy="read-failed",
+                        warnings=[warning],
+                    )
+                )
+                continue
+
             if frame.empty:
+                warning = f"{file_path.name}: no rows parsed (empty or invalid file)"
+                warnings.append(warning)
                 source_details.append(
                     SourceApplication(
                         name=file_path.name,
@@ -726,6 +776,7 @@ def export_facts(
                         rows_in=0,
                         rows_out=0,
                         strategy="empty-input",
+                        warnings=[warning],
                     )
                 )
                 continue
@@ -777,13 +828,51 @@ def export_facts(
             raise ExportError("No rows produced after applying export mappings.")
         facts = pd.concat(mapped_frames, ignore_index=True)
     else:
-        frames = [_read_one(f) for f in files]
+        frames: List[pd.DataFrame] = []
+        successful_paths: List[Path] = []
+        for file_path in files:
+            try:
+                frame = _read_one(file_path)
+            except Exception as exc:
+                warning = f"Failed to read {file_path.name}: {exc}"
+                warnings.append(warning)
+                source_details.append(
+                    SourceApplication(
+                        name=file_path.name,
+                        path=file_path,
+                        rows_in=0,
+                        rows_out=0,
+                        strategy="read-failed",
+                        warnings=[warning],
+                    )
+                )
+                continue
+            if frame.empty:
+                warning = f"{file_path.name}: no rows parsed (empty or invalid file)"
+                warnings.append(warning)
+                source_details.append(
+                    SourceApplication(
+                        name=file_path.name,
+                        path=file_path,
+                        rows_in=0,
+                        rows_out=0,
+                        strategy="empty-input",
+                        warnings=[warning],
+                    )
+                )
+                continue
+            frames.append(frame)
+            successful_paths.append(file_path)
+
+        if not frames:
+            raise ExportError("No rows produced after reading staging inputs.")
+
         staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         facts = _apply_mapping(staging, cfg)
         source_details.append(
             SourceApplication(
                 name="legacy-config",
-                path=files[0],
+                path=successful_paths[0],
                 rows_in=len(staging),
                 rows_out=len(facts),
                 strategy="legacy",
@@ -827,8 +916,103 @@ def export_facts(
         write_db=_parse_write_db_flag(write_db),
     )
 
+    result_rows = len(facts)
+    inputs_used = [
+        str(detail.path)
+        for detail in source_details
+        if detail.rows_out > 0
+        and detail.strategy not in {"read-failed", "empty-input", "unmapped", "meta-skip"}
+    ]
+    inputs_skipped = [
+        {
+            "path": str(detail.path),
+            "strategy": detail.strategy,
+            "warnings": detail.warnings,
+        }
+        for detail in source_details
+        if detail.rows_out == 0
+    ]
+    report = {
+        "inputs_scanned": len(files) + len(skipped_meta),
+        "inputs_used": inputs_used,
+        "inputs_skipped": inputs_skipped,
+        "rows_exported": result_rows,
+        "warnings": warnings,
+        "sample_head": facts.head(5).to_dict(orient="records"),
+    }
+
+    report_json = out_dir / "export_report.json"
+    report_md = out_dir / "export_report.md"
+    with open(report_json, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, sort_keys=True)
+
+    md_lines = [
+        "# Export Report",
+        "",
+        f"- Inputs scanned: {report['inputs_scanned']}",
+        f"- Inputs used: {len(inputs_used)}",
+        f"- Inputs skipped: {len(inputs_skipped)}",
+        f"- Rows exported: {result_rows}",
+        "",
+    ]
+
+    if inputs_used:
+        md_lines.append("## Inputs Used")
+        for detail in source_details:
+            if str(detail.path) in inputs_used:
+                md_lines.append(
+                    f"- {detail.path} — {detail.rows_out} rows via {detail.strategy}"
+                )
+        md_lines.append("")
+
+    if inputs_skipped:
+        md_lines.append("## Inputs Skipped")
+        for skipped in inputs_skipped[:10]:
+            warn_text = "; ".join(skipped.get("warnings") or [])
+            reason = skipped.get("strategy", "unknown")
+            if warn_text:
+                md_lines.append(
+                    f"- {skipped['path']} — {reason} ({warn_text})"
+                )
+            else:
+                md_lines.append(f"- {skipped['path']} — {reason}")
+        md_lines.append("")
+
+    if warnings:
+        md_lines.append("## Warnings")
+        for warning in warnings:
+            md_lines.append(f"- {warning}")
+        md_lines.append("")
+
+    if not facts.empty:
+        md_lines.append("## Preview (first 5 rows)")
+        md_lines.append("```")
+        md_lines.append(facts.head(5).to_csv(index=False))
+        md_lines.append("```")
+
+    with open(report_md, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(md_lines).strip() + "\n")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as fh:
+                fh.write("## Export Facts\n")
+                fh.write(f"- Rows exported: {result_rows}\n")
+                fh.write(
+                    f"- Inputs used: {len(inputs_used)} / {report['inputs_scanned']} total\n"
+                )
+                if inputs_skipped:
+                    skipped_preview = ", ".join(
+                        f"{item['path']} ({item['strategy']})" for item in inputs_skipped[:2]
+                    )
+                    fh.write(f"- Skipped: {skipped_preview}\n")
+                fh.write("\n")
+        except OSError:
+            LOGGER.debug("Could not write GitHub summary", exc_info=True)
+
     return ExportResult(
-        rows=len(facts),
+        rows=result_rows,
         csv_path=csv_path,
         parquet_path=parquet_written,
         dataframe=facts,
