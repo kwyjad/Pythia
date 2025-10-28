@@ -43,6 +43,143 @@ except ImportError:
     print("Please 'pip install pandas pyarrow pyyaml' to run the exporter.", file=sys.stderr)
     sys.exit(2)
 
+_DTM_ALIAS_MAP = {
+    "CountryISO3": ["CountryISO3", "country_iso3", "iso3"],
+    "ReportingDate": [
+        "ReportingDate",
+        "as_of",
+        "as_of_date",
+        "reporting_date",
+        "date",
+        "month_start",
+    ],
+    "idp_count": ["idp_count", "numPresentIdpInd", "IDPTotal", "TotalIDPs", "value"],
+}
+
+
+def _first_present(
+    df: "pd.DataFrame", candidates: Iterable[str]
+) -> tuple["pd.Series", Optional[str]]:
+    for candidate in candidates:
+        if candidate in df.columns:
+            return df[candidate], candidate
+    return pd.Series([pd.NA] * len(df), index=df.index), None
+
+
+def _normalize_dtm_admin0(
+    df: "pd.DataFrame",
+) -> tuple["pd.DataFrame", Dict[str, Any]]:
+    iso_series, iso_source = _first_present(df, _DTM_ALIAS_MAP["CountryISO3"])
+    iso = iso_series.astype(str).str.strip().str.upper()
+
+    raw_date, date_source = _first_present(df, _DTM_ALIAS_MAP["ReportingDate"])
+    parsed_dates = pd.to_datetime(raw_date, errors="coerce", utc=False)
+    month_end = parsed_dates + pd.offsets.MonthEnd(0)
+    formatted_dates = month_end.dt.strftime("%Y-%m-%d")
+
+    raw_value, value_source = _first_present(df, _DTM_ALIAS_MAP["idp_count"])
+    numeric_values = pd.to_numeric(raw_value, errors="coerce")
+
+    valid_iso = iso.str.len() == 3
+    valid_dates = parsed_dates.notna()
+    valid_values = numeric_values.notna()
+    keep_mask = valid_iso & valid_dates & valid_values
+    positive_mask = numeric_values > 0
+    filtered_mask = keep_mask & positive_mask
+
+    filtered = pd.DataFrame(
+        {
+            "iso3": iso.where(filtered_mask).dropna(),
+            "as_of_date": formatted_dates.where(filtered_mask).dropna(),
+            "value": numeric_values.where(filtered_mask).dropna(),
+        }
+    ).reset_index(drop=True)
+
+    metadata: Dict[str, Any] = {
+        "rows_in": int(len(df)),
+        "rows_after_filters": int(len(filtered)),
+        "filters_applied": ["keep_if_not_null", "keep_if_positive"],
+        "drop_histogram": {
+            "keep_if_not_null": int((~keep_mask).sum()),
+            "keep_if_positive": int((keep_mask & ~positive_mask).sum()),
+        },
+        "sources": {
+            "iso3": iso_source,
+            "as_of_date": date_source,
+            "value": value_source,
+        },
+    }
+
+    return filtered, metadata
+
+
+def _map_dtm_displacement_admin0(
+    frame: "pd.DataFrame",
+) -> tuple["pd.DataFrame", Dict[str, Any]]:
+    filtered, metadata = _normalize_dtm_admin0(frame)
+    if filtered.empty:
+        empty = pd.DataFrame(
+            columns=[
+                "iso3",
+                "as_of_date",
+                "ym",
+                "metric",
+                "value",
+                "semantics",
+                "series_semantics",
+                "source",
+            ]
+        )
+        metadata.update({
+            "rows_after_aggregate": 0,
+            "dedupe_keys": ["iso3", "as_of_date", "metric"],
+            "aggregate_funcs": {"value": "max"},
+        })
+        return empty, metadata
+
+    working = filtered.copy()
+    working["metric"] = "idp_displacement_stock_dtm"
+    working["semantics"] = "stock"
+    working["series_semantics"] = "stock"
+    working["source"] = "IOM DTM"
+
+    aggregated = (
+        working.groupby(["iso3", "as_of_date", "metric"], as_index=False, sort=False)[
+            "value"
+        ]
+        .max()
+        .reset_index(drop=True)
+    )
+    aggregated["value"] = aggregated["value"].map(_format_numeric_string)
+    aggregated["semantics"] = "stock"
+    aggregated["series_semantics"] = "stock"
+    aggregated["source"] = "IOM DTM"
+    aggregated["ym"] = pd.to_datetime(
+        aggregated["as_of_date"], errors="coerce", utc=False
+    ).dt.strftime("%Y-%m")
+
+    columns_order = [
+        "iso3",
+        "as_of_date",
+        "ym",
+        "metric",
+        "value",
+        "semantics",
+        "series_semantics",
+        "source",
+    ]
+    aggregated = aggregated[columns_order]
+
+    metadata.update(
+        {
+            "rows_after_aggregate": int(len(aggregated)),
+            "dedupe_keys": ["iso3", "as_of_date", "metric"],
+            "aggregate_funcs": {"value": "max"},
+        }
+    )
+
+    return aggregated, metadata
+
 try:  # Optional dependency for DB dual-write
     from resolver.db import duckdb_io
 except Exception:  # pragma: no cover - allow exporter without duckdb installed
@@ -1387,12 +1524,99 @@ def export_facts(
             raw_frames.append((file_path, frame))
             relative_path = _relativize_path(file_path)
             columns = [str(col) for col in frame.columns]
-            if file_path.name == "dtm_displacement.csv":
-                dtm_frame = frame
             debug_entry: Dict[str, Any] = {
                 "file": relative_path,
                 "columns": columns,
             }
+
+            if file_path.name.lower() == "dtm_displacement.csv":
+                mapped, meta = _map_dtm_displacement_admin0(frame)
+                filters_applied = list(meta.get("filters_applied", []))
+                drop_hist = {
+                    str(key): int(value)
+                    for key, value in (meta.get("drop_histogram") or {}).items()
+                }
+                aggregate_keys = list(meta.get("dedupe_keys", []))
+                aggregate_funcs = {
+                    str(column): str(func)
+                    for column, func in (meta.get("aggregate_funcs") or {}).items()
+                }
+                rows_after_filters = int(meta.get("rows_after_filters", len(mapped)))
+                rows_after_aggregate = int(meta.get("rows_after_aggregate", len(mapped)))
+
+                detail = SourceApplication(
+                    name="dtm_displacement_admin0",
+                    path=file_path,
+                    rows_in=len(frame),
+                    rows_mapped=rows_after_filters,
+                    rows_after_filters=rows_after_filters,
+                    rows_after_aggregate=rows_after_aggregate,
+                    rows_after_dedupe=len(mapped),
+                    strategy="dtm-admin0-alias",
+                    filters_applied=filters_applied,
+                    drop_histogram=drop_hist,
+                    aggregate_keys=aggregate_keys,
+                    aggregate_funcs=aggregate_funcs,
+                )
+                detail.dedupe_keys = aggregate_keys
+                detail.dedupe_keep = "max"
+
+                mapping_details: Dict[str, Dict[str, Any]] = {}
+                sources = meta.get("sources") or {}
+                iso_source = sources.get("iso3")
+                if iso_source:
+                    mapping_details["iso3"] = {"source": iso_source}
+                date_source = sources.get("as_of_date")
+                if date_source:
+                    mapping_details["as_of_date"] = {
+                        "source": date_source,
+                        "ops": ["to_month_end"],
+                    }
+                value_source = sources.get("value")
+                if value_source:
+                    mapping_details["value"] = {
+                        "source": value_source,
+                        "ops": ["to_number"],
+                    }
+                mapping_details["metric"] = {"const": "idp_displacement_stock_dtm"}
+                mapping_details["semantics"] = {"const": "stock"}
+                mapping_details["series_semantics"] = {"const": "stock"}
+                mapping_details["source"] = {"const": "IOM DTM"}
+                detail.mapping_details = mapping_details
+
+                if len(frame) > 0 and mapped.empty:
+                    warning_msg = (
+                        "dtm_displacement.csv: DTM mapper produced 0 rows after normalization"
+                    )
+                    detail.warnings.append(warning_msg)
+                    warnings.append(warning_msg)
+
+                source_details.append(detail)
+                if not mapped.empty:
+                    mapped_frames.append(mapped)
+
+                debug_entry.update(
+                    {
+                        "matched": True,
+                        "used_mapping": "dtm_displacement_admin0_alias",
+                        "strategy": "dtm-admin0-alias",
+                        "filters": filters_applied,
+                        "drop_histogram": drop_hist,
+                    }
+                )
+                if not mapped.empty:
+                    debug_entry["rows_out"] = int(len(mapped))
+                    debug_entry["dedupe"] = {
+                        "keys": aggregate_keys,
+                        "keep": detail.dedupe_keep,
+                    }
+                    debug_entry["aggregate"] = {
+                        "keys": aggregate_keys,
+                        "funcs": aggregate_funcs,
+                    }
+                debug_records.append(debug_entry)
+                continue
+
             matched_cfg, attempts = _find_source_for_file(file_path, frame, sources_cfg)
             strategy = "config"
             attempt_summary = _summarize_match_attempts(attempts)
@@ -1696,9 +1920,8 @@ def export_facts(
     unmatched_set.update(str(path) for path in unmatched_paths)
     unmatched_files = sorted(unmatched_set)
     dropped_by_filter = {
-        key: int(drop_hist_total[key])
+        key: int(drop_hist_total.get(key, 0))
         for key in filters_ordered
-        if drop_hist_total.get(key)
     }
 
     report = {

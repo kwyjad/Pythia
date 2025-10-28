@@ -34,14 +34,23 @@ def test_export_source_specific_dtm_mapping(tmp_path, monkeypatch):
 
     df = result.dataframe
     assert result.rows == 2
-    assert {"iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"}.issubset(
+    assert {
+        "iso3",
+        "as_of_date",
+        "ym",
+        "metric",
+        "value",
+        "semantics",
+        "series_semantics",
+        "source",
+    }.issubset(
         set(df.columns)
     )
     assert set(df["iso3"]) == {"NGA", "NER"}
-    assert set(df["metric"]) == {"idps_stock"}
+    assert set(df["metric"]) == {"idp_displacement_stock_dtm"}
     assert set(df["semantics"]) == {"stock"}
     assert set(df["source"]) == {"IOM DTM"}
-    assert all(value.endswith("01") or value.endswith("05") for value in df["as_of_date"])
+    assert set(df["as_of_date"]) == {"2024-01-31"}
 
     matched = result.report["matched_files"]
     assert len(matched) == 1
@@ -55,7 +64,7 @@ def test_export_source_specific_dtm_mapping(tmp_path, monkeypatch):
         "rows_before": 2,
     }
     mapping = matched[0]["mapping"]
-    assert mapping["metric"]["const"] == "idps_stock"
+    assert mapping["metric"]["const"] == "idp_displacement_stock_dtm"
     assert mapping["iso3"]["source"] == "CountryISO3"
     assert result.report["monthly_summary"] == [{"month": "2024-01", "rows": 2}]
 
@@ -85,9 +94,12 @@ def test_export_filters_and_dedupe(tmp_path, monkeypatch):
     df = result.dataframe
     assert result.rows == 1
     assert df.iloc[0]["value"] == "10"
-    assert result.report["dropped_by_filter"] == {"keep_if_positive": 1}
+    assert result.report["dropped_by_filter"] == {
+        "keep_if_not_null": 0,
+        "keep_if_positive": 1,
+    }
     assert result.report["dedupe_keys"] == ["iso3", "as_of_date", "metric"]
-    assert result.report["dedupe_keep"] == ["last"]
+    assert result.report["dedupe_keep"] == ["max"]
 
     matched = result.report["matched_files"][0]
     assert matched["rows_in"] == 3
