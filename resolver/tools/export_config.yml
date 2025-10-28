@@ -47,39 +47,30 @@ dates:
 sources:
   - name: dtm_displacement_admin0
     match:
-      filename_regex: "(?:^|.*/)?dtm_displacement\\.csv$"
-      required_any:
-        iso3: [iso3, CountryISO3]
-        as_of_date: [as_of_date, ReportingDate]
-        value: [idp_count, numPresentIdpInd]
+      filename_regex: "(?i)^dtm.*displacement.*\\.csv$"
+      required_columns: [CountryISO3, ReportingDate, idp_count]
     map:
       iso3:
-        from_any: [iso3, CountryISO3]
+        from: CountryISO3
         ops: [trim, uppercase]
       as_of_date:
-        from_any: [as_of_date, ReportingDate]
+        from: ReportingDate
         ops: [to_date]
       ym:
         from: as_of_date
         ops: [to_ym]
       metric:
-        const: idps_stock
+        const: idps_present
       value:
-        from_any: [idp_count, numPresentIdpInd]
+        from: idp_count
         ops: [to_number]
       semantics:
         const: stock
       source:
-        const: IOM DTM
+        const: IOM DTM (admin0)
     filters:
-      - keep_if_not_null: [iso3, as_of_date, value]
+      - keep_if_not_null: [CountryISO3, ReportingDate, idp_count]
       - keep_if_positive: [value]
-    aggregate:
-      keys: [iso3, as_of_date, metric]
-      funcs:
-        value: max
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
-    hints:
-      expect_admin_level: admin0

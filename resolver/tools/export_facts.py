@@ -132,6 +132,16 @@ def _collect_inputs(inp: Path) -> tuple[List[Path], List[Path]]:
     return [inp], []
 
 
+def _relativize_path(path: Path) -> str:
+    candidates = [ROOT.parent, Path.cwd()]
+    for base in candidates:
+        try:
+            return path.resolve().relative_to(base.resolve()).as_posix()
+        except ValueError:
+            continue
+    return path.resolve().as_posix()
+
+
 @dataclass
 class SourceApplication:
     name: str
@@ -415,46 +425,105 @@ def _apply_dedupe(
     return deduped, keys, keep_arg, removed
 
 
-def _source_matches(path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, Any]) -> bool:
+def _source_matches(
+    path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, Any]
+) -> tuple[bool, Dict[str, Any]]:
     match_cfg = source_cfg.get("match") if isinstance(source_cfg, Mapping) else None
     if not isinstance(match_cfg, Mapping):
-        return True
+        return True, {"regex_miss": False, "regex_checked": False, "missing_columns": []}
+    reasons: Dict[str, Any] = {
+        "regex_miss": False,
+        "regex_checked": False,
+        "missing_columns": [],
+        "missing_required_any": [],
+    }
     filename_regex = match_cfg.get("filename_regex")
     if filename_regex:
         try:
             pattern = str(filename_regex)
             target = path.as_posix()
-            if not re.search(pattern, target):
-                if not re.search(pattern, path.name):
-                    return False
-        except re.error:
-            return False
+            reasons["regex_checked"] = True
+            if not re.search(pattern, target) and not re.search(pattern, path.name):
+                reasons["regex_miss"] = True
+                return False, reasons
+        except re.error as exc:
+            reasons["regex_checked"] = True
+            reasons["regex_miss"] = True
+            reasons["regex_error"] = str(exc)
+            return False, reasons
     required = match_cfg.get("required_columns")
     if required:
         required_columns = {str(column) for column in _ensure_iterable(required)}
         if not required_columns.issubset(set(frame.columns)):
-            return False
+            reasons["missing_columns"] = sorted(
+                required_columns.difference(set(frame.columns))
+            )
+            return False, reasons
     required_any = match_cfg.get("required_any")
     if isinstance(required_any, Mapping):
         available = {str(column) for column in frame.columns}
+        missing_groups: List[str] = []
         for aliases in required_any.values():
             alias_group = [str(alias) for alias in _ensure_iterable(aliases) if str(alias)]
             if alias_group and not any(alias in available for alias in alias_group):
-                return False
-    return True
+                missing_groups.append(
+                    "/".join(alias_group)
+                    if len(alias_group) > 1
+                    else (alias_group[0] if alias_group else "")
+                )
+        if missing_groups:
+            reasons["missing_required_any"] = [group for group in missing_groups if group]
+            return False, reasons
+    return True, reasons
 
 
 def _find_source_for_file(
     path: Path,
     frame: "pd.DataFrame",
     sources_cfg: Sequence[Mapping[str, Any]],
-) -> Optional[Mapping[str, Any]]:
+) -> tuple[Optional[Mapping[str, Any]], List[Dict[str, Any]]]:
+    attempts: List[Dict[str, Any]] = []
     for source in sources_cfg:
         if not isinstance(source, Mapping):
             continue
-        if _source_matches(path, frame, source):
-            return source
-    return None
+        matched, reasons = _source_matches(path, frame, source)
+        attempt = {
+            "name": str(source.get("name") or path.name),
+            "matched": matched,
+            "reasons": reasons,
+        }
+        attempts.append(attempt)
+        if matched:
+            return source, attempts
+    return None, attempts
+
+
+def _summarize_match_attempts(attempts: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    regex_checked = False
+    regex_success = False
+    missing_columns: set[str] = set()
+    missing_required_any: set[str] = set()
+    for attempt in attempts:
+        raw_reasons = attempt.get("reasons")
+        reasons = raw_reasons if isinstance(raw_reasons, Mapping) else {}
+        if reasons.get("regex_checked"):
+            regex_checked = True
+            if not reasons.get("regex_miss"):
+                regex_success = True
+        for column in reasons.get("missing_columns") or []:
+            missing_columns.add(str(column))
+        for group in reasons.get("missing_required_any") or []:
+            missing_required_any.add(str(group))
+    if regex_checked:
+        summary["regex_miss"] = not regex_success
+    else:
+        summary["regex_miss"] = False
+    if missing_columns:
+        summary["missing_columns"] = sorted(missing_columns)
+    if missing_required_any:
+        summary["missing_required_any"] = sorted(missing_required_any)
+    return summary
 
 
 def _auto_detect_dtm_source(frame: "pd.DataFrame") -> Optional[Dict[str, Any]]:
@@ -1105,6 +1174,7 @@ def export_facts(
 
     warnings: List[str] = []
     source_details: List[SourceApplication] = []
+    debug_records: List[Dict[str, Any]] = []
 
     for meta_path in skipped_meta:
         message = f"Skipped metadata file {meta_path.name}"
@@ -1138,6 +1208,15 @@ def export_facts(
             except Exception as exc:
                 warning = f"Failed to read {file_path.name}: {exc}"
                 warnings.append(warning)
+                debug_records.append(
+                    {
+                        "file": _relativize_path(file_path),
+                        "matched": False,
+                        "used_mapping": None,
+                        "columns": [],
+                        "reasons": {"read_error": str(exc)},
+                    }
+                )
                 source_details.append(
                     SourceApplication(
                         name=file_path.name,
@@ -1153,6 +1232,15 @@ def export_facts(
             if frame.empty:
                 warning = f"{file_path.name}: no rows parsed (empty or invalid file)"
                 warnings.append(warning)
+                debug_records.append(
+                    {
+                        "file": _relativize_path(file_path),
+                        "matched": False,
+                        "used_mapping": None,
+                        "columns": [],
+                        "reasons": {"empty_input": True},
+                    }
+                )
                 source_details.append(
                     SourceApplication(
                         name=file_path.name,
@@ -1166,8 +1254,15 @@ def export_facts(
                 continue
 
             raw_frames.append((file_path, frame))
-            matched_cfg = _find_source_for_file(file_path, frame, sources_cfg)
+            relative_path = _relativize_path(file_path)
+            columns = [str(col) for col in frame.columns]
+            debug_entry: Dict[str, Any] = {
+                "file": relative_path,
+                "columns": columns,
+            }
+            matched_cfg, attempts = _find_source_for_file(file_path, frame, sources_cfg)
             strategy = "config"
+            attempt_summary = _summarize_match_attempts(attempts)
             if matched_cfg is None:
                 auto_cfg = _auto_detect_dtm_source(frame)
                 if auto_cfg is not None:
@@ -1185,6 +1280,14 @@ def export_facts(
                         strategy="canonical-passthrough",
                     )
                     source_details.append(detail)
+                    debug_entry.update(
+                        {
+                            "matched": True,
+                            "used_mapping": "canonical-passthrough",
+                            "strategy": "canonical-passthrough",
+                        }
+                    )
+                    debug_records.append(debug_entry)
                     if not mapped.empty:
                         mapped_frames.append(mapped)
                     continue
@@ -1201,6 +1304,17 @@ def export_facts(
                             warnings=[warning],
                         )
                     )
+                    reasons = attempt_summary or {}
+                    if "regex_miss" not in reasons:
+                        reasons["regex_miss"] = False
+                    debug_entry.update(
+                        {
+                            "matched": False,
+                            "used_mapping": None,
+                            "reasons": reasons,
+                        }
+                    )
+                    debug_records.append(debug_entry)
                     continue
 
             mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
@@ -1210,6 +1324,20 @@ def export_facts(
             source_details.append(detail)
             if not mapped.empty:
                 mapped_frames.append(mapped)
+            mapping_name = str(matched_cfg.get("name") or file_path.name)
+            debug_entry.update(
+                {
+                    "matched": True,
+                    "used_mapping": mapping_name,
+                    "strategy": strategy,
+                }
+            )
+            if detail.dedupe_keys:
+                debug_entry["dedupe"] = {
+                    "keys": detail.dedupe_keys,
+                    "keep": detail.dedupe_keep,
+                }
+            debug_records.append(debug_entry)
 
         if not mapped_frames and raw_frames:
             staging_frames = [frame for _, frame in raw_frames]
@@ -1238,6 +1366,11 @@ def export_facts(
                 strategy="legacy-fallback",
             )
             source_details.append(detail)
+            fallback_warning = (
+                "Legacy fallback applied: "
+                f"{len(staging)} staging rows → {len(fallback)} exported rows"
+            )
+            warnings.append(fallback_warning)
             if not fallback.empty:
                 mapped_frames.append(fallback)
 
@@ -1399,6 +1532,16 @@ def export_facts(
         "meta_files_skipped": [str(path) for path in skipped_meta],
         "monthly_summary": monthly_summary,
     }
+
+    debug_dir = Path("diagnostics/ingestion/export_preview")
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_path = debug_dir / "mapping_debug.jsonl"
+        with open(debug_path, "w", encoding="utf-8") as fh:
+            for record in debug_records:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        LOGGER.warning("Failed to write mapping debug file: %s", exc)
 
     report_json_path = report_json_path or (out_dir / "export_report.json")
     report_json_path.parent.mkdir(parents=True, exist_ok=True)
