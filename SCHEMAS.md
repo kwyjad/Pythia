@@ -16,6 +16,7 @@
 - [db.manifests](#dbmanifests)
 - [context.facts_last12](#contextfacts_last12)
 - [Ingestion Diagnostics Schema](#ingestion-diagnostics-schema)
+- [Export configuration (`resolver/tools/export_config.yml`)](#export-configuration-resolvertoolsexport_configyml)
 
 ## staging.common
 
@@ -457,3 +458,34 @@ values and now surfaces additional normalization telemetry:
 
 Zero-row runs are marked `ok-empty` with reason `"header-only (0 rows)"`; `dtm_api_sample.json` captures the API response sample to help diagnose the cause.
 - **Note:** The ingestion window is derived from `BACKFILL_START_ISO` and `BACKFILL_END_ISO`. If either discovery returns zero countries or every request yields zero rows within that window the connector raises a `RuntimeError`, surfaces the reason in `dtm_run.json`, and exits with a non-zero status.
+
+## Export configuration (`resolver/tools/export_config.yml`)
+
+`export_facts.py` reads this YAML to map staging files into canonical `facts.csv` rows. Each entry under
+`sources` contains:
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `name` | yes | Identifier for logs and diagnostics. |
+| `match.filename_regex` | no | Case-insensitive regex applied to the filename; when omitted any file may match. |
+| `match.required_columns` | no | List of source columns that must exist for the mapping to apply. |
+| `map.<target>.from` | no | Source column (or previously-derived target) to transform into the canonical column. |
+| `map.<target>.const` | no | Constant value used when no source column is required. |
+| `map.<target>.ops` | no | Ordered list of operations applied to the series (see below). |
+| `filters.keep_if_not_null` | no | Drop rows where any listed column is blank or null after mapping. |
+| `filters.keep_if_positive` | no | Drop rows where any listed column is ≤ 0 after numeric coercion. |
+| `dedupe.keys` | no | Columns used for row-level deduplication (e.g., `iso3`, `as_of_date`, `metric`). |
+| `dedupe.keep` | no | `first` or `last` row to keep during deduplication (defaults to `last`). |
+
+Supported `ops` values:
+
+- `trim` / `strip` — remove leading/trailing whitespace.
+- `uppercase` / `lowercase` — enforce casing.
+- `to_date` — parse timestamps into `YYYY-MM-DD` strings.
+- `to_ym` — derive `YYYY-MM` from a date-like column.
+- `to_number` — coerce values into numeric strings (dropping non-numeric rows when paired with `keep_if_positive`).
+
+When no configured source matches a file, the exporter auto-detects DTM displacement CSVs that expose
+`CountryISO3`, `ReportingDate`, and `idp_count` columns and applies the same mapping as
+`dtm_displacement_admin0`. Files that already provide every canonical column fall back to a
+pass-through mapping.

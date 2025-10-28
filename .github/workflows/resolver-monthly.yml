@@ -203,6 +203,7 @@ jobs:
           echo "placeholder" > diagnostics/ingestion/raw/KEEP.txt
           echo "placeholder" > diagnostics/ingestion/metrics/KEEP.txt
           echo "placeholder" > diagnostics/ingestion/samples/KEEP.txt
+          echo "placeholder" > diagnostics/ingestion/dtm/KEEP.txt
 
       - name: Upload connector logs
         if: always()

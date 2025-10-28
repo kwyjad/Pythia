@@ -25,14 +25,15 @@ After exporting:
 """
 
 import argparse
-import os
-import sys
-import json
 import datetime as dt
+import json
 import logging
-from dataclasses import dataclass
+import os
+import re
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 try:
     import pandas as pd
@@ -65,14 +66,29 @@ EXPORTS = ROOT / "exports"
 DEFAULT_CONFIG = TOOLS / "export_config.yml"
 
 REQUIRED = [
-    "event_id","country_name","iso3",
-    "hazard_code","hazard_label","hazard_class",
-    "metric","value","unit",
-    "as_of_date","publication_date",
-    "publisher","source_type","source_url","doc_title",
-    "definition_text","method","confidence",
-    "revision","ingested_at"
+    "event_id",
+    "country_name",
+    "iso3",
+    "hazard_code",
+    "hazard_label",
+    "hazard_class",
+    "metric",
+    "value",
+    "unit",
+    "as_of_date",
+    "publication_date",
+    "publisher",
+    "source_type",
+    "source_url",
+    "doc_title",
+    "definition_text",
+    "method",
+    "confidence",
+    "revision",
+    "ingested_at",
 ]
+
+CANONICAL_CORE = {"iso3", "metric", "value", "as_of_date"}
 
 def _load_config(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -96,6 +112,253 @@ def _collect_inputs(inp: Path) -> List[Path]:
                 files.append(p)
         return files
     return [inp]
+
+
+@dataclass
+class SourceApplication:
+    name: str
+    path: Path
+    rows_in: int
+    rows_out: int
+    strategy: str
+    warnings: List[str] = field(default_factory=list)
+
+
+def _ensure_iterable(value: Any) -> Sequence[Any]:
+    if isinstance(value, (list, tuple)):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def _coerce_string_series(series: "pd.Series", *, preserve_index: bool = True) -> "pd.Series":
+    if not isinstance(series, pd.Series):
+        values = list(series) if isinstance(series, Iterable) and not isinstance(series, (str, bytes)) else [series]
+        idx = None
+        if preserve_index and isinstance(series, pd.Series):
+            idx = series.index
+        return pd.Series(values, index=idx, dtype="object").astype(str).fillna("")
+    return series.astype(str).fillna("")
+
+
+def _apply_op(series: "pd.Series", op: str) -> "pd.Series":
+    op_normalized = (op or "").strip().lower()
+    if op_normalized in {"uppercase", "upper"}:
+        return series.astype(str).str.upper()
+    if op_normalized in {"lowercase", "lower"}:
+        return series.astype(str).str.lower()
+    if op_normalized in {"trim", "strip"}:
+        return series.astype(str).str.strip()
+    if op_normalized == "to_date":
+        parsed = pd.to_datetime(series, errors="coerce", utc=False)
+        formatted = parsed.dt.strftime("%Y-%m-%d")
+        fallback = series.astype(str).replace({"NaT": "", "nan": "", "NaN": ""})
+        return formatted.where(parsed.notna(), fallback).fillna("")
+    if op_normalized == "to_ym":
+        parsed = pd.to_datetime(series, errors="coerce", utc=False)
+        formatted = parsed.dt.strftime("%Y-%m")
+        fallback = series.astype(str).str.slice(0, 7)
+        return formatted.where(parsed.notna(), fallback).fillna("")
+    if op_normalized in {"to_number", "number"}:
+        numeric = pd.to_numeric(series, errors="coerce")
+        def _format_number(value: Any) -> str:
+            if pd.isna(value):
+                return ""
+            if float(value).is_integer():
+                return str(int(value))
+            return str(value)
+        return numeric.map(_format_number).fillna("")
+    return series.astype(str).fillna("")
+
+
+def _resolve_mapping_series(
+    frame: "pd.DataFrame",
+    context: Dict[str, "pd.Series"],
+    mapping: Mapping[str, Any],
+    *,
+    length: int,
+) -> "pd.Series":
+    if "const" in mapping:
+        value = mapping.get("const", "")
+        return pd.Series([value] * length, index=frame.index, dtype="object").astype(str)
+
+    source_key = mapping.get("from")
+    if source_key is None:
+        series = pd.Series([""] * length, index=frame.index, dtype="object")
+    else:
+        if source_key in context:
+            series = context[source_key]
+        elif source_key in frame.columns:
+            series = frame[source_key]
+        else:
+            series = pd.Series([""] * length, index=frame.index, dtype="object")
+
+    series = _coerce_string_series(series)
+    for op in _ensure_iterable(mapping.get("ops")):
+        series = _apply_op(series, str(op))
+    return series
+
+
+def _apply_filters(frame: "pd.DataFrame", filters: Sequence[Mapping[str, Any]]) -> "pd.DataFrame":
+    filtered = frame
+    for rule in filters or []:
+        if not isinstance(rule, Mapping):
+            continue
+        if "keep_if_not_null" in rule:
+            columns = [str(col) for col in _ensure_iterable(rule.get("keep_if_not_null"))]
+            if not columns:
+                continue
+            mask = pd.Series(True, index=filtered.index)
+            for column in columns:
+                if column not in filtered.columns:
+                    mask &= False
+                    continue
+                values = filtered[column].astype(str)
+                mask &= values.str.strip().ne("")
+            filtered = filtered.loc[mask]
+        elif "keep_if_positive" in rule:
+            columns = [str(col) for col in _ensure_iterable(rule.get("keep_if_positive"))]
+            if not columns:
+                continue
+            mask = pd.Series(True, index=filtered.index)
+            for column in columns:
+                if column not in filtered.columns:
+                    mask &= False
+                    continue
+                numeric = pd.to_numeric(filtered[column], errors="coerce")
+                mask &= numeric > 0
+            filtered = filtered.loc[mask]
+    return filtered
+
+
+def _apply_dedupe(frame: "pd.DataFrame", dedupe_cfg: Mapping[str, Any] | None) -> "pd.DataFrame":
+    if not isinstance(dedupe_cfg, Mapping):
+        return frame
+    keys = [str(col) for col in _ensure_iterable(dedupe_cfg.get("keys")) if str(col)]
+    if not keys:
+        return frame
+    keep = str(dedupe_cfg.get("keep", "last")).strip().lower() or "last"
+    keep_arg = keep if keep in {"first", "last"} else "last"
+    return frame.drop_duplicates(subset=keys, keep=keep_arg)
+
+
+def _source_matches(path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, Any]) -> bool:
+    match_cfg = source_cfg.get("match") if isinstance(source_cfg, Mapping) else None
+    if not isinstance(match_cfg, Mapping):
+        return True
+    filename_regex = match_cfg.get("filename_regex")
+    if filename_regex:
+        try:
+            if not re.search(str(filename_regex), path.name):
+                return False
+        except re.error:
+            return False
+    required = match_cfg.get("required_columns")
+    if required:
+        required_columns = {str(column) for column in _ensure_iterable(required)}
+        if not required_columns.issubset(set(frame.columns)):
+            return False
+    return True
+
+
+def _find_source_for_file(
+    path: Path,
+    frame: "pd.DataFrame",
+    sources_cfg: Sequence[Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    for source in sources_cfg:
+        if not isinstance(source, Mapping):
+            continue
+        if _source_matches(path, frame, source):
+            return source
+    return None
+
+
+def _auto_detect_dtm_source(frame: "pd.DataFrame") -> Optional[Dict[str, Any]]:
+    required = {"CountryISO3", "ReportingDate", "idp_count"}
+    if not required.issubset(set(frame.columns)):
+        return None
+    return {
+        "name": "dtm_displacement_admin0_auto",
+        "map": {
+            "iso3": {"from": "CountryISO3", "ops": ["trim", "uppercase"]},
+            "as_of_date": {"from": "ReportingDate", "ops": ["to_date"]},
+            "ym": {"from": "as_of_date", "ops": ["to_ym"]},
+            "metric": {"const": "idps"},
+            "value": {"from": "idp_count", "ops": ["to_number"]},
+            "semantics": {"const": "stock"},
+            "source": {"const": "IOM DTM"},
+        },
+        "filters": [
+            {"keep_if_not_null": ["CountryISO3", "ReportingDate", "idp_count"]},
+            {"keep_if_positive": ["value"]},
+        ],
+        "dedupe": {"keys": ["iso3", "as_of_date", "metric"], "keep": "last"},
+    }
+
+
+def _canonical_passthrough(frame: "pd.DataFrame") -> "pd.DataFrame":
+    coerced = frame.copy()
+    for column in coerced.columns:
+        coerced[column] = _coerce_string_series(coerced[column])
+    for column in REQUIRED:
+        if column not in coerced.columns:
+            coerced[column] = ""
+    return coerced
+
+
+def _has_canonical_columns(frame: "pd.DataFrame") -> bool:
+    columns = set(frame.columns)
+    if CANONICAL_CORE.issubset(columns):
+        return True
+    return set(REQUIRED).issubset(columns)
+
+
+def _apply_source(
+    *,
+    path: Path,
+    frame: "pd.DataFrame",
+    source_cfg: Mapping[str, Any],
+) -> tuple["pd.DataFrame", SourceApplication]:
+    name = str(source_cfg.get("name") or path.name)
+    map_cfg = source_cfg.get("map") if isinstance(source_cfg, Mapping) else None
+    if not isinstance(map_cfg, Mapping):
+        mapped = _canonical_passthrough(frame)
+        return mapped, SourceApplication(name=name, path=path, rows_in=len(frame), rows_out=len(mapped), strategy="passthrough")
+
+    context: Dict[str, "pd.Series"] = {}
+    out = pd.DataFrame(index=frame.index)
+    for target, instructions in map_cfg.items():
+        if not isinstance(instructions, Mapping):
+            continue
+        series = _resolve_mapping_series(frame, context, instructions, length=len(frame))
+        out[target] = series
+        context[target] = series
+
+    out = _apply_filters(out, source_cfg.get("filters", []))
+    out = _apply_dedupe(out, source_cfg.get("dedupe"))
+
+    for column in out.columns:
+        out[column] = _coerce_string_series(out[column])
+
+    for column in REQUIRED:
+        if column not in out.columns:
+            out[column] = ""
+
+    warnings: List[str] = []
+    if len(out) == 0 and len(frame) > 0:
+        warnings.append(f"{name}: mapping yielded 0 rows (from {len(frame)} input rows)")
+
+    applied = SourceApplication(
+        name=name,
+        path=path,
+        rows_in=len(frame),
+        rows_out=len(out),
+        strategy=str(source_cfg.get("name") or "config"),
+        warnings=warnings,
+    )
+    return out.reset_index(drop=True), applied
 
 def _apply_mapping(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
     """
@@ -420,6 +683,8 @@ class ExportResult:
     csv_path: Path
     parquet_path: Optional[Path]
     dataframe: "pd.DataFrame"
+    warnings: List[str] = field(default_factory=list)
+    sources: List[SourceApplication] = field(default_factory=list)
 
 
 class ExportError(RuntimeError):
@@ -443,10 +708,88 @@ def export_facts(
 
     cfg = _load_config(config_path)
 
-    frames = [_read_one(f) for f in files]
-    staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    warnings: List[str] = []
+    source_details: List[SourceApplication] = []
 
-    facts = _apply_mapping(staging, cfg)
+    use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
+
+    if use_sources:
+        mapped_frames: List[pd.DataFrame] = []
+        sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
+        for file_path in files:
+            frame = _read_one(file_path)
+            if frame.empty:
+                source_details.append(
+                    SourceApplication(
+                        name=file_path.name,
+                        path=file_path,
+                        rows_in=0,
+                        rows_out=0,
+                        strategy="empty-input",
+                    )
+                )
+                continue
+
+            matched_cfg = _find_source_for_file(file_path, frame, sources_cfg)
+            strategy = "config"
+            if matched_cfg is None:
+                auto_cfg = _auto_detect_dtm_source(frame)
+                if auto_cfg is not None:
+                    matched_cfg = auto_cfg
+                    strategy = "auto-dtm"
+                elif _has_canonical_columns(frame):
+                    mapped = _canonical_passthrough(frame).reset_index(drop=True)
+                    source_details.append(
+                        SourceApplication(
+                            name=file_path.name,
+                            path=file_path,
+                            rows_in=len(frame),
+                            rows_out=len(mapped),
+                            strategy="canonical-passthrough",
+                        )
+                    )
+                    mapped_frames.append(mapped)
+                    continue
+                else:
+                    warning = f"No export mapping matched {file_path.name}; file skipped"
+                    warnings.append(warning)
+                    source_details.append(
+                        SourceApplication(
+                            name=file_path.name,
+                            path=file_path,
+                            rows_in=len(frame),
+                            rows_out=0,
+                            strategy="unmapped",
+                            warnings=[warning],
+                        )
+                    )
+                    continue
+
+            mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
+            detail.strategy = strategy
+            if detail.warnings:
+                warnings.extend(detail.warnings)
+            source_details.append(detail)
+            if not mapped.empty:
+                mapped_frames.append(mapped)
+
+        if not mapped_frames:
+            raise ExportError("No rows produced after applying export mappings.")
+        facts = pd.concat(mapped_frames, ignore_index=True)
+    else:
+        frames = [_read_one(f) for f in files]
+        staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+        facts = _apply_mapping(staging, cfg)
+        source_details.append(
+            SourceApplication(
+                name="legacy-config",
+                path=files[0],
+                rows_in=len(staging),
+                rows_out=len(facts),
+                strategy="legacy",
+            )
+        )
+
     facts = _apply_series_semantics(facts)
     for col in ["as_of_date", "publication_date"]:
         if col in facts.columns:
@@ -463,6 +806,8 @@ def export_facts(
     )
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug("Sample rows: %s", facts.head(5).to_dict(orient="records"))
+    for warning in warnings:
+        LOGGER.warning("Export mapping warning: %s", warning)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
@@ -487,6 +832,8 @@ def export_facts(
         csv_path=csv_path,
         parquet_path=parquet_written,
         dataframe=facts,
+        warnings=warnings,
+        sources=source_details,
     )
 
 
