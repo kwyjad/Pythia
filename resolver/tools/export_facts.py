@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import numbers
 import os
 import re
 import sys
@@ -90,6 +91,132 @@ REQUIRED = [
 ]
 
 CANONICAL_CORE = {"iso3", "metric", "value", "as_of_date"}
+
+
+def _normalize_export_df(df: "pd.DataFrame") -> "pd.DataFrame":
+    if df is None or df.empty:
+        return df
+
+    required = ["iso3", "as_of_date", "metric", "value"]
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    df["iso3"] = df["iso3"].astype(str).str.strip().str.upper()
+    df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df["metric"] = df["metric"].astype(str).str.strip()
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+    df = df.dropna(subset=["iso3", "as_of_date", "metric", "value"])
+    df = df[df["iso3"].str.len() == 3]
+    df = df[df["value"] > 0]
+
+    return df
+
+
+def _format_numeric_string(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, numbers.Number):
+        float_val = float(value)
+        if float_val.is_integer():
+            return str(int(float_val))
+        return str(float_val)
+    return str(value)
+
+
+def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dict[str, Any]]:
+    cols = {"CountryISO3", "ReportingDate", "idp_count"}
+    metadata = {
+        "rows_after_filters": 0,
+        "rows_after_aggregate": 0,
+        "rows_after_dedupe": 0,
+        "filters_applied": ["keep_if_not_null", "keep_if_positive"],
+        "drop_histogram": {"keep_if_not_null": 0, "keep_if_positive": 0},
+        "aggregate_keys": ["iso3", "as_of_date", "metric"],
+        "aggregate_funcs": {"value": "max"},
+        "aggregate_rows_before": 0,
+    }
+
+    empty_df = pd.DataFrame(
+        columns=["iso3", "as_of_date", "metric", "value", "series_semantics", "semantics", "source", "ym"]
+    )
+
+    if frame is None or frame.empty or not cols.issubset(set(frame.columns)):
+        return empty_df, metadata
+
+    iso_series = frame["CountryISO3"].astype(str).str.strip().str.upper()
+    parsed_dates = pd.to_datetime(frame["ReportingDate"], errors="coerce")
+    value_series = pd.to_numeric(frame["idp_count"], errors="coerce")
+
+    valid_iso = iso_series.str.len() == 3
+    valid_dates = parsed_dates.notna()
+    valid_values = value_series.notna()
+    not_null_mask = valid_iso & valid_dates & valid_values
+    positive_mask = value_series > 0
+    filters_mask = not_null_mask & positive_mask
+
+    metadata["drop_histogram"]["keep_if_not_null"] = int((~not_null_mask).sum())
+    metadata["drop_histogram"]["keep_if_positive"] = int((not_null_mask & ~positive_mask).sum())
+
+    if not filters_mask.any():
+        return empty_df, metadata
+
+    filtered = pd.DataFrame(
+        {
+            "iso3": iso_series[filters_mask],
+            "as_of_date": parsed_dates[filters_mask],
+            "metric": "idps_stock",
+            "value": value_series[filters_mask],
+        }
+    )
+    filtered["series_semantics"] = "stock"
+    filtered["semantics"] = "stock"
+    filtered["source"] = "IOM DTM"
+
+    normalized = _normalize_export_df(filtered)
+    metadata["rows_after_filters"] = int(len(normalized))
+    metadata["aggregate_rows_before"] = metadata["rows_after_filters"]
+
+    if normalized.empty:
+        return empty_df, metadata
+
+    aggregated = (
+        normalized.groupby(["iso3", "as_of_date", "metric"], as_index=False, sort=False)
+        .agg({"value": "max"})
+        .reset_index(drop=True)
+    )
+    aggregated["series_semantics"] = "stock"
+    aggregated["semantics"] = "stock"
+    aggregated["source"] = "IOM DTM"
+    aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce").dt.strftime(
+        "%Y-%m-%d"
+    )
+    aggregated["ym"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce").dt.strftime("%Y-%m")
+    aggregated["value"] = aggregated["value"].apply(_format_numeric_string)
+
+    for column in REQUIRED:
+        if column not in aggregated.columns:
+            aggregated[column] = ""
+
+    metadata["rows_after_aggregate"] = int(len(aggregated))
+    metadata["rows_after_dedupe"] = int(len(aggregated))
+
+    ordered_columns = [
+        "iso3",
+        "as_of_date",
+        "ym",
+        "metric",
+        "value",
+        "semantics",
+        "series_semantics",
+        "source",
+    ]
+    existing = [col for col in ordered_columns if col in aggregated.columns]
+    remaining = [col for col in aggregated.columns if col not in existing]
+    aggregated = aggregated[existing + remaining]
+
+    return aggregated.reset_index(drop=True), metadata
 
 def _load_config(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -1202,6 +1329,10 @@ def export_facts(
         mapped_frames: List[pd.DataFrame] = []
         sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
         raw_frames: List[tuple[Path, "pd.DataFrame"]] = []
+        dtm_frame: Optional["pd.DataFrame"] = None
+        dtm_detail: Optional[SourceApplication] = None
+        dtm_yaml_rows: Optional[int] = None
+        dtm_debug_entry: Optional[Dict[str, Any]] = None
         for file_path in files:
             try:
                 frame = _read_one(file_path)
@@ -1256,6 +1387,8 @@ def export_facts(
             raw_frames.append((file_path, frame))
             relative_path = _relativize_path(file_path)
             columns = [str(col) for col in frame.columns]
+            if file_path.name == "dtm_displacement.csv":
+                dtm_frame = frame
             debug_entry: Dict[str, Any] = {
                 "file": relative_path,
                 "columns": columns,
@@ -1322,6 +1455,9 @@ def export_facts(
             if detail.warnings:
                 warnings.extend(detail.warnings)
             source_details.append(detail)
+            if file_path.name == "dtm_displacement.csv":
+                dtm_yaml_rows = len(mapped)
+                dtm_detail = detail
             if not mapped.empty:
                 mapped_frames.append(mapped)
             mapping_name = str(matched_cfg.get("name") or file_path.name)
@@ -1338,6 +1474,53 @@ def export_facts(
                     "keep": detail.dedupe_keep,
                 }
             debug_records.append(debug_entry)
+            if file_path.name == "dtm_displacement.csv":
+                dtm_debug_entry = debug_entry
+
+        if dtm_yaml_rows == 0 and dtm_frame is not None:
+            fallback, fallback_meta = _map_dtm_admin0_fallback(dtm_frame)
+            if fallback is not None and not fallback.empty:
+                if "series_semantics" not in fallback.columns:
+                    fallback["series_semantics"] = "stock"
+                mapped_frames.append(fallback)
+                warning_msg = (
+                    "dtm_displacement.csv: YAML mapping yielded 0 rows; applied admin0 fallback"
+                )
+                warnings.append(warning_msg)
+                LOGGER.warning(
+                    "Export mapping warning: YAML mapping yielded 0 rows; applied dtm_admin0 fallback: %s rows",
+                    len(fallback),
+                )
+                if dtm_detail is not None:
+                    dtm_detail.rows_mapped = fallback_meta.get("rows_after_filters", len(fallback))
+                    dtm_detail.rows_after_filters = fallback_meta.get("rows_after_filters", len(fallback))
+                    dtm_detail.rows_after_aggregate = fallback_meta.get("rows_after_aggregate", len(fallback))
+                    dtm_detail.rows_after_dedupe = fallback_meta.get("rows_after_dedupe", len(fallback))
+                    dtm_detail.dedupe_keys = ["iso3", "as_of_date", "metric"]
+                    dtm_detail.dedupe_keep = "last"
+                    dtm_detail.aggregate_keys = fallback_meta.get("aggregate_keys", [])
+                    dtm_detail.aggregate_funcs = fallback_meta.get("aggregate_funcs", {})
+                    dtm_detail.drop_histogram = fallback_meta.get("drop_histogram", {})
+                    dtm_detail.filters_applied = fallback_meta.get("filters_applied", [])
+                    metric_details = dtm_detail.mapping_details.get("metric")
+                    if isinstance(metric_details, dict):
+                        metric_details["const"] = "idps_stock"
+                    detail_warning = (
+                        "YAML mapping yielded 0 rows; applied dtm_admin0 fallback"
+                    )
+                    if detail_warning not in dtm_detail.warnings:
+                        dtm_detail.warnings.append(detail_warning)
+                if dtm_debug_entry is not None:
+                    dtm_debug_entry["fallback"] = {
+                        "applied": True,
+                        "rows": int(len(fallback)),
+                        "rows_after_filters": int(
+                            fallback_meta.get("rows_after_filters", len(fallback))
+                        ),
+                        "rows_after_aggregate": int(
+                            fallback_meta.get("rows_after_aggregate", len(fallback))
+                        ),
+                    }
 
         if not mapped_frames and raw_frames:
             staging_frames = [frame for _, frame in raw_frames]
