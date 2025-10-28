@@ -66,6 +66,20 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
   reachability probe results, and a staging snapshot. This summary replaces the
   previous "no files found" warnings with explicit "not present" markers.
 
+### Date filter behavior
+
+- The normalizer auto-detects the reporting date column using common variants
+  (`ReportingDate`, `reportingDate`, `reporting_date`, `date`, `Date`) and
+  applies an inclusive window derived from `RESOLVER_START_ISO`/`RESOLVER_END_ISO`.
+- Dates are parsed leniently and rows outside the window (or with unparseable
+  dates) are counted with drop reasons; a 200-row sample is written to
+  `diagnostics/ingestion/dtm/normalize_drops.csv` when rows are removed.
+- Set `DTM_NO_DATE_FILTER=1` (or `--no-date-filter`) to disable both the API
+  parameters and the normalization-time filter.
+- CI summaries include a **DTM Date Filter** section highlighting the detected
+  column, parse rate, min/max dates, in/out counts, and whether the filter was
+  skipped.
+
 ## Codex / CI setup
 
 When running resolver tests in the Codex environment (or any fresh CI runner),

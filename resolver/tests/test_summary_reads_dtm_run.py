@@ -115,3 +115,48 @@ def test_config_section_renders_parse_lines_and_warning(tmp_path: Path) -> None:
         "- ⚠ config had api.countries but selector list not applied (check loader/version)."
         in markdown
     )
+
+
+def test_date_filter_section_renders(tmp_path: Path) -> None:
+    diagnostics = tmp_path / "diagnostics" / "ingestion"
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    report_path = diagnostics / "connectors_report.jsonl"
+    payload = {
+        "connector_id": "dtm_client",
+        "mode": "real",
+        "status": "ok",
+        "reason": None,
+        "duration_ms": 0,
+        "http": {"2xx": 1, "4xx": 0, "5xx": 0, "retries": 0, "rate_limit_remaining": None, "last_status": 200},
+        "counts": {"fetched": 10, "normalized": 10, "written": 10},
+        "extras": {
+            "status_raw": "ok",
+            "rows_written": 10,
+            "date_filter": {
+                "date_column_used": "ReportingDate",
+                "parsed_ok": 8,
+                "parsed_total": 10,
+                "inside": 6,
+                "outside": 4,
+                "parse_failed": 2,
+                "window_start": "2024-01-01",
+                "window_end": "2024-01-31",
+                "inclusive": True,
+                "skipped": False,
+                "min_date": "2024-01-01",
+                "max_date": "2024-02-15",
+                "drop_counts": {"date_out_of_window": 2, "date_parse_failed": 2},
+            },
+            "artifacts": {
+                "normalize_drops": "diagnostics/ingestion/dtm/normalize_drops.csv",
+            },
+        },
+    }
+    report_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    entries = summarize_connectors.load_report(report_path)
+    markdown = summarize_connectors.build_markdown(entries)
+    assert "## DTM Date Filter" in markdown
+    assert "- **Date column:** `ReportingDate`" in markdown
+    assert "- **Parsed:** 8/10" in markdown
+    assert "Drop sample" in markdown

@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
@@ -152,6 +152,14 @@ CANONICAL_HEADERS = [
 SERIES_INCIDENT = "incident"
 SERIES_CUMULATIVE = "cumulative"
 
+DATE_CANDIDATES: Tuple[str, ...] = (
+    "ReportingDate",
+    "reportingDate",
+    "reporting_date",
+    "date",
+    "Date",
+)
+
 __all__ = [
     "CANONICAL_HEADERS",
     "SERIES_INCIDENT",
@@ -198,6 +206,296 @@ for directory in (
     OUT_DIR,
 ):
     directory.mkdir(parents=True, exist_ok=True)
+
+
+def _pick_reporting_date_column(
+    df: pd.DataFrame, preferred: Sequence[str] | None = None
+) -> Optional[str]:
+    if df is None or not hasattr(df, "columns"):
+        return None
+    try:
+        columns_iterable = list(df.columns)
+    except Exception:  # pragma: no cover - defensive guard
+        columns_iterable = []
+    lookup: Dict[str, str] = {}
+    for column in columns_iterable:
+        text = str(column).strip()
+        if not text:
+            continue
+        lookup[text.lower()] = column
+    candidates: List[str] = []
+    if preferred:
+        for item in preferred:
+            if item is None:
+                continue
+            candidate = str(item).strip()
+            if candidate:
+                candidates.append(candidate)
+    candidates.extend(DATE_CANDIDATES)
+    for candidate in candidates:
+        lowered = str(candidate).strip().lower()
+        if lowered and lowered in lookup:
+            return lookup[lowered]
+    return None
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalise_date_for_stats(value: Any) -> Optional[date]:
+    if value in (None, "", "NaT"):
+        return None
+    try:
+        parsed = pd.to_datetime(value)
+    except Exception:
+        return None
+    if getattr(parsed, "tzinfo", None):
+        try:
+            parsed = parsed.tz_convert(None)
+        except AttributeError:
+            try:
+                parsed = parsed.tz_localize(None)
+            except Exception:
+                pass
+    if hasattr(parsed, "to_pydatetime"):
+        parsed = parsed.to_pydatetime()
+    if isinstance(parsed, datetime):
+        return parsed.date()
+    if isinstance(parsed, date):
+        return parsed
+    return None
+
+
+def _merge_date_filter_stats(
+    target: MutableMapping[str, Any], diag: Mapping[str, Any]
+) -> MutableMapping[str, Any]:
+    if not isinstance(target, MutableMapping):
+        target = {}  # type: ignore[assignment]
+    window_start = diag.get("window_start")
+    window_end = diag.get("window_end")
+    if window_start and not target.get("window_start"):
+        target["window_start"] = window_start
+    if window_end and not target.get("window_end"):
+        target["window_end"] = window_end
+    target["inclusive"] = bool(diag.get("inclusive", target.get("inclusive", True)))
+    if not target.get("date_column_used") and diag.get("date_column_used"):
+        target["date_column_used"] = diag.get("date_column_used")
+    for key in ("parsed_ok", "parsed_total", "inside", "outside", "parse_failed"):
+        target[key] = _coerce_int(target.get(key)) + _coerce_int(diag.get(key))
+    if diag.get("skipped"):
+        target["skipped"] = True
+    else:
+        target.setdefault("skipped", False)
+    diag_min = _normalise_date_for_stats(diag.get("min_date"))
+    diag_max = _normalise_date_for_stats(diag.get("max_date"))
+    existing_min = _normalise_date_for_stats(target.get("min_date"))
+    existing_max = _normalise_date_for_stats(target.get("max_date"))
+    if diag_min:
+        if not existing_min or diag_min < existing_min:
+            target["min_date"] = diag_min.isoformat()
+    elif "min_date" not in target:
+        target["min_date"] = None
+    if diag_max:
+        if not existing_max or diag_max > existing_max:
+            target["max_date"] = diag_max.isoformat()
+    elif "max_date" not in target:
+        target["max_date"] = None
+    sample_path = diag.get("sample_path")
+    if sample_path and not target.get("sample_path"):
+        target["sample_path"] = sample_path
+    drop_counts = diag.get("drop_counts")
+    if isinstance(drop_counts, Mapping):
+        aggregate = target.setdefault("drop_counts", {})
+        if isinstance(aggregate, MutableMapping):
+            for reason, count in drop_counts.items():
+                aggregate[reason] = _coerce_int(aggregate.get(reason)) + _coerce_int(count)
+    return target
+
+
+def _apply_date_window(
+    df: pd.DataFrame,
+    start_iso: Optional[str],
+    end_iso: Optional[str],
+    *,
+    disable: bool,
+    diag_out_dir: Path,
+    extras: MutableMapping[str, Any],
+    preferred_columns: Sequence[str] | None = None,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    diag: Dict[str, Any] = {
+        "window_start": start_iso,
+        "window_end": end_iso,
+        "inclusive": True,
+        "parsed_total": int(len(df)),
+        "parsed_ok": 0,
+        "inside": 0,
+        "outside": 0,
+        "parse_failed": 0,
+        "min_date": None,
+        "max_date": None,
+        "skipped": bool(disable),
+        "sample_path": None,
+        "drop_counts": {},
+    }
+    total_rows = diag["parsed_total"]
+    used_col = _pick_reporting_date_column(df, preferred=preferred_columns)
+    diag["date_column_used"] = used_col
+    if total_rows == 0:
+        diag["parsed_ok"] = 0
+        existing = extras.get("date_filter")
+        if not isinstance(existing, MutableMapping):
+            existing = {}
+            extras["date_filter"] = existing
+        merged = _merge_date_filter_stats(existing, diag)
+        extras["date_filter"] = merged
+        LOG.info(
+            "date_filter: column=%s parsed=%s/%s inside=%s outside=%s min=%s max=%s skipped=%s",
+            merged.get("date_column_used"),
+            merged.get("parsed_ok"),
+            merged.get("parsed_total"),
+            merged.get("inside"),
+            merged.get("outside"),
+            merged.get("min_date"),
+            merged.get("max_date"),
+            merged.get("skipped"),
+        )
+        return df, diag
+    if disable or not used_col or not start_iso or not end_iso:
+        diag["parsed_ok"] = 0 if total_rows == 0 else total_rows
+        diag["inside"] = total_rows
+        existing = extras.get("date_filter")
+        if not isinstance(existing, MutableMapping):
+            existing = {}
+            extras["date_filter"] = existing
+        merged = _merge_date_filter_stats(existing, diag)
+        extras["date_filter"] = merged
+        LOG.info(
+            "date_filter: column=%s parsed=%s/%s inside=%s outside=%s min=%s max=%s skipped=%s",
+            merged.get("date_column_used"),
+            merged.get("parsed_ok"),
+            merged.get("parsed_total"),
+            merged.get("inside"),
+            merged.get("outside"),
+            merged.get("min_date"),
+            merged.get("max_date"),
+            merged.get("skipped"),
+        )
+        return df, diag
+    series = pd.to_datetime(df[used_col], errors="coerce", utc=False)
+    valid_mask = series.notna()
+    diag["parsed_ok"] = int(valid_mask.sum())
+    try:
+        start_date = pd.to_datetime(start_iso).date() if start_iso else None
+        end_date = pd.to_datetime(end_iso).date() if end_iso else None
+    except Exception:
+        start_date = None
+        end_date = None
+    if not start_date or not end_date:
+        diag["inside"] = diag["parsed_ok"]
+        diag["parse_failed"] = total_rows - diag["parsed_ok"]
+        diag["outside"] = total_rows - diag["inside"]
+        existing = extras.get("date_filter")
+        if not isinstance(existing, MutableMapping):
+            existing = {}
+            extras["date_filter"] = existing
+        merged = _merge_date_filter_stats(existing, diag)
+        extras["date_filter"] = merged
+        LOG.info(
+            "date_filter: column=%s parsed=%s/%s inside=%s outside=%s min=%s max=%s skipped=%s",
+            merged.get("date_column_used"),
+            merged.get("parsed_ok"),
+            merged.get("parsed_total"),
+            merged.get("inside"),
+            merged.get("outside"),
+            merged.get("min_date"),
+            merged.get("max_date"),
+            merged.get("skipped"),
+        )
+        return df, diag
+    date_series = series.dt.date
+    range_mask = (date_series >= start_date) & (date_series <= end_date)
+    mask = valid_mask & range_mask
+    parse_failed_mask = ~valid_mask
+    outside_mask = valid_mask & ~range_mask
+    inside_count = int(mask.sum())
+    parse_failed_count = int(parse_failed_mask.sum())
+    outside_total = int(outside_mask.sum() + parse_failed_count)
+    diag.update(
+        {
+            "inside": inside_count,
+            "outside": outside_total,
+            "parse_failed": parse_failed_count,
+            "skipped": bool(diag.get("skipped")),
+        }
+    )
+    valid_dates = [
+        value
+        for value in date_series[valid_mask].tolist()
+        if isinstance(value, date)
+    ]
+    if valid_dates:
+        diag["min_date"] = min(valid_dates).isoformat()
+        diag["max_date"] = max(valid_dates).isoformat()
+    drop_counts: Dict[str, int] = {}
+    if outside_mask.any():
+        drop_counts["date_out_of_window"] = int(outside_mask.sum())
+    if parse_failed_count:
+        drop_counts["date_parse_failed"] = parse_failed_count
+    diag["drop_counts"] = drop_counts
+    kept = df[mask].copy()
+    dropped = df[~mask].copy()
+    if not dropped.empty:
+        drop_reason = pd.Series("date_out_of_window", index=df.index)
+        drop_reason.loc[parse_failed_mask.index[parse_failed_mask]] = "date_parse_failed"
+        drop_dates_map = {
+            idx: value.isoformat() if isinstance(value, date) else None
+            for idx, value in zip(date_series.index, date_series.tolist())
+        }
+        dropped.loc[:, "_drop_reason"] = drop_reason.loc[dropped.index].tolist()
+        dropped.loc[:, "_drop_date"] = [drop_dates_map.get(idx) for idx in dropped.index]
+        diag_out_dir.mkdir(parents=True, exist_ok=True)
+        sample_path = diag_out_dir / "normalize_drops.csv"
+        existing_sample: Optional[pd.DataFrame]
+        if sample_path.exists():
+            try:
+                existing_sample = pd.read_csv(sample_path)
+            except Exception:
+                existing_sample = None
+        else:
+            existing_sample = None
+        if existing_sample is not None and not existing_sample.empty:
+            combined = pd.concat([existing_sample, dropped.head(200)], ignore_index=True)
+            combined = combined.head(200)
+        else:
+            combined = dropped.head(200)
+        try:
+            combined.to_csv(sample_path, index=False)
+        except Exception:
+            LOG.debug("dtm: unable to write normalize_drops.csv", exc_info=True)
+        else:
+            diag["sample_path"] = str(sample_path)
+    existing = extras.get("date_filter")
+    if not isinstance(existing, MutableMapping):
+        existing = {}
+        extras["date_filter"] = existing
+    merged = _merge_date_filter_stats(existing, diag)
+    extras["date_filter"] = merged
+    LOG.info(
+        "date_filter: column=%s parsed=%s/%s inside=%s outside=%s min=%s max=%s skipped=%s",
+        merged.get("date_column_used"),
+        merged.get("parsed_ok"),
+        merged.get("parsed_total"),
+        merged.get("inside"),
+        merged.get("outside"),
+        merged.get("min_date"),
+        merged.get("max_date"),
+        merged.get("skipped"),
+    )
+    return kept, diag
 
 _LEGACY_DIAGNOSTICS_DIR = _REPO_ROOT / "legacy_diagnostics"
 
@@ -2695,11 +2993,31 @@ def _fetch_api_data(
         "no_iso3": 0,
         "no_value_col": 0,
         "date_out_of_window": 0,
+        "date_parse_failed": 0,
         "other": 0,
     }
     summary_extras["drop_reasons_counter"] = drop_reasons_counter
     value_column_usage: Dict[str, int] = {}
     summary_extras["value_column_usage"] = value_column_usage
+    filter_start = os.getenv("RESOLVER_START_ISO") or window_start
+    filter_end = os.getenv("RESOLVER_END_ISO") or window_end
+    date_filter_defaults = summary_extras.setdefault(
+        "date_filter",
+        {
+            "window_start": filter_start,
+            "window_end": filter_end,
+            "inclusive": True,
+            "parsed_ok": 0,
+            "parsed_total": 0,
+            "inside": 0,
+            "outside": 0,
+            "parse_failed": 0,
+            "min_date": None,
+            "max_date": None,
+            "skipped": bool(no_date_filter),
+        },
+    )
+    date_filter_defaults.setdefault("date_column_used", None)
 
     try:
         PER_COUNTRY_METRICS_PATH.unlink(missing_ok=True)  # type: ignore[arg-type]
@@ -3088,6 +3406,32 @@ def _fetch_api_data(
                         except Exception:  # pragma: no cover - diagnostics only
                             LOG.debug("Unable to update admin0 sample", exc_info=True)
 
+                    current_date_column = _pick_reporting_date_column(
+                        page, preferred=(date_column,)
+                    )
+                    page, date_diag = _apply_date_window(
+                        page,
+                        filter_start,
+                        filter_end,
+                        disable=bool(no_date_filter),
+                        diag_out_dir=DTM_DIAGNOSTICS_DIR,
+                        extras=summary_extras,
+                        preferred_columns=(date_column,),
+                    )
+                    drop_counts_diag = date_diag.get("drop_counts")
+                    if isinstance(drop_counts_diag, Mapping):
+                        for reason, count in drop_counts_diag.items():
+                            drop_reasons_counter[reason] = drop_reasons_counter.get(reason, 0) + int(count)
+                    summary.setdefault("rows", {}).setdefault("dropped", 0)
+                    summary["rows"]["dropped"] += int(date_diag.get("outside", 0))
+                    if page.empty:
+                        continue
+                    current_date_column = (
+                        date_diag.get("date_column_used")
+                        or current_date_column
+                        or date_column
+                    )
+
                     per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
                     per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
                     causes: Dict[Tuple[str, str], str] = {}
@@ -3107,9 +3451,9 @@ def _fetch_api_data(
                                     row.get(country_column),
                                 )
                             continue
-                        bucket = month_start(row.get(date_column))
+                        bucket = month_start(row.get(current_date_column))
                         if not bucket:
-                            drop_reasons_counter["date_out_of_window"] += 1
+                            drop_reasons_counter["date_parse_failed"] += 1
                             continue
                         admin1 = ""
                         if admin1_column in page.columns:
@@ -3123,7 +3467,7 @@ def _fetch_api_data(
                             drop_reasons_counter["other"] += 1
                             continue
                         per_admin[(iso, admin1)][bucket] = float(value)
-                        as_of_value = _parse_iso_date_or_none(row.get(date_column))
+                        as_of_value = _parse_iso_date_or_none(row.get(current_date_column))
                         if not as_of_value:
                             as_of_value = datetime.now(timezone.utc).date().isoformat()
                         existing_asof = per_admin_asof[(iso, admin1)].get(bucket)
@@ -4303,6 +4647,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "http_trace": str(DTM_HTTP_LOG_PATH),
         "samples": str(SAMPLE_ADMIN0_PATH),
     }
+    date_filter_info = summary_extras.get("date_filter")
+    if isinstance(date_filter_info, Mapping):
+        sample_path = date_filter_info.get("sample_path")
+        if sample_path:
+            summary_extras["artifacts"]["normalize_drops"] = str(sample_path)
     summary_extras["staging_csv"] = str(OUT_PATH)
     summary_extras["staging_meta"] = str(META_PATH)
     summary_extras["diagnostics_dir"] = str(DTM_DIAGNOSTICS_DIR)
