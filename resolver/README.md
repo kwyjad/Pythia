@@ -231,8 +231,15 @@ If you see validation errors, fix the staging inputs or tweak resolver/tools/exp
   auto-detects the DTM columns and applies the same mapping so facts are still produced.
 - `scripts/ci/summarize_connectors.py` now runs the exporter against `resolver/staging/` during CI
   and writes a preview to `diagnostics/ingestion/export_preview/facts.csv`. The rendered
-  `diagnostics/ingestion/summary.md` gains an **Export Facts** section with the row count, a
-  5-row sample of `iso3/as_of_date/ym/metric/value/semantics/source`, and any mapping warnings.
+  `diagnostics/ingestion/summary.md` gains an **Export Facts** section with the row count, matched
+  files, applied filters/dedupe keys, and a 5-row sample of
+  `iso3/as_of_date/metric/value`. The same Markdown block is appended to the GitHub job summary when
+  available.
+- Every export writes `resolver/exports/backfill/export_report.json` and
+  `resolver/exports/backfill/export_report.md` (or the paths you pass via `--report-*`). The JSON
+  captures inputs scanned, matched files with their row counts, unmatched files, filters, dedupe
+  choices, drop histograms, warnings, and a 5-row preview; the Markdown mirrors the content for quick
+  sharing and is also appended to `diagnostics/ingestion/summary.md` when `--append-summary` is used.
 - Diagnostics artifacts for `diagnostics/ingestion/{raw,metrics,samples,dtm}` include `KEEP.txt`
   placeholders so empty bundles no longer trigger "No files were found" warnings in CI.
 

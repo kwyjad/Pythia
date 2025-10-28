@@ -492,21 +492,25 @@ pass-through mapping.
 
 ### Export report artifacts
 
-Successful runs now emit lightweight diagnostics alongside `facts.csv` in the export directory:
+Successful runs emit lightweight diagnostics alongside `facts.csv` in the export directory **and**
+append the same Markdown block to `diagnostics/ingestion/summary.md` (and `GITHUB_STEP_SUMMARY`
+when running inside Actions):
 
 - `export_report.json` — machine-readable metadata with:
-  - `inputs_scanned`: total number of data and metadata files discovered beneath the `--in` path.
-  - `inputs_used`: paths that produced rows (ignoring skipped metadata and failed reads).
-  - `inputs_skipped`: structured objects describing files that produced zero rows (e.g.,
-    metadata files, empty inputs, or read failures) and any associated warnings.
+  - `inputs_scanned`: total number of files inspected under the `--in` path (metadata included).
+  - `matched_files`: objects containing `path`, `source`, `strategy`, `rows_in`,
+    `rows_after_filters`, `rows_after_dedupe`, and any rule-level drop histogram or warnings.
+  - `unmatched_files`: files that were discovered but produced no rows (unmapped, empty, or read
+    failures).
   - `rows_exported`: final row count written to `facts.csv`.
+  - `filters_applied`: ordered list of filter rule names that ran.
+  - `dedupe_keys` / `dedupe_keep`: columns and strategy (`first`/`last`) used during deduplication.
+  - `dropped_by_filter`: histogram of rows removed by each filter rule.
+  - `preview`: first five exported rows serialized as dictionaries for quick inspection.
   - `warnings`: de-duplicated warning strings surfaced during mapping.
-  - `sample_head`: first five exported rows serialized as dictionaries for quick inspection.
-- `export_report.md` — human-friendly summary mirroring the JSON payload with counts, bullet
-  lists of used/skipped files, and a five-row CSV preview.
+  - `meta_files_skipped`: metadata companions (`*.meta.json`) ignored during the run.
+- `export_report.md` — Markdown rendering of the same payload with bullet highlights, a matched-file
+  table, and a four-column preview (iso3, as_of_date, metric, value) of the exported facts.
 
-Metadata files ending in `.meta.json` are skipped automatically and logged in the report with the
-`meta-skip` strategy. Empty or invalid JSON inputs no longer halt the export; instead they surface a
-warning, appear under `inputs_skipped`, and allow the remaining files to map successfully. When the
-workflow runs inside GitHub Actions the same summary is appended to the job log via the
-`GITHUB_STEP_SUMMARY` artifact.
+Empty or invalid inputs no longer halt the export; instead they surface warnings, appear under
+`unmatched_files`, and allow remaining files to map successfully.

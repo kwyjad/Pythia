@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -136,9 +137,41 @@ class SourceApplication:
     name: str
     path: Path
     rows_in: int
-    rows_out: int
-    strategy: str
+    rows_mapped: int = 0
+    rows_after_filters: int = 0
+    rows_after_dedupe: int = 0
+    strategy: str = ""
     warnings: List[str] = field(default_factory=list)
+    filters_applied: List[str] = field(default_factory=list)
+    drop_histogram: Dict[str, int] = field(default_factory=dict)
+    dedupe_keys: List[str] = field(default_factory=list)
+    dedupe_keep: str = "last"
+
+    @property
+    def rows_out(self) -> int:
+        return self.rows_after_dedupe
+
+    def as_report_entry(self) -> Dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "source": self.name,
+            "strategy": self.strategy,
+            "rows_in": self.rows_in,
+            "rows_mapped": self.rows_mapped,
+            "rows_after_filters": self.rows_after_filters,
+            "rows_after_dedupe": self.rows_after_dedupe,
+            "filters": list(dict.fromkeys(self.filters_applied)),
+            "dedupe": {
+                "keys": self.dedupe_keys,
+                "keep": self.dedupe_keep,
+            }
+            if self.dedupe_keys
+            else None,
+            "drop_histogram": {
+                key: int(value) for key, value in (self.drop_histogram or {}).items()
+            },
+            "warnings": list(self.warnings or []),
+        }
 
 
 def _ensure_iterable(value: Any) -> Sequence[Any]:
@@ -217,11 +250,17 @@ def _resolve_mapping_series(
     return series
 
 
-def _apply_filters(frame: "pd.DataFrame", filters: Sequence[Mapping[str, Any]]) -> "pd.DataFrame":
+def _apply_filters(
+    frame: "pd.DataFrame", filters: Sequence[Mapping[str, Any]]
+) -> tuple["pd.DataFrame", Dict[str, int], List[str]]:
     filtered = frame
+    histogram: Counter[str] = Counter()
+    applied: List[str] = []
     for rule in filters or []:
         if not isinstance(rule, Mapping):
             continue
+        rule_name = next(iter(rule.keys()), "") if rule else ""
+        before = len(filtered)
         if "keep_if_not_null" in rule:
             columns = [str(col) for col in _ensure_iterable(rule.get("keep_if_not_null"))]
             if not columns:
@@ -246,18 +285,27 @@ def _apply_filters(frame: "pd.DataFrame", filters: Sequence[Mapping[str, Any]]) 
                 numeric = pd.to_numeric(filtered[column], errors="coerce")
                 mask &= numeric > 0
             filtered = filtered.loc[mask]
-    return filtered
+        else:
+            continue
+        applied.append(rule_name)
+        histogram[rule_name] += max(before - len(filtered), 0)
+    return filtered, {key: int(value) for key, value in histogram.items()}, applied
 
 
-def _apply_dedupe(frame: "pd.DataFrame", dedupe_cfg: Mapping[str, Any] | None) -> "pd.DataFrame":
+def _apply_dedupe(
+    frame: "pd.DataFrame", dedupe_cfg: Mapping[str, Any] | None
+) -> tuple["pd.DataFrame", List[str], str, int]:
     if not isinstance(dedupe_cfg, Mapping):
-        return frame
+        return frame, [], "last", 0
     keys = [str(col) for col in _ensure_iterable(dedupe_cfg.get("keys")) if str(col)]
     if not keys:
-        return frame
+        return frame, [], "last", 0
     keep = str(dedupe_cfg.get("keep", "last")).strip().lower() or "last"
     keep_arg = keep if keep in {"first", "last"} else "last"
-    return frame.drop_duplicates(subset=keys, keep=keep_arg)
+    before = len(frame)
+    deduped = frame.drop_duplicates(subset=keys, keep=keep_arg)
+    removed = max(before - len(deduped), 0)
+    return deduped, keys, keep_arg, removed
 
 
 def _source_matches(path: Path, frame: "pd.DataFrame", source_cfg: Mapping[str, Any]) -> bool:
@@ -342,7 +390,16 @@ def _apply_source(
     map_cfg = source_cfg.get("map") if isinstance(source_cfg, Mapping) else None
     if not isinstance(map_cfg, Mapping):
         mapped = _canonical_passthrough(frame)
-        return mapped, SourceApplication(name=name, path=path, rows_in=len(frame), rows_out=len(mapped), strategy="passthrough")
+        detail = SourceApplication(
+            name=name,
+            path=path,
+            rows_in=len(frame),
+            rows_mapped=len(mapped),
+            rows_after_filters=len(mapped),
+            rows_after_dedupe=len(mapped),
+            strategy="passthrough",
+        )
+        return mapped, detail
 
     context: Dict[str, "pd.Series"] = {}
     out = pd.DataFrame(index=frame.index)
@@ -353,8 +410,15 @@ def _apply_source(
         out[target] = series
         context[target] = series
 
-    out = _apply_filters(out, source_cfg.get("filters", []))
-    out = _apply_dedupe(out, source_cfg.get("dedupe"))
+    rows_mapped = len(out)
+    filtered, drop_histogram, filters_applied = _apply_filters(
+        out, source_cfg.get("filters", [])
+    )
+    rows_after_filters = len(filtered)
+    deduped, dedupe_keys, dedupe_keep, _ = _apply_dedupe(
+        filtered, source_cfg.get("dedupe")
+    )
+    out = deduped
 
     for column in out.columns:
         out[column] = _coerce_string_series(out[column])
@@ -371,9 +435,15 @@ def _apply_source(
         name=name,
         path=path,
         rows_in=len(frame),
-        rows_out=len(out),
+        rows_mapped=rows_mapped,
+        rows_after_filters=rows_after_filters,
+        rows_after_dedupe=len(out),
         strategy=str(source_cfg.get("name") or "config"),
         warnings=warnings,
+        filters_applied=filters_applied,
+        drop_histogram=drop_histogram,
+        dedupe_keys=dedupe_keys,
+        dedupe_keep=dedupe_keep,
     )
     return out.reset_index(drop=True), applied
 
@@ -502,6 +572,13 @@ def _warn_on_non_canonical_semantics(label: str, frame: "pd.DataFrame | None") -
 
 
 def _apply_series_semantics(frame: "pd.DataFrame") -> "pd.DataFrame":
+    if frame is None:
+        return frame
+    if frame.empty:
+        if "series_semantics" not in frame.columns:
+            frame = frame.copy()
+            frame["series_semantics"] = []
+        return frame
     if "series_semantics" not in frame.columns:
         frame["series_semantics"] = ""
     frame["series_semantics"] = frame.apply(
@@ -702,12 +779,110 @@ class ExportResult:
     dataframe: "pd.DataFrame"
     warnings: List[str] = field(default_factory=list)
     sources: List[SourceApplication] = field(default_factory=list)
+    report: Dict[str, Any] = field(default_factory=dict)
 
 
 class ExportError(RuntimeError):
     pass
 
 
+def _render_markdown_report(report: Mapping[str, Any]) -> str:
+    matched_files: List[Mapping[str, Any]] = list(report.get("matched_files") or [])
+    matched_sources = sorted(
+        {
+            str(entry.get("source"))
+            for entry in matched_files
+            if entry.get("source")
+        }
+    )
+    inputs_scanned = int(report.get("inputs_scanned", 0) or 0)
+    rows_exported = int(report.get("rows_exported", 0) or 0)
+    filters_applied: List[str] = [
+        str(name)
+        for name in (report.get("filters_applied") or [])
+        if str(name)
+    ]
+    dedupe_keys: List[str] = [
+        str(name)
+        for name in (report.get("dedupe_keys") or [])
+        if str(name)
+    ]
+    dedupe_keep: List[str] = [
+        str(name)
+        for name in (report.get("dedupe_keep") or [])
+        if str(name)
+    ]
+    drop_histogram: Mapping[str, Any] = report.get("dropped_by_filter") or {}
+    unmatched_files: List[str] = [
+        str(path) for path in (report.get("unmatched_files") or [])
+    ]
+    warnings_list: List[str] = [
+        str(msg) for msg in (report.get("warnings") or []) if str(msg)
+    ]
+
+    lines: List[str] = ["## Export Facts"]
+    lines.append(f"- **Inputs scanned:** {inputs_scanned}")
+    if matched_files:
+        if matched_sources:
+            lines.append(
+                f"- **Matched:** {len(matched_files)} file(s) → sources: {', '.join(matched_sources)}"
+            )
+        else:
+            lines.append(f"- **Matched:** {len(matched_files)} file(s)")
+    else:
+        lines.append("- **Matched:** 0 file(s)")
+    lines.append(f"- **Rows exported:** {rows_exported}")
+    if dedupe_keys:
+        keep_display = ", ".join(sorted(set(dedupe_keep))) if dedupe_keep else "last"
+        lines.append(
+            f"- **Dedupe keys:** {', '.join(dedupe_keys)} (keep={keep_display})"
+        )
+    else:
+        lines.append("- **Dedupe keys:** (none)")
+    if filters_applied:
+        lines.append(f"- **Filters:** {', '.join(filters_applied)}")
+    else:
+        lines.append("- **Filters:** (none)")
+    if drop_histogram:
+        drop_parts = [f"{key}: {value}" for key, value in drop_histogram.items()]
+        lines.append(f"- **Rows dropped by filters:** {', '.join(drop_parts)}")
+    if unmatched_files:
+        preview = unmatched_files[:5]
+        suffix = " …" if len(unmatched_files) > 5 else ""
+        lines.append(f"- **Unmatched files:** {', '.join(preview)}{suffix}")
+    else:
+        lines.append("- **Unmatched files:** (none)")
+    if warnings_list:
+        lines.append(f"- **Warnings:** {', '.join(warnings_list[:5])}")
+
+    if matched_files:
+        lines.append("")
+        lines.append("### Matched files")
+        lines.append("| File | Source | Rows in | After filters | After dedupe | Strategy |")
+        lines.append("| --- | --- | ---: | ---: | ---: | --- |")
+        for entry in matched_files:
+            file_name = Path(str(entry.get("path", ""))).name or str(entry.get("path", ""))
+            source_name = str(entry.get("source") or "")
+            rows_in = entry.get("rows_in") or 0
+            rows_filtered = entry.get("rows_after_filters") or 0
+            rows_dedupe = entry.get("rows_after_dedupe") or 0
+            strategy = str(entry.get("strategy") or "")
+            lines.append(
+                f"| {file_name} | {source_name} | {rows_in} | {rows_filtered} | {rows_dedupe} | {strategy} |"
+            )
+
+    preview_rows: List[Mapping[str, Any]] = list(report.get("preview") or [])
+    if preview_rows:
+        lines.append("")
+        lines.append("### Preview (first 5 rows)")
+        columns = ["iso3", "as_of_date", "metric", "value"]
+        lines.append("| iso3 | as_of_date | metric | value |")
+        lines.append("| --- | --- | --- | --- |")
+        for row in preview_rows:
+            values = [str(row.get(col, "")) for col in columns]
+            lines.append("| " + " | ".join(values) + " |")
+
+    return "\n".join(lines).rstrip() + "\n"
 def export_facts(
     *,
     inp: Path,
@@ -715,6 +890,9 @@ def export_facts(
     out_dir: Path = EXPORTS,
     write_db: str | bool | None = None,
     db_url: Optional[str] = None,
+    report_json_path: Optional[Path] = None,
+    report_md_path: Optional[Path] = None,
+    append_summary_path: Optional[Path] = None,
 ) -> ExportResult:
     if not config_path.exists():
         raise ExportError(f"Config not found: {config_path}")
@@ -732,7 +910,6 @@ def export_facts(
                 name=meta_path.name,
                 path=meta_path,
                 rows_in=0,
-                rows_out=0,
                 strategy="meta-skip",
                 warnings=[message],
             )
@@ -745,9 +922,12 @@ def export_facts(
 
     use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
 
+    unmatched_paths: List[Path] = []
+
     if use_sources:
         mapped_frames: List[pd.DataFrame] = []
         sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
+        raw_frames: List[tuple[Path, "pd.DataFrame"]] = []
         for file_path in files:
             try:
                 frame = _read_one(file_path)
@@ -759,11 +939,11 @@ def export_facts(
                         name=file_path.name,
                         path=file_path,
                         rows_in=0,
-                        rows_out=0,
                         strategy="read-failed",
                         warnings=[warning],
                     )
                 )
+                unmatched_paths.append(file_path)
                 continue
 
             if frame.empty:
@@ -774,13 +954,14 @@ def export_facts(
                         name=file_path.name,
                         path=file_path,
                         rows_in=0,
-                        rows_out=0,
                         strategy="empty-input",
                         warnings=[warning],
                     )
                 )
+                unmatched_paths.append(file_path)
                 continue
 
+            raw_frames.append((file_path, frame))
             matched_cfg = _find_source_for_file(file_path, frame, sources_cfg)
             strategy = "config"
             if matched_cfg is None:
@@ -790,26 +971,28 @@ def export_facts(
                     strategy = "auto-dtm"
                 elif _has_canonical_columns(frame):
                     mapped = _canonical_passthrough(frame).reset_index(drop=True)
-                    source_details.append(
-                        SourceApplication(
-                            name=file_path.name,
-                            path=file_path,
-                            rows_in=len(frame),
-                            rows_out=len(mapped),
-                            strategy="canonical-passthrough",
-                        )
+                    detail = SourceApplication(
+                        name=file_path.name,
+                        path=file_path,
+                        rows_in=len(frame),
+                        rows_mapped=len(mapped),
+                        rows_after_filters=len(mapped),
+                        rows_after_dedupe=len(mapped),
+                        strategy="canonical-passthrough",
                     )
-                    mapped_frames.append(mapped)
+                    source_details.append(detail)
+                    if not mapped.empty:
+                        mapped_frames.append(mapped)
                     continue
                 else:
                     warning = f"No export mapping matched {file_path.name}; file skipped"
                     warnings.append(warning)
+                    unmatched_paths.append(file_path)
                     source_details.append(
                         SourceApplication(
                             name=file_path.name,
                             path=file_path,
                             rows_in=len(frame),
-                            rows_out=0,
                             strategy="unmapped",
                             warnings=[warning],
                         )
@@ -824,9 +1007,40 @@ def export_facts(
             if not mapped.empty:
                 mapped_frames.append(mapped)
 
-        if not mapped_frames:
-            raise ExportError("No rows produced after applying export mappings.")
-        facts = pd.concat(mapped_frames, ignore_index=True)
+        if not mapped_frames and raw_frames:
+            staging_frames = [frame for _, frame in raw_frames]
+            staging = (
+                pd.concat(staging_frames, ignore_index=True)
+                if len(staging_frames) > 1
+                else staging_frames[0]
+            )
+            fallback = _apply_mapping(staging, cfg)
+            fallback_raw_len = len(fallback)
+            if not fallback.empty:
+                canonical_columns = [col for col in CANONICAL_CORE if col in fallback.columns]
+                if canonical_columns:
+                    non_empty = fallback[canonical_columns].apply(
+                        lambda col: col.astype(str).str.strip().ne(""), axis=0
+                    )
+                    valid_mask = non_empty.any(axis=1)
+                    fallback = fallback.loc[valid_mask]
+            detail = SourceApplication(
+                name="legacy-config",
+                path=raw_frames[0][0],
+                rows_in=len(staging),
+                rows_mapped=fallback_raw_len,
+                rows_after_filters=len(fallback),
+                rows_after_dedupe=len(fallback),
+                strategy="legacy-fallback",
+            )
+            source_details.append(detail)
+            if not fallback.empty:
+                mapped_frames.append(fallback)
+
+        if mapped_frames:
+            facts = pd.concat(mapped_frames, ignore_index=True)
+        else:
+            facts = pd.DataFrame(columns=REQUIRED)
     else:
         frames: List[pd.DataFrame] = []
         successful_paths: List[Path] = []
@@ -841,7 +1055,6 @@ def export_facts(
                         name=file_path.name,
                         path=file_path,
                         rows_in=0,
-                        rows_out=0,
                         strategy="read-failed",
                         warnings=[warning],
                     )
@@ -855,7 +1068,6 @@ def export_facts(
                         name=file_path.name,
                         path=file_path,
                         rows_in=0,
-                        rows_out=0,
                         strategy="empty-input",
                         warnings=[warning],
                     )
@@ -874,8 +1086,10 @@ def export_facts(
                 name="legacy-config",
                 path=successful_paths[0],
                 rows_in=len(staging),
-                rows_out=len(facts),
                 strategy="legacy",
+                rows_mapped=len(facts),
+                rows_after_filters=len(facts),
+                rows_after_dedupe=len(facts),
             )
         )
 
@@ -917,97 +1131,84 @@ def export_facts(
     )
 
     result_rows = len(facts)
-    inputs_used = [
-        str(detail.path)
-        for detail in source_details
-        if detail.rows_out > 0
-        and detail.strategy not in {"read-failed", "empty-input", "unmapped", "meta-skip"}
-    ]
-    inputs_skipped = [
-        {
-            "path": str(detail.path),
-            "strategy": detail.strategy,
-            "warnings": detail.warnings,
-        }
-        for detail in source_details
-        if detail.rows_out == 0
-    ]
-    report = {
-        "inputs_scanned": len(files) + len(skipped_meta),
-        "inputs_used": inputs_used,
-        "inputs_skipped": inputs_skipped,
-        "rows_exported": result_rows,
-        "warnings": warnings,
-        "sample_head": facts.head(5).to_dict(orient="records"),
+
+    filters_ordered: List[str] = []
+    dedupe_keys_ordered: List[str] = []
+    dedupe_keep_values: set[str] = set()
+    drop_hist_total: Counter[str] = Counter()
+    matched_entries: List[Dict[str, Any]] = []
+    unmatched_set: set[str] = {str(path) for path in unmatched_paths}
+
+    for detail in source_details:
+        include_detail = detail.rows_mapped > 0 or detail.rows_after_dedupe > 0
+        if detail.strategy == "legacy-fallback" and detail.rows_after_dedupe == 0:
+            include_detail = False
+        if include_detail:
+            entry = detail.as_report_entry()
+            matched_entries.append(entry)
+            for name in entry.get("filters") or []:
+                if name and name not in filters_ordered:
+                    filters_ordered.append(str(name))
+            dedupe_info = entry.get("dedupe") or {}
+            for key in dedupe_info.get("keys") or []:
+                if key and key not in dedupe_keys_ordered:
+                    dedupe_keys_ordered.append(str(key))
+            keep_value = dedupe_info.get("keep")
+            if keep_value:
+                dedupe_keep_values.add(str(keep_value))
+            drop_hist_total.update(detail.drop_histogram or {})
+        elif detail.strategy in {"unmapped", "read-failed", "empty-input", "legacy-fallback"}:
+            unmatched_set.add(str(detail.path))
+
+    unmatched_set.update(str(path) for path in unmatched_paths)
+    unmatched_files = sorted(unmatched_set)
+    dropped_by_filter = {
+        key: int(drop_hist_total[key])
+        for key in filters_ordered
+        if drop_hist_total.get(key)
     }
 
-    report_json = out_dir / "export_report.json"
-    report_md = out_dir / "export_report.md"
-    with open(report_json, "w", encoding="utf-8") as fh:
+    report = {
+        "inputs_scanned": len(files),
+        "matched_files": matched_entries,
+        "unmatched_files": unmatched_files,
+        "rows_exported": result_rows,
+        "filters_applied": filters_ordered,
+        "dedupe_keys": dedupe_keys_ordered,
+        "dedupe_keep": sorted(dedupe_keep_values) if dedupe_keep_values else [],
+        "dropped_by_filter": dropped_by_filter,
+        "preview": facts.head(5).to_dict(orient="records"),
+        "warnings": warnings,
+        "meta_files_skipped": [str(path) for path in skipped_meta],
+    }
+
+    report_json_path = report_json_path or (out_dir / "export_report.json")
+    report_json_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_json_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, sort_keys=True)
 
-    md_lines = [
-        "# Export Report",
-        "",
-        f"- Inputs scanned: {report['inputs_scanned']}",
-        f"- Inputs used: {len(inputs_used)}",
-        f"- Inputs skipped: {len(inputs_skipped)}",
-        f"- Rows exported: {result_rows}",
-        "",
-    ]
+    markdown_block = _render_markdown_report(report)
+    report_md_path = report_md_path or (out_dir / "export_report.md")
+    report_md_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_md_path, "w", encoding="utf-8") as fh:
+        fh.write(markdown_block)
 
-    if inputs_used:
-        md_lines.append("## Inputs Used")
-        for detail in source_details:
-            if str(detail.path) in inputs_used:
-                md_lines.append(
-                    f"- {detail.path} — {detail.rows_out} rows via {detail.strategy}"
-                )
-        md_lines.append("")
-
-    if inputs_skipped:
-        md_lines.append("## Inputs Skipped")
-        for skipped in inputs_skipped[:10]:
-            warn_text = "; ".join(skipped.get("warnings") or [])
-            reason = skipped.get("strategy", "unknown")
-            if warn_text:
-                md_lines.append(
-                    f"- {skipped['path']} — {reason} ({warn_text})"
-                )
-            else:
-                md_lines.append(f"- {skipped['path']} — {reason}")
-        md_lines.append("")
-
-    if warnings:
-        md_lines.append("## Warnings")
-        for warning in warnings:
-            md_lines.append(f"- {warning}")
-        md_lines.append("")
-
-    if not facts.empty:
-        md_lines.append("## Preview (first 5 rows)")
-        md_lines.append("```")
-        md_lines.append(facts.head(5).to_csv(index=False))
-        md_lines.append("```")
-
-    with open(report_md, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(md_lines).strip() + "\n")
+    if append_summary_path is not None:
+        append_summary_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            needs_leading_newline = append_summary_path.exists() and append_summary_path.stat().st_size > 0
+        except OSError:
+            needs_leading_newline = False
+        with open(append_summary_path, "a", encoding="utf-8") as fh:
+            if needs_leading_newline:
+                fh.write("\n")
+            fh.write(markdown_block)
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         try:
             with open(summary_path, "a", encoding="utf-8") as fh:
-                fh.write("## Export Facts\n")
-                fh.write(f"- Rows exported: {result_rows}\n")
-                fh.write(
-                    f"- Inputs used: {len(inputs_used)} / {report['inputs_scanned']} total\n"
-                )
-                if inputs_skipped:
-                    skipped_preview = ", ".join(
-                        f"{item['path']} ({item['strategy']})" for item in inputs_skipped[:2]
-                    )
-                    fh.write(f"- Skipped: {skipped_preview}\n")
-                fh.write("\n")
+                fh.write(markdown_block)
         except OSError:
             LOGGER.debug("Could not write GitHub summary", exc_info=True)
 
@@ -1018,6 +1219,7 @@ def export_facts(
         dataframe=facts,
         warnings=warnings,
         sources=source_details,
+        report=report,
     )
 
 
@@ -1037,6 +1239,21 @@ def main():
         default=None,
         help="Optional DuckDB URL override (defaults to RESOLVER_DB_URL)",
     )
+    ap.add_argument(
+        "--report-json",
+        default=None,
+        help="Optional path for export_report.json (defaults to <out>/export_report.json)",
+    )
+    ap.add_argument(
+        "--report-md",
+        default=None,
+        help="Optional path for export_report.md (defaults to <out>/export_report.md)",
+    )
+    ap.add_argument(
+        "--append-summary",
+        default=None,
+        help="Append the Export Facts markdown block to this file",
+    )
     args = ap.parse_args()
 
     try:
@@ -1046,6 +1263,9 @@ def main():
             out_dir=Path(args.out),
             write_db=args.write_db,
             db_url=args.db_url,
+            report_json_path=Path(args.report_json) if args.report_json else None,
+            report_md_path=Path(args.report_md) if args.report_md else None,
+            append_summary_path=Path(args.append_summary) if args.append_summary else None,
         )
     except ExportError as exc:
         print(str(exc), file=sys.stderr)
