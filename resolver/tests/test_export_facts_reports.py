@@ -38,7 +38,7 @@ def test_export_source_specific_dtm_mapping(tmp_path, monkeypatch):
         set(df.columns)
     )
     assert set(df["iso3"]) == {"NGA", "NER"}
-    assert set(df["metric"]) == {"idps"}
+    assert set(df["metric"]) == {"idps_stock"}
     assert set(df["semantics"]) == {"stock"}
     assert set(df["source"]) == {"IOM DTM"}
     assert all(value.endswith("01") or value.endswith("05") for value in df["as_of_date"])
@@ -47,6 +47,17 @@ def test_export_source_specific_dtm_mapping(tmp_path, monkeypatch):
     assert len(matched) == 1
     assert matched[0]["source"] == "dtm_displacement_admin0"
     assert matched[0]["rows_in"] == 2
+    assert matched[0]["rows_after_aggregate"] == 2
+    assert matched[0]["aggregate"] == {
+        "funcs": {"value": "max"},
+        "keys": ["iso3", "as_of_date", "metric"],
+        "rows_after": 2,
+        "rows_before": 2,
+    }
+    mapping = matched[0]["mapping"]
+    assert mapping["metric"]["const"] == "idps_stock"
+    assert mapping["iso3"]["source"] == "CountryISO3"
+    assert result.report["monthly_summary"] == [{"month": "2024-01", "rows": 2}]
 
 
 def test_export_filters_and_dedupe(tmp_path, monkeypatch):
@@ -81,7 +92,12 @@ def test_export_filters_and_dedupe(tmp_path, monkeypatch):
     matched = result.report["matched_files"][0]
     assert matched["rows_in"] == 3
     assert matched["rows_after_filters"] == 2
+    assert matched["rows_after_aggregate"] == 1
     assert matched["rows_after_dedupe"] == 1
+    assert matched["aggregate"]["rows_before"] == 2
+    assert matched["aggregate"]["rows_after"] == 1
+    assert matched["aggregate"]["funcs"] == {"value": "max"}
+    assert result.report["monthly_summary"] == [{"month": "2024-02", "rows": 1}]
 
 
 def test_export_report_written_and_appended(tmp_path, monkeypatch):
@@ -119,11 +135,15 @@ def test_export_report_written_and_appended(tmp_path, monkeypatch):
     assert report_data["rows_exported"] == 1
     assert report_data["matched_files"][0]["path"].endswith("dtm_displacement.csv")
     assert report_data["filters_applied"] == ["keep_if_not_null", "keep_if_positive"]
+    assert report_data["monthly_summary"] == [{"month": "2024-03", "rows": 1}]
+    assert "rows_after_aggregate" in report_data["matched_files"][0]
 
     md_contents = report_md.read_text(encoding="utf-8")
     assert "## Export Facts" in md_contents
     assert "Matched files" in md_contents
     assert "dtm_displacement.csv" in md_contents
+    assert "Mapping & aggregation" in md_contents
+    assert "Monthly summary" in md_contents
 
     summary_contents = summary_path.read_text(encoding="utf-8")
     assert md_contents.strip() in summary_contents

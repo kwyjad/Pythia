@@ -47,22 +47,25 @@ dates:
 sources:
   - name: dtm_displacement_admin0
     match:
-      filename_regex: "^dtm_displacement\\.csv$"
-      required_columns: [CountryISO3, ReportingDate, idp_count]
+      filename_regex: "(?:^|.*/)?dtm_displacement\\.csv$"
+      required_any:
+        iso3: [iso3, CountryISO3]
+        as_of_date: [as_of_date, ReportingDate]
+        value: [idp_count, numPresentIdpInd]
     map:
       iso3:
-        from: CountryISO3
+        from_any: [iso3, CountryISO3]
         ops: [trim, uppercase]
       as_of_date:
-        from: ReportingDate
+        from_any: [as_of_date, ReportingDate]
         ops: [to_date]
       ym:
         from: as_of_date
         ops: [to_ym]
       metric:
-        const: idps
+        const: idps_stock
       value:
-        from: idp_count
+        from_any: [idp_count, numPresentIdpInd]
         ops: [to_number]
       semantics:
         const: stock
@@ -71,6 +74,12 @@ sources:
     filters:
       - keep_if_not_null: [iso3, as_of_date, value]
       - keep_if_positive: [value]
+    aggregate:
+      keys: [iso3, as_of_date, metric]
+      funcs:
+        value: max
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
+    hints:
+      expect_admin_level: admin0
