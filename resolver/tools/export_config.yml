@@ -1,4 +1,4 @@
-﻿mapping:
+mapping:
   event_id:        ["event_id", "evt_id"]
   country_name:    ["country_name", "country"]
   iso3:            ["iso3", "iso_code3"]
@@ -43,3 +43,34 @@ transforms:
 dates:
   as_of_date: ["date_as_of", "asof"]
   publication_date: ["pub_date", "pub"]
+
+sources:
+  - name: dtm_displacement_admin0
+    match:
+      filename_regex: "(?i)dtm.*displacement.*\\.csv$"
+      required_columns: [CountryISO3, ReportingDate, idp_count]
+    map:
+      iso3:
+        from: CountryISO3
+        ops: [trim, uppercase]
+      as_of_date:
+        from: ReportingDate
+        ops: [to_date]
+      ym:
+        from: as_of_date
+        ops: [to_ym]
+      metric:
+        const: idps
+      value:
+        from: idp_count
+        ops: [to_number]
+      semantics:
+        const: stock
+      source:
+        const: IOM DTM
+    filters:
+      - keep_if_not_null: [CountryISO3, ReportingDate, idp_count]
+      - keep_if_positive: [value]
+    dedupe:
+      keys: [iso3, as_of_date, metric]
+      keep: last

@@ -25,6 +25,7 @@ MISSING_REPORT_SUMMARY = (
 )
 
 STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
+EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"]
 
 
 def _ensure_dict(data: Any) -> Dict[str, Any]:
@@ -106,6 +107,80 @@ def _collect_staging_inventory(path: Path) -> Dict[str, Any]:
         "total_size": total_size,
         "files": files[:5],
     }
+
+
+def _collect_export_summary(
+    staging_dir: Path,
+    config_path: Path,
+    preview_dir: Path,
+) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "rows": 0,
+        "headers": [],
+        "preview": [],
+        "warnings": [],
+        "sources": [],
+        "error": None,
+    }
+    try:
+        from resolver.tools.export_facts import ExportError, export_facts
+    except Exception as exc:  # pragma: no cover - defensive import
+        summary["error"] = f"import-error: {exc}"
+        return summary
+
+    if not staging_dir.exists():
+        summary["error"] = f"staging missing ({staging_dir})"
+        return summary
+    if not config_path.exists():
+        summary["error"] = f"config missing ({config_path})"
+        return summary
+
+    try:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        result = export_facts(
+            inp=staging_dir,
+            config_path=config_path,
+            out_dir=preview_dir,
+        )
+    except ExportError as exc:
+        summary["error"] = str(exc)
+        return summary
+    except Exception as exc:  # pragma: no cover - defensive
+        summary["error"] = f"unexpected error: {exc}"
+        return summary
+
+    df = result.dataframe
+    summary["rows"] = len(df)
+    if not df.empty:
+        desired_columns = [col for col in EXPORT_PREVIEW_COLUMNS if col in df.columns]
+        if not desired_columns:
+            desired_columns = list(df.columns[: min(6, len(df.columns))])
+        preview_df = df.loc[:, desired_columns].head(5)
+        summary["headers"] = desired_columns
+        summary["preview"] = [[str(cell) for cell in row] for row in preview_df.to_numpy().tolist()]
+    else:
+        summary["headers"] = [col for col in EXPORT_PREVIEW_COLUMNS if col in df.columns]
+        summary["preview"] = []
+    summary["warnings"] = list(result.warnings)
+    sources: List[Dict[str, Any]] = []
+    for detail in getattr(result, "sources", []):
+        try:
+            entry = {
+                "name": getattr(detail, "name", "unknown"),
+                "path": getattr(detail, "path", Path("?")).as_posix()
+                if hasattr(detail, "path")
+                else str(getattr(detail, "path", "?")),
+                "rows_in": getattr(detail, "rows_in", 0),
+                "rows_out": getattr(detail, "rows_out", 0),
+                "strategy": getattr(detail, "strategy", ""),
+                "warnings": list(getattr(detail, "warnings", [])),
+            }
+        except Exception:  # pragma: no cover - best effort
+            continue
+        sources.append(entry)
+    summary["sources"] = sources
+    summary["csv_path"] = result.csv_path.as_posix()
+    return summary
 
 
 def _format_meta_cell(
@@ -1332,6 +1407,7 @@ def build_markdown(
     *,
     dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
+    export_summary: Mapping[str, Any] | None = None,
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
     total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
@@ -1345,6 +1421,49 @@ def build_markdown(
     lines.append(f"* **Rows fetched:** {total_fetched}")
     lines.append(f"* **Rows written:** {total_written}")
     lines.append("")
+
+    export_info = export_summary or {}
+    export_error = export_info.get("error")
+    if export_info or export_error:
+        lines.append("## Export Facts")
+        lines.append("")
+        if export_error:
+            lines.append(f"- **Status:** {export_error}")
+        else:
+            rows_written = export_info.get("rows", 0)
+            csv_path = export_info.get("csv_path")
+            lines.append(f"- **facts.csv rows:** {rows_written}")
+            if csv_path:
+                lines.append(f"- **facts.csv path:** `{csv_path}`")
+            preview_headers = export_info.get("headers") or []
+            preview_rows = export_info.get("preview") or []
+            table_lines = _format_markdown_table(preview_headers, preview_rows)
+            if table_lines:
+                lines.append("")
+                lines.extend(table_lines)
+            warnings_list = [str(w) for w in export_info.get("warnings", []) if str(w)]
+            if warnings_list:
+                lines.append("")
+                lines.append("**Mapping warnings:**")
+                for warning in warnings_list:
+                    lines.append(f"- {warning}")
+            sources_details = export_info.get("sources") or []
+            if sources_details:
+                lines.append("")
+                lines.append("**Source mappings:**")
+                for detail in sources_details:
+                    name = detail.get("name", "unknown")
+                    strategy = detail.get("strategy", "")
+                    rows_in = detail.get("rows_in", 0)
+                    rows_out = detail.get("rows_out", 0)
+                    summary_line = f"- `{name}` ({strategy or 'config'}): in={rows_in}, out={rows_out}"
+                    warnings_detail = detail.get("warnings") or []
+                    if warnings_detail:
+                        joined = "; ".join(str(w) for w in warnings_detail if str(w))
+                        if joined:
+                            summary_line += f" — warnings: {joined}"
+                    lines.append(summary_line)
+        lines.append("")
 
     if dtm_entry:
         config_section = _render_config_section(dtm_entry)
@@ -1464,9 +1583,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         entries = [stub_entry]
     deduped_entries, dedupe_notes = deduplicate_entries(entries)
+    export_summary = _collect_export_summary(
+        Path("resolver/staging"),
+        Path("resolver/tools/export_config.yml"),
+        Path("diagnostics/ingestion/export_preview"),
+    )
     reachability_path = Path("diagnostics/ingestion/dtm/reachability.json")
     reachability_payload = _safe_load_json(reachability_path) or {}
-    markdown = build_markdown(deduped_entries, dedupe_notes=dedupe_notes, reachability=reachability_payload)
+    markdown = build_markdown(
+        deduped_entries,
+        dedupe_notes=dedupe_notes,
+        reachability=reachability_payload,
+        export_summary=export_summary,
+    )
     write_markdown(out_path, markdown)
     if args.github_step_summary:
         append_to_summary(markdown)

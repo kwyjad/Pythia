@@ -212,6 +212,22 @@ python resolver/tools/freeze_snapshot.py \
 
 If you see validation errors, fix the staging inputs or tweak resolver/tools/export_config.yml.
 
+### DTM displacement exports & diagnostics
+
+- `resolver/tools/export_config.yml` defines source-aware mappings for canonical `facts.csv`. The
+  DTM displacement file (`resolver/staging/dtm_displacement.csv`) matches the
+  `dtm_displacement_admin0` entry, which maps `CountryISO3` → `iso3`, parses `ReportingDate` to
+  `as_of_date`/`ym`, coerces `idp_count` into `value`, and tags rows with
+  `metric=idps`, `semantics=stock`, and `source=IOM DTM`.
+- When the workflow encounters a displacement CSV that didn’t match the config, the exporter
+  auto-detects the DTM columns and applies the same mapping so facts are still produced.
+- `scripts/ci/summarize_connectors.py` now runs the exporter against `resolver/staging/` during CI
+  and writes a preview to `diagnostics/ingestion/export_preview/facts.csv`. The rendered
+  `diagnostics/ingestion/summary.md` gains an **Export Facts** section with the row count, a
+  5-row sample of `iso3/as_of_date/ym/metric/value/semantics/source`, and any mapping warnings.
+- Diagnostics artifacts for `diagnostics/ingestion/{raw,metrics,samples,dtm}` include `KEEP.txt`
+  placeholders so empty bundles no longer trigger "No files were found" warnings in CI.
+
 ## End-to-end (Stubs → Export → Validate → Freeze)
 
 ```bash
