@@ -2,12 +2,7 @@ enabled: true
 api:
   # Leave `countries` empty to trigger runtime discovery via dtmapi.get_all_countries().
   countries: 
-    - "South Sudan"
-    - "Nigeria"
-    - "Somalia"
-    - "Ethiopia"
     - "Sudan"
     - "DR Congo"
-    - "Yemen"
   admin_levels:
     - admin0
