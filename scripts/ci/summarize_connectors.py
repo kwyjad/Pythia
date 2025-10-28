@@ -879,6 +879,53 @@ def _render_staging_readiness(entry: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _render_dtm_date_filter(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    date_filter = _ensure_dict(extras.get("date_filter"))
+    if not date_filter:
+        return []
+
+    parsed_ok = _coerce_int(date_filter.get("parsed_ok"))
+    parsed_total = _coerce_int(date_filter.get("parsed_total"))
+    percentage = "—"
+    if parsed_total:
+        percentage = f"{(parsed_ok / parsed_total) * 100:.1f}%"
+    min_date = date_filter.get("min_date") or "—"
+    max_date = date_filter.get("max_date") or "—"
+    inside = _coerce_int(date_filter.get("inside"))
+    outside = _coerce_int(date_filter.get("outside"))
+    parse_failed = _coerce_int(date_filter.get("parse_failed"))
+    window_start = date_filter.get("window_start") or "—"
+    window_end = date_filter.get("window_end") or "—"
+    inclusive_text = "inclusive" if date_filter.get("inclusive", True) else "exclusive"
+    skipped = _format_yes_no(date_filter.get("skipped"))
+    column_used = str(date_filter.get("date_column_used") or "—")
+    drop_counts = _ensure_dict(date_filter.get("drop_counts"))
+    artifacts = _ensure_dict(extras.get("artifacts"))
+    sample_path = artifacts.get("normalize_drops")
+
+    lines = ["## DTM Date Filter", ""]
+    lines.append(f"- **Date column:** `{column_used}`")
+    lines.append(f"- **Parsed:** {parsed_ok}/{parsed_total} ({percentage})")
+    lines.append(f"- **Min/Max date:** {min_date} → {max_date}")
+    lines.append(f"- **Inside window:** {inside}")
+    lines.append(f"- **Outside window:** {outside}")
+    if parse_failed:
+        lines.append(f"- **Parse failures:** {parse_failed}")
+    lines.append(f"- **Window:** {window_start} → {window_end} ({inclusive_text})")
+    lines.append(f"- **Skipped filter:** {skipped}")
+    if drop_counts:
+        formatted = ", ".join(
+            f"{reason} ({_coerce_int(count)})" for reason, count in sorted(drop_counts.items())
+        )
+        if formatted:
+            lines.append(f"- **Drop reasons:** {formatted}")
+    if isinstance(sample_path, str) and sample_path:
+        lines.append(f"- **Drop sample:** `{sample_path}`")
+    lines.append("")
+    return lines
+
+
 def _render_dtm_per_country(entry: Mapping[str, Any]) -> List[str]:
     extras = _ensure_dict(entry.get("extras"))
     per_country_raw = extras.get("per_country")
@@ -1303,6 +1350,9 @@ def build_markdown(
         config_section = _render_config_section(dtm_entry)
         if config_section:
             lines.extend(config_section)
+        date_filter_section = _render_dtm_date_filter(dtm_entry)
+        if date_filter_section:
+            lines.extend(date_filter_section)
         staging_section = _render_staging_readiness(dtm_entry)
         if staging_section:
             lines.extend(staging_section)
