@@ -125,9 +125,10 @@ def _map_dtm_displacement_admin0(
                 "ym",
                 "metric",
                 "value",
-                "semantics",
                 "series_semantics",
+                "semantics",
                 "source",
+                "hazard_code",
             ]
         )
         metadata.update({
@@ -139,9 +140,10 @@ def _map_dtm_displacement_admin0(
 
     working = filtered.copy()
     working["metric"] = "idp_displacement_stock_dtm"
-    working["semantics"] = "stock"
     working["series_semantics"] = "stock"
+    working["semantics"] = "stock"
     working["source"] = "IOM DTM"
+    working["hazard_code"] = ""
 
     aggregated = (
         working.groupby(["iso3", "as_of_date", "metric"], as_index=False, sort=False)[
@@ -151,9 +153,10 @@ def _map_dtm_displacement_admin0(
         .reset_index(drop=True)
     )
     aggregated["value"] = aggregated["value"].map(_format_numeric_string)
-    aggregated["semantics"] = "stock"
     aggregated["series_semantics"] = "stock"
+    aggregated["semantics"] = "stock"
     aggregated["source"] = "IOM DTM"
+    aggregated["hazard_code"] = ""
     aggregated["ym"] = pd.to_datetime(
         aggregated["as_of_date"], errors="coerce", utc=False
     ).dt.strftime("%Y-%m")
@@ -164,9 +167,10 @@ def _map_dtm_displacement_admin0(
         "ym",
         "metric",
         "value",
-        "semantics",
         "series_semantics",
+        "semantics",
         "source",
+        "hazard_code",
     ]
     aggregated = aggregated[columns_order]
 
@@ -230,6 +234,101 @@ REQUIRED = [
 CANONICAL_CORE = {"iso3", "metric", "value", "as_of_date"}
 
 
+# === PATCH START: export_facts contract columns & finalizer ===
+# Canonical always-on columns for facts export
+BASE_COLS: List[str] = [
+    "iso3",
+    "as_of_date",
+    "ym",
+    "metric",
+    "value",
+    "series_semantics",  # canonical
+    "semantics",  # legacy alias (kept for tests/BC)
+    "source",
+]
+
+# Report/metadata contract columns expected by validator/tests
+REPORT_META_COLS: List[str] = [
+    "event_id",
+    "country_name",
+    "hazard_code",
+    "hazard_label",
+    "hazard_class",
+    "unit",
+    "publication_date",
+    "publisher",
+    "source_type",
+    "source_url",
+    "doc_title",
+    "definition_text",
+    "method",
+    "confidence",
+    "revision",
+    "ingested_at",
+]
+
+# Full ordered export contract (CSV & Parquet). Extra columns are allowed after these.
+EXPORT_ORDER: List[str] = BASE_COLS + REPORT_META_COLS
+
+DATE_STRING_COLS = ["as_of_date", "publication_date"]  # must serialize as strings for tests
+
+
+def _ensure_export_contract(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        # Still enforce headers for downstream tools/tests
+        df = pd.DataFrame(columns=EXPORT_ORDER)
+
+    # 1) semantics aliases: always keep both; canonical is series_semantics
+    if "series_semantics" not in df.columns and "semantics" in df.columns:
+        df = df.rename(columns={"semantics": "series_semantics"})
+    if "series_semantics" not in df.columns:
+        df["series_semantics"] = pd.NA
+    # legacy alias mirrors canonical
+    if "semantics" not in df.columns:
+        df["semantics"] = df["series_semantics"]
+    else:
+        # keep them in sync if both exist
+        df["semantics"] = df["semantics"].fillna(df["series_semantics"])
+        df["series_semantics"] = df["series_semantics"].fillna(df["semantics"])
+
+    # 2) ym derivation if missing
+    if "ym" not in df.columns:
+        _asof = pd.to_datetime(df.get("as_of_date"), errors="coerce")
+        df["ym"] = _asof.dt.strftime("%Y-%m")
+
+    # 3) required base columns
+    for col in ["iso3", "as_of_date", "metric", "value", "source"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # 4) report metadata: pass-through if present, else add as empty
+    for col in REPORT_META_COLS:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # 5) hazard_code MUST exist for DuckDB upsert key
+    #    If truly unknown, keep empty string (presence matters; value can be empty)
+    df["hazard_code"] = df["hazard_code"].fillna("")
+
+    # 6) dates as strings (tests check dtype=object)
+    for dcol in DATE_STRING_COLS:
+        if dcol in df.columns:
+            # Coerce to datetime then format back to string; preserves object dtype on read_csv
+            # If parse fails, keep original string
+            s = pd.to_datetime(df[dcol], errors="coerce").dt.strftime("%Y-%m-%d")
+            df[dcol] = s.where(~s.isna(), df[dcol].astype("string")).astype("string")
+
+    # 7) Column ordering: put contract columns first, then any extras
+    front = [c for c in EXPORT_ORDER if c in df.columns]
+    rest = [c for c in df.columns if c not in front]
+    df = df[front + rest]
+
+    return df
+
+
+# === PATCH END: export_facts contract columns & finalizer ===
+
+
 def _normalize_export_df(df: "pd.DataFrame") -> "pd.DataFrame":
     if df is None or df.empty:
         return df
@@ -276,7 +375,17 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
     }
 
     empty_df = pd.DataFrame(
-        columns=["iso3", "as_of_date", "metric", "value", "series_semantics", "semantics", "source", "ym"]
+        columns=[
+            "iso3",
+            "as_of_date",
+            "metric",
+            "value",
+            "series_semantics",
+            "semantics",
+            "source",
+            "hazard_code",
+            "ym",
+        ]
     )
 
     if frame is None or frame.empty or not cols.issubset(set(frame.columns)):
@@ -310,6 +419,7 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
     filtered["series_semantics"] = "stock"
     filtered["semantics"] = "stock"
     filtered["source"] = "IOM DTM"
+    filtered["hazard_code"] = ""
 
     normalized = _normalize_export_df(filtered)
     metadata["rows_after_filters"] = int(len(normalized))
@@ -326,6 +436,7 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
     aggregated["series_semantics"] = "stock"
     aggregated["semantics"] = "stock"
     aggregated["source"] = "IOM DTM"
+    aggregated["hazard_code"] = ""
     aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce").dt.strftime(
         "%Y-%m-%d"
     )
@@ -345,9 +456,10 @@ def _map_dtm_admin0_fallback(frame: "pd.DataFrame") -> tuple["pd.DataFrame", Dic
         "ym",
         "metric",
         "value",
-        "semantics",
         "series_semantics",
+        "semantics",
         "source",
+        "hazard_code",
     ]
     existing = [col for col in ordered_columns if col in aggregated.columns]
     remaining = [col for col in aggregated.columns if col not in existing]
@@ -1859,6 +1971,17 @@ def export_facts(
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
     pq_path = out_dir / "facts.parquet"
+
+    # === PATCH START: export_facts finalize before write ===
+    facts = _ensure_export_contract(facts)
+
+    try:
+        dist = facts["series_semantics"].fillna("").value_counts(dropna=False).to_dict()
+        LOGGER.info("series_semantics distribution (finalized): %s", dist)
+    except Exception:  # pragma: no cover - defensive logging only
+        pass
+    # === PATCH END: export_facts finalize before write ===
+
     facts.to_csv(csv_path, index=False)
 
     parquet_written: Optional[Path] = None
