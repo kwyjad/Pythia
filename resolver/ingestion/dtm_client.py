@@ -167,6 +167,7 @@ SERIES_CUMULATIVE = "cumulative"
 _DATE_CANDIDATES: list[str] = [
     "ReportingDate",
     "reportingDate",
+    "reporting_date",
     "ReportDate",
     "Date",
     "date",
@@ -228,18 +229,31 @@ for directory in (
 def _pick_reporting_date_column(
     df: pd.DataFrame, preferred: Sequence[str] | None = None
 ) -> Optional[str]:
+    """Return the header that most likely represents the reporting date column."""
+
     if df is None or not hasattr(df, "columns"):
         return None
+
     try:
         columns_iterable = list(df.columns)
     except Exception:  # pragma: no cover - defensive guard
         columns_iterable = []
-    lookup: Dict[str, str] = {}
+
+    def _normalize(token: Any) -> str:
+        text = str(token).strip().lower()
+        if not text:
+            return ""
+        return text.replace("_", "")
+
+    normalized_lookup: Dict[str, str] = {}
     for column in columns_iterable:
         text = str(column).strip()
         if not text:
             continue
-        lookup[text.lower()] = column
+        key = _normalize(text)
+        if key and key not in normalized_lookup:
+            normalized_lookup[key] = column
+
     candidates: List[str] = []
     if preferred:
         for item in preferred:
@@ -249,10 +263,17 @@ def _pick_reporting_date_column(
             if candidate:
                 candidates.append(candidate)
     candidates.extend(DATE_CANDIDATES)
+
     for candidate in candidates:
-        lowered = str(candidate).strip().lower()
-        if lowered and lowered in lookup:
-            return lookup[lowered]
+        key = _normalize(candidate)
+        if key and key in normalized_lookup:
+            return normalized_lookup[key]
+
+    for column in columns_iterable:
+        key = _normalize(column)
+        if "report" in key and "date" in key and "start" not in key and "end" not in key:
+            return column
+
     return None
 
 

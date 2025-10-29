@@ -470,6 +470,36 @@ else
   echo "No staging files discovered." >> "${SUMMARY_MD}"
 fi
 
+append_section "DTM date header probe"
+{
+  echo '```'
+  "$PYTHON" - <<'PY'
+import os
+
+try:
+    import pandas as pd  # type: ignore
+except Exception as exc:  # pragma: no cover - best effort diagnostics
+    print(f"- pandas unavailable: {exc}")
+else:
+    path = "resolver/staging/dtm_displacement.csv"
+    if os.path.exists(path):
+        try:
+            frame = pd.read_csv(path, nrows=0)
+        except Exception as error:  # pragma: no cover - diagnostics only
+            print(f"- could not read headers: {error}")
+        else:
+            headers = list(frame.columns)
+            normalized = [
+                str(value).strip().lower().replace("_", "") for value in headers
+            ]
+            print(f"- dtm_displacement.csv headers (0 rows): {headers}")
+            print(f"- normalized headers: {normalized}")
+    else:
+        print("- dtm_displacement.csv not present")
+PY
+  echo '```'
+} >> "${SUMMARY_MD}" 2>/dev/null || true
+
 append_section "Snapshots directory"
 append_code_block "${snapshots_file}" "data/snapshots missing"
 
