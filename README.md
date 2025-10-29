@@ -21,6 +21,16 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
   - Cache-enabled runs expect repeated `duckdb_io.get_db(url)` calls to return the same connection object; cache-disabled runs (`RESOLVER_DISABLE_CONN_CACHE=1`) intentionally return fresh handles, and tests should branch accordingly.
 
+### PR Gate: Canary tests
+
+Branches prefixed with `codex/` trigger the dedicated [Canary Gate workflow](.github/workflows/codex-canary-gate.yml) on every push and pull request. The job installs the resolver with the standard CI constraints and runs `python -m scripts.ci.run_canary`, which executes a fixed trio of fast contract tests:
+
+- `resolver/tests/test_run_connectors_extra_args.py::test_run_connectors_passes_extra_args_and_env`
+- `resolver/tests/test_iso_normalize_and_drop_reasons.py::test_dtm_drop_reason_counters_capture_iso_and_value_failures`
+- `resolver/tests/test_dtm_soft_timeouts.py::test_soft_timeouts_yield_ok_empty`
+
+The workflow completes in well under two minutes and is a required check for Codex PRs into `main`. When a canary fails the job comments directly on the pull request, applies a `needs-fix/canary` label, and links to the run logs so you can triage without hunting through the Actions UI.
+
 ## Go Live: Initial resolver backfill
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).

@@ -361,6 +361,8 @@ field_aliases:
 - `diagnostics/ingestion/samples/` — sampled rows preserved for schema inspection.
 - `diagnostics/ingestion/dtm/` — discovery probes and HTTP traces from the DTM client, including `discovery_fail.json` when discovery fails.
 
+> **Heads-up:** CI (including the Codex Canary Gate) often runs with network access disabled. When upstream APIs are unreachable the connector writes header-only staging CSVs plus metadata that captures `zero_rows_reason="connect_timeout"`. Downstream exporters and schema checks must treat these empty-but-successful outputs as valid.
+
 **Diagnostics:** each execution writes:
 - `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
 - `diagnostics/ingestion/dtm_api_request.json` recording admin levels, countries, operations, and the date window passed to the API (secrets redacted).
