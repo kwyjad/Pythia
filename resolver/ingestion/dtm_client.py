@@ -3352,6 +3352,7 @@ def _fetch_api_data(
                         size = int(page.shape[0])
                         current = summary["paging"]["page_size"] or 0
                         summary["paging"]["page_size"] = max(current, size)
+                    raw_page = page
                     if hasattr(page, "drop_duplicates"):
                         sort_cols = [
                             col
@@ -3370,7 +3371,7 @@ def _fetch_api_data(
                                 na_position="last",
                                 kind="mergesort",
                             )
-                        dedupe_cols = [
+                        dedupe_candidates = [
                             col
                             for col in [
                                 "CountryISO3",
@@ -3381,17 +3382,23 @@ def _fetch_api_data(
                             ]
                             if col in page.columns
                         ]
-                        if dedupe_cols:
-                            before_dedupe = int(page.shape[0])
-                            page = page.drop_duplicates(subset=dedupe_cols, keep="last")
-                            page = page.reset_index(drop=True)
-                            if int(page.shape[0]) != before_dedupe:
-                                LOG.debug(
-                                    "dtm: deduped admin0 rows before normalization (before=%d after=%d keys=%s)",
-                                    before_dedupe,
-                                    int(page.shape[0]),
-                                    dedupe_cols,
-                                )
+                        if dedupe_candidates:
+                            subset_cols = [
+                                col for col in dedupe_candidates if col != "ReportingDate"
+                            ]
+                            if subset_cols and "ReportingDate" in dedupe_candidates:
+                                subset_cols.append("ReportingDate")
+                            if subset_cols:
+                                before_dedupe = int(page.shape[0])
+                                page = page.drop_duplicates(subset=subset_cols, keep="last")
+                                page = page.reset_index(drop=True)
+                                if int(page.shape[0]) != before_dedupe:
+                                    LOG.debug(
+                                        "dtm: deduped admin0 rows before normalization (before=%d after=%d keys=%s)",
+                                        before_dedupe,
+                                        int(page.shape[0]),
+                                        subset_cols,
+                                    )
                     if page.empty:
                         continue
                     LOG.debug(
@@ -3420,8 +3427,14 @@ def _fetch_api_data(
                             }
                         )
                         continue
-                    value_column_usage[idp_column] = value_column_usage.get(idp_column, 0) + int(
-                        page[idp_column].notna().sum()
+                    raw_count = 0
+                    if isinstance(raw_page, pd.DataFrame) and idp_column in raw_page.columns:
+                        raw_count = int(raw_page[idp_column].notna().sum())
+                    value_column_usage[idp_column] = value_column_usage.get(idp_column, 0) + raw_count
+                    LOG.debug(
+                        "DTM diag value-column raw count: %s=%s",
+                        idp_column,
+                        raw_count,
                     )
                     if level not in head_written_levels:
                         try:
