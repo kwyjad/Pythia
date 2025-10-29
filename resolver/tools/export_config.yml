@@ -77,6 +77,8 @@ sources:
       keys: [iso3, as_of_date, metric]
       keep: last
   - name: dtm_displacement_admin0
+    # The connector may emit header-only CSVs (soft timeout / ok-empty runs).
+    # Filters below will skip those safely because the required columns are empty.
     match:
       filename_regex: "(?i)^dtm.*displacement.*\\.csv$"
       required_columns: [CountryISO3, ReportingDate, idp_count]
