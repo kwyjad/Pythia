@@ -879,6 +879,216 @@ def _complete_soft_timeout_rescue(
     return 0
 
 
+def _complete_fake_success(
+    *,
+    args: argparse.Namespace,
+    base_extras: Mapping[str, Any],
+    base_http: Mapping[str, Any],
+    deps: Mapping[str, Any],
+    timings_ms: Mapping[str, Any],
+    diagnostics_ctx: Any,
+    window_start_iso: Optional[str],
+    window_end_iso: Optional[str],
+    configured_labels: Sequence[str],
+    configured_iso3: Sequence[str],
+    admin_levels: Sequence[str],
+    mode: str,
+    reason: str,
+    offline: bool,
+    diagnostics_details: Optional[Mapping[str, Any]] = None,
+) -> int:
+    from resolver.ingestion.dtm_fakes import write_fake_admin0_staging
+
+    fake_started = time.perf_counter()
+    iso_filter = list(configured_iso3)
+    rows = write_fake_admin0_staging(
+        out_csv=OUT_PATH,
+        out_meta=META_PATH,
+        window_start=window_start_iso,
+        window_end=window_end_iso,
+        iso3_whitelist=iso_filter or None,
+        reason=reason,
+        diagnostics=dict(diagnostics_details) if diagnostics_details else None,
+    )
+    ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
+    _write_http_trace_placeholder(Path(HTTP_TRACE_PATH), offline=offline)
+
+    elapsed_ms = max(0, int((time.perf_counter() - fake_started) * 1000))
+    timings_payload = dict(timings_ms)
+    timings_payload["fake_write"] = elapsed_ms
+
+    http_payload = dict(base_http)
+    http_payload.setdefault("retries", 0)
+    http_payload.setdefault("timeout", 0)
+    http_payload.setdefault("rate_limit_remaining", None)
+    http_payload["last_status"] = http_payload.get("last_status")
+    http_payload["fake_runs"] = int(http_payload.get("fake_runs", 0) or 0) + 1
+
+    extras_payload = dict(base_extras)
+    extras_payload.update(
+        {
+            "rows_total": rows,
+            "rows_written": rows,
+            "status_raw": "ok",
+            "exit_code": 0,
+            "window_start": window_start_iso,
+            "window_end": window_end_iso,
+            "fake_data_used": True,
+            "fake_reason": reason,
+            "fake_mode": mode,
+            "fake_rows_written": rows,
+            "timings_ms": dict(timings_payload),
+        }
+    )
+    extras_payload.setdefault("zero_rows_reason", None)
+    extras_payload.setdefault("soft_timeouts", base_extras.get("soft_timeouts"))
+    extras_payload["force_fake"] = bool(extras_payload.get("force_fake")) or mode == "force_fake"
+    extras_payload["fake_on_timeout"] = bool(base_extras.get("fake_on_timeout"))
+    extras_payload["http"] = dict(http_payload)
+    extras_payload["deps"] = dict(deps)
+
+    config_section_raw = extras_payload.get("config")
+    if isinstance(config_section_raw, Mapping):
+        config_section = dict(config_section_raw)
+    else:
+        config_section = {}
+    if configured_labels:
+        config_section.setdefault("countries_preview", list(configured_labels)[:5])
+        config_section.setdefault("config_countries_count", len(configured_labels))
+        config_section.setdefault("countries_mode", "explicit_config")
+        if configured_iso3:
+            config_section.setdefault("selected_iso3_preview", list(configured_iso3)[:10])
+        parse_section_raw = config_section.get("config_parse")
+        if isinstance(parse_section_raw, Mapping):
+            parse_section = dict(parse_section_raw)
+        else:
+            parse_section = {}
+        parse_section.setdefault("countries", list(configured_labels))
+        if admin_levels:
+            parse_section.setdefault("admin_levels", list(admin_levels))
+        config_section["config_parse"] = parse_section
+    if admin_levels:
+        config_section.setdefault("admin_levels", list(admin_levels))
+    extras_payload["config"] = config_section
+
+    discovery_struct: Optional[Dict[str, Any]] = None
+    if configured_labels:
+        discovery_struct = {
+            "used_stage": "explicit_config",
+            "configured_labels": list(configured_labels),
+            "unresolved_labels": [],
+            "total_countries": len(configured_labels),
+        }
+        if iso_filter:
+            discovery_struct["resolved_iso3"] = list(iso_filter)
+        extras_payload["discovery"] = discovery_struct
+
+    effective_params = {
+        "countries": list(iso_filter or configured_labels),
+        "admin_levels": list(admin_levels),
+        "window": {"start": window_start_iso, "end": window_end_iso},
+        "mode": mode,
+        "fake_data_used": True,
+    }
+    extras_payload["effective_params"] = effective_params
+
+    diagnostics_payload: Dict[str, Any]
+    raw_diagnostics = extras_payload.get("diagnostics")
+    if isinstance(raw_diagnostics, Mapping):
+        diagnostics_payload = dict(raw_diagnostics)
+    else:
+        diagnostics_payload = {}
+    if diagnostics_details:
+        diagnostics_payload.setdefault("fake", {}).update(dict(diagnostics_details))
+    diagnostics_payload.setdefault("fake_data_used", True)
+    diagnostics_payload.setdefault("fake_reason", reason)
+    extras_payload["diagnostics"] = diagnostics_payload
+
+    try:
+        meta_payload = json.loads(META_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        meta_payload = {}
+    meta_payload.update(
+        {
+            "connector": "dtm_client",
+            "level": "admin0",
+            "fake_data": True,
+            "fake_reason": reason,
+            "window": {"start": window_start_iso, "end": window_end_iso},
+            "iso3_filter": list(iso_filter),
+            "http": dict(http_payload),
+            "deps": dict(deps),
+            "effective_params": effective_params,
+            "written_rows": rows,
+        }
+    )
+    if configured_labels:
+        meta_payload.setdefault("configured_labels", list(configured_labels))
+    if discovery_struct:
+        meta_payload["discovery"] = discovery_struct
+    meta_diagnostics: Dict[str, Any] = {}
+    if isinstance(meta_payload.get("diagnostics"), Mapping):
+        meta_diagnostics.update(meta_payload["diagnostics"])
+    if diagnostics_details:
+        meta_diagnostics.setdefault("fake", {}).update(dict(diagnostics_details))
+    if meta_diagnostics:
+        meta_payload["diagnostics"] = meta_diagnostics
+    META_PATH.write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    totals = {
+        "rows_fetched": rows,
+        "rows_normalized": rows,
+        "rows_written": rows,
+        "kept": rows,
+        "dropped": 0,
+        "parse_errors": 0,
+    }
+    run_payload = {
+        "window": {"start": window_start_iso, "end": window_end_iso},
+        "countries": {
+            "requested": list(configured_labels),
+            "resolved": list(iso_filter or configured_labels),
+        },
+        "http": dict(http_payload),
+        "paging": {"pages": 0, "page_size": None, "total_received": rows},
+        "rows": {
+            "fetched": rows,
+            "normalized": rows,
+            "written": rows,
+            "kept": rows,
+            "dropped": 0,
+        },
+        "totals": totals,
+        "status": "ok",
+        "reason": reason,
+        "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+        "extras": dict(extras_payload),
+        "args": vars(args),
+    }
+    write_json(RUN_DETAILS_PATH, run_payload)
+
+    diagnostics_result = diagnostics_finalize_run(
+        diagnostics_ctx,
+        status="ok",
+        reason=reason,
+        http=http_payload,
+        counts={"written": rows},
+        extras=extras_payload,
+    )
+    diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+    _append_connectors_report(
+        mode="real",
+        status="ok",
+        rows=rows,
+        reason=f"fake_data:{reason}",
+        extras=extras_payload,
+        http=http_payload,
+        counts={"fetched": rows, "normalized": rows, "written": rows},
+    )
+    _mirror_legacy_diagnostics()
+    return 0
+
+
 class ConfigDict(dict):
     """Dictionary subclass that retains the source metadata for logging."""
 
@@ -3204,6 +3414,21 @@ def _normalize_list(value: Any) -> List[str]:
     return items
 
 
+def _resolve_configured_iso3(labels: Sequence[str]) -> List[str]:
+    seen: Set[str] = set()
+    codes: List[str] = []
+    for label in labels:
+        iso_candidate = to_iso3(label)
+        if not iso_candidate:
+            continue
+        iso = iso_candidate.strip().upper()
+        if len(iso) != 3 or iso in seen:
+            continue
+        seen.add(iso)
+        codes.append(iso)
+    return codes
+
+
 def _fetch_api_data(
     cfg: Mapping[str, Any],
     *,
@@ -4229,6 +4454,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Treat connect timeouts as ok-empty instead of hard failures.",
     )
     parser.add_argument(
+        "--force-fake",
+        action="store_true",
+        help="Always write clearly marked fake admin0 rows and exit successfully.",
+    )
+    parser.add_argument(
+        "--fake-on-timeout",
+        action="store_true",
+        help="If a timeout occurs, write fake admin0 rows instead of failing.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging and force file logging for troubleshooting.",
@@ -4291,6 +4526,8 @@ def _write_meta(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     soft_timeouts = bool_from_env_or_flag("DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False))
+    force_fake = bool_from_env_or_flag("DTM_FORCE_FAKE", getattr(args, "force_fake", False))
+    fake_on_timeout = bool_from_env_or_flag("DTM_FAKE_ON_TIMEOUT", getattr(args, "fake_on_timeout", False))
     global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE, OUT_PATH
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
@@ -4417,7 +4654,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "offline_smoke": offline_smoke,
         "offline": OFFLINE,
         "timings_ms": dict(timings_ms),
-        "soft_timeouts": soft_timeouts,
+        "soft_timeouts": bool(soft_timeouts),
+        "force_fake": bool(force_fake),
+        "fake_on_timeout": bool(fake_on_timeout),
     }
     base_extras["config"] = {
         "config_path_used": config_path_text,
@@ -4477,7 +4716,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     tls_ok = True
     tls_details: Dict[str, Any] = {}
-    if soft_timeouts:
+    if soft_timeouts and not force_fake:
         try:
             tls_ok, tls_details = _preflight_tls()
         except Exception as exc:  # pragma: no cover - defensive guard
@@ -4508,101 +4747,101 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return exit_code
 
     raw_auth_key = (os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip()
-    try:
-        _auth_probe(raw_auth_key, offline=OFFLINE)
-    except DTMUnauthorizedError as exc:
-        reason = f"auth: {exc}"
-        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
-        extras_payload = dict(base_extras)
-        extras_payload.update(
-            {
-                "rows_total": 0,
-                "exit_code": 1,
-                "status_raw": "error",
-                "auth_error": "unauthorized",
+    if not force_fake:
+        try:
+            _auth_probe(raw_auth_key, offline=OFFLINE)
+        except DTMUnauthorizedError as exc:
+            reason = f"auth: {exc}"
+            counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+            extras_payload = dict(base_extras)
+            extras_payload.update(
+                {
+                    "rows_total": 0,
+                    "exit_code": 1,
+                    "status_raw": "error",
+                    "auth_error": "unauthorized",
+                }
+            )
+            extras_payload["timings_ms"] = dict(timings_ms)
+            _write_connector_report(
+                status="error",
+                reason=reason,
+                extras=extras_payload,
+                http=dict(base_http),
+                counts=counts_payload,
+            )
+            ensure_zero_row_outputs(offline=OFFLINE)
+            run_payload = {
+                "window": {"start": None, "end": None},
+                "countries": {},
+                "http": dict(base_http),
+                "paging": {"pages": 0, "page_size": None, "total_received": 0},
+                "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
+                "totals": {"rows_written": 0},
+                "status": "error",
+                "reason": reason,
+                "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+                "extras": {
+                    "deps": deps_payload,
+                    "timings_ms": dict(timings_ms),
+                    "strict_empty": strict_empty,
+                    "no_date_filter": no_date_filter,
+                    "offline": OFFLINE,
+                    "auth_error": "unauthorized",
+                },
+                "args": vars(args),
             }
-        )
-        extras_payload["timings_ms"] = dict(timings_ms)
-        _write_connector_report(
-            status="error",
-            reason=reason,
-            extras=extras_payload,
-            http=dict(base_http),
-            counts=counts_payload,
-        )
-        ensure_zero_row_outputs(offline=OFFLINE)
-        run_payload = {
-            "window": {"start": None, "end": None},
-            "countries": {},
-            "http": dict(base_http),
-            "paging": {"pages": 0, "page_size": None, "total_received": 0},
-            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
-            "totals": {"rows_written": 0},
-            "status": "error",
-            "reason": reason,
-            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
-            "extras": {
-                "deps": deps_payload,
-                "timings_ms": dict(timings_ms),
-                "strict_empty": strict_empty,
-                "no_date_filter": no_date_filter,
-                "offline": OFFLINE,
-                "auth_error": "unauthorized",
-            },
-            "args": vars(args),
-        }
-        write_json(RUN_DETAILS_PATH, run_payload)
-        _mirror_legacy_diagnostics()
-        LOG.error("dtm: auth probe failed: %s", exc)
-        OFFLINE = previous_offline
-        return 1
-    except Exception as exc:
-        reason = f"auth: {exc}" if str(exc) else "auth: error"
-        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
-        extras_payload = dict(base_extras)
-        extras_payload.update(
-            {
-                "rows_total": 0,
-                "exit_code": 1,
-                "status_raw": "error",
-                "auth_error": "exception",
+            write_json(RUN_DETAILS_PATH, run_payload)
+            _mirror_legacy_diagnostics()
+            LOG.error("dtm: auth probe failed: %s", exc)
+            OFFLINE = previous_offline
+            return 1
+        except Exception as exc:
+            reason = f"auth: {exc}" if str(exc) else "auth: error"
+            counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+            extras_payload = dict(base_extras)
+            extras_payload.update(
+                {
+                    "rows_total": 0,
+                    "exit_code": 1,
+                    "status_raw": "error",
+                    "auth_error": "exception",
+                }
+            )
+            extras_payload["timings_ms"] = dict(timings_ms)
+            _write_connector_report(
+                status="error",
+                reason=reason,
+                extras=extras_payload,
+                http=dict(base_http),
+                counts=counts_payload,
+            )
+            ensure_zero_row_outputs(offline=OFFLINE)
+            run_payload = {
+                "window": {"start": None, "end": None},
+                "countries": {},
+                "http": dict(base_http),
+                "paging": {"pages": 0, "page_size": None, "total_received": 0},
+                "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
+                "totals": {"rows_written": 0},
+                "status": "error",
+                "reason": reason,
+                "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+                "extras": {
+                    "deps": deps_payload,
+                    "timings_ms": dict(timings_ms),
+                    "strict_empty": strict_empty,
+                    "no_date_filter": no_date_filter,
+                    "offline": OFFLINE,
+                    "auth_error": "exception",
+                },
+                "args": vars(args),
             }
-        )
-        extras_payload["timings_ms"] = dict(timings_ms)
-        _write_connector_report(
-            status="error",
-            reason=reason,
-            extras=extras_payload,
-            http=dict(base_http),
-            counts=counts_payload,
-        )
-        ensure_zero_row_outputs(offline=OFFLINE)
-        run_payload = {
-            "window": {"start": None, "end": None},
-            "countries": {},
-            "http": dict(base_http),
-            "paging": {"pages": 0, "page_size": None, "total_received": 0},
-            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
-            "totals": {"rows_written": 0},
-            "status": "error",
-            "reason": reason,
-            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
-            "extras": {
-                "deps": deps_payload,
-                "timings_ms": dict(timings_ms),
-                "strict_empty": strict_empty,
-                "no_date_filter": no_date_filter,
-                "offline": OFFLINE,
-                "auth_error": "exception",
-            },
-            "args": vars(args),
-        }
-        write_json(RUN_DETAILS_PATH, run_payload)
-        _mirror_legacy_diagnostics()
-        LOG.error("dtm: auth probe error: %s", exc)
-        OFFLINE = previous_offline
-        return 1
-
+            write_json(RUN_DETAILS_PATH, run_payload)
+            _mirror_legacy_diagnostics()
+            LOG.error("dtm: auth probe error: %s", exc)
+            OFFLINE = previous_offline
+            return 1
     http_stats: MutableMapping[str, int] = _ensure_http_counts({})
     extras: Dict[str, Any] = dict(base_extras)
     extras["mode"] = "skip" if skip_requested else extras.get("mode", "real")
@@ -4621,6 +4860,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config_source_path = str(_resolve_config_path())
     config_exists_flag = False
     config_sha_prefix: Optional[str] = None
+    configured_labels: List[str] = []
+    configured_iso3: List[str] = []
+    configured_admin_levels: List[str] = []
 
     try:
         cfg = load_config()
@@ -4639,6 +4881,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "config_sha256": config_sha_prefix or "n/a",
             }
         )
+        api_section = cfg.get("api") if isinstance(cfg.get("api"), Mapping) else {}
+        configured_labels = _normalize_list(api_section.get("countries"))
+        configured_iso3 = _resolve_configured_iso3(configured_labels)
+        configured_admin_levels = _resolve_admin_levels(cfg)
         config_parse = getattr(cfg, "_config_parse", {})
         if isinstance(config_parse, Mapping):
             parsed_countries = [
@@ -4671,6 +4917,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 and not config_extras.get("countries_mode")
             ):
                 config_extras["countries_mode"] = str(config_parse.get("countries_mode"))
+        if configured_labels and not config_extras.get("countries_preview"):
+            config_extras["countries_preview"] = configured_labels[:5]
+        if configured_iso3 and not config_extras.get("selected_iso3_preview"):
+            config_extras["selected_iso3_preview"] = configured_iso3[:10]
+        if configured_admin_levels and not config_extras.get("admin_levels"):
+            config_extras["admin_levels"] = list(configured_admin_levels)
+        if force_fake:
+            LOG.warning("dtm: force-fake enabled; writing bundled staging rows and skipping API")
+            diagnostics_details = {
+                "mode": "force_fake",
+                "configured_labels": list(configured_labels),
+                "configured_iso3": list(configured_iso3),
+            }
+            exit_code = _complete_fake_success(
+                args=args,
+                base_extras=base_extras,
+                base_http=base_http,
+                deps=deps_payload,
+                timings_ms=timings_ms,
+                diagnostics_ctx=diagnostics_ctx,
+                window_start_iso=window_start_iso,
+                window_end_iso=window_end_iso,
+                configured_labels=configured_labels,
+                configured_iso3=configured_iso3,
+                admin_levels=configured_admin_levels,
+                mode="force_fake",
+                reason="force_fake",
+                offline=OFFLINE,
+                diagnostics_details=diagnostics_details,
+            )
+            OFFLINE = previous_offline
+            return exit_code
         if not cfg.get("enabled", True):
             status = "skipped"
             reason = "disabled via config"
@@ -4697,6 +4975,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except requests.exceptions.RequestException as exc:
         timeout_like = _is_connect_timeout_error(exc)
+        if fake_on_timeout and timeout_like:
+            LOG.error("dtm: timeout detected; writing fake rows due to fake-on-timeout", exc_info=True)
+            details = {
+                "mode": "fake_on_timeout",
+                "exception": type(exc).__name__,
+                "message": str(exc),
+            }
+            exit_code = _complete_fake_success(
+                args=args,
+                base_extras=base_extras,
+                base_http=http_stats,
+                deps=deps_payload,
+                timings_ms=timings_ms,
+                diagnostics_ctx=diagnostics_ctx,
+                window_start_iso=window_start_iso,
+                window_end_iso=window_end_iso,
+                configured_labels=configured_labels,
+                configured_iso3=configured_iso3,
+                admin_levels=configured_admin_levels,
+                mode="fake_on_timeout",
+                reason="network_timeout",
+                offline=OFFLINE,
+                diagnostics_details=details,
+            )
+            OFFLINE = previous_offline
+            return exit_code
         if soft_timeouts and timeout_like:
             LOG.error("dtm: timeout detected (%s); treating as ok-empty", exc)
             details = {

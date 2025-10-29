@@ -39,6 +39,22 @@ on:
         options:
           - "false"
           - "true"
+      fake_on_timeout:
+        description: "Write clearly-marked fake DTM rows if network times out"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      force_fake:
+        description: "Force fake DTM rows (skip network)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -150,6 +166,12 @@ jobs:
           fi
           if [ "${EMPTY_POLICY:-allow}" = "allow" ]; then
             CMD_ARGS+=(--extra-env "dtm_client=DTM_SOFT_TIMEOUTS=1")
+          fi
+          if [ "${{ inputs.fake_on_timeout }}" = "true" ]; then
+            CMD_ARGS+=(--extra-env "dtm_client=DTM_FAKE_ON_TIMEOUT=1")
+          fi
+          if [ "${{ inputs.force_fake }}" = "true" ]; then
+            CMD_ARGS+=(--extra-env "dtm_client=DTM_FORCE_FAKE=1")
           fi
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?

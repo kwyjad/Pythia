@@ -198,6 +198,22 @@ timeout flag and the connector will exit with a non-zero status on connection er
 - Ingestion outputs must land in `resolver/staging` for the derive/freeze steps to pick them up. Set
   `RESOLVER_OUTPUT_DIR=resolver/staging` (the workflows do this automatically) or the summary’s **Staging readiness** section
   will flag the mismatch when files appear under the legacy `data/staging` path instead.
+
+#### DTM fake rows safety net
+
+When you need the rest of the resolver pipeline to continue despite DTM being unreachable, enable the fake-data rescue:
+
+- Set `DTM_FORCE_FAKE=1` (or pass `--force-fake`) to skip network access entirely. The connector writes the bundled
+  `resolver/ingestion/static/dtm_admin0_fake.csv` into staging, marks the metadata with `"fake_data": true`, and records
+  `fake_reason=force_fake` in diagnostics so job summaries and downstream exporters surface the override.
+- Set `DTM_FAKE_ON_TIMEOUT=1` (or pass `--fake-on-timeout`) to fall back to the same fake rows only when a
+  `requests.exceptions.ConnectTimeout`/`ReadTimeout`/`ConnectionError` bubbles up during ingestion. Metadata then records
+  `fake_reason=network_timeout` alongside the captured exception type.
+
+Both toggles honour the explicit country list from `resolver/config/dtm.yml`, filter the fake rows to the requested ISO3 codes
+and ingestion window, and still emit manifests/diagnostics so later steps (exports, precedence, deltas, snapshots) ingest the
+fake staging exactly as they would live data. The fake rows use obvious 2025 timestamps and the `.meta.json` advertises
+`fake_data_used` so analysts reviewing run summaries can immediately see when a rescue mode was applied.
 - Use `--soft-timeouts` (or `DTM_SOFT_TIMEOUTS=1`) when running behind strict egress rules. Connect/read timeouts to
   `dtmapi.iom.int` are treated as `status=ok` runs with `zero_rows_reason=connect_timeout`, allowing workflows with
   `EMPTY_POLICY=allow` to succeed while you request firewall exceptions. The connector still writes a header-only CSV alongside
