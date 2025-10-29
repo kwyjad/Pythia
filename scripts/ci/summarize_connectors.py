@@ -858,6 +858,15 @@ def _render_dtm_deep_dive(entry: Mapping[str, Any]) -> List[str]:
         ]
         if chosen_rows:
             lines.extend(_format_markdown_table(["Value column", "Rows"], chosen_rows))
+    attempted_dates = normalize.get("attempted_date_columns")
+    if isinstance(attempted_dates, (list, tuple)) and attempted_dates:
+        lines.append("Attempted date columns: " + ", ".join(str(col) for col in attempted_dates))
+    used_date = normalize.get("date_col_used")
+    if used_date:
+        lines.append(f"Chosen date column: {used_date}")
+    bad_samples = normalize.get("bad_date_samples")
+    if isinstance(bad_samples, (list, tuple)) and bad_samples:
+        lines.append("Bad date samples: " + ", ".join(str(sample) for sample in bad_samples[:5]))
     lines.append("")
 
     samples_path = artifacts.get("samples")

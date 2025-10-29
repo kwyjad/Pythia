@@ -164,13 +164,19 @@ CANONICAL_HEADERS = [
 SERIES_INCIDENT = "incident"
 SERIES_CUMULATIVE = "cumulative"
 
-DATE_CANDIDATES: Tuple[str, ...] = (
+_DATE_CANDIDATES: list[str] = [
     "ReportingDate",
     "reportingDate",
     "reporting_date",
-    "date",
+    "ReportDate",
     "Date",
-)
+    "date",
+    "asOfDate",
+    "PublicationDate",
+    "pub_date",
+    "FromReportingDate",
+]
+DATE_CANDIDATES: Tuple[str, ...] = tuple(_DATE_CANDIDATES)
 
 __all__ = [
     "CANONICAL_HEADERS",
@@ -223,18 +229,31 @@ for directory in (
 def _pick_reporting_date_column(
     df: pd.DataFrame, preferred: Sequence[str] | None = None
 ) -> Optional[str]:
+    """Return the header that most likely represents the reporting date column."""
+
     if df is None or not hasattr(df, "columns"):
         return None
+
     try:
         columns_iterable = list(df.columns)
     except Exception:  # pragma: no cover - defensive guard
         columns_iterable = []
-    lookup: Dict[str, str] = {}
+
+    def _normalize(token: Any) -> str:
+        text = str(token).strip().lower()
+        if not text:
+            return ""
+        return text.replace("_", "")
+
+    normalized_lookup: Dict[str, str] = {}
     for column in columns_iterable:
         text = str(column).strip()
         if not text:
             continue
-        lookup[text.lower()] = column
+        key = _normalize(text)
+        if key and key not in normalized_lookup:
+            normalized_lookup[key] = column
+
     candidates: List[str] = []
     if preferred:
         for item in preferred:
@@ -244,10 +263,17 @@ def _pick_reporting_date_column(
             if candidate:
                 candidates.append(candidate)
     candidates.extend(DATE_CANDIDATES)
+
     for candidate in candidates:
-        lowered = str(candidate).strip().lower()
-        if lowered and lowered in lookup:
-            return lookup[lowered]
+        key = _normalize(candidate)
+        if key and key in normalized_lookup:
+            return normalized_lookup[key]
+
+    for column in columns_iterable:
+        key = _normalize(column)
+        if "report" in key and "date" in key and "start" not in key and "end" not in key:
+            return column
+
     return None
 
 
@@ -326,6 +352,64 @@ def _merge_date_filter_stats(
             for reason, count in drop_counts.items():
                 aggregate[reason] = _coerce_int(aggregate.get(reason)) + _coerce_int(count)
     return target
+
+
+def _first_parsable_date_column(
+    df: pd.DataFrame, candidates: Iterable[str]
+) -> Tuple[Optional[str], Optional[pd.Series], Dict[str, Any]]:
+    tried: list[str] = []
+    for col in candidates:
+        if col not in getattr(df, "columns", []):
+            continue
+        tried.append(col)
+        try:
+            series = pd.to_datetime(df[col], errors="coerce", utc=True)
+        except Exception:
+            continue
+        if series.notna().any():
+            output = series
+            if hasattr(series, "dt") and getattr(series.dt, "tz", None) is not None:
+                try:
+                    output = series.dt.tz_convert("UTC")
+                except Exception:
+                    output = series
+            bad_tokens: list[str] = []
+            try:
+                raw = df[col].astype("string", copy=False)
+                parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
+                invalid_mask = parsed.isna() & raw.notna()
+                if invalid_mask.any():
+                    for token in raw[invalid_mask].unique().tolist():
+                        token_str = str(token)
+                        if token_str and token_str not in bad_tokens:
+                            bad_tokens.append(token_str)
+                        if len(bad_tokens) >= 5:
+                            break
+            except Exception:
+                bad_tokens = []
+            normalized = output.dt.date.astype("string") if hasattr(output, "dt") else output
+            return col, normalized, {
+                "attempted": tried,
+                "used": col,
+                "bad_samples": bad_tokens,
+            }
+    bad: list[str] = []
+    for col in tried:
+        try:
+            raw = df[col].astype("string", copy=False)
+            parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
+        except Exception:
+            continue
+        invalid = raw[parsed.isna()].dropna().unique().tolist()
+        for token in invalid:
+            token_str = str(token)
+            if token_str and token_str not in bad:
+                bad.append(token_str)
+            if len(bad) >= 5:
+                break
+        if len(bad) >= 5:
+            break
+    return None, None, {"attempted": tried, "used": None, "bad_samples": bad}
 
 
 def _apply_date_window(
@@ -3456,6 +3540,34 @@ def _fetch_api_data(
     metrics_summary = _init_metrics_summary()
     _ensure_diagnostics_scaffolding()
     summary_extras = summary.setdefault("extras", {})
+    attempted_date_columns: list[str] = []
+    chosen_date_column: Optional[str] = None
+    bad_date_samples: list[str] = []
+
+    def _record_date_diag(diag: Mapping[str, Any]) -> None:
+        nonlocal chosen_date_column
+        if not isinstance(diag, Mapping):
+            return
+        attempted = diag.get("attempted")
+        if isinstance(attempted, (list, tuple)):
+            for candidate in attempted:
+                candidate_str = str(candidate)
+                if candidate_str and candidate_str not in attempted_date_columns:
+                    attempted_date_columns.append(candidate_str)
+        used_value = diag.get("used")
+        if used_value and not chosen_date_column:
+            chosen_date_column = str(used_value)
+        bad = diag.get("bad_samples")
+        if isinstance(bad, (list, tuple)):
+            for token in bad:
+                token_str = str(token)
+                if not token_str:
+                    continue
+                if token_str not in bad_date_samples:
+                    bad_date_samples.append(token_str)
+                if len(bad_date_samples) >= 5:
+                    break
+
     per_country_counts: List[Dict[str, Any]] = []
     per_country_diagnostics: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -3895,6 +4007,24 @@ def _fetch_api_data(
                     if level == "admin0":
                         original_columns = list(page.columns)
 
+                        date_col, parsed_dates, date_diag = _first_parsable_date_column(
+                            page, _DATE_CANDIDATES
+                        )
+                        _record_date_diag(date_diag)
+                        if isinstance(page, pd.DataFrame):
+                            working_page = page.copy()
+                        else:
+                            working_page = pd.DataFrame(page)
+                        if date_col and date_col in working_page.columns and date_col != "ReportingDate":
+                            working_page = working_page.rename(columns={date_col: "ReportingDate"})
+                        if parsed_dates is not None:
+                            working_page["ReportingDate"] = parsed_dates
+                        elif "ReportingDate" not in working_page.columns:
+                            working_page["ReportingDate"] = pd.Series(
+                                [pd.NA] * len(working_page), index=working_page.index, dtype="string"
+                            )
+                        page = working_page
+
                         def _iso_lookup(series: pd.Series) -> Tuple[Optional[str], Optional[str]]:
                             return resolve_iso3_fields(
                                 series,
@@ -3996,10 +4126,27 @@ def _fetch_api_data(
                             raw_count = int(raw_page[idp_column].notna().sum())
                         value_column_usage[idp_column] = value_column_usage.get(idp_column, 0) + raw_count
                         LOG.debug(
-                            "DTM diag value-column raw count: %s=%s",
-                            idp_column,
-                            raw_count,
+                                "DTM diag value-column raw count: %s=%s",
+                                idp_column,
+                                raw_count,
+                            )
+                        date_col, parsed_dates, date_diag = _first_parsable_date_column(
+                            page, _DATE_CANDIDATES
                         )
+                        _record_date_diag(date_diag)
+                        if isinstance(page, pd.DataFrame):
+                            working_page = page.copy()
+                        else:
+                            working_page = pd.DataFrame(page)
+                        if date_col and date_col in working_page.columns and date_col != "ReportingDate":
+                            working_page = working_page.rename(columns={date_col: "ReportingDate"})
+                        if parsed_dates is not None:
+                            working_page["ReportingDate"] = parsed_dates
+                        elif "ReportingDate" not in working_page.columns:
+                            working_page["ReportingDate"] = pd.Series(
+                                [pd.NA] * len(working_page), index=working_page.index, dtype="string"
+                            )
+                        page = working_page
                         if level not in head_written_levels:
                             try:
                                 _dump_head(page, level, country_label)
@@ -4017,6 +4164,17 @@ def _fetch_api_data(
                         except Exception:  # pragma: no cover - diagnostics only
                             LOG.debug("failed to write sample rows", exc_info=True)
                         page = page.rename(columns={idp_column: "idp_count"})
+                        iso_source = None
+                        for candidate in ("CountryISO3", "Admin0Pcode", "admin0Pcode", "iso3"):
+                            if candidate in page.columns:
+                                iso_source = candidate
+                                break
+                        if iso_source and iso_source != "CountryISO3":
+                            page = page.rename(columns={iso_source: "CountryISO3"})
+                        if "CountryISO3" in page.columns:
+                            page.loc[:, "CountryISO3"] = (
+                                page["CountryISO3"].astype("string", copy=False).str.strip().str.upper()
+                            )
                         current_date_column = _pick_reporting_date_column(
                             page, preferred=(date_column,)
                         )
@@ -4271,6 +4429,10 @@ def _fetch_api_data(
     metrics_summary["rows_fetched"] = int(summary.get("rows", {}).get("fetched", 0))
     metrics_summary["duration_sec"] = round(max(0.0, time.perf_counter() - run_started), 3)
     _write_metrics_summary_file(metrics_summary)
+
+    summary_extras["normalize_attempted_date_columns"] = list(attempted_date_columns)
+    summary_extras["normalize_date_col_used"] = chosen_date_column
+    summary_extras["normalize_bad_date_samples"] = bad_date_samples[:5]
 
     return all_records, summary
 
@@ -5385,13 +5547,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "levels": level_rollup_summary,
     }
 
-    summary_extras["normalize"] = {
+    attempted_dates = summary_extras.pop("normalize_attempted_date_columns", [])
+    date_used = summary_extras.pop("normalize_date_col_used", None)
+    bad_samples = summary_extras.pop("normalize_bad_date_samples", [])
+    normalize_block: Dict[str, Any] = {
         "rows_fetched": int(rows_summary.get("fetched", 0)),
         "rows_normalized": int(rows_summary.get("normalized", rows_written)),
         "rows_written": rows_written,
         "drop_reasons": drop_counts,
         "chosen_value_columns": chosen_value_columns,
     }
+    if attempted_dates:
+        normalize_block["attempted_date_columns"] = list(attempted_dates)
+    if date_used:
+        normalize_block["date_col_used"] = date_used
+    if bad_samples:
+        normalize_block["bad_date_samples"] = list(bad_samples)
+    summary_extras["normalize"] = normalize_block
 
     rescue_info = summary_extras.get("rescue_probe")
     if isinstance(rescue_info, Mapping):
