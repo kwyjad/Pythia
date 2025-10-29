@@ -139,6 +139,7 @@ The resolver fast tests exercise connectors without network access. To keep thos
 - The CLI ignores ambient `sys.argv` flags by default, so tests can safely invoke `resolver.ingestion.dtm_client.main()` without pytest arguments leaking into the parser.
 - The static ISO3 roster at `resolver/ingestion/static/iso3_master.csv` must provide `admin0Pcode` and `admin0Name` columns and include key countries (e.g., ETH, SDN, PHL, UKR, TUR) even if the total row count drifts slightly.
 - Stock-to-flow conversion in fast mode intentionally drops the first observation and clips negative deltas to zero for determinism; production ingestion can opt into richer semantics as needed.
+- Admin0 outputs written by `resolver.ingestion.dtm_client` store monthly flows (`value_type=new_displaced`) after converting stocks to deltas. Downstream exports detect this shape and label the metric as `idp_displacement_new_dtm` with `semantics=new` so the facts table records month-over-month displacement instead of cumulative stock.
 - Discovery fallbacks that rely on the static roster may omit an `operation` column—the fast suite accepts either shape so long as the admin0 columns are present.
 - Module-level path constants such as `DIAGNOSTICS_ROOT`, `DTM_DIAGNOSTICS_DIR`, and `HTTP_TRACE_PATH` remain import-time attributes and are referenced throughout `resolver.ingestion.dtm_client`; tests monkeypatch these to stage diagnostics inside temporary directories.
 

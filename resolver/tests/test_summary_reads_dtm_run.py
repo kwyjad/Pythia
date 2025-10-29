@@ -56,6 +56,40 @@ def test_summary_uses_dtm_run_totals(tmp_path: Path) -> None:
     assert cells[9] == "1"
 
 
+def test_summary_overrides_zero_counts_with_run_json(tmp_path: Path) -> None:
+    diagnostics = tmp_path / "diagnostics" / "ingestion"
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    run_path = diagnostics / "dtm_run.json"
+    run_payload = {
+        "rows": {"fetched": 5, "normalized": 5, "written": 5},
+        "totals": {"rows_written": 5},
+    }
+    run_path.write_text(json.dumps(run_payload), encoding="utf-8")
+
+    report_path = diagnostics / "connectors_report.jsonl"
+    payload = {
+        "connector_id": "dtm_client",
+        "mode": "real",
+        "status": "ok",
+        "reason": None,
+        "duration_ms": 0,
+        "http": {"2xx": 1, "4xx": 0, "5xx": 0, "retries": 0, "rate_limit_remaining": None, "last_status": 200},
+        "counts": {"fetched": 0, "normalized": 0, "written": 0},
+        "extras": {"run_details_path": str(run_path)},
+    }
+    report_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    entries = summarize_connectors.load_report(report_path)
+    assert entries[0]["counts"]["fetched"] == 5
+    assert entries[0]["counts"]["normalized"] == 5
+    assert entries[0]["counts"]["written"] == 5
+
+    markdown = summarize_connectors.build_markdown(entries)
+    assert "* **Rows fetched:** 5 (from run.json)" in markdown
+    assert "* **Rows normalized:** 5 (from run.json)" in markdown
+    assert "* **Rows written:** 5 (from run.json)" in markdown
+
+
 def test_config_section_renders_parse_lines_and_warning(tmp_path: Path) -> None:
     diagnostics = tmp_path / "diagnostics" / "ingestion"
     diagnostics.mkdir(parents=True, exist_ok=True)

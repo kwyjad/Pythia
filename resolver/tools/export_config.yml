@@ -45,6 +45,37 @@ dates:
   publication_date: ["pub_date", "pub"]
 
 sources:
+  - name: dtm_displacement_admin0_flows
+    match:
+      filename_regex: "(?i)^dtm.*displacement.*\\.csv$"
+      required_columns: [CountryISO3, as_of, value, value_type]
+    map:
+      iso3:
+        from: CountryISO3
+        ops: [trim, uppercase]
+      as_of_date:
+        from: as_of
+        ops: [to_date]
+      ym:
+        from: as_of_date
+        ops: [to_ym]
+      metric:
+        const: idp_displacement_new_dtm
+      value:
+        from: value
+        ops: [to_number]
+      series_semantics:
+        const: new
+      semantics:
+        const: new
+      source:
+        const: IOM DTM (admin0)
+    filters:
+      - keep_if_not_null: [iso3, as_of_date, value]
+      - keep_if_positive: [value]
+    dedupe:
+      keys: [iso3, as_of_date, metric]
+      keep: last
   - name: dtm_displacement_admin0
     match:
       filename_regex: "(?i)^dtm.*displacement.*\\.csv$"

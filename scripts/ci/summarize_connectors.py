@@ -44,6 +44,106 @@ def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
     return data if isinstance(data, Mapping) else None
 
 
+def _candidate_run_paths(raw_entry: Mapping[str, Any], connector_id: str) -> List[Path]:
+    extras = _ensure_dict(raw_entry.get("extras"))
+    candidates: List[Path] = []
+    direct_path = extras.get("run_details_path") or extras.get("run_path")
+    if isinstance(direct_path, str) and direct_path.strip():
+        candidates.append(Path(direct_path.strip()))
+
+    slug = connector_id.replace(" ", "_") if connector_id else ""
+    alt_slug = slug[:-7] if slug.endswith("_client") else slug
+    labels = [label for label in {slug, alt_slug} if label]
+
+    diagnostics_dir = extras.get("diagnostics_dir")
+    if isinstance(diagnostics_dir, str) and diagnostics_dir.strip():
+        diag_base = Path(diagnostics_dir.strip())
+        for label in labels:
+            candidates.append(diag_base / f"{label}_run.json")
+        candidates.append(diag_base / "run.json")
+
+    for label in labels:
+        candidates.append(Path("diagnostics/ingestion") / label / f"{label}_run.json")
+
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key not in seen:
+            deduped.append(candidate)
+            seen.add(key)
+    return deduped
+
+
+def _extract_run_counts(payload: Mapping[str, Any]) -> Dict[str, int]:
+    rows_block = _ensure_dict(payload.get("rows"))
+    totals_block = _ensure_dict(payload.get("totals"))
+    counts = {
+        "fetched": payload.get("rows_fetched"),
+        "normalized": payload.get("rows_normalized"),
+        "written": payload.get("rows_written"),
+    }
+    if counts["fetched"] in (None, ""):
+        counts["fetched"] = rows_block.get("fetched")
+    if counts["normalized"] in (None, ""):
+        counts["normalized"] = rows_block.get("normalized")
+    if counts["written"] in (None, ""):
+        counts["written"] = rows_block.get("written")
+    if counts["written"] in (None, ""):
+        counts["written"] = totals_block.get("rows_written")
+    return {key: _coerce_int(value) for key, value in counts.items()}
+
+
+def _override_counts_from_run_json(
+    normalized_entry: Dict[str, Any], raw_entry: Mapping[str, Any]
+) -> bool:
+    counts = dict(_ensure_dict(normalized_entry.get("counts")))
+    connector_id = str(normalized_entry.get("connector_id") or "")
+    if counts and all(counts.get(key, 0) > 0 for key in ("fetched", "normalized", "written")):
+        return False
+
+    candidate_paths = _candidate_run_paths(raw_entry, connector_id)
+    seen: set[Path] = set()
+    for candidate in candidate_paths:
+        path = candidate
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        payload = _safe_load_json(path)
+        if not payload:
+            continue
+        run_counts = _extract_run_counts(payload)
+        fetched_override = run_counts.get("fetched", 0)
+        normalized_override = run_counts.get("normalized", 0)
+        written_override = run_counts.get("written", 0)
+        if fetched_override == 0:
+            fetched_override = normalized_override
+        if fetched_override == 0:
+            fetched_override = written_override
+        if normalized_override == 0 and fetched_override > 0:
+            normalized_override = fetched_override
+        applied = False
+        if fetched_override > 0 and fetched_override > counts.get("fetched", 0):
+            counts["fetched"] = fetched_override
+            applied = True
+        if normalized_override > 0 and normalized_override > counts.get("normalized", 0):
+            counts["normalized"] = normalized_override
+            applied = True
+        if written_override > 0 and written_override > counts.get("written", 0):
+            counts["written"] = written_override
+            applied = True
+        if applied:
+            extras = dict(normalized_entry.get("extras") or {})
+            extras["counts_override_source"] = "run.json"
+            extras["counts_override_path"] = path.as_posix()
+            normalized_entry["extras"] = extras
+            normalized_entry["counts"] = counts
+            return True
+    return False
+
+
 def _load_mapping_debug(path: Path) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     try:
@@ -323,7 +423,9 @@ def load_report(path: Path) -> List[Dict[str, Any]]:
             except json.JSONDecodeError as exc:  # pragma: no cover - defensive
                 raise RuntimeError(f"Unable to parse JSON on line {line_number}: {exc}") from exc
             if isinstance(payload, Mapping):
-                entries.append(_normalise_entry(payload))
+                normalised = _normalise_entry(payload)
+                _override_counts_from_run_json(normalised, payload)
+                entries.append(normalised)
     return entries
 
 
@@ -1431,16 +1533,24 @@ def build_markdown(
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
     total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
+    total_normalized = sum(entry.get("counts", {}).get("normalized", 0) for entry in sorted_entries)
     total_written = sum(entry.get("counts", {}).get("written", 0) for entry in sorted_entries)
     dtm_entry = next((entry for entry in sorted_entries if entry.get("connector_id") == "dtm_client"), None)
     mapping_debug_records = list(mapping_debug or [])
+
+    override_note = any(
+        _ensure_dict(entry.get("extras")).get("counts_override_source") == "run.json"
+        for entry in sorted_entries
+    )
+    footnote = " (from run.json)" if override_note else ""
 
     lines = [SUMMARY_TITLE, "", "## Run Summary", ""]
     lines.append(f"* **Connectors:** {len(sorted_entries)}")
     lines.append(f"* **Status counts:** {_format_status_counts(sorted_entries)}")
     lines.append(f"* **Reason histogram:** {_format_reason_histogram(sorted_entries)}")
-    lines.append(f"* **Rows fetched:** {total_fetched}")
-    lines.append(f"* **Rows written:** {total_written}")
+    lines.append(f"* **Rows fetched:** {total_fetched}{footnote}")
+    lines.append(f"* **Rows normalized:** {total_normalized}{footnote}")
+    lines.append(f"* **Rows written:** {total_written}{footnote}")
     lines.append("")
 
     export_info = export_summary or {}
