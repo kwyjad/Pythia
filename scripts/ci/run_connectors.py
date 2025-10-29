@@ -280,6 +280,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         overrides = extra_env.get(name)
         if overrides:
             connector_env.update(overrides)
+        auto_soft_timeout = False
+        if name == "dtm_client":
+            policy_for_log = connector_env.get("EMPTY_POLICY", env.get("EMPTY_POLICY", "allow"))
+            empty_policy = policy_for_log.strip().lower()
+            has_soft_flag = any(part == "--soft-timeouts" for part in cmd)
+            if empty_policy in {"allow", "warn"} and not has_soft_flag:
+                cmd.append("--soft-timeouts")
+                auto_soft_timeout = True
+        if overrides:
+            print(f"env[{name}]: {overrides}")
+        if auto_soft_timeout:
+            print(f"auto-soft-timeouts[{name}]: EMPTY_POLICY={policy_for_log}")
+        print(f"argv[{name}]: {_quoted(cmd)}")
         rc = try_with_optional_debug(cmd, log_path, connector_env)
         status = "ok" if rc == 0 else "error"
         reason = None if rc == 0 else f"exit code {rc}"

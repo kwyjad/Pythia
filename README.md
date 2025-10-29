@@ -159,6 +159,16 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
   export DTM_ADMIN_LEVELS="admin0,admin1"
   ```
 
+#### DTM reachability & `EMPTY_POLICY`
+
+Resolver runs launched with `EMPTY_POLICY=allow` (the default) automatically append `--soft-timeouts` when invoking
+`resolver.ingestion.dtm_client`. If the TLS handshake or HTTP connect step to `dtmapi.iom.int` times out, the connector records
+an `ok-empty` run with `zero_rows_reason=connect_timeout`, writes a header-only `resolver/staging/dtm_displacement.csv`, and
+persists diagnostics describing the explicit country list pulled from `resolver/config/dtm.yml`. Backfill jobs therefore keep
+moving even when the upstream API is briefly unreachable. To force hard failures in CI or locally, set `EMPTY_POLICY=fail`
+before running `scripts/ci/run_connectors.py` or the “Resolver — Initial Backfill” workflow; the runner will skip the soft
+timeout flag and the connector will exit with a non-zero status on connection errors.
+
 - The official SDK expects ISO-3 selectors via the `Admin0Pcode` argument (not `CountryISO3`). The connector reads
   country selectors from the `api.countries` list and admin levels from `api.admin_levels` inside `resolver/config/dtm.yml`
   (or whichever config path you supply via `DTM_CONFIG_PATH`) and shims the SDK call so legacy helpers/tests that still emit

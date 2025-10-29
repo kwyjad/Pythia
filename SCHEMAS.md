@@ -135,6 +135,10 @@ Canonical CSV header (mirrors `resolver.ingestion.dtm_client.CANONICAL_HEADERS`)
 source,country_iso3,admin1,event_id,as_of,month_start,value_type,value,unit,method,confidence,raw_event_id,raw_fields_json
 ```
 
+> **Resilience note:** When `resolver.ingestion.dtm_client` is invoked with soft timeouts enabled and `dtmapi.iom.int` is
+> temporarily unreachable, the connector writes only the header row plus a `.meta.json` stub. Downstream export tools already
+> treat empty CSVs as “no new displacement data” and must continue to accept header-only inputs in those scenarios.
+
 ## db.facts_raw
 
 Canonical facts written to DuckDB alongside CSV exports.

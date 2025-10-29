@@ -13,6 +13,8 @@ import os
 import pathlib
 import random
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -26,6 +28,14 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional,
 import pandas as pd
 import yaml
 import requests
+import urllib3
+
+try:  # pragma: no cover - defensive import guard
+    from urllib3.exceptions import ConnectTimeoutError as Urllib3ConnectTimeoutError
+    from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeoutError
+except Exception:  # pragma: no cover - defensive import guard
+    Urllib3ConnectTimeoutError = None
+    Urllib3ReadTimeoutError = None
 from tenacity import (
     RetryError,
     retry,
@@ -120,6 +130,7 @@ OUT_PATH = OUT_DIR / "dtm_displacement.csv"
 OUTPUT_PATH = OUT_PATH
 DEFAULT_OUTPUT = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
+RESCUE_HEADERS = ["CountryISO3", "ReportingDate", "idp_count"]
 
 STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
     ("South Sudan", "SSD"),
@@ -686,6 +697,188 @@ def _append_connectors_report(
     )
 
 
+def _complete_soft_timeout_rescue(
+    *,
+    args: argparse.Namespace,
+    base_extras: Mapping[str, Any],
+    base_http: Mapping[str, Any],
+    deps: Mapping[str, Any],
+    timings_ms: Mapping[str, int],
+    diagnostics_ctx: Any,
+    details: Mapping[str, Any],
+    offline: bool,
+    zero_reason: str = "connect_timeout",
+) -> int:
+    timings_payload = dict(timings_ms)
+    http_payload = dict(base_http)
+    http_payload["timeout"] = int(http_payload.get("timeout", 0) or 0) + 1
+    http_payload["last_status"] = http_payload.get("last_status")
+    http_payload["retries"] = int(http_payload.get("retries", 0) or 0)
+    http_payload.setdefault("rate_limit_remaining", None)
+
+    try:
+        RESCUE_PROBE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        write_json(RESCUE_PROBE_PATH, details)
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: unable to persist TLS preflight details", exc_info=True)
+
+    _ensure_out_dir_exists(OUT_DIR)
+    _write_header_only_csv(OUT_PATH, RESCUE_HEADERS)
+    ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
+    _write_http_trace_placeholder(Path(HTTP_TRACE_PATH), offline=offline)
+
+    window_start_dt, window_end_dt = resolve_ingestion_window()
+    window_start_iso = window_start_dt.isoformat() if window_start_dt else None
+    window_end_iso = window_end_dt.isoformat() if window_end_dt else None
+
+    config_countries: List[str] = []
+    discovery_struct: Optional[Dict[str, Any]] = None
+    try:
+        cfg = load_config()
+    except Exception:  # pragma: no cover - defensive guard
+        LOG.debug("dtm: failed to load config during rescue path", exc_info=True)
+        cfg = None  # type: ignore[assignment]
+    if isinstance(cfg, Mapping):
+        api_cfg = cfg.get("api") if isinstance(cfg.get("api"), Mapping) else {}
+        if isinstance(api_cfg, Mapping):
+            config_countries = _normalize_list(api_cfg.get("countries"))
+        config_section = dict(base_extras.get("config", {}))
+        if config_countries:
+            config_section["countries_mode"] = "explicit_config"
+            config_section["countries_count"] = len(config_countries)
+            config_section["countries_preview"] = config_countries[:5]
+            config_section["selected_iso3_preview"] = config_countries[:10]
+            config_section["config_countries_count"] = len(config_countries)
+            config_parse = config_section.get("config_parse")
+            if isinstance(config_parse, Mapping):
+                updated_parse = dict(config_parse)
+                updated_parse["countries"] = list(config_countries)
+                updated_parse["countries_count"] = len(config_countries)
+                config_section["config_parse"] = updated_parse
+            config_keys = config_section.get("config_keys_found")
+            if isinstance(config_keys, Mapping):
+                updated_keys = dict(config_keys)
+                updated_keys["countries"] = True
+                config_section["config_keys_found"] = updated_keys
+            discovery_struct = {
+                "used_stage": "explicit_config",
+                "configured_labels": list(config_countries),
+                "unresolved_labels": [],
+                "total_countries": len(config_countries),
+            }
+        base_extras_config = dict(base_extras.get("config", {}))
+        base_extras_config.update(config_section)
+    else:
+        base_extras_config = dict(base_extras.get("config", {}))
+
+    effective_params: Dict[str, Any] = {"countries": list(config_countries)}
+    if window_start_iso or window_end_iso:
+        effective_params["window"] = {"start": window_start_iso, "end": window_end_iso}
+
+    extras_payload = dict(base_extras)
+    extras_payload["config"] = base_extras_config
+    extras_payload.update(
+        {
+            "mode": extras_payload.get("mode", "real"),
+            "rows_total": 0,
+            "rows_written": 0,
+            "exit_code": 0,
+            "status_raw": "ok",
+            "zero_rows_reason": zero_reason,
+            "soft_timeouts": True,
+            "soft_timeout_applied": True,
+            "rescue_probe": dict(details),
+            "timings_ms": dict(timings_payload),
+        }
+    )
+    extras_payload["effective_params"] = effective_params
+    extras_payload["window"] = {"start_iso": window_start_iso, "end_iso": window_end_iso}
+    extras_payload["dtm"] = {"base_url": "unknown"}
+    if discovery_struct:
+        extras_payload["discovery"] = discovery_struct
+    else:
+        extras_payload.setdefault("discovery", {"used_stage": None})
+    extras_payload["http"] = {
+        "count_2xx": 0,
+        "count_4xx": 0,
+        "count_5xx": 0,
+        "retries": 0,
+        "timeouts": int(http_payload.get("timeout", 0) or 0),
+        "last_status": None,
+        "endpoints_top": [],
+    }
+    extras_payload["artifacts"] = {
+        "run_json": str(RUN_DETAILS_PATH),
+        "http_trace": str(DTM_HTTP_LOG_PATH),
+        "samples": str(SAMPLE_ADMIN0_PATH),
+    }
+    extras_payload["staging_csv"] = str(OUT_PATH)
+    extras_payload["staging_meta"] = str(META_PATH)
+    extras_payload["diagnostics_dir"] = str(DTM_DIAGNOSTICS_DIR)
+
+    _write_meta(
+        0,
+        window_start_iso,
+        window_end_iso,
+        deps=deps,
+        effective_params=effective_params,
+        http_counters=http_payload,
+        timings_ms=dict(timings_payload),
+        discovery=discovery_struct,
+        diagnostics=None,
+        status="ok",
+        reason=zero_reason,
+        zero_rows_reason=zero_reason,
+    )
+
+    configured_labels = list(config_countries)
+    run_payload = {
+        "window": {"start": window_start_iso, "end": window_end_iso},
+        "countries": {"requested": configured_labels, "resolved": configured_labels},
+        "http": dict(http_payload),
+        "paging": {"pages": 0, "page_size": None, "total_received": 0},
+        "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
+        "totals": {
+            "rows_fetched": 0,
+            "rows_normalized": 0,
+            "rows_written": 0,
+            "kept": 0,
+            "dropped": 0,
+            "parse_errors": 0,
+        },
+        "status": "ok",
+        "reason": zero_reason,
+        "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
+        "extras": dict(extras_payload),
+        "args": vars(args),
+    }
+    try:
+        write_json(RUN_DETAILS_PATH, run_payload)
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: unable to persist run payload during rescue", exc_info=True)
+
+    diagnostics_result = diagnostics_finalize_run(
+        diagnostics_ctx,
+        status="ok",
+        reason=zero_reason,
+        http=dict(http_payload),
+        counts={"written": 0},
+        extras=extras_payload,
+    )
+    diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+    _append_connectors_report(
+        mode="real",
+        status="ok-empty",
+        rows=0,
+        reason=zero_reason,
+        extras=extras_payload,
+        http=http_payload,
+        counts={"written": 0},
+    )
+    _mirror_legacy_diagnostics()
+    return 0
+
+
 class ConfigDict(dict):
     """Dictionary subclass that retains the source metadata for logging."""
 
@@ -716,6 +909,29 @@ def _preflight_dependencies() -> Tuple[Dict[str, Any], bool]:
             info["packages"].append({"name": name, "version": str(version)})
 
     return info, not info["missing"]
+
+
+def _preflight_tls(host: str = "dtmapi.iom.int", port: int = 443, timeout: float = 5.0) -> Tuple[bool, Dict[str, Any]]:
+    details: Dict[str, Any] = {
+        "host": host,
+        "port": port,
+        "timeout_sec": float(timeout),
+    }
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            context = ssl.create_default_context()
+            with context.wrap_socket(sock, server_hostname=host):
+                pass
+    except Exception as exc:
+        details["ok"] = False
+        details["error"] = str(exc) or type(exc).__name__
+        details["error_type"] = type(exc).__name__
+        details["elapsed_ms"] = max(0, int((time.perf_counter() - started) * 1000))
+        return False, details
+    details["ok"] = True
+    details["elapsed_ms"] = max(0, int((time.perf_counter() - started) * 1000))
+    return True, details
 
 
 def _log_dependency_snapshot(info: Mapping[str, Any]) -> None:
@@ -2147,6 +2363,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(val).strip().lower() in {"1", "true", "y", "yes", "on"}
 
 
+def bool_from_env_or_flag(name: str, flag_value: bool, *, default: bool = False) -> bool:
+    if flag_value:
+        return True
+    return _env_bool(name, default)
+
+
 def _ensure_http_counts(counts: Optional[MutableMapping[str, int]]) -> MutableMapping[str, int]:
     base: MutableMapping[str, int] = counts or {}
     for key in HTTP_COUNT_KEYS:
@@ -2165,6 +2387,10 @@ def _is_connect_timeout_error(exc: BaseException) -> bool:
         if isinstance(current, requests.exceptions.ConnectTimeout):
             return True
         if isinstance(current, requests.exceptions.ReadTimeout):
+            return True
+        if Urllib3ConnectTimeoutError is not None and isinstance(current, Urllib3ConnectTimeoutError):
+            return True
+        if Urllib3ReadTimeoutError is not None and isinstance(current, Urllib3ReadTimeoutError):
             return True
         if isinstance(current, requests.exceptions.Timeout):
             message = str(current).lower()
@@ -3071,6 +3297,17 @@ def _fetch_api_data(
     summary["countries"]["requested"] = requested_countries
     if requested_countries:
         LOG.info("Config requested countries=%s", requested_countries)
+        discovery_placeholder = summary_extras.setdefault("discovery", {})
+        if not isinstance(discovery_placeholder, Mapping):
+            discovery_placeholder = {}
+            summary_extras["discovery"] = discovery_placeholder
+        discovery_placeholder = dict(discovery_placeholder)
+        discovery_placeholder.setdefault("configured_labels", list(requested_countries))
+        discovery_placeholder.setdefault("total_countries", len(requested_countries))
+        discovery_placeholder.setdefault("used_stage", "explicit_config")
+        discovery_placeholder.setdefault("source", "explicit_config")
+        discovery_placeholder.setdefault("unresolved_labels", [])
+        summary_extras["discovery"] = discovery_placeholder
 
     target = client.client if hasattr(client, "client") else client
     discovery_result = _perform_discovery(cfg, metrics=metrics_summary, client=client)
@@ -4053,6 +4290,7 @@ def _write_meta(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    soft_timeouts = bool_from_env_or_flag("DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False))
     global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE, OUT_PATH
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
@@ -4094,7 +4332,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         or _env_bool("RESOLVER_STRICT_EMPTY", False)
     )
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
-    soft_timeouts = args.soft_timeouts or _env_bool("DTM_SOFT_TIMEOUTS", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
     skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
     offline_mode = skip_requested or bool(offline_smoke)
@@ -4236,6 +4473,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         OFFLINE = previous_offline
         return 1
 
+    diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
+
+    tls_ok = True
+    tls_details: Dict[str, Any] = {}
+    if soft_timeouts:
+        try:
+            tls_ok, tls_details = _preflight_tls()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            tls_ok = False
+            tls_details = {
+                "ok": False,
+                "error": str(exc) or type(exc).__name__,
+                "error_type": type(exc).__name__,
+            }
+        if not tls_ok:
+            LOG.warning("dtm: TLS preflight failed; applying soft-timeout rescue", exc_info=False)
+            tls_details.setdefault("ok", False)
+            tls_details.setdefault("stage", "preflight_tls")
+            timings_ms = dict(timings_ms)
+            timings_ms["preflight_tls"] = int(tls_details.get("elapsed_ms") or 0)
+            base_extras["timings_ms"] = dict(timings_ms)
+            exit_code = _complete_soft_timeout_rescue(
+                args=args,
+                base_extras=base_extras,
+                base_http=base_http,
+                deps=deps_payload,
+                timings_ms=timings_ms,
+                diagnostics_ctx=diagnostics_ctx,
+                details=tls_details,
+                offline=OFFLINE,
+            )
+            OFFLINE = previous_offline
+            return exit_code
+
     raw_auth_key = (os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip()
     try:
         _auth_probe(raw_auth_key, offline=OFFLINE)
@@ -4332,7 +4603,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         OFFLINE = previous_offline
         return 1
 
-    diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
     http_stats: MutableMapping[str, int] = _ensure_http_counts({})
     extras: Dict[str, Any] = dict(base_extras)
     extras["mode"] = "skip" if skip_requested else extras.get("mode", "real")
@@ -4429,27 +4699,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         timeout_like = _is_connect_timeout_error(exc)
         if soft_timeouts and timeout_like:
             LOG.error("dtm: timeout detected (%s); treating as ok-empty", exc)
-            http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
-            status = "ok-empty"
-            reason = "timeout"
-            extras.setdefault("zero_rows_reason", reason)
-            extras["soft_timeout_applied"] = True
-            summary.setdefault("extras", {}).setdefault("zero_rows_reason", reason)
-            ensure_zero_row_outputs(offline=OFFLINE)
-        else:
-            LOG.error("dtm: HTTP failure detected (%s)", exc)
-            if timeout_like:
-                http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
-            else:
-                http_stats["error"] = int(http_stats.get("error", 0) or 0) + 1
-            status = "error"
-            reason = str(exc) or ("timeout" if timeout_like else "http_error")
-            exit_code = 1
-            extras.setdefault(
-                "exception",
-                {"type": type(exc).__name__, "message": str(exc)},
+            details = {
+                "ok": False,
+                "error": str(exc) or type(exc).__name__,
+                "error_type": type(exc).__name__,
+                "stage": "fetch",
+            }
+            timings_snapshot = dict(timings_ms)
+            base_extras["timings_ms"] = dict(timings_snapshot)
+            exit_code = _complete_soft_timeout_rescue(
+                args=args,
+                base_extras=base_extras,
+                base_http=http_stats,
+                deps=deps_payload,
+                timings_ms=timings_snapshot,
+                diagnostics_ctx=diagnostics_ctx,
+                details=details,
+                offline=OFFLINE,
             )
-            ensure_zero_row_outputs(offline=OFFLINE)
+            OFFLINE = previous_offline
+            return exit_code
+        LOG.error("dtm: HTTP failure detected (%s)", exc)
+        if timeout_like:
+            http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
+        else:
+            http_stats["error"] = int(http_stats.get("error", 0) or 0) + 1
+        status = "error"
+        reason = str(exc) or ("timeout" if timeout_like else "http_error")
+        exit_code = 1
+        extras.setdefault(
+            "exception",
+            {"type": type(exc).__name__, "message": str(exc)},
+        )
+        ensure_zero_row_outputs(offline=OFFLINE)
     except ValueError as exc:
         LOG.error("dtm: %s", exc)
         status = "error"
