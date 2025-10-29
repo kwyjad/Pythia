@@ -1269,9 +1269,15 @@ def _perform_discovery(
         snapshot_records: List[Dict[str, Any]] = []
         resolved_selectors: List[str] = []
         unresolved_labels: List[str] = []
+        ordered_selectors: List[str] = []
+        seen_selectors: Set[str] = set()
         for country in requested_countries:
             iso_candidate = to_iso3(country, alias_map)
-            selector = iso_candidate or str(country)
+            selector = (iso_candidate or str(country)).strip()
+            if iso_candidate:
+                selector = iso_candidate.strip().upper()
+            if not selector:
+                selector = str(country).strip()
             if not iso_candidate:
                 unresolved_labels.append(str(country))
             normalized_records.append(
@@ -1289,6 +1295,10 @@ def _perform_discovery(
                 }
             )
             resolved_selectors.append(str(selector))
+            normalized_key = selector.upper() if selector and selector.isalpha() and len(selector) == 3 else selector
+            if normalized_key not in seen_selectors and selector:
+                ordered_selectors.append(str(selector))
+                seen_selectors.add(normalized_key)
         discovered = pd.DataFrame(normalized_records, columns=["admin0Name", "admin0Pcode"])
         stage_entry = {
             "stage": "explicit_config",
@@ -1307,7 +1317,7 @@ def _perform_discovery(
             "latency_ms": {"explicit_config": 0},
             "used_stage": "explicit_config",
             "configured_labels": list(requested_countries),
-            "resolved": list(resolved_selectors),
+            "resolved": list(ordered_selectors or resolved_selectors),
             "unresolved_labels": list(unresolved_labels),
         }
         _write_discovery_report(report)
@@ -1332,12 +1342,13 @@ def _perform_discovery(
             snapshot_frame.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
         except Exception:  # pragma: no cover - diagnostics only
             LOG.debug("Unable to persist discovery snapshot", exc_info=True)
+        resolved_list = ordered_selectors or resolved_selectors
         if metrics is not None:
-            metrics["countries_attempted"] = len(resolved_selectors)
+            metrics["countries_attempted"] = len(resolved_list)
             metrics["stage_used"] = "explicit_config"
             _write_metrics_summary_file(metrics)
         return DiscoveryResult(
-            countries=resolved_selectors,
+            countries=resolved_list,
             frame=discovered,
             stage_used="explicit_config",
             report=report,
@@ -2153,11 +2164,17 @@ def _is_connect_timeout_error(exc: BaseException) -> bool:
         visited.add(id(current))
         if isinstance(current, requests.exceptions.ConnectTimeout):
             return True
+        if isinstance(current, requests.exceptions.ReadTimeout):
+            return True
+        if isinstance(current, requests.exceptions.Timeout):
+            message = str(current).lower()
+            if "timed out" in message or "timeout" in message:
+                return True
         name = type(current).__name__.lower()
         if "connecttimeout" in name:
             return True
         message = str(current).lower()
-        if "connect timeout" in message or "timed out while connecting" in message:
+        if "connect timeout" in message or "timed out while connecting" in message or "read timeout" in message:
             return True
         next_exc = getattr(current, "__cause__", None)
         if not isinstance(next_exc, BaseException):
@@ -2686,6 +2703,8 @@ def _run_offline_smoke(
         http_counters=http_payload,
         timings_ms=timings_ms,
         diagnostics={"mode": "offline-smoke", "offline": True},
+        status="ok",
+        reason=reason,
     )
 
     run_payload = {
@@ -2773,6 +2792,9 @@ def _finalize_skip_run(
         http_counters=http_payload,
         timings_ms={},
         diagnostics={"mode": "skip", "reason": reason},
+        status="skipped",
+        reason=reason,
+        zero_rows_reason=reason,
     )
 
     run_payload = {
@@ -3352,7 +3374,7 @@ def _fetch_api_data(
                         size = int(page.shape[0])
                         current = summary["paging"]["page_size"] or 0
                         summary["paging"]["page_size"] = max(current, size)
-                    raw_page = page
+                    raw_page = page.copy() if isinstance(page, pd.DataFrame) else page
                     if hasattr(page, "drop_duplicates"):
                         sort_cols = [
                             col
@@ -3990,6 +4012,10 @@ def _write_meta(
     failures: Sequence[Mapping[str, Any]] = (),
     discovery: Optional[Mapping[str, Any]] = None,
     diagnostics: Optional[Mapping[str, Any]] = None,
+    status: Optional[str] = None,
+    reason: Optional[str] = None,
+    zero_rows_reason: Optional[str] = None,
+    http_summary: Optional[Mapping[str, Any]] = None,
 ) -> None:
     payload: Dict[str, Any] = {"row_count": rows}
     if window_start:
@@ -4002,10 +4028,26 @@ def _write_meta(
     payload["timings_ms"] = {key: int(value) for key, value in timings_ms.items()}
     payload["per_country_counts"] = list(per_country_counts)
     payload["failures"] = list(failures)
+    http_payload: Dict[str, Any] = {key: int(http_counters.get(key, 0) or 0) for key in HTTP_COUNT_KEYS}
+    http_payload["retries"] = int(http_counters.get("retries", 0) or 0)
+    http_payload["last_status"] = http_counters.get("last_status")
+    if "rate_limit_remaining" in http_counters:
+        http_payload["rate_limit_remaining"] = http_counters.get("rate_limit_remaining")
+    if isinstance(http_summary, Mapping):
+        for key, value in http_summary.items():
+            if value is not None:
+                http_payload[key] = value
+    payload["http"] = http_payload
     if discovery is not None:
         payload["discovery"] = dict(discovery)
     if diagnostics is not None:
         payload["diagnostics"] = dict(diagnostics)
+    if status is not None:
+        payload["status"] = status
+    if reason is not None:
+        payload["reason"] = reason
+    if zero_rows_reason:
+        payload["zero_rows_reason"] = zero_rows_reason
     write_json(META_PATH, payload)
 
 
@@ -4383,25 +4425,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 ensure_zero_row_outputs(offline=OFFLINE)
             timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-        if soft_timeouts and _is_connect_timeout_error(exc):
-            LOG.error("dtm: connect timeout detected (%s); treating as ok-empty", exc)
+    except requests.exceptions.RequestException as exc:
+        timeout_like = _is_connect_timeout_error(exc)
+        if soft_timeouts and timeout_like:
+            LOG.error("dtm: timeout detected (%s); treating as ok-empty", exc)
             http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
-            if not http_stats.get("last_status"):
-                http_stats["last_status"] = 0
-            status = "ok"
-            reason = "http_connect_timeout"
+            status = "ok-empty"
+            reason = "timeout"
             extras.setdefault("zero_rows_reason", reason)
             extras["soft_timeout_applied"] = True
             summary.setdefault("extras", {}).setdefault("zero_rows_reason", reason)
             ensure_zero_row_outputs(offline=OFFLINE)
         else:
             LOG.error("dtm: HTTP failure detected (%s)", exc)
-            http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
-            if not http_stats.get("last_status"):
-                http_stats["last_status"] = 0
+            if timeout_like:
+                http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
+            else:
+                http_stats["error"] = int(http_stats.get("error", 0) or 0) + 1
             status = "error"
-            reason = str(exc) or "http_error"
+            reason = str(exc) or ("timeout" if timeout_like else "http_error")
             exit_code = 1
             extras.setdefault(
                 "exception",
@@ -4509,7 +4551,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         extras["rows_written"] = rows_written
         summary_extras["rows_written"] = rows_written
 
-    if strict_empty and zero_rows and exit_code == 0 and zero_rows_reason != "http_connect_timeout":
+    if strict_empty and zero_rows and exit_code == 0 and zero_rows_reason != "timeout":
         exit_code = 2
         LOG.error("dtm: strict-empty enabled; exiting with code 2 for zero rows")
 
@@ -4721,6 +4763,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         failures=failures_payload,
         discovery=summary_extras.get("discovery"),
         diagnostics=summary_extras.get("diagnostics"),
+        status=status,
+        reason=reason,
+        zero_rows_reason=zero_rows_reason,
+        http_summary=summary_extras.get("http"),
     )
 
     run_payload = {

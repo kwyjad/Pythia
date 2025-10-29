@@ -178,9 +178,11 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
 - Ingestion outputs must land in `resolver/staging` for the derive/freeze steps to pick them up. Set
   `RESOLVER_OUTPUT_DIR=resolver/staging` (the workflows do this automatically) or the summary’s **Staging readiness** section
   will flag the mismatch when files appear under the legacy `data/staging` path instead.
-- Use `--soft-timeouts` (or `DTM_SOFT_TIMEOUTS=1`) when running behind strict egress rules. Connect timeouts to
-  `dtmapi.iom.int` are treated as `status=ok-empty` with `zero_rows_reason=http_connect_timeout`, allowing workflows with
-  `EMPTY_POLICY=allow` to succeed while you request firewall exceptions. The initial-backfill and monthly workflows pass this
+- Use `--soft-timeouts` (or `DTM_SOFT_TIMEOUTS=1`) when running behind strict egress rules. Connect/read timeouts to
+  `dtmapi.iom.int` are treated as `status=ok-empty` with `zero_rows_reason=timeout`, allowing workflows with
+  `EMPTY_POLICY=allow` to succeed while you request firewall exceptions. The connector still writes a header-only CSV alongside
+  a `.meta.json` containing `{"status": "ok-empty", "zero_rows_reason": "timeout", "http": {"timeouts": 1}}`, so downstream
+  exporters safely skip the file while diagnostics capture the failure. The initial-backfill and monthly workflows pass this
   flag automatically when the empty policy permits blanks.
 
 - When the resulting configuration (YAML or env overrides) specifies a non-empty `api.countries`, the connector skips SDK/HTTP
