@@ -269,10 +269,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not name:
             continue
         module = f"resolver.ingestion.{name}"
-        cmd = [python_exe, "-m", module]
-        additional = extra_args.get(name, [])
-        if additional:
-            cmd.extend(additional)
+        base_cmd = [python_exe, "-m", module]
+        user_flags = list(extra_args.get(name, []))
+        env_flags: List[str] = []
         log_path = logs_dir / f"{name}.log"
         print(f"=== RUN {name} → {log_path} ===")
         diagnostics_ctx = diagnostics_start_run(name, "real")
@@ -282,12 +281,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             connector_env.update(overrides)
         auto_soft_timeout = False
         if name == "dtm_client":
+            overrides_map = overrides or {}
+
+            def _truthy(value: str | None) -> bool:
+                if not value:
+                    return False
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+
+            if _truthy(overrides_map.get("DTM_SOFT_TIMEOUTS")):
+                if "--soft-timeouts" not in env_flags and "--soft-timeouts" not in user_flags:
+                    env_flags.append("--soft-timeouts")
+            if _truthy(overrides_map.get("DTM_NO_DATE_FILTER")):
+                if "--no-date-filter" not in env_flags and "--no-date-filter" not in user_flags:
+                    env_flags.append("--no-date-filter")
+
             policy_for_log = connector_env.get("EMPTY_POLICY", env.get("EMPTY_POLICY", "allow"))
             empty_policy = policy_for_log.strip().lower()
-            has_soft_flag = any(part == "--soft-timeouts" for part in cmd)
+            has_soft_flag = "--soft-timeouts" in env_flags or "--soft-timeouts" in user_flags
             if empty_policy in {"allow", "warn"} and not has_soft_flag:
-                cmd.append("--soft-timeouts")
+                env_flags.append("--soft-timeouts")
                 auto_soft_timeout = True
+        cmd = base_cmd + env_flags + user_flags
         if overrides:
             print(f"env[{name}]: {overrides}")
         if auto_soft_timeout:
