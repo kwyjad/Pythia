@@ -317,6 +317,12 @@ The DTM connector is API-only and always calls the official DTM API via the `dtm
 **Secrets:**
 - `DTM_API_KEY` (required) — single IOM DTM subscription key used for all authenticated calls.
 
+Normalization for the admin0 staging feed lives in `resolver/ingestion/dtm/normalize.py`. The
+diagnostics payload emitted under `extras.normalize` records
+`chosen_value_columns` counts before any ISO/date filtering and increments the
+`drop_reasons` buckets (`no_iso3`, `no_value_col`, `date_out_of_window`,
+`date_parse_failed`, `other`) at the moment each row is discarded.
+
 **Configuration fields:**
 
 | Field | Required | Description |

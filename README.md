@@ -161,6 +161,9 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
 - Credential setup (`DTM_API_KEY` or `DTM_SUBSCRIPTION_KEY`).
 - Expected diagnostics outputs and skip reasons (`sdk_missing`, `auth_missing`, `discovery_empty`).
 - Troubleshooting tips for zero-row exports and negative monthly flows.
+- Contributor note: admin0 normalization lives in `resolver/ingestion/dtm/normalize.py`.
+  Run `pytest -k normalize_dtm_admin0` for the fast unit tests that cover value-column
+  selection and drop-reason counters.
 - Configuration defaults keep `api.countries: []` and `admin_levels: ["admin0"]` so discovery stays enabled for fast tests. To
   target a curated geography list without editing the YAML, export environment overrides before invoking the connector:
 

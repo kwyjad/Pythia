@@ -51,6 +51,7 @@ from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
 )
+from resolver.ingestion.dtm.normalize import normalize_admin0
 from resolver.ingestion.dtm_auth import build_discovery_header_variants, get_dtm_api_key
 from resolver.ingestion.utils import ensure_headers, flow_from_stock, month_start, stable_digest
 from resolver.ingestion.utils.iso_normalize import resolve_iso3 as resolve_iso3_fields, to_iso3
@@ -3890,84 +3891,157 @@ def _fetch_api_data(
                         len(page.columns),
                         list(page.columns),
                     )
-                    idp_column = _resolve_idp_value_column(page, idp_candidates)
-                    LOG.info("resolved value column: idp_count_col=%r", idp_column)
-                    if not idp_column:
-                        LOG.warning(
-                            "no value column matched; aliases=%s; rows=%d",
-                            idp_candidates,
-                            len(page),
-                        )
-                        drop_reasons_counter["no_value_col"] += int(page.shape[0])
-                        status_entry["errors"] = True
-                        failures.append(
-                            {
-                                "country": country_label,
-                                "level": level,
-                                "operation": operation,
-                                "error": "MissingValueColumn",
-                                "message": "aliases=%s columns=%s"
-                                % (idp_candidates, list(page.columns)),
-                            }
-                        )
-                        continue
-                    raw_count = 0
-                    if isinstance(raw_page, pd.DataFrame) and idp_column in raw_page.columns:
-                        raw_count = int(raw_page[idp_column].notna().sum())
-                    value_column_usage[idp_column] = value_column_usage.get(idp_column, 0) + raw_count
-                    LOG.debug(
-                        "DTM diag value-column raw count: %s=%s",
-                        idp_column,
-                        raw_count,
-                    )
-                    if level not in head_written_levels:
-                        try:
-                            _dump_head(page, level, country_label)
-                        except Exception:  # pragma: no cover - diagnostics only
-                            LOG.debug(
-                                "failed to write raw head for level=%s country=%s",
-                                level,
-                                country_label,
-                                exc_info=True,
-                            )
-                        else:
-                            head_written_levels.add(level)
-                    try:
-                        _write_level_sample(page, level)
-                    except Exception:  # pragma: no cover - diagnostics only
-                        LOG.debug("failed to write sample rows", exc_info=True)
-                    page = page.rename(columns={idp_column: "idp_count"})
+                    original_rows = int(page.shape[0])
                     if level == "admin0":
+                        original_columns = list(page.columns)
+
+                        def _iso_lookup(series: pd.Series) -> Tuple[Optional[str], Optional[str]]:
+                            return resolve_iso3_fields(
+                                series,
+                                aliases=aliases,
+                                name_keys=(country_column,),
+                            )
+
+                        normalized_result = normalize_admin0(
+                            page,
+                            idp_aliases=idp_candidates,
+                            start_iso=None if no_date_filter else filter_start,
+                            end_iso=None if no_date_filter else filter_end,
+                            iso3_lookup=_iso_lookup,
+                        )
+                        local_drop = normalized_result.get("counters", {}).get("drop_reasons", {})
+                        for reason, count in local_drop.items():
+                            drop_reasons_counter[reason] = drop_reasons_counter.get(reason, 0) + int(count)
+                        chosen_entries = normalized_result.get("counters", {}).get(
+                            "chosen_value_columns", []
+                        )
+                        chosen_column = chosen_entries[0]["column"] if chosen_entries else None
+                        chosen_count = int(chosen_entries[0]["count"]) if chosen_entries else 0
+                        LOG.info("resolved value column: idp_count_col=%r", chosen_column)
+                        if chosen_column:
+                            value_column_usage[chosen_column] = value_column_usage.get(
+                                chosen_column, 0
+                            ) + chosen_count
+                        normalized_page = normalized_result.get("df", pd.DataFrame())
+                        summary.setdefault("rows", {}).setdefault("dropped", 0)
+                        summary["rows"]["dropped"] += max(
+                            0, original_rows - int(normalized_page.shape[0])
+                        )
+                        if normalized_result.get("zero_rows_reason") == "invalid_indicator":
+                            LOG.warning(
+                                "no value column matched; aliases=%s; rows=%d",
+                                idp_candidates,
+                                len(page),
+                            )
+                            status_entry["errors"] = True
+                            failures.append(
+                                {
+                                    "country": country_label,
+                                    "level": level,
+                                    "operation": operation,
+                                    "error": "MissingValueColumn",
+                                    "message": "aliases=%s columns=%s"
+                                    % (idp_candidates, original_columns),
+                                }
+                            )
+                            continue
+                        if normalized_page.empty:
+                            continue
+                        if level not in head_written_levels:
+                            try:
+                                _dump_head(page, level, country_label)
+                            except Exception:  # pragma: no cover - diagnostics only
+                                LOG.debug(
+                                    "failed to write raw head for level=%s country=%s",
+                                    level,
+                                    country_label,
+                                    exc_info=True,
+                                )
+                            else:
+                                head_written_levels.add(level)
                         try:
-                            _record_admin0_sample(page, operation=operation)
+                            _write_level_sample(page, level)
+                        except Exception:  # pragma: no cover - diagnostics only
+                            LOG.debug("failed to write sample rows", exc_info=True)
+                        try:
+                            _record_admin0_sample(normalized_page, operation=operation)
                         except Exception:  # pragma: no cover - diagnostics only
                             LOG.debug("Unable to update admin0 sample", exc_info=True)
-
-                    current_date_column = _pick_reporting_date_column(
-                        page, preferred=(date_column,)
-                    )
-                    page, date_diag = _apply_date_window(
-                        page,
-                        filter_start,
-                        filter_end,
-                        disable=bool(no_date_filter),
-                        diag_out_dir=DTM_DIAGNOSTICS_DIR,
-                        extras=summary_extras,
-                        preferred_columns=(date_column,),
-                    )
-                    drop_counts_diag = date_diag.get("drop_counts")
-                    if isinstance(drop_counts_diag, Mapping):
-                        for reason, count in drop_counts_diag.items():
-                            drop_reasons_counter[reason] = drop_reasons_counter.get(reason, 0) + int(count)
-                    summary.setdefault("rows", {}).setdefault("dropped", 0)
-                    summary["rows"]["dropped"] += int(date_diag.get("outside", 0))
-                    if page.empty:
-                        continue
-                    current_date_column = (
-                        date_diag.get("date_column_used")
-                        or current_date_column
-                        or date_column
-                    )
+                        page = normalized_page
+                        current_date_column = "ReportingDate"
+                    else:
+                        idp_column = _resolve_idp_value_column(page, idp_candidates)
+                        LOG.info("resolved value column: idp_count_col=%r", idp_column)
+                        if not idp_column:
+                            LOG.warning(
+                                "no value column matched; aliases=%s; rows=%d",
+                                idp_candidates,
+                                len(page),
+                            )
+                            drop_reasons_counter["no_value_col"] += int(page.shape[0])
+                            status_entry["errors"] = True
+                            failures.append(
+                                {
+                                    "country": country_label,
+                                    "level": level,
+                                    "operation": operation,
+                                    "error": "MissingValueColumn",
+                                    "message": "aliases=%s columns=%s"
+                                    % (idp_candidates, list(page.columns)),
+                                }
+                            )
+                            continue
+                        raw_count = 0
+                        if isinstance(raw_page, pd.DataFrame) and idp_column in raw_page.columns:
+                            raw_count = int(raw_page[idp_column].notna().sum())
+                        value_column_usage[idp_column] = value_column_usage.get(idp_column, 0) + raw_count
+                        LOG.debug(
+                            "DTM diag value-column raw count: %s=%s",
+                            idp_column,
+                            raw_count,
+                        )
+                        if level not in head_written_levels:
+                            try:
+                                _dump_head(page, level, country_label)
+                            except Exception:  # pragma: no cover - diagnostics only
+                                LOG.debug(
+                                    "failed to write raw head for level=%s country=%s",
+                                    level,
+                                    country_label,
+                                    exc_info=True,
+                                )
+                            else:
+                                head_written_levels.add(level)
+                        try:
+                            _write_level_sample(page, level)
+                        except Exception:  # pragma: no cover - diagnostics only
+                            LOG.debug("failed to write sample rows", exc_info=True)
+                        page = page.rename(columns={idp_column: "idp_count"})
+                        current_date_column = _pick_reporting_date_column(
+                            page, preferred=(date_column,)
+                        )
+                        page, date_diag = _apply_date_window(
+                            page,
+                            filter_start,
+                            filter_end,
+                            disable=bool(no_date_filter),
+                            diag_out_dir=DTM_DIAGNOSTICS_DIR,
+                            extras=summary_extras,
+                            preferred_columns=(date_column,),
+                        )
+                        drop_counts_diag = date_diag.get("drop_counts")
+                        if isinstance(drop_counts_diag, Mapping):
+                            for reason, count in drop_counts_diag.items():
+                                drop_reasons_counter[reason] = drop_reasons_counter.get(reason, 0) + int(count)
+                        summary.setdefault("rows", {}).setdefault("dropped", 0)
+                        summary["rows"]["dropped"] += int(date_diag.get("outside", 0))
+                        if page.empty:
+                            continue
+                        current_date_column = (
+                            date_diag.get("date_column_used")
+                            or current_date_column
+                            or date_column
+                        )
 
                     per_admin: Dict[Tuple[str, str], Dict[datetime, float]] = defaultdict(dict)
                     per_admin_asof: Dict[Tuple[str, str], Dict[datetime, str]] = defaultdict(dict)
