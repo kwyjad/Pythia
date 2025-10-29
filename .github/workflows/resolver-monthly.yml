@@ -51,6 +51,8 @@ jobs:
       LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
       DTM_CONFIG_PATH: resolver/config/dtm.yml
       RESOLVER_OUTPUT_DIR: resolver/staging
+      DTM_WINDOW_START: "2024-01-01"
+      DTM_WINDOW_END: "2025-10-31"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -242,7 +244,7 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          scripts/ci/run_and_capture.sh context "python -m resolver.tools.build_llm_context --months 12 --outdir context"
+          python scripts/ci/build_llm_context.py
 
       - name: Create release archive
         run: |
