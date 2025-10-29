@@ -21,6 +21,16 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
   - Cache-enabled runs expect repeated `duckdb_io.get_db(url)` calls to return the same connection object; cache-disabled runs (`RESOLVER_DISABLE_CONN_CACHE=1`) intentionally return fresh handles, and tests should branch accordingly.
 
+### PR Gate: Canary tests
+
+Branches prefixed with `codex/` trigger the dedicated [Canary Gate workflow](.github/workflows/codex-canary-gate.yml) on every push and pull request. The job installs the resolver with the standard CI constraints and runs `python -m scripts.ci.run_canary`, which executes a fixed trio of fast contract tests:
+
+- `resolver/tests/test_run_connectors_extra_args.py::test_run_connectors_passes_extra_args_and_env`
+- `resolver/tests/test_iso_normalize_and_drop_reasons.py::test_dtm_drop_reason_counters_capture_iso_and_value_failures`
+- `resolver/tests/test_dtm_soft_timeouts.py::test_soft_timeouts_yield_ok_empty`
+
+The workflow completes in well under two minutes and is a required check for Codex PRs into `main`. When a canary fails the job comments directly on the pull request, applies a `needs-fix/canary` label, and links to the run logs so you can triage without hunting through the Actions UI.
+
 ## Go Live: Initial resolver backfill
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
@@ -159,6 +169,16 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
   export DTM_ADMIN_LEVELS="admin0,admin1"
   ```
 
+#### DTM reachability & `EMPTY_POLICY`
+
+Resolver runs launched with `EMPTY_POLICY=allow` (the default) automatically append `--soft-timeouts` when invoking
+`resolver.ingestion.dtm_client`. If the TLS handshake or HTTP connect step to `dtmapi.iom.int` times out, the connector records
+an `ok-empty` run with `zero_rows_reason=connect_timeout`, writes a header-only `resolver/staging/dtm_displacement.csv`, and
+persists diagnostics describing the explicit country list pulled from `resolver/config/dtm.yml`. Backfill jobs therefore keep
+moving even when the upstream API is briefly unreachable. To force hard failures in CI or locally, set `EMPTY_POLICY=fail`
+before running `scripts/ci/run_connectors.py` or the “Resolver — Initial Backfill” workflow; the runner will skip the soft
+timeout flag and the connector will exit with a non-zero status on connection errors.
+
 - The official SDK expects ISO-3 selectors via the `Admin0Pcode` argument (not `CountryISO3`). The connector reads
   country selectors from the `api.countries` list and admin levels from `api.admin_levels` inside `resolver/config/dtm.yml`
   (or whichever config path you supply via `DTM_CONFIG_PATH`) and shims the SDK call so legacy helpers/tests that still emit
@@ -178,10 +198,26 @@ The refactored DTM connector now focuses on API-first ingestion with a streamlin
 - Ingestion outputs must land in `resolver/staging` for the derive/freeze steps to pick them up. Set
   `RESOLVER_OUTPUT_DIR=resolver/staging` (the workflows do this automatically) or the summary’s **Staging readiness** section
   will flag the mismatch when files appear under the legacy `data/staging` path instead.
+
+#### DTM fake rows safety net
+
+When you need the rest of the resolver pipeline to continue despite DTM being unreachable, enable the fake-data rescue:
+
+- Set `DTM_FORCE_FAKE=1` (or pass `--force-fake`) to skip network access entirely. The connector writes the bundled
+  `resolver/ingestion/static/dtm_admin0_fake.csv` into staging, marks the metadata with `"fake_data": true`, and records
+  `fake_reason=force_fake` in diagnostics so job summaries and downstream exporters surface the override.
+- Set `DTM_FAKE_ON_TIMEOUT=1` (or pass `--fake-on-timeout`) to fall back to the same fake rows only when a
+  `requests.exceptions.ConnectTimeout`/`ReadTimeout`/`ConnectionError` bubbles up during ingestion. Metadata then records
+  `fake_reason=network_timeout` alongside the captured exception type.
+
+Both toggles honour the explicit country list from `resolver/config/dtm.yml`, filter the fake rows to the requested ISO3 codes
+and ingestion window, and still emit manifests/diagnostics so later steps (exports, precedence, deltas, snapshots) ingest the
+fake staging exactly as they would live data. The fake rows use obvious 2025 timestamps and the `.meta.json` advertises
+`fake_data_used` so analysts reviewing run summaries can immediately see when a rescue mode was applied.
 - Use `--soft-timeouts` (or `DTM_SOFT_TIMEOUTS=1`) when running behind strict egress rules. Connect/read timeouts to
-  `dtmapi.iom.int` are treated as `status=ok-empty` with `zero_rows_reason=timeout`, allowing workflows with
+  `dtmapi.iom.int` are treated as `status=ok` runs with `zero_rows_reason=connect_timeout`, allowing workflows with
   `EMPTY_POLICY=allow` to succeed while you request firewall exceptions. The connector still writes a header-only CSV alongside
-  a `.meta.json` containing `{"status": "ok-empty", "zero_rows_reason": "timeout", "http": {"timeouts": 1}}`, so downstream
+  a `.meta.json` containing `{"status": "ok", "zero_rows_reason": "connect_timeout", "http": {"timeout": 1}}`, so downstream
   exporters safely skip the file while diagnostics capture the failure. The initial-backfill and monthly workflows pass this
   flag automatically when the empty policy permits blanks.
 

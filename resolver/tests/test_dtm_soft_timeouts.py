@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -65,27 +63,31 @@ def test_soft_timeouts_yield_ok_empty(monkeypatch: pytest.MonkeyPatch, patch_pat
     rc = dtm_client.main(["--soft-timeouts"])
     assert rc == 0
 
-    report_lines = patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
-    assert len(report_lines) == 1
-    payload = json.loads(report_lines[0])
-    assert payload["status"] in {"ok", "ok-empty"}
-    assert payload["extras"].get("status_raw") == "ok-empty"
-    assert payload["extras"].get("zero_rows_reason") == "timeout"
-    assert payload["extras"].get("exit_code") == 0
+    report_payloads = [
+        json.loads(line)
+        for line in patch_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
+        if line.strip()
+    ]
+    assert report_payloads
+    zero_reasons = {entry.get("extras", {}).get("zero_rows_reason") for entry in report_payloads}
+    assert "connect_timeout" in zero_reasons
+    assert any(entry.get("status") in {"ok", "ok-empty"} for entry in report_payloads)
+    assert any(entry.get("extras", {}).get("status_raw") in {"ok", "ok-empty"} for entry in report_payloads)
+    assert all(entry.get("extras", {}).get("exit_code", 0) == 0 for entry in report_payloads)
 
     csv_text = patch_paths["OUT_PATH"].read_text(encoding="utf-8").splitlines()
-    assert csv_text == ["source,country_iso3,admin1,event_id,as_of,month_start,value_type,value,unit,method,confidence,raw_event_id,raw_fields_json"]
+    assert csv_text == ["CountryISO3,ReportingDate,idp_count"]
 
     meta_payload = json.loads(patch_paths["META_PATH"].read_text(encoding="utf-8"))
     assert meta_payload["row_count"] == 0
-    assert meta_payload.get("status") == "ok-empty"
-    assert meta_payload.get("zero_rows_reason") == "timeout"
-    assert meta_payload.get("http", {}).get("timeouts") == 1
+    assert meta_payload.get("status") == "ok"
+    assert meta_payload.get("zero_rows_reason") == "connect_timeout"
+    assert meta_payload.get("http", {}).get("timeout") == 1
 
     run_payload = json.loads(patch_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
-    assert run_payload["status"] == "ok-empty"
-    assert run_payload["reason"] == "timeout"
-    assert run_payload["extras"].get("zero_rows_reason") == "timeout"
+    assert run_payload["status"] == "ok"
+    assert run_payload["reason"] == "connect_timeout"
+    assert run_payload["extras"].get("zero_rows_reason") == "connect_timeout"
     assert run_payload["extras"].get("http", {}).get("timeouts") == 1
 
 

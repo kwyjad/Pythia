@@ -135,6 +135,11 @@ Canonical CSV header (mirrors `resolver.ingestion.dtm_client.CANONICAL_HEADERS`)
 source,country_iso3,admin1,event_id,as_of,month_start,value_type,value,unit,method,confidence,raw_event_id,raw_fields_json
 ```
 
+> **Resilience note:** When `resolver.ingestion.dtm_client` is invoked with soft timeouts enabled and `dtmapi.iom.int` is
+> temporarily unreachable, the connector writes only the header row plus a `.meta.json` stub (recording `status: "ok"` and
+> `zero_rows_reason: "connect_timeout"`). Downstream export tools already treat empty CSVs as “no new displacement data” and
+> must continue to accept header-only inputs in those scenarios.
+
 ## db.facts_raw
 
 Canonical facts written to DuckDB alongside CSV exports.
@@ -355,6 +360,10 @@ field_aliases:
 - `diagnostics/ingestion/metrics/` — numeric rollups or per-request metrics emitted by connectors.
 - `diagnostics/ingestion/samples/` — sampled rows preserved for schema inspection.
 - `diagnostics/ingestion/dtm/` — discovery probes and HTTP traces from the DTM client, including `discovery_fail.json` when discovery fails.
+
+> **Heads-up:** CI (including the Codex Canary Gate) often runs with network access disabled. When upstream APIs are unreachable the connector writes header-only staging CSVs plus metadata that captures `zero_rows_reason="connect_timeout"`. Downstream exporters and schema checks must treat these empty-but-successful outputs as valid.
+
+> **CI note:** Connector automation may add safety flags such as `--soft-timeouts` or `--no-date-filter` on behalf of Codex workflows. The runner intentionally inserts those before any user-provided extras so test expectations that "last flag wins" remain stable.
 
 **Diagnostics:** each execution writes:
 - `diagnostics/ingestion/dtm_run.json` summarising the ingestion window, requested and resolved countries, HTTP counters (`2xx`, `4xx`, `5xx`, `timeout`, `error`, `retries`, `last_status`), paging (`pages`, `page_size`, `total_received`), row totals, and a `totals` block capturing aggregate counts plus the CLI arguments used.
