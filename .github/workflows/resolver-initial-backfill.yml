@@ -476,8 +476,7 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          mkdir -p context
-          python -m resolver.tools.build_llm_context --months "${CONTEXT_MONTHS:-12}" --outdir context
+          python scripts/ci/build_llm_context.py
 
       - name: Upload context artifact
         uses: actions/upload-artifact@v4

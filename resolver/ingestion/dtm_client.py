@@ -70,6 +70,21 @@ REPO_CONFIG_PATH = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
 SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
 
 
+def _resolve_effective_window() -> Tuple[Optional[str], Optional[str], bool]:
+    """Return the ISO window bounds, applying CI overrides when provided."""
+
+    start_dt, end_dt = resolve_ingestion_window()
+    start_iso = start_dt.isoformat() if start_dt else None
+    end_iso = end_dt.isoformat() if end_dt else None
+    start_override = (os.getenv("DTM_WINDOW_START") or "").strip()
+    end_override = (os.getenv("DTM_WINDOW_END") or "").strip()
+    override_applied = bool(start_override and end_override)
+    if override_applied:
+        start_iso = start_override
+        end_iso = end_override
+    return start_iso, end_iso, override_applied
+
+
 def _resolve_config_path() -> Path:
     repo_root = Path(REPO_ROOT)
     resolver_root = repo_root / "resolver"
@@ -812,9 +827,7 @@ def _complete_soft_timeout_rescue(
     ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
     _write_http_trace_placeholder(Path(HTTP_TRACE_PATH), offline=offline)
 
-    window_start_dt, window_end_dt = resolve_ingestion_window()
-    window_start_iso = window_start_dt.isoformat() if window_start_dt else None
-    window_end_iso = window_end_dt.isoformat() if window_end_dt else None
+    window_start_iso, window_end_iso, window_override_env = _resolve_effective_window()
 
     config_countries: List[str] = []
     discovery_struct: Optional[Dict[str, Any]] = None
@@ -858,7 +871,11 @@ def _complete_soft_timeout_rescue(
 
     effective_params: Dict[str, Any] = {"countries": list(config_countries)}
     if window_start_iso or window_end_iso:
-        effective_params["window"] = {"start": window_start_iso, "end": window_end_iso}
+        effective_params["window"] = {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "override_env": window_override_env,
+        }
 
     extras_payload = dict(base_extras)
     extras_payload["config"] = base_extras_config
@@ -877,7 +894,11 @@ def _complete_soft_timeout_rescue(
         }
     )
     extras_payload["effective_params"] = effective_params
-    extras_payload["window"] = {"start_iso": window_start_iso, "end_iso": window_end_iso}
+    extras_payload["window"] = {
+        "start_iso": window_start_iso,
+        "end_iso": window_end_iso,
+        "override_env": window_override_env,
+    }
     extras_payload["dtm"] = {"base_url": "unknown"}
     if discovery_struct:
         extras_payload["discovery"] = discovery_struct
@@ -918,7 +939,11 @@ def _complete_soft_timeout_rescue(
 
     configured_labels = list(config_countries)
     run_payload = {
-        "window": {"start": window_start_iso, "end": window_end_iso},
+        "window": {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "override_env": window_override_env,
+        },
         "countries": {"requested": configured_labels, "resolved": configured_labels},
         "http": dict(http_payload),
         "paging": {"pages": 0, "page_size": None, "total_received": 0},
@@ -970,7 +995,7 @@ def _complete_fake_success(
     base_extras: Mapping[str, Any],
     base_http: Mapping[str, Any],
     deps: Mapping[str, Any],
-    timings_ms: Mapping[str, Any],
+    timings_ms: Mapping[str, int],
     diagnostics_ctx: Any,
     window_start_iso: Optional[str],
     window_end_iso: Optional[str],
@@ -981,6 +1006,7 @@ def _complete_fake_success(
     reason: str,
     offline: bool,
     diagnostics_details: Optional[Mapping[str, Any]] = None,
+    window_override_env: Optional[bool] = None,
 ) -> int:
     from resolver.ingestion.dtm_fakes import write_fake_admin0_staging
 
@@ -1010,6 +1036,9 @@ def _complete_fake_success(
     http_payload["fake_runs"] = int(http_payload.get("fake_runs", 0) or 0) + 1
 
     extras_payload = dict(base_extras)
+    if window_override_env is None:
+        _, _, window_override_env = _resolve_effective_window()
+
     extras_payload.update(
         {
             "rows_total": rows,
@@ -1018,6 +1047,7 @@ def _complete_fake_success(
             "exit_code": 0,
             "window_start": window_start_iso,
             "window_end": window_end_iso,
+            "window_override_env": window_override_env,
             "fake_data_used": True,
             "fake_reason": reason,
             "fake_mode": mode,
@@ -1071,7 +1101,11 @@ def _complete_fake_success(
     effective_params = {
         "countries": list(iso_filter or configured_labels),
         "admin_levels": list(admin_levels),
-        "window": {"start": window_start_iso, "end": window_end_iso},
+        "window": {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "override_env": window_override_env,
+        },
         "mode": mode,
         "fake_data_used": True,
     }
@@ -1099,7 +1133,11 @@ def _complete_fake_success(
             "level": "admin0",
             "fake_data": True,
             "fake_reason": reason,
-            "window": {"start": window_start_iso, "end": window_end_iso},
+            "window": {
+                "start": window_start_iso,
+                "end": window_end_iso,
+                "override_env": window_override_env,
+            },
             "iso3_filter": list(iso_filter),
             "http": dict(http_payload),
             "deps": dict(deps),
@@ -1129,7 +1167,11 @@ def _complete_fake_success(
         "parse_errors": 0,
     }
     run_payload = {
-        "window": {"start": window_start_iso, "end": window_end_iso},
+        "window": {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "override_env": window_override_env,
+        },
         "countries": {
             "requested": list(configured_labels),
             "resolved": list(iso_filter or configured_labels),
@@ -5087,9 +5129,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reason: Optional[str] = None
     exit_code = 0
 
-    window_start_dt, window_end_dt = resolve_ingestion_window()
-    window_start_iso = window_start_dt.isoformat() if window_start_dt else None
-    window_end_iso = window_end_dt.isoformat() if window_end_dt else None
+    window_start_iso, window_end_iso, window_override_env = _resolve_effective_window()
 
     rows_written = 0
     summary: Dict[str, Any] = {}
@@ -5182,6 +5222,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 reason="force_fake",
                 offline=OFFLINE,
                 diagnostics_details=diagnostics_details,
+                window_override_env=window_override_env,
             )
             OFFLINE = previous_offline
             return exit_code
@@ -5234,6 +5275,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 reason="network_timeout",
                 offline=OFFLINE,
                 diagnostics_details=details,
+                window_override_env=window_override_env,
             )
             OFFLINE = previous_offline
             return exit_code
@@ -5308,6 +5350,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "rows_total": rows_written,
             "window_start": window_start_iso,
             "window_end": window_end_iso,
+            "window_override_env": window_override_env,
             "strict_empty": strict_empty,
             "no_date_filter": no_date_filter,
             "exit_code": exit_code,
@@ -5517,7 +5560,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     summary_extras["config"] = dict(config_extras)
 
-    summary_extras["window"] = {"start_iso": window_start_iso, "end_iso": window_end_iso}
+    summary_extras["window"] = {
+        "start_iso": window_start_iso,
+        "end_iso": window_end_iso,
+        "override_env": window_override_env,
+    }
 
     summary_extras["http"] = {
         "count_2xx": int(http_payload.get("2xx", 0)),
@@ -5602,7 +5649,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     run_payload = {
-        "window": {"start": window_start_iso, "end": window_end_iso},
+        "window": {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "override_env": window_override_env,
+        },
         "countries": summary.get("countries", {}),
         "http": http_payload,
         "paging": summary.get("paging", {"pages": 0, "page_size": None, "total_received": 0}),
