@@ -219,6 +219,12 @@ Monthly "new" deltas derived from resolved totals.
 | definition_text | string | no |  |  |
 | created_at | datetime | no |  |  |
 
+### Metric reference
+
+| Metric | Series semantics | Unit | Cadence | Description |
+| --- | --- | --- | --- | --- |
+| idp_displacement_new_dtm | new | persons | monthly | Monthly new internally displaced persons derived from DTM admin0 stock snapshots. Semantics `new` denotes the month-over-month increase computed from `value_type=new_displaced` rows produced by the connector. |
+
 ## db.snapshots
 
 Snapshot metadata recorded alongside dual-write operations.

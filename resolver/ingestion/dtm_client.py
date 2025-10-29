@@ -3352,6 +3352,46 @@ def _fetch_api_data(
                         size = int(page.shape[0])
                         current = summary["paging"]["page_size"] or 0
                         summary["paging"]["page_size"] = max(current, size)
+                    if hasattr(page, "drop_duplicates"):
+                        sort_cols = [
+                            col
+                            for col in [
+                                "CountryISO3",
+                                "ReportingDate",
+                                "revision",
+                                "ingested_at",
+                            ]
+                            if col in page.columns
+                        ]
+                        if sort_cols:
+                            page = page.sort_values(
+                                by=sort_cols,
+                                ascending=[True] * len(sort_cols),
+                                na_position="last",
+                                kind="mergesort",
+                            )
+                        dedupe_cols = [
+                            col
+                            for col in [
+                                "CountryISO3",
+                                "ReportingDate",
+                                "idp_count",
+                                "value",
+                                "value_type",
+                            ]
+                            if col in page.columns
+                        ]
+                        if dedupe_cols:
+                            before_dedupe = int(page.shape[0])
+                            page = page.drop_duplicates(subset=dedupe_cols, keep="last")
+                            page = page.reset_index(drop=True)
+                            if int(page.shape[0]) != before_dedupe:
+                                LOG.debug(
+                                    "dtm: deduped admin0 rows before normalization (before=%d after=%d keys=%s)",
+                                    before_dedupe,
+                                    int(page.shape[0]),
+                                    dedupe_cols,
+                                )
                     if page.empty:
                         continue
                     LOG.debug(

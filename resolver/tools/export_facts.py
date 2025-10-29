@@ -89,11 +89,13 @@ def _normalize_dtm_admin0(
 
     filtered = pd.DataFrame(
         {
-            "iso3": iso.where(filtered_mask).dropna(),
-            "as_of_date": formatted_dates.where(filtered_mask).dropna(),
-            "value": numeric_values.where(filtered_mask).dropna(),
+            "iso3": iso.loc[filtered_mask],
+            "as_of_date": formatted_dates.loc[filtered_mask],
+            "value": numeric_values.loc[filtered_mask],
         }
-    ).reset_index(drop=True)
+    )
+    filtered["__row_id"] = filtered.index
+    filtered = filtered.reset_index(drop=True)
 
     metadata: Dict[str, Any] = {
         "rows_in": int(len(df)),
@@ -133,12 +135,125 @@ def _map_dtm_displacement_admin0(
         )
         metadata.update({
             "rows_after_aggregate": 0,
+            "rows_after_dedupe": 0,
             "dedupe_keys": ["iso3", "as_of_date", "metric"],
             "aggregate_funcs": {"value": "max"},
         })
         return empty, metadata
 
-    working = filtered.copy()
+    def _detect_flow_payload(df: "pd.DataFrame") -> bool:
+        if df is None or df.empty:
+            return False
+        lower_lookup = {str(col).lower(): col for col in frame.columns}
+        value_type_col = lower_lookup.get("value_type")
+        if value_type_col and (
+            frame[value_type_col].astype(str).str.lower() == "new_displaced"
+        ).any():
+            return True
+        method_col = lower_lookup.get("method")
+        if method_col and frame[method_col].astype(str).str.contains(
+            "stock_to_flow", case=False, na=False
+        ).any():
+            return True
+        stock_aliases = {"idp_count", "totalidps", "idptotal", "numpresentidpind"}
+        has_stock_alias = any(str(col).lower() in stock_aliases for col in frame.columns)
+        has_value = "value" in lower_lookup
+        return has_value and not has_stock_alias
+
+    is_flow = _detect_flow_payload(frame)
+
+    working = filtered.drop(columns=["__row_id"], errors="ignore").copy()
+
+    if is_flow:
+        before_rows = int(len(working))
+        working["metric"] = "idp_displacement_new_dtm"
+        working["series_semantics"] = "new"
+        working["semantics"] = "new"
+        working["source"] = "IOM DTM"
+        working["hazard_code"] = ""
+
+        if "__row_id" in filtered.columns:
+            row_ids = filtered["__row_id"]
+        else:
+            row_ids = pd.Index([])
+        extras: Dict[str, pd.Series] = {}
+        for candidate in ("revision", "ingested_at"):
+            if candidate in frame.columns and not row_ids.empty:
+                extras[candidate] = (
+                    frame.loc[row_ids, candidate]
+                    .reset_index(drop=True)
+                    .astype(str)
+                )
+        for name, series in extras.items():
+            working[name] = series
+
+        working["as_of_date"] = pd.to_datetime(
+            working["as_of_date"], errors="coerce", utc=False
+        ).dt.strftime("%Y-%m-%d")
+        working["ym"] = pd.to_datetime(
+            working["as_of_date"], errors="coerce", utc=False
+        ).dt.strftime("%Y-%m")
+
+        sort_columns: List[str] = []
+        ascending: List[bool] = []
+        if "iso3" in working.columns:
+            sort_columns.append("iso3")
+            ascending.append(True)
+        working["__sort_as_of"] = pd.to_datetime(
+            working["as_of_date"], errors="coerce", utc=False
+        )
+        sort_columns.append("__sort_as_of")
+        ascending.append(True)
+        if "revision" in working.columns:
+            sort_columns.append("revision")
+            ascending.append(True)
+        if "ingested_at" in working.columns:
+            sort_columns.append("ingested_at")
+            ascending.append(True)
+        if sort_columns:
+            working = working.sort_values(
+                by=sort_columns,
+                ascending=ascending,
+                na_position="last",
+                kind="mergesort",
+            )
+        dedupe_keys = [key for key in ["iso3", "as_of_date", "metric"] if key in working.columns]
+        deduped = (
+            working.drop_duplicates(subset=dedupe_keys, keep="last")
+            .drop(columns=["__sort_as_of"], errors="ignore")
+            .reset_index(drop=True)
+        )
+        deduped["value"] = deduped["value"].map(_format_numeric_string)
+        metadata.update(
+            {
+                "rows_after_aggregate": before_rows,
+                "rows_after_dedupe": int(len(deduped)),
+                "dedupe_keys": dedupe_keys,
+                "dedupe_keep": "last",
+                "aggregate_funcs": {},
+                "strategy": "dtm-flow",
+            }
+        )
+        LOGGER.info(
+            "DTM export: detected flow semantics → metric=idp_displacement_new_dtm, rows=%d→%d",
+            before_rows,
+            len(deduped),
+        )
+        columns_order = [
+            "iso3",
+            "as_of_date",
+            "ym",
+            "metric",
+            "value",
+            "series_semantics",
+            "semantics",
+            "source",
+            "hazard_code",
+        ]
+        existing = [col for col in columns_order if col in deduped.columns]
+        remaining = [col for col in deduped.columns if col not in existing]
+        return deduped[existing + remaining], metadata
+
     working["metric"] = "idp_displacement_stock_dtm"
     working["series_semantics"] = "stock"
     working["semantics"] = "stock"
@@ -177,6 +292,7 @@ def _map_dtm_displacement_admin0(
     metadata.update(
         {
             "rows_after_aggregate": int(len(aggregated)),
+            "rows_after_dedupe": int(len(aggregated)),
             "dedupe_keys": ["iso3", "as_of_date", "metric"],
             "aggregate_funcs": {"value": "max"},
         }
