@@ -15,3 +15,5 @@
   performance diagnostics with offline tests.
 - feat(idmc): add provenance manifests, diagnostics redaction, schema/docs, and
   compliance metadata for governance.
+- feat(precedence): add union tool, offline tests, opt-in canary workflow, and
+  documentation updates.
