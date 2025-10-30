@@ -1,3 +1,13 @@
 """Offline-first skeleton connector for IDMC (Internal Displacement Monitoring Centre)."""
 
-__all__ = ["config", "client", "normalize", "diagnostics", "cli", "http", "cache", "probe"]
+__all__ = [
+    "config",
+    "client",
+    "normalize",
+    "diagnostics",
+    "cli",
+    "http",
+    "cache",
+    "probe",
+    "export",
+]
