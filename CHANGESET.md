@@ -13,3 +13,5 @@
   selection, offline tests, and docs.
 - feat(idmc): add rate limiting, month chunking, streaming cache, and
   performance diagnostics with offline tests.
+- feat(idmc): add provenance manifests, diagnostics redaction, schema/docs, and
+  compliance metadata for governance.

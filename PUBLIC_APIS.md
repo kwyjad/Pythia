@@ -24,6 +24,12 @@
 - `cache.cache_key`, `cache.cache_get`, and `cache.cache_put` provide a small
   file-backed cache for HTTP responses used by the connector and CLI.
 
+### Upstream source reference
+
+| Source | Base URL | Endpoints | Auth mode | Terms URL |
+| --- | --- | --- | --- | --- |
+| IDMC (IDU) | `https://www.internal-displacement.org` | `idus_json`, `idus_geo` (REST) | Optional bearer token via `IDMC_API_TOKEN` | _Pending legal confirmation_ |
+
 ## TypeScript / JavaScript
 
 (none)

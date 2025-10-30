@@ -24,6 +24,7 @@ from .export import build_resolution_ready_facts, summarise_facts
 from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
+from .provenance import build_provenance, write_json
 
 
 def _parse_csv(value: str | None, *, transform=None) -> List[str]:
@@ -483,32 +484,96 @@ def main(argv: list[str] | None = None) -> int:
             "config": str(config_path),
         }
 
-    write_connectors_line(
-        {
-            "status": status,
-            "reason": reason,
-            "mode": diagnostics.get("mode", "offline"),
-            "http": diagnostics.get("http", {}),
-            "cache": diagnostics.get("cache"),
-            "filters": diagnostics.get("filters"),
-            "probe": probe_result,
-            "timings": timings,
-            "rows_fetched": sum(len(frame) for frame in data.values()),
-            "rows_normalized": rows,
-            "rows_written": rows,
-            "drop_reasons": drops,
-            "samples": samples,
-            "zero_rows": zero_rows,
-            "run_flags": run_flags,
-            "debug": debug,
-            "export": export_details,
-            "exports": exports_payload or None,
-            "hazards": hazards_payload,
-            "performance": diagnostics.get("performance"),
-            "rate_limit": diagnostics.get("rate_limit"),
-            "chunks": diagnostics.get("chunks"),
-        }
+    rows_fetched = sum(len(frame) for frame in data.values())
+
+    diagnostics_payload = {
+        "status": status,
+        "reason": reason,
+        "mode": diagnostics.get("mode", "offline"),
+        "http": diagnostics.get("http", {}),
+        "cache": diagnostics.get("cache"),
+        "filters": diagnostics.get("filters"),
+        "probe": probe_result,
+        "timings": timings,
+        "rows_fetched": rows_fetched,
+        "rows_normalized": rows,
+        "rows_written": rows,
+        "drop_reasons": drops,
+        "samples": samples,
+        "zero_rows": zero_rows,
+        "run_flags": run_flags,
+        "debug": debug,
+        "export": export_details,
+        "exports": exports_payload or None,
+        "hazards": hazards_payload,
+        "performance": diagnostics.get("performance"),
+        "rate_limit": diagnostics.get("rate_limit"),
+        "chunks": diagnostics.get("chunks"),
+    }
+
+    base_url_used = (args.base_url or cfg.api.base_url or "").rstrip("/")
+    endpoints_used = {
+        name: (
+            f"{base_url_used}{endpoint}" if base_url_used else str(endpoint)
+        )
+        for name, endpoint in cfg.api.endpoints.items()
+    }
+    run_meta = {
+        "cmd": "resolver.ingestion.idmc.cli",
+        "args": vars(args),
+        "env": {
+            key: os.getenv(key)
+            for key in [
+                "IDMC_API_TOKEN",
+                "IDMC_BASE_URL",
+                "IDMC_REQ_PER_SEC",
+                "IDMC_MAX_CONCURRENCY",
+                "IDMC_FORCE_CACHE_ONLY",
+            ]
+        },
+        "egress_ip": (probe_result or {}).get("egress_ip") if isinstance(probe_result, dict) else None,
+        "base_url": base_url_used or None,
+        "endpoints": endpoints_used,
+        "timings_ms": timings,
+        "mode": diagnostics.get("mode", "offline"),
+    }
+    diagnostics_payload["run_env"] = run_meta["env"]
+    http_rollup = diagnostics.get("http") or {}
+    cache_stats = diagnostics.get("cache") or {}
+    drop_hist = {key: int(value) for key, value in (drops or {}).items()}
+    normalize_stats = {
+        "rows_fetched": int(rows_fetched),
+        "rows_normalized": int(rows),
+        "drop_reasons": drop_hist,
+    }
+    export_info = export_details.copy()
+    export_paths = export_info.get("paths", {}) if isinstance(export_info, dict) else {}
+    if not isinstance(export_paths, dict):
+        export_paths = {}
+    csv_export_path = export_paths.get("csv")
+    csv_manifest_path = None
+    if export_info.get("enabled") and csv_export_path:
+        csv_manifest_path = f"{csv_export_path}.manifest.json"
+        export_info.setdefault("manifests", {})["csv"] = csv_manifest_path
+    notes = {"zero_rows": zero_rows} if zero_rows else {}
+    provenance = build_provenance(
+        run_meta=run_meta,
+        reachability=probe_result or {},
+        http_rollup=http_rollup,
+        cache_info=cache_stats,
+        normalize_stats=normalize_stats,
+        export_info=export_info,
+        notes=notes,
     )
+    manifest_path = os.path.join("diagnostics", "ingestion", "idmc", "manifest.json")
+    write_json(manifest_path, provenance)
+    diagnostics_payload["provenance"] = {"path": manifest_path}
+    diagnostics_payload["export"] = export_info
+
+    if csv_manifest_path:
+        write_json(csv_manifest_path, provenance)
+
+    write_connectors_line(diagnostics_payload)
 
     if status == "error":
         raise SystemExit(2)
