@@ -16,11 +16,12 @@ from .diagnostics import (
     write_connectors_line,
     write_drop_reasons,
     write_sample_preview,
+    write_unmapped_hazards_preview,
     zero_rows_rescue,
 )
 from .export import build_resolution_ready_facts, summarise_facts
 from .exporter import to_facts, write_facts_csv, write_facts_parquet
-from .normalize import normalize_all
+from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
 
 
@@ -102,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Write facts-ready outputs (CSV/Parquet) after normalize",
     )
     parser.add_argument(
+        "--map-hazards",
+        action="store_true",
+        help="Append hazard_code/label/class columns",
+    )
+    parser.add_argument(
         "--out-dir",
         default=os.getenv("IDMC_OUT_DIR", "artifacts/idmc"),
         help="Directory to write facts files (default artifacts/idmc)",
@@ -117,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     env_series = _parse_csv(os.getenv("IDMC_SERIES"), transform=lambda value: value.lower())
     env_enable_export = _env_truthy(os.getenv("IDMC_ENABLE_EXPORT"))
     env_write_outputs = _env_truthy(os.getenv("IDMC_WRITE_OUTPUTS"))
+    env_map_hazards = _env_truthy(os.getenv("IDMC_MAP_HAZARDS"))
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
@@ -142,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     write_outputs = bool(args.write_outputs)
     if env_write_outputs is not None:
         write_outputs = write_outputs or bool(env_write_outputs)
+
+    map_hazards = bool(args.map_hazards)
+    if env_map_hazards is not None:
+        map_hazards = map_hazards or bool(env_map_hazards)
 
     export_feature_flags = {
         "RESOLVER_EXPORT_ENABLE_IDMC": _env_truthy(
@@ -214,7 +225,9 @@ def main(argv: list[str] | None = None) -> int:
         },
         date_window,
         selected_series,
+        map_hazards=map_hazards,
     )
+    tidy, unmapped_hazards = maybe_map_hazards(tidy, map_hazards)
     normalize_ms = to_ms(tick() - normalize_start)
 
     rows = len(tidy)
@@ -232,6 +245,16 @@ def main(argv: list[str] | None = None) -> int:
     samples = {"normalized_preview": preview_path, "drop_reasons": drop_path}
     if diagnostics.get("raw_path"):
         samples["raw_snapshot"] = diagnostics["raw_path"]
+
+    hazards_payload = {"enabled": bool(map_hazards), "unmapped_hazard": 0}
+    if map_hazards:
+        unmapped_count = int(len(unmapped_hazards))
+        hazards_payload["unmapped_hazard"] = unmapped_count
+        if unmapped_count:
+            hazards_payload["samples_unmapped"] = int(min(unmapped_count, 3))
+            preview = write_unmapped_hazards_preview(unmapped_hazards)
+            if preview:
+                samples["hazard_unmapped_preview"] = preview
 
     selectors = {
         "only_countries": selected_countries,
@@ -264,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         "write_outputs": write_outputs,
         "out_dir": args.out_dir,
         "export_feature_enabled": export_feature_enabled,
+        "map_hazards": map_hazards,
     }
 
     feature_flag_states = {
@@ -331,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             "debug": debug,
             "export": export_details,
             "exports": exports_payload or None,
+            "hazards": hazards_payload,
         }
     )
 

@@ -326,6 +326,9 @@ structured overrides (all mirrored by environment variables):
   variable attached to HTTP requests.
 - Normalization and diagnostics semantics are documented in
   `resolver/docs/ingestion/idmc.md`.
+- When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
+  normalized schema temporarily includes optional columns `hazard_code`,
+  `hazard_label`, and `hazard_class`.
 
 ## DTM API diagnostics
 

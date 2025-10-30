@@ -84,3 +84,32 @@ def write_drop_reasons(payload: Mapping[str, int]) -> str:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(dict(payload), handle, ensure_ascii=False, indent=2, sort_keys=True)
     return path
+
+
+def write_unmapped_hazards_preview(frame) -> str | None:
+    """Persist a preview CSV for unmapped hazards, if any."""
+
+    if frame is None or getattr(frame, "empty", True):
+        return None
+
+    preferred_columns = [
+        "iso3",
+        "as_of_date",
+        "metric",
+        "value",
+        "displacement_type",
+        "hazard_category",
+        "hazard_type",
+        "hazard_subtype",
+        "violence_type",
+        "conflict_type",
+        "notes",
+    ]
+    available = [column for column in preferred_columns if column in frame.columns]
+    if not available:
+        available = list(frame.columns)
+    subset = frame.loc[:, available].head(5)
+
+    path = os.path.join(diagnostics_dir(), "unmapped_hazards_preview.csv")
+    subset.to_csv(path, index=False)
+    return path

@@ -1,0 +1,9 @@
+# minimal columns used by mapper + normalize
+iso3,as_of_date,metric,value,series_semantics,source,displacement_type,hazard_type,hazard_subtype,violence_type
+BGD,2024-07-31,idp_displacement_new_idmc,100,new,IDMC,Disaster,Flood,,
+ETH,2024-02-29,idp_displacement_new_idmc,200,new,IDMC,Disaster,Drought,,
+MEX,2024-10-31,idp_displacement_new_idmc,50,new,IDMC,Disaster,Tropical Cyclone,,
+ESP,2024-08-31,idp_displacement_new_idmc,25,new,IDMC,Disaster,Heat Wave,,
+LKA,2024-06-30,idp_displacement_new_idmc,10,new,IDMC,Disaster,Epidemic,,
+KEN,2024-09-30,idp_displacement_new_idmc,70,new,IDMC,Conflict,,,Riots
+COD,2024-09-30,idp_displacement_new_idmc,300,new,IDMC,Conflict,,,Battles
