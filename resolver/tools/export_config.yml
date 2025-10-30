@@ -116,3 +116,7 @@ metrics:
     enabled: true
     series_semantics: stock
     source: IOM DTM (admin0)
+  idp_displacement_new_idmc:
+    enabled: false
+    series_semantics: new
+    source: IDMC
