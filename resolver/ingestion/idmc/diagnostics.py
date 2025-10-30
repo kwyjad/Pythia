@@ -53,6 +53,12 @@ def zero_rows_rescue(selectors: Mapping[str, Any], notes: str) -> Dict[str, Any]
     return {"selectors": dict(selectors), "notes": notes}
 
 
+def debug_block(**fields: Any) -> Dict[str, Any]:
+    """Return a filtered debug payload omitting ``None`` values."""
+
+    return {key: value for key, value in fields.items() if value is not None}
+
+
 def write_connectors_line(payload: Dict[str, Any]) -> None:
     """Append a diagnostics line for the connector run."""
 

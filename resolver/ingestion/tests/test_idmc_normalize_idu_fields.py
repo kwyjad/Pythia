@@ -42,4 +42,4 @@ def test_idmc_normalize_idu_fields():
 
     assert drops["no_iso3"] >= 1
     assert drops["date_parse_failed"] >= 1
-    assert drops["duplicates_dropped"] == 1
+    assert drops["dup_event"] == 1

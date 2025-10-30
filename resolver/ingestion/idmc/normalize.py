@@ -86,7 +86,8 @@ def _normalize_monthly_flow(
         "no_iso3": 0,
         "no_value_col": 0,
         "date_out_of_window": 0,
-        "duplicates_dropped": 0,
+        "negative_value": 0,
+        "dup_event": 0,
     }
 
     iso_candidates = _dedupe_preserve_order(field_aliases.get("iso3", ["iso3", "ISO3"]))
@@ -115,6 +116,14 @@ def _normalize_monthly_flow(
         }
     )
 
+    def _clean_iso(value: object) -> object:
+        if pd.isna(value):
+            return pd.NA
+        text = str(value).strip().upper()
+        return text or pd.NA
+
+    normalized["iso3"] = normalized["iso3"].apply(_clean_iso)
+
     before = len(normalized)
     normalized = normalized.dropna(subset=["iso3"])
     drops["no_iso3"] += before - len(normalized)
@@ -122,6 +131,10 @@ def _normalize_monthly_flow(
     before = len(normalized)
     normalized = normalized.dropna(subset=["value"])
     drops["no_value_col"] += before - len(normalized)
+
+    before = len(normalized)
+    normalized = normalized[normalized["value"] >= 0]
+    drops["negative_value"] += before - len(normalized)
 
     before = len(normalized)
     normalized = normalized.dropna(subset=["as_of_date"])
@@ -144,7 +157,7 @@ def _normalize_monthly_flow(
         .drop_duplicates(["iso3", "as_of_date", "metric"], keep="first")
         .reset_index(drop=True)
     )
-    drops["duplicates_dropped"] += before - len(normalized)
+    drops["dup_event"] += before - len(normalized)
 
     return normalized, drops
 
@@ -153,6 +166,7 @@ def normalize_all(
     by_series: Dict[str, pd.DataFrame],
     field_aliases: Dict[str, List[str]],
     date_window: Dict[str, str | None],
+    selected_series: Iterable[str] | None = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     tidy_frames = []
     aggregate_drops = {
@@ -160,10 +174,15 @@ def normalize_all(
         "no_iso3": 0,
         "no_value_col": 0,
         "date_out_of_window": 0,
-        "duplicates_dropped": 0,
+        "negative_value": 0,
+        "dup_event": 0,
     }
 
-    if "monthly_flow" in by_series:
+    series_filter = {
+        (series or "").strip().lower() for series in (selected_series or ["flow"])
+    }
+
+    if "flow" in series_filter and "monthly_flow" in by_series:
         frame, drops = _normalize_monthly_flow(by_series["monthly_flow"], field_aliases, date_window)
         tidy_frames.append(frame)
         for key, value in drops.items():

@@ -23,21 +23,27 @@ The first ten normalized rows are saved to
 histogram is mirrored to `diagnostics/ingestion/idmc/drop_reasons.json` for
 inspection.
 
-## Flags and environment overrides
+## Feature flags
 
-| Flag | Purpose |
-| --- | --- |
-| `--skip-network` | Force offline mode (fixtures/cache only). |
-| `--window-days` | Client-side window applied to `displacement_date` (default `30`). |
-| `--only-countries=COD,SDN` | Filter to a comma-separated list of ISO3 codes. |
-| `--base-url` | Override the IDU base URL (defaults to `https://backend.idmcdb.org`). |
-| `--cache-ttl` | Override the cache TTL in seconds for this run. |
+IDMC honours the shared [connector feature flags](flags.md) while keeping runs
+deterministic offline. CLI arguments override environment variables which, in
+turn, win over static config defaults.
 
-Environment variables provide the same controls:
+| CLI flag | Environment variable | Notes |
+| --- | --- | --- |
+| `--skip-network` | `IDMC_FORCE_CACHE_ONLY=1` | Skip HTTP probes and fall back to cache/fixtures. |
+| `--strict-empty` | — | Exit with status code `2` when zero rows survive. |
+| `--no-date-filter` | `IDMC_NO_DATE_FILTER=1` | Disable both server and client date filters. |
+| `--window-days=<int>` | `IDMC_WINDOW_DAYS=<int>` | Trailing window (days) applied to `displacement_date`. |
+| `--only-countries=COD,SDN` | `IDMC_ONLY_COUNTRIES="COD,SDN"` | Parsed into an uppercase ISO3 list for client filtering. |
+| `--series=flow,stock` | `IDMC_SERIES="flow"` | Defaults to `flow`; selecting `stock` currently yields zero rows for IDU. |
+| `--base-url=<url>` | `IDMC_BASE_URL=<url>` | Override the IDU endpoint root (useful for staging mirrors). |
+| `--cache-ttl=<seconds>` | `IDMC_CACHE_TTL_S=<seconds>` | Override the cache lifetime for online runs. |
 
-- `IDMC_BASE_URL`, `IDMC_REACHABILITY_TIMEOUT`
-- `IDMC_CACHE_DIR`, `IDMC_CACHE_TTL_S`, `IDMC_FORCE_CACHE_ONLY`
-- `IDMC_API_TOKEN` (optional bearer token; IDU does not currently require it)
+`run_flags` in `diagnostics/ingestion/connectors.jsonl` echoes the resolved
+values (`skip_network`, `only_countries`, `series`, etc.) and the `debug` block
+reports derived context such as `selected_countries_count` or the cache mode
+used for the run.
 
 ## Normalization rules
 
@@ -50,7 +56,9 @@ Environment variables provide the same controls:
 - **Windowing:** if configured, `as_of_date` must fall within the inclusive
   `date_window` (`date_out_of_window`).
 - **Duplicates:** rows are deduplicated on `(iso3, as_of_date, metric)` by
-  keeping the maximum value observed (`duplicates_dropped`).
+  keeping the maximum value observed (`dup_event`).
+- **Non-negative guardrail:** negative values are dropped before deduping
+  (`negative_value`).
 - **Output schema:** `metric=idp_displacement_new_idmc`,
   `series_semantics=new`, `source=IDMC`.
 
