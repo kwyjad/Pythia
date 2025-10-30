@@ -36,6 +36,19 @@ def _default_force_cache_only() -> bool:
     return raw not in {"", "0", "false", "no"}
 
 
+def _csv_env(name: str, *, transform) -> Optional[List[str]]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    parts = []
+    for piece in raw.split(","):
+        text = piece.strip()
+        if not text:
+            continue
+        parts.append(transform(text))
+    return parts
+
+
 def _default_base_url() -> str:
     return os.getenv("IDMC_BASE_URL", "https://backend.idmcdb.org")
 
@@ -65,7 +78,7 @@ class ApiCfg:
     base_url: str = field(default_factory=_default_base_url)
     endpoints: Dict[str, str] = field(default_factory=_default_endpoints)
     countries: List[str] = field(default_factory=list)
-    series: List[str] = field(default_factory=lambda: ["stock", "flow"])
+    series: List[str] = field(default_factory=lambda: ["flow"])
     date_window: DateWindow = field(default_factory=DateWindow)
     token_env: str = "IDMC_API_TOKEN"
 
@@ -126,6 +139,32 @@ def load(path: str | None = None) -> IdmcConfig:
     except (TypeError, ValueError):  # pragma: no cover - defensive
         ttl_seconds = _default_cache_ttl()
 
+    env_countries = _csv_env("IDMC_ONLY_COUNTRIES", transform=str.upper)
+    env_series = _csv_env("IDMC_SERIES", transform=lambda value: value.lower())
+    env_force_cache_only = os.getenv("IDMC_FORCE_CACHE_ONLY")
+
+    config_countries = [
+        str(value).strip().upper()
+        for value in api_block.get("countries", [])
+        if str(value).strip()
+    ]
+    config_series = [
+        str(value).strip().lower()
+        for value in api_block.get("series", [])
+        if str(value).strip()
+    ] or ["flow"]
+
+    countries = env_countries if env_countries is not None else config_countries
+    series = env_series if env_series is not None else config_series
+    if not series:
+        series = ["flow"]
+
+    cache_force_cache_only = _coerce_bool(
+        cache_block.get("force_cache_only"), _default_force_cache_only()
+    )
+    if env_force_cache_only is not None:
+        cache_force_cache_only = _coerce_bool(env_force_cache_only, cache_force_cache_only)
+
     return IdmcConfig(
         enabled=bool(data.get("enabled", True)),
         api=ApiCfg(
@@ -134,8 +173,8 @@ def load(path: str | None = None) -> IdmcConfig:
                 **_default_endpoints(),
                 **api_block.get("endpoints", {}),
             },
-            countries=api_block.get("countries", []),
-            series=api_block.get("series", ["stock", "flow"]),
+            countries=countries,
+            series=series,
             date_window=DateWindow(
                 start=api_block.get("date_window", {}).get("start"),
                 end=api_block.get("date_window", {}).get("end"),
@@ -145,9 +184,7 @@ def load(path: str | None = None) -> IdmcConfig:
         cache=CacheCfg(
             dir=cache_block.get("dir", _default_cache_dir()),
             ttl_seconds=ttl_seconds,
-            force_cache_only=_coerce_bool(
-                cache_block.get("force_cache_only"), _default_force_cache_only()
-            ),
+            force_cache_only=cache_force_cache_only,
         ),
         field_aliases=FieldAliases(
             value_flow=alias_block.get(

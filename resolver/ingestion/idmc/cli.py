@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
+from typing import List
 
 from .client import fetch
 from .config import load
 from .diagnostics import (
+    debug_block,
     tick,
     timings_block,
     to_ms,
@@ -17,6 +20,32 @@ from .diagnostics import (
 )
 from .normalize import normalize_all
 from .probe import ProbeOptions, probe_reachability
+
+
+def _parse_csv(value: str | None, *, transform=None) -> List[str]:
+    if not value:
+        return []
+    transform = transform or (lambda item: item)
+    return [
+        transform(part.strip())
+        for part in value.split(",")
+        if part and part.strip()
+    ]
+
+
+def _env_truthy(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    return value.strip().lower() not in {"", "0", "false", "no"}
+
+
+def _env_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,14 +62,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--window-days",
         type=int,
-        default=30,
+        default=None,
         help="Client-side window in days for IDU records (default: 30)",
     )
     parser.add_argument(
         "--only-countries",
         type=str,
-        default="",
+        default=None,
         help="Comma-separated ISO3 codes to keep (client-side filter)",
+    )
+    parser.add_argument(
+        "--series",
+        type=str,
+        default=None,
+        help="Comma-separated series to normalise (default: flow)",
     )
     parser.add_argument(
         "--base-url",
@@ -57,14 +92,53 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = load()
-    cli_countries = [part.strip() for part in args.only_countries.split(",") if part.strip()]
 
-    window_days = None if args.no_date_filter else args.window_days
+    env_force_cache_only = _env_truthy(os.getenv("IDMC_FORCE_CACHE_ONLY"))
+    env_no_date_filter = _env_truthy(os.getenv("IDMC_NO_DATE_FILTER"))
+    env_window_days = _env_int(os.getenv("IDMC_WINDOW_DAYS"))
+    env_countries = _parse_csv(os.getenv("IDMC_ONLY_COUNTRIES"), transform=str.upper)
+    env_series = _parse_csv(os.getenv("IDMC_SERIES"), transform=lambda value: value.lower())
+
+    cli_countries = _parse_csv(args.only_countries, transform=str.upper)
+    cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
+
+    selected_countries: List[str] = cli_countries or env_countries or [
+        country.upper() for country in cfg.api.countries
+    ]
+    if not selected_countries:
+        selected_countries = []
+    else:
+        selected_countries = list(dict.fromkeys(selected_countries))
+
+    selected_series: List[str] = cli_series or env_series or ["flow"]
+    if not selected_series:
+        selected_series = ["flow"]
+    else:
+        selected_series = list(dict.fromkeys(selected_series))
+
+    effective_no_date_filter = bool(args.no_date_filter)
+    if env_no_date_filter is not None:
+        effective_no_date_filter = effective_no_date_filter or bool(env_no_date_filter)
+
+    window_days = None
+    if not effective_no_date_filter:
+        if args.window_days is not None:
+            window_days = args.window_days
+        elif env_window_days is not None:
+            window_days = env_window_days
+        else:
+            window_days = 30
     overall_start = tick()
 
     probe_result = None
     probe_start = tick()
-    if not args.skip_network and not cfg.cache.force_cache_only:
+    force_cache_only = cfg.cache.force_cache_only
+    if env_force_cache_only is not None:
+        force_cache_only = bool(env_force_cache_only)
+
+    cfg.cache.force_cache_only = force_cache_only
+
+    if not args.skip_network and not force_cache_only:
         try:
             probe_result = probe_reachability(
                 ProbeOptions(base_url=args.base_url or cfg.api.base_url)
@@ -79,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_network=bool(args.skip_network),
         soft_timeouts=True,
         window_days=window_days,
-        only_countries=cli_countries,
+        only_countries=selected_countries,
         base_url=args.base_url,
         cache_ttl=args.cache_ttl,
     )
@@ -102,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             "iso3": cfg.field_aliases.iso3,
         },
         date_window,
+        selected_series,
     )
     normalize_ms = to_ms(tick() - normalize_start)
 
@@ -122,8 +197,9 @@ def main(argv: list[str] | None = None) -> int:
         samples["raw_snapshot"] = diagnostics["raw_path"]
 
     selectors = {
-        "only_countries": [country.upper() for country in cli_countries],
+        "only_countries": selected_countries,
         "window_days": window_days,
+        "series": selected_series,
     }
     zero_rows = None
     if rows == 0:
@@ -137,6 +213,22 @@ def main(argv: list[str] | None = None) -> int:
         fetch_ms=fetch_ms,
         normalize_ms=normalize_ms,
         total_ms=to_ms(tick() - overall_start),
+    )
+
+    run_flags = {
+        "skip_network": bool(args.skip_network),
+        "strict_empty": bool(args.strict_empty),
+        "no_date_filter": effective_no_date_filter,
+        "window_days": window_days,
+        "only_countries": selected_countries,
+        "series": selected_series,
+        "force_cache_only": force_cache_only,
+    }
+
+    debug = debug_block(
+        selected_series=selected_series,
+        selected_countries_count=len(selected_countries),
+        cache_mode=diagnostics.get("mode", "offline"),
     )
 
     write_connectors_line(
@@ -155,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
             "drop_reasons": drops,
             "samples": samples,
             "zero_rows": zero_rows,
+            "run_flags": run_flags,
+            "debug": debug,
         }
     )
 

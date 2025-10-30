@@ -4,6 +4,9 @@
 
 ## Table of contents
 
+- Runtime connector controls: see
+  [`resolver/docs/ingestion/flags.md`](resolver/docs/ingestion/flags.md).
+
 - [staging.common](#stagingcommon)
 - [staging.reliefweb_pdf](#stagingreliefwebpdf)
 - [staging.unhcr_odp](#stagingunhcrodp)
