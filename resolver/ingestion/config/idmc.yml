@@ -1,0 +1,15 @@
+enabled: true
+api:
+  countries: []
+  series: ["stock", "flow"]
+  date_window:
+    start:
+    end:
+  endpoints:
+    monthly_flow: ""
+    stock: ""
+field_aliases:
+  value_flow: ["new_displacements", "New displacements"]
+  value_stock: ["idps", "IDPs", "Total IDPs"]
+  date: ["date", "Date", "month", "Month", "ReportingDate"]
+  iso3: ["iso3", "ISO3", "Country ISO3", "CountryISO3"]

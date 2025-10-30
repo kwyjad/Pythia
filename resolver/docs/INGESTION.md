@@ -28,3 +28,13 @@ Set `LOG_LEVEL=DEBUG` to ask the connector for richer breadcrumbs. The resolved
 sources snapshot (`diagnostics/ingestion/dtm_sources_resolved.json`) mirrors the
 post-preflight source list so you can confirm inferred column names, resolved
 paths, and skip reasons locally before a retry.
+
+## IDMC skeleton smoke test
+
+The IDMC connector is currently offline-only and exists to wire fixtures, normalization, and diagnostics. Run the smoke test locally with:
+
+```bash
+python -m resolver.ingestion.idmc.cli --skip-network
+```
+
+The command appends a diagnostics row to `diagnostics/ingestion/connectors.jsonl` and writes a normalized preview CSV to `diagnostics/ingestion/idmc/normalized_preview.csv`.

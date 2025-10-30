@@ -11,6 +11,10 @@
 - `get_shared_duckdb_conn(db_url, *, force_reopen=False)`
 - `clear_cached_connection(db_url)`
 
+## resolver.ingestion.idmc
+
+- *(TODO)* expose structured result objects once the connector moves beyond the offline skeleton.
+
 ## TypeScript / JavaScript
 
 (none)
