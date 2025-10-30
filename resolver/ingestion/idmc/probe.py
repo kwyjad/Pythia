@@ -94,7 +94,14 @@ def probe_http_head(url: str, timeout: float) -> Dict[str, Any]:
             payload["status"] = getattr(response, "status", None) or response.getcode()
             payload["headers"] = dict(response.headers.items())
     except urllib.error.URLError as exc:  # pragma: no cover - network dependent
-        payload["error"] = getattr(exc, "reason", str(exc))
+        reason = getattr(exc, "reason", None)
+        if reason is not None:
+            try:
+                payload["error"] = str(reason)
+            except Exception:  # pragma: no cover - defensive
+                payload["error"] = repr(reason)
+        else:
+            payload["error"] = str(exc)
     except Exception as exc:  # pragma: no cover - defensive
         payload["error"] = str(exc)
     payload["elapsed_ms"] = _elapsed_ms(started)

@@ -17,6 +17,9 @@ def test_fetch_uses_cache_when_forced(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "RAW_DIAG_DIR", str(raw_dir))
 
     cfg = config.load()
+    cfg.cache.dir = str(cache_dir)
+    cfg.cache.ttl_seconds = 0
+    cfg.cache.force_cache_only = True
     endpoint = cfg.api.endpoints["idus_json"]
     url = f"{cfg.api.base_url.rstrip('/')}{endpoint}"
     key = cache.cache_key(url, params=None)
@@ -32,7 +35,7 @@ def test_fetch_uses_cache_when_forced(monkeypatch, tmp_path):
         only_countries=["SDN"],
     )
 
-    frame = data["idus_view_flat"]
+    frame = data["monthly_flow"]
     assert isinstance(frame, pd.DataFrame)
     assert list(frame["iso3"]) == ["SDN"]
     assert frame.iloc[0]["figure"] == 800

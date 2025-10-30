@@ -50,6 +50,7 @@ def http_get(
     exceptions: list[Dict[str, object]] = []
     total_elapsed = 0.0
     total_backoff = 0.0
+    attempt_durations: list[float] = []
 
     last_status: Optional[int] = None
     last_headers: Dict[str, str] = {}
@@ -63,7 +64,9 @@ def http_get(
                 status = getattr(response, "status", None) or response.getcode()
                 last_status = int(status)
                 last_headers = dict(response.headers.items())
-                total_elapsed += time.monotonic() - started
+                elapsed = time.monotonic() - started
+                total_elapsed += elapsed
+                attempt_durations.append(elapsed)
                 diagnostics = {
                     "attempts": attempt,
                     "retries": attempt - 1,
@@ -71,18 +74,31 @@ def http_get(
                     "backoff_s": round(total_backoff, 3),
                     "exceptions": exceptions,
                     "status": last_status,
+                    "attempt_durations_s": [round(value, 6) for value in attempt_durations],
                 }
                 return last_status, last_headers, body, diagnostics
         except urllib.error.URLError as err:  # pragma: no cover - network dependent
-            total_elapsed += time.monotonic() - started
+            elapsed = time.monotonic() - started
+            total_elapsed += elapsed
+            attempt_durations.append(elapsed)
+            reason = getattr(err, "reason", None)
+            if reason is not None:
+                try:
+                    reason_text = str(reason)
+                except Exception:  # pragma: no cover - defensive
+                    reason_text = repr(reason)
+            else:
+                reason_text = None
             exceptions.append({
                 "attempt": attempt,
                 "type": err.__class__.__name__,
-                "reason": getattr(err, "reason", None),
+                "reason": reason_text,
                 "message": str(err),
             })
         except Exception as err:  # pragma: no cover - defensive
-            total_elapsed += time.monotonic() - started
+            elapsed = time.monotonic() - started
+            total_elapsed += elapsed
+            attempt_durations.append(elapsed)
             exceptions.append({
                 "attempt": attempt,
                 "type": err.__class__.__name__,
@@ -102,5 +118,6 @@ def http_get(
         "backoff_s": round(total_backoff, 3),
         "exceptions": exceptions,
         "status": last_status,
+        "attempt_durations_s": [round(value, 6) for value in attempt_durations],
     }
     raise HttpRequestError(f"GET {url} failed", diagnostics)

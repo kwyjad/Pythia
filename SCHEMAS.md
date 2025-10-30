@@ -321,6 +321,8 @@ structured overrides (all mirrored by environment variables):
   override via `IDMC_CACHE_DIR`, `IDMC_CACHE_TTL_S`, and `IDMC_FORCE_CACHE_ONLY`.
 - `api.token_env` (default `IDMC_API_TOKEN`) names the optional bearer token environment
   variable attached to HTTP requests.
+- Normalization and diagnostics semantics are documented in
+  `resolver/docs/ingestion/idmc.md`.
 
 ## DTM API diagnostics
 

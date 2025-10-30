@@ -1,4 +1,4 @@
-"""Command line entrypoint for the IDMC connector skeleton."""
+"""Command line entrypoint for the IDMC connector."""
 from __future__ import annotations
 
 import argparse
@@ -6,8 +6,17 @@ import io
 
 from .client import fetch
 from .config import load
-from .diagnostics import write_connectors_line, write_sample_preview
+from .diagnostics import (
+    tick,
+    timings_block,
+    to_ms,
+    write_connectors_line,
+    write_drop_reasons,
+    write_sample_preview,
+    zero_rows_rescue,
+)
 from .normalize import normalize_all
+from .probe import ProbeOptions, probe_reachability
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,6 +60,20 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = [part.strip() for part in args.only_countries.split(",") if part.strip()]
 
     window_days = None if args.no_date_filter else args.window_days
+    overall_start = tick()
+
+    probe_result = None
+    probe_start = tick()
+    if not args.skip_network and not cfg.cache.force_cache_only:
+        try:
+            probe_result = probe_reachability(
+                ProbeOptions(base_url=args.base_url or cfg.api.base_url)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            probe_result = {"error": str(exc)}
+    probe_ms = to_ms(tick() - probe_start)
+
+    fetch_start = tick()
     data, diagnostics = fetch(
         cfg,
         skip_network=bool(args.skip_network),
@@ -60,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         cache_ttl=args.cache_ttl,
     )
+    fetch_ms = to_ms(tick() - fetch_start)
 
     date_window = {
         "start": cfg.api.date_window.start,
@@ -68,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_date_filter:
         date_window = {"start": None, "end": None}
 
+    normalize_start = tick()
     tidy, drops = normalize_all(
         data,
         {
@@ -78,11 +103,13 @@ def main(argv: list[str] | None = None) -> int:
         },
         date_window,
     )
+    normalize_ms = to_ms(tick() - normalize_start)
 
     rows = len(tidy)
     buffer = io.StringIO()
     tidy.head(10).to_csv(buffer, index=False)
     preview_path = write_sample_preview("normalized", buffer.getvalue())
+    drop_path = write_drop_reasons(drops)
 
     status = "ok"
     reason = None
@@ -90,9 +117,27 @@ def main(argv: list[str] | None = None) -> int:
         status = "error"
         reason = "strict-empty-0-rows"
 
-    samples = {"normalized_preview": preview_path}
+    samples = {"normalized_preview": preview_path, "drop_reasons": drop_path}
     if diagnostics.get("raw_path"):
         samples["raw_snapshot"] = diagnostics["raw_path"]
+
+    selectors = {
+        "only_countries": [country.upper() for country in cli_countries],
+        "window_days": window_days,
+    }
+    zero_rows = None
+    if rows == 0:
+        zero_rows = zero_rows_rescue(
+            selectors,
+            "No rows after filters. See drop_reasons.",
+        )
+
+    timings = timings_block(
+        probe_ms=probe_ms,
+        fetch_ms=fetch_ms,
+        normalize_ms=normalize_ms,
+        total_ms=to_ms(tick() - overall_start),
+    )
 
     write_connectors_line(
         {
@@ -102,12 +147,14 @@ def main(argv: list[str] | None = None) -> int:
             "http": diagnostics.get("http", {}),
             "cache": diagnostics.get("cache"),
             "filters": diagnostics.get("filters"),
-            "probe": diagnostics.get("probe"),
+            "probe": probe_result,
+            "timings": timings,
             "rows_fetched": sum(len(frame) for frame in data.values()),
             "rows_normalized": rows,
             "rows_written": rows,
             "drop_reasons": drops,
             "samples": samples,
+            "zero_rows": zero_rows,
         }
     )
 

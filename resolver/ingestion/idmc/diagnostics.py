@@ -1,10 +1,10 @@
-"""Diagnostics helpers for the IDMC connector skeleton."""
+"""Diagnostics helpers for the IDMC connector."""
 from __future__ import annotations
 
 import json
 import os
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 
 def _ensure_dir(path: str) -> str:
@@ -24,6 +24,35 @@ def connectors_log_path() -> str:
     return os.path.join(_ensure_dir(os.path.join("diagnostics", "ingestion")), "connectors.jsonl")
 
 
+def tick() -> float:
+    """Return the current monotonic timestamp for timing spans."""
+
+    return time.perf_counter()
+
+
+def to_ms(seconds: float | None) -> int:
+    """Convert a span expressed in seconds to whole milliseconds."""
+
+    if seconds is None:
+        return 0
+    try:
+        return int(round(float(seconds) * 1000))
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return 0
+
+
+def timings_block(**named_spans_ms: float | int) -> Dict[str, int]:
+    """Normalise timing spans into a diagnostics-friendly mapping."""
+
+    return {name: int(round(value)) for name, value in named_spans_ms.items()}
+
+
+def zero_rows_rescue(selectors: Mapping[str, Any], notes: str) -> Dict[str, Any]:
+    """Construct a zero-rows diagnostics payload."""
+
+    return {"selectors": dict(selectors), "notes": notes}
+
+
 def write_connectors_line(payload: Dict[str, Any]) -> None:
     """Append a diagnostics line for the connector run."""
 
@@ -39,4 +68,13 @@ def write_sample_preview(name: str, csv_head: str) -> str:
     path = os.path.join(diagnostics_dir(), f"{name}_preview.csv")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(csv_head)
+    return path
+
+
+def write_drop_reasons(payload: Mapping[str, int]) -> str:
+    """Persist drop-reasons histogram for debugging."""
+
+    path = os.path.join(diagnostics_dir(), "drop_reasons.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(dict(payload), handle, ensure_ascii=False, indent=2, sort_keys=True)
     return path

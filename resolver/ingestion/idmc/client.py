@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -11,7 +12,6 @@ import pandas as pd
 from .cache import cache_get, cache_key, cache_put
 from .config import IdmcConfig
 from .http import HttpRequestError, http_get
-from .probe import ProbeOptions, probe_reachability
 
 HERE = os.path.dirname(__file__)
 FIXTURES_DIR = os.path.join(HERE, "fixtures")
@@ -81,6 +81,24 @@ def _filter_window(frame: pd.DataFrame, window_days: Optional[int]) -> pd.DataFr
     return frame.loc[mask]
 
 
+def _percentile(values: List[int], pct: float) -> int:
+    """Return the percentile for a sorted list of ints."""
+
+    if not values:
+        return 0
+    if len(values) == 1:
+        return values[0]
+    rank = pct / 100.0 * (len(values) - 1)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return values[int(rank)]
+    lower_val = values[lower]
+    upper_val = values[upper]
+    fraction = rank - lower
+    return int(round(lower_val + (upper_val - lower_val) * fraction))
+
+
 def fetch_idu_json(
     cfg: IdmcConfig,
     *,
@@ -103,20 +121,25 @@ def fetch_idu_json(
     http_info: Dict[str, Any] = {
         "requests": 0,
         "retries": 0,
-        "last_status": None,
+        "status_last": None,
         "duration_s": 0.0,
         "backoff_s": 0.0,
+        "latency_ms": {"p50": 0, "p95": 0, "max": 0},
+        "attempt_durations_ms": [],
+    }
+    cache_stats: Dict[str, Any] = {
+        "dir": cache_dir,
+        "key": key,
+        "path": cache_path,
+        "ttl_seconds": ttl_seconds,
+        "hit": False,
+        "hits": 0,
+        "misses": 0,
     }
     diagnostics: Dict[str, Any] = {
         "mode": "fixture",
         "url": url,
-        "cache": {
-            "dir": cache_dir,
-            "key": key,
-            "path": cache_path,
-            "ttl_seconds": ttl_seconds,
-            "hit": False,
-        },
+        "cache": cache_stats,
         "http": http_info,
         "filters": {},
         "raw_path": None,
@@ -128,21 +151,25 @@ def fetch_idu_json(
     if cache_entry is not None:
         body = cache_entry.body
         diagnostics["mode"] = "cache"
-        diagnostics["cache"]["hit"] = True
-        diagnostics["cache"].update(cache_entry.metadata)
+        cache_stats["hit"] = True
+        cache_stats["hits"] = 1
+        cache_stats.update(cache_entry.metadata)
     elif use_cache_only:
         payload = _read_json_fixture("idus_view_flat.json")
         rows = _normalise_rows(payload)
         frame = pd.DataFrame(rows)
+        frame = _filter_window(frame, window_days)
+        frame = _filter_countries(frame, only_countries or [])
         diagnostics["mode"] = "fixture"
         diagnostics["reason"] = "cache-miss-cache-only"
-        diagnostics["filters"] = {
+        filters = {
             "window_days": window_days,
             "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-            "rows_before": len(frame),
+            "rows_before": len(rows),
             "rows_after": len(frame),
         }
-        return frame, diagnostics
+        diagnostics["filters"] = filters
+        return frame.reset_index(drop=True), diagnostics
 
     if body is None and not use_cache_only:
         try:
@@ -151,12 +178,24 @@ def fetch_idu_json(
                 {
                     "requests": http_diag.get("attempts", 1),
                     "retries": http_diag.get("retries", 0),
-                    "last_status": status,
+                    "status_last": status,
                     "duration_s": http_diag.get("duration_s", 0.0),
                     "backoff_s": http_diag.get("backoff_s", 0.0),
                     "exceptions": http_diag.get("exceptions", []),
+                    "attempt_durations_ms": [
+                        int(round(value * 1000))
+                        for value in http_diag.get("attempt_durations_s", [])
+                    ],
                 }
             )
+            attempt_latencies = http_info.get("attempt_durations_ms", [])
+            if attempt_latencies:
+                sorted_latencies = sorted(attempt_latencies)
+                http_info["latency_ms"] = {
+                    "p50": _percentile(sorted_latencies, 50),
+                    "p95": _percentile(sorted_latencies, 95),
+                    "max": max(sorted_latencies),
+                }
             diagnostics["mode"] = "online"
             metadata = {
                 "status": status,
@@ -164,58 +203,84 @@ def fetch_idu_json(
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
             }
             cache_entry = cache_put(cache_dir, key, body, metadata)
-            diagnostics["cache"].update(cache_entry.metadata)
+            cache_stats["misses"] = 1
+            cache_stats.update(cache_entry.metadata)
         except HttpRequestError as exc:
             http_info.update(
                 {
                     "requests": exc.diagnostics.get("attempts", 0),
                     "retries": exc.diagnostics.get("retries", 0),
-                    "last_status": exc.diagnostics.get("status"),
+                    "status_last": exc.diagnostics.get("status"),
                     "duration_s": exc.diagnostics.get("duration_s", 0.0),
                     "backoff_s": exc.diagnostics.get("backoff_s", 0.0),
                     "exceptions": exc.diagnostics.get("exceptions", []),
+                    "attempt_durations_ms": [
+                        int(round(value * 1000))
+                        for value in exc.diagnostics.get("attempt_durations_s", [])
+                    ],
                 }
             )
+            attempt_latencies = http_info.get("attempt_durations_ms", [])
+            if attempt_latencies:
+                sorted_latencies = sorted(attempt_latencies)
+                http_info["latency_ms"] = {
+                    "p50": _percentile(sorted_latencies, 50),
+                    "p95": _percentile(sorted_latencies, 95),
+                    "max": max(sorted_latencies),
+                }
             diagnostics["mode"] = "fixture"
             diagnostics["reason"] = "http-error"
             diagnostics["error"] = exc.diagnostics
             payload = _read_json_fixture("idus_view_flat.json")
             rows = _normalise_rows(payload)
             frame = pd.DataFrame(rows)
-            diagnostics["filters"] = {
+            frame = _filter_window(frame, window_days)
+            frame = _filter_countries(frame, only_countries or [])
+            filters = {
                 "window_days": window_days,
                 "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-                "rows_before": len(frame),
+                "rows_before": len(rows),
                 "rows_after": len(frame),
             }
-            return frame, diagnostics
+            diagnostics["filters"] = filters
+            if not cache_stats["hit"]:
+                cache_stats["misses"] = 1
+            return frame.reset_index(drop=True), diagnostics
 
     if body is None:
         payload = _read_json_fixture("idus_view_flat.json")
         rows = _normalise_rows(payload)
         frame = pd.DataFrame(rows)
+        frame = _filter_window(frame, window_days)
+        frame = _filter_countries(frame, only_countries or [])
         diagnostics["mode"] = diagnostics.get("mode", "fixture")
         diagnostics["reason"] = diagnostics.get("reason", "cache-miss")
-        diagnostics["filters"] = {
+        filters = {
             "window_days": window_days,
             "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-            "rows_before": len(frame),
+            "rows_before": len(rows),
             "rows_after": len(frame),
         }
-        return frame, diagnostics
+        diagnostics["filters"] = filters
+        if not cache_stats["hit"]:
+            cache_stats["misses"] = 1
+        return frame.reset_index(drop=True), diagnostics
 
     payload = json.loads(body.decode("utf-8"))
     rows = _normalise_rows(payload)
     frame = pd.DataFrame(rows)
     frame = _filter_window(frame, window_days)
     frame = _filter_countries(frame, only_countries or [])
-    diagnostics["filters"] = {
+    filters = {
         "window_days": window_days,
         "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
         "rows_before": len(rows),
         "rows_after": len(frame),
     }
+    diagnostics["filters"] = filters
     diagnostics["raw_path"] = _write_raw_snapshot(key, body)
+    if not cache_stats["hit"]:
+        cache_stats["misses"] = 1
     return frame.reset_index(drop=True), diagnostics
 
 
@@ -231,13 +296,7 @@ def fetch(
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
     """Return payloads for downstream normalization and diagnostics."""
 
-    data = fetch_offline(True)
-    probe_info: Dict[str, Any] | None = None
-    try:
-        if not skip_network and not cfg.cache.force_cache_only:
-            probe_info = probe_reachability(ProbeOptions(base_url=base_url or cfg.api.base_url))
-    except Exception as exc:  # pragma: no cover - defensive
-        probe_info = {"error": str(exc)}
+    data: Dict[str, pd.DataFrame] = {}
 
     countries = list(only_countries or cfg.api.countries)
     idu_frame, idu_diag = fetch_idu_json(
@@ -249,15 +308,30 @@ def fetch(
         skip_network=skip_network,
     )
 
-    data["idus_view_flat"] = idu_frame
+    data["monthly_flow"] = idu_frame
 
-    http_diag = idu_diag.get("http", {"requests": 0, "retries": 0, "last_status": None})
+    http_diag = idu_diag.get("http", {})
+    cache_diag = idu_diag.get("cache", {})
+    latency_block = http_diag.get("latency_ms") or {}
+    http_block = {
+        "requests": int(http_diag.get("requests", 0) or 0),
+        "retries": int(http_diag.get("retries", 0) or 0),
+        "status_last": http_diag.get("status_last"),
+        "latency_ms": {
+            "p50": int((latency_block.get("p50") or 0)),
+            "p95": int((latency_block.get("p95") or 0)),
+            "max": int((latency_block.get("max") or 0)),
+        },
+        "cache": {
+            "hits": int(cache_diag.get("hits", 0) or 0),
+            "misses": int(cache_diag.get("misses", 0) or 0),
+        },
+    }
     diagnostics: Dict[str, Any] = {
         "mode": idu_diag.get("mode", "offline"),
-        "http": http_diag,
-        "cache": idu_diag.get("cache", {}),
+        "http": http_block,
+        "cache": cache_diag,
         "filters": idu_diag.get("filters", {}),
-        "probe": probe_info,
         "raw_path": idu_diag.get("raw_path"),
     }
     return data, diagnostics
