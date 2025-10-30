@@ -76,15 +76,6 @@ sources:
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
-metrics:
-  idp_displacement_new_idmc:
-    series_semantics: new
-    source: IDMC
-    enabled: true
-  idp_displacement_stock_idmc:
-    series_semantics: stock
-    source: IDMC
-    enabled: true
   - name: dtm_displacement_admin0
     # The connector may emit header-only CSVs (soft timeout / ok-empty runs).
     # Filters below will skip those safely because the required columns are empty.
@@ -116,3 +107,12 @@ metrics:
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
+metrics:
+  idp_displacement_new_dtm:
+    enabled: true
+    series_semantics: new
+    source: IOM DTM (admin0)
+  idps_present:
+    enabled: true
+    series_semantics: stock
+    source: IOM DTM (admin0)
