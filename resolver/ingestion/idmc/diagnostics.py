@@ -6,6 +6,8 @@ import os
 import time
 from typing import Any, Dict, Mapping
 
+from .provenance import redact_secrets as _redact_secrets
+
 
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
@@ -115,13 +117,20 @@ def chunks_block(enabled: bool, entries: Any, *, count: int) -> Dict[str, Any]:
     }
 
 
+def redact_secrets(payload: Any) -> Any:
+    """Public helper to redact sensitive values from diagnostics payloads."""
+
+    return _redact_secrets(payload)
+
+
 def write_connectors_line(payload: Dict[str, Any]) -> None:
     """Append a diagnostics line for the connector run."""
 
     line = {"connector": "idmc", "ts": int(time.time())}
     line.update(payload)
+    safe_line = redact_secrets(line)
     with open(connectors_log_path(), "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+        handle.write(json.dumps(safe_line, ensure_ascii=False) + "\n")
 
 
 def write_sample_preview(name: str, csv_head: str) -> str:

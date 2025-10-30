@@ -19,6 +19,7 @@
 - [db.manifests](#dbmanifests)
 - [context.facts_last12](#contextfacts_last12)
 - [Ingestion Diagnostics Schema](#ingestion-diagnostics-schema)
+- [IDMC provenance manifest](#idmc-provenance-manifest)
 - [Export configuration (`resolver/tools/export_config.yml`)](#export-configuration-resolvertoolsexport_configyml)
 
 ## staging.common
@@ -329,6 +330,59 @@ structured overrides (all mirrored by environment variables):
 - When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
   normalized schema temporarily includes optional columns `hazard_code`,
   `hazard_label`, and `hazard_class`.
+
+## IDMC provenance manifest
+
+The IDMC CLI writes a provenance manifest to
+`diagnostics/ingestion/idmc/manifest.json` (and alongside exported CSV facts).
+The minimal schema is:
+
+```
+{
+  schema_version: int,
+  generated_at_utc: str,
+  source_system: str,
+  series: str,
+  attribution: {
+    source_name: str,
+    terms_url: str,
+    citation: str,
+    license_note: str,
+    method_note: str,
+  },
+  run: {
+    cmd: str,
+    args: object,
+    env: object,
+    egress_ip: str | null,
+    base_url: str | null,
+    endpoints: object,
+    timings_ms: object,
+    mode: str,
+  },
+  reachability: object,
+  http: object,
+  cache: object,
+  normalize: {
+    rows_fetched: int,
+    rows_normalized: int,
+    drop_reasons: object,
+  },
+  export: {
+    enabled: bool,
+    rows: int,
+    paths: object,
+    feature_flags: object,
+    manifests?: {
+      csv?: str,
+    },
+  },
+  notes: object,
+}
+```
+
+Secrets are redacted in-place: keys containing `token`, `secret`, `password`, or
+known HTTP auth headers collapse to `***REDACTED***`.
 
 ## DTM API diagnostics
 

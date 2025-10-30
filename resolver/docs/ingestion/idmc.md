@@ -141,6 +141,37 @@ with:
 - a `zero_rows` rescue block when no rows survive filtering, including the
   selectors (`only_countries`, `window_days`) and a human-readable note.
 
+## Attribution & Provenance
+
+Every CLI run writes a machine-readable provenance manifest to
+`diagnostics/ingestion/idmc/manifest.json`. The manifest captures the connector
+arguments, the resolved environment snapshot (`IDMC_*` variables), reachability
+probe outputs, HTTP/cache rollups, normalization counts, export status, and a
+default attribution block (source name, placeholder terms URL, citation, license
+note, and method note). When export previews are enabled, a sibling
+`*.manifest.json` sits next to the generated facts CSV so downstream tooling can
+trace lineage without cross-referencing logs.
+
+Secrets are redacted automatically. Any key containing `token`, `secret`, or
+`password` (and known headers like `Authorization`) is replaced with
+`***REDACTED***` in manifests and in the shared
+`diagnostics/ingestion/connectors.jsonl` log. The manifest therefore records that
+`IDMC_API_TOKEN` was supplied without ever persisting the raw credential.
+
+The manifest blocks of interest are:
+
+- `run`: CLI command, parsed arguments, sanitized environment, effective base
+  URL, resolved endpoints, timings, and mode (`offline`/`online`).
+- `reachability`: DNS/TCP/TLS probe data including the observed egress IP when
+  available.
+- `http`: Request counters, retry summaries, status codes, latency percentiles,
+  and cache hits/misses surfaced by the client diagnostics.
+- `cache`: Cache directory/mode information.
+- `normalize`: Row counts before/after normalization plus drop-reason histogram.
+- `export`: Export enablement, feature flags, written paths, and manifest
+  pointers for exported artifacts.
+- `notes`: Supplemental flags such as the zero-rows rescue block.
+
 Use `--skip-network` or `IDMC_FORCE_CACHE_ONLY=1` to keep runs deterministic.
 Fixtures remain available under `resolver/ingestion/idmc/fixtures/` for offline
 testing and CI.
