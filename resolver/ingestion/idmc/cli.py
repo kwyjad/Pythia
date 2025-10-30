@@ -94,6 +94,29 @@ def main(argv: list[str] | None = None) -> int:
         help="Override cache TTL in seconds for this run",
     )
     parser.add_argument(
+        "--rate",
+        type=float,
+        default=None,
+        help="Requests per second cap (token bucket); 0 disables limiting",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Maximum concurrent fetches (default: 1)",
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        default=None,
+        help="Stream responses larger than this many bytes to disk",
+    )
+    parser.add_argument(
+        "--chunk-by-month",
+        action="store_true",
+        help="Partition long windows into month chunks",
+    )
+    parser.add_argument(
         "--enable-export",
         action="store_true",
         help="Enable resolution-ready facts export preview",
@@ -156,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     env_write_candidates = _env_truthy(os.getenv("IDMC_WRITE_CANDIDATES"))
     env_run_precedence = _env_truthy(os.getenv("IDMC_RUN_PRECEDENCE"))
     env_map_hazards = _env_truthy(os.getenv("IDMC_MAP_HAZARDS"))
+    env_rate = os.getenv("IDMC_REQ_PER_SEC")
+    env_max_concurrency = _env_int(os.getenv("IDMC_MAX_CONCURRENCY"))
+    env_max_bytes = _env_int(os.getenv("IDMC_MAX_BYTES"))
+    env_chunk_by_month = _env_truthy(os.getenv("IDMC_CHUNK_BY_MONTH"))
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
@@ -196,6 +223,34 @@ def main(argv: list[str] | None = None) -> int:
     map_hazards = bool(args.map_hazards)
     if env_map_hazards is not None:
         map_hazards = map_hazards or bool(env_map_hazards)
+
+    rate_limit = args.rate
+    if rate_limit is None and env_rate is not None:
+        try:
+            rate_limit = float(env_rate)
+        except ValueError:  # pragma: no cover - defensive
+            rate_limit = None
+    if rate_limit is None:
+        try:
+            rate_limit = float(os.getenv("IDMC_REQ_PER_SEC", "0.5"))
+        except ValueError:  # pragma: no cover - defensive
+            rate_limit = 0.5
+
+    max_concurrency = args.max_concurrency
+    if max_concurrency is None and env_max_concurrency is not None:
+        max_concurrency = env_max_concurrency
+    if max_concurrency is None or max_concurrency <= 0:
+        max_concurrency = 1
+
+    max_bytes = args.max_bytes
+    if max_bytes is None and env_max_bytes is not None:
+        max_bytes = env_max_bytes
+    if max_bytes is None or max_bytes <= 0:
+        max_bytes = 10 * 1024 * 1024
+
+    chunk_by_month = bool(args.chunk_by_month)
+    if env_chunk_by_month is not None:
+        chunk_by_month = chunk_by_month or bool(env_chunk_by_month)
 
     export_feature_flags = {
         "RESOLVER_EXPORT_ENABLE_IDMC": _env_truthy(
@@ -247,6 +302,10 @@ def main(argv: list[str] | None = None) -> int:
         only_countries=selected_countries,
         base_url=args.base_url,
         cache_ttl=args.cache_ttl,
+        rate_per_sec=rate_limit,
+        max_concurrency=max_concurrency,
+        max_bytes=max_bytes,
+        chunk_by_month=chunk_by_month,
     )
     fetch_ms = to_ms(tick() - fetch_start)
 
@@ -336,6 +395,10 @@ def main(argv: list[str] | None = None) -> int:
         "precedence_out": args.precedence_out,
         "export_feature_enabled": export_feature_enabled,
         "map_hazards": map_hazards,
+        "rate": rate_limit,
+        "max_concurrency": max_concurrency,
+        "max_bytes": max_bytes,
+        "chunk_by_month": chunk_by_month,
     }
 
     feature_flag_states = {
@@ -441,6 +504,9 @@ def main(argv: list[str] | None = None) -> int:
             "export": export_details,
             "exports": exports_payload or None,
             "hazards": hazards_payload,
+            "performance": diagnostics.get("performance"),
+            "rate_limit": diagnostics.get("rate_limit"),
+            "chunks": diagnostics.get("chunks"),
         }
     )
 

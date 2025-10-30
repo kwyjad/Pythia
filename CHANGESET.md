@@ -11,3 +11,5 @@
   diagnostics preview for unmapped rows.
 - feat(idmc): emit precedence-ready candidates, opt-in CLI wiring for
   selection, offline tests, and docs.
+- feat(idmc): add rate limiting, month chunking, streaming cache, and
+  performance diagnostics with offline tests.

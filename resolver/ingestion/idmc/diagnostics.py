@@ -59,6 +59,62 @@ def debug_block(**fields: Any) -> Dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+def performance_block(
+    *,
+    requests: int,
+    wire_bytes: int,
+    body_bytes: int,
+    duration_s: float,
+    rows: int,
+) -> Dict[str, Any]:
+    """Build a normalised performance diagnostics payload."""
+
+    seconds = max(float(duration_s), 0.001)
+    throughput = int(round((wire_bytes / 1024.0) / seconds)) if wire_bytes else 0
+    records = int(round(rows / seconds)) if rows else 0
+    return {
+        "requests": int(requests),
+        "wire_bytes": int(wire_bytes),
+        "body_bytes": int(body_bytes),
+        "duration_s": round(seconds, 3),
+        "throughput_kibps": throughput,
+        "records_per_sec": records,
+    }
+
+
+def rate_limit_block(
+    *,
+    req_per_sec: float,
+    max_concurrency: int,
+    retries: int,
+    retry_after_events: int,
+    retry_after_wait_s: float,
+    rate_limit_wait_s: float,
+    planned_wait_s: float,
+) -> Dict[str, Any]:
+    """Describe rate limiting and throttling behaviour for diagnostics."""
+
+    return {
+        "req_per_sec": float(req_per_sec),
+        "max_concurrency": int(max_concurrency),
+        "retries": int(retries),
+        "retry_after_events": int(retry_after_events),
+        "retry_after_wait_s": round(float(retry_after_wait_s), 3),
+        "rate_limit_wait_s": round(float(rate_limit_wait_s), 3),
+        "planned_wait_s": round(float(planned_wait_s), 3),
+    }
+
+
+def chunks_block(enabled: bool, entries: Any, *, count: int) -> Dict[str, Any]:
+    """Return chunking diagnostics including per-chunk stats."""
+
+    return {
+        "enabled": bool(enabled),
+        "count": int(count),
+        "by_month": list(entries),
+    }
+
+
 def write_connectors_line(payload: Dict[str, Any]) -> None:
     """Append a diagnostics line for the connector run."""
 

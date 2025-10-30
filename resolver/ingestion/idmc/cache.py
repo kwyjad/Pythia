@@ -15,7 +15,7 @@ __all__ = ["CacheEntry", "cache_key", "cache_get", "cache_put"]
 class CacheEntry:
     """In-memory representation of cached payload and metadata."""
 
-    body: bytes
+    body: bytes | None
     metadata: Dict[str, Any]
 
 
@@ -58,13 +58,36 @@ def cache_get(base_dir: str, key: str, ttl_seconds: int | None) -> CacheEntry | 
     return CacheEntry(body=body, metadata=metadata)
 
 
-def cache_put(base_dir: str, key: str, body: bytes, metadata: Dict[str, Any] | None = None) -> CacheEntry:
+def _copy_stream(src_path: str, dst_path: str) -> None:
+    with open(src_path, "rb") as source, open(dst_path, "wb") as target:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            target.write(chunk)
+
+
+def cache_put(
+    base_dir: str,
+    key: str,
+    body: bytes | bytearray | memoryview | str | os.PathLike[str],
+    metadata: Dict[str, Any] | None = None,
+) -> CacheEntry:
     """Persist a cached payload and optional metadata."""
 
     data_path, meta_path = _paths(base_dir, key)
-    with open(data_path, "wb") as handle:
-        handle.write(body)
+    stored_body: bytes | None
+    if isinstance(body, (str, os.PathLike)):
+        src = os.fspath(body)
+        if os.path.abspath(src) != os.path.abspath(data_path):
+            _copy_stream(src, data_path)
+        stored_body = None
+    else:
+        raw = bytes(body)
+        with open(data_path, "wb") as handle:
+            handle.write(raw)
+        stored_body = raw
     meta = metadata or {}
     with open(meta_path, "w", encoding="utf-8") as handle:
         json.dump(meta, handle, ensure_ascii=False, indent=2)
-    return CacheEntry(body=body, metadata=meta)
+    return CacheEntry(body=stored_body, metadata=meta)
