@@ -107,3 +107,12 @@ sources:
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
+metrics:
+  idp_displacement_new_dtm:
+    enabled: true
+    series_semantics: new
+    source: IOM DTM (admin0)
+  idps_present:
+    enabled: true
+    series_semantics: stock
+    source: IOM DTM (admin0)

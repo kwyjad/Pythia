@@ -21,6 +21,12 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
   - Cache-enabled runs expect repeated `duckdb_io.get_db(url)` calls to return the same connection object; cache-disabled runs (`RESOLVER_DISABLE_CONN_CACHE=1`) intentionally return fresh handles, and tests should branch accordingly.
 
+### Configs
+
+See `resolver/docs/CONFIGS.md` for overlay guidance and run
+`pytest -k export_config_yaml_valid` after editing
+`resolver/tools/export_config.yml`.
+
 ## Go Live: Initial resolver backfill
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
@@ -424,6 +430,8 @@ Repository connectors only run against live APIs when the expected credentials a
 | UNHCR ODP | Yes | `UNHCR_ODP_USERNAME`, `UNHCR_ODP_PASSWORD`, `UNHCR_ODP_CLIENT_ID`, `UNHCR_ODP_CLIENT_SECRET` | Scrapes monthly Operational Data Portal widgets (max one page) and only runs when the full credential set is available.【F:resolver/ingestion/config/unhcr_odp.yml†L2-L11】【F:resolver/ingestion/run_all_stubs.py†L278-L291】 |
 | DTM | Optional | `DTM_API_KEY` | Fetches IDP data from IOM DTM API v3 at Admin 0, Admin 1, and Admin 2 levels. Register at https://dtm-apim-portal.iom.int/ and subscribe to API-V3 to obtain a subscription key. Without the key, real runs exit with code `2` after printing `Missing DTM_API_KEY`; use `--offline-smoke` (or `DTM_OFFLINE_SMOKE=1`) for header-only diagnostics without credentials. |
 | All other live connectors | No | – | EM-DAT, GDACS, HDX, IPC, UNHCR population, WFP mVAM, WHO PHE, and WorldPop rely on configuration only; they skip when disabled in YAML but do not require secrets.【F:resolver/ingestion/config/dtm.yml†L2-L6】【F:resolver/ingestion/config/emdat.yml†L2-L9】【F:resolver/ingestion/config/gdacs.yml†L2-L8】【F:resolver/ingestion/config/hdx.yml†L1-L18】【F:resolver/ingestion/config/ipc.yml†L1-L5】【F:resolver/ingestion/config/unhcr.yml†L2-L19】【F:resolver/ingestion/config/wfp_mvam_sources.yml†L1-L3】【F:resolver/ingestion/config/who_phe.yml†L1-L9】【F:resolver/ingestion/config/worldpop.yml†L1-L14】 |
+
+The IDMC (IDU) connector currently ships as an offline-only skeleton that loads bundled fixtures and normalizes displacement flow and stock metrics for testing.【F:resolver/ingestion/idmc/cli.py†L11-L72】【F:resolver/ingestion/idmc/normalize.py†L1-L125】
 
 Resolver artifact hygiene
 
