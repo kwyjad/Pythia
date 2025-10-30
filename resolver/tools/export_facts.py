@@ -115,8 +115,160 @@ def _normalize_dtm_admin0(
     return filtered, metadata
 
 
+def _compute_dtm_admin0_stock_and_flow(
+    month_level: "pd.DataFrame",
+) -> tuple["pd.DataFrame", "pd.DataFrame", str]:
+    policy = os.getenv("DTM_FLOW_NEGATIVE_POLICY", "clip_zero").lower()
+
+    month_stock = (
+        month_level.groupby(["iso3", "as_of_date"], as_index=False)["value"]
+        .max()
+        .sort_values(["iso3", "as_of_date"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+    stock = month_stock.copy()
+    stock.loc[:, "metric"] = "idp_displacement_stock_dtm"
+    stock.loc[:, "series_semantics"] = "stock"
+    stock.loc[:, "semantics"] = "stock"
+    stock.loc[:, "source"] = "IOM DTM"
+    stock.loc[:, "hazard_code"] = ""
+    stock_dates = pd.to_datetime(stock["as_of_date"], errors="coerce")
+    stock = stock.drop(columns=["as_of_date"])
+    stock.loc[:, "ym"] = stock_dates.dt.strftime("%Y-%m")
+    stock.loc[:, "as_of_date"] = stock_dates.dt.strftime("%Y-%m-%d")
+    stock_values = stock["value"].map(_format_numeric_string)
+    stock = stock.drop(columns=["value"])
+    stock.loc[:, "value"] = stock_values
+
+    flow_base = month_stock.copy()
+    flow_base.loc[:, "flow_value"] = (
+        flow_base.groupby("iso3", group_keys=False)["value"].diff()
+    )
+
+    if policy == "clip_zero":
+        flow_base.loc[:, "flow_value"] = flow_base["flow_value"].clip(lower=0)
+
+    flow_base.loc[:, "flow_value"] = flow_base["flow_value"].fillna(0)
+
+    flow = (
+        flow_base.drop(columns=["value"], errors="ignore")
+        .rename(columns={"flow_value": "value"})
+        .copy()
+    )
+    flow.loc[:, "metric"] = "idp_displacement_new_dtm"
+    flow.loc[:, "series_semantics"] = "new"
+    flow.loc[:, "semantics"] = "new"
+    flow.loc[:, "source"] = "IOM DTM"
+    flow.loc[:, "hazard_code"] = ""
+    flow_dates = pd.to_datetime(flow["as_of_date"], errors="coerce")
+    flow = flow.drop(columns=["as_of_date"])
+    flow.loc[:, "ym"] = flow_dates.dt.strftime("%Y-%m")
+    flow.loc[:, "as_of_date"] = flow_dates.dt.strftime("%Y-%m-%d")
+    flow_values = flow["value"].map(_format_numeric_string)
+    flow = flow.drop(columns=["value"])
+    flow.loc[:, "value"] = flow_values
+
+    return stock.reset_index(drop=True), flow.reset_index(drop=True), policy
+
+
+def _map_dtm_admin0_with_flows(frame: "pd.DataFrame") -> "pd.DataFrame":
+    """Return combined stock + flow series for DTM admin0 staging data."""
+    if frame is None or frame.empty:
+        return frame
+
+    filtered, _ = _normalize_dtm_admin0(frame)
+    if filtered is None or filtered.empty:
+        return filtered
+
+    working = filtered.drop(columns=["__row_id"], errors="ignore").copy()
+
+    working.loc[:, "as_of_date"] = pd.to_datetime(
+        working["as_of_date"], errors="coerce", utc=False
+    )
+    working = working.dropna(subset=["as_of_date"])  # defensive
+    working.loc[:, "as_of_date"] = (
+        working["as_of_date"] + pd.offsets.MonthEnd(0)
+    )
+
+    stock, flow, policy = _compute_dtm_admin0_stock_and_flow(working)
+
+    out = pd.concat([stock, flow], ignore_index=True, sort=False)
+
+    try:
+        _mapping_debug_append(
+            "dtm_admin0_dual_series",
+            {
+                "stock_rows": int(stock.shape[0]),
+                "new_rows": int(flow.shape[0]),
+                "negative_policy": policy,
+            },
+        )
+    except Exception:  # pragma: no cover - debug helper optional
+        pass
+
+    LOGGER.info(
+        "DTM export: admin0 produced stock_rows=%d new_rows=%d (policy=%s)",
+        len(stock),
+        len(flow),
+        policy,
+    )
+
+    return out.reset_index(drop=True)
+
+
+def _normalize_truthy_flag(value: Any) -> Optional[bool]:
+    """Return True/False for common truthy strings; None when indeterminate."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, numbers.Number):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "":
+            return None
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _resolve_dtm_flow_toggle(
+    config: Optional[Mapping[str, Any]] = None,
+) -> tuple[bool, Optional[bool], Optional[bool]]:
+    """Determine whether to include DTM flow rows.
+
+    Returns a tuple of ``(include_flow, env_flag, config_flag)`` where ``env_flag``
+    and ``config_flag`` capture the interpreted boolean values (if any) that
+    contributed to the decision. The environment flag wins when explicitly set;
+    otherwise we fall back to the config knob.
+    """
+
+    env_raw = os.getenv("RESOLVER_EXPORT_ENABLE_FLOW")
+    env_flag = _normalize_truthy_flag(env_raw)
+
+    cfg_flag: Optional[bool] = None
+    if isinstance(config, Mapping):
+        export_cfg = config.get("export")
+        if isinstance(export_cfg, Mapping):
+            dtm_cfg = export_cfg.get("dtm")
+            if isinstance(dtm_cfg, Mapping):
+                cfg_flag = _normalize_truthy_flag(dtm_cfg.get("include_flow"))
+
+    if env_flag is not None:
+        return env_flag, env_flag, cfg_flag
+
+    include_flow = bool(cfg_flag)
+    return include_flow, env_flag, cfg_flag
+
+
 def _map_dtm_displacement_admin0(
     frame: "pd.DataFrame",
+    *,
+    config: Optional[Mapping[str, Any]] = None,
 ) -> tuple["pd.DataFrame", Dict[str, Any]]:
     filtered, metadata = _normalize_dtm_admin0(frame)
     if filtered.empty:
@@ -133,148 +285,79 @@ def _map_dtm_displacement_admin0(
                 "hazard_code",
             ]
         )
-        metadata.update({
-            "rows_after_aggregate": 0,
-            "rows_after_dedupe": 0,
-            "dedupe_keys": ["iso3", "as_of_date", "metric"],
-            "aggregate_funcs": {"value": "max"},
-        })
-        return empty, metadata
-
-    def _detect_flow_payload(df: "pd.DataFrame") -> bool:
-        if df is None or df.empty:
-            return False
-        lower_lookup = {str(col).lower(): col for col in frame.columns}
-        value_type_col = lower_lookup.get("value_type")
-        if value_type_col and (
-            frame[value_type_col].astype(str).str.lower() == "new_displaced"
-        ).any():
-            return True
-        method_col = lower_lookup.get("method")
-        if method_col and frame[method_col].astype(str).str.contains(
-            "stock_to_flow", case=False, na=False
-        ).any():
-            return True
-        stock_aliases = {"idp_count", "totalidps", "idptotal", "numpresentidpind"}
-        has_stock_alias = any(str(col).lower() in stock_aliases for col in frame.columns)
-        has_value = "value" in lower_lookup
-        return has_value and not has_stock_alias
-
-    is_flow = _detect_flow_payload(frame)
-
-    working = filtered.drop(columns=["__row_id"], errors="ignore").copy()
-
-    if is_flow:
-        before_rows = int(len(working))
-        working["metric"] = "idp_displacement_new_dtm"
-        working["series_semantics"] = "new"
-        working["semantics"] = "new"
-        working["source"] = "IOM DTM"
-        working["hazard_code"] = ""
-
-        if "__row_id" in filtered.columns:
-            row_ids = filtered["__row_id"]
-        else:
-            row_ids = pd.Index([])
-        extras: Dict[str, pd.Series] = {}
-        for candidate in ("revision", "ingested_at"):
-            if candidate in frame.columns and not row_ids.empty:
-                extras[candidate] = (
-                    frame.loc[row_ids, candidate]
-                    .reset_index(drop=True)
-                    .astype(str)
-                )
-        for name, series in extras.items():
-            working[name] = series
-
-        working["as_of_date"] = pd.to_datetime(
-            working["as_of_date"], errors="coerce", utc=False
-        ).dt.strftime("%Y-%m-%d")
-        working["ym"] = pd.to_datetime(
-            working["as_of_date"], errors="coerce", utc=False
-        ).dt.strftime("%Y-%m")
-
-        sort_columns: List[str] = []
-        ascending: List[bool] = []
-        if "iso3" in working.columns:
-            sort_columns.append("iso3")
-            ascending.append(True)
-        working["__sort_as_of"] = pd.to_datetime(
-            working["as_of_date"], errors="coerce", utc=False
-        )
-        sort_columns.append("__sort_as_of")
-        ascending.append(True)
-        if "revision" in working.columns:
-            sort_columns.append("revision")
-            ascending.append(True)
-        if "ingested_at" in working.columns:
-            sort_columns.append("ingested_at")
-            ascending.append(True)
-        if sort_columns:
-            working = working.sort_values(
-                by=sort_columns,
-                ascending=ascending,
-                na_position="last",
-                kind="mergesort",
-            )
-        dedupe_keys = [key for key in ["iso3", "as_of_date", "metric"] if key in working.columns]
-        deduped = (
-            working.drop_duplicates(subset=dedupe_keys, keep="last")
-            .drop(columns=["__sort_as_of"], errors="ignore")
-            .reset_index(drop=True)
-        )
-        deduped["value"] = deduped["value"].map(_format_numeric_string)
         metadata.update(
             {
-                "rows_after_aggregate": before_rows,
-                "rows_after_dedupe": int(len(deduped)),
-                "dedupe_keys": dedupe_keys,
-                "dedupe_keep": "last",
-                "aggregate_funcs": {},
-                "strategy": "dtm-flow",
+                "rows_after_aggregate": 0,
+                "rows_after_dedupe": 0,
+                "dedupe_keys": ["iso3", "as_of_date", "metric"],
+                "aggregate_funcs": {"value": "max"},
+                "strategy": "dtm-stock-flow",
             }
         )
-        LOGGER.info(
-            "DTM export: detected flow semantics → metric=idp_displacement_new_dtm, rows=%d→%d",
-            before_rows,
-            len(deduped),
-        )
-        columns_order = [
-            "iso3",
-            "as_of_date",
-            "ym",
-            "metric",
-            "value",
-            "series_semantics",
-            "semantics",
-            "source",
-            "hazard_code",
-        ]
-        existing = [col for col in columns_order if col in deduped.columns]
-        remaining = [col for col in deduped.columns if col not in existing]
-        return deduped[existing + remaining], metadata
+        return empty, metadata
 
-    working["metric"] = "idp_displacement_stock_dtm"
-    working["series_semantics"] = "stock"
-    working["semantics"] = "stock"
-    working["source"] = "IOM DTM"
-    working["hazard_code"] = ""
-
-    aggregated = (
-        working.groupby(["iso3", "as_of_date", "metric"], as_index=False, sort=False)[
-            "value"
-        ]
-        .max()
-        .reset_index(drop=True)
+    working = filtered.drop(columns=["__row_id"], errors="ignore").copy()
+    working.loc[:, "as_of_date"] = pd.to_datetime(
+        working["as_of_date"], errors="coerce", utc=False
     )
-    aggregated["value"] = aggregated["value"].map(_format_numeric_string)
-    aggregated["series_semantics"] = "stock"
-    aggregated["semantics"] = "stock"
-    aggregated["source"] = "IOM DTM"
-    aggregated["hazard_code"] = ""
-    aggregated["ym"] = pd.to_datetime(
-        aggregated["as_of_date"], errors="coerce", utc=False
-    ).dt.strftime("%Y-%m")
+    working = working.dropna(subset=["as_of_date"])  # defensive
+    working.loc[:, "as_of_date"] = (
+        working["as_of_date"] + pd.offsets.MonthEnd(0)
+    )
+
+    stock, flow, policy = _compute_dtm_admin0_stock_and_flow(working)
+
+    include_flow, env_flag, cfg_flag = _resolve_dtm_flow_toggle(config)
+
+    if include_flow and not flow.empty:
+        out = pd.concat([stock, flow], ignore_index=True, sort=False)
+        flow_rows = int(len(flow))
+    else:
+        out = stock
+        flow_rows = 0
+
+    metadata.update(
+        {
+            "dtm_flow_enabled": bool(include_flow),
+            "dtm_rows_stock": int(len(stock)),
+            "dtm_rows_flow": flow_rows,
+            "dtm_flow_env_flag": env_flag,
+            "dtm_flow_config_flag": cfg_flag,
+        }
+    )
+
+    metadata.update(
+        {
+            "rows_after_aggregate": int(len(out)),
+            "rows_after_dedupe": int(len(out)),
+            "dedupe_keys": ["iso3", "as_of_date", "metric"],
+            "aggregate_funcs": {"value": "max"},
+            "strategy": "dtm-stock-flow",
+        }
+    )
+
+    try:
+        _mapping_debug_append(
+            "dtm_admin0_dual_series",
+            {
+                "stock_rows": int(stock.shape[0]),
+                "new_rows": int(flow.shape[0]),
+                "negative_policy": policy,
+            },
+        )
+    except Exception:  # pragma: no cover - debug helper optional
+        pass
+
+    LOGGER.info(
+        "DTM export: admin0 produced stock_rows=%d flow_rows=%d "
+        "(flow_enabled=%s policy=%s env_flag=%s config_flag=%s)",
+        len(stock),
+        flow_rows,
+        include_flow,
+        policy,
+        env_flag,
+        cfg_flag,
+    )
 
     columns_order = [
         "iso3",
@@ -287,18 +370,9 @@ def _map_dtm_displacement_admin0(
         "source",
         "hazard_code",
     ]
-    aggregated = aggregated[columns_order]
-
-    metadata.update(
-        {
-            "rows_after_aggregate": int(len(aggregated)),
-            "rows_after_dedupe": int(len(aggregated)),
-            "dedupe_keys": ["iso3", "as_of_date", "metric"],
-            "aggregate_funcs": {"value": "max"},
-        }
-    )
-
-    return aggregated, metadata
+    existing = [col for col in columns_order if col in out.columns]
+    remaining = [col for col in out.columns if col not in existing]
+    return out[existing + remaining].reset_index(drop=True), metadata
 
 try:  # Optional dependency for DB dual-write
     from resolver.db import duckdb_io
@@ -1533,6 +1607,16 @@ def _render_markdown_report(report: Mapping[str, Any]) -> str:
     else:
         lines.append("- **Matched:** 0 file(s)")
     lines.append(f"- **Rows exported:** {rows_exported}")
+    dtm_rows_stock = int(report.get("dtm_rows_stock", 0) or 0)
+    dtm_rows_flow = int(report.get("dtm_rows_flow", 0) or 0)
+    dtm_flow_enabled = bool(report.get("dtm_flow_enabled", False))
+    if dtm_rows_stock or dtm_rows_flow or dtm_flow_enabled:
+        lines.append(
+            f"- **DTM flow enabled:** {dtm_flow_enabled}"
+        )
+        lines.append(
+            f"- **DTM rows:** stock={dtm_rows_stock} flow={dtm_rows_flow}"
+        )
     if dedupe_keys:
         keep_display = ", ".join(sorted(set(dedupe_keep))) if dedupe_keep else "last"
         lines.append(
@@ -1688,6 +1772,10 @@ def export_facts(
 
     use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
 
+    dtm_flow_enabled: bool = False
+    dtm_rows_stock: int = 0
+    dtm_rows_flow: int = 0
+
     unmatched_paths: List[Path] = []
 
     if use_sources:
@@ -1698,6 +1786,8 @@ def export_facts(
         dtm_detail: Optional[SourceApplication] = None
         dtm_yaml_rows: Optional[int] = None
         dtm_debug_entry: Optional[Dict[str, Any]] = None
+        dtm_flow_env_flag: Optional[bool] = None
+        dtm_flow_config_flag: Optional[bool] = None
         for file_path in files:
             try:
                 frame = _read_one(file_path)
@@ -1758,7 +1848,7 @@ def export_facts(
             }
 
             if file_path.name.lower() == "dtm_displacement.csv":
-                mapped, meta = _map_dtm_displacement_admin0(frame)
+                mapped, meta = _map_dtm_displacement_admin0(frame, config=cfg)
                 filters_applied = list(meta.get("filters_applied", []))
                 drop_hist = {
                     str(key): int(value)
@@ -1771,6 +1861,12 @@ def export_facts(
                 }
                 rows_after_filters = int(meta.get("rows_after_filters", len(mapped)))
                 rows_after_aggregate = int(meta.get("rows_after_aggregate", len(mapped)))
+
+                dtm_flow_enabled = bool(meta.get("dtm_flow_enabled", False))
+                dtm_rows_stock = int(meta.get("dtm_rows_stock", 0))
+                dtm_rows_flow = int(meta.get("dtm_rows_flow", 0))
+                dtm_flow_env_flag = meta.get("dtm_flow_env_flag")
+                dtm_flow_config_flag = meta.get("dtm_flow_config_flag")
 
                 detail = SourceApplication(
                     name="dtm_displacement_admin0",
@@ -1842,6 +1938,15 @@ def export_facts(
                         "keys": aggregate_keys,
                         "funcs": aggregate_funcs,
                     }
+                debug_entry.update(
+                    {
+                        "dtm_flow_enabled": dtm_flow_enabled,
+                        "dtm_rows_stock": dtm_rows_stock,
+                        "dtm_rows_flow": dtm_rows_flow,
+                        "dtm_flow_env_flag": dtm_flow_env_flag,
+                        "dtm_flow_config_flag": dtm_flow_config_flag,
+                    }
+                )
                 debug_records.append(debug_entry)
                 continue
 
@@ -2176,6 +2281,9 @@ def export_facts(
         "warnings": warnings,
         "meta_files_skipped": [str(path) for path in skipped_meta],
         "monthly_summary": monthly_summary,
+        "dtm_flow_enabled": bool(dtm_flow_enabled),
+        "dtm_rows_stock": int(dtm_rows_stock),
+        "dtm_rows_flow": int(dtm_rows_flow),
     }
 
     debug_dir = Path("diagnostics/ingestion/export_preview")
