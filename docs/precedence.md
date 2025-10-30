@@ -104,3 +104,45 @@
 - **Clarity**: one unambiguous monthly PA figure per shock/country.
 - **Timeliness with restraint**: curated/event-flows first, inference last.
 - **Explainability**: metadata makes the choice defensible.
+
+---
+
+## Candidate schema (precedence canary)
+
+Precedence-ready candidate CSVs should include the following columns. The union helper
+(`scripts/precedence/union_candidates.py`) fills any missing fields with nulls so the
+selector always sees a consistent shape:
+
+```
+iso3, as_of_date, metric, value,
+source_system, collection_type, coverage, freshness_days,
+origin_iso3, destination_iso3, method_note,
+series, indicator, indicator_kind, qa_rank
+```
+
+`as_of_date` must be parseable as a timestamp; `value`, `freshness_days`, and `qa_rank`
+are coerced to numeric types. The helper drops fully empty rows before writing to
+`diagnostics/precedence/union_candidates.csv` and emits a companion
+`union_summary.json` with per-source and per-metric counts.
+
+---
+
+## Manual canary run
+
+You can dry-run the end-to-end precedence selection offline with the new helper. First
+produce candidates (either by running offline connectors or preparing fixture CSVs),
+then union and select:
+
+```bash
+# (1) Emit precedence candidates in offline mode (IDMC example)
+python -m resolver.ingestion.idmc.cli --skip-network --write-candidates
+
+# (2) Union all candidates and run the selector
+python scripts/precedence/union_candidates.py
+python -m resolver.cli.precedence_cli --config tools/precedence_config.yml \
+  --candidates diagnostics/precedence/union_candidates.csv \
+  --out diagnostics/precedence/selected.csv
+```
+
+The CLI prints row totals and the helper writes both the unioned candidates and the
+final `selected.csv` into `diagnostics/precedence/`.

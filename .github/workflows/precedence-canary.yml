@@ -1,0 +1,53 @@
+---
+name: "Precedence Canary"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    if: ${{ github.repository == 'oughtinc/Pythia' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      RESOLVER_PRECEDENCE_ENABLE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            resolver/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[ingestion]
+          python -m pip install -r resolver/requirements.txt
+
+      - name: Generate IDMC fixture candidates (optional)
+        run: |
+          python -m resolver.ingestion.idmc.cli --skip-network --write-candidates
+        continue-on-error: true
+
+      - name: Run precedence canary
+        run: scripts/ci/run_precedence_canary.sh
+
+      - name: Upload precedence diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: precedence-canary-diagnostics
+          path: |
+            diagnostics/precedence/union_candidates.csv
+            diagnostics/precedence/union_summary.json
+            diagnostics/precedence/selected.csv
+          if-no-files-found: warn

@@ -39,6 +39,11 @@ python -m resolver.cli.precedence_cli \
 
 The CLI is opt-in only; wiring into automated workflows will happen in a later change.
 
+### Precedence canary workflow
+- Trigger **Actions → Precedence Canary → Run workflow** to execute the offline precedence dry run in GitHub Actions. The job is opt-in and only proceeds when `RESOLVER_PRECEDENCE_ENABLE=1` is exported.
+- The workflow unions any connector-emitted `*_candidates.csv` files, runs `resolver.cli.precedence_cli` end to end, and uploads `union_candidates.csv`, `union_summary.json`, and `selected.csv` as artifacts.
+- Use the run logs to confirm how many candidate files were merged, per-metric row counts, and overall country coverage; fast CI suites remain unchanged.
+
 ## Go Live: Initial resolver backfill
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
