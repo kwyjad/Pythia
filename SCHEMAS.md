@@ -310,6 +310,18 @@ Example JSONL entry:
 }
 ```
 
+## IDMC connector configuration keys
+
+The IDMC connector reads `resolver/ingestion/config/idmc.yml` and accepts the following
+structured overrides (all mirrored by environment variables):
+
+- `api.base_url` and `api.endpoints` (including `idus_json` and `idus_geo`) control the IDU
+  HTTP targets; override via `IDMC_BASE_URL`.
+- `cache.dir`, `cache.ttl_seconds`, and `cache.force_cache_only` configure the on-disk cache;
+  override via `IDMC_CACHE_DIR`, `IDMC_CACHE_TTL_S`, and `IDMC_FORCE_CACHE_ONLY`.
+- `api.token_env` (default `IDMC_API_TOKEN`) names the optional bearer token environment
+  variable attached to HTTP requests.
+
 ## DTM API diagnostics
 
 The DTM connector is API-only and always calls the official DTM API via the `dtmapi` package.

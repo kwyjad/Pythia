@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "iso3": "SDN",
+        "country": "Sudan",
+        "figure": 800
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [32.5, 15.6]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "iso3": "COD",
+        "country": "DR Congo",
+        "figure": 500
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [23.7, -4.0]
+      }
+    }
+  ]
+}
