@@ -18,6 +18,7 @@ jobs:
       duckdb_label: ${{ matrix.duckdb_spec || 'default' }}
       RESOLVER_CACHE: "0"
       RESOLVER_DIAG: "1"
+      RESOLVER_EXPORT_ENABLE_FLOW: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

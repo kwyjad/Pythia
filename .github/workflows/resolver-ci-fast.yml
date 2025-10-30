@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       duckdb_label: default
+      RESOLVER_EXPORT_ENABLE_FLOW: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -21,16 +21,6 @@ Our GitHub Actions workflows now include extra safety rails to ensure they alway
 - Database-backed resolver tests run twice in CI (with cache enabled and disabled) so regressions caused by cache state changes are caught immediately in both `.github/workflows/resolver-ci.yml` and `.github/workflows/resolver-ci-fast.yml`.
   - Cache-enabled runs expect repeated `duckdb_io.get_db(url)` calls to return the same connection object; cache-disabled runs (`RESOLVER_DISABLE_CONN_CACHE=1`) intentionally return fresh handles, and tests should branch accordingly.
 
-### PR Gate: Canary tests
-
-Branches prefixed with `codex/` trigger the dedicated [Canary Gate workflow](.github/workflows/codex-canary-gate.yml) on every push and pull request. The job installs the resolver with the standard CI constraints and runs `python -m scripts.ci.run_canary`, which executes a fixed trio of fast contract tests:
-
-- `resolver/tests/test_run_connectors_extra_args.py::test_run_connectors_passes_extra_args_and_env`
-- `resolver/tests/test_iso_normalize_and_drop_reasons.py::test_dtm_drop_reason_counters_capture_iso_and_value_failures`
-- `resolver/tests/test_dtm_soft_timeouts.py::test_soft_timeouts_yield_ok_empty`
-
-The workflow completes in well under two minutes and is a required check for Codex PRs into `main`. When a canary fails the job comments directly on the pull request, applies a `needs-fix/canary` label, and links to the run logs so you can triage without hunting through the Actions UI.
-
 ## Go Live: Initial resolver backfill
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
@@ -152,6 +142,49 @@ The resolver fast tests exercise connectors without network access. To keep thos
 - Admin0 outputs written by `resolver.ingestion.dtm_client` store monthly flows (`value_type=new_displaced`) after converting stocks to deltas. Downstream exports detect this shape and label the metric as `idp_displacement_new_dtm` with `semantics=new` so the facts table records month-over-month displacement instead of cumulative stock.
 - Discovery fallbacks that rely on the static roster may omit an `operation` column—the fast suite accepts either shape so long as the admin0 columns are present.
 - Module-level path constants such as `DIAGNOSTICS_ROOT`, `DTM_DIAGNOSTICS_DIR`, and `HTTP_TRACE_PATH` remain import-time attributes and are referenced throughout `resolver.ingestion.dtm_client`; tests monkeypatch these to stage diagnostics inside temporary directories.
+
+### DTM export: stock vs flow (stock-only by default)
+
+The Resolver’s DTM admin0 export can emit **stock** and **flow** series. To keep
+fast tests deterministic and lightweight, **flows are disabled by default** and
+only **stock** rows are written unless you explicitly enable flows.
+
+**How to enable flows**
+
+1. **Environment flag (wins if set):**
+
+   ```bash
+   # enable flows
+   export RESOLVER_EXPORT_ENABLE_FLOW=1
+   # disable flows (default)
+   export RESOLVER_EXPORT_ENABLE_FLOW=0
+   ```
+
+2. **Optional config knob** (if you prefer config over env):
+
+   ```yaml
+   # e.g., resolver/config/*.yml
+   export:
+     dtm:
+       include_flow: true
+   ```
+
+**CI behavior**
+
+- **Fast tests** set `RESOLVER_EXPORT_ENABLE_FLOW=0` (stock-only; stable row counts).
+- **Pipeline runs** set `RESOLVER_EXPORT_ENABLE_FLOW=1` so both stock and flow rows are exported.
+
+**Diagnostics**
+
+When exports run you’ll see these fields in the export report:
+
+- `dtm_flow_enabled` — `true|false`
+- `dtm_rows_stock` — number of stock rows prepared
+- `dtm_rows_flow` — number of flow rows prepared (only if enabled)
+
+**Backwards compatibility**
+
+If you don’t set any flags/config, behavior matches historical runs: **stock-only**.
 
 ### DTM connector quick start
 

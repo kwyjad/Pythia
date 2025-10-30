@@ -133,8 +133,10 @@ def _compute_dtm_admin0_stock_and_flow(
     stock.loc[:, "semantics"] = "stock"
     stock.loc[:, "source"] = "IOM DTM"
     stock.loc[:, "hazard_code"] = ""
-    stock.loc[:, "ym"] = stock["as_of_date"].dt.strftime("%Y-%m")
-    stock.loc[:, "as_of_date"] = stock["as_of_date"].dt.strftime("%Y-%m-%d")
+    stock_dates = pd.to_datetime(stock["as_of_date"], errors="coerce")
+    stock = stock.drop(columns=["as_of_date"])
+    stock.loc[:, "ym"] = stock_dates.dt.strftime("%Y-%m")
+    stock.loc[:, "as_of_date"] = stock_dates.dt.strftime("%Y-%m-%d")
     stock_values = stock["value"].map(_format_numeric_string)
     stock = stock.drop(columns=["value"])
     stock.loc[:, "value"] = stock_values
@@ -159,8 +161,10 @@ def _compute_dtm_admin0_stock_and_flow(
     flow.loc[:, "semantics"] = "new"
     flow.loc[:, "source"] = "IOM DTM"
     flow.loc[:, "hazard_code"] = ""
-    flow.loc[:, "ym"] = flow["as_of_date"].dt.strftime("%Y-%m")
-    flow.loc[:, "as_of_date"] = flow["as_of_date"].dt.strftime("%Y-%m-%d")
+    flow_dates = pd.to_datetime(flow["as_of_date"], errors="coerce")
+    flow = flow.drop(columns=["as_of_date"])
+    flow.loc[:, "ym"] = flow_dates.dt.strftime("%Y-%m")
+    flow.loc[:, "as_of_date"] = flow_dates.dt.strftime("%Y-%m-%d")
     flow_values = flow["value"].map(_format_numeric_string)
     flow = flow.drop(columns=["value"])
     flow.loc[:, "value"] = flow_values
@@ -213,8 +217,58 @@ def _map_dtm_admin0_with_flows(frame: "pd.DataFrame") -> "pd.DataFrame":
     return out.reset_index(drop=True)
 
 
+def _normalize_truthy_flag(value: Any) -> Optional[bool]:
+    """Return True/False for common truthy strings; None when indeterminate."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, numbers.Number):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "":
+            return None
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _resolve_dtm_flow_toggle(
+    config: Optional[Mapping[str, Any]] = None,
+) -> tuple[bool, Optional[bool], Optional[bool]]:
+    """Determine whether to include DTM flow rows.
+
+    Returns a tuple of ``(include_flow, env_flag, config_flag)`` where ``env_flag``
+    and ``config_flag`` capture the interpreted boolean values (if any) that
+    contributed to the decision. The environment flag wins when explicitly set;
+    otherwise we fall back to the config knob.
+    """
+
+    env_raw = os.getenv("RESOLVER_EXPORT_ENABLE_FLOW")
+    env_flag = _normalize_truthy_flag(env_raw)
+
+    cfg_flag: Optional[bool] = None
+    if isinstance(config, Mapping):
+        export_cfg = config.get("export")
+        if isinstance(export_cfg, Mapping):
+            dtm_cfg = export_cfg.get("dtm")
+            if isinstance(dtm_cfg, Mapping):
+                cfg_flag = _normalize_truthy_flag(dtm_cfg.get("include_flow"))
+
+    if env_flag is not None:
+        return env_flag, env_flag, cfg_flag
+
+    include_flow = bool(cfg_flag)
+    return include_flow, env_flag, cfg_flag
+
+
 def _map_dtm_displacement_admin0(
     frame: "pd.DataFrame",
+    *,
+    config: Optional[Mapping[str, Any]] = None,
 ) -> tuple["pd.DataFrame", Dict[str, Any]]:
     filtered, metadata = _normalize_dtm_admin0(frame)
     if filtered.empty:
@@ -253,7 +307,24 @@ def _map_dtm_displacement_admin0(
 
     stock, flow, policy = _compute_dtm_admin0_stock_and_flow(working)
 
-    out = pd.concat([stock, flow], ignore_index=True, sort=False)
+    include_flow, env_flag, cfg_flag = _resolve_dtm_flow_toggle(config)
+
+    if include_flow and not flow.empty:
+        out = pd.concat([stock, flow], ignore_index=True, sort=False)
+        flow_rows = int(len(flow))
+    else:
+        out = stock
+        flow_rows = 0
+
+    metadata.update(
+        {
+            "dtm_flow_enabled": bool(include_flow),
+            "dtm_rows_stock": int(len(stock)),
+            "dtm_rows_flow": flow_rows,
+            "dtm_flow_env_flag": env_flag,
+            "dtm_flow_config_flag": cfg_flag,
+        }
+    )
 
     metadata.update(
         {
@@ -278,10 +349,14 @@ def _map_dtm_displacement_admin0(
         pass
 
     LOGGER.info(
-        "DTM export: admin0 produced stock_rows=%d new_rows=%d (policy=%s)",
+        "DTM export: admin0 produced stock_rows=%d flow_rows=%d "
+        "(flow_enabled=%s policy=%s env_flag=%s config_flag=%s)",
         len(stock),
-        len(flow),
+        flow_rows,
+        include_flow,
         policy,
+        env_flag,
+        cfg_flag,
     )
 
     columns_order = [
@@ -1532,6 +1607,16 @@ def _render_markdown_report(report: Mapping[str, Any]) -> str:
     else:
         lines.append("- **Matched:** 0 file(s)")
     lines.append(f"- **Rows exported:** {rows_exported}")
+    dtm_rows_stock = int(report.get("dtm_rows_stock", 0) or 0)
+    dtm_rows_flow = int(report.get("dtm_rows_flow", 0) or 0)
+    dtm_flow_enabled = bool(report.get("dtm_flow_enabled", False))
+    if dtm_rows_stock or dtm_rows_flow or dtm_flow_enabled:
+        lines.append(
+            f"- **DTM flow enabled:** {dtm_flow_enabled}"
+        )
+        lines.append(
+            f"- **DTM rows:** stock={dtm_rows_stock} flow={dtm_rows_flow}"
+        )
     if dedupe_keys:
         keep_display = ", ".join(sorted(set(dedupe_keep))) if dedupe_keep else "last"
         lines.append(
@@ -1687,6 +1772,10 @@ def export_facts(
 
     use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
 
+    dtm_flow_enabled: bool = False
+    dtm_rows_stock: int = 0
+    dtm_rows_flow: int = 0
+
     unmatched_paths: List[Path] = []
 
     if use_sources:
@@ -1697,6 +1786,8 @@ def export_facts(
         dtm_detail: Optional[SourceApplication] = None
         dtm_yaml_rows: Optional[int] = None
         dtm_debug_entry: Optional[Dict[str, Any]] = None
+        dtm_flow_env_flag: Optional[bool] = None
+        dtm_flow_config_flag: Optional[bool] = None
         for file_path in files:
             try:
                 frame = _read_one(file_path)
@@ -1757,7 +1848,7 @@ def export_facts(
             }
 
             if file_path.name.lower() == "dtm_displacement.csv":
-                mapped, meta = _map_dtm_displacement_admin0(frame)
+                mapped, meta = _map_dtm_displacement_admin0(frame, config=cfg)
                 filters_applied = list(meta.get("filters_applied", []))
                 drop_hist = {
                     str(key): int(value)
@@ -1770,6 +1861,12 @@ def export_facts(
                 }
                 rows_after_filters = int(meta.get("rows_after_filters", len(mapped)))
                 rows_after_aggregate = int(meta.get("rows_after_aggregate", len(mapped)))
+
+                dtm_flow_enabled = bool(meta.get("dtm_flow_enabled", False))
+                dtm_rows_stock = int(meta.get("dtm_rows_stock", 0))
+                dtm_rows_flow = int(meta.get("dtm_rows_flow", 0))
+                dtm_flow_env_flag = meta.get("dtm_flow_env_flag")
+                dtm_flow_config_flag = meta.get("dtm_flow_config_flag")
 
                 detail = SourceApplication(
                     name="dtm_displacement_admin0",
@@ -1841,6 +1938,15 @@ def export_facts(
                         "keys": aggregate_keys,
                         "funcs": aggregate_funcs,
                     }
+                debug_entry.update(
+                    {
+                        "dtm_flow_enabled": dtm_flow_enabled,
+                        "dtm_rows_stock": dtm_rows_stock,
+                        "dtm_rows_flow": dtm_rows_flow,
+                        "dtm_flow_env_flag": dtm_flow_env_flag,
+                        "dtm_flow_config_flag": dtm_flow_config_flag,
+                    }
+                )
                 debug_records.append(debug_entry)
                 continue
 
@@ -2175,6 +2281,9 @@ def export_facts(
         "warnings": warnings,
         "meta_files_skipped": [str(path) for path in skipped_meta],
         "monthly_summary": monthly_summary,
+        "dtm_flow_enabled": bool(dtm_flow_enabled),
+        "dtm_rows_stock": int(dtm_rows_stock),
+        "dtm_rows_flow": int(dtm_rows_flow),
     }
 
     debug_dir = Path("diagnostics/ingestion/export_preview")
