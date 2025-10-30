@@ -150,3 +150,28 @@ shared facts contract documented in `SCHEMAS.md` and include:
 
 Connectors diagnostics echo the export status (enabled/disabled), row counts,
 and output paths under the `export` key.
+
+## Precedence candidates (opt-in)
+
+Use the precedence adapter to emit Resolver-standard candidates for IDMC and,
+optionally, run the config-driven selector locally. The feature is fully
+offline and does not modify existing workflows.
+
+```bash
+python -m resolver.ingestion.idmc.cli \
+  --skip-network \
+  --write-candidates \
+  --candidates-out diagnostics/ingestion/idmc/idmc_candidates.csv
+```
+
+- `--write-candidates` (or `IDMC_WRITE_CANDIDATES=1`) emits
+  `idmc_candidates.csv` with rich metadata columns (source system, collection
+  type, coverage, freshness).
+- `--run-precedence` (or `IDMC_RUN_PRECEDENCE=1`) reuses those candidates to run
+  the config in `tools/precedence_config.yml` and writes the selected rows to
+  `--precedence-out` (defaults to `diagnostics/ingestion/idmc/idmc_selected.csv`).
+- `--precedence-config` overrides the config path when experimenting with custom
+  rules.
+
+Diagnostics list both artifact paths under `samples` and summarise row counts in
+the `exports` block of `connectors.jsonl`.

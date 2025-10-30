@@ -95,6 +95,8 @@
 - Unknown origin in DI: do not impute to origin.
 - Temporal roll-up: weekly → month sum.
 - **Never** add IDMC and DTM flows together for the same country-month; pick per precedence.
+- Resolver’s IDMC CLI can now emit precedence-ready candidates (`--write-candidates`)
+  and dry-run the selector locally (`--run-precedence`).
 
 ---
 
