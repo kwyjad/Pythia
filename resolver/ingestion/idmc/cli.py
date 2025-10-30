@@ -18,6 +18,7 @@ from .diagnostics import (
     write_sample_preview,
     zero_rows_rescue,
 )
+from .export import build_resolution_ready_facts, summarise_facts
 from .normalize import normalize_all
 from .probe import ProbeOptions, probe_reachability
 
@@ -89,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override cache TTL in seconds for this run",
     )
+    parser.add_argument(
+        "--enable-export",
+        action="store_true",
+        help="Enable resolution-ready facts export preview",
+    )
     args = parser.parse_args(argv)
 
     cfg = load()
@@ -98,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     env_window_days = _env_int(os.getenv("IDMC_WINDOW_DAYS"))
     env_countries = _parse_csv(os.getenv("IDMC_ONLY_COUNTRIES"), transform=str.upper)
     env_series = _parse_csv(os.getenv("IDMC_SERIES"), transform=lambda value: value.lower())
+    env_enable_export = _env_truthy(os.getenv("IDMC_ENABLE_EXPORT"))
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
@@ -115,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
         selected_series = ["flow"]
     else:
         selected_series = list(dict.fromkeys(selected_series))
+
+    enable_export = bool(args.enable_export)
+    if env_enable_export is not None:
+        enable_export = enable_export or bool(env_enable_export)
 
     effective_no_date_filter = bool(args.no_date_filter)
     if env_no_date_filter is not None:
@@ -223,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
         "only_countries": selected_countries,
         "series": selected_series,
         "force_cache_only": force_cache_only,
+        "enable_export": enable_export,
     }
 
     debug = debug_block(
@@ -230,6 +242,16 @@ def main(argv: list[str] | None = None) -> int:
         selected_countries_count=len(selected_countries),
         cache_mode=diagnostics.get("mode", "offline"),
     )
+
+    exports_payload = {}
+    if enable_export:
+        facts_frame = build_resolution_ready_facts(tidy)
+        facts_summary = summarise_facts(facts_frame)
+        buffer = io.StringIO()
+        facts_frame.head(10).to_csv(buffer, index=False)
+        facts_preview_path = write_sample_preview("facts", buffer.getvalue())
+        samples["facts_preview"] = facts_preview_path
+        exports_payload["facts"] = {**facts_summary, "preview": facts_preview_path}
 
     write_connectors_line(
         {
@@ -249,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             "zero_rows": zero_rows,
             "run_flags": run_flags,
             "debug": debug,
+            "exports": exports_payload or None,
         }
     )
 
