@@ -8,6 +8,8 @@ __all__ = [
     "cli",
     "http",
     "cache",
+    "rate_limit",
+    "chunking",
     "probe",
     "export",
 ]

@@ -46,6 +46,38 @@ values (`skip_network`, `only_countries`, `series`, etc.) and the `debug` block
 reports derived context such as `selected_countries_count` or the cache mode
 used for the run.
 
+## Scale-up guidance
+
+Online runs can now be tuned for larger windows and polite throughput. The
+following flags keep the connector responsive while avoiding rate-limit bans:
+
+```bash
+python -m resolver.ingestion.idmc.cli \
+  --window-days=60 \
+  --rate=0.5 \
+  --max-concurrency=1 \
+  --max-bytes=$((10 * 1024 * 1024)) \
+  --chunk-by-month
+```
+
+- `--rate` / `IDMC_REQ_PER_SEC` wraps all HTTP calls in a token bucket. Setting
+  the value to `0` disables throttling, but the default `0.5` keeps peak load
+  within IDMC’s expectations.
+- `--max-concurrency` / `IDMC_MAX_CONCURRENCY` controls the chunk fan-out. The
+  connector remains conservative (`1`) by default; higher values should only be
+  used when mirroring traffic through an internal cache.
+- `--max-bytes` / `IDMC_MAX_BYTES` streams large responses directly to
+  `.cache/idmc/` so JSON payloads no longer sit twice in memory.
+- `--chunk-by-month` partitions wide windows into month-sized requests. This
+  primarily improves cache segmentation and parsing behaviour; the upstream API
+  still responds with a flat feed.
+
+For wider windows (e.g. 180 days) prefer `--rate=0.3` and keep concurrency at
+`1`. Diagnostics now include `performance`, `rate_limit`, and `chunks` blocks
+with request counts, wire/body bytes, throughput, planned waits, and per-month
+timings. The environment flag `IDMC_TEST_NO_SLEEP=1` remains available for fast
+offline tests: it records planned waits without actually sleeping.
+
 ## Normalization rules
 
 - **ISO3 resolution:** values are upper-cased and validated via the Resolver
