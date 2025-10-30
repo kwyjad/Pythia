@@ -48,6 +48,7 @@ jobs:
       UNHCR_ODP_PASSWORD: ${{ secrets.UNHCR_ODP_PASSWORD }}
       UNHCR_ODP_CLIENT_ID: ${{ secrets.UNHCR_ODP_CLIENT_ID }}
       UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
+      IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
       LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
       DTM_CONFIG_PATH: resolver/config/dtm.yml
       RESOLVER_OUTPUT_DIR: resolver/staging
@@ -138,9 +139,13 @@ jobs:
               ]
               return all(os.getenv(name, "").strip() for name in required)
 
+          def has_idmc_creds() -> bool:
+              return bool(os.getenv("IDMC_API_TOKEN", "").strip())
+
           decisions = {
               "RESOLVER_SKIP_ACLED": not has_acled_creds(),
               "RESOLVER_SKIP_UNHCR_ODP": not has_unhcr_odp_creds(),
+              "RESOLVER_SKIP_IDMC": not has_idmc_creds(),
           }
 
           env_path = os.environ["GITHUB_ENV"]
@@ -158,6 +163,12 @@ jobs:
           set -euo pipefail
           python -m scripts.ci.probe_dtm_reachability || true
 
+      - name: Probe IDMC reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.probe_idmc_reachability || true
+
       - name: Run live connectors (with per-connector log tee)
         env:
           LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
@@ -172,6 +183,8 @@ jobs:
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
           mkdir -p .ci/diagnostics .ci/exitcodes || true
           CMD_ARGS=(--extra-args "dtm_client=--soft-timeouts" --extra-env "dtm_client=DTM_SOFT_TIMEOUTS=1")
+          CMD_ARGS+=(--extra-args "idmc=--chunk-by-month")
+          CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
           exit ${CONNECTOR_EXIT}

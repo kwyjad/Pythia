@@ -80,6 +80,7 @@ jobs:
       DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
+      IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
@@ -117,11 +118,44 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
+      - name: Configure connector skips
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          python - <<'PY'
+          import os
+
+          def has_idmc_creds() -> bool:
+              return bool(os.getenv("IDMC_API_TOKEN", "").strip())
+
+          decisions = {
+              "RESOLVER_SKIP_IDMC": not has_idmc_creds(),
+          }
+
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as env:
+              for key, should_skip in decisions.items():
+                  value = "1" if should_skip else "0"
+                  env.write(f"{key}={value}\n")
+                  state = "skipping" if should_skip else "enabled"
+                  print(f"{key}={value} ({state})")
+          PY
+
       - name: Probe DTM reachability
         shell: bash
         run: |
           set -euo pipefail
           python -m scripts.ci.probe_dtm_reachability || true
+
+      - name: Probe IDMC reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.probe_idmc_reachability || true
 
       - name: Run connectors (with per-connector log tee)
         env:
@@ -173,6 +207,8 @@ jobs:
           if [ "${{ inputs.force_fake }}" = "true" ]; then
             CMD_ARGS+=(--extra-env "dtm_client=DTM_FORCE_FAKE=1")
           fi
+          CMD_ARGS+=(--extra-args "idmc=--chunk-by-month")
+          CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
           exit ${CONNECTOR_EXIT}

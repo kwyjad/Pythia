@@ -17,3 +17,4 @@
   compliance metadata for governance.
 - feat(precedence): add union tool, offline tests, opt-in canary workflow, and
   documentation updates.
+- ci(idmc): wire IDMC into monthly/backfill workflows with probe, harness defaults, and skip gating.

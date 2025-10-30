@@ -12,6 +12,22 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
+
+@dataclasses.dataclass(frozen=True)
+class ConnectorMetadata:
+    """Static configuration for a connector entrypoint."""
+
+    module: str
+    default_args: tuple[str, ...] = ()
+    default_env: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    skip_env: str | None = None
+
+
+def _env_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
@@ -21,6 +37,7 @@ DEFAULT_CONNECTORS: List[str] = [
     "acled_client",
     "dtm_client",
     "ifrc_go_client",
+    "idmc",
     "ipc_client",
     "reliefweb_client",
     "unhcr_client",
@@ -28,6 +45,27 @@ DEFAULT_CONNECTORS: List[str] = [
     "wfp_mvam_client",
     "who_phe_client",
 ]
+
+_IDMC_DEFAULT_ENV = {
+    "IDMC_SOFT_TIMEOUTS": "1",
+    "IDMC_REQ_PER_SEC": "${IDMC_REQ_PER_SEC:-0.3}",
+    "IDMC_MAX_CONCURRENCY": "${IDMC_MAX_CONCURRENCY:-1}",
+}
+
+CONNECTOR_METADATA: Dict[str, ConnectorMetadata] = {
+    "idmc": ConnectorMetadata(
+        module="resolver.ingestion.idmc.cli",
+        default_args=("--write-candidates",),
+        default_env=_IDMC_DEFAULT_ENV,
+        skip_env="RESOLVER_SKIP_IDMC",
+    ),
+    "idmc_client": ConnectorMetadata(
+        module="resolver.ingestion.idmc.cli",
+        default_args=("--write-candidates",),
+        default_env=_IDMC_DEFAULT_ENV,
+        skip_env="RESOLVER_SKIP_IDMC",
+    ),
+}
 
 LOGS_DIR = Path("diagnostics") / "ingestion" / "logs"
 REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
@@ -268,14 +306,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         name = connector.strip()
         if not name:
             continue
-        module = f"resolver.ingestion.{name}"
-        base_cmd = [python_exe, "-m", module]
-        user_flags = list(extra_args.get(name, []))
-        env_flags: List[str] = []
+        metadata = CONNECTOR_METADATA.get(name)
+        module = metadata.module if metadata else f"resolver.ingestion.{name}"
         log_path = logs_dir / f"{name}.log"
+        skip_env = metadata.skip_env if metadata else None
+        if skip_env and _env_truthy(env.get(skip_env)):
+            print(f"=== SKIP {name} via {skip_env}=1 → {log_path} ===")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                f"{name} skipped due to {skip_env}=1\n",
+                encoding="utf-8",
+            )
+            diagnostics_ctx = diagnostics_start_run(name, "real")
+            result = diagnostics_finalize_run(
+                diagnostics_ctx,
+                "skipped",
+                reason=f"disabled via {skip_env}",
+                extras={
+                    "skip_reason": f"{skip_env}=1",
+                    "log_path": str(log_path),
+                },
+            )
+            records[name] = result
+            _write_report(report_path, [result])
+            for sub in ("raw", "metrics", "samples"):
+                keep = diag_base / sub / ".keep"
+                try:
+                    keep.touch()
+                except OSError:
+                    pass
+            continue
+
+        base_cmd = [python_exe, "-m", module]
+        default_args = list(metadata.default_args) if metadata else []
+        user_flags = default_args + list(extra_args.get(name, []))
+        env_flags: List[str] = []
         print(f"=== RUN {name} → {log_path} ===")
         diagnostics_ctx = diagnostics_start_run(name, "real")
         connector_env = dict(env)
+        default_env = dict(metadata.default_env) if metadata else {}
+        if default_env:
+            connector_env.update(default_env)
         overrides = extra_env.get(name)
         if overrides:
             connector_env.update(overrides)
@@ -302,6 +373,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 env_flags.append("--soft-timeouts")
                 auto_soft_timeout = True
         cmd = base_cmd + env_flags + user_flags
+        if default_args:
+            print(f"default-argv[{name}]: {default_args}")
+        if default_env:
+            print(f"default-env[{name}]: {default_env}")
         if overrides:
             print(f"env[{name}]: {overrides}")
         if auto_soft_timeout:
