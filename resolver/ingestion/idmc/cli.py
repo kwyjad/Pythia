@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+from pathlib import Path
 from typing import List
 
 from .client import fetch
@@ -103,6 +104,35 @@ def main(argv: list[str] | None = None) -> int:
         help="Write facts-ready outputs (CSV/Parquet) after normalize",
     )
     parser.add_argument(
+        "--write-candidates",
+        action="store_true",
+        help="Write precedence candidate CSV after normalize",
+    )
+    parser.add_argument(
+        "--candidates-out",
+        default=os.getenv(
+            "IDMC_CANDIDATES_OUT", "diagnostics/ingestion/idmc/idmc_candidates.csv"
+        ),
+        help="Destination for precedence candidates CSV",
+    )
+    parser.add_argument(
+        "--run-precedence",
+        action="store_true",
+        help="Run precedence selection using generated candidates",
+    )
+    parser.add_argument(
+        "--precedence-config",
+        default=os.getenv("IDMC_PRECEDENCE_CONFIG", "tools/precedence_config.yml"),
+        help="Path to precedence config when running --run-precedence",
+    )
+    parser.add_argument(
+        "--precedence-out",
+        default=os.getenv(
+            "IDMC_PRECEDENCE_OUT", "diagnostics/ingestion/idmc/idmc_selected.csv"
+        ),
+        help="Destination CSV for precedence selection output",
+    )
+    parser.add_argument(
         "--map-hazards",
         action="store_true",
         help="Append hazard_code/label/class columns",
@@ -123,6 +153,8 @@ def main(argv: list[str] | None = None) -> int:
     env_series = _parse_csv(os.getenv("IDMC_SERIES"), transform=lambda value: value.lower())
     env_enable_export = _env_truthy(os.getenv("IDMC_ENABLE_EXPORT"))
     env_write_outputs = _env_truthy(os.getenv("IDMC_WRITE_OUTPUTS"))
+    env_write_candidates = _env_truthy(os.getenv("IDMC_WRITE_CANDIDATES"))
+    env_run_precedence = _env_truthy(os.getenv("IDMC_RUN_PRECEDENCE"))
     env_map_hazards = _env_truthy(os.getenv("IDMC_MAP_HAZARDS"))
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
@@ -149,6 +181,17 @@ def main(argv: list[str] | None = None) -> int:
     write_outputs = bool(args.write_outputs)
     if env_write_outputs is not None:
         write_outputs = write_outputs or bool(env_write_outputs)
+
+    write_candidates = bool(args.write_candidates)
+    if env_write_candidates is not None:
+        write_candidates = write_candidates or bool(env_write_candidates)
+
+    run_precedence = bool(args.run_precedence)
+    if env_run_precedence is not None:
+        run_precedence = run_precedence or bool(env_run_precedence)
+
+    if run_precedence:
+        write_candidates = True
 
     map_hazards = bool(args.map_hazards)
     if env_map_hazards is not None:
@@ -285,7 +328,12 @@ def main(argv: list[str] | None = None) -> int:
         "force_cache_only": force_cache_only,
         "enable_export": enable_export,
         "write_outputs": write_outputs,
+        "write_candidates": write_candidates,
         "out_dir": args.out_dir,
+        "candidates_out": args.candidates_out,
+        "run_precedence": run_precedence,
+        "precedence_config": args.precedence_config,
+        "precedence_out": args.precedence_out,
         "export_feature_enabled": export_feature_enabled,
         "map_hazards": map_hazards,
     }
@@ -334,6 +382,43 @@ def main(argv: list[str] | None = None) -> int:
         facts_preview_path = write_sample_preview("facts", buffer.getvalue())
         samples["facts_preview"] = facts_preview_path
         exports_payload["facts"] = {**facts_summary, "preview": facts_preview_path}
+
+    candidates_frame = None
+    if write_candidates:
+        from .candidates import to_candidates_from_normalized
+
+        candidates_frame = to_candidates_from_normalized(tidy)
+        candidates_path = Path(args.candidates_out)
+        candidates_path.parent.mkdir(parents=True, exist_ok=True)
+        candidates_frame.to_csv(candidates_path, index=False)
+        samples["precedence_candidates"] = str(candidates_path)
+        exports_payload["precedence_candidates"] = {
+            "rows": int(len(candidates_frame)),
+            "path": str(candidates_path),
+        }
+
+    if run_precedence:
+        if candidates_frame is None:
+            from .candidates import to_candidates_from_normalized
+
+            candidates_frame = to_candidates_from_normalized(tidy)
+
+        import yaml
+
+        from tools.precedence_engine import apply_precedence
+
+        config_path = Path(args.precedence_config)
+        precedence_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        selected_frame = apply_precedence(candidates_frame, precedence_config)
+        precedence_path = Path(args.precedence_out)
+        precedence_path.parent.mkdir(parents=True, exist_ok=True)
+        selected_frame.to_csv(precedence_path, index=False)
+        samples["precedence_selected"] = str(precedence_path)
+        exports_payload["precedence_selected"] = {
+            "rows": int(len(selected_frame)),
+            "path": str(precedence_path),
+            "config": str(config_path),
+        }
 
     write_connectors_line(
         {

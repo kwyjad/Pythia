@@ -9,3 +9,5 @@
 - feat(idmc): wire IDU flow to facts (export adapter, gated, offline tests).
 - feat(idmc): add optional hazard mapping with Resolver codes, CLI flag, and
   diagnostics preview for unmapped rows.
+- feat(idmc): emit precedence-ready candidates, opt-in CLI wiring for
+  selection, offline tests, and docs.
