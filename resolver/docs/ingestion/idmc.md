@@ -78,3 +78,41 @@ with:
 Use `--skip-network` or `IDMC_FORCE_CACHE_ONLY=1` to keep runs deterministic.
 Fixtures remain available under `resolver/ingestion/idmc/fixtures/` for offline
 testing and CI.
+
+## Exports
+
+IDMC’s monthly **flow** series can be exported as resolution-ready facts when
+the Resolver export gate is enabled. Exports stay disabled in fast tests unless
+explicitly opted in.
+
+1. Enable the feature flag:
+
+   ```bash
+   export RESOLVER_EXPORT_ENABLE_IDMC=1  # or RESOLVER_EXPORT_ENABLE_FLOW=1
+   ```
+
+2. Run the connector with output writing enabled:
+
+   ```bash
+   python -m resolver.ingestion.idmc.cli \
+     --skip-network \
+     --write-outputs \
+     --out-dir artifacts/idmc
+   ```
+
+   The `--out-dir` argument defaults to `artifacts/idmc` (override with
+   `IDMC_OUT_DIR`).
+
+The run writes `idmc_facts_flow.csv` and, when optional dependencies are
+available, `idmc_facts_flow.parquet` to the requested directory. Rows follow the
+shared facts contract documented in `SCHEMAS.md` and include:
+
+- `iso3`
+- `as_of_date`
+- `metric` (`idp_displacement_new_idmc`)
+- `value`
+- `series_semantics` (`new`)
+- `source` (`IDMC`)
+
+Connectors diagnostics echo the export status (enabled/disabled), row counts,
+and output paths under the `export` key.

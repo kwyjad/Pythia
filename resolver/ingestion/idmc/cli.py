@@ -19,6 +19,7 @@ from .diagnostics import (
     zero_rows_rescue,
 )
 from .export import build_resolution_ready_facts, summarise_facts
+from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import normalize_all
 from .probe import ProbeOptions, probe_reachability
 
@@ -95,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Enable resolution-ready facts export preview",
     )
+    parser.add_argument(
+        "--write-outputs",
+        action="store_true",
+        help="Write facts-ready outputs (CSV/Parquet) after normalize",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=os.getenv("IDMC_OUT_DIR", "artifacts/idmc"),
+        help="Directory to write facts files (default artifacts/idmc)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load()
@@ -105,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     env_countries = _parse_csv(os.getenv("IDMC_ONLY_COUNTRIES"), transform=str.upper)
     env_series = _parse_csv(os.getenv("IDMC_SERIES"), transform=lambda value: value.lower())
     env_enable_export = _env_truthy(os.getenv("IDMC_ENABLE_EXPORT"))
+    env_write_outputs = _env_truthy(os.getenv("IDMC_WRITE_OUTPUTS"))
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
@@ -126,6 +138,20 @@ def main(argv: list[str] | None = None) -> int:
     enable_export = bool(args.enable_export)
     if env_enable_export is not None:
         enable_export = enable_export or bool(env_enable_export)
+
+    write_outputs = bool(args.write_outputs)
+    if env_write_outputs is not None:
+        write_outputs = write_outputs or bool(env_write_outputs)
+
+    export_feature_flags = {
+        "RESOLVER_EXPORT_ENABLE_IDMC": _env_truthy(
+            os.getenv("RESOLVER_EXPORT_ENABLE_IDMC")
+        ),
+        "RESOLVER_EXPORT_ENABLE_FLOW": _env_truthy(
+            os.getenv("RESOLVER_EXPORT_ENABLE_FLOW")
+        ),
+    }
+    export_feature_enabled = any(value for value in export_feature_flags.values())
 
     effective_no_date_filter = bool(args.no_date_filter)
     if env_no_date_filter is not None:
@@ -235,7 +261,39 @@ def main(argv: list[str] | None = None) -> int:
         "series": selected_series,
         "force_cache_only": force_cache_only,
         "enable_export": enable_export,
+        "write_outputs": write_outputs,
+        "out_dir": args.out_dir,
+        "export_feature_enabled": export_feature_enabled,
     }
+
+    feature_flag_states = {
+        key: bool(value) if value is not None else False
+        for key, value in export_feature_flags.items()
+    }
+    export_details = {
+        "enabled": False,
+        "rows": 0,
+        "paths": {},
+        "feature_flags": feature_flag_states,
+    }
+
+    if write_outputs and not export_feature_enabled:
+        export_details["reason"] = "feature-flag-disabled"
+
+    if write_outputs and export_feature_enabled:
+        facts_frame = to_facts(tidy)
+        csv_path = write_facts_csv(facts_frame, args.out_dir)
+        parquet_path = write_facts_parquet(facts_frame, args.out_dir)
+        export_details.update(
+            {
+                "enabled": True,
+                "rows": len(facts_frame),
+                "paths": {
+                    "csv": csv_path,
+                    "parquet": parquet_path or None,
+                },
+            }
+        )
 
     debug = debug_block(
         selected_series=selected_series,
@@ -271,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             "zero_rows": zero_rows,
             "run_flags": run_flags,
             "debug": debug,
+            "export": export_details,
             "exports": exports_payload or None,
         }
     )

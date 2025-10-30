@@ -6,3 +6,4 @@
 - feat(idmc): enable IDU online fetch with reachability probe, cache utilities, CLI overrides, and offline-first tests.
 - feat(idmc): convert IDU payloads into monthly new displacement rows with drop diagnostics, timing metrics, and zero-row rescue tooling.
 - feat(idmc): feature flags & connector contract suite (offline deterministic).
+- feat(idmc): wire IDU flow to facts (export adapter, gated, offline tests).
