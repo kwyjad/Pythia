@@ -1,0 +1,128 @@
+# Config-driven precedence rules for monthly admin0 series
+# This is a *declarative* spec consumed by tools/precedence_engine.py
+
+version: 1
+defaults:
+  tie_breakers:
+    - key: coverage_rank    # national=3, corridor=2, site=1, unknown=0
+      order: desc
+    - key: freshness_days   # smaller is fresher
+      order: asc
+    - key: qa_rank          # if available (3 high .. 1 low); else assume 0
+      order: desc
+    - key: value
+      order: desc
+  fields_present:
+    - iso3
+    - as_of_date
+    - metric
+    - value
+  metadata_defaults:
+    source_system: unknown
+    collection_type: unknown
+    coverage: unknown
+    freshness_days: null
+    origin_iso3: null
+    destination_iso3: null
+    method_note: null
+
+coverage_ranks:
+  national: 3
+  corridor: 2
+  site: 1
+  unknown: 0
+
+# ---------- Shocks ----------
+shocks:
+
+  flood_pa:
+    output_metric: flood_affected_pa
+    semantics: new
+    components:
+      main:
+        candidates:
+          - match: { source_system: EMDAT, metric: flood_pa }
+            collection_type: event_db
+            transform:
+              # attribution / dedupe rules handled upstream in EM-DAT normalizer;
+              # precedence engine only selects among candidates when multiple exist.
+              type: passthrough
+
+  drought_pa:
+    output_metric: drought_affected_pa
+    semantics: new
+    components:
+      main:
+        candidates:
+          - match: { source_system: EMDAT, metric: drought_pa }
+            collection_type: event_db
+            transform: { type: passthrough }
+
+  cyclone_pa:
+    output_metric: cyclone_affected_pa
+    semantics: new
+    components:
+      main:
+        candidates:
+          - match: { source_system: EMDAT, metric: cyclone_pa }
+            collection_type: event_db
+            transform: { type: passthrough }
+
+  conflict_fatalities_new:
+    output_metric: conflict_fatalities_new
+    semantics: new
+    components:
+      main:
+        candidates:
+          - match: { source_system: ACLED, metric: conflict_fatalities_new }
+            collection_type: event_db
+            transform: { type: passthrough }
+
+  displacement_influx_new:
+    output_metric: displacement_influx_new
+    semantics: new
+    components:
+      main:
+        candidates:
+          - match: { source_system: UNHCR, indicator: arrivals, metric: displacement_influx_new }
+            collection_type: registration
+            transform: { type: passthrough }
+          - match: { source_system: DTM, indicator_kind: flow, metric: displacement_influx_new }
+            collection_type: flow_monitoring
+            transform: { type: passthrough }
+    tie_breakers_override:
+      # prefer broader coverage, then freshness
+      - key: coverage_rank
+        order: desc
+      - key: freshness_days
+        order: asc
+      - key: value
+        order: desc
+
+  # Conflict Escalation / Onset 1 (PA) == internal_displacement_new + cross_border_outflow_new
+  conflict_onset1_pa:
+    output_metric: conflict_onset1_pa
+    semantics: new
+    assemble: sum_components
+    components:
+
+      internal_displacement_new:
+        candidates:
+          - match: { source_system: IDMC, series: IDU, metric: internal_displacement_new }
+            collection_type: curated_event
+            transform: { type: passthrough }
+          - match: { source_system: DTM, indicator_kind: explicit_flow, metric: internal_displacement_new }  # “newly displaced/movements”
+            collection_type: flow_monitoring
+            transform: { type: passthrough }
+          - match: { source_system: DTM, indicator_kind: stock, metric: internal_displacement_stock }
+            collection_type: stock_inferred
+            transform:
+              type: delta_from_stock
+              guards:
+                suppress_negative: true
+                suppress_large_spikes_without_event: true
+                add_flag: rebaseline_suspected
+
+      cross_border_outflow_new:
+        mirror_from: displacement_influx_new
+        credit_to: origin_iso3

@@ -27,6 +27,18 @@ See `resolver/docs/CONFIGS.md` for overlay guidance and run
 `pytest -k export_config_yaml_valid` after editing
 `resolver/tools/export_config.yml`.
 
+### (Optional) Run precedence selection locally
+Use the config-driven precedence scaffold to pick one monthly value per shock/country for audit and exploration.
+
+```bash
+python -m resolver.cli.precedence_cli \
+  --config tools/precedence_config.yml \
+  --candidates diagnostics/ingestion/export_preview/facts.csv \
+  --out diagnostics/precedence/selected.csv
+```
+
+The CLI is opt-in only; wiring into automated workflows will happen in a later change.
+
 ## Go Live: Initial resolver backfill
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
