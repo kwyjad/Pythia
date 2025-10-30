@@ -1,0 +1,24 @@
+{
+  "data": [
+    {
+      "iso3": "SDN",
+      "displacement_date": "2024-02-12",
+      "displacement_start_date": "2024-02-11",
+      "displacement_end_date": "2024-02-12",
+      "figure": 800,
+      "country": "Sudan",
+      "hazard_category": "conflict",
+      "id": 111
+    },
+    {
+      "iso3": "COD",
+      "displacement_date": "2024-01-20",
+      "displacement_start_date": "2024-01-18",
+      "displacement_end_date": "2024-01-21",
+      "figure": 500,
+      "country": "DR Congo",
+      "hazard_category": "conflict",
+      "id": 222
+    }
+  ]
+}
