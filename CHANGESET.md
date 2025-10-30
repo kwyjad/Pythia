@@ -7,3 +7,5 @@
 - feat(idmc): convert IDU payloads into monthly new displacement rows with drop diagnostics, timing metrics, and zero-row rescue tooling.
 - feat(idmc): feature flags & connector contract suite (offline deterministic).
 - feat(idmc): wire IDU flow to facts (export adapter, gated, offline tests).
+- feat(idmc): add optional hazard mapping with Resolver codes, CLI flag, and
+  diagnostics preview for unmapped rows.

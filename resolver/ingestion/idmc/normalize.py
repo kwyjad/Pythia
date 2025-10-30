@@ -80,6 +80,8 @@ def _normalize_monthly_flow(
     raw: pd.DataFrame,
     field_aliases: Dict[str, List[str]],
     date_window: Dict[str, str | None],
+    *,
+    map_hazards: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     drops = {
         "date_parse_failed": 0,
@@ -115,6 +117,26 @@ def _normalize_monthly_flow(
             "source": SOURCE_NAME,
         }
     )
+
+    if map_hazards:
+        def _raw_or_na(column: str) -> pd.Series:
+            if column in raw.columns:
+                return raw[column]
+            return pd.Series([pd.NA] * len(raw), index=raw.index)
+
+        hazard_columns = {
+            "displacement_type": _raw_or_na("displacement_type"),
+            "hazard_category": _raw_or_na("hazard_category"),
+            "hazard_subcategory": _raw_or_na("hazard_subcategory"),
+            "hazard_type": _raw_or_na("hazard_type"),
+            "hazard_subtype": _raw_or_na("hazard_subtype"),
+            "violence_type": _raw_or_na("violence_type"),
+            "conflict_type": _raw_or_na("conflict_type"),
+            "notes": _raw_or_na("notes"),
+            "event_details": _raw_or_na("event_details"),
+        }
+        for column, series in hazard_columns.items():
+            normalized[column] = series
 
     def _clean_iso(value: object) -> object:
         if pd.isna(value):
@@ -167,6 +189,8 @@ def normalize_all(
     field_aliases: Dict[str, List[str]],
     date_window: Dict[str, str | None],
     selected_series: Iterable[str] | None = None,
+    *,
+    map_hazards: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     tidy_frames = []
     aggregate_drops = {
@@ -183,7 +207,12 @@ def normalize_all(
     }
 
     if "flow" in series_filter and "monthly_flow" in by_series:
-        frame, drops = _normalize_monthly_flow(by_series["monthly_flow"], field_aliases, date_window)
+        frame, drops = _normalize_monthly_flow(
+            by_series["monthly_flow"],
+            field_aliases,
+            date_window,
+            map_hazards=map_hazards,
+        )
         tidy_frames.append(frame)
         for key, value in drops.items():
             aggregate_drops[key] = aggregate_drops.get(key, 0) + value
@@ -204,3 +233,51 @@ def normalize_all(
         )
 
     return pd.concat(tidy_frames, ignore_index=True), aggregate_drops
+
+
+def maybe_map_hazards(
+    frame: pd.DataFrame, enabled: bool
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Optionally apply hazard mapping to a normalized frame."""
+
+    if not enabled:
+        return frame, pd.DataFrame()
+
+    from .hazards import apply_hazard_mapping
+
+    hazard_context_columns = [
+        "displacement_type",
+        "hazard_category",
+        "hazard_subcategory",
+        "hazard_type",
+        "hazard_subtype",
+        "violence_type",
+        "conflict_type",
+        "notes",
+        "event_details",
+    ]
+
+    working = frame.copy()
+    for column in hazard_context_columns:
+        if column not in working.columns:
+            working[column] = pd.NA
+
+    mapped = apply_hazard_mapping(working)
+    hazard_series = mapped.get(
+        "hazard_code", pd.Series([pd.NA] * len(mapped), index=mapped.index)
+    )
+    unmapped_mask = hazard_series.isna()
+    context_columns = [
+        column
+        for column in (
+            ["iso3", "as_of_date", "metric", "value"] + hazard_context_columns
+        )
+        if column in mapped.columns
+    ]
+    unmapped = mapped.loc[unmapped_mask, context_columns].copy()
+
+    drop_columns = [
+        column for column in hazard_context_columns if column in mapped.columns
+    ]
+    cleaned = mapped.drop(columns=drop_columns)
+    return cleaned, unmapped

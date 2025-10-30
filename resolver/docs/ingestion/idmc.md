@@ -39,6 +39,7 @@ turn, win over static config defaults.
 | `--series=flow,stock` | `IDMC_SERIES="flow"` | Defaults to `flow`; selecting `stock` currently yields zero rows for IDU. |
 | `--base-url=<url>` | `IDMC_BASE_URL=<url>` | Override the IDU endpoint root (useful for staging mirrors). |
 | `--cache-ttl=<seconds>` | `IDMC_CACHE_TTL_S=<seconds>` | Override the cache lifetime for online runs. |
+| `--map-hazards` | `IDMC_MAP_HAZARDS=1` | Append Resolver hazard metadata (code/label/class) and related diagnostics. |
 
 `run_flags` in `diagnostics/ingestion/connectors.jsonl` echoes the resolved
 values (`skip_network`, `only_countries`, `series`, etc.) and the `debug` block
@@ -61,6 +62,39 @@ used for the run.
   (`negative_value`).
 - **Output schema:** `metric=idp_displacement_new_idmc`,
   `series_semantics=new`, `source=IDMC`.
+
+## Hazard mapping (optional)
+
+An opt-in post-process tags each normalized row with Resolver’s canonical hazard
+codes. Enable it via `--map-hazards` or `IDMC_MAP_HAZARDS=1`. When active the
+normalized frame gains three additional columns:
+
+- `hazard_code`
+- `hazard_label`
+- `hazard_class`
+
+The current heuristic covers the following codes:
+
+| Code | Label | Class |
+| --- | --- | --- |
+| `FL` | Flood | natural |
+| `DR` | Drought | natural |
+| `TC` | Tropical Cyclone | natural |
+| `HW` | Heat Wave | natural |
+| `PHE` | Public Health Emergency | epidemic |
+| `CU` | Civil Unrest | human-induced |
+| `ACE` | Armed Conflict – Escalation | human-induced |
+
+Disaster rows are mapped via keyword matching on the IDU hazard metadata
+(`hazard_category`, `hazard_type`, etc.). Conflict rows default to `ACE` unless
+riot/protest cues promote them to `CU`. Internal displacement feeds do not
+currently emit cross-border influx (`DI`) records. Rows that do not match any
+rule expose `hazard_class` based on the upstream `displacement_type` and remain
+otherwise null for code/label.
+
+Diagnostics add a `hazards` block with `enabled`, `unmapped_hazard` counts and a
+path to `hazard_unmapped_preview` when applicable. The preview CSV lists a small
+sample of unmatched rows for manual inspection.
 
 ## Diagnostics payload
 
