@@ -1,59 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-JOB_NAME="${1:-job}"
-MODE="${2:-generic}"
-SMOKE_DIR="${3:-}"
-SMOKE_MIN="${4:-}"
-# shellcheck disable=SC2034
-PLACEHOLDER_ARGS=("${MODE}" "${SMOKE_DIR}" "${SMOKE_MIN}")
-
-if [[ -n "${ART_DIR:-}" ]]; then
-  TARGET_DIR="${ART_DIR}"
-else
-  RUN_ID="${GITHUB_RUN_ID:-local}"
-  RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
-  SAFE_JOB="${JOB_NAME:-job}"
-  TARGET_DIR="dist/diagnostics-${SAFE_JOB}-${RUN_ID}-${RUN_ATTEMPT}"
-fi
-
-mkdir -p "${TARGET_DIR}"
-
-set +e
-SUMMARY_PATH=$(python scripts/ci/collect_diagnostics.py "${TARGET_DIR}")
-STATUS=$?
-set -e
-
-if [[ "${STATUS}" -ne 0 || -z "${SUMMARY_PATH}" || ! -f "${SUMMARY_PATH}" ]]; then
-  SUMMARY_PATH="${TARGET_DIR}/summary.md"
-  {
-    echo "# CI Diagnostics Summary"
-    echo
-    echo "_collector failed; see artifacts under ${TARGET_DIR}._"
-  } >"${SUMMARY_PATH}"
-  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    {
-      echo
-      cat "${SUMMARY_PATH}"
-    } >>"${GITHUB_STEP_SUMMARY}"
+DEST_DIR="${1:-}"
+if [[ -z "${DEST_DIR}" ]]; then
+  if [[ -n "${ART_DIR:-}" ]]; then
+    DEST_DIR="${ART_DIR}"
+  else
+    DEST_DIR=".ci/diagnostics"
   fi
 fi
 
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  {
-    echo "ARTIFACT_PATH=${TARGET_DIR}"
-    echo "SUMMARY_PATH=${SUMMARY_PATH}"
-  } >>"${GITHUB_ENV}"
+mkdir -p "${DEST_DIR}"
+
+SOURCE_DIR="${ART_DIR:-}"
+if [[ -n "${SOURCE_DIR}" && -d "${SOURCE_DIR}" && "${SOURCE_DIR}" != "${DEST_DIR}" ]]; then
+  rsync -a "${SOURCE_DIR}/" "${DEST_DIR}/" || true
 fi
 
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  SUMMARY_ABS=$(cd "$(dirname "${SUMMARY_PATH}")" && pwd)/"$(basename "${SUMMARY_PATH}")"
-  TARGET_ABS=$(cd "${TARGET_DIR}" && pwd)
-  {
-    echo "artifact_path=${TARGET_ABS}"
-    echo "summary_path=${SUMMARY_ABS}"
-  } >>"${GITHUB_OUTPUT}"
+copy_if_exists() {
+  local path="$1"
+  if [[ -n "${path}" && -f "${path}" ]]; then
+    cp -f "${path}" "${DEST_DIR}/" || true
+  fi
+}
+
+copy_if_exists "${DEST_DIR}/env.txt"
+copy_if_exists "${DEST_DIR}/pip-freeze.txt"
+copy_if_exists "${SOURCE_DIR}/env.txt"
+copy_if_exists "${SOURCE_DIR}/pip-freeze.txt"
+copy_if_exists "env.txt"
+copy_if_exists "pip-freeze.txt"
+copy_if_exists "${SOURCE_DIR}/pytest-junit.xml"
+copy_if_exists "${SOURCE_DIR}/db.junit.xml"
+copy_if_exists "pytest-junit.xml"
+copy_if_exists "db.junit.xml"
+log_candidate=".ci/pytest-${RUNNER_OS:-Linux}.out.log"
+copy_if_exists "${log_candidate}"
+
+if [[ ! -f "${DEST_DIR}/SUMMARY.md" ]]; then
+  if ! python scripts/ci/generate_summary.py --out "${DEST_DIR}/SUMMARY.md"; then
+    {
+      echo "# CI Diagnostics Summary (fallback)"
+      echo "Generator failed; see raw artifacts."
+    } > "${DEST_DIR}/SUMMARY.md"
+  fi
 fi
 
-echo "Diagnostics directory: ${TARGET_DIR}"
-echo "Summary path: ${SUMMARY_PATH}"
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" && -f "${DEST_DIR}/SUMMARY.md" ]]; then
+  cat "${DEST_DIR}/SUMMARY.md" >> "${GITHUB_STEP_SUMMARY}"
+fi
+
+echo "Diagnostics ready in ${DEST_DIR} (flat folder, no nested zips)."

@@ -501,7 +501,9 @@ jobs:
         if: always()
         env:
           GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
-        run: python scripts/ci/collect_diagnostics.py "${ART_DIR}"
+        run: |
+          python scripts/ci/collect_diagnostics.py "${ART_DIR}"
+          bash .github/actions/collect-diagnostics/collect.sh "${ART_DIR}"
 
       - name: Upload CI artifacts (always)
         if: always()

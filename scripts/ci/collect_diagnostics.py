@@ -146,56 +146,55 @@ def main():
         # Python version
         py_ver = sys.version.replace("\n", " ")
 
-        # Artifact tree
         tree = _tree_listing(art_dir)
 
-        summary = textwrap.dedent(f"""
-        # CI Diagnostics Summary
-        Generated: {now_utc}
-        Artifacts directory: `{art_dir}`
+        lines: list[str] = [
+            "# CI Diagnostics Summary",
+            f"Generated: {now_utc}",
+            f"Artifacts directory: `{art_dir}`",
+            "",
+            "## Run Metadata",
+            "",
+            meta_table,
+            "",
+            "## Python",
+            f"`{py_ver}`",
+            "",
+            "## Environment Variables (env.txt)",
+            "```bash",
+            env_preview,
+            "```",
+            "",
+            "## pip freeze",
+            "```",
+            freeze_preview,
+            "```",
+            "",
+            "## Test Results",
+            junit_block,
+            "",
+            "## Artifact Listing",
+            tree,
+        ]
 
-        ## Run Metadata
-
-        {meta_table}
-
-        ## Python
-        `{py_ver}`
-
-        ## Environment Variables (env.txt)
-        ```bash
-        {env_preview}
-        ```
-
-        ## pip freeze
-        ```
-        {freeze_preview}
-        ```
-
-        ## {junit_block}
-
-        ## Artifact Listing
-
-        {tree}
-        """).strip()
-
-        summary_path = art_dir / "summary.md"
-        _write_text(summary_path, summary)
+        summary_path = art_dir / "SUMMARY.md"
+        _write_text(summary_path, "\n".join(lines).strip() + "\n")
 
         step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if step_summary:
             try:
                 with open(step_summary, "a", encoding="utf-8") as handle:
-                    handle.write(summary + "\n")
+                    handle.write("\n" + summary_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
 
-        print(f"Diagnostics written to: {art_dir}")
+        print(f"Diagnostics summary: {summary_path}")
         sys.exit(0)
     except Exception as e:
         # Last resort: never crash the job — emit a minimal summary.
         tb = traceback.format_exc()
         fallback = "# CI Diagnostics Summary (fallback)\n\nError while writing summary:\n\n```\n" + tb + "\n```"
-        summary_path = art_dir / "summary.md"
+        summary_path = art_dir / "SUMMARY.md"
         _write_text(summary_path, fallback)
         step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if step_summary:
