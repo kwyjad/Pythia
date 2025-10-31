@@ -27,3 +27,10 @@ fi
 
 echo "Diagnostics collected under: ${ART_DIR}"
 ls -lah "${ART_DIR}" || true
+
+# Emit step outputs for composite action
+SUMMARY_PATH="${SUMMARY_PATH:-${ART_DIR}/SUMMARY.md}"
+{
+  echo "artifact_path=${ART_DIR}"
+  echo "summary_path=${SUMMARY_PATH}"
+} >> "${GITHUB_OUTPUT}"

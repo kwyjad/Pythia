@@ -213,9 +213,13 @@ def _resolve_run_details_override() -> Optional[Path]:
 
 def _refresh_run_details_path() -> Path:
     override = _resolve_run_details_override()
-    path = override or _DEFAULT_RUN_DETAILS_PATH
-    globals()["RUN_DETAILS_PATH"] = path
-    return path
+    if override is not None:
+        path = override
+    else:
+        path = globals().get("RUN_DETAILS_PATH", _DEFAULT_RUN_DETAILS_PATH)
+    resolved = Path(path)
+    globals()["RUN_DETAILS_PATH"] = resolved
+    return resolved
 
 
 def _ensure_normalize_block(extras: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
@@ -297,7 +301,7 @@ def _write_run_details(payload: Mapping[str, Any]) -> None:
         globals()["RUN_DETAILS_PATH"] = override
         target = override
     else:
-        target = RUN_DETAILS_PATH
+        target = Path(RUN_DETAILS_PATH)
     prepared = _prepare_run_details_payload(payload, run_details_path=target)
     write_json(target, prepared)
 
@@ -747,6 +751,38 @@ def _mirror_legacy_diagnostics() -> None:
         )
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
+
+
+def _get_dtm_key_and_header(*, warn_on_missing: bool = True) -> Tuple[str, Optional[str]]:
+    """Resolve the preferred DTM API key and header name from the environment."""
+
+    header_name = (os.getenv("DTM_API_HEADER_NAME") or "Ocp-Apim-Subscription-Key").strip() or (
+        "Ocp-Apim-Subscription-Key"
+    )
+
+    def _clean(value: Optional[str]) -> str:
+        return value.strip() if value else ""
+
+    key = _clean(os.getenv("DTM_API_KEY"))
+    if key:
+        LOG.debug("dtm: API key sourced from DTM_API_KEY; header=%s", header_name)
+        return header_name, key
+
+    subscription = _clean(os.getenv("DTM_SUBSCRIPTION_KEY"))
+    if subscription:
+        LOG.debug("dtm: API key sourced from DTM_SUBSCRIPTION_KEY; header=%s", header_name)
+        return header_name, subscription
+
+    primary = _clean(os.getenv("DTM_API_PRIMARY_KEY"))
+    secondary = _clean(os.getenv("DTM_API_SECONDARY_KEY"))
+    legacy = primary or secondary
+    if legacy:
+        LOG.debug("dtm: API key sourced from legacy primary/secondary; header=%s", header_name)
+        return header_name, legacy
+
+    if warn_on_missing:
+        LOG.warning("dtm: No DTM API key found in environment.")
+    return header_name, None
 
 _FILE_LOGGING_INITIALIZED = False
 
@@ -1821,7 +1857,12 @@ def _dtm_http_get(
 ) -> Any:
     base_url = "https://dtmapi.iom.int"
     url = f"{base_url}{path}"
-    headers = dict(headers_override) if headers_override else {"Ocp-Apim-Subscription-Key": key}
+    if headers_override:
+        headers = dict(headers_override)
+    else:
+        header_name, env_key = _get_dtm_key_and_header(warn_on_missing=False)
+        effective_key = key or (env_key or "")
+        headers = {header_name: effective_key} if effective_key else {}
     started = time.perf_counter()
     entry: Dict[str, Any] = {"ts": time.time(), "url": url, "ok": False, "nonce": round(random.random(), 6)}
     if params:
@@ -2189,13 +2230,14 @@ def _perform_discovery(
     retry_attempts = int(retries_cfg.get("attempts", 3))
     backoff_seconds = float(retries_cfg.get("backoff_seconds", 1.5))
 
-    key = (api_key or get_dtm_api_key() or "").strip()
+    header_name, configured_key = _get_dtm_key_and_header(warn_on_missing=not OFFLINE)
+    key = (api_key or get_dtm_api_key() or configured_key or "").strip()
     if not key and not OFFLINE:
         raise RuntimeError("Missing DTM_API_KEY environment variable.")
 
     header_variants = build_discovery_header_variants(key)
     if not header_variants:
-        header_variants = [{"Ocp-Apim-Subscription-Key": key}] if key else []
+        header_variants = [{header_name: key}] if key else []
 
     stage_entries: List[Dict[str, Any]] = []
     stage_errors: List[Dict[str, Any]] = []
@@ -5317,39 +5359,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         OFFLINE = previous_offline
         return exit_code
 
-    env_auth_key = (
-        os.getenv("DTM_API_KEY")
-        or os.getenv("DTM_SUBSCRIPTION_KEY")
-        or os.getenv("DTM_API_PRIMARY_KEY")
-        or os.getenv("DTM_API_SECONDARY_KEY")
-        or ""
-    ).strip()
-
-    if not offline_smoke:
-        if not env_auth_key:
-            ensure_zero_row_outputs(offline=True)
-            extras_payload, http_payload, counts_payload = _finalize_skip_run(
-                reason="auth_missing",
-                strict_empty=strict_empty,
-                no_date_filter=no_date_filter,
-                args=args,
-                mode="auth_missing",
-                log_message="dtm: missing DTM API credentials; emitting header-only CSV",
-            )
-            extras_payload["auth_missing"] = True
-            extras_for_reports = dict(extras_payload)
-            extras_for_reports["auth_missing"] = True
-            _append_connectors_report(
-                mode="auth_missing",
-                status="skipped",
-                rows=0,
-                reason="auth_missing",
-                extras=extras_for_reports,
-                http=http_payload,
-                counts=counts_payload,
-            )
-            OFFLINE = previous_offline
-            return 0
+    _, env_key = _get_dtm_key_and_header(warn_on_missing=not OFFLINE)
+    env_auth_key = (env_key or "").strip()
 
     if offline_smoke:
         LOG.info("offline-smoke: header-only output (no API key required)")
@@ -5484,6 +5495,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         OFFLINE = previous_offline
         return 1
 
+    if not offline_smoke and have_dtmapi and not env_auth_key:
+        ensure_zero_row_outputs(offline=True)
+        extras_payload, http_payload, counts_payload = _finalize_skip_run(
+            reason="auth_missing",
+            strict_empty=strict_empty,
+            no_date_filter=no_date_filter,
+            args=args,
+            mode="auth_missing",
+            log_message="dtm: missing DTM API credentials; emitting header-only CSV",
+        )
+        extras_payload["auth_missing"] = True
+        extras_for_reports = dict(extras_payload)
+        extras_for_reports["auth_missing"] = True
+        _append_connectors_report(
+            mode="auth_missing",
+            status="skipped",
+            rows=0,
+            reason="auth_missing",
+            extras=extras_for_reports,
+            http=http_payload,
+            counts=counts_payload,
+        )
+        OFFLINE = previous_offline
+        return 0
+
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
 
     tls_ok = True
@@ -5518,7 +5554,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             OFFLINE = previous_offline
             return exit_code
 
-    raw_auth_key = (os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip()
+    _, raw_key = _get_dtm_key_and_header(warn_on_missing=False)
+    raw_auth_key = (raw_key or "").strip()
     if not force_fake:
         try:
             _auth_probe(raw_auth_key, offline=OFFLINE)

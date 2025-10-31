@@ -75,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         write_report(out_path, lines, payload)
         return 0
 
+    catalog_exc = getattr(duckdb, "CatalogException", Exception)
+
     try:
         con = duckdb.connect(str(db_path))
     except Exception as exc:
@@ -84,6 +86,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        try:
+            con.execute("PRAGMA show_indexes")
+        except catalog_exc:
+            pass
+        except Exception:
+            pass
+
         table_names, table_err = enumerate_tables(con)
         if table_err:
             lines.append(f"failed to enumerate tables: {table_err}")
