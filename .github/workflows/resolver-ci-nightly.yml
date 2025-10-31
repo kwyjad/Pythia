@@ -96,6 +96,15 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install -e .[db, test]
 
+      - name: Capture baseline diagnostics files
+        if: always()
+        run: |
+          set -euo pipefail
+          env | sort > "${ART_DIR}/env.txt" || true
+          if command -v python >/dev/null 2>&1; then
+            python -m pip freeze > "${ART_DIR}/pip-freeze.txt" || true
+          fi
+
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
         run: |
@@ -488,36 +497,20 @@ jobs:
             fi
           done
 
-      - name: Collect diagnostics
+      - name: Collect diagnostics (always)
         if: always()
-        shell: bash
+        env:
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
         run: |
           python scripts/ci/collect_diagnostics.py "${ART_DIR}"
+          bash .github/actions/collect-diagnostics/collect.sh "${ART_DIR}"
 
-      - name: Upload summary.md
+      - name: Upload CI artifacts (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-ci-summary
-          path: ${{ env.ART_DIR }}/summary.md
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Bundle diagnostics
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${ART_DIR}"
-          rm -f ../nightly-nightly-tests-*.zip || true
-          zip -r "../nightly-nightly-tests-${SAFE_SUFFIX}-${RUN_TS}.zip" . || true
-
-      - name: Upload diagnostics bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nightly-diagnostics-bundle
-          path: ci_artifacts/nightly-nightly-tests-*.zip
+          name: nightly-tests-db-${{ env.RUN_TS }}
+          path: ${{ env.ART_DIR }}
           if-no-files-found: warn
           retention-days: 14
 

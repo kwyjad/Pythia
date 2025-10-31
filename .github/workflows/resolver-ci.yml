@@ -67,16 +67,18 @@ jobs:
         run: |
           python scripts/ci/make_diagnostics.py
 
-      - name: Upload diagnostics bundle
+      - name: Build CI summary
+        if: always()
+        run: python scripts/ci/collect_diagnostics.py ".ci/diagnostics"
+
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-${{ github.job }}-${{ env.duckdb_label }}-run${{ github.run_attempt }}
-          path: |
-            diagnostics_*.tar.gz
-            .ci/diagnostics/**
+          path: .ci/diagnostics
           if-no-files-found: warn
-          overwrite: true
+          retention-days: 14
 
       - name: Respect test result
         if: ${{ always() && steps.tests.outcome == 'failure' }}

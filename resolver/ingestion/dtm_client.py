@@ -2425,61 +2425,43 @@ class DTMApiClient:
         if OFFLINE:
             LOG.debug("dtm: offline skip for get_idp_admin0 country=%s", country)
             return pd.DataFrame()
-        trimmed = str(country).strip() if country else ""
-        self._last_param_used = None
-        base_country = _country_kwargs(country)
-        attempts: List[Tuple[Dict[str, Any], Optional[str]]] = []
-        base_kwargs: Dict[str, Any] = {**base_country}
-        base_kwargs["FromReportingDate"] = from_date
-        base_kwargs["ToReportingDate"] = to_date
-        attempts.append(
-            (
-                base_kwargs,
-                "iso3" if "CountryISO3" in base_country else "name" if base_country else None,
-            )
-        )
-        if trimmed and base_country:
-            if "CountryISO3" in base_country:
-                fallback_country = {"CountryName": trimmed or base_country["CountryISO3"]}
-                fallback_param = "name"
-            else:
-                iso_guess = to_iso3(trimmed) or (trimmed.upper() if trimmed else "")
-                iso_guess = (iso_guess or "").strip().upper()[:3]
-                if iso_guess:
-                    fallback_country = {"CountryISO3": iso_guess}
-                    fallback_param = "iso3"
-                else:
-                    fallback_country = {}
-                    fallback_param = None
-            if fallback_country:
-                fallback_kwargs: Dict[str, Any] = {**fallback_country}
-                fallback_kwargs["FromReportingDate"] = from_date
-                fallback_kwargs["ToReportingDate"] = to_date
-                if fallback_kwargs != base_kwargs:
-                    attempts.append((fallback_kwargs, fallback_param))
 
-        last_no_match = False
-        last_param: Optional[str] = None
-        for idx, (payload, param_used) in enumerate(attempts):
-            last_param = param_used
-            filter_target: Optional[str]
-            if "CountryISO3" in payload:
-                filter_target = payload.get("CountryISO3")
-            elif "CountryName" in payload:
-                filter_target = payload.get("CountryName")
-            else:
-                filter_target = country
-            filter_kwargs = _country_filter(filter_target)
+        trimmed = str(country).strip() if country else ""
+        params = {"FromReportingDate": from_date, "ToReportingDate": to_date}
+        attempts: List[Tuple[str, Dict[str, Any]]] = []
+
+        base_kwargs = _country_kwargs(country)
+        iso_candidate = base_kwargs.get("CountryISO3")
+        if not iso_candidate and trimmed:
+            iso_candidate = to_iso3(trimmed) or (trimmed.upper() if len(trimmed) == 3 else "")
+            iso_candidate = (iso_candidate or "").strip().upper()[:3] or None
+
+        if iso_candidate:
+            attempts.append(("iso3", {"CountryISO3": iso_candidate}))
+        if trimmed:
+            attempts.append(("name", {"CountryName": trimmed}))
+        if not attempts:
+            attempts.append(("auto", dict(base_kwargs)))
+
+        last_param_used: Optional[str] = None
+        seen_no_match = False
+
+        for idx, (mode, payload) in enumerate(attempts):
+            if not payload:
+                continue
+            request_kwargs = dict(payload)
+            request_kwargs.update(params)
+            filter_target = payload.get("CountryISO3") or payload.get("CountryName") or trimmed or None
             try:
                 frame = _sdk_call_with_arg_shim(
                     self.client,
                     "get_idp_admin0_data",
-                    country_filter=filter_kwargs,
-                    **payload,
+                    country_filter=_country_filter(filter_target),
+                    **request_kwargs,
                 )
             except ValueError as exc:
                 if _is_no_country_match_error(exc):
-                    last_no_match = True
+                    seen_no_match = True
                     if idx + 1 < len(attempts):
                         if http_counts is not None:
                             http_counts["retries"] = http_counts.get("retries", 0) + 1
@@ -2492,18 +2474,21 @@ class DTMApiClient:
                 LOG.error("Admin0 request failed: %s", exc)
                 self._record_failure(exc, http_counts)
                 raise
-            else:
-                self._record_success(http_counts, 200)
-                if self.rate_limit_delay:
-                    time.sleep(self.rate_limit_delay)
-                self._last_param_used = param_used
-                return frame
 
-        if last_no_match:
+            self._record_success(http_counts, 200)
+            if self.rate_limit_delay:
+                time.sleep(self.rate_limit_delay)
+            last_param_used = "iso3" if "CountryISO3" in payload else "name" if "CountryName" in payload else mode
+            self._last_param_used = last_param_used
+            return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
+
+        if seen_no_match:
+            self._last_param_used = last_param_used or (attempts[-1][0] if attempts else None)
             self._mark_skip_no_match(country, http_counts)
-            self._last_param_used = last_param
-            return None
-        return None
+            return pd.DataFrame()
+
+        self._last_param_used = last_param_used
+        return pd.DataFrame()
 
     def get_idp_admin1(
         self,
@@ -3328,11 +3313,13 @@ def _finalize_skip_run(
 
     counts_payload: Dict[str, Any] = {"fetched": 0, "normalized": 0, "written": 0}
 
+    exit_code = 2 if strict_empty else 0
+
     extras_payload: Dict[str, Any] = {
         "mode": "skip",
         "rows_total": 0,
         "status_raw": "skipped",
-        "exit_code": 0,
+        "exit_code": exit_code,
         "strict_empty": strict_empty,
         "no_date_filter": no_date_filter,
         "offline_smoke": False,
@@ -3381,6 +3368,7 @@ def _finalize_skip_run(
             "strict_empty": strict_empty,
             "no_date_filter": no_date_filter,
             "offline_smoke": False,
+            "exit_code": exit_code,
         },
         "args": vars(args),
     }
@@ -4856,6 +4844,172 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.info("Skip mode: no real network calls; writing header & trace placeholder")
     if OFFLINE:
         LOG.debug("dtm: offline gating enabled (skip=%s offline_smoke=%s)", skip_requested, offline_smoke)
+
+    if skip_requested:
+        skip_reason = "disabled via RESOLVER_SKIP_DTM"
+        ensure_zero_row_outputs(offline=True)
+        extras_payload, http_payload, counts_payload = _finalize_skip_run(
+            reason=skip_reason,
+            strict_empty=strict_empty,
+            no_date_filter=no_date_filter,
+            args=args,
+        )
+        window_start_iso, window_end_iso, window_override_env = _resolve_effective_window()
+        config_candidate = _resolve_config_path()
+        config_path_text = str(config_candidate.resolve())
+        config_exists_initial = config_candidate.exists()
+        try:
+            config_sha = (
+                hashlib.sha256(config_candidate.read_bytes()).hexdigest()[:12]
+                if config_exists_initial
+                else "n/a"
+            )
+        except Exception:  # pragma: no cover - diagnostics helper
+            config_sha = "n/a"
+        config_section: Dict[str, Any] = {
+            "config_path_used": config_path_text,
+            "config_exists": bool(config_exists_initial),
+            "config_sha256": config_sha,
+            "countries_mode": None,
+            "countries_count": 0,
+            "countries_preview": [],
+            "admin_levels": [],
+            "selected_iso3_preview": [],
+            "no_date_filter": 1 if no_date_filter else 0,
+            "config_parse": {"countries": [], "admin_levels": []},
+            "config_keys_found": {"countries": False, "admin_levels": False},
+            "config_countries_count": 0,
+        }
+        try:
+            effective_cfg = load_config()
+        except Exception:  # pragma: no cover - defensive guard
+            LOG.debug("dtm: failed to load config during skip path", exc_info=True)
+            effective_cfg = {}
+
+        api_payload: Dict[str, Any] = {}
+        if isinstance(effective_cfg, Mapping):
+            api_cfg = effective_cfg.get("api") if isinstance(effective_cfg.get("api"), Mapping) else {}
+            if isinstance(api_cfg, Mapping):
+                countries = _normalize_list(api_cfg.get("countries"))
+                admin_levels = _normalize_list(api_cfg.get("admin_levels"))
+            else:
+                countries = []
+                admin_levels = []
+            api_payload = {
+                "countries": list(countries),
+                "admin_levels": list(admin_levels),
+            }
+            if countries:
+                config_section.setdefault("countries_mode", "explicit_config")
+                config_section["countries_count"] = len(countries)
+                config_section["config_countries_count"] = len(countries)
+                config_section["countries_preview"] = countries[:5]
+                config_section["selected_iso3_preview"] = countries[:10]
+            if admin_levels:
+                config_section["admin_levels"] = list(admin_levels)
+            config_parse = config_section.get("config_parse")
+            if isinstance(config_parse, Mapping):
+                updated_parse = dict(config_parse)
+                if countries:
+                    updated_parse["countries"] = list(countries)
+                    updated_parse["countries_count"] = len(countries)
+                if admin_levels:
+                    updated_parse["admin_levels"] = list(admin_levels)
+                config_section["config_parse"] = updated_parse
+            config_keys = config_section.get("config_keys_found")
+            if isinstance(config_keys, Mapping):
+                updated_keys = dict(config_keys)
+                if countries:
+                    updated_keys["countries"] = True
+                if admin_levels:
+                    updated_keys["admin_levels"] = True
+                config_section["config_keys_found"] = updated_keys
+        config_section["api"] = api_payload
+        config_section["window"] = {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "override_env": window_override_env,
+        }
+
+        exit_code = 2 if strict_empty else 0
+        extras_payload["exit_code"] = exit_code
+        extras_payload["config"] = config_section
+        extras_payload.setdefault(
+            "window",
+            {
+                "start": window_start_iso,
+                "end": window_end_iso,
+                "override_env": window_override_env,
+            },
+        )
+        extras_for_reports = dict(extras_payload)
+        extras_for_reports.update(
+            {
+                "skip_requested": True,
+                "staging_csv": str(OUT_PATH),
+                "staging_meta": str(META_PATH),
+                "config": config_section,
+            }
+        )
+        extras_for_reports.setdefault(
+            "window",
+            {
+                "start": window_start_iso,
+                "end": window_end_iso,
+                "override_env": window_override_env,
+            },
+        )
+
+        try:
+            diagnostics_ctx_raw = diagnostics_start_run("dtm_client", "real")
+        except Exception:  # pragma: no cover - diagnostics helper
+            LOG.debug("dtm: diagnostics_start_run failed during skip", exc_info=True)
+            diagnostics_ctx_raw = None
+
+        if isinstance(diagnostics_ctx_raw, MutableMapping):
+            diagnostics_ctx: MutableMapping[str, Any] = diagnostics_ctx_raw
+        else:
+            diagnostics_ctx = {
+                "connector_id": "dtm_client",
+                "mode": "real",
+                "started_at": datetime.now(timezone.utc),
+                "timer": time.perf_counter(),
+                "http": {},
+                "counts": {},
+                "coverage": {},
+                "samples": {},
+                "extras": {},
+            }
+
+        existing_extras = diagnostics_ctx.get("extras") if isinstance(diagnostics_ctx, MutableMapping) else None
+        ctx_extras: Dict[str, Any]
+        if isinstance(existing_extras, Mapping):
+            ctx_extras = dict(existing_extras)
+        else:
+            ctx_extras = {}
+        ctx_extras.setdefault("mode", "skip")
+        ctx_extras["skip_requested"] = True
+        if isinstance(diagnostics_ctx, MutableMapping):
+            diagnostics_ctx["extras"] = ctx_extras
+
+        diagnostics_result = diagnostics_finalize_run(
+            diagnostics_ctx,
+            status="skipped",
+            reason=skip_reason,
+            http=http_payload,
+            counts=counts_payload,
+            extras=extras_for_reports,
+        )
+        diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+        _write_connector_report(
+            status="skipped",
+            reason=skip_reason,
+            extras=extras_for_reports,
+            http=http_payload,
+            counts=counts_payload,
+        )
+        OFFLINE = previous_offline
+        return exit_code
 
     if offline_smoke:
         LOG.info("offline-smoke: header-only output (no API key required)")
