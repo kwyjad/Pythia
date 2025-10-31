@@ -124,7 +124,9 @@ DIAGNOSTICS_LOG_DIR = DIAGNOSTICS_ROOT / "logs"
 
 # Standard filenames under those dirs
 CONNECTORS_REPORT = DIAGNOSTICS_ROOT / "connectors_report.jsonl"
-RUN_DETAILS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_run.json"
+LEGACY_CONNECTORS_REPORT = REPO_ROOT / "diagnostics" / "connectors_report.jsonl"
+_DEFAULT_RUN_DETAILS_PATH = DTM_DIAGNOSTICS_DIR / "dtm_run.json"
+RUN_DETAILS_PATH = _DEFAULT_RUN_DETAILS_PATH
 DTM_HTTP_LOG_PATH = DTM_DIAGNOSTICS_DIR / "dtm_http.ndjson"
 HTTP_TRACE_PATH = DTM_HTTP_LOG_PATH
 DISCOVERY_SNAPSHOT_PATH = DTM_DIAGNOSTICS_DIR / "discovery_countries.csv"
@@ -147,6 +149,8 @@ OUTPUT_PATH = OUT_PATH
 DEFAULT_OUTPUT = OUT_PATH
 META_PATH = OUT_PATH.with_suffix(OUT_PATH.suffix + ".meta.json")
 RESCUE_HEADERS = ["CountryISO3", "ReportingDate", "idp_count"]
+
+INGESTION_SUMMARY_PATH = DTM_DIAGNOSTICS_DIR / "summary.json"
 
 STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
     ("South Sudan", "SSD"),
@@ -178,6 +182,124 @@ CANONICAL_HEADERS = [
 
 SERIES_INCIDENT = "incident"
 SERIES_CUMULATIVE = "cumulative"
+
+_NORMALIZE_DROP_KEYS = [
+    "bad_iso",
+    "unknown_country",
+    "missing_value",
+    "non_positive_value",
+    "non_integer_value",
+    "missing_as_of",
+    "future_as_of",
+    "invalid_semantics",
+]
+
+
+def _zero_drop_map() -> Dict[str, int]:
+    return {key: 0 for key in _NORMALIZE_DROP_KEYS}
+
+
+def _resolve_run_details_override() -> Optional[Path]:
+    override = os.environ.get("RUN_DETAILS_PATH") or os.environ.get(
+        "RESOLVER_RUN_DETAILS_PATH"
+    )
+    if not override:
+        return None
+    candidate = Path(override).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    return candidate
+
+
+def _refresh_run_details_path() -> Path:
+    override = _resolve_run_details_override()
+    path = override or _DEFAULT_RUN_DETAILS_PATH
+    globals()["RUN_DETAILS_PATH"] = path
+    return path
+
+
+def _ensure_normalize_block(extras: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    if not isinstance(extras, MutableMapping):
+        extras = dict(extras) if isinstance(extras, Mapping) else {}
+    block_source = extras.get("normalize")
+    block: Dict[str, Any]
+    if isinstance(block_source, Mapping):
+        block = dict(block_source)
+    else:
+        block = {}
+
+    def _coerce_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+    rows_in = block.get("rows_in", block.get("rows_fetched", 0))
+    rows_out = block.get("rows_out", block.get("rows_written", 0))
+    block["rows_in"] = _coerce_int(rows_in, 0)
+    block["rows_out"] = _coerce_int(rows_out, 0)
+    block.setdefault(
+        "rows_dropped",
+        max(block["rows_in"] - block["rows_out"], 0),
+    )
+    block["rows_dropped"] = _coerce_int(block.get("rows_dropped", 0), block["rows_in"] - block["rows_out"])
+
+    drop_raw = block.get("drop_reasons")
+    drop_counts = _zero_drop_map()
+    if isinstance(drop_raw, Mapping):
+        for key, value in drop_raw.items():
+            if key in drop_counts:
+                drop_counts[key] = _coerce_int(value, 0)
+            else:
+                try:
+                    drop_counts[str(key)] = _coerce_int(value, 0)
+                except Exception:
+                    drop_counts[str(key)] = value
+    block["drop_reasons"] = drop_counts
+
+    extras["normalize"] = block
+    return block
+
+
+def _prepare_run_details_payload(
+    payload: Mapping[str, Any], *, run_details_path: Path
+) -> Dict[str, Any]:
+    base = dict(payload)
+    extras_source = base.get("extras")
+    if isinstance(extras_source, MutableMapping):
+        extras: Dict[str, Any] = dict(extras_source)
+    elif isinstance(extras_source, Mapping):
+        extras = dict(extras_source)
+    else:
+        extras = {}
+    base["extras"] = extras
+
+    artifacts_source = extras.get("artifacts")
+    if isinstance(artifacts_source, MutableMapping):
+        artifacts: Dict[str, Any] = dict(artifacts_source)
+    elif isinstance(artifacts_source, Mapping):
+        artifacts = dict(artifacts_source)
+    else:
+        artifacts = {}
+    artifacts.setdefault("run_json", str(run_details_path))
+    extras["artifacts"] = artifacts
+
+    _ensure_normalize_block(extras)
+    return base
+
+
+def _write_run_details(payload: Mapping[str, Any]) -> None:
+    override = _resolve_run_details_override()
+    if override is not None:
+        globals()["RUN_DETAILS_PATH"] = override
+        target = override
+    else:
+        target = RUN_DETAILS_PATH
+    prepared = _prepare_run_details_payload(payload, run_details_path=target)
+    write_json(target, prepared)
 
 _DATE_CANDIDATES: list[str] = [
     "ReportingDate",
@@ -643,6 +765,52 @@ ADMIN_METHODS = {
 }
 
 
+def _call_admin_level(client: Any, level: str, **kwargs: Any) -> Tuple[Any, str]:
+    filtered_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+    candidates: List[str] = []
+    primary = ADMIN_METHODS.get(level)
+    if primary:
+        candidates.append(primary)
+    if level == "admin0":
+        candidates.extend(["get_admin0", "fetch_admin0"])
+    elif level == "admin1":
+        candidates.extend(["get_admin1", "fetch_admin1"])
+    elif level == "admin2":
+        candidates.extend(["get_admin2", "fetch_admin2"])
+    candidates.extend(
+        name
+        for name in (
+            f"get_idp_{level}",
+            f"get_{level}",
+            f"fetch_{level}",
+            level,
+        )
+        if name not in candidates
+    )
+
+    for name in candidates:
+        fn = getattr(client, name, None)
+        if not callable(fn):
+            continue
+        call_kwargs = filtered_kwargs
+        code = getattr(fn, "__code__", None)
+        if code is not None and getattr(code, "co_varnames", None):
+            allowed = set(code.co_varnames)
+            call_kwargs = {k: v for k, v in filtered_kwargs.items() if k in allowed}
+            if not call_kwargs and filtered_kwargs:
+                call_kwargs = filtered_kwargs
+        try:
+            result = fn(**call_kwargs)
+        except TypeError:
+            try:
+                result = fn(**filtered_kwargs)
+            except TypeError:
+                continue
+        setattr(client, "_dtm_last_method", name)
+        return result, name
+    raise AttributeError(f"No callable for admin level '{level}' found on client")
+
+
 def _is_no_country_match_error(err: BaseException) -> bool:
     """Return ``True`` when *err* carries the discovery soft-skip signature."""
 
@@ -761,6 +929,113 @@ def ensure_zero_row_outputs(*, offline: bool) -> None:
     _write_http_trace_placeholder(trace_path, offline=offline)
 
 
+def _sanitize_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _sanitize_mapping(value)
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    if isinstance(value, (str, int, float)) or value is None:
+        return value
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _sanitize_mapping(mapping: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    if not isinstance(mapping, Mapping):
+        return result
+    for key, value in mapping.items():
+        result[key] = _sanitize_value(value)
+    return result
+
+
+def _select_summary_extras(extras: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {}
+    if not isinstance(extras, Mapping):
+        return snapshot
+    keys = (
+        "staging_csv",
+        "staging_meta",
+        "mode",
+        "rows_total",
+        "status_raw",
+        "exit_code",
+        "strict_empty",
+        "no_date_filter",
+        "offline_smoke",
+        "skip_requested",
+        "zero_rows_reason",
+        "auth_missing",
+    )
+    for key in keys:
+        if key in extras:
+            snapshot[key] = extras[key]
+    window_info = extras.get("window") if isinstance(extras, Mapping) else None
+    if isinstance(window_info, Mapping):
+        snapshot["window"] = dict(window_info)
+    return snapshot
+
+
+def _write_ingestion_summary(
+    *,
+    mode: str,
+    status: str,
+    reason: str,
+    rows_out: int,
+    output_path: str,
+    extras: Optional[Mapping[str, Any]] = None,
+    http: Optional[Mapping[str, Any]] = None,
+    counts: Optional[Mapping[str, Any]] = None,
+) -> None:
+    payload = {
+        "mode": mode,
+        "status": status,
+        "reason": reason or "",
+        "rows_out": int(rows_out or 0),
+        "output_path": output_path,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "http": _sanitize_mapping(http),
+        "counts": _sanitize_mapping(counts),
+        "extras": _sanitize_mapping(extras),
+    }
+    try:
+        write_json(INGESTION_SUMMARY_PATH, payload)
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: unable to write ingestion summary", exc_info=True)
+
+
+def _emit_summary_from_report(
+    *,
+    mode: str,
+    status: str,
+    reason: str,
+    rows: int,
+    extras: Optional[Mapping[str, Any]],
+    http: Optional[Mapping[str, Any]],
+    counts: Optional[Mapping[str, Any]],
+) -> None:
+    extras_snapshot = _select_summary_extras(extras)
+    counts_payload = _sanitize_mapping(counts)
+    rows_out = counts_payload.get("written")
+    if isinstance(rows_out, (int, float)):
+        computed_rows = int(rows_out)
+    else:
+        computed_rows = int(extras_snapshot.get("rows_total") or rows or 0)
+    output_path = str(extras_snapshot.get("staging_csv") or OUT_PATH)
+    _write_ingestion_summary(
+        mode=mode,
+        status=status,
+        reason=reason or "",
+        rows_out=computed_rows,
+        output_path=output_path,
+        extras=extras_snapshot,
+        http=http,
+        counts=counts_payload,
+    )
+
+
 def _append_connectors_report(
     *,
     mode: str,
@@ -789,6 +1064,7 @@ def _append_connectors_report(
     extras_payload.update(extras or {})
 
     _write_connector_report(
+        mode=mode,
         status=status,
         reason=reason or f"{mode}: {status}",
         extras=extras_payload,
@@ -963,7 +1239,7 @@ def _complete_soft_timeout_rescue(
         "args": vars(args),
     }
     try:
-        write_json(RUN_DETAILS_PATH, run_payload)
+        _write_run_details(run_payload)
     except Exception:  # pragma: no cover - diagnostics helper
         LOG.debug("dtm: unable to persist run payload during rescue", exc_info=True)
 
@@ -1192,7 +1468,7 @@ def _complete_fake_success(
         "extras": dict(extras_payload),
         "args": vars(args),
     }
-    write_json(RUN_DETAILS_PATH, run_payload)
+    _write_run_details(run_payload)
 
     diagnostics_result = diagnostics_finalize_run(
         diagnostics_ctx,
@@ -2224,6 +2500,7 @@ def _resolve_idp_value_column(df: pd.DataFrame, aliases: Sequence[str]) -> Optio
 
 def _write_connector_report(
     *,
+    mode: str = "real",
     status: str,
     reason: str,
     extras: Optional[Mapping[str, Any]] = None,
@@ -2232,7 +2509,7 @@ def _write_connector_report(
 ) -> None:
     payload: Dict[str, Any] = {
         "connector_id": "dtm_client",
-        "mode": "real",
+        "mode": mode,
         "status": status,
         "reason": reason,
         "http": dict(http or {}),
@@ -2255,6 +2532,22 @@ def _write_connector_report(
     with CONNECTORS_REPORT.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, default=str))
         handle.write("\n")
+    try:
+        LEGACY_CONNECTORS_REPORT.parent.mkdir(parents=True, exist_ok=True)
+        with LEGACY_CONNECTORS_REPORT.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str))
+            handle.write("\n")
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: unable to append legacy connectors report", exc_info=True)
+    _emit_summary_from_report(
+        mode=mode,
+        status=status,
+        reason=reason,
+        rows=int(payload["counts"].get("written", 0) or 0),
+        extras=extras_payload,
+        http=http_payload,
+        counts=payload["counts"],
+    )
     _mirror_legacy_diagnostics()
 
 
@@ -3241,6 +3534,8 @@ def _run_offline_smoke(
         "timings_ms": dict(timings_ms),
         "offline": True,
     }
+    extras_payload["staging_csv"] = str(OUT_PATH)
+    extras_payload["staging_meta"] = str(META_PATH)
 
     _write_meta(
         0,
@@ -3277,11 +3572,13 @@ def _run_offline_smoke(
             "deps": deps_payload,
             "rows_total": 0,
             "offline": True,
+            "staging_csv": str(OUT_PATH),
+            "staging_meta": str(META_PATH),
         },
         "args": vars(args),
     }
 
-    write_json(RUN_DETAILS_PATH, run_payload)
+    _write_run_details(run_payload)
     _mirror_legacy_diagnostics()
     if record_connector:
         _append_connectors_report(
@@ -3303,8 +3600,13 @@ def _finalize_skip_run(
     strict_empty: bool,
     no_date_filter: bool,
     args: argparse.Namespace,
+    mode: str = "skip",
+    log_message: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-    LOG.info("dtm: RESOLVER_SKIP_DTM detected; emitting header-only CSV and exiting")
+    if log_message:
+        LOG.info(log_message)
+    else:
+        LOG.info("dtm: RESOLVER_SKIP_DTM detected; emitting header-only CSV and exiting")
 
     http_payload: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     http_payload["retries"] = 0
@@ -3316,7 +3618,7 @@ def _finalize_skip_run(
     exit_code = 2 if strict_empty else 0
 
     extras_payload: Dict[str, Any] = {
-        "mode": "skip",
+        "mode": mode,
         "rows_total": 0,
         "status_raw": "skipped",
         "exit_code": exit_code,
@@ -3324,6 +3626,8 @@ def _finalize_skip_run(
         "no_date_filter": no_date_filter,
         "offline_smoke": False,
     }
+    extras_payload["staging_csv"] = str(OUT_PATH)
+    extras_payload["staging_meta"] = str(META_PATH)
 
     deps_payload = {
         "python": sys.version.split()[0],
@@ -3341,7 +3645,7 @@ def _finalize_skip_run(
         effective_params={},
         http_counters=http_payload,
         timings_ms={},
-        diagnostics={"mode": "skip", "reason": reason},
+        diagnostics={"mode": mode, "reason": reason},
         status="skipped",
         reason=reason,
         zero_rows_reason=reason,
@@ -3364,16 +3668,18 @@ def _finalize_skip_run(
         "reason": reason,
         "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
         "extras": {
-            "mode": "skip",
+            "mode": mode,
             "strict_empty": strict_empty,
             "no_date_filter": no_date_filter,
             "offline_smoke": False,
             "exit_code": exit_code,
+            "staging_csv": str(OUT_PATH),
+            "staging_meta": str(META_PATH),
         },
         "args": vars(args),
     }
 
-    write_json(RUN_DETAILS_PATH, run_payload)
+    _write_run_details(run_payload)
     _mirror_legacy_diagnostics()
     return extras_payload, http_payload, counts_payload
 
@@ -3398,19 +3704,15 @@ def _iter_level_pages(
     to_date: Optional[str],
     http_counts: MutableMapping[str, int],
 ):
-    method_name = ADMIN_METHODS.get(level)
-    fetcher = getattr(client, method_name) if method_name else None
-    if fetcher is None:
-        raise ValueError(f"Unsupported admin level: {level}")
-    kwargs = {
+    kwargs: Dict[str, Any] = {
         "country": country,
         "from_date": from_date,
         "to_date": to_date,
         "http_counts": http_counts,
     }
-    if level == "admin2" and operation:
+    if operation is not None:
         kwargs["operation"] = operation
-    frame = fetcher(**kwargs)
+    frame, _ = _call_admin_level(client, level, **kwargs)
     safe_kwargs = {key: value for key, value in kwargs.items() if key != "http_counts"}
     LOG.debug("dtm: fetched %s with params=%s", level, safe_kwargs)
     if frame is not None and not frame.empty:
@@ -3470,6 +3772,8 @@ def _fetch_level_pages_with_logging(
         raise
 
     elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+    method_used = getattr(client, "_dtm_last_method", method_name)
+    context["path"] = f"/{method_used}"
     rows = sum(int(page.shape[0]) for page in pages if hasattr(page, "shape"))
     size_bytes = 0
     for page in pages:
@@ -4791,6 +5095,7 @@ def _write_meta(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    _refresh_run_details_path()
     soft_timeouts = bool_from_env_or_flag("DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False))
     force_fake = bool_from_env_or_flag("DTM_FORCE_FAKE", getattr(args, "force_fake", False))
     fake_on_timeout = bool_from_env_or_flag("DTM_FAKE_ON_TIMEOUT", getattr(args, "fake_on_timeout", False))
@@ -5002,6 +5307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
         _write_connector_report(
+            mode="skip",
             status="skipped",
             reason=skip_reason,
             extras=extras_for_reports,
@@ -5010,6 +5316,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         OFFLINE = previous_offline
         return exit_code
+
+    env_auth_key = (
+        os.getenv("DTM_API_KEY")
+        or os.getenv("DTM_SUBSCRIPTION_KEY")
+        or os.getenv("DTM_API_PRIMARY_KEY")
+        or os.getenv("DTM_API_SECONDARY_KEY")
+        or ""
+    ).strip()
+
+    if not offline_smoke:
+        if not env_auth_key:
+            ensure_zero_row_outputs(offline=True)
+            extras_payload, http_payload, counts_payload = _finalize_skip_run(
+                reason="auth_missing",
+                strict_empty=strict_empty,
+                no_date_filter=no_date_filter,
+                args=args,
+                mode="auth_missing",
+                log_message="dtm: missing DTM API credentials; emitting header-only CSV",
+            )
+            extras_payload["auth_missing"] = True
+            extras_for_reports = dict(extras_payload)
+            extras_for_reports["auth_missing"] = True
+            _append_connectors_report(
+                mode="auth_missing",
+                status="skipped",
+                rows=0,
+                reason="auth_missing",
+                extras=extras_for_reports,
+                http=http_payload,
+                counts=counts_payload,
+            )
+            OFFLINE = previous_offline
+            return 0
 
     if offline_smoke:
         LOG.info("offline-smoke: header-only output (no API key required)")
@@ -5061,7 +5401,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         deps_payload["requests"],
     )
 
-    api_key_configured = bool((os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip())
+    api_key_configured = bool(env_auth_key)
     base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     base_http["rate_limit_remaining"] = None
     base_http["retries"] = 0
@@ -5138,7 +5478,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             },
             "args": vars(args),
         }
-        write_json(RUN_DETAILS_PATH, run_payload)
+        _write_run_details(run_payload)
         _mirror_legacy_diagnostics()
         LOG.error(reason)
         OFFLINE = previous_offline
@@ -5223,7 +5563,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 },
                 "args": vars(args),
             }
-            write_json(RUN_DETAILS_PATH, run_payload)
+            _write_run_details(run_payload)
             _mirror_legacy_diagnostics()
             LOG.error("dtm: auth probe failed: %s", exc)
             OFFLINE = previous_offline
@@ -5269,7 +5609,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 },
                 "args": vars(args),
             }
-            write_json(RUN_DETAILS_PATH, run_payload)
+            _write_run_details(run_payload)
             _mirror_legacy_diagnostics()
             LOG.error("dtm: auth probe error: %s", exc)
             OFFLINE = previous_offline
@@ -5830,7 +6170,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if rows_written == 0 and "api_sample_path" not in run_payload["extras"] and API_SAMPLE_PATH.exists():
         run_payload["extras"]["api_sample_path"] = str(API_SAMPLE_PATH)
 
-    write_json(RUN_DETAILS_PATH, run_payload)
+    _write_run_details(run_payload)
     _mirror_legacy_diagnostics()
     extras["run_details_path"] = str(RUN_DETAILS_PATH)
     extras["meta_path"] = str(META_PATH)
