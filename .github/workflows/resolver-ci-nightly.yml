@@ -488,18 +488,18 @@ jobs:
             fi
           done
 
-      - name: Collect diagnostics
+      - name: Collect diagnostics (always)
         if: always()
-        shell: bash
-        run: |
-          python scripts/ci/collect_diagnostics.py "${ART_DIR}"
+        uses: ./.github/actions/collect-diagnostics
+        with:
+          job_name: nightly-tests-db
 
-      - name: Upload summary.md
+      - name: Upload CI artifacts (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-ci-summary
-          path: ${{ env.ART_DIR }}/summary.md
+          name: nightly-tests-db-${{ env.RUN_TS }}
+          path: ${{ env.ART_DIR }}
           if-no-files-found: warn
           retention-days: 14
 

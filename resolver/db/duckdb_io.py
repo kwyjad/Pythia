@@ -168,8 +168,8 @@ def _connection_in_transaction(conn: "duckdb.DuckDBPyConnection") -> bool:
 
 
 def _is_savepoint_syntax_error(exc: Exception) -> bool:
-    message = str(exc)
-    return isinstance(exc, _PARSER_EXC) and "SAVEPOINT" in message.upper()
+    s = f"{type(exc).__name__}: {exc}".lower()
+    return "savepoint" in s and ("syntax error" in s or "parser error" in s or "not implemented" in s)
 
 
 def _record_savepoint_support(supported: bool) -> None:
@@ -188,55 +188,47 @@ def _savepoints_certainly_unsupported() -> bool:
 
 @contextmanager
 def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[None]:
-    """Wrap DuckDB DDL in a savepoint or standalone transaction."""
+    """Wrap DuckDB DDL in a savepoint when available or fall back to passthrough."""
+
+    if os.environ.get("RESOLVER_DUCKDB_DDL_TRANSACTIONS", "1") == "0":
+        _record_savepoint_support(False)
+        LOGGER.debug("duckdb.ddl.transactions_disabled | label=%s", label)
+        yield
+        return
 
     savepoint = f"sp_{uuid.uuid4().hex[:8]}"
-    mode: str
-
+    mode = "savepoint"
     try:
-        conn.execute(f"SAVEPOINT {savepoint}")
-    except Exception as exc:
-        LOGGER.debug(
-            "duckdb.ddl.savepoint_begin_failed | label=%s", label, exc_info=True
-        )
-        if _is_savepoint_syntax_error(exc):
-            _record_savepoint_support(False)
-            if _connection_in_transaction(conn):
+        try:
+            conn.execute(f"SAVEPOINT {savepoint}")
+            _record_savepoint_support(True)
+            LOGGER.debug(
+                "duckdb.ddl.savepoint_started | label=%s | savepoint=%s",
+                label,
+                savepoint,
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "duckdb.ddl.savepoint_begin_failed | label=%s", label, exc_info=True
+            )
+            if _is_savepoint_syntax_error(exc):
+                _record_savepoint_support(False)
                 mode = "passthrough"
-                LOGGER.debug(
-                    "duckdb.ddl.savepoint_passthrough | label=%s", label
-                )
+                LOGGER.debug("duckdb.ddl.passthrough_begin | label=%s", label)
             else:
-                try:
-                    conn.execute("BEGIN")
-                except Exception:
-                    LOGGER.debug(
-                        "duckdb.ddl.begin_failed | label=%s", label, exc_info=True
-                    )
-                    raise
-                else:
-                    mode = "begin"
-                    LOGGER.debug("duckdb.ddl.begin_started | label=%s", label)
-        else:
-            try:
-                conn.execute("BEGIN")
-            except Exception:
-                LOGGER.debug(
-                    "duckdb.ddl.begin_failed | label=%s", label, exc_info=True
-                )
                 raise
-            else:
-                mode = "begin"
-                LOGGER.debug("duckdb.ddl.begin_started | label=%s", label)
-    else:
-        _record_savepoint_support(True)
-        mode = "savepoint"
-        LOGGER.debug(
-            "duckdb.ddl.savepoint_started | label=%s | savepoint=%s", label, savepoint
-        )
 
-    try:
         yield
+
+        if mode == "savepoint":
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            LOGGER.debug(
+                "duckdb.ddl.savepoint_released | label=%s | savepoint=%s",
+                label,
+                savepoint,
+            )
+        else:
+            LOGGER.debug("duckdb.ddl.passthrough_completed | label=%s", label)
     except Exception:
         if mode == "savepoint":
             try:
@@ -246,7 +238,7 @@ def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[
                     label,
                     savepoint,
                 )
-            except Exception:  # pragma: no cover - defensive logging
+            except Exception:
                 LOGGER.debug(
                     "duckdb.ddl.savepoint_rollback_failed | label=%s | savepoint=%s",
                     label,
@@ -256,12 +248,7 @@ def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[
             finally:
                 try:
                     conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-                    LOGGER.debug(
-                        "duckdb.ddl.savepoint_released_after_error | label=%s | savepoint=%s",
-                        label,
-                        savepoint,
-                    )
-                except Exception:  # pragma: no cover - defensive logging
+                except Exception:
                     LOGGER.debug(
                         "duckdb.ddl.savepoint_release_failed | label=%s | savepoint=%s",
                         label,
@@ -269,30 +256,8 @@ def _ddl_transaction(conn: "duckdb.DuckDBPyConnection", label: str) -> Iterator[
                         exc_info=True,
                     )
         else:
-            if mode == "begin":
-                try:
-                    conn.execute("ROLLBACK")
-                    LOGGER.debug("duckdb.ddl.rollback_completed | label=%s", label)
-                except Exception:  # pragma: no cover - defensive logging
-                    LOGGER.debug(
-                        "duckdb.ddl.rollback_failed | label=%s", label, exc_info=True
-                    )
-            else:  # passthrough
-                LOGGER.debug("duckdb.ddl.passthrough_error | label=%s", label)
+            LOGGER.debug("duckdb.ddl.passthrough_error | label=%s", label)
         raise
-    else:
-        if mode == "savepoint":
-            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
-            LOGGER.debug(
-                "duckdb.ddl.savepoint_released | label=%s | savepoint=%s",
-                label,
-                savepoint,
-            )
-        elif mode == "begin":
-            conn.execute("COMMIT")
-            LOGGER.debug("duckdb.ddl.committed | label=%s", label)
-        else:
-            LOGGER.debug("duckdb.ddl.passthrough_completed | label=%s", label)
 
 
 def _run_ddl_batch(
