@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import subprocess
 import sys
 import textwrap
 import traceback
 from datetime import datetime, UTC
 from pathlib import Path
 from string import Template
-from typing import Iterable, Mapping, MutableMapping
+from typing import Iterable, List, Mapping, MutableMapping, Optional
 
 DEFAULT_ART_DIR = ".ci/diagnostics"
 
@@ -63,13 +65,35 @@ def _try_junit_totals(junit_path: Path) -> Mapping[str, object]:
         "errors": 0,
         "skipped": 0,
         "time": 0.0,
+        "failures_detail": [],
     }
+    details: List[Mapping[str, object]] = []
     for suite in suites:
         totals["tests"] += int(suite.attrib.get("tests", 0))
         totals["failures"] += int(suite.attrib.get("failures", 0))
         totals["errors"] += int(suite.attrib.get("errors", 0))
         totals["skipped"] += int(suite.attrib.get("skipped", 0))
         totals["time"] += float(suite.attrib.get("time", 0.0))
+        for case in suite.findall("testcase"):
+            duration = float(case.attrib.get("time", 0.0))
+            testcase_name = case.attrib.get("name", "")
+            classname = case.attrib.get("classname", "")
+            full_name = ".".join(filter(None, (classname, testcase_name))) or testcase_name
+            for failure_tag in ("failure", "error"):
+                for node in case.findall(failure_tag):
+                    message = (node.attrib.get("message") or "").strip()
+                    text = (node.text or "").strip()
+                    trace_tail = "\n".join(text.splitlines()[-12:]) if text else ""
+                    details.append(
+                        {
+                            "name": full_name or testcase_name or "(unknown)",
+                            "message": message or failure_tag,
+                            "trace": trace_tail,
+                            "time": duration,
+                            "type": failure_tag,
+                        }
+                    )
+    totals["failures_detail"] = details
 
     return {"status": "present", **totals}
 
@@ -140,17 +164,139 @@ def _duckdb_inspect(db_path: Path) -> Mapping[str, object]:
             pass
 
 
-def _render_summary(env: Mapping[str, str], junit: Mapping[str, object], *, lda_log: str, normalize_log: str, pip_freeze: str, duckdb_report: Mapping[str, object]) -> str:
+def _format_failures(junit: Mapping[str, object]) -> str:
+    detail = junit.get("failures_detail") if isinstance(junit, Mapping) else None
+    if not detail or not isinstance(detail, list):
+        return "No test failures recorded."
+    lines: List[str] = []
+    for entry in list(detail)[:5]:
+        name = str(entry.get("name", "(unknown)")) if isinstance(entry, Mapping) else "(unknown)"
+        message = str(entry.get("message", "")) if isinstance(entry, Mapping) else ""
+        duration = entry.get("time", 0.0) if isinstance(entry, Mapping) else 0.0
+        try:
+            duration_val = float(duration)
+        except (TypeError, ValueError):
+            duration_val = 0.0
+        summary_line = f"- **{name}** ({duration_val:.3f}s)"
+        if message:
+            summary_line += f" — {message}"
+        lines.append(summary_line)
+        trace = str(entry.get("trace", "")) if isinstance(entry, Mapping) else ""
+        if trace.strip():
+            lines.append("  ```")
+            lines.extend(f"  {line}" for line in trace.strip().splitlines())
+            lines.append("  ```")
+    if len(detail) > 5:
+        lines.append(f"- … {len(detail) - 5} additional failure(s) omitted")
+    return "\n".join(lines) or "No test failures recorded."
+
+
+def _selected_env_block() -> str:
+    interesting = [
+        "GITHUB_WORKFLOW",
+        "GITHUB_JOB",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_ATTEMPT",
+        "RESOLVER_DB_URL",
+        "RESOLVER_API_BACKEND",
+        "PYTHONPATH",
+    ]
+    return "\n".join(f"{key}={os.environ.get(key, '')}" for key in interesting)
+
+
+def _pip_freeze_output(art_dir: Path) -> str:
+    freeze_path = art_dir / "pip-freeze.txt"
+    if freeze_path.exists():
+        return freeze_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        output = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True)
+    except Exception as exc:
+        return f"pip freeze failed: {exc}"
+    try:
+        freeze_path.write_text(output, encoding="utf-8")
+    except Exception:
+        pass
+    return output
+
+
+def _find_run_details_path() -> Optional[Path]:
+    candidates: List[Path] = []
+    override = os.environ.get("RUN_DETAILS_PATH") or os.environ.get(
+        "RESOLVER_RUN_DETAILS_PATH"
+    )
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(
+        [
+            Path("diagnostics/ingestion/dtm/dtm_run.json"),
+            Path("resolver/diagnostics/ingestion/dtm/dtm_run.json"),
+        ]
+    )
+    for candidate in candidates:
+        try:
+            expanded = candidate.expanduser()
+            if not expanded.is_absolute():
+                expanded = (Path.cwd() / expanded).resolve()
+        except Exception:
+            continue
+        if expanded.exists():
+            return expanded
+    return None
+
+
+def _collect_run_details(art_dir: Path) -> str:
+    path = _find_run_details_path()
+    if not path:
+        return ""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    target = art_dir / path.name
+    try:
+        if path.resolve() != target.resolve():
+            target.write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+    return content
+
+
+def _render_summary(
+    env: Mapping[str, str],
+    junit: Mapping[str, object],
+    *,
+    pytest_failures: str,
+    env_block: str,
+    lda_log: str,
+    normalize_log: str,
+    pip_freeze: str,
+    duckdb_report: Mapping[str, object],
+    run_details: str,
+    pytest_tail: str,
+) -> str:
     pytest_summary = "JUnit report: unavailable"
     if junit:
         status = str(junit.get("status", "unknown"))
         if status == "present":
+            totals = {
+                key: junit.get(key, 0)
+                for key in ("tests", "failures", "errors", "skipped", "time")
+            }
+            try:
+                totals["time"] = float(totals.get("time", 0.0))
+            except (TypeError, ValueError):
+                totals["time"] = 0.0
             pytest_summary = (
-                "tests={tests} failures={failures} errors={errors} skipped={skipped} "
-                "time={time}".format(**{k: junit.get(k, 0) for k in ("tests", "failures", "errors", "skipped", "time")})
-            )
+                "tests={tests} failures={failures} errors={errors} skipped={skipped} time={time:.2f}s"
+            ).format(**totals)
         else:
             pytest_summary = f"JUnit report: {status}"
+
+    duckdb_json = json.dumps(duckdb_report, indent=2, ensure_ascii=False)
+    env_text = env_block.strip() or "(no additional environment variables captured)"
+    pip_text = pip_freeze.strip() or "(pip freeze unavailable)"
+    run_details_text = run_details.strip() or "{}"
+    pytest_tail_text = pytest_tail.strip() or "(no pytest output captured)"
 
     tmpl = Template(
         textwrap.dedent(
@@ -158,16 +304,41 @@ def _render_summary(env: Mapping[str, str], junit: Mapping[str, object], *, lda_
             # CI Diagnostics Summary
 
             ## Run Metadata
-            Commit: $commit  
-            Ref: $ref  
-            Workflow: $workflow  
-            Job: $job  
-            Run ID: $run_id  Attempt: $attempt  
-            Timestamp (UTC): $ts  
+            Commit: $commit
+            Ref: $ref
+            Workflow: $workflow
+            Job: $job
+            Run ID: $run_id  Attempt: $attempt
+            Timestamp (UTC): $ts
             Python: $python  OS: $os
+            Platform: $platform
+            Python executable: $python_executable
 
             ## Pytest Summary
             $pytest_summary
+
+            ## Pytest Failures (top entries)
+            $pytest_failures
+
+            ## Environment (selected)
+            ```
+            $env_block
+            ```
+
+            ## pip freeze
+            ```
+            $pip_freeze
+            ```
+
+            ## DTM run-details
+            ```json
+            $run_details
+            ```
+
+            ## Pytest output tail
+            ```
+            $pytest_tail
+            ```
 
             ## Command Tails
             ### lda-all
@@ -180,18 +351,11 @@ def _render_summary(env: Mapping[str, str], junit: Mapping[str, object], *, lda_
             ```json
             $duckdb_json
             ```
-
-            ## pip freeze
-            ```
-            $pip_freeze
-            ```
             """
         ).strip()
     )
 
-    duckdb_json = json.dumps(duckdb_report, indent=2, ensure_ascii=False)
-
-    return tmpl.substitute(
+    return tmpl.safe_substitute(
         commit=env.get("commit", "(unknown)"),
         ref=env.get("ref", "(unknown)"),
         workflow=env.get("workflow", "(unknown)"),
@@ -201,11 +365,17 @@ def _render_summary(env: Mapping[str, str], junit: Mapping[str, object], *, lda_
         ts=env.get("ts", "(unknown)"),
         python=env.get("python", "(unknown)"),
         os=env.get("os", "(unknown)"),
+        platform=env.get("platform", platform.platform()),
+        python_executable=env.get("python_executable", sys.executable),
         pytest_summary=pytest_summary,
+        pytest_failures=pytest_failures,
+        env_block=env_text,
+        pip_freeze=pip_text,
+        run_details=run_details_text,
+        pytest_tail=pytest_tail_text,
         lda_log=lda_log,
         normalize_log=normalize_log,
         duckdb_json=duckdb_json,
-        pip_freeze=pip_freeze,
     )
 
 
@@ -221,6 +391,8 @@ def _gather_env() -> Mapping[str, str]:
         "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "python": sys.version.split()[0],
         "os": uname,
+        "platform": platform.platform(),
+        "python_executable": sys.executable,
     }
 
 
@@ -249,19 +421,40 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     try:
         env = _gather_env()
-        junit = _try_junit_totals(art_dir / "pytest-junit.xml")
-        pip_freeze = _read_text(art_dir / "pip-freeze.txt")
+        junit_path = art_dir / "pytest-junit.xml"
+        if not junit_path.exists() and Path("pytest-junit.xml").exists():
+            try:
+                junit_path.write_text(Path("pytest-junit.xml").read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            except Exception:
+                pass
+        junit = _try_junit_totals(junit_path)
+        pip_freeze = _pip_freeze_output(art_dir)
         lda_log = _read_text(art_dir / "lda-all.log")
         normalize_log = _read_text(art_dir / "normalize.log")
         duckdb_report = _duckdb_inspect(Path("data/resolver.duckdb"))
+        run_details = _collect_run_details(art_dir)
+
+        pytest_log_path = Path("pytest-Linux.log")
+        pytest_tail = ""
+        if pytest_log_path.exists():
+            try:
+                tail_lines = pytest_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                tail_lines = []
+            if tail_lines:
+                pytest_tail = "\n".join(tail_lines[-400:])
 
         summary_text = _render_summary(
             env,
             junit,
+            pytest_failures=_format_failures(junit),
+            env_block=_selected_env_block(),
             lda_log=lda_log,
             normalize_log=normalize_log,
             pip_freeze=pip_freeze,
             duckdb_report=duckdb_report,
+            run_details=run_details,
+            pytest_tail=pytest_tail,
         )
 
         _write_summary_files(art_dir, summary_text)
