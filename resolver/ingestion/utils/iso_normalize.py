@@ -144,10 +144,10 @@ def resolve_iso3(
     """
 
     if fields is None:
-        return None, "missing_fields"
+        return None, "no_iso3"
 
     iso_fields = ("admin0Pcode", "CountryPcode", "CountryISO3", "ISO3", "iso3")
-    invalid_sources: list[str] = []
+    bad_iso_detected = False
 
     for key in iso_fields:
         if key not in fields:
@@ -160,8 +160,11 @@ def resolve_iso3(
             continue
         iso_candidate = to_iso3(text, aliases)
         if iso_candidate:
-            return iso_candidate, None
-        invalid_sources.append(key)
+            iso_upper = iso_candidate.strip().upper()
+            if text.strip().upper() == iso_upper:
+                return iso_upper, None
+            return iso_upper, "bad_iso"
+        bad_iso_detected = True
 
     ordered_name_keys = list(name_keys or [])
     for fallback_key in ("CountryName", "Country", "country", "admin0Name"):
@@ -176,11 +179,12 @@ def resolve_iso3(
             continue
         iso_candidate = to_iso3(value, aliases)
         if iso_candidate:
-            return iso_candidate, None
+            iso_upper = iso_candidate.strip().upper()
+            return iso_upper, "bad_iso" if bad_iso_detected else None
 
-    if invalid_sources:
-        return None, "invalid_iso_fields:" + ",".join(sorted(set(invalid_sources)))
-    return None, "missing_iso_source"
+    if bad_iso_detected:
+        return None, "bad_iso"
+    return None, "no_iso3"
 
 
 __all__ = ["to_iso3", "resolve_iso3"]

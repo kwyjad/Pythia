@@ -618,3 +618,25 @@ when running inside Actions):
 
 Empty or invalid inputs no longer halt the export; instead they surface warnings, appear under
 `unmatched_files`, and allow remaining files to map successfully.
+
+### DTM normalize diagnostics schema
+
+The DTM ingestion client writes `diagnostics/ingestion/dtm/dtm_run.json` after each run. The
+`extras.normalize` block provides a stable shape for the diagnostics that downstream tooling and
+tests rely on:
+
+- `rows_fetched` / `rows_normalized` / `rows_written` — integer counters describing the records
+  processed through the normalization pipeline.
+- `drop_reasons` — a dictionary containing counts for every standard key (present even when `0`):
+  `no_iso3`, `no_value_col`, `bad_iso`, `unknown_country`, `missing_value`, `non_positive_value`,
+  `non_integer_value`, `missing_as_of`, `future_as_of`, `invalid_semantics`, and `other`.
+- `chosen_value_columns` — ordered list of objects with `column` and `count` describing how many
+  pre-normalization rows matched each candidate value column (for example the preferred
+  `TotalIDPs`).
+- `config` — a sub-block exposing the effective configuration: `countries_mode` (for example
+  `explicit_config`, `discovered`, or `static_iso3`) and the list of `admin_levels` attempted for
+  the run.
+
+When new drop reasons are added, they should be appended to the canonical list while keeping the
+existing keys in place to avoid breaking analysis notebooks and the regression tests in
+`resolver/tests/test_iso_normalize_and_drop_reasons.py`.

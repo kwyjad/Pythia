@@ -184,6 +184,8 @@ SERIES_INCIDENT = "incident"
 SERIES_CUMULATIVE = "cumulative"
 
 _NORMALIZE_DROP_KEYS = [
+    "no_iso3",
+    "no_value_col",
     "bad_iso",
     "unknown_country",
     "missing_value",
@@ -192,6 +194,10 @@ _NORMALIZE_DROP_KEYS = [
     "missing_as_of",
     "future_as_of",
     "invalid_semantics",
+    "date_parse_failed",
+    "date_out_of_window",
+    "no_country_match",
+    "other",
 ]
 
 
@@ -3644,6 +3650,7 @@ def _finalize_skip_run(
     args: argparse.Namespace,
     mode: str = "skip",
     log_message: Optional[str] = None,
+    skip_flags: Optional[Mapping[str, bool]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     if log_message:
         LOG.info(log_message)
@@ -3668,6 +3675,8 @@ def _finalize_skip_run(
         "no_date_filter": no_date_filter,
         "offline_smoke": False,
     }
+    if isinstance(skip_flags, Mapping):
+        extras_payload["skip_flags"] = {key: bool(value) for key, value in skip_flags.items()}
     extras_payload["staging_csv"] = str(OUT_PATH)
     extras_payload["staging_meta"] = str(META_PATH)
 
@@ -3720,6 +3729,10 @@ def _finalize_skip_run(
         },
         "args": vars(args),
     }
+    if isinstance(skip_flags, Mapping):
+        run_payload["extras"]["skip_flags"] = {
+            key: bool(value) for key, value in skip_flags.items()
+        }
 
     _write_run_details(run_payload)
     _mirror_legacy_diagnostics()
@@ -3849,7 +3862,10 @@ def _fetch_level_pages_with_logging(
 
 def _resolve_admin_levels(cfg: Mapping[str, Any]) -> List[str]:
     api_cfg = cfg.get("api", {})
-    configured = api_cfg.get("admin_levels") or cfg.get("admin_levels")
+    configured_raw = api_cfg.get("admin_levels")
+    if configured_raw is None:
+        configured_raw = cfg.get("admin_levels")
+    configured = _normalize_list(configured_raw)
     if not configured:
         return ["admin0"]
     levels = []
@@ -3950,14 +3966,8 @@ def _fetch_api_data(
     summary_extras["per_country_counts"] = per_country_counts
     summary_extras["per_country"] = per_country_diagnostics
     summary_extras["failures"] = failures
-    drop_reasons_counter = {
-        "no_country_match": 0,
-        "no_iso3": 0,
-        "no_value_col": 0,
-        "date_out_of_window": 0,
-        "date_parse_failed": 0,
-        "other": 0,
-    }
+    drop_reasons_counter = {key: 0 for key in _NORMALIZE_DROP_KEYS}
+    drop_reasons_counter.setdefault("no_country_match", 0)
     summary_extras["drop_reasons_counter"] = drop_reasons_counter
     value_column_usage: Dict[str, int] = {}
     summary_extras["value_column_usage"] = value_column_usage
@@ -4190,6 +4200,11 @@ def _fetch_api_data(
     for alias in (field_mapping.get("idp_column"), *base_idp_aliases):
         if alias and alias not in idp_candidates:
             idp_candidates.append(alias)
+    for alias in idp_candidates:
+        alias_str = str(alias)
+        if not alias_str:
+            continue
+        value_column_usage.setdefault(alias_str, 0)
 
     aliases = cfg.get("country_aliases") or {}
     measure = str(cfg.get("output", {}).get("measure", "stock")).strip().lower()
@@ -4383,6 +4398,22 @@ def _fetch_api_data(
                     if level == "admin0":
                         original_columns = list(page.columns)
 
+                        candidate_counts: Dict[str, int] = {}
+                        for alias in idp_candidates:
+                            alias_str = str(alias)
+                            if not alias_str:
+                                continue
+                            if alias_str in page.columns:
+                                numeric_series = pd.to_numeric(page[alias_str], errors="coerce")
+                                count = int(numeric_series.notna().sum())
+                            else:
+                                count = 0
+                            candidate_counts[alias_str] = count
+                            if alias_str not in value_column_usage:
+                                value_column_usage[alias_str] = 0
+                            if count:
+                                value_column_usage[alias_str] += count
+
                         date_col, parsed_dates, date_diag = _first_parsable_date_column(
                             page, _DATE_CANDIDATES
                         )
@@ -4425,9 +4456,9 @@ def _fetch_api_data(
                         chosen_count = int(chosen_entries[0]["count"]) if chosen_entries else 0
                         LOG.info("resolved value column: idp_count_col=%r", chosen_column)
                         if chosen_column:
-                            value_column_usage[chosen_column] = value_column_usage.get(
-                                chosen_column, 0
-                            ) + chosen_count
+                            value_column_usage.setdefault(chosen_column, 0)
+                            if chosen_column not in candidate_counts:
+                                value_column_usage[chosen_column] += chosen_count
                         normalized_page = normalized_result.get("df", pd.DataFrame())
                         summary.setdefault("rows", {}).setdefault("dropped", 0)
                         summary["rows"]["dropped"] += max(
@@ -5183,14 +5214,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
-    skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
+    skip_env_requested = _env_bool("RESOLVER_SKIP_DTM", False)
+    force_run_override = _env_bool("DTM_FORCE_RUN", False)
+    skip_requested = skip_env_requested and not force_run_override
+    skip_flags = {
+        "RESOLVER_SKIP_DTM": skip_env_requested,
+        "DTM_FORCE_RUN": force_run_override,
+    }
+    if skip_env_requested and force_run_override:
+        LOG.info("dtm: DTM_FORCE_RUN override active; proceeding despite RESOLVER_SKIP_DTM")
     offline_mode = skip_requested or bool(offline_smoke)
     previous_offline = OFFLINE
     OFFLINE = offline_mode
     if skip_requested:
         LOG.info("Skip mode: no real network calls; writing header & trace placeholder")
     if OFFLINE:
-        LOG.debug("dtm: offline gating enabled (skip=%s offline_smoke=%s)", skip_requested, offline_smoke)
+        LOG.debug(
+            "dtm: offline gating enabled (skip=%s offline_smoke=%s)",
+            skip_requested,
+            offline_smoke,
+        )
 
     if skip_requested:
         skip_reason = "disabled via RESOLVER_SKIP_DTM"
@@ -5200,6 +5243,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             strict_empty=strict_empty,
             no_date_filter=no_date_filter,
             args=args,
+            skip_flags=skip_flags,
         )
         window_start_iso, window_end_iso, window_override_env = _resolve_effective_window()
         config_candidate = _resolve_config_path()
@@ -5440,6 +5484,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "soft_timeouts": bool(soft_timeouts),
         "force_fake": bool(force_fake),
         "fake_on_timeout": bool(fake_on_timeout),
+        "skip_flags": dict(skip_flags),
     }
     base_extras["config"] = {
         "config_path_used": config_path_text,
@@ -5486,6 +5531,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "timings_ms": dict(timings_ms),
                 "strict_empty": strict_empty,
                 "no_date_filter": no_date_filter,
+                "skip_flags": dict(skip_flags),
             },
             "args": vars(args),
         }
@@ -5504,6 +5550,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args=args,
             mode="auth_missing",
             log_message="dtm: missing DTM API credentials; emitting header-only CSV",
+            skip_flags=skip_flags,
         )
         extras_payload["auth_missing"] = True
         extras_for_reports = dict(extras_payload)
@@ -5597,6 +5644,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "no_date_filter": no_date_filter,
                     "offline": OFFLINE,
                     "auth_error": "unauthorized",
+                    "skip_flags": dict(skip_flags),
                 },
                 "args": vars(args),
             }
@@ -5643,6 +5691,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "no_date_filter": no_date_filter,
                     "offline": OFFLINE,
                     "auth_error": "exception",
+                    "skip_flags": dict(skip_flags),
                 },
                 "args": vars(args),
             }
@@ -6022,7 +6071,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     summary_extras["discovery"] = discovery_extras
 
     drop_counts_raw = summary_extras.get("drop_reasons_counter", {})
-    drop_counts = {key: int(value) for key, value in drop_counts_raw.items()} if isinstance(drop_counts_raw, Mapping) else {}
+    drop_counts: Dict[str, int] = {}
+    if isinstance(drop_counts_raw, Mapping):
+        for key, value in drop_counts_raw.items():
+            try:
+                drop_counts[str(key)] = int(value)
+            except Exception:
+                continue
+    for key in _NORMALIZE_DROP_KEYS:
+        drop_counts.setdefault(key, 0)
     value_usage_raw = summary_extras.get("value_column_usage", {})
     value_usage = (
         {str(key): int(value) for key, value in value_usage_raw.items()}
@@ -6035,6 +6092,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ]
     summary_extras.pop("drop_reasons_counter", None)
     summary_extras.pop("value_column_usage", None)
+
+    skip_flags_ref = base_extras.get("skip_flags") if isinstance(base_extras, Mapping) else None
+    if isinstance(skip_flags_ref, Mapping):
+        summary_extras.setdefault("skip_flags", dict(skip_flags_ref))
 
     resolved_countries = []
     countries_info = summary.get("countries") if isinstance(summary, Mapping) else {}
@@ -6134,6 +6195,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rows_written": rows_written,
         "drop_reasons": drop_counts,
         "chosen_value_columns": chosen_value_columns,
+    }
+    normalize_block["config"] = {
+        "countries_mode": countries_mode,
+        "admin_levels": admin_levels_list,
     }
     if attempted_dates:
         normalize_block["attempted_date_columns"] = list(attempted_dates)
