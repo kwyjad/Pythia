@@ -22,7 +22,31 @@ import traceback
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from pathlib import Path
+from typing import List, Tuple
 import subprocess
+
+
+def _render_section(heading: str, body: str, *, level: int = 2) -> str:
+    prefix = "#" * max(level, 1)
+    cleaned = body.rstrip()
+    return f"{prefix} {heading}\n\n{cleaned}\n"
+
+
+def _write_summary_md(art_dir: Path, sections: List[Tuple[str, str]]) -> Path:
+    art_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = art_dir / "summary.md"
+    parts = []
+    for index, (heading, body) in enumerate(sections):
+        level = 1 if index == 0 else 2
+        parts.append(_render_section(heading, body, level=level))
+    content = "\n".join(parts).strip() + "\n"
+    _write_text(summary_path, content)
+
+    # Maintain backwards compatibility with legacy collectors expecting
+    # an uppercase file name.
+    legacy_summary = art_dir / "SUMMARY.md"
+    _write_text(legacy_summary, content)
+    return summary_path
 
 KEY_ENV_VARS = [
     "GITHUB_REPOSITORY", "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW",
@@ -146,39 +170,33 @@ def main():
         # Python version
         py_ver = sys.version.replace("\n", " ")
 
-        tree = _tree_listing(art_dir)
+        tree_listing = _tree_listing(art_dir)
 
-        lines: list[str] = [
-            "# CI Diagnostics Summary",
+        overview_lines = [
             f"Generated: {now_utc}",
             f"Artifacts directory: `{art_dir}`",
-            "",
-            "## Run Metadata",
-            "",
-            meta_table,
-            "",
-            "## Python",
-            f"`{py_ver}`",
-            "",
-            "## Environment Variables (env.txt)",
-            "```bash",
-            env_preview,
-            "```",
-            "",
-            "## pip freeze",
-            "```",
-            freeze_preview,
-            "```",
-            "",
-            "## Test Results",
-            junit_block,
-            "",
-            "## Artifact Listing",
-            tree,
+        ]
+        diagnostics_dir_display = (art_dir / "diagnostics").as_posix()
+        print("# CI Diagnostics Summary")
+        print(f"Generated: {now_utc}")
+        print(f"Artifacts: {diagnostics_dir_display}")
+        print(f"Python: {sys.version.split()[0]}")
+
+        env_block = "```bash\n" + env_preview.rstrip() + "\n```"
+        freeze_block = "```\n" + freeze_preview.rstrip() + "\n```"
+        tree_block = "```\n" + tree_listing.rstrip() + "\n```"
+
+        sections = [
+            ("CI Diagnostics Summary", "\n".join(overview_lines)),
+            ("Run Metadata", meta_table),
+            ("Python", f"`{py_ver}`"),
+            ("Environment Variables (env.txt)", env_block),
+            ("pip freeze", freeze_block),
+            ("Test Results", junit_block),
+            ("Artifact Listing", tree_block),
         ]
 
-        summary_path = art_dir / "SUMMARY.md"
-        _write_text(summary_path, "\n".join(lines).strip() + "\n")
+        summary_path = _write_summary_md(art_dir, sections)
 
         step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if step_summary:
@@ -193,9 +211,12 @@ def main():
     except Exception as e:
         # Last resort: never crash the job — emit a minimal summary.
         tb = traceback.format_exc()
-        fallback = "# CI Diagnostics Summary (fallback)\n\nError while writing summary:\n\n```\n" + tb + "\n```"
-        summary_path = art_dir / "SUMMARY.md"
-        _write_text(summary_path, fallback)
+        fallback_body = "Error while writing summary:\n\n```\n" + tb + "\n```"
+        fallback = "# CI Diagnostics Summary (fallback)\n\n" + fallback_body
+        summary_path = _write_summary_md(
+            art_dir,
+            [("CI Diagnostics Summary (fallback)", fallback_body)],
+        )
         step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if step_summary:
             try:

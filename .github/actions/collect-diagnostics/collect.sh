@@ -1,53 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEST_DIR="${1:-}"
-if [[ -z "${DEST_DIR}" ]]; then
-  if [[ -n "${ART_DIR:-}" ]]; then
-    DEST_DIR="${ART_DIR}"
-  else
-    DEST_DIR=".ci/diagnostics"
-  fi
+ART_DIR="${1:-${ART_DIR:-}}"
+if [[ -z "${ART_DIR}" ]]; then
+  echo "Usage: collect.sh <ART_DIR>" >&2
+  exit 1
 fi
 
+mkdir -p "${ART_DIR}"
+DEST_DIR="${ART_DIR}/diagnostics"
 mkdir -p "${DEST_DIR}"
 
-SOURCE_DIR="${ART_DIR:-}"
-if [[ -n "${SOURCE_DIR}" && -d "${SOURCE_DIR}" && "${SOURCE_DIR}" != "${DEST_DIR}" ]]; then
-  rsync -a "${SOURCE_DIR}/" "${DEST_DIR}/" || true
-fi
-
-copy_if_exists() {
-  local path="$1"
-  if [[ -n "${path}" && -f "${path}" ]]; then
-    cp -f "${path}" "${DEST_DIR}/" || true
+copy_tree() {
+  local src="$1"
+  local dest="$2"
+  if [[ -d "${src}" ]]; then
+    mkdir -p "${dest}"
+    cp -R "${src}/." "${dest}/" 2>/dev/null || true
   fi
 }
 
-copy_if_exists "${DEST_DIR}/env.txt"
-copy_if_exists "${DEST_DIR}/pip-freeze.txt"
-copy_if_exists "${SOURCE_DIR}/env.txt"
-copy_if_exists "${SOURCE_DIR}/pip-freeze.txt"
-copy_if_exists "env.txt"
-copy_if_exists "pip-freeze.txt"
-copy_if_exists "${SOURCE_DIR}/pytest-junit.xml"
-copy_if_exists "${SOURCE_DIR}/db.junit.xml"
-copy_if_exists "pytest-junit.xml"
-copy_if_exists "db.junit.xml"
-log_candidate=".ci/pytest-${RUNNER_OS:-Linux}.out.log"
-copy_if_exists "${log_candidate}"
+copy_tree ".ci/diagnostics" "${DEST_DIR}/ci"
+copy_tree "diagnostics" "${DEST_DIR}/ingestion"
+copy_tree "${ART_DIR}/ci-diagnostics" "${DEST_DIR}/ci"
+copy_tree "${ART_DIR}/diagnostics" "${DEST_DIR}/ingestion"
 
-if [[ ! -f "${DEST_DIR}/SUMMARY.md" ]]; then
-  if ! python scripts/ci/generate_summary.py --out "${DEST_DIR}/SUMMARY.md"; then
-    {
-      echo "# CI Diagnostics Summary (fallback)"
-      echo "Generator failed; see raw artifacts."
-    } > "${DEST_DIR}/SUMMARY.md"
-  fi
+SUMMARY_PATH="${ART_DIR}/summary.md"
+LEGACY_SUMMARY="${ART_DIR}/SUMMARY.md"
+if [[ -f "${LEGACY_SUMMARY}" && ! -f "${SUMMARY_PATH}" ]]; then
+  cp -f "${LEGACY_SUMMARY}" "${SUMMARY_PATH}"
+fi
+if [[ ! -f "${SUMMARY_PATH}" ]]; then
+  {
+    echo "# CI Diagnostics Summary"
+    echo
+    echo "(no summary generated)"
+  } > "${SUMMARY_PATH}"
+  cp -f "${SUMMARY_PATH}" "${LEGACY_SUMMARY}"
 fi
 
-if [[ -n "${GITHUB_STEP_SUMMARY:-}" && -f "${DEST_DIR}/SUMMARY.md" ]]; then
-  cat "${DEST_DIR}/SUMMARY.md" >> "${GITHUB_STEP_SUMMARY}"
-fi
-
-echo "Diagnostics ready in ${DEST_DIR} (flat folder, no nested zips)."
+echo "Collected diagnostics into ${ART_DIR}" 
+ls -la "${ART_DIR}" || true
