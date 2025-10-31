@@ -1,231 +1,282 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Render a consolidated CI diagnostics summary without fragile f-strings."""
 
-"""
-Collect CI diagnostics into a single directory and render a single summary.md.
+from __future__ import annotations
 
-Design:
-- Never zip. Let upload-artifact compress once.
-- Never crash on missing inputs. Emit placeholders instead.
-- One-stop summary with:
-  * Run metadata (GitHub env)
-  * Python version + pip freeze
-  * Selected env vars relevant to Resolver
-  * Pytest JUnit digest (if present)
-  * Artifact tree listing
-"""
-
+import json
 import os
 import sys
 import textwrap
 import traceback
-from datetime import datetime, timezone
-from xml.etree import ElementTree as ET
+from datetime import datetime, UTC
 from pathlib import Path
-from typing import List, Tuple
-import subprocess
+from string import Template
+from typing import Iterable, Mapping, MutableMapping
+
+DEFAULT_ART_DIR = ".ci/diagnostics"
 
 
-def _render_section(heading: str, body: str, *, level: int = 2) -> str:
-    prefix = "#" * max(level, 1)
-    cleaned = body.rstrip()
-    return f"{prefix} {heading}\n\n{cleaned}\n"
+def _resolve_art_dir(argv: Iterable[str]) -> Path:
+    args = list(argv)
+    if len(args) >= 2 and args[1]:
+        target = Path(args[1])
+    else:
+        target = Path(os.environ.get("ART_DIR", DEFAULT_ART_DIR))
+    target = target.resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
-def _write_summary_md(art_dir: Path, sections: List[Tuple[str, str]]) -> Path:
-    art_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = art_dir / "summary.md"
-    parts = []
-    for index, (heading, body) in enumerate(sections):
-        level = 1 if index == 0 else 2
-        parts.append(_render_section(heading, body, level=level))
-    content = "\n".join(parts).strip() + "\n"
-    _write_text(summary_path, content)
-
-    # Maintain backwards compatibility with legacy collectors expecting
-    # an uppercase file name.
-    legacy_summary = art_dir / "SUMMARY.md"
-    _write_text(legacy_summary, content)
-    return summary_path
-
-KEY_ENV_VARS = [
-    "GITHUB_REPOSITORY", "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW",
-    "GITHUB_JOB", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
-    "RUN_TS", "SAFE_SUFFIX",
-    "RESOLVER_API_BACKEND", "RESOLVER_DB_URL",
-    "RESOLVER_LOG_LEVEL", "PYTEST_ADDOPTS", "PYTHONPATH",
-    "RESOLVER_EXPORT_ENABLE_FLOW", "RESOLVER_SKIP_DTM",
-]
-
-def _write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-def _safe_read(path: Path) -> str:
+def _read_text(path: Path, default: str = "(no output captured)") -> str:
     try:
-        return path.read_text(encoding="utf-8")
-    except Exception as e:
-        return f"{path.name} missing ({repr(e)})"
+        if path.exists():
+            return path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    return default
 
-def _run_cmd(cmd, cwd=None) -> str:
+
+def _try_junit_totals(junit_path: Path) -> Mapping[str, object]:
     try:
-        out = subprocess.check_output(cmd, cwd=cwd, stderr=subprocess.STDOUT, text=True)
-        return out
-    except Exception as e:
-        return f"Command {cmd!r} failed: {e}"
+        import xml.etree.ElementTree as ET
+    except Exception as exc:  # pragma: no cover - extremely unlikely on CI images
+        return {"status": f"xml unavailable: {exc}"}
 
-def _parse_junit(junit_path: Path) -> dict:
     if not junit_path.exists():
-        return {"present": False}
+        return {"status": "absent"}
+
     try:
-        root = ET.parse(junit_path).getroot()
-        # JUnit root may be <testsuite> or <testsuites>
-        suites = []
-        if root.tag == "testsuite":
-            suites = [root]
-        elif root.tag == "testsuites":
-            suites = list(root.findall("testsuite"))
-        total = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "time": 0.0}
-        for s in suites:
-            total["tests"] += int(s.attrib.get("tests", 0))
-            total["failures"] += int(s.attrib.get("failures", 0))
-            total["errors"] += int(s.attrib.get("errors", 0))
-            total["skipped"] += int(s.attrib.get("skipped", 0))
-            total["time"] += float(s.attrib.get("time", 0.0))
-        return {"present": True, "totals": total}
-    except Exception as e:
-        return {"present": False, "error": repr(e)}
+        root = ET.fromstring(junit_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return {"status": f"unreadable: {exc}"}
 
-def _tree_listing(root_dir: Path) -> str:
-    lines = []
-    for dirpath, dirnames, filenames in os.walk(root_dir):
-        rel = os.path.relpath(dirpath, root_dir)
-        prefix = "." if rel == "." else rel
-        lines.append(prefix + "/")
-        for f in sorted(filenames):
-            lines.append(f"  {f}")
-    return "\n".join(lines) if lines else "_artifact directory is empty_"
+    suites = []
+    if root.tag == "testsuite":
+        suites = [root]
+    elif root.tag == "testsuites":
+        suites = list(root.findall("testsuite"))
 
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: collect_diagnostics.py <ART_DIR>", file=sys.stderr)
-        sys.exit(2)
+    totals: MutableMapping[str, int | float] = {
+        "tests": 0,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "time": 0.0,
+    }
+    for suite in suites:
+        totals["tests"] += int(suite.attrib.get("tests", 0))
+        totals["failures"] += int(suite.attrib.get("failures", 0))
+        totals["errors"] += int(suite.attrib.get("errors", 0))
+        totals["skipped"] += int(suite.attrib.get("skipped", 0))
+        totals["time"] += float(suite.attrib.get("time", 0.0))
 
-    art_dir = Path(sys.argv[1]).resolve()
-    art_dir.mkdir(parents=True, exist_ok=True)
+    return {"status": "present", **totals}
 
-    # Attempt to generate env/pip-freeze if missing (best-effort).
-    env_txt = art_dir / "env.txt"
-    if not env_txt.exists():
-        try:
-            env_dump = "\n".join(sorted(f"{k}={v}" for k, v in os.environ.items()))
-            _write_text(env_txt, env_dump)
-        except Exception:
-            pass
 
-    pip_freeze = art_dir / "pip-freeze.txt"
-    if not pip_freeze.exists():
-        try:
-            freeze_out = _run_cmd([sys.executable, "-m", "pip", "freeze"])
-            _write_text(pip_freeze, freeze_out)
-        except Exception:
-            pass
-
-    junit_path = art_dir / "pytest-junit.xml"
-
-    # Build summary.md
+def _duckdb_inspect(db_path: Path) -> Mapping[str, object]:
     try:
-        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        import duckdb
+    except Exception as exc:
+        return {"error": f"duckdb import failed: {exc}"}
 
-        # Metadata table
-        rows = []
-        for k in KEY_ENV_VARS:
-            rows.append((k, os.environ.get(k, "")))
-        meta_table = "\n".join(
-            ["| Key | Value |", "| --- | --- |"] +
-            [f"| `{k}` | {v if v else ' '} |" for k, v in rows]
+    if not db_path.exists():
+        return {"error": f"database not found: {db_path}"}
+
+    try:
+        con = duckdb.connect(str(db_path))
+    except Exception as exc:
+        return {"error": f"duckdb connect failed: {exc}"}
+
+    try:
+        tables_relation = con.sql(
+            "SELECT name FROM duckdb_tables() WHERE database_name IS NULL"
         )
+        table_names = {row[0] for row in tables_relation.fetchall()}
 
-        # Selected env previews
-        env_preview = _safe_read(env_txt)
-        freeze_preview = _safe_read(pip_freeze)
+        report: MutableMapping[str, Mapping[str, object]] = {}
+        targets = [
+            "facts_raw",
+            "facts_resolved",
+            "facts_deltas",
+            "facts_monthly_deltas",
+            "manifests",
+            "meta_runs",
+            "snapshots",
+        ]
+        for table in targets:
+            exists = table in table_names
+            table_report: MutableMapping[str, object] = {"exists": exists}
+            if exists:
+                count_relation = con.sql(f"SELECT COUNT(*) AS cnt FROM {table}")
+                table_report["rows"] = count_relation.fetchone()[0]
 
-        # Pytest digest
-        junit_info = _parse_junit(junit_path)
-        if junit_info.get("present"):
-            totals = junit_info["totals"]
-            junit_block = textwrap.dedent(f"""
-            **Pytest (JUnit)**
+                sample_relation = con.sql(f"SELECT * FROM {table} LIMIT 4")
+                columns = sample_relation.columns
+                sample_rows = sample_relation.fetchall()
+                table_report["sample"] = [
+                    dict(zip(columns, row)) for row in sample_rows
+                ]
 
-            - tests: {totals['tests']}
-            - failures: {totals['failures']}
-            - errors: {totals['errors']}
-            - skipped: {totals['skipped']}
-            - time (s): {totals['time']}
-            """).strip()
+                schema_relation = con.sql(f"PRAGMA table_info('{table}')")
+                schema_columns = schema_relation.columns
+                schema_rows = schema_relation.fetchall()
+                table_report["schema"] = [
+                    dict(zip(schema_columns, row)) for row in schema_rows
+                ]
+            else:
+                table_report["rows"] = "n/a"
+                table_report["sample"] = []
+                table_report["schema"] = []
+            report[table] = table_report
+
+        return report
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def _render_summary(env: Mapping[str, str], junit: Mapping[str, object], *, lda_log: str, normalize_log: str, pip_freeze: str, duckdb_report: Mapping[str, object]) -> str:
+    pytest_summary = "JUnit report: unavailable"
+    if junit:
+        status = str(junit.get("status", "unknown"))
+        if status == "present":
+            pytest_summary = (
+                "tests={tests} failures={failures} errors={errors} skipped={skipped} "
+                "time={time}".format(**{k: junit.get(k, 0) for k in ("tests", "failures", "errors", "skipped", "time")})
+            )
         else:
-            err = junit_info.get("error", "No JUnit file found.")
-            junit_block = f"**Pytest (JUnit)**\n\n_{err}_"
+            pytest_summary = f"JUnit report: {status}"
 
-        # Python version
-        py_ver = sys.version.replace("\n", " ")
+    tmpl = Template(
+        textwrap.dedent(
+            """
+            # CI Diagnostics Summary
 
-        tree_listing = _tree_listing(art_dir)
+            ## Run Metadata
+            Commit: $commit  
+            Ref: $ref  
+            Workflow: $workflow  
+            Job: $job  
+            Run ID: $run_id  Attempt: $attempt  
+            Timestamp (UTC): $ts  
+            Python: $python  OS: $os
 
-        overview_lines = [
-            f"Generated: {now_utc}",
-            f"Artifacts directory: `{art_dir}`",
-        ]
-        diagnostics_dir_display = (art_dir / "diagnostics").as_posix()
-        print("# CI Diagnostics Summary")
-        print(f"Generated: {now_utc}")
-        print(f"Artifacts: {diagnostics_dir_display}")
-        print(f"Python: {sys.version.split()[0]}")
+            ## Pytest Summary
+            $pytest_summary
 
-        env_block = "```bash\n" + env_preview.rstrip() + "\n```"
-        freeze_block = "```\n" + freeze_preview.rstrip() + "\n```"
-        tree_block = "```\n" + tree_listing.rstrip() + "\n```"
+            ## Command Tails
+            ### lda-all
+            $lda_log
 
-        sections = [
-            ("CI Diagnostics Summary", "\n".join(overview_lines)),
-            ("Run Metadata", meta_table),
-            ("Python", f"`{py_ver}`"),
-            ("Environment Variables (env.txt)", env_block),
-            ("pip freeze", freeze_block),
-            ("Test Results", junit_block),
-            ("Artifact Listing", tree_block),
-        ]
+            ### normalize
+            $normalize_log
 
-        summary_path = _write_summary_md(art_dir, sections)
+            ## DuckDB Inspection (key tables)
+            ```json
+            $duckdb_json
+            ```
 
-        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if step_summary:
-            try:
-                with open(step_summary, "a", encoding="utf-8") as handle:
-                    handle.write("\n" + summary_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+            ## pip freeze
+            ```
+            $pip_freeze
+            ```
+            """
+        ).strip()
+    )
 
-        print(f"Diagnostics summary: {summary_path}")
-        sys.exit(0)
-    except Exception as e:
-        # Last resort: never crash the job — emit a minimal summary.
-        tb = traceback.format_exc()
-        fallback_body = "Error while writing summary:\n\n```\n" + tb + "\n```"
-        fallback = "# CI Diagnostics Summary (fallback)\n\n" + fallback_body
-        summary_path = _write_summary_md(
-            art_dir,
-            [("CI Diagnostics Summary (fallback)", fallback_body)],
+    duckdb_json = json.dumps(duckdb_report, indent=2, ensure_ascii=False)
+
+    return tmpl.substitute(
+        commit=env.get("commit", "(unknown)"),
+        ref=env.get("ref", "(unknown)"),
+        workflow=env.get("workflow", "(unknown)"),
+        job=env.get("job", "(unknown)"),
+        run_id=env.get("run_id", "(unknown)"),
+        attempt=env.get("attempt", "(unknown)"),
+        ts=env.get("ts", "(unknown)"),
+        python=env.get("python", "(unknown)"),
+        os=env.get("os", "(unknown)"),
+        pytest_summary=pytest_summary,
+        lda_log=lda_log,
+        normalize_log=normalize_log,
+        duckdb_json=duckdb_json,
+        pip_freeze=pip_freeze,
+    )
+
+
+def _gather_env() -> Mapping[str, str]:
+    uname = os.uname().sysname if hasattr(os, "uname") else "(unknown)"
+    return {
+        "commit": os.environ.get("GITHUB_SHA") or os.environ.get("GIT_COMMIT", "(unknown)"),
+        "ref": os.environ.get("GITHUB_REF", "(unknown)"),
+        "workflow": os.environ.get("GITHUB_WORKFLOW", "(unknown)"),
+        "job": os.environ.get("GITHUB_JOB", "(unknown)"),
+        "run_id": os.environ.get("GITHUB_RUN_ID", "(unknown)"),
+        "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "(unknown)"),
+        "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "python": sys.version.split()[0],
+        "os": uname,
+    }
+
+
+def _write_summary_files(art_dir: Path, content: str) -> None:
+    summary_path = art_dir / "SUMMARY.md"
+    summary_path.write_text(content, encoding="utf-8")
+    legacy = art_dir / "summary.md"
+    legacy.write_text(content, encoding="utf-8")
+
+
+def _append_step_summary(content: str) -> None:
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not step_summary:
+        return
+    try:
+        with open(step_summary, "a", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.write("\n")
+    except Exception:
+        pass
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    argv = list(sys.argv if argv is None else argv)
+    art_dir = _resolve_art_dir(argv)
+
+    try:
+        env = _gather_env()
+        junit = _try_junit_totals(art_dir / "pytest-junit.xml")
+        pip_freeze = _read_text(art_dir / "pip-freeze.txt")
+        lda_log = _read_text(art_dir / "lda-all.log")
+        normalize_log = _read_text(art_dir / "normalize.log")
+        duckdb_report = _duckdb_inspect(Path("data/resolver.duckdb"))
+
+        summary_text = _render_summary(
+            env,
+            junit,
+            lda_log=lda_log,
+            normalize_log=normalize_log,
+            pip_freeze=pip_freeze,
+            duckdb_report=duckdb_report,
         )
-        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if step_summary:
-            try:
-                with open(step_summary, "a", encoding="utf-8") as handle:
-                    handle.write(fallback + "\n")
-            except Exception:
-                pass
-        print("collect_diagnostics.py encountered an error but wrote fallback summary.md", file=sys.stderr)
-        sys.exit(0)
+
+        _write_summary_files(art_dir, summary_text)
+        _append_step_summary(summary_text)
+
+        print(f"Wrote diagnostics summary to {art_dir / 'SUMMARY.md'}")
+        return 0
+    except Exception:
+        tb = traceback.format_exc()
+        fallback = "# CI Diagnostics Summary (fallback)\n\n````\n" + tb + "\n````\n"
+        _write_summary_files(art_dir, fallback)
+        _append_step_summary(fallback)
+        print("collect_diagnostics.py encountered an error but wrote fallback summary", file=sys.stderr)
+        return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

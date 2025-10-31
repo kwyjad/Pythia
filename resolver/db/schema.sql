@@ -83,5 +83,16 @@ CREATE TABLE IF NOT EXISTS snapshots (
     deltas_rows INTEGER,
     meta TEXT
 );
+CREATE VIEW IF NOT EXISTS facts_monthly_deltas AS
+SELECT
+  ym,
+  iso3,
+  hazard_code,
+  metric,
+  COALESCE(value_new, value_stock) AS value,
+  series_semantics,
+  as_of,
+  source_id
+FROM facts_deltas;
 
 COMMIT;

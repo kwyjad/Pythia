@@ -151,3 +151,8 @@ resolver/diagnostics/
 ${RESOLVER_DATA_DIR}/
 **/staging/**/raw/
 **/*.meta.json
+!resolver/diagnostics/__init__.py
+!resolver/diagnostics/ingestion/
+!resolver/diagnostics/ingestion/__init__.py
+!resolver/diagnostics/ingestion/summarize_connectors.py
+!resolver/diagnostics/
