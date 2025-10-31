@@ -4857,6 +4857,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if OFFLINE:
         LOG.debug("dtm: offline gating enabled (skip=%s offline_smoke=%s)", skip_requested, offline_smoke)
 
+    if skip_requested:
+        skip_reason = "disabled via RESOLVER_SKIP_DTM"
+        ensure_zero_row_outputs(offline=True)
+        extras_payload, http_payload, counts_payload = _finalize_skip_run(
+            reason=skip_reason,
+            strict_empty=strict_empty,
+            no_date_filter=no_date_filter,
+            args=args,
+        )
+        extras_for_reports = dict(extras_payload)
+        extras_for_reports.update(
+            {
+                "skip_requested": True,
+                "staging_csv": str(OUT_PATH),
+                "staging_meta": str(META_PATH),
+            }
+        )
+        diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
+        extras_ctx = diagnostics_ctx.setdefault("extras", {})
+        if isinstance(extras_ctx, dict):
+            extras_ctx.setdefault("mode", "skip")
+            extras_ctx["skip_requested"] = True
+        diagnostics_result = diagnostics_finalize_run(
+            diagnostics_ctx,
+            status="skipped",
+            reason=skip_reason,
+            http=http_payload,
+            counts=counts_payload,
+            extras=extras_for_reports,
+        )
+        diagnostics_append_jsonl(CONNECTORS_REPORT, diagnostics_result)
+        _write_connector_report(
+            status="skipped",
+            reason=skip_reason,
+            extras=extras_for_reports,
+            http=http_payload,
+            counts=counts_payload,
+        )
+        OFFLINE = previous_offline
+        return 0
+
     if offline_smoke:
         LOG.info("offline-smoke: header-only output (no API key required)")
         _ensure_out_dir_exists(OUT_DIR)

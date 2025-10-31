@@ -490,9 +490,7 @@ jobs:
 
       - name: Collect diagnostics (always)
         if: always()
-        uses: ./.github/actions/collect-diagnostics
-        with:
-          job_name: nightly-tests-db
+        run: python scripts/ci/collect_diagnostics.py "${ART_DIR}"
 
       - name: Upload CI artifacts (always)
         if: always()
@@ -500,24 +498,6 @@ jobs:
         with:
           name: nightly-tests-db-${{ env.RUN_TS }}
           path: ${{ env.ART_DIR }}
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Bundle diagnostics
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${ART_DIR}"
-          rm -f ../nightly-nightly-tests-*.zip || true
-          zip -r "../nightly-nightly-tests-${SAFE_SUFFIX}-${RUN_TS}.zip" . || true
-
-      - name: Upload diagnostics bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nightly-diagnostics-bundle
-          path: ci_artifacts/nightly-nightly-tests-*.zip
           if-no-files-found: warn
           retention-days: 14
 
