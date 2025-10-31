@@ -146,15 +146,14 @@ jobs:
         run: |
           python scripts/ci/make_ai_summary.py || true
 
-    - name: Collect diagnostics summary (fast)
-      if: always()
-      env:
-        ART_DIR: ${{ env.ART_DIR }}
-        SAFE_SUFFIX: fast-tests
-        GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
-      run: |
-        python scripts/ci/collect_diagnostics.py "$ART_DIR"
-        bash .github/actions/collect-diagnostics/collect.sh
+      - name: Collect diagnostics summary (fast)
+        if: always()
+        env:
+          ART_DIR: ${{ env.ART_DIR }}
+          SAFE_SUFFIX: fast-tests
+        run: |
+          python scripts/ci/collect_diagnostics.py "$ART_DIR"
+          bash .github/actions/collect-diagnostics/collect.sh
 
       - name: Upload diagnostics artifact (fast)
         if: always()
