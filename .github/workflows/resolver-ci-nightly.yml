@@ -96,6 +96,15 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install -e .[db, test]
 
+      - name: Capture baseline diagnostics files
+        if: always()
+        run: |
+          set -euo pipefail
+          env | sort > "${ART_DIR}/env.txt" || true
+          if command -v python >/dev/null 2>&1; then
+            python -m pip freeze > "${ART_DIR}/pip-freeze.txt" || true
+          fi
+
       - name: Verify DuckDB presence
         if: steps.dbfiles.outputs.present == 'true'
         run: |
@@ -490,6 +499,8 @@ jobs:
 
       - name: Collect diagnostics (always)
         if: always()
+        env:
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
         run: python scripts/ci/collect_diagnostics.py "${ART_DIR}"
 
       - name: Upload CI artifacts (always)

@@ -26,6 +26,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Prepare diagnostics directory
+        run: |
+          set -euo pipefail
+          RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "RUN_TS=$RUN_TS" >> "$GITHUB_ENV"
+          ART_DIR="$GITHUB_WORKSPACE/.ci/diagnostics"
+          echo "ART_DIR=$ART_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$ART_DIR"
+
       - name: Diagnostics collector syntax check
         shell: bash
         run: |
@@ -44,9 +53,11 @@ jobs:
           set -euo pipefail
           chmod +x scripts/ci/run_and_capture.sh || true
 
-      - name: Snapshot environment (pip freeze)
+      - name: Capture baseline diagnostics files
         run: |
-          bash scripts/ci/run_and_capture.sh pip-freeze "pip freeze | tee .ci/diagnostics/pip-freeze.txt"
+          set -euo pipefail
+          env | sort > "$ART_DIR/env.txt" || true
+          python -m pip freeze > "$ART_DIR/pip-freeze.txt" || true
 
       - name: Import probes (python, pytest, duckdb)
         run: |
@@ -94,11 +105,11 @@ jobs:
           fi
 
           # Real run with JUnit (this one we care about)
-          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml .ci/diagnostics/pytest-junit.xml"
+          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml $ART_DIR/pytest-junit.xml"
 
           # Mirror to legacy root filename for collectors that still look there
-          if [ -f .ci/diagnostics/pytest-junit.xml ]; then
-            cp .ci/diagnostics/pytest-junit.xml pytest-junit.xml
+          if [ -f "$ART_DIR/pytest-junit.xml" ]; then
+            cp "$ART_DIR/pytest-junit.xml" pytest-junit.xml
           fi
 
       - name: Verify imports (python, pytest, duckdb)
@@ -135,18 +146,20 @@ jobs:
         run: |
           python scripts/ci/make_ai_summary.py || true
 
-      - name: Collect diagnostics (fast)
+      - name: Collect diagnostics summary (fast)
         if: always()
-        uses: ./.github/actions/collect-diagnostics
-        with:
-          job_name: fast-tests
+        env:
+          SAFE_SUFFIX: fast-tests
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+        run: |
+          python scripts/ci/collect_diagnostics.py "$ART_DIR"
 
       - name: Upload diagnostics artifact (fast)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-fast-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ARTIFACT_PATH }}/**
+          path: ${{ env.ART_DIR }}
           if-no-files-found: warn
           retention-days: 7
 
@@ -184,8 +197,10 @@ jobs:
             summary_path=""
             if [ -f "$artifact_dir/SUMMARY.md" ]; then
               summary_path="$artifact_dir/SUMMARY.md"
+            elif [ -f "$artifact_dir/summary.md" ]; then
+              summary_path="$artifact_dir/summary.md"
             else
-              summary_path=$(find "$artifact_dir" -maxdepth 5 -type f -name 'SUMMARY.md' -print -quit || true)
+              summary_path=$(find "$artifact_dir" -maxdepth 5 -type f \( -name 'SUMMARY.md' -o -name 'summary.md' \) -print -quit || true)
             fi
 
             if [ -n "$summary_path" ]; then
