@@ -4,14 +4,14 @@ from __future__ import annotations
 from typing import Optional
 
 
-def _fmt_count(value: Optional[int | float]) -> str:
-    """Return '-' for None or zero; otherwise stringified value."""
+def _fmt_count(x: Optional[int | float]) -> str:
+    """Dash for None or zero; otherwise str(x)."""
 
-    if value is None:
+    if x is None:
         return "-"
     try:
-        if float(value) == 0:
+        if float(x) == 0:
             return "-"
     except Exception:
         pass
-    return str(value)
+    return str(x)
