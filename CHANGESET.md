@@ -37,3 +37,5 @@
   fast tests and covering it with a focused regression test.
 - ci(summarizer): restore the classic 13-column connector table layout and scope the config regression test to the expected
   lines so legacy fast-test fixtures stay green.
+- ci(summarizer): keep the literal config path line in the summary while maintaining the classic table layout required by the
+  fast-test suite.

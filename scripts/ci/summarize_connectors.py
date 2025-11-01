@@ -46,9 +46,9 @@ EM_DASH = "—"
 
 CLASSIC_TABLE_HEADER = (
     "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
-    "Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    "Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
 )
-CLASSIC_TABLE_DIVIDER = "|---|---:|---|---|---|---|---:|---:|---:|---:|---|---:|---|"
+CLASSIC_TABLE_DIVIDER = "|---|---:|---|---|---|---|---:|---:|---:|---|---:|---|"
 
 
 _LAST_STUB_REASON_ALIAS: str | None = None
@@ -524,7 +524,7 @@ def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
     lines.append(f"- Config: {path}")
 
     if isinstance(warnings, Sequence) and warnings:
-        lines.append("- warnings:")
+        lines.append("- Warnings:")
         for warning in warnings:
             lines.append(f"  - {warning}")
 
@@ -1709,26 +1709,6 @@ def _render_connector_matrix(
 
         record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
 
-        rows_written_cell = f"{fetched_count}/{normalized_count}/{written_count}"
-        rows_written_value = bucket.get("rows_written")
-        if rows_written_value is None and isinstance(record_extras, Mapping):
-            rows_written_value = record_extras.get("rows_written")
-        if rows_written_value is not None:
-            try:
-                coerced_rows = _coerce_int(rows_written_value)
-            except (TypeError, ValueError):
-                coerced_rows = rows_written_value
-            run_totals = (
-                record_extras.get("run_totals") if isinstance(record_extras, Mapping) else None
-            )
-            if coerced_rows not in (None, 0, "0"):
-                rows_written_cell = str(coerced_rows)
-            elif isinstance(run_totals, Mapping) and run_totals.get("rows_written") is not None:
-                try:
-                    rows_written_cell = str(_coerce_int(run_totals.get("rows_written")))
-                except (TypeError, ValueError):
-                    rows_written_cell = str(run_totals.get("rows_written"))
-
         kept = EM_DASH
         dropped = EM_DASH
         parse_err = EM_DASH
@@ -1788,14 +1768,13 @@ def _render_connector_matrix(
             parse_err = str(parse_errors_value)
 
         lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
                 name=name,
                 mode=mode,
                 status=status_value,
                 reason=reason_text,
                 http=http_text,
                 counts=counts_text,
-                rows_written=rows_written_cell,
                 kept=kept,
                 dropped=dropped,
                 parse_errors=parse_err,
@@ -1807,7 +1786,7 @@ def _render_connector_matrix(
 
     if not all_names:
         lines.append(
-            f"| — | real | — | — | {EM_DASH} | 0/0/0 (0) | 0/0/0 | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} |"
+            f"| — | real | — | — | {EM_DASH} | 0/0/0 (0) | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} |"
         )
 
     lines.append("")
