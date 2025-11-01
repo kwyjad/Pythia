@@ -27,3 +27,4 @@
 - ci(summary): restore summarize_connectors public API (load_report, build_markdown, main, SUMMARY_TITLE) and summary._fmt_count; reintroduce sections required by fast-tests (staging readiness, samples, config used, zero-row root cause, logs).
 - fix(ci/summarizer): restore connector table columns, em-dash formatting, DTM diagnostics, secret redaction, and missing-report stubs so fast tests pass with the refactored superreport.
 - ci(summary): restore public API strings, selector effectiveness section, top-5 sample histograms, logs/meta table, and CLI missing-report stub for the best-ever summary.
+- fix(ci/summarizer): align literals for config line, missing-report stub, selector phrasing, logs/meta table, and zero-row primary reason to unblock fast tests.

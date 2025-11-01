@@ -60,7 +60,8 @@ def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
             normalized.get("client") == "summarizer"
             and normalized.get("mode") == "diagnostics"
             and normalized.get("status") == "error"
-            and normalized.get("reason") == "missing or empty report"
+            and normalized.get("reason")
+            in {"missing or empty report", "missing-report"}
         ):
             # Preserve stub line on disk but do not include it in rendered diagnostics.
             continue
@@ -432,6 +433,7 @@ def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
 def _legacy_selector_section(
     entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
 ) -> List[str]:
+    top_selectors: List[str] = []
     lines = ["## Selector effectiveness", ""]
     snippets: List[str] = []
     for entry in entries:
@@ -445,6 +447,35 @@ def _legacy_selector_section(
             continue
         connector_id = entry.get("connector_id") or entry.get("connector") or "unknown"
         if isinstance(selector_payload, Mapping):
+            top_payload = selector_payload.get("top_by_rows")
+            if isinstance(top_payload, Sequence):
+                for item in top_payload:
+                    selector_name: str | None = None
+                    rows_val: str | None = None
+                    if isinstance(item, Mapping):
+                        selector_name = str(
+                            item.get("selector")
+                            or item.get("name")
+                            or item.get("id")
+                            or item.get("value")
+                            or ""
+                        ).strip() or None
+                        rows_val = item.get("rows") or item.get("row_count")
+                    elif isinstance(item, Sequence) and len(item) >= 2:
+                        selector_name = str(item[0]).strip() or None
+                        rows_val = item[1]
+                    if not selector_name:
+                        continue
+                    summary_val = rows_val
+                    try:
+                        if summary_val is not None:
+                            summary_val = int(summary_val)
+                    except (TypeError, ValueError):
+                        summary_val = rows_val
+                    if summary_val is None:
+                        top_selectors.append(selector_name)
+                    else:
+                        top_selectors.append(f"{selector_name} ({summary_val})")
             coverage = selector_payload.get("coverage")
             matched = selector_payload.get("matched")
             snippets.append(
@@ -463,7 +494,13 @@ def _legacy_selector_section(
             relative = path.relative_to(diagnostics_dir)
             snippets.append(f"- file: `{relative}`")
 
+    if top_selectors:
+        top_text = ", ".join(top_selectors[:5])
+    else:
+        top_text = "n/a"
+    lines.append(f"- Top selectors by rows: {top_text}")
     if snippets:
+        lines.extend([""])
         lines.extend(snippets)
     else:
         lines.append("- No selector diagnostics found; cannot compare coverage.")
@@ -473,6 +510,7 @@ def _legacy_selector_section(
 def _legacy_zero_row_section(
     entries: Sequence[Mapping[str, Any]], staging_snapshot: Mapping[str, Any]
 ) -> List[str]:
+    zero_entries: List[Mapping[str, Any]] = []
     for entry in entries:
         counts = entry.get("counts") if isinstance(entry, Mapping) else None
         extras = entry.get("extras") if isinstance(entry, Mapping) else None
@@ -485,13 +523,21 @@ def _legacy_zero_row_section(
             continue
         try:
             if float(written) == 0:
-                return [
-                    "## Zero-row root cause",
-                    "",
-                    "- One or more connectors produced zero rows.",
-                ]
+                zero_entries.append(entry)
         except Exception:
             continue
+
+    if zero_entries:
+        primary_reason = "unknown"
+        histogram = reason_histogram(zero_entries)
+        if histogram:
+            primary_reason = histogram.most_common(1)[0][0]
+        return [
+            "## Zero-row root cause",
+            "",
+            "- One or more connectors produced zero rows.",
+            f"- Primary reason: {primary_reason}",
+        ]
 
     for connector_meta in staging_snapshot.values():
         if not isinstance(connector_meta, Mapping):
@@ -506,6 +552,7 @@ def _legacy_zero_row_section(
                         "## Zero-row root cause",
                         "",
                         "- One or more connectors produced zero rows.",
+                        "- Primary reason: unknown",
                     ]
             except (TypeError, ValueError):
                 continue
@@ -624,8 +671,6 @@ def _render_dtm_per_country_section(entry: Mapping[str, Any]) -> List[str]:
 def _legacy_logs_section(diagnostics_dir: Path) -> List[str]:
     logs = gather_log_files(diagnostics_dir)
     meta_files = gather_meta_json_files(diagnostics_dir)
-    if not logs and not meta_files:
-        return []
 
     meta_rows = 0
     for path in meta_files:
@@ -642,9 +687,9 @@ def _legacy_logs_section(diagnostics_dir: Path) -> List[str]:
             continue
 
     lines = ["## Logs", ""]
-    lines.append("| Logs | Meta rows |")
-    lines.append("| --- | ---: |")
-    lines.append(f"| {len(logs)} | {meta_rows} |")
+    lines.append("| Logs | Meta rows | Meta |")
+    lines.append("| --- | ---: | --- |")
+    lines.append(f"| {len(logs)} | {meta_rows} | {len(meta_files)} |")
     lines.append("")
     if logs:
         for file in logs:
@@ -653,9 +698,14 @@ def _legacy_logs_section(diagnostics_dir: Path) -> List[str]:
             except ValueError:
                 rel = file
             lines.append(f"- {rel.as_posix()}")
+    else:
+        lines.append("- No log files discovered.")
     if meta_files:
         lines.append("")
         lines.append("- Meta diagnostics present")
+    elif logs:
+        lines.append("")
+        lines.append("- No meta diagnostics found.")
     return lines
 
 
@@ -1608,21 +1658,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_path = Path(args.output)
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    stub_needed = not report_path.exists()
-    entries: List[Mapping[str, Any]] = []
-    if not stub_needed and report_path.exists():
-        entries = load_report(report_path)
-        if not entries:
-            try:
-                stub_needed = report_path.stat().st_size == 0
-            except OSError:
-                stub_needed = True
-    if stub_needed:
+    entries = load_report(report_path)
+    if not entries:
         stub = {
             "client": "summarizer",
             "mode": "diagnostics",
             "status": "error",
-            "reason": "missing or empty report",
+            "reason": "missing-report",
             "counts": {"written": 0},
         }
         report_path.write_text(json.dumps(stub) + "\n", encoding="utf-8")
