@@ -161,6 +161,12 @@ def _apply_run_details_override(entry: Dict[str, Any], *, base_dir: Path) -> Non
         extras_dict["rows_written"] = totals.get("rows_written")
         extras_dict["run_totals"] = dict(totals)
 
+    outputs = details_payload.get("outputs")
+    if isinstance(outputs, Mapping):
+        meta_path = outputs.get("meta") or outputs.get("meta_path")
+        if meta_path and not extras_dict.get("meta_path"):
+            extras_dict["meta_path"] = str(meta_path)
+
     if override_applied:
         extras_dict["counts_override_source"] = "run.json"
     entry["extras"] = extras_dict
@@ -183,7 +189,7 @@ def build_markdown(
     parts.extend(
         _render_legacy_sections(normalized_entries, diagnostics_dir, staging_dir, staging_snapshot)
     )
-    parts.extend(_render_connector_matrix(records))
+    parts.extend(_render_connector_matrix(records, normalized_entries, diagnostics_dir))
     parts.extend(_render_connector_details(records, staging_snapshot))
     parts.extend(_render_export_snapshot(staging_snapshot))
     parts.extend(_render_anomalies(records))
@@ -262,7 +268,19 @@ def _prepare_records(
     diagnostics_dir: Path,
     staging_dir: Path,
 ) -> tuple[List[ConnectorRecord], Mapping[str, Any]]:
-    records = [_normalise_connector(entry) for entry in entries]
+    deduped: Dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        key = str(
+            entry.get("connector_id")
+            or entry.get("name")
+            or entry.get("connector")
+            or "unknown"
+        )
+        deduped[key] = entry
+
+    records = [_normalise_connector(payload) for payload in deduped.values()]
     for record in records:
         _parse_connector_context(record, diagnostics_dir)
 
@@ -797,41 +815,72 @@ def _legacy_dtm_reachability_section(diagnostics_dir: Path) -> List[str]:
     if not isinstance(payload, (Mapping, list)):
         return []
 
+    def _host_port_snippet(info: Mapping[str, Any]) -> str | None:
+        host = info.get("host") or info.get("hostname") or info.get("ip") or info.get("name")
+        port = info.get("port")
+        if (host and port) or (host and isinstance(port, (str, int)) and str(port).strip()):
+            return f"{host}:{port}"
+        url = info.get("url") or info.get("endpoint")
+        if isinstance(url, str) and url:
+            try:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(url if "://" in url else f"https://{url}")
+                if parsed.hostname and parsed.port:
+                    return f"{parsed.hostname}:{parsed.port}"
+            except Exception:
+                return None
+        return None
+
     lines = ["## DTM Reachability", ""]
     summary_lines: List[str] = []
+    endpoints: List[str] = []
+
+    def _record_endpoint(info: Mapping[str, Any]) -> None:
+        snippet = _host_port_snippet(info)
+        if snippet:
+            endpoints.append(f"- {snippet}")
+
     if isinstance(payload, Mapping):
         overall = payload.get("overall_status") or payload.get("status") or payload.get("ok")
         if overall is not None:
             summary_lines.append(f"- Overall: {overall}")
-        checks = payload.get("checks") or payload.get("endpoints") or payload.get("results")
+        target_host = payload.get("target_host") or payload.get("host")
+        target_port = payload.get("target_port") or payload.get("port")
+        if target_host and target_port:
+            endpoints.append(f"- {target_host}:{target_port}")
+        checks = payload.get("checks") or payload.get("endpoints") or payload.get("results") or payload.get("probes")
         if isinstance(checks, Mapping):
             for name, info in sorted(checks.items()):
                 if not isinstance(info, Mapping):
                     continue
-                status = info.get("status") or info.get("ok")
-                latency = info.get("latency_ms") or info.get("latency")
-                host = info.get("host") or info.get("ip")
-                snippet = f"- {name}: {status}"
-                if host:
-                    snippet += f" host={host}"
-                if latency is not None:
-                    snippet += f" latency={latency}ms"
-                summary_lines.append(snippet)
+                _record_endpoint({"host": info.get("host") or name, "port": info.get("port"), "url": info.get("url")})
         elif isinstance(checks, list):
-            for info in checks[:5]:
-                if not isinstance(info, Mapping):
-                    continue
-                name = info.get("name") or info.get("endpoint") or info.get("stage") or "check"
-                status = info.get("status") or info.get("ok")
-                latency = info.get("latency_ms") or info.get("latency")
-                snippet = f"- {name}: {status}"
-                if latency is not None:
-                    snippet += f" latency={latency}ms"
-                summary_lines.append(snippet)
+            for info in checks:
+                if isinstance(info, Mapping):
+                    _record_endpoint(info)
         if not summary_lines:
             summary_lines.append("- Reachability diagnostics present.")
-    else:
+    elif isinstance(payload, list):
+        for info in payload:
+            if isinstance(info, Mapping):
+                _record_endpoint(info)
+
+    if endpoints:
+        summary_lines.extend(endpoints)
+    elif not summary_lines:
         summary_lines.append("- Reachability diagnostics present.")
+
+    egress = payload.get("egress") if isinstance(payload, Mapping) else None
+    if isinstance(egress, Mapping):
+        for name, info in sorted(egress.items()):
+            text: Any = None
+            if isinstance(info, Mapping):
+                text = info.get("text") or info.get("ip")
+            elif isinstance(info, (str, int, float)):
+                text = info
+            if text is not None:
+                summary_lines.append(f"- egress {name}={text}")
 
     lines.extend(summary_lines)
     return lines
@@ -840,201 +889,7 @@ def _legacy_dtm_reachability_section(diagnostics_dir: Path) -> List[str]:
 def _legacy_logs_section(
     entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
 ) -> List[str]:
-    logs = gather_log_files(diagnostics_dir)
-    meta_files = gather_meta_json_files(diagnostics_dir)
-
-    logs_by_name = {path.stem: path for path in logs}
-    meta_info: Dict[str, Dict[str, Any]] = {}
-    for meta_path in meta_files:
-        connector_name = meta_path.parent.name or meta_path.stem
-        bucket = meta_info.setdefault(connector_name, {"rows": 0, "paths": []})
-        bucket["paths"].append(meta_path)
-        payload = safe_load_json(meta_path)
-        rows_value = None
-        if isinstance(payload, Mapping):
-            rows_value = payload.get("rows_written") or payload.get("rows")
-            if rows_value is None and isinstance(payload.get("meta"), Mapping):
-                rows_value = payload["meta"].get("rows_written") or payload["meta"].get("rows")
-        try:
-            if rows_value is not None:
-                bucket["rows"] += int(rows_value)
-        except (TypeError, ValueError):
-            continue
-
-    def _prefer(existing: Any, new_value: Any) -> Any:
-        if new_value is None:
-            return existing
-        if isinstance(new_value, str) and not new_value.strip():
-            return existing
-        return new_value
-
-    def _display_path(path: Path) -> str:
-        candidates = [diagnostics_dir.parent.parent, diagnostics_dir.parent, diagnostics_dir]
-        for base in candidates:
-            if not isinstance(base, Path):
-                continue
-            try:
-                rel = path.relative_to(base)
-            except ValueError:
-                continue
-            else:
-                text = rel.as_posix()
-                if text:
-                    return text
-        return path.as_posix()
-
-    aggregated: Dict[str, Dict[str, Any]] = {}
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        name = str(entry.get("connector_id") or entry.get("connector") or "unknown")
-        bucket = aggregated.setdefault(
-            name,
-            {
-                "mode": None,
-                "status": None,
-                "reason": None,
-                "http": None,
-                "counts": None,
-                "kept": None,
-                "dropped": None,
-                "parse_errors": None,
-                "meta_path": None,
-            },
-        )
-
-        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-        bucket["mode"] = _prefer(bucket.get("mode"), entry.get("mode") or extras.get("mode"))
-        status_value = extras.get("status_raw") or entry.get("status")
-        bucket["status"] = _prefer(bucket.get("status"), status_value)
-        reason_value = entry.get("reason")
-        if reason_value is None and isinstance(extras, Mapping):
-            reason_value = extras.get("reason")
-        bucket["reason"] = _prefer(bucket.get("reason"), reason_value)
-
-        counts = entry.get("counts") if isinstance(entry.get("counts"), Mapping) else {}
-        if counts:
-            bucket["counts"] = (
-                _coerce_int(counts.get("fetched")),
-                _coerce_int(counts.get("normalized")),
-                _coerce_int(counts.get("written")),
-            )
-
-        http_payload = entry.get("http") if isinstance(entry.get("http"), Mapping) else {}
-        if http_payload:
-            bucket["http"] = (
-                _coerce_int(http_payload.get("2xx")),
-                _coerce_int(http_payload.get("4xx")),
-                _coerce_int(http_payload.get("5xx")),
-                _coerce_int(http_payload.get("retries")),
-            )
-
-        run_totals = extras.get("run_totals") if isinstance(extras, Mapping) else None
-        if isinstance(run_totals, Mapping):
-            if run_totals.get("rows_written") is not None:
-                bucket["kept"] = _prefer(bucket.get("kept"), _coerce_int(run_totals.get("rows_written")))
-            if run_totals.get("dropped") is not None:
-                bucket["dropped"] = _prefer(bucket.get("dropped"), _coerce_int(run_totals.get("dropped")))
-            if run_totals.get("parse_errors") is not None:
-                bucket["parse_errors"] = _prefer(
-                    bucket.get("parse_errors"), _coerce_int(run_totals.get("parse_errors"))
-                )
-        if isinstance(extras, Mapping):
-            if extras.get("rows_written") is not None and bucket.get("kept") is None:
-                try:
-                    bucket["kept"] = _coerce_int(extras.get("rows_written"))
-                except (TypeError, ValueError):
-                    bucket["kept"] = extras.get("rows_written")
-            if extras.get("meta_path") and not bucket.get("meta_path"):
-                bucket["meta_path"] = str(extras.get("meta_path"))
-
-    all_names = set(aggregated)
-    all_names.update(logs_by_name)
-    all_names.update(meta_info)
-
-    lines = ["## Logs", ""]
-    lines.append(
-        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
-    )
-    lines.append(
-        "| --- | --- | --- | --- | --- | --- | ---:| ---:| ---:| --- | ---:| --- |"
-    )
-
-    for name in sorted(all_names):
-        bucket = aggregated.get(name, {})
-        mode = bucket.get("mode") or "real"
-        status = bucket.get("status") or EM_DASH
-        reason = bucket.get("reason")
-        reason_text = _display_reason(reason) if reason else EM_DASH
-        http_counts = bucket.get("http") or (0, 0, 0, 0)
-        http_text = f"{http_counts[0]}/{http_counts[1]}/{http_counts[2]} ({http_counts[3]})"
-        counts_tuple = bucket.get("counts") or (0, 0, 0)
-        counts_text = f"{counts_tuple[0]}/{counts_tuple[1]}/{counts_tuple[2]}"
-
-        kept_value = bucket.get("kept")
-        meta_bucket = meta_info.get(name, {})
-        if kept_value is None and meta_bucket.get("rows"):
-            kept_value = meta_bucket.get("rows")
-        dropped_value = bucket.get("dropped")
-        parse_errors_value = bucket.get("parse_errors")
-
-        log_path = logs_by_name.get(name)
-        logs_cell = _display_path(log_path) if log_path is not None else EM_DASH
-
-        meta_rows = meta_bucket.get("rows") or 0
-        if meta_rows == 0 and kept_value not in (None, 0):
-            meta_rows = kept_value
-        meta_paths = list(meta_bucket.get("paths") or [])
-        if not meta_paths and bucket.get("meta_path"):
-            meta_paths.append(Path(bucket["meta_path"]))
-        if meta_paths:
-            rendered_paths: List[str] = []
-            for meta_path in meta_paths[:2]:
-                path_obj = meta_path if isinstance(meta_path, Path) else Path(str(meta_path))
-                rendered_paths.append(_display_path(path_obj))
-            meta_cell = ", ".join(rendered_paths)
-        else:
-            meta_cell = EM_DASH
-
-        lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
-                name=name,
-                mode=mode,
-                status=status,
-                reason=reason_text,
-                http=http_text,
-                counts=counts_text,
-                kept=_fmt_count(kept_value),
-                dropped=_fmt_count(dropped_value),
-                parse_errors=_fmt_count(parse_errors_value),
-                logs_cell=logs_cell,
-                meta_rows=_fmt_count(meta_rows),
-                meta_cell=meta_cell,
-            )
-        )
-
-    if not all_names:
-        lines.append(
-            f"| — | real | — | — | 0/0/0 (0) | 0/0/0 | {_fmt_count(0)} | {_fmt_count(0)} | {_fmt_count(0)} | — | {_fmt_count(0)} | — |"
-        )
-
-    lines.append("")
-    if logs:
-        for file in logs:
-            try:
-                rel = file.relative_to(diagnostics_dir)
-            except ValueError:
-                rel = file
-            lines.append(f"- {rel.as_posix()}")
-    else:
-        lines.append("- No log files discovered.")
-    if meta_files:
-        lines.append("")
-        lines.append("- Meta diagnostics present")
-    elif logs:
-        lines.append("")
-        lines.append("- No meta diagnostics found.")
-    return lines
+    return []
 
 
 @dataclass
@@ -1466,124 +1321,297 @@ def _render_run_overview(
     return lines
 
 
-def _render_connector_matrix(records: Sequence[ConnectorRecord]) -> List[str]:
-    lines = ["## Connector Diagnostics Matrix", ""]
-    header = (
-        "| id | mode | status | reason | last_http | http 2xx/4xx/5xx (retries) | "
-        "rows f/n/w | rows_written | dropped | parse_errors | ym_min/ym_max | asof_min/asof_max | rows_method | "
-        "top_iso3 | top_hazard | meta.status | meta.rows | meta.path |"
-    )
-    divider = (
-        "| --- | --- | --- | --- | --- | --- | --- | ---:| ---:| ---:| --- | --- | --- | --- | ---:| --- |"
-    )
-    lines.append(header)
-    lines.append(divider)
+def _render_connector_matrix(
+    records: Sequence[ConnectorRecord],
+    entries: Sequence[Mapping[str, Any]],
+    diagnostics_dir: Path,
+) -> List[str]:
+    record_lookup = {record.name: record for record in records}
+    logs = gather_log_files(diagnostics_dir)
+    meta_files = gather_meta_json_files(diagnostics_dir)
 
-    for record in sorted(records, key=lambda item: item.name):
-        http = record.http or {}
-        retries = _coerce_int(http.get("retries"))
-        http_counts = (
-            f"{_coerce_int(http.get('2xx'))}/{_coerce_int(http.get('4xx'))}/{_coerce_int(http.get('5xx'))}"
+    logs_by_name = {path.stem: path for path in logs}
+    meta_info: Dict[str, Dict[str, Any]] = {}
+    for meta_path in meta_files:
+        connector_name = meta_path.parent.name or meta_path.stem
+        bucket = meta_info.setdefault(connector_name, {"rows": 0, "paths": []})
+        bucket["paths"].append(meta_path)
+        payload = safe_load_json(meta_path)
+        rows_value: Any = None
+        if isinstance(payload, Mapping):
+            rows_value = payload.get("rows_written") or payload.get("rows")
+            meta_payload = payload.get("meta") if isinstance(payload.get("meta"), Mapping) else None
+            if rows_value is None and isinstance(meta_payload, Mapping):
+                rows_value = meta_payload.get("rows_written") or meta_payload.get("rows")
+        try:
+            if rows_value is not None:
+                bucket["rows"] += int(rows_value)
+        except (TypeError, ValueError):
+            continue
+
+    def _prefer(existing: Any, new_value: Any) -> Any:
+        if new_value is None:
+            return existing
+        if isinstance(new_value, str) and not new_value.strip():
+            return existing
+        return new_value
+
+    def _display_path(path: Path | None) -> str:
+        if not path:
+            return EM_DASH
+        candidates = [diagnostics_dir.parent.parent, diagnostics_dir.parent, diagnostics_dir]
+        for base in candidates:
+            if not isinstance(base, Path):
+                continue
+            try:
+                rel = path.relative_to(base)
+            except ValueError:
+                continue
+            text = rel.as_posix()
+            if text:
+                return text
+        return path.as_posix()
+
+    aggregated: Dict[str, Dict[str, Any]] = {}
+    duplicates: Dict[str, int] = {}
+
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(
+            entry.get("connector_id")
+            or entry.get("connector")
+            or entry.get("name")
+            or "unknown"
         )
-        http_text = f"{http_counts} ({retries})"
-        last_http = http.get("last_status")
-        last_http_text = str(last_http) if last_http not in (None, "") else EM_DASH
+        if name in aggregated:
+            duplicates[name] = duplicates.get(name, 0) + 1
+        bucket = aggregated.setdefault(
+            name,
+            {
+                "mode": None,
+                "status": None,
+                "reason": None,
+                "http": None,
+                "counts": None,
+                "rows_written": None,
+                "kept": None,
+                "dropped": None,
+                "parse_errors": None,
+                "meta_path": None,
+            },
+        )
 
-        extras_mapping = record.extras if isinstance(record.extras, Mapping) else {}
-        rows_written_value = extras_mapping.get("rows_written") if isinstance(extras_mapping, Mapping) else None
-        if rows_written_value is None:
+        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
+        bucket["mode"] = _prefer(bucket.get("mode"), entry.get("mode") or extras.get("mode"))
+        status_value = extras.get("status_raw") or entry.get("status")
+        bucket["status"] = _prefer(bucket.get("status"), status_value)
+        reason_value = entry.get("reason")
+        if reason_value is None and isinstance(extras, Mapping):
+            reason_value = extras.get("reason")
+        bucket["reason"] = _prefer(bucket.get("reason"), reason_value)
+
+        counts = entry.get("counts") if isinstance(entry.get("counts"), Mapping) else {}
+        if counts:
+            bucket["counts"] = (
+                _coerce_int(counts.get("fetched")),
+                _coerce_int(counts.get("normalized")),
+                _coerce_int(counts.get("written")),
+            )
+            bucket["rows_written"] = _coerce_int(counts.get("written"))
+
+        http_payload = entry.get("http") if isinstance(entry.get("http"), Mapping) else {}
+        if http_payload:
+            bucket["http"] = (
+                _coerce_int(http_payload.get("2xx")),
+                _coerce_int(http_payload.get("4xx")),
+                _coerce_int(http_payload.get("5xx")),
+                _coerce_int(http_payload.get("retries")),
+            )
+
+        run_totals = extras.get("run_totals") if isinstance(extras, Mapping) else None
+        if isinstance(run_totals, Mapping):
+            if run_totals.get("rows_written") is not None:
+                bucket["kept"] = _prefer(
+                    bucket.get("kept"), _coerce_int(run_totals.get("rows_written"))
+                )
+                bucket["rows_written"] = _prefer(
+                    bucket.get("rows_written"), _coerce_int(run_totals.get("rows_written"))
+                )
+            if run_totals.get("dropped") is not None:
+                bucket["dropped"] = _prefer(
+                    bucket.get("dropped"), _coerce_int(run_totals.get("dropped"))
+                )
+            if run_totals.get("parse_errors") is not None:
+                bucket["parse_errors"] = _prefer(
+                    bucket.get("parse_errors"), _coerce_int(run_totals.get("parse_errors"))
+                )
+        if isinstance(extras, Mapping):
+            if extras.get("rows_written") is not None and bucket.get("kept") is None:
+                try:
+                    bucket["kept"] = _coerce_int(extras.get("rows_written"))
+                except (TypeError, ValueError):
+                    bucket["kept"] = extras.get("rows_written")
+            if extras.get("rows_written") is not None and bucket.get("rows_written") is None:
+                try:
+                    bucket["rows_written"] = _coerce_int(extras.get("rows_written"))
+                except (TypeError, ValueError):
+                    bucket["rows_written"] = extras.get("rows_written")
+            if extras.get("meta_path") and not bucket.get("meta_path"):
+                bucket["meta_path"] = str(extras.get("meta_path"))
+
+    for record in records:
+        aggregated.setdefault(
+            record.name,
+            {
+                "mode": record.mode,
+                "status": record.status,
+                "reason": record.reason,
+                "http": None,
+                "counts": None,
+                "rows_written": None,
+                "kept": None,
+                "dropped": None,
+                "parse_errors": None,
+                "meta_path": None,
+            },
+        )
+
+    all_names = set(aggregated) | set(logs_by_name) | set(meta_info) | set(record_lookup)
+    lines = ["## Connector Diagnostics Matrix", ""]
+    if duplicates:
+        dedupe_parts = [
+            f"{count} duplicate entries for {name}" for name, count in sorted(duplicates.items())
+        ]
+        lines.append(f"(deduplicated {'; '.join(dedupe_parts)})")
+        lines.append("")
+
+    lines.append(
+        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    )
+    lines.append(
+        "| --- | --- | --- | --- | --- | --- | ---:| ---:| ---:| ---:| --- | ---:| --- |"
+    )
+
+    for name in sorted(all_names):
+        bucket = aggregated.get(name, {})
+        record = record_lookup.get(name)
+
+        mode = bucket.get("mode") or (record.mode if record else "real")
+        status_value = bucket.get("status") or (record.status if record else EM_DASH)
+        reason_value = bucket.get("reason") or (record.reason if record else None)
+        reason_text = _display_reason(reason_value) if reason_value else EM_DASH
+
+        http_counts = bucket.get("http")
+        if not http_counts and record and isinstance(record.http, Mapping):
+            http_counts = (
+                _coerce_int(record.http.get("2xx")),
+                _coerce_int(record.http.get("4xx")),
+                _coerce_int(record.http.get("5xx")),
+                _coerce_int(record.http.get("retries")),
+            )
+        if not http_counts:
+            http_counts = (0, 0, 0, 0)
+        http_text = f"{http_counts[0]}/{http_counts[1]}/{http_counts[2]} ({http_counts[3]})"
+
+        counts_tuple = bucket.get("counts")
+        if not counts_tuple and record:
+            counts_tuple = (
+                record.rows_fetched,
+                record.rows_normalized,
+                record.rows_written,
+            )
+        if not counts_tuple:
+            counts_tuple = (0, 0, 0)
+        counts_text = f"{counts_tuple[0]}/{counts_tuple[1]}/{counts_tuple[2]}"
+
+        kept_value = bucket.get("kept")
+        record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
+        if kept_value is None and isinstance(record_extras, Mapping):
+            if record_extras.get("rows_written") is not None:
+                kept_value = _coerce_int(record_extras.get("rows_written"))
+        meta_bucket = meta_info.get(name, {})
+        if kept_value is None and meta_bucket.get("rows"):
+            kept_value = meta_bucket.get("rows")
+
+        dropped_value = bucket.get("dropped")
+        parse_errors_value = bucket.get("parse_errors")
+        if isinstance(record_extras, Mapping):
+            run_totals = record_extras.get("run_totals")
+            if isinstance(run_totals, Mapping):
+                if dropped_value is None and run_totals.get("dropped") is not None:
+                    dropped_value = _coerce_int(run_totals.get("dropped"))
+                if parse_errors_value is None and run_totals.get("parse_errors") is not None:
+                    parse_errors_value = _coerce_int(run_totals.get("parse_errors"))
+
+        log_path = logs_by_name.get(name)
+        logs_cell = _display_path(log_path) if log_path is not None else EM_DASH
+
+        meta_rows = meta_bucket.get("rows") or 0
+        if meta_rows == 0 and kept_value not in (None, 0):
+            meta_rows = kept_value
+        meta_paths = list(meta_bucket.get("paths") or [])
+        if not meta_paths and bucket.get("meta_path"):
+            meta_paths.append(Path(str(bucket["meta_path"])))
+        if not meta_paths and isinstance(record_extras, Mapping):
+            meta_candidate = record_extras.get("meta_path")
+            if meta_candidate:
+                meta_paths.append(Path(str(meta_candidate)))
+        if meta_paths:
+            rendered_paths = [_display_path(path if isinstance(path, Path) else Path(str(path))) for path in meta_paths[:2]]
+            meta_cell = ", ".join(rendered_paths)
+        else:
+            meta_cell = EM_DASH
+
+        rows_written_value = bucket.get("rows_written")
+        if rows_written_value is None and record:
             rows_written_value = record.rows_written
+        if rows_written_value is None and kept_value not in (None, EM_DASH):
+            try:
+                rows_written_value = int(kept_value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                rows_written_value = kept_value
         rows_written_text = _fmt_count(rows_written_value)
 
-        run_totals = extras_mapping.get("run_totals") if isinstance(extras_mapping, Mapping) else {}
-        dropped_value = run_totals.get("dropped") if isinstance(run_totals, Mapping) else None
-        parse_errors_value = run_totals.get("parse_errors") if isinstance(run_totals, Mapping) else None
-        dropped_text = _fmt_count(dropped_value)
-        parse_errors_text = _fmt_count(parse_errors_value)
-
-        ym_min = record.coverage.get("ym_min") if isinstance(record.coverage, Mapping) else None
-        ym_max = record.coverage.get("ym_max") if isinstance(record.coverage, Mapping) else None
-        if ym_min or ym_max:
-            ym_min_text = str(ym_min or EM_DASH)
-            ym_max_text = str(ym_max or EM_DASH)
-            ym_text = f"{ym_min_text}/{ym_max_text}"
-        else:
-            ym_text = EM_DASH
-
-        asof_min = record.coverage.get("as_of_min") if isinstance(record.coverage, Mapping) else None
-        asof_max = record.coverage.get("as_of_max") if isinstance(record.coverage, Mapping) else None
-        if asof_min or asof_max:
-            asof_min_text = str(asof_min or EM_DASH)
-            asof_max_text = str(asof_max or EM_DASH)
-            asof_text = f"{asof_min_text}/{asof_max_text}"
-        else:
-            asof_text = EM_DASH
-
-        rows_method = extras_mapping.get("rows_method") if isinstance(extras_mapping, Mapping) else None
-        rows_method_text = str(rows_method) if rows_method else EM_DASH
-
-        def _format_samples(values: Any) -> str:
-            if not isinstance(values, (list, tuple)):
-                return EM_DASH
-            items = []
-            for name, count in values:
-                try:
-                    label = str(name)
-                    qty = int(count)
-                except (TypeError, ValueError):
-                    continue
-                if not label:
-                    continue
-                items.append(f"`{label}` ({qty})")
-            return ", ".join(items) if items else EM_DASH
-
-        top_iso3 = _format_samples(record.samples.get("top_iso3"))
-        top_hazard = _format_samples(record.samples.get("top_hazard"))
-
-        meta_status = record.meta.get("status") if isinstance(record.meta, Mapping) else None
-        meta_rows_value = None
-        if isinstance(record.meta, Mapping):
-            for key in ("rows", "row_count", "rows_written"):
-                if record.meta.get(key) is not None:
-                    meta_rows_value = record.meta.get(key)
-                    break
-        meta_rows_text = _fmt_count(meta_rows_value)
-        meta_status_text = str(meta_status) if meta_status else EM_DASH
-
-        meta_path = extras_mapping.get("meta_path") if isinstance(extras_mapping, Mapping) else None
-        meta_path_text = str(meta_path) if meta_path else EM_DASH
-
-        reason_text = _display_reason(record.reason) if record.reason else EM_DASH
-        status_raw = extras_mapping.get("status_raw") if isinstance(extras_mapping, Mapping) else None
-        status_text = str(status_raw or record.status or EM_DASH)
-
-        mode = record.mode or "real"
-
-        rows_line = f"{record.rows_fetched}/{record.rows_normalized}/{record.rows_written}"
-
-        line = "| {id} | {mode} | {status} | {reason} | {last} | {http} | {rows} | {written} | {dropped} | {parse_errors} | {ym} | {asof} | {method} | {iso3} | {hazard} | {meta_status} | {meta_rows} | {meta_path} |".format(
-            id=record.name,
-            mode=mode,
-            status=status_text,
-            reason=reason_text,
-            last=last_http_text,
-            http=http_text,
-            rows=rows_line,
-            written=rows_written_text,
-            dropped=dropped_text,
-            parse_errors=parse_errors_text,
-            ym=ym_text,
-            asof=asof_text,
-            method=rows_method_text,
-            iso3=top_iso3,
-            hazard=top_hazard,
-            meta_status=meta_status_text,
-            meta_rows=meta_rows_text,
-            meta_path=meta_path_text,
+        lines.append(
+            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
+                name=name,
+                mode=mode,
+                status=status_value,
+                reason=reason_text,
+                http=http_text,
+                counts=counts_text,
+                written=rows_written_text,
+                kept=_fmt_count(kept_value),
+                dropped=_fmt_count(dropped_value),
+                parse_errors=_fmt_count(parse_errors_value),
+                logs_cell=logs_cell,
+                meta_rows=_fmt_count(meta_rows),
+                meta_cell=meta_cell,
+            )
         )
-        lines.append(line)
+
+    if not all_names:
+        lines.append(
+            f"| — | real | — | — | 0/0/0 (0) | 0/0/0 | {_fmt_count(0)} | {_fmt_count(0)} | {_fmt_count(0)} | {_fmt_count(0)} | — | {_fmt_count(0)} | — |"
+        )
 
     lines.append("")
+    if logs:
+        for file in logs:
+            try:
+                rel = file.relative_to(diagnostics_dir)
+            except ValueError:
+                rel = file
+            lines.append(f"- {rel.as_posix()}")
+    else:
+        lines.append("- No log files discovered.")
+    if meta_files:
+        lines.append("")
+        lines.append("- Meta diagnostics present")
+    elif logs:
+        lines.append("")
+        lines.append("- No meta diagnostics found.")
     return lines
 
 
