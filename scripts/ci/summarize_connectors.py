@@ -41,18 +41,40 @@ DEFAULT_REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jso
 DEFAULT_DIAG_DIR = Path("diagnostics") / "ingestion"
 DEFAULT_STAGING_DIR = Path("resolver") / "staging"
 SUMMARY_TITLE = "# Ingestion Superreport"
+LEGACY_TITLE = "# Connector Diagnostics"
 EM_DASH = "—"
+
+
+_LAST_STUB_REASON_ALIAS: str | None = None
 
 
 def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
     """Load a JSONL report, tolerating absent or malformed entries."""
 
-    target = Path(path)
-    entries: List[Dict[str, Any]] = []
-    if not target.exists():
-        return entries
+    global _LAST_STUB_REASON_ALIAS
 
-    for entry in safe_load_jsonl(target):
+    target = Path(path)
+    raw_entries: List[Any] = []
+    if target.exists():
+        raw_entries = safe_load_jsonl(target)
+    if not raw_entries:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stub = {
+            "client": "summarizer",
+            "mode": "diagnostics",
+            "status": "error",
+            "reason": "missing or empty report",
+            "extras": {"stub": "missing-report"},
+            "counts": {"written": 0},
+        }
+        target.write_text(json.dumps(stub) + "\n", encoding="utf-8")
+        raw_entries = [stub]
+        _LAST_STUB_REASON_ALIAS = "missing-report"
+    else:
+        _LAST_STUB_REASON_ALIAS = None
+
+    entries: List[Dict[str, Any]] = []
+    for entry in raw_entries:
         if not isinstance(entry, Mapping):
             continue
         normalized = dict(entry)
@@ -64,6 +86,8 @@ def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
             in {"missing or empty report", "missing-report"}
         ):
             # Preserve stub line on disk but do not include it in rendered diagnostics.
+            if normalized.get("extras", {}).get("stub") == "missing-report":
+                _LAST_STUB_REASON_ALIAS = "missing-report"
             continue
         extras = normalized.get("extras")
         if isinstance(extras, Mapping):
@@ -71,6 +95,17 @@ def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
         _apply_run_details_override(normalized, base_dir=target.parent)
         entries.append(normalized)
     return entries
+
+
+def _display_reason(reason: Any) -> str:
+    if reason is None:
+        return "unknown"
+    text = str(reason).strip()
+    if not text:
+        return "unknown"
+    if text.lower() == "missing or empty report":
+        return "missing-report"
+    return text
 
 
 def _fmt_count(value: Optional[int | float]) -> str:
@@ -157,7 +192,7 @@ def build_markdown(
     normalized_entries = [entry for entry in entries or [] if isinstance(entry, Mapping)]
     records, staging_snapshot = _prepare_records(normalized_entries, diagnostics_dir, staging_dir)
 
-    parts: List[str] = [SUMMARY_TITLE, ""]
+    parts: List[str] = [LEGACY_TITLE, "", SUMMARY_TITLE, ""]
     parts.extend(_render_run_overview(records, normalized_entries))
     parts.extend(
         _render_legacy_sections(normalized_entries, diagnostics_dir, staging_dir, staging_snapshot)
@@ -315,13 +350,19 @@ def _render_legacy_sections(
     dtm_lines = _legacy_dtm_sections(entries)
     if dtm_lines:
         lines.extend(dtm_lines)
+        lines.append("")
+
+    reachability_lines = _legacy_dtm_reachability_section(diagnostics_dir)
+    if reachability_lines:
+        lines.extend(reachability_lines)
+        lines.append("")
 
     zero_lines = _legacy_zero_row_section(entries, staging_snapshot)
     if zero_lines:
         lines.extend(zero_lines)
         lines.append("")
 
-    log_lines = _legacy_logs_section(diagnostics_dir)
+    log_lines = _legacy_logs_section(entries, diagnostics_dir)
     if log_lines:
         lines.extend(log_lines)
         lines.append("")
@@ -528,15 +569,22 @@ def _legacy_zero_row_section(
             continue
 
     if zero_entries:
-        primary_reason = "unknown"
         histogram = reason_histogram(zero_entries)
         if histogram:
-            primary_reason = histogram.most_common(1)[0][0]
+            primary_reason = _display_reason(histogram.most_common(1)[0][0])
+            top_reasons = ", ".join(
+                f"{_display_reason(reason)} ({count})"
+                for reason, count in histogram.most_common(5)
+            )
+        else:
+            primary_reason = "unknown"
+            top_reasons = "—"
         return [
             "## Zero-row root cause",
             "",
             "- One or more connectors produced zero rows.",
             f"- Primary reason: {primary_reason}",
+            f"- Top drop reasons: {top_reasons}",
         ]
 
     for connector_meta in staging_snapshot.values():
@@ -553,6 +601,7 @@ def _legacy_zero_row_section(
                         "",
                         "- One or more connectors produced zero rows.",
                         "- Primary reason: unknown",
+                        "- Top drop reasons: —",
                     ]
             except (TypeError, ValueError):
                 continue
@@ -668,28 +717,172 @@ def _render_dtm_per_country_section(entry: Mapping[str, Any]) -> List[str]:
     return lines
 
 
-def _legacy_logs_section(diagnostics_dir: Path) -> List[str]:
+def _legacy_dtm_reachability_section(diagnostics_dir: Path) -> List[str]:
+    reachability_path = diagnostics_dir / "dtm" / "reachability.json"
+    payload = safe_load_json(reachability_path)
+    if not isinstance(payload, (Mapping, list)):
+        return []
+
+    lines = ["## DTM Reachability", ""]
+    summary_lines: List[str] = []
+    if isinstance(payload, Mapping):
+        overall = payload.get("overall_status") or payload.get("status") or payload.get("ok")
+        if overall is not None:
+            summary_lines.append(f"- Overall: {overall}")
+        checks = payload.get("checks") or payload.get("endpoints") or payload.get("results")
+        if isinstance(checks, Mapping):
+            for name, info in sorted(checks.items()):
+                if not isinstance(info, Mapping):
+                    continue
+                status = info.get("status") or info.get("ok")
+                latency = info.get("latency_ms") or info.get("latency")
+                host = info.get("host") or info.get("ip")
+                snippet = f"- {name}: {status}"
+                if host:
+                    snippet += f" host={host}"
+                if latency is not None:
+                    snippet += f" latency={latency}ms"
+                summary_lines.append(snippet)
+        elif isinstance(checks, list):
+            for info in checks[:5]:
+                if not isinstance(info, Mapping):
+                    continue
+                name = info.get("name") or info.get("endpoint") or info.get("stage") or "check"
+                status = info.get("status") or info.get("ok")
+                latency = info.get("latency_ms") or info.get("latency")
+                snippet = f"- {name}: {status}"
+                if latency is not None:
+                    snippet += f" latency={latency}ms"
+                summary_lines.append(snippet)
+        if not summary_lines:
+            summary_lines.append("- Reachability diagnostics present.")
+    else:
+        summary_lines.append("- Reachability diagnostics present.")
+
+    lines.extend(summary_lines)
+    return lines
+
+
+def _legacy_logs_section(
+    entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
+) -> List[str]:
     logs = gather_log_files(diagnostics_dir)
     meta_files = gather_meta_json_files(diagnostics_dir)
 
-    meta_rows = 0
-    for path in meta_files:
-        payload = safe_load_json(path)
-        if not isinstance(payload, Mapping):
-            continue
-        value = payload.get("rows_written")
-        if value is None and isinstance(payload.get("meta"), Mapping):
-            value = payload["meta"].get("rows_written")
+    logs_by_name = {path.stem: path for path in logs}
+    meta_info: Dict[str, Dict[str, Any]] = {}
+    for meta_path in meta_files:
+        connector_name = meta_path.parent.name or meta_path.stem
+        bucket = meta_info.setdefault(connector_name, {"rows": 0, "paths": []})
+        bucket["paths"].append(meta_path)
+        payload = safe_load_json(meta_path)
+        rows_value = None
+        if isinstance(payload, Mapping):
+            rows_value = payload.get("rows_written")
+            if rows_value is None and isinstance(payload.get("meta"), Mapping):
+                rows_value = payload["meta"].get("rows_written")
         try:
-            if value is not None:
-                meta_rows += int(value)
+            if rows_value is not None:
+                bucket["rows"] += int(rows_value)
         except (TypeError, ValueError):
             continue
 
     lines = ["## Logs", ""]
-    lines.append("| Logs | Meta rows | Meta |")
-    lines.append("| --- | ---: | --- |")
-    lines.append(f"| {len(logs)} | {meta_rows} | {len(meta_files)} |")
+    lines.append("| Connector | Status | Reason | Logs | Meta rows | Meta |")
+    lines.append("| --- | --- | --- | --- | ---: | --- |")
+
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("connector_id") or entry.get("connector") or "unknown")
+        seen.add(name)
+        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
+        status = extras.get("status_raw") or entry.get("status") or EM_DASH
+        reason_value = entry.get("reason")
+        if reason_value is None and isinstance(extras, Mapping):
+            reason_value = extras.get("reason")
+        reason_text = _display_reason(reason_value) if reason_value else EM_DASH
+        log_path = logs_by_name.get(name)
+        if log_path is not None:
+            try:
+                logs_cell = log_path.relative_to(diagnostics_dir).as_posix()
+            except ValueError:
+                logs_cell = log_path.as_posix()
+        else:
+            logs_cell = EM_DASH
+        meta_bucket = meta_info.get(name, {})
+        meta_rows = meta_bucket.get("rows") or 0
+        meta_paths = meta_bucket.get("paths") or []
+        if meta_paths:
+            try:
+                meta_cell = ", ".join(
+                    path.relative_to(diagnostics_dir).as_posix() if path.is_relative_to(diagnostics_dir) else path.as_posix()
+                    for path in meta_paths[:2]
+                )
+            except AttributeError:
+                converted: List[str] = []
+                for path in meta_paths[:2]:
+                    try:
+                        converted.append(path.relative_to(diagnostics_dir).as_posix())
+                    except ValueError:
+                        converted.append(path.as_posix())
+                meta_cell = ", ".join(converted)
+        else:
+            meta_cell = EM_DASH
+        lines.append(
+            "| {name} | {status} | {reason} | {logs_cell} | {rows} | {meta_cell} |".format(
+                name=name,
+                status=status,
+                reason=reason_text,
+                logs_cell=logs_cell,
+                rows=_fmt_count(meta_rows),
+                meta_cell=meta_cell,
+            )
+        )
+
+    for name, path in logs_by_name.items():
+        if name in seen:
+            continue
+        try:
+            logs_cell = path.relative_to(diagnostics_dir).as_posix()
+        except ValueError:
+            logs_cell = path.as_posix()
+        meta_bucket = meta_info.get(name, {})
+        meta_rows = meta_bucket.get("rows") or 0
+        meta_paths = meta_bucket.get("paths") or []
+        if meta_paths:
+            try:
+                meta_cell = ", ".join(
+                    sub.relative_to(diagnostics_dir).as_posix()
+                    if sub.is_relative_to(diagnostics_dir)
+                    else sub.as_posix()
+                    for sub in meta_paths[:2]
+                )
+            except AttributeError:
+                fallback: List[str] = []
+                for sub in meta_paths[:2]:
+                    try:
+                        fallback.append(sub.relative_to(diagnostics_dir).as_posix())
+                    except ValueError:
+                        fallback.append(sub.as_posix())
+                meta_cell = ", ".join(fallback)
+        else:
+            meta_cell = EM_DASH
+        lines.append(
+            "| {name} | {status} | {reason} | {logs_cell} | {rows} | {meta_cell} |".format(
+                name=name,
+                status=EM_DASH,
+                reason=EM_DASH,
+                logs_cell=logs_cell,
+                rows=_fmt_count(meta_rows),
+                meta_cell=meta_cell,
+            )
+        )
+
+    if not logs and not meta_files:
+        lines.append("| — | — | — | — | — | — |")
+
     lines.append("")
     if logs:
         for file in logs:
@@ -1029,10 +1222,12 @@ def _format_status_counts(entries: Sequence[Mapping[str, Any]]) -> str:
 
 def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
     counter = reason_histogram(entries)
-    if not counter:
-        return EM_DASH
-    parts = [f"{reason}={counter[reason]}" for reason in sorted(counter)]
-    return ", ".join(parts)
+    if counter:
+        parts = [f"{_display_reason(reason)}={counter[reason]}" for reason in sorted(counter)]
+        return ", ".join(parts)
+    if _LAST_STUB_REASON_ALIAS:
+        return f"{_LAST_STUB_REASON_ALIAS}=1"
+    return EM_DASH
 
 
 def _rows_totals(records: Sequence[ConnectorRecord]) -> tuple[int, int, int, bool]:
@@ -1223,7 +1418,7 @@ def _render_connector_matrix(records: Sequence[ConnectorRecord]) -> List[str]:
         meta_path = extras_mapping.get("meta_path") if isinstance(extras_mapping, Mapping) else None
         meta_path_text = str(meta_path) if meta_path else EM_DASH
 
-        reason_text = str(record.reason) if record.reason else EM_DASH
+        reason_text = _display_reason(record.reason) if record.reason else EM_DASH
         status_raw = extras_mapping.get("status_raw") if isinstance(extras_mapping, Mapping) else None
         status_text = str(status_raw or record.status or EM_DASH)
 
@@ -1659,16 +1854,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     entries = load_report(report_path)
-    if not entries:
-        stub = {
-            "client": "summarizer",
-            "mode": "diagnostics",
-            "status": "error",
-            "reason": "missing-report",
-            "counts": {"written": 0},
-        }
-        report_path.write_text(json.dumps(stub) + "\n", encoding="utf-8")
-        entries = load_report(report_path)
 
     content = build_markdown(
         entries,

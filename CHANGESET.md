@@ -28,3 +28,4 @@
 - fix(ci/summarizer): restore connector table columns, em-dash formatting, DTM diagnostics, secret redaction, and missing-report stubs so fast tests pass with the refactored superreport.
 - ci(summary): restore public API strings, selector effectiveness section, top-5 sample histograms, logs/meta table, and CLI missing-report stub for the best-ever summary.
 - fix(ci/summarizer): align literals for config line, missing-report stub, selector phrasing, logs/meta table, and zero-row primary reason to unblock fast tests.
+- ci(summary): restore legacy headings, config literals, logs/meta per-connector table, reason aliasing, DTM reachability section, and zero-row drop summary for full fast-test parity.
