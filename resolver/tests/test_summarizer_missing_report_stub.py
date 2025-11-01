@@ -28,7 +28,7 @@ def test_missing_report_stub(tmp_path):
     assert len(lines) == 1
     payload = json.loads(lines[0])
     assert payload["status"] == "error"
-    assert payload["reason"] == "missing or empty report"
+    assert payload["reason"] == "missing-report"
     summary_text = out.read_text(encoding="utf-8")
     assert "# Ingestion Superreport" in summary_text
     assert "* **Connectors:** 0" in summary_text

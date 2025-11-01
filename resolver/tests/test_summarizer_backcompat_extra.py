@@ -37,4 +37,7 @@ def test_build_markdown_has_dual_titles_and_table_header(tmp_path: Path) -> None
     content = sc.build_markdown(entries, diagnostics_root=diagnostics, staging_root=staging_dir)
     assert "# Connector Diagnostics" in content
     assert "# Ingestion Superreport" in content
-    assert "| Connector | Status | Reason | Logs | Meta rows | Meta |" in content
+    assert (
+        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+        in content
+    )

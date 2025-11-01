@@ -57,37 +57,23 @@ def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
     raw_entries: List[Any] = []
     if target.exists():
         raw_entries = safe_load_jsonl(target)
-    if not raw_entries:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        stub = {
-            "client": "summarizer",
-            "mode": "diagnostics",
-            "status": "error",
-            "reason": "missing or empty report",
-            "extras": {"stub": "missing-report"},
-            "counts": {"written": 0},
-        }
-        target.write_text(json.dumps(stub) + "\n", encoding="utf-8")
-        raw_entries = [stub]
-        _LAST_STUB_REASON_ALIAS = "missing-report"
-    else:
-        _LAST_STUB_REASON_ALIAS = None
 
     entries: List[Dict[str, Any]] = []
+    _LAST_STUB_REASON_ALIAS = None
     for entry in raw_entries:
         if not isinstance(entry, Mapping):
             continue
         normalized = dict(entry)
+        reason_value = normalized.get("reason")
+        connector_id = str(normalized.get("connector_id") or "")
         if (
-            normalized.get("client") == "summarizer"
-            and normalized.get("mode") == "diagnostics"
-            and normalized.get("status") == "error"
-            and normalized.get("reason")
-            in {"missing or empty report", "missing-report"}
-        ):
-            # Preserve stub line on disk but do not include it in rendered diagnostics.
-            if normalized.get("extras", {}).get("stub") == "missing-report":
-                _LAST_STUB_REASON_ALIAS = "missing-report"
+            connector_id == "_summary"
+            or (
+                normalized.get("client") == "summarizer"
+                and normalized.get("mode") == "diagnostics"
+            )
+        ) and (reason_value in {"missing or empty report", "missing-report"}):
+            _LAST_STUB_REASON_ALIAS = "missing-report"
             continue
         extras = normalized.get("extras")
         if isinstance(extras, Mapping):
@@ -579,12 +565,50 @@ def _legacy_zero_row_section(
         else:
             primary_reason = "unknown"
             top_reasons = "—"
+
+        selectors_with_rows: List[str] = []
+        for entry in zero_entries:
+            extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
+            selector_payload = extras.get("selector") if isinstance(extras, Mapping) else None
+            if not isinstance(selector_payload, Mapping):
+                continue
+            top_rows = selector_payload.get("top_by_rows")
+            if isinstance(top_rows, Sequence):
+                for item in top_rows:
+                    selector_name: str | None = None
+                    rows_value: Any = None
+                    if isinstance(item, Mapping):
+                        selector_name = str(
+                            item.get("selector")
+                            or item.get("name")
+                            or item.get("id")
+                            or item.get("value")
+                            or ""
+                        ).strip() or None
+                        rows_value = item.get("rows") or item.get("row_count")
+                    elif isinstance(item, Sequence) and len(item) >= 2:
+                        selector_name = str(item[0]).strip() or None
+                        rows_value = item[1]
+                    if not selector_name:
+                        continue
+                    try:
+                        numeric_rows = int(rows_value)
+                    except (TypeError, ValueError):
+                        numeric_rows = None
+                    if numeric_rows is not None and numeric_rows > 0:
+                        selectors_with_rows.append(f"{selector_name} ({numeric_rows})")
+                    elif rows_value not in (None, "", 0):
+                        selectors_with_rows.append(f"{selector_name} ({rows_value})")
+
+        selectors_text = ", ".join(selectors_with_rows[:5]) if selectors_with_rows else "none"
+
         return [
             "## Zero-row root cause",
             "",
             "- One or more connectors produced zero rows.",
             f"- Primary reason: {primary_reason}",
             f"- Top drop reasons: {top_reasons}",
+            f"- Selectors with rows: {selectors_text}",
         ]
 
     for connector_meta in staging_snapshot.values():
@@ -778,110 +802,171 @@ def _legacy_logs_section(
         payload = safe_load_json(meta_path)
         rows_value = None
         if isinstance(payload, Mapping):
-            rows_value = payload.get("rows_written")
+            rows_value = payload.get("rows_written") or payload.get("rows")
             if rows_value is None and isinstance(payload.get("meta"), Mapping):
-                rows_value = payload["meta"].get("rows_written")
+                rows_value = payload["meta"].get("rows_written") or payload["meta"].get("rows")
         try:
             if rows_value is not None:
                 bucket["rows"] += int(rows_value)
         except (TypeError, ValueError):
             continue
 
-    lines = ["## Logs", ""]
-    lines.append("| Connector | Status | Reason | Logs | Meta rows | Meta |")
-    lines.append("| --- | --- | --- | --- | ---: | --- |")
+    def _prefer(existing: Any, new_value: Any) -> Any:
+        if new_value is None:
+            return existing
+        if isinstance(new_value, str) and not new_value.strip():
+            return existing
+        return new_value
 
-    seen: set[str] = set()
+    def _display_path(path: Path) -> str:
+        candidates = [diagnostics_dir.parent.parent, diagnostics_dir.parent, diagnostics_dir]
+        for base in candidates:
+            if not isinstance(base, Path):
+                continue
+            try:
+                rel = path.relative_to(base)
+            except ValueError:
+                continue
+            else:
+                text = rel.as_posix()
+                if text:
+                    return text
+        return path.as_posix()
+
+    aggregated: Dict[str, Dict[str, Any]] = {}
     for entry in entries:
         if not isinstance(entry, Mapping):
             continue
         name = str(entry.get("connector_id") or entry.get("connector") or "unknown")
-        seen.add(name)
+        bucket = aggregated.setdefault(
+            name,
+            {
+                "mode": None,
+                "status": None,
+                "reason": None,
+                "http": None,
+                "counts": None,
+                "kept": None,
+                "dropped": None,
+                "parse_errors": None,
+                "meta_path": None,
+            },
+        )
+
         extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-        status = extras.get("status_raw") or entry.get("status") or EM_DASH
+        bucket["mode"] = _prefer(bucket.get("mode"), entry.get("mode") or extras.get("mode"))
+        status_value = extras.get("status_raw") or entry.get("status")
+        bucket["status"] = _prefer(bucket.get("status"), status_value)
         reason_value = entry.get("reason")
         if reason_value is None and isinstance(extras, Mapping):
             reason_value = extras.get("reason")
-        reason_text = _display_reason(reason_value) if reason_value else EM_DASH
-        log_path = logs_by_name.get(name)
-        if log_path is not None:
-            try:
-                logs_cell = log_path.relative_to(diagnostics_dir).as_posix()
-            except ValueError:
-                logs_cell = log_path.as_posix()
-        else:
-            logs_cell = EM_DASH
-        meta_bucket = meta_info.get(name, {})
-        meta_rows = meta_bucket.get("rows") or 0
-        meta_paths = meta_bucket.get("paths") or []
-        if meta_paths:
-            try:
-                meta_cell = ", ".join(
-                    path.relative_to(diagnostics_dir).as_posix() if path.is_relative_to(diagnostics_dir) else path.as_posix()
-                    for path in meta_paths[:2]
+        bucket["reason"] = _prefer(bucket.get("reason"), reason_value)
+
+        counts = entry.get("counts") if isinstance(entry.get("counts"), Mapping) else {}
+        if counts:
+            bucket["counts"] = (
+                _coerce_int(counts.get("fetched")),
+                _coerce_int(counts.get("normalized")),
+                _coerce_int(counts.get("written")),
+            )
+
+        http_payload = entry.get("http") if isinstance(entry.get("http"), Mapping) else {}
+        if http_payload:
+            bucket["http"] = (
+                _coerce_int(http_payload.get("2xx")),
+                _coerce_int(http_payload.get("4xx")),
+                _coerce_int(http_payload.get("5xx")),
+                _coerce_int(http_payload.get("retries")),
+            )
+
+        run_totals = extras.get("run_totals") if isinstance(extras, Mapping) else None
+        if isinstance(run_totals, Mapping):
+            if run_totals.get("rows_written") is not None:
+                bucket["kept"] = _prefer(bucket.get("kept"), _coerce_int(run_totals.get("rows_written")))
+            if run_totals.get("dropped") is not None:
+                bucket["dropped"] = _prefer(bucket.get("dropped"), _coerce_int(run_totals.get("dropped")))
+            if run_totals.get("parse_errors") is not None:
+                bucket["parse_errors"] = _prefer(
+                    bucket.get("parse_errors"), _coerce_int(run_totals.get("parse_errors"))
                 )
-            except AttributeError:
-                converted: List[str] = []
-                for path in meta_paths[:2]:
-                    try:
-                        converted.append(path.relative_to(diagnostics_dir).as_posix())
-                    except ValueError:
-                        converted.append(path.as_posix())
-                meta_cell = ", ".join(converted)
+        if isinstance(extras, Mapping):
+            if extras.get("rows_written") is not None and bucket.get("kept") is None:
+                try:
+                    bucket["kept"] = _coerce_int(extras.get("rows_written"))
+                except (TypeError, ValueError):
+                    bucket["kept"] = extras.get("rows_written")
+            if extras.get("meta_path") and not bucket.get("meta_path"):
+                bucket["meta_path"] = str(extras.get("meta_path"))
+
+    all_names = set(aggregated)
+    all_names.update(logs_by_name)
+    all_names.update(meta_info)
+
+    lines = ["## Logs", ""]
+    lines.append(
+        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    )
+    lines.append(
+        "| --- | --- | --- | --- | --- | --- | ---:| ---:| ---:| --- | ---:| --- |"
+    )
+
+    for name in sorted(all_names):
+        bucket = aggregated.get(name, {})
+        mode = bucket.get("mode") or "real"
+        status = bucket.get("status") or EM_DASH
+        reason = bucket.get("reason")
+        reason_text = _display_reason(reason) if reason else EM_DASH
+        http_counts = bucket.get("http") or (0, 0, 0, 0)
+        http_text = f"{http_counts[0]}/{http_counts[1]}/{http_counts[2]} ({http_counts[3]})"
+        counts_tuple = bucket.get("counts") or (0, 0, 0)
+        counts_text = f"{counts_tuple[0]}/{counts_tuple[1]}/{counts_tuple[2]}"
+
+        kept_value = bucket.get("kept")
+        meta_bucket = meta_info.get(name, {})
+        if kept_value is None and meta_bucket.get("rows"):
+            kept_value = meta_bucket.get("rows")
+        dropped_value = bucket.get("dropped")
+        parse_errors_value = bucket.get("parse_errors")
+
+        log_path = logs_by_name.get(name)
+        logs_cell = _display_path(log_path) if log_path is not None else EM_DASH
+
+        meta_rows = meta_bucket.get("rows") or 0
+        if meta_rows == 0 and kept_value not in (None, 0):
+            meta_rows = kept_value
+        meta_paths = list(meta_bucket.get("paths") or [])
+        if not meta_paths and bucket.get("meta_path"):
+            meta_paths.append(Path(bucket["meta_path"]))
+        if meta_paths:
+            rendered_paths: List[str] = []
+            for meta_path in meta_paths[:2]:
+                path_obj = meta_path if isinstance(meta_path, Path) else Path(str(meta_path))
+                rendered_paths.append(_display_path(path_obj))
+            meta_cell = ", ".join(rendered_paths)
         else:
             meta_cell = EM_DASH
+
         lines.append(
-            "| {name} | {status} | {reason} | {logs_cell} | {rows} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
                 name=name,
+                mode=mode,
                 status=status,
                 reason=reason_text,
+                http=http_text,
+                counts=counts_text,
+                kept=_fmt_count(kept_value),
+                dropped=_fmt_count(dropped_value),
+                parse_errors=_fmt_count(parse_errors_value),
                 logs_cell=logs_cell,
-                rows=_fmt_count(meta_rows),
+                meta_rows=_fmt_count(meta_rows),
                 meta_cell=meta_cell,
             )
         )
 
-    for name, path in logs_by_name.items():
-        if name in seen:
-            continue
-        try:
-            logs_cell = path.relative_to(diagnostics_dir).as_posix()
-        except ValueError:
-            logs_cell = path.as_posix()
-        meta_bucket = meta_info.get(name, {})
-        meta_rows = meta_bucket.get("rows") or 0
-        meta_paths = meta_bucket.get("paths") or []
-        if meta_paths:
-            try:
-                meta_cell = ", ".join(
-                    sub.relative_to(diagnostics_dir).as_posix()
-                    if sub.is_relative_to(diagnostics_dir)
-                    else sub.as_posix()
-                    for sub in meta_paths[:2]
-                )
-            except AttributeError:
-                fallback: List[str] = []
-                for sub in meta_paths[:2]:
-                    try:
-                        fallback.append(sub.relative_to(diagnostics_dir).as_posix())
-                    except ValueError:
-                        fallback.append(sub.as_posix())
-                meta_cell = ", ".join(fallback)
-        else:
-            meta_cell = EM_DASH
+    if not all_names:
         lines.append(
-            "| {name} | {status} | {reason} | {logs_cell} | {rows} | {meta_cell} |".format(
-                name=name,
-                status=EM_DASH,
-                reason=EM_DASH,
-                logs_cell=logs_cell,
-                rows=_fmt_count(meta_rows),
-                meta_cell=meta_cell,
-            )
+            f"| — | real | — | — | 0/0/0 (0) | 0/0/0 | {_fmt_count(0)} | {_fmt_count(0)} | {_fmt_count(0)} | — | {_fmt_count(0)} | — |"
         )
-
-    if not logs and not meta_files:
-        lines.append("| — | — | — | — | — | — |")
 
     lines.append("")
     if logs:
@@ -1853,6 +1938,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_path = Path(args.output)
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines: List[str] = []
+    if report_path.exists():
+        try:
+            existing_lines = [
+                line
+                for line in report_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except OSError:
+            existing_lines = []
+    if not report_path.exists() or not existing_lines:
+        stub_payload = {
+            "connector_id": "_summary",
+            "mode": "real",
+            "status": "error",
+            "reason": "missing-report",
+            "counts": {"fetched": 0, "normalized": 0, "written": 0},
+            "http": {"2xx": 0, "4xx": 0, "5xx": 0, "retries": 0},
+        }
+        report_path.write_text(json.dumps(stub_payload) + "\n", encoding="utf-8")
+        existing_lines = [json.dumps(stub_payload)]
+
     entries = load_report(report_path)
 
     content = build_markdown(

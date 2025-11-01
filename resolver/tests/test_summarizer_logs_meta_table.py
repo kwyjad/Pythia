@@ -22,6 +22,12 @@ def test_logs_meta_table(tmp_path):
     )
 
     lines = markdown.splitlines()
-    assert "| Logs | Meta rows |" in lines
-    assert "| --- | ---: |" in lines
-    assert "| 1 | 3 |" in lines
+    header = (
+        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    )
+    assert header in lines
+    dtm_row = next(line for line in lines if line.startswith("| dtm |"))
+    assert "| 3 |" in dtm_row
+    assert "diagnostics/ingestion/dtm/run.meta.json" in dtm_row
+    ingestion_row = next(line for line in lines if "logs/ingestion.log" in line)
+    assert ingestion_row.startswith("| ingestion |")
