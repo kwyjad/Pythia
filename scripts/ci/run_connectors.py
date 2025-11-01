@@ -55,13 +55,13 @@ _IDMC_DEFAULT_ENV = {
 CONNECTOR_METADATA: Dict[str, ConnectorMetadata] = {
     "idmc": ConnectorMetadata(
         module="resolver.ingestion.idmc.cli",
-        default_args=("--write-candidates",),
+        default_args=("--write-candidates", "--chunk-by-month"),
         default_env=_IDMC_DEFAULT_ENV,
         skip_env="RESOLVER_SKIP_IDMC",
     ),
     "idmc_client": ConnectorMetadata(
         module="resolver.ingestion.idmc.cli",
-        default_args=("--write-candidates",),
+        default_args=("--write-candidates", "--chunk-by-month"),
         default_env=_IDMC_DEFAULT_ENV,
         skip_env="RESOLVER_SKIP_IDMC",
     ),
@@ -292,6 +292,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if env.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
         env.setdefault("PYTHONDEVMODE", "1")
         env.setdefault("PYTHONWARNINGS", "default")
+
+    if "RESOLVER_SKIP_IDMC" not in env:
+        token_present = bool(env.get("IDMC_API_TOKEN", "").strip())
+        env["RESOLVER_SKIP_IDMC"] = "0" if token_present else "1"
 
     connectors = _resolve_connectors(env)
     if not connectors:

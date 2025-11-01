@@ -81,6 +81,8 @@ jobs:
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
+      IDMC_REQ_PER_SEC: 0.3
+      IDMC_MAX_CONCURRENCY: 1
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}

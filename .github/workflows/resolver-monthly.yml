@@ -49,6 +49,8 @@ jobs:
       UNHCR_ODP_CLIENT_ID: ${{ secrets.UNHCR_ODP_CLIENT_ID }}
       UNHCR_ODP_CLIENT_SECRET: ${{ secrets.UNHCR_ODP_CLIENT_SECRET }}
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
+      IDMC_REQ_PER_SEC: 0.3
+      IDMC_MAX_CONCURRENCY: 1
       LOG_LEVEL: ${{ github.event.inputs.log_level || 'INFO' }}
       DTM_CONFIG_PATH: resolver/config/dtm.yml
       RESOLVER_OUTPUT_DIR: resolver/staging

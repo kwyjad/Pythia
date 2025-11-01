@@ -89,6 +89,10 @@ jobs:
             echo "resolver/tests missing"
           fi
 
+      - name: Python syntax check (critical CI modules)
+        run: |
+          python scripts/ci/validate_python_syntax.py
+
       - name: Pytest (with JUnit)
         id: tests
         continue-on-error: true
