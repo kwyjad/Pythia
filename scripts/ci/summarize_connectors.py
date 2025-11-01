@@ -469,65 +469,102 @@ def _legacy_samples_section(
 
 
 def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    preferred: Mapping[str, Any] | None = None
+    fallback: Mapping[str, Any] | None = None
+    preferred_extras: Mapping[str, Any] | None = None
+    fallback_extras: Mapping[str, Any] | None = None
+
     for entry in entries:
         extras = entry.get("extras") if isinstance(entry, Mapping) else None
         config = extras.get("config") if isinstance(extras, Mapping) else None
         if not isinstance(config, Mapping):
             continue
-        path = config.get("config_path_used") or extras.get("config_path_used") or "unknown"
-        source = config.get("config_source_label") or extras.get("config_source") or "unknown"
-        warnings = config.get("config_warnings")
-        lines = ["## Config used", ""]
-        lines.append(f"- Config source: {source}")
-        lines.append(f"- Config: {path}")
-        if isinstance(warnings, Sequence) and warnings:
-            lines.append("- warnings:")
-            for warning in warnings:
-                lines.append(f"  - {warning}")
 
-        preview = config.get("countries_preview")
-        if isinstance(preview, Sequence) and not isinstance(preview, (str, bytes)):
-            preview_text = ", ".join(str(item) for item in list(preview)[:5] if str(item)) or "—"
-            lines.append(f"- Countries preview: {preview_text}")
+        label = str(
+            config.get("config_source_label")
+            or (extras.get("config_source") if isinstance(extras, Mapping) else "")
+            or ""
+        ).strip()
 
-        config_parse = config.get("config_parse") if isinstance(config.get("config_parse"), Mapping) else {}
-        config_keys_found = config.get("config_keys_found") if isinstance(config.get("config_keys_found"), Mapping) else {}
-        parse_countries = []
-        raw_countries = config_parse.get("countries") if isinstance(config_parse, Mapping) else None
-        if isinstance(raw_countries, Sequence) and not isinstance(raw_countries, (str, bytes)):
-            parse_countries = [str(item) for item in raw_countries if str(item)]
-        parsed_admin_levels = []
-        raw_levels = config_parse.get("admin_levels") if isinstance(config_parse, Mapping) else None
-        if isinstance(raw_levels, Sequence) and not isinstance(raw_levels, (str, bytes)):
-            parsed_admin_levels = [str(item) for item in raw_levels if str(item)]
+        if fallback is None:
+            fallback = config
+            fallback_extras = extras if isinstance(extras, Mapping) else None
 
-        if parse_countries:
-            lines.append(f"- **Countries parse:** api.countries: found ({len(parse_countries)})")
-        else:
-            lines.append("- **Countries parse:** api.countries: missing or empty")
+        if label.lower() == "resolver":
+            preferred = config
+            preferred_extras = extras if isinstance(extras, Mapping) else None
+            break
 
-        if parsed_admin_levels:
-            levels_repr = ", ".join(parsed_admin_levels)
-            lines.append(f"- **Admin levels parse:** api.admin_levels: found ([{levels_repr}])")
-        else:
-            lines.append("- **Admin levels parse:** api.admin_levels: missing or empty")
+    chosen = preferred or fallback
+    chosen_extras = preferred_extras or fallback_extras
 
-        if isinstance(config_keys_found, Mapping):
-            countries_found = bool(config_keys_found.get("countries"))
-            admin_found = bool(config_keys_found.get("admin_levels"))
-            lines.append(
-                "- **Config keys found:** countries={c}, admin_levels={a}".format(
-                    c=str(countries_found).lower(),
-                    a=str(admin_found).lower(),
-                )
+    if not isinstance(chosen, Mapping):
+        return []
+
+    path = (
+        chosen.get("config_path_used")
+        or (chosen_extras.get("config_path_used") if isinstance(chosen_extras, Mapping) else None)
+        or "unknown"
+    )
+    source = (
+        chosen.get("config_source_label")
+        or (chosen_extras.get("config_source") if isinstance(chosen_extras, Mapping) else None)
+        or "unknown"
+    )
+    warnings = chosen.get("config_warnings")
+
+    lines = ["## Config used", ""]
+    lines.append(f"- Config source: {source}")
+    lines.append(f"- Config: {path}")
+
+    if isinstance(warnings, Sequence) and warnings:
+        lines.append("- warnings:")
+        for warning in warnings:
+            lines.append(f"  - {warning}")
+
+    preview = chosen.get("countries_preview")
+    if isinstance(preview, Sequence) and not isinstance(preview, (str, bytes)):
+        preview_text = ", ".join(str(item) for item in list(preview)[:5] if str(item)) or "—"
+        lines.append(f"- Countries preview: {preview_text}")
+
+    config_parse = chosen.get("config_parse") if isinstance(chosen.get("config_parse"), Mapping) else {}
+    config_keys_found = (
+        chosen.get("config_keys_found") if isinstance(chosen.get("config_keys_found"), Mapping) else {}
+    )
+    parse_countries: List[str] = []
+    raw_countries = config_parse.get("countries") if isinstance(config_parse, Mapping) else None
+    if isinstance(raw_countries, Sequence) and not isinstance(raw_countries, (str, bytes)):
+        parse_countries = [str(item) for item in raw_countries if str(item)]
+    parsed_admin_levels: List[str] = []
+    raw_levels = config_parse.get("admin_levels") if isinstance(config_parse, Mapping) else None
+    if isinstance(raw_levels, Sequence) and not isinstance(raw_levels, (str, bytes)):
+        parsed_admin_levels = [str(item) for item in raw_levels if str(item)]
+
+    if parse_countries:
+        lines.append(f"- **Countries parse:** api.countries: found ({len(parse_countries)})")
+    else:
+        lines.append("- **Countries parse:** api.countries: missing or empty")
+
+    if parsed_admin_levels:
+        levels_repr = ", ".join(parsed_admin_levels)
+        lines.append(f"- **Admin levels parse:** api.admin_levels: found ([{levels_repr}])")
+    else:
+        lines.append("- **Admin levels parse:** api.admin_levels: missing or empty")
+
+    if isinstance(config_keys_found, Mapping):
+        countries_found = bool(config_keys_found.get("countries"))
+        admin_found = bool(config_keys_found.get("admin_levels"))
+        lines.append(
+            "- **Config keys found:** countries={c}, admin_levels={a}".format(
+                c=str(countries_found).lower(),
+                a=str(admin_found).lower(),
             )
-            countries_mode = str(config.get("countries_mode", "discovered")).strip().lower()
-            if countries_found and countries_mode == "discovered":
-                lines.append(
-                    "- ⚠ config had api.countries but selector list not applied (check loader/version)."
-                )
-        return lines
-    return []
+        )
+        countries_mode = str(chosen.get("countries_mode", "discovered")).strip().lower()
+        if countries_found and countries_mode == "discovered":
+            lines.append("- ⚠ config had api.countries but selector list not applied (check loader/version).")
+
+    return lines
 
 
 def _legacy_selector_section(

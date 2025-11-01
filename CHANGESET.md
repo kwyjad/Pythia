@@ -33,3 +33,5 @@
 - ci(summary): enforce deduped connector rows with run.json meta paths, emit host:port reachability bullets, and ensure config, selector, and zero-row diagnostics match fast-test literals.
 - ci(summarizer): restore classic connectors table header, literal config lines, top-5 sample histogram, and legacy stub row,
   while preferring run.json totals for rows written so fast tests match the expected markdown.
+- ci(summary): always render Config used block when config extras exist, preserving the literal "Config:" path line required by
+  fast tests and covering it with a focused regression test.
