@@ -2,9 +2,10 @@
 
 ## Connector configuration paths
 
-Connector YAMLs now have a single home under `resolver/ingestion/config/`.  A short guide covering the search order,
-fallback behaviour, and how to clean up legacy duplicates lives in
-[`ingestion/config_paths.md`](ingestion/config_paths.md).  Refer to it when adding a new connector or migrating an
+Connector YAMLs are in the middle of a migration toward `resolver/ingestion/config/`, but the shared loader currently
+prefers the legacy copies in `resolver/config/` so fast tests and older jobs keep working. A short guide covering the
+search order, fallback behaviour, and how to clean up legacy duplicates lives in
+[`ingestion/config_paths.md`](ingestion/config_paths.md). Refer to it when adding a new connector or migrating an
 existing configuration.
 
 ## DTM connector troubleshooting

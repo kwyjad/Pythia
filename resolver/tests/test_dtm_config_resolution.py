@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from resolver.ingestion import dtm_client
+from resolver.ingestion._shared import config_loader
 
 
 @pytest.fixture(autouse=True)
@@ -23,14 +24,28 @@ def _prepare_repo(monkeypatch: pytest.MonkeyPatch, repo_root: Path) -> None:
     monkeypatch.setattr(dtm_client, "REPO_ROOT", repo_root, raising=False)
     monkeypatch.setattr(dtm_client, "RESOLVER_ROOT", resolver_root, raising=False)
     ingestion_default = (ingestion_config / "dtm.yml").resolve()
-    monkeypatch.setattr(dtm_client, "LEGACY_CONFIG_PATH", ingestion_default, raising=False)
+    legacy_default = (resolver_root / "config" / "dtm.yml").resolve()
+    monkeypatch.setattr(dtm_client, "LEGACY_CONFIG_PATH", legacy_default, raising=False)
     monkeypatch.setattr(
         dtm_client,
         "REPO_CONFIG_PATH",
-        (resolver_root / "config" / "dtm.yml").resolve(),
+        legacy_default,
         raising=False,
     )
-    monkeypatch.setattr(dtm_client, "CONFIG_PATH", ingestion_default, raising=False)
+    monkeypatch.setattr(dtm_client, "CONFIG_PATH", legacy_default, raising=False)
+    monkeypatch.setattr(
+        config_loader,
+        "LEGACY_CONFIG_ROOT",
+        (resolver_root / "config").resolve(),
+    )
+    monkeypatch.setattr(
+        config_loader,
+        "INGESTION_CONFIG_ROOT",
+        (resolver_root / "ingestion" / "config").resolve(),
+    )
+    monkeypatch.setattr(config_loader, "RESOLVER_ROOT", resolver_root.resolve())
+    monkeypatch.setattr(config_loader, "REPO_ROOT", repo_root.resolve())
+    monkeypatch.setattr(config_loader, "_LAST_RESULTS", {})
 
 
 def test_load_config_records_api_selectors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

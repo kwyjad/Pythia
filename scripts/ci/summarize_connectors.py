@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import certifi
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 REASON_HISTOGRAM_LIMIT = 5
 
 DEFAULT_HTTP_KEYS = ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status")
@@ -26,6 +27,22 @@ MISSING_REPORT_SUMMARY = (
 
 STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
 EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"]
+
+
+def _relativize_path(raw: Any) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        path = Path(raw)
+    except (TypeError, ValueError):
+        return raw
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except Exception:
+        try:
+            return path.resolve().as_posix()
+        except Exception:
+            return str(path)
 
 
 def _ensure_dict(data: Any) -> Dict[str, Any]:
@@ -584,6 +601,22 @@ def _render_details(entry: Mapping[str, Any]) -> str:
         joined_warnings = "; ".join(str(item) for item in config_warnings if str(item))
         if joined_warnings:
             bullets.append(f"- **Config warnings:** {joined_warnings}")
+
+    config_path_used = (
+        config_block.get("config_path_used")
+        or extras.get("config_path_used")
+        or extras.get("config_path")
+    )
+    countries_mode = (
+        config_block.get("countries_mode")
+        or _ensure_dict(config_block.get("config_parse")).get("countries_mode")
+    )
+    rel_config_path = _relativize_path(config_path_used)
+    if rel_config_path:
+        line = f"- Config: {rel_config_path}"
+        if countries_mode:
+            line += f" (countries_mode={countries_mode})"
+        bullets.append(line)
 
     if "api_key_configured" in extras:
         api_configured = extras["api_key_configured"]

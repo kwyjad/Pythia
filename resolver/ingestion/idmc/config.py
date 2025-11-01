@@ -141,7 +141,7 @@ def load(
     """Load the IDMC configuration from disk."""
 
     loader_warnings: Tuple[str, ...] = ()
-    source_label = "ingestion"
+    source_label = "resolver"
     resolved_path: Optional[Path] = None
 
     if path is not None:
@@ -150,13 +150,19 @@ def load(
             data = yaml.safe_load(fh) or {}
         source_label = "custom"
     else:
-        data, source_label = load_connector_config("idmc", strict_mismatch=strict_loader)
+        (
+            data,
+            source_label,
+            resolved_path,
+            loader_warning_list,
+        ) = load_connector_config("idmc", strict_mismatch=strict_loader)
         details = get_config_details("idmc")
         if details is not None:
             resolved_path = details.path
             loader_warnings = details.warnings
         else:
-            resolved_path = DEFAULT_PATH
+            resolved_path = resolved_path or DEFAULT_PATH
+            loader_warnings = tuple(loader_warning_list)
         data = dict(data or {})
 
     if not isinstance(data, dict):

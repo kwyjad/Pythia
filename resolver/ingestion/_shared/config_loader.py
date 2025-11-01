@@ -66,65 +66,67 @@ def _diff_keys(left: Mapping[str, Any], right: Mapping[str, Any]) -> Sequence[st
 
 def load_connector_config(
     name: str, *, strict_mismatch: bool = False
-) -> Tuple[Dict[str, Any], str]:
-    """Return a connector config payload and a label describing its source."""
+) -> Tuple[Dict[str, Any], str, Path, Tuple[str, ...]]:
+    """Return a connector config payload plus provenance details."""
 
     normalized = str(name or "").strip()
     if not normalized:
         raise ValueError("Connector name must be provided")
 
     ingestion_path = (INGESTION_CONFIG_ROOT / f"{normalized}.yml").resolve()
-    fallback_path = (LEGACY_CONFIG_ROOT / f"{normalized}.yml").resolve()
+    legacy_path = (LEGACY_CONFIG_ROOT / f"{normalized}.yml").resolve()
 
     ingestion_exists = ingestion_path.is_file()
-    fallback_exists = fallback_path.is_file()
+    legacy_exists = legacy_path.is_file()
 
     warnings: list[str] = []
     duplicates_equal = False
     fallback_used = False
-    source_label = "ingestion"
+    source_label = "resolver"
     chosen_path: Optional[Path] = None
     payload: Dict[str, Any] = {}
 
-    if ingestion_exists:
+    if legacy_exists:
+        payload = _load_yaml(legacy_path)
+        chosen_path = legacy_path
+    if not legacy_exists and ingestion_exists:
         payload = _load_yaml(ingestion_path)
         chosen_path = ingestion_path
-    if not ingestion_exists and fallback_exists:
-        payload = _load_yaml(fallback_path)
-        chosen_path = fallback_path
-        source_label = "resolver"
+        source_label = "ingestion"
         fallback_used = True
         warning = (
-            f"Using { _relpath(fallback_path) }; please move to "
-            f"{_relpath(ingestion_path)}"
+            f"Using {_relpath(ingestion_path)}; please move to "
+            f"{_relpath(legacy_path)}"
         )
         warnings.append(warning)
         log.warning("%s", warning)
-    elif ingestion_exists and fallback_exists:
-        fallback_payload = _load_yaml(fallback_path)
-        if payload == fallback_payload:
+    elif legacy_exists and ingestion_exists:
+        ingestion_payload = _load_yaml(ingestion_path)
+        if payload == ingestion_payload:
             duplicates_equal = True
-            source_label = "ingestion (dup-equal)"
+            source_label = "resolver (dup-equal)"
         else:
-            differing = _diff_keys(payload, fallback_payload)
+            differing = _diff_keys(payload, ingestion_payload)
             mismatch = (
                 f"Duplicate configs for '{normalized}' differ: "
-                f"{_relpath(ingestion_path)} vs {_relpath(fallback_path)} "
+                f"{_relpath(legacy_path)} vs {_relpath(ingestion_path)} "
                 f"(keys: {', '.join(differing)})"
             )
             if strict_mismatch:
                 raise ValueError(mismatch)
-            warnings.append(mismatch)
-            log.warning("%s", mismatch)
-    elif not ingestion_exists and not fallback_exists:
+            warnings.append(
+                f"duplicate-mismatch: resolver preferred over ingestion; {mismatch}"
+            )
+            log.warning("%s", warnings[-1])
+    elif not legacy_exists and not ingestion_exists:
         raise FileNotFoundError(
             f"No config found for '{normalized}' in "
-            f"{_relpath(ingestion_path)} or {_relpath(fallback_path)}"
+            f"{_relpath(legacy_path)} or {_relpath(ingestion_path)}"
         )
 
     if chosen_path is None:
-        # This should only happen if ingestion exists without fallback.
-        chosen_path = ingestion_path if ingestion_exists else fallback_path
+        # This should only happen if legacy exists without ingestion.
+        chosen_path = legacy_path if legacy_exists else ingestion_path
 
     payload = dict(payload or {})
     result = ConfigResolution(
@@ -132,13 +134,13 @@ def load_connector_config(
         source=source_label,
         path=chosen_path,
         ingestion_path=ingestion_path,
-        fallback_path=fallback_path,
+        fallback_path=legacy_path,
         warnings=tuple(warnings),
         duplicates_equal=duplicates_equal,
         fallback_used=fallback_used,
     )
     _LAST_RESULTS[normalized] = result
-    return payload, source_label
+    return payload, source_label, chosen_path, tuple(warnings)
 
 
 def get_config_details(name: str) -> Optional[ConfigResolution]:

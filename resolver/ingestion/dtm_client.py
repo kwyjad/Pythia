@@ -71,8 +71,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = _REPO_ROOT
 RESOLVER_ROOT = REPO_ROOT / "resolver"
 INGESTION_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
-LEGACY_CONFIG_PATH = INGESTION_CONFIG_PATH  # Back-compat alias expected by tests
 REPO_CONFIG_PATH = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
+LEGACY_CONFIG_PATH = REPO_CONFIG_PATH  # Back-compat alias expected by tests
 SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
 
 
@@ -3402,7 +3402,18 @@ def load_config() -> Dict[str, Any]:
             sha_prefix = None
         source_label = "custom"
     else:
-        raw_data, source_label = load_connector_config("dtm")
+        try:
+            (
+                raw_data,
+                source_label,
+                resolved_path_obj,
+                loader_warning_list,
+            ) = load_connector_config("dtm")
+        except FileNotFoundError:
+            raw_data = {}
+            source_label = "resolver"
+            resolved_path_obj = _resolve_config_path()
+            loader_warning_list = ()
         data = dict(raw_data or {})
         details = get_config_details("dtm")
         if details is not None:
@@ -3411,7 +3422,10 @@ def load_config() -> Dict[str, Any]:
             fallback_path = details.fallback_path
             warnings = details.warnings
         else:
-            path = _resolve_config_path()
+            path = resolved_path_obj or _resolve_config_path()
+            ingestion_path = INGESTION_CONFIG_PATH
+            fallback_path = REPO_CONFIG_PATH
+            warnings = tuple(loader_warning_list)
         if path.exists():
             try:
                 raw_bytes = path.read_bytes()
