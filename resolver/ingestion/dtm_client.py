@@ -2599,6 +2599,24 @@ def _write_connector_report(
     _mirror_legacy_diagnostics()
 
 
+def _append_summary_line(message: str) -> None:
+    summary_path = DIAGNOSTICS_DIR / "summary.md"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    header = "# Connector Diagnostics\n\n"
+    if summary_path.exists():
+        existing = summary_path.read_text(encoding="utf-8")
+    else:
+        summary_path.write_text(header, encoding="utf-8")
+        existing = header
+    formatted = f"* dtm_client: {message} *\n"
+    if formatted.strip() in {line.strip() for line in existing.splitlines()}:
+        return
+    with summary_path.open("a", encoding="utf-8") as handle:
+        if not existing.endswith("\n"):
+            handle.write("\n")
+        handle.write(formatted)
+
+
 def _append_summary_stub_if_needed(message: str) -> None:
     summary_path = DIAGNOSTICS_DIR / "summary.md"
     if summary_path.exists():
@@ -5169,9 +5187,20 @@ def _write_meta(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     _refresh_run_details_path()
-    soft_timeouts = bool_from_env_or_flag("DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False))
-    force_fake = bool_from_env_or_flag("DTM_FORCE_FAKE", getattr(args, "force_fake", False))
-    fake_on_timeout = bool_from_env_or_flag("DTM_FAKE_ON_TIMEOUT", getattr(args, "fake_on_timeout", False))
+    soft_timeouts = bool_from_env_or_flag(
+        "DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False)
+    )
+    force_fake = bool_from_env_or_flag(
+        "DTM_FORCE_FAKE", getattr(args, "force_fake", False)
+    )
+    if not force_fake:
+        force_fake = _env_bool("RESOLVER_FORCE_FAKE", False)
+    allow_offline = _env_bool("RESOLVER_ALLOW_OFFLINE", False) or _env_bool(
+        "DTM_ALLOW_OFFLINE", False
+    )
+    fake_on_timeout = bool_from_env_or_flag(
+        "DTM_FAKE_ON_TIMEOUT", getattr(args, "fake_on_timeout", False)
+    )
     global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE, OUT_PATH
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
@@ -5456,6 +5485,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         deps_payload["requests"],
     )
 
+    if not have_dtmapi and not allow_offline and not force_fake:
+        reason = "dependency-missing: dtmapi"
+        run_payload = {
+            "event": "connector_summary",
+            "connector": "dtm",
+            "status": "error",
+            "reason": reason,
+            "attempts": 1,
+            "duration_ms": 0,
+            "notes": "dtmapi not importable",
+            "extras": {"deps": dict(dep_info)},
+        }
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = {"deps": dict(dep_info), "exit_code": 1, "rows_total": 0}
+        _write_run_details(run_payload)
+        _write_connector_report(
+            status="error",
+            reason=reason,
+            extras=extras_payload,
+            http={},
+            counts=counts_payload,
+        )
+        _append_summary_line(reason)
+        ensure_zero_row_outputs(offline=OFFLINE)
+        LOG.error(reason)
+        OFFLINE = previous_offline
+        return 1
+
     api_key_configured = bool(env_auth_key)
     base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     base_http["rate_limit_remaining"] = None
@@ -5500,46 +5557,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "config_keys_found": {"countries": False, "admin_levels": False},
         "config_countries_count": 0,
     }
-
-    if not have_dtmapi:
-        reason = "dependency-missing: dtmapi (install with: pip install 'dtmapi>=0.1.5')"
-        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
-        extras_payload = dict(base_extras)
-        extras_payload.update({"rows_total": 0, "exit_code": 1, "status_raw": "error"})
-        extras_payload["timings_ms"] = dict(timings_ms)
-        _write_connector_report(
-            status="error",
-            reason=reason,
-            extras=extras_payload,
-            http=dict(base_http),
-            counts=counts_payload,
-        )
-        _append_summary_stub_if_needed(reason)
-        ensure_zero_row_outputs(offline=OFFLINE)
-        run_payload = {
-            "window": {"start": None, "end": None},
-            "countries": {},
-            "http": dict(base_http),
-            "paging": {"pages": 0, "page_size": None, "total_received": 0},
-            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
-            "totals": {"rows_written": 0},
-            "status": "error",
-            "reason": reason,
-            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
-            "extras": {
-                "deps": deps_payload,
-                "timings_ms": dict(timings_ms),
-                "strict_empty": strict_empty,
-                "no_date_filter": no_date_filter,
-                "skip_flags": dict(skip_flags),
-            },
-            "args": vars(args),
-        }
-        _write_run_details(run_payload)
-        _mirror_legacy_diagnostics()
-        LOG.error(reason)
-        OFFLINE = previous_offline
-        return 1
 
     if not offline_smoke and have_dtmapi and not env_auth_key:
         ensure_zero_row_outputs(offline=True)
@@ -6193,6 +6210,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rows_fetched": int(rows_summary.get("fetched", 0)),
         "rows_normalized": int(rows_summary.get("normalized", rows_written)),
         "rows_written": rows_written,
+        "raw_rows": int(rows_summary.get("fetched", 0)),
         "drop_reasons": drop_counts,
         "chosen_value_columns": chosen_value_columns,
     }

@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Union
 
@@ -34,8 +36,14 @@ def write_bytes(path: PathLike, data: bytes) -> Path:
 def write_json(path: PathLike, obj: Any, *, encoding: str = "utf-8", indent: int = 2) -> Path:
     p = Path(path)
     _ensure_parent(p)
-    with p.open("w", encoding=encoding) as fh:
-        json.dump(obj, fh, ensure_ascii=False, indent=indent)
+    with tempfile.NamedTemporaryFile(
+        "w", delete=False, dir=str(p.parent), encoding=encoding
+    ) as tmp:
+        json.dump(obj, tmp, ensure_ascii=False, indent=indent, default=str)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, p)
     log.debug(
         "write_json: %s (keys=%s)",
         p,
