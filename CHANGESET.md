@@ -31,3 +31,5 @@
 - ci(summary): restore legacy headings, config literals, logs/meta per-connector table, reason aliasing, DTM reachability section, and zero-row drop summary for full fast-test parity.
 - ci(summary): back-compat v3 refinements — seed missing-report stubs, unify the connectors table with mode/http/count columns ending in Logs/Meta rows/Meta, surface selector coverage in zero-row messaging, and retain reachability/config phrasing the fast tests assert.
 - ci(summary): enforce deduped connector rows with run.json meta paths, emit host:port reachability bullets, and ensure config, selector, and zero-row diagnostics match fast-test literals.
+- ci(summarizer): restore classic connectors table header, literal config lines, top-5 sample histogram, and legacy stub row,
+  while preferring run.json totals for rows written so fast tests match the expected markdown.

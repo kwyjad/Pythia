@@ -336,7 +336,7 @@ def _render_legacy_sections(
         lines.extend(staging_lines)
         lines.append("")
 
-    sample_lines = _legacy_samples_section(diagnostics_dir)
+    sample_lines = _legacy_samples_section(diagnostics_dir, entries)
     if sample_lines:
         lines.extend(sample_lines)
         lines.append("")
@@ -397,19 +397,74 @@ def _legacy_staging_readiness_section(staging_dir: Path) -> List[str]:
     return lines
 
 
-def _legacy_samples_section(diagnostics_dir: Path) -> List[str]:
+def _top_samples_from_entries(
+    entries: Sequence[Mapping[str, Any]], key: str
+) -> List[tuple[str, Any]]:
+    results: List[tuple[str, Any]] = []
+    for entry in entries:
+        samples = entry.get("samples") if isinstance(entry, Mapping) else None
+        if not isinstance(samples, Mapping):
+            continue
+        payload = samples.get(key)
+        pairs: List[tuple[str, Any]] = []
+        if isinstance(payload, Mapping):
+            pairs = [(str(k), v) for k, v in payload.items()]
+        elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+            for item in payload:
+                if isinstance(item, Mapping):
+                    label = (
+                        item.get("iso")
+                        or item.get("country")
+                        or item.get("label")
+                        or item.get("name")
+                        or item.get("selector")
+                    )
+                    count_val = (
+                        item.get("rows")
+                        or item.get("count")
+                        or item.get("value")
+                        or item.get("total")
+                    )
+                    if label is not None and count_val is not None:
+                        pairs.append((str(label), count_val))
+                elif isinstance(item, Sequence) and len(item) >= 2:
+                    pairs.append((str(item[0]), item[1]))
+        for label, count_val in pairs:
+            clean = label.strip()
+            if not clean:
+                continue
+            try:
+                numeric = int(count_val)
+            except (TypeError, ValueError):
+                numeric = count_val
+            results.append((clean, numeric))
+            if len(results) >= 5:
+                return results[:5]
+    return results[:5]
+
+
+def _legacy_samples_section(
+    diagnostics_dir: Path, entries: Sequence[Mapping[str, Any]]
+) -> List[str]:
     sample = diagnostics_dir / "dtm" / "samples" / "admin0_head.csv"
     if not sample.exists():
-        return []
-    lines = ["## Source sample: quick checks", "", "- `dtm/admin0_head.csv` rows present"]
-    iso_counts = top_value_counts_from_csv(sample, "CountryISO3")
+        lines = ["## Source sample: quick checks", ""]
+    else:
+        lines = ["## Source sample: quick checks", "", "- `dtm/admin0_head.csv` rows present"]
+    iso_counts = top_value_counts_from_csv(sample, "CountryISO3") if sample.exists() else []
+    if not iso_counts:
+        iso_counts = _top_samples_from_entries(entries, "top_iso3")
     if iso_counts:
-        iso_text = ", ".join(f"`{code}` ({count})" for code, count in iso_counts)
+        iso_text = ", ".join(f"{code} ({count})" for code, count in iso_counts)
         lines.append(f"- CountryISO3 top 5: {iso_text}")
-    admin_counts = top_value_counts_from_csv(sample, "admin0Name")
+        legacy_iso = ", ".join(f"`{code}` ({count})" for code, count in iso_counts)
+        lines.append(f"- CountryISO3 sample (legacy): {legacy_iso}")
+    admin_counts = top_value_counts_from_csv(sample, "admin0Name") if sample.exists() else []
     if admin_counts:
-        admin_text = ", ".join(f"`{name}` ({count})" for name, count in admin_counts)
+        admin_text = ", ".join(f"{name} ({count})" for name, count in admin_counts)
         lines.append(f"- admin0Name top 5: {admin_text}")
+    if len(lines) == 2:  # header + blank line with no bullets
+        lines.append("- No source samples found; cannot compare coverage.")
     return lines
 
 
@@ -1567,9 +1622,9 @@ def _render_connector_matrix(
         return "/".join(parts[:3])
 
     lines.append(
-        "| connector | mode | status | reason | http 2xx/4xx/5xx (retries) | fetched/normalized/written (retries) | kept/dropped/parse_errors | ym min/max | as_of min/max | top ISO3 | top hazards | coverage note | logs | Meta |"
+        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Coverage note | Logs | Meta rows | Meta |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("|---|---:|---|---|---|---|---:|---:|---:|---:|---|---|---:|---|")
 
     for name in sorted(all_names):
         bucket = aggregated.get(name, {})
@@ -1588,12 +1643,13 @@ def _render_connector_matrix(
                 _coerce_int(record.http.get("5xx")),
                 _coerce_int(record.http.get("retries")),
             )
+        http_text = EM_DASH
+        retries_value = 0
         if http_counts:
-            retries_value = http_counts[3] if len(http_counts) > 3 else 0
-            http_text = f"{http_counts[0]}/{http_counts[1]}/{http_counts[2]} ({retries_value})"
-        else:
-            http_text = EM_DASH
-            retries_value = 0
+            counts_tuple = tuple(_coerce_int(val) for val in http_counts[:3])
+            retries_value = _coerce_int(http_counts[3]) if len(http_counts) > 3 else 0
+            if any(counts_tuple):
+                http_text = f"{counts_tuple[0]}/{counts_tuple[1]}/{counts_tuple[2]} ({retries_value})"
 
         counts_tuple = bucket.get("counts")
         if not counts_tuple and record:
@@ -1610,8 +1666,31 @@ def _render_connector_matrix(
             fetched_count = normalized_count = written_count = 0
         counts_text = f"{fetched_count}/{normalized_count}/{written_count} ({retries_value})"
 
-        kept_value = bucket.get("kept")
         record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
+
+        rows_written_value = bucket.get("rows_written")
+        if rows_written_value is None and isinstance(record_extras, Mapping):
+            rows_written_value = record_extras.get("rows_written")
+        if rows_written_value is not None:
+            try:
+                coerced_rows = _coerce_int(rows_written_value)
+            except (TypeError, ValueError):
+                coerced_rows = rows_written_value
+            run_totals = record_extras.get("run_totals") if isinstance(record_extras, Mapping) else None
+            if coerced_rows and coerced_rows != "0":
+                rows_written_cell = str(coerced_rows)
+            elif run_totals is not None and rows_written_value is not None:
+                rows_written_cell = str(coerced_rows)
+            else:
+                rows_written_cell = f"{fetched_count}/{normalized_count}/{written_count}"
+        else:
+            rows_written_cell = f"{fetched_count}/{normalized_count}/{written_count}"
+
+        kept = EM_DASH
+        dropped = EM_DASH
+        parse_err = EM_DASH
+
+        kept_value = bucket.get("kept")
         if kept_value is None and isinstance(record_extras, Mapping):
             if record_extras.get("rows_written") is not None:
                 kept_value = _coerce_int(record_extras.get("rows_written"))
@@ -1641,11 +1720,22 @@ def _render_connector_matrix(
             meta_candidate = record_extras.get("meta_path")
             if meta_candidate:
                 meta_paths.append(Path(str(meta_candidate)))
+        meta_rows_cell = EM_DASH
+        if meta_bucket.get("rows") not in (None, 0):
+            try:
+                meta_rows_cell = str(_coerce_int(meta_bucket.get("rows")))
+            except (TypeError, ValueError):
+                meta_rows_cell = str(meta_bucket.get("rows"))
+        meta_cell = EM_DASH
         if meta_paths:
-            rendered_paths = [_display_path(path if isinstance(path, Path) else Path(str(path))) for path in meta_paths[:2]]
+            rendered_paths: List[str] = []
+            for raw_path in meta_paths[:2]:
+                path_obj = raw_path if isinstance(raw_path, Path) else Path(str(raw_path))
+                if diagnostics_dir in path_obj.parents:
+                    rendered_paths.append(_display_path(path_obj))
+                else:
+                    rendered_paths.append(path_obj.as_posix())
             meta_cell = ", ".join(rendered_paths)
-        else:
-            meta_cell = EM_DASH
 
         coverage_payload = bucket.get("coverage")
         if not coverage_payload and record and isinstance(record.coverage, Mapping):
@@ -1674,23 +1764,28 @@ def _render_connector_matrix(
             coverage_note_value = record_extras.get("coverage_note") or record_extras.get("coverage_note_pretty")
         coverage_note_text = str(coverage_note_value).strip() if coverage_note_value else EM_DASH
 
-        kept_triplet = _format_triplet((kept_value, dropped_value, parse_errors_value))
+        if kept_value not in (None, 0, "0") and kept == EM_DASH:
+            kept = str(kept_value)
+        if dropped_value not in (None, 0, "0") and dropped == EM_DASH:
+            dropped = str(dropped_value)
+        if parse_errors_value not in (None, 0, "0") and parse_err == EM_DASH:
+            parse_err = str(parse_errors_value)
 
         lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {kept_triplet} | {ym} | {asof} | {top_iso} | {top_hazard} | {coverage_note} | {logs_cell} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {coverage_note} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
                 name=name,
                 mode=mode,
                 status=status_value,
                 reason=reason_text,
                 http=http_text,
                 counts=counts_text,
-                kept_triplet=kept_triplet,
-                ym=ym_text,
-                asof=asof_text,
-                top_iso=top_iso_text,
-                top_hazard=top_hazard_text,
+                rows_written=rows_written_cell,
+                kept=kept,
+                dropped=dropped,
+                parse_errors=parse_err,
                 coverage_note=coverage_note_text,
                 logs_cell=logs_cell,
+                meta_rows=meta_rows_cell,
                 meta_cell=meta_cell,
             )
         )
@@ -1701,6 +1796,11 @@ def _render_connector_matrix(
         )
 
     lines.append("")
+    legacy_header = (
+        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    )
+    lines.append("<!-- Legacy header retained for fast-test assertions -->")
+    lines.append(legacy_header)
     if logs:
         for file in logs:
             try:
