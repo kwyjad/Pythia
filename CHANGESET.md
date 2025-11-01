@@ -39,3 +39,5 @@
   lines so legacy fast-test fixtures stay green.
 - ci(summarizer): keep the literal config path line in the summary while maintaining the classic table layout required by the
   fast-test suite.
+- ci(summary): reinstate the Rows written column in the connector table, feed it from run.json totals, and update stub coverage
+  so the classic fast-test expectations stay satisfied.
