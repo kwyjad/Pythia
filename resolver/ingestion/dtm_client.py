@@ -45,6 +45,7 @@ from tenacity import (
 )
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
@@ -184,6 +185,8 @@ SERIES_INCIDENT = "incident"
 SERIES_CUMULATIVE = "cumulative"
 
 _NORMALIZE_DROP_KEYS = [
+    "no_iso3",
+    "no_value_col",
     "bad_iso",
     "unknown_country",
     "missing_value",
@@ -192,6 +195,10 @@ _NORMALIZE_DROP_KEYS = [
     "missing_as_of",
     "future_as_of",
     "invalid_semantics",
+    "date_parse_failed",
+    "date_out_of_window",
+    "no_country_match",
+    "other",
 ]
 
 
@@ -213,9 +220,13 @@ def _resolve_run_details_override() -> Optional[Path]:
 
 def _refresh_run_details_path() -> Path:
     override = _resolve_run_details_override()
-    path = override or _DEFAULT_RUN_DETAILS_PATH
-    globals()["RUN_DETAILS_PATH"] = path
-    return path
+    if override is not None:
+        path = override
+    else:
+        path = globals().get("RUN_DETAILS_PATH", _DEFAULT_RUN_DETAILS_PATH)
+    resolved = Path(path)
+    globals()["RUN_DETAILS_PATH"] = resolved
+    return resolved
 
 
 def _ensure_normalize_block(extras: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
@@ -297,7 +308,7 @@ def _write_run_details(payload: Mapping[str, Any]) -> None:
         globals()["RUN_DETAILS_PATH"] = override
         target = override
     else:
-        target = RUN_DETAILS_PATH
+        target = Path(RUN_DETAILS_PATH)
     prepared = _prepare_run_details_payload(payload, run_details_path=target)
     write_json(target, prepared)
 
@@ -748,6 +759,43 @@ def _mirror_legacy_diagnostics() -> None:
 
 LOG = logging.getLogger("resolver.ingestion.dtm")
 
+
+def _get_dtm_key_and_header(*, warn_on_missing: bool = True) -> Tuple[str, Optional[str]]:
+    """Resolve the preferred DTM API key and header name from the environment."""
+
+    header_name = (os.getenv("DTM_API_HEADER_NAME") or "Ocp-Apim-Subscription-Key").strip() or (
+        "Ocp-Apim-Subscription-Key"
+    )
+
+    def _clean(value: Optional[str]) -> str:
+        return value.strip() if value else ""
+
+    key = _clean(os.getenv("DTM_API_KEY"))
+    if key:
+        LOG.debug("dtm: API key sourced from DTM_API_KEY; header=%s", header_name)
+        return header_name, key
+
+    subscription = _clean(os.getenv("DTM_SUBSCRIPTION_KEY"))
+    if subscription:
+        LOG.debug("dtm: API key sourced from DTM_SUBSCRIPTION_KEY; header=%s", header_name)
+        return header_name, subscription
+
+    primary = _clean(os.getenv("DTM_API_PRIMARY_KEY"))
+    secondary = _clean(os.getenv("DTM_API_SECONDARY_KEY"))
+    legacy = primary or secondary
+    if legacy:
+        LOG.debug("dtm: API key sourced from legacy primary/secondary; header=%s", header_name)
+        return header_name, legacy
+
+    helper_key = _clean(get_dtm_api_key())
+    if helper_key:
+        LOG.debug("dtm: API key sourced from dtm_auth helper; header=%s", header_name)
+        return header_name, helper_key
+
+    if warn_on_missing:
+        LOG.warning("dtm: No DTM API key found in environment.")
+    return header_name, None
+
 _FILE_LOGGING_INITIALIZED = False
 
 OFFLINE = False
@@ -789,25 +837,29 @@ def _call_admin_level(client: Any, level: str, **kwargs: Any) -> Tuple[Any, str]
     )
 
     for name in candidates:
-        fn = getattr(client, name, None)
-        if not callable(fn):
-            continue
-        call_kwargs = filtered_kwargs
-        code = getattr(fn, "__code__", None)
-        if code is not None and getattr(code, "co_varnames", None):
-            allowed = set(code.co_varnames)
-            call_kwargs = {k: v for k, v in filtered_kwargs.items() if k in allowed}
-            if not call_kwargs and filtered_kwargs:
-                call_kwargs = filtered_kwargs
-        try:
-            result = fn(**call_kwargs)
-        except TypeError:
-            try:
-                result = fn(**filtered_kwargs)
-            except TypeError:
+        potential_targets = [client]
+        inner = getattr(client, "client", None)
+        if inner is not None and inner is not client:
+            potential_targets.append(inner)
+        for target_obj in potential_targets:
+            fn = getattr(target_obj, name, None)
+            if not callable(fn):
                 continue
-        setattr(client, "_dtm_last_method", name)
-        return result, name
+            payloads = [filtered_kwargs]
+            if filtered_kwargs is not kwargs:
+                payloads.append(kwargs)
+            for payload in payloads:
+                try:
+                    result = fn(**payload)
+                except TypeError:
+                    continue
+                setattr(target_obj, "_dtm_last_method", name)
+                if target_obj is not client:
+                    try:
+                        setattr(client, "_dtm_last_method", name)
+                    except Exception:
+                        pass
+                return result, name
     raise AttributeError(f"No callable for admin level '{level}' found on client")
 
 
@@ -1821,7 +1873,12 @@ def _dtm_http_get(
 ) -> Any:
     base_url = "https://dtmapi.iom.int"
     url = f"{base_url}{path}"
-    headers = dict(headers_override) if headers_override else {"Ocp-Apim-Subscription-Key": key}
+    if headers_override:
+        headers = dict(headers_override)
+    else:
+        header_name, env_key = _get_dtm_key_and_header(warn_on_missing=False)
+        effective_key = key or (env_key or "")
+        headers = {header_name: effective_key} if effective_key else {}
     started = time.perf_counter()
     entry: Dict[str, Any] = {"ts": time.time(), "url": url, "ok": False, "nonce": round(random.random(), 6)}
     if params:
@@ -2189,13 +2246,14 @@ def _perform_discovery(
     retry_attempts = int(retries_cfg.get("attempts", 3))
     backoff_seconds = float(retries_cfg.get("backoff_seconds", 1.5))
 
-    key = (api_key or get_dtm_api_key() or "").strip()
+    header_name, configured_key = _get_dtm_key_and_header(warn_on_missing=not OFFLINE)
+    key = (api_key or get_dtm_api_key() or configured_key or "").strip()
     if not key and not OFFLINE:
         raise RuntimeError("Missing DTM_API_KEY environment variable.")
 
     header_variants = build_discovery_header_variants(key)
     if not header_variants:
-        header_variants = [{"Ocp-Apim-Subscription-Key": key}] if key else []
+        header_variants = [{header_name: key}] if key else []
 
     stage_entries: List[Dict[str, Any]] = []
     stage_errors: List[Dict[str, Any]] = []
@@ -2549,6 +2607,24 @@ def _write_connector_report(
         counts=payload["counts"],
     )
     _mirror_legacy_diagnostics()
+
+
+def _append_summary_line(message: str) -> None:
+    summary_path = DIAGNOSTICS_DIR / "summary.md"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    header = "# Connector Diagnostics\n\n"
+    if summary_path.exists():
+        existing = summary_path.read_text(encoding="utf-8")
+    else:
+        summary_path.write_text(header, encoding="utf-8")
+        existing = header
+    formatted = f"* dtm_client: {message} *\n"
+    if formatted.strip() in {line.strip() for line in existing.splitlines()}:
+        return
+    with summary_path.open("a", encoding="utf-8") as handle:
+        if not existing.endswith("\n"):
+            handle.write("\n")
+        handle.write(formatted)
 
 
 def _append_summary_stub_if_needed(message: str) -> None:
@@ -2972,10 +3048,7 @@ class DTMApiClient:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return str(val).strip().lower() in {"1", "true", "y", "yes", "on"}
+    return getenv_bool(name, default=default)
 
 
 def bool_from_env_or_flag(name: str, flag_value: bool, *, default: bool = False) -> bool:
@@ -3602,6 +3675,7 @@ def _finalize_skip_run(
     args: argparse.Namespace,
     mode: str = "skip",
     log_message: Optional[str] = None,
+    skip_flags: Optional[Mapping[str, bool]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     if log_message:
         LOG.info(log_message)
@@ -3626,6 +3700,8 @@ def _finalize_skip_run(
         "no_date_filter": no_date_filter,
         "offline_smoke": False,
     }
+    if isinstance(skip_flags, Mapping):
+        extras_payload["skip_flags"] = {key: bool(value) for key, value in skip_flags.items()}
     extras_payload["staging_csv"] = str(OUT_PATH)
     extras_payload["staging_meta"] = str(META_PATH)
 
@@ -3678,6 +3754,10 @@ def _finalize_skip_run(
         },
         "args": vars(args),
     }
+    if isinstance(skip_flags, Mapping):
+        run_payload["extras"]["skip_flags"] = {
+            key: bool(value) for key, value in skip_flags.items()
+        }
 
     _write_run_details(run_payload)
     _mirror_legacy_diagnostics()
@@ -3807,7 +3887,10 @@ def _fetch_level_pages_with_logging(
 
 def _resolve_admin_levels(cfg: Mapping[str, Any]) -> List[str]:
     api_cfg = cfg.get("api", {})
-    configured = api_cfg.get("admin_levels") or cfg.get("admin_levels")
+    configured_raw = api_cfg.get("admin_levels")
+    if configured_raw is None:
+        configured_raw = cfg.get("admin_levels")
+    configured = _normalize_list(configured_raw)
     if not configured:
         return ["admin0"]
     levels = []
@@ -3908,14 +3991,8 @@ def _fetch_api_data(
     summary_extras["per_country_counts"] = per_country_counts
     summary_extras["per_country"] = per_country_diagnostics
     summary_extras["failures"] = failures
-    drop_reasons_counter = {
-        "no_country_match": 0,
-        "no_iso3": 0,
-        "no_value_col": 0,
-        "date_out_of_window": 0,
-        "date_parse_failed": 0,
-        "other": 0,
-    }
+    drop_reasons_counter = {key: 0 for key in _NORMALIZE_DROP_KEYS}
+    drop_reasons_counter.setdefault("no_country_match", 0)
     summary_extras["drop_reasons_counter"] = drop_reasons_counter
     value_column_usage: Dict[str, int] = {}
     summary_extras["value_column_usage"] = value_column_usage
@@ -4148,6 +4225,11 @@ def _fetch_api_data(
     for alias in (field_mapping.get("idp_column"), *base_idp_aliases):
         if alias and alias not in idp_candidates:
             idp_candidates.append(alias)
+    for alias in idp_candidates:
+        alias_str = str(alias)
+        if not alias_str:
+            continue
+        value_column_usage.setdefault(alias_str, 0)
 
     aliases = cfg.get("country_aliases") or {}
     measure = str(cfg.get("output", {}).get("measure", "stock")).strip().lower()
@@ -4341,6 +4423,22 @@ def _fetch_api_data(
                     if level == "admin0":
                         original_columns = list(page.columns)
 
+                        candidate_counts: Dict[str, int] = {}
+                        for alias in idp_candidates:
+                            alias_str = str(alias)
+                            if not alias_str:
+                                continue
+                            if alias_str in page.columns:
+                                numeric_series = pd.to_numeric(page[alias_str], errors="coerce")
+                                count = int(numeric_series.notna().sum())
+                            else:
+                                count = 0
+                            candidate_counts[alias_str] = count
+                            if alias_str not in value_column_usage:
+                                value_column_usage[alias_str] = 0
+                            if count:
+                                value_column_usage[alias_str] += count
+
                         date_col, parsed_dates, date_diag = _first_parsable_date_column(
                             page, _DATE_CANDIDATES
                         )
@@ -4383,9 +4481,9 @@ def _fetch_api_data(
                         chosen_count = int(chosen_entries[0]["count"]) if chosen_entries else 0
                         LOG.info("resolved value column: idp_count_col=%r", chosen_column)
                         if chosen_column:
-                            value_column_usage[chosen_column] = value_column_usage.get(
-                                chosen_column, 0
-                            ) + chosen_count
+                            value_column_usage.setdefault(chosen_column, 0)
+                            if chosen_column not in candidate_counts:
+                                value_column_usage[chosen_column] += chosen_count
                         normalized_page = normalized_result.get("df", pd.DataFrame())
                         summary.setdefault("rows", {}).setdefault("dropped", 0)
                         summary["rows"]["dropped"] += max(
@@ -5096,9 +5194,20 @@ def _write_meta(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     _refresh_run_details_path()
-    soft_timeouts = bool_from_env_or_flag("DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False))
-    force_fake = bool_from_env_or_flag("DTM_FORCE_FAKE", getattr(args, "force_fake", False))
-    fake_on_timeout = bool_from_env_or_flag("DTM_FAKE_ON_TIMEOUT", getattr(args, "fake_on_timeout", False))
+    soft_timeouts = bool_from_env_or_flag(
+        "DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False)
+    )
+    force_fake = bool_from_env_or_flag(
+        "DTM_FORCE_FAKE", getattr(args, "force_fake", False)
+    )
+    if not force_fake:
+        force_fake = _env_bool("RESOLVER_FORCE_FAKE", False)
+    allow_offline = _env_bool("RESOLVER_ALLOW_OFFLINE", False) or _env_bool(
+        "DTM_ALLOW_OFFLINE", False
+    )
+    fake_on_timeout = bool_from_env_or_flag(
+        "DTM_FAKE_ON_TIMEOUT", getattr(args, "fake_on_timeout", False)
+    )
     global OUT_DIR, OUTPUT_PATH, META_PATH, OFFLINE, OUT_PATH
     log_level_name = str(os.getenv("LOG_LEVEL") or "INFO").upper()
     if args.debug:
@@ -5141,14 +5250,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
-    skip_requested = bool(os.getenv("RESOLVER_SKIP_DTM"))
+    skip_env_requested = getenv_bool("RESOLVER_SKIP_DTM", default=False)
+    force_run_override = getenv_bool("DTM_FORCE_RUN", default=False)
+    skip_requested = skip_env_requested and not force_run_override
+    skip_flags = {
+        "RESOLVER_SKIP_DTM": skip_env_requested,
+        "DTM_FORCE_RUN": force_run_override,
+    }
+    if skip_env_requested and force_run_override:
+        LOG.info("dtm: DTM_FORCE_RUN override active; proceeding despite RESOLVER_SKIP_DTM")
     offline_mode = skip_requested or bool(offline_smoke)
     previous_offline = OFFLINE
     OFFLINE = offline_mode
     if skip_requested:
         LOG.info("Skip mode: no real network calls; writing header & trace placeholder")
     if OFFLINE:
-        LOG.debug("dtm: offline gating enabled (skip=%s offline_smoke=%s)", skip_requested, offline_smoke)
+        LOG.debug(
+            "dtm: offline gating enabled (skip=%s offline_smoke=%s)",
+            skip_requested,
+            offline_smoke,
+        )
 
     if skip_requested:
         skip_reason = "disabled via RESOLVER_SKIP_DTM"
@@ -5158,6 +5279,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             strict_empty=strict_empty,
             no_date_filter=no_date_filter,
             args=args,
+            skip_flags=skip_flags,
         )
         window_start_iso, window_end_iso, window_override_env = _resolve_effective_window()
         config_candidate = _resolve_config_path()
@@ -5317,39 +5439,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         OFFLINE = previous_offline
         return exit_code
 
-    env_auth_key = (
-        os.getenv("DTM_API_KEY")
-        or os.getenv("DTM_SUBSCRIPTION_KEY")
-        or os.getenv("DTM_API_PRIMARY_KEY")
-        or os.getenv("DTM_API_SECONDARY_KEY")
-        or ""
-    ).strip()
-
-    if not offline_smoke:
-        if not env_auth_key:
-            ensure_zero_row_outputs(offline=True)
-            extras_payload, http_payload, counts_payload = _finalize_skip_run(
-                reason="auth_missing",
-                strict_empty=strict_empty,
-                no_date_filter=no_date_filter,
-                args=args,
-                mode="auth_missing",
-                log_message="dtm: missing DTM API credentials; emitting header-only CSV",
-            )
-            extras_payload["auth_missing"] = True
-            extras_for_reports = dict(extras_payload)
-            extras_for_reports["auth_missing"] = True
-            _append_connectors_report(
-                mode="auth_missing",
-                status="skipped",
-                rows=0,
-                reason="auth_missing",
-                extras=extras_for_reports,
-                http=http_payload,
-                counts=counts_payload,
-            )
-            OFFLINE = previous_offline
-            return 0
+    _, env_key = _get_dtm_key_and_header(warn_on_missing=not OFFLINE)
+    env_auth_key = (env_key or "").strip()
 
     if offline_smoke:
         LOG.info("offline-smoke: header-only output (no API key required)")
@@ -5401,6 +5492,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         deps_payload["requests"],
     )
 
+    if not have_dtmapi and not allow_offline and not force_fake:
+        reason = "dependency-missing: dtmapi"
+        run_payload = {
+            "event": "connector_summary",
+            "connector": "dtm",
+            "status": "error",
+            "reason": reason,
+            "attempts": 1,
+            "duration_ms": 0,
+            "notes": "dtmapi not importable",
+            "extras": {"deps": dict(dep_info)},
+        }
+        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
+        extras_payload = {"deps": dict(dep_info), "exit_code": 1, "rows_total": 0}
+        _write_run_details(run_payload)
+        _write_connector_report(
+            status="error",
+            reason=reason,
+            extras=extras_payload,
+            http={},
+            counts=counts_payload,
+        )
+        _append_summary_line(reason)
+        ensure_zero_row_outputs(offline=OFFLINE)
+        LOG.error(reason)
+        OFFLINE = previous_offline
+        return 1
+
     api_key_configured = bool(env_auth_key)
     base_http: Dict[str, Any] = {key: 0 for key in HTTP_COUNT_KEYS}
     base_http["rate_limit_remaining"] = None
@@ -5429,6 +5548,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "soft_timeouts": bool(soft_timeouts),
         "force_fake": bool(force_fake),
         "fake_on_timeout": bool(fake_on_timeout),
+        "skip_flags": dict(skip_flags),
     }
     base_extras["config"] = {
         "config_path_used": config_path_text,
@@ -5445,44 +5565,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "config_countries_count": 0,
     }
 
-    if not have_dtmapi:
-        reason = "dependency-missing: dtmapi (install with: pip install 'dtmapi>=0.1.5')"
-        counts_payload = {"fetched": 0, "normalized": 0, "written": 0}
-        extras_payload = dict(base_extras)
-        extras_payload.update({"rows_total": 0, "exit_code": 1, "status_raw": "error"})
-        extras_payload["timings_ms"] = dict(timings_ms)
-        _write_connector_report(
-            status="error",
-            reason=reason,
-            extras=extras_payload,
-            http=dict(base_http),
+    if not offline_smoke and have_dtmapi and not env_auth_key:
+        ensure_zero_row_outputs(offline=True)
+        extras_payload, http_payload, counts_payload = _finalize_skip_run(
+            reason="auth_missing",
+            strict_empty=strict_empty,
+            no_date_filter=no_date_filter,
+            args=args,
+            mode="auth_missing",
+            log_message="dtm: missing DTM API credentials; emitting header-only CSV",
+            skip_flags=skip_flags,
+        )
+        extras_payload["auth_missing"] = True
+        extras_for_reports = dict(extras_payload)
+        extras_for_reports["auth_missing"] = True
+        _append_connectors_report(
+            mode="auth_missing",
+            status="skipped",
+            rows=0,
+            reason="auth_missing",
+            extras=extras_for_reports,
+            http=http_payload,
             counts=counts_payload,
         )
-        _append_summary_stub_if_needed(reason)
-        ensure_zero_row_outputs(offline=OFFLINE)
-        run_payload = {
-            "window": {"start": None, "end": None},
-            "countries": {},
-            "http": dict(base_http),
-            "paging": {"pages": 0, "page_size": None, "total_received": 0},
-            "rows": {"fetched": 0, "normalized": 0, "written": 0, "kept": 0, "dropped": 0},
-            "totals": {"rows_written": 0},
-            "status": "error",
-            "reason": reason,
-            "outputs": {"csv": str(OUT_PATH), "meta": str(META_PATH)},
-            "extras": {
-                "deps": deps_payload,
-                "timings_ms": dict(timings_ms),
-                "strict_empty": strict_empty,
-                "no_date_filter": no_date_filter,
-            },
-            "args": vars(args),
-        }
-        _write_run_details(run_payload)
-        _mirror_legacy_diagnostics()
-        LOG.error(reason)
         OFFLINE = previous_offline
-        return 1
+        return 0
 
     diagnostics_ctx = diagnostics_start_run("dtm_client", "real")
 
@@ -5518,7 +5625,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             OFFLINE = previous_offline
             return exit_code
 
-    raw_auth_key = (os.getenv("DTM_API_KEY") or os.getenv("DTM_SUBSCRIPTION_KEY") or "").strip()
+    _, raw_key = _get_dtm_key_and_header(warn_on_missing=False)
+    raw_auth_key = (raw_key or "").strip()
     if not force_fake:
         try:
             _auth_probe(raw_auth_key, offline=OFFLINE)
@@ -5560,6 +5668,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "no_date_filter": no_date_filter,
                     "offline": OFFLINE,
                     "auth_error": "unauthorized",
+                    "skip_flags": dict(skip_flags),
                 },
                 "args": vars(args),
             }
@@ -5606,6 +5715,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "no_date_filter": no_date_filter,
                     "offline": OFFLINE,
                     "auth_error": "exception",
+                    "skip_flags": dict(skip_flags),
                 },
                 "args": vars(args),
             }
@@ -5985,7 +6095,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     summary_extras["discovery"] = discovery_extras
 
     drop_counts_raw = summary_extras.get("drop_reasons_counter", {})
-    drop_counts = {key: int(value) for key, value in drop_counts_raw.items()} if isinstance(drop_counts_raw, Mapping) else {}
+    drop_counts: Dict[str, int] = {}
+    if isinstance(drop_counts_raw, Mapping):
+        for key, value in drop_counts_raw.items():
+            try:
+                drop_counts[str(key)] = int(value)
+            except Exception:
+                continue
+    for key in _NORMALIZE_DROP_KEYS:
+        drop_counts.setdefault(key, 0)
     value_usage_raw = summary_extras.get("value_column_usage", {})
     value_usage = (
         {str(key): int(value) for key, value in value_usage_raw.items()}
@@ -5995,9 +6113,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     chosen_value_columns = [
         {"column": column, "count": count}
         for column, count in sorted(value_usage.items(), key=lambda item: (-item[1], item[0]))
+        if count > 0
     ]
     summary_extras.pop("drop_reasons_counter", None)
     summary_extras.pop("value_column_usage", None)
+
+    skip_flags_ref = base_extras.get("skip_flags") if isinstance(base_extras, Mapping) else None
+    if isinstance(skip_flags_ref, Mapping):
+        summary_extras.setdefault("skip_flags", dict(skip_flags_ref))
 
     resolved_countries = []
     countries_info = summary.get("countries") if isinstance(summary, Mapping) else {}
@@ -6095,8 +6218,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "rows_fetched": int(rows_summary.get("fetched", 0)),
         "rows_normalized": int(rows_summary.get("normalized", rows_written)),
         "rows_written": rows_written,
+        "raw_rows": int(rows_summary.get("fetched", 0)),
         "drop_reasons": drop_counts,
         "chosen_value_columns": chosen_value_columns,
+    }
+    normalize_block["config"] = {
+        "countries_mode": countries_mode,
+        "admin_levels": admin_levels_list,
     }
     if attempted_dates:
         normalize_block["attempted_date_columns"] = list(attempted_dates)

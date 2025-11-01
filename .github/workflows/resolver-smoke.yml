@@ -204,6 +204,8 @@ jobs:
         if: always()
         id: collect_smoke
         uses: ./.github/actions/collect-diagnostics
+        env:
+          ART_DIR: ${{ github.workspace }}/.ci/diagnostics
         with:
           job_name: pipeline-smoke
           mode: smoke
@@ -215,7 +217,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-pipeline-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ARTIFACT_PATH }}/**
+          path: ${{ steps.collect_smoke.outputs.artifact_path }}/**
           if-no-files-found: warn
           retention-days: 7
 

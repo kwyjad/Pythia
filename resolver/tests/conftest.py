@@ -15,8 +15,8 @@ from resolver.tests.fixtures.bootstrap_fast_exports import FastExports, build_fa
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Set default skip flag for DTM tests unless the runner overrides it."""
-    os.environ.setdefault("RESOLVER_SKIP_DTM", "1")
+    """Ensure DTM integration tests run unless explicitly skipped."""
+    os.environ.pop("RESOLVER_SKIP_DTM", None)
 
 CI_ENV_VAR = "GITHUB_ACTIONS"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -223,6 +223,12 @@ def fast_staging_dir() -> Path:
     if not staging_dir.exists():
         pytest.skip("staging fixtures unavailable")
     return staging_dir
+
+
+@pytest.fixture(autouse=True)
+def _unset_skip_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure per-test environments do not inherit RESOLVER_SKIP_DTM."""
+    monkeypatch.delenv("RESOLVER_SKIP_DTM", raising=False)
 
 
 if os.environ.get("RUN_EXPORTS_TESTS") == "1":

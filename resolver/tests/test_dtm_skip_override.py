@@ -9,7 +9,7 @@ from resolver.ingestion import dtm_client
 
 
 @pytest.fixture(autouse=True)
-def _redirect_dtm_paths(tmp_path, monkeypatch):
+def _redirect_dtm_outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     diagnostics_root = tmp_path / "diagnostics" / "ingestion"
     dtm_dir = diagnostics_root / "dtm"
     replacements = {
@@ -21,11 +21,8 @@ def _redirect_dtm_paths(tmp_path, monkeypatch):
         "DTM_LOG_DIR": dtm_dir / "logs",
         "CONNECTORS_REPORT": diagnostics_root / "connectors_report.jsonl",
         "RUN_DETAILS_PATH": dtm_dir / "dtm_run.json",
-        "API_REQUEST_PATH": dtm_dir / "dtm_api_request.json",
         "API_SAMPLE_PATH": dtm_dir / "dtm_api_sample.json",
         "API_RESPONSE_SAMPLE_PATH": dtm_dir / "dtm_api_response_sample.json",
-        "DISCOVERY_SNAPSHOT_PATH": dtm_dir / "discovery_countries.csv",
-        "DISCOVERY_FAIL_PATH": dtm_dir / "discovery_fail.json",
         "DTM_HTTP_LOG_PATH": dtm_dir / "dtm_http.ndjson",
         "DISCOVERY_RAW_JSON_PATH": dtm_dir / "raw" / "dtm_countries.json",
         "PER_COUNTRY_METRICS_PATH": dtm_dir / "metrics" / "dtm_per_country.jsonl",
@@ -34,7 +31,6 @@ def _redirect_dtm_paths(tmp_path, monkeypatch):
         "RESCUE_PROBE_PATH": dtm_dir / "rescue_probe.json",
         "METRICS_SUMMARY_PATH": dtm_dir / "metrics" / "metrics.json",
         "SAMPLE_ADMIN0_PATH": dtm_dir / "samples" / "admin0_head.csv",
-        "_LEGACY_DIAGNOSTICS_DIR": tmp_path / "legacy_diagnostics",
     }
     staging_dir = tmp_path / "staging"
     output_csv = staging_dir / "dtm_displacement.csv"
@@ -47,9 +43,9 @@ def _redirect_dtm_paths(tmp_path, monkeypatch):
             "HTTP_TRACE_PATH": staging_dir / "dtm_http.ndjson",
         }
     )
-    for attr, path in replacements.items():
-        monkeypatch.setattr(dtm_client, attr, path)
-    for directory in (
+    for attr, value in replacements.items():
+        monkeypatch.setattr(dtm_client, attr, value)
+    for directory in [
         diagnostics_root,
         dtm_dir,
         dtm_dir / "raw",
@@ -57,16 +53,14 @@ def _redirect_dtm_paths(tmp_path, monkeypatch):
         dtm_dir / "samples",
         dtm_dir / "logs",
         staging_dir,
-        replacements["_LEGACY_DIAGNOSTICS_DIR"],
-    ):
+    ]:
         directory.mkdir(parents=True, exist_ok=True)
     yield
 
 
-def test_chosen_value_columns_count_raw_frame(monkeypatch):
+def test_force_run_overrides_skip(monkeypatch: pytest.MonkeyPatch):
     class _StubDTMClient:
         def __init__(self):
-            self._http_counts: Dict[str, int] = {}
             self.rate_limit_delay = 0
 
         @staticmethod
@@ -75,47 +69,34 @@ def test_chosen_value_columns_count_raw_frame(monkeypatch):
                 http_counts["last_status"] = 200
                 http_counts["2xx"] = http_counts.get("2xx", 0) + 1
 
-        def get_idp_admin0(self, *, country, from_date, to_date, http_counts):
+        def get_idp_admin0(self, *, country, from_date, to_date, http_counts):  # noqa: ANN001
             self._record_success(http_counts)
-            label = str(country)
-            if label == "DR Congo":
-                return pd.DataFrame(
-                    [
-                        {
-                            "CountryName": "Democratic Republic of the Congo",
-                            "ReportingDate": "2023-03-15",
-                            "TotalIDPs": 120,
-                        },
-                        {
-                            "CountryName": "Atlantis",
-                            "ReportingDate": "2023-03-15",
-                            "TotalIDPs": 15,
-                        },
-                    ]
-                )
-            if label == "Côte d'Ivoire":
-                return pd.DataFrame(
-                    [
-                        {
-                            "CountryName": "Côte d'Ivoire",
-                            "ReportingDate": "2023-03-01",
-                            "OtherValue": 5,
-                        }
-                    ]
-                )
-            return pd.DataFrame()
+            return pd.DataFrame(
+                [
+                    {
+                        "CountryName": "Exampleland",
+                        "ReportingDate": "2024-01-15",
+                        "TotalIDPs": 42,
+                    }
+                ]
+            )
 
-    class _StubDTMApiClient:
-        def __init__(self, config):
-            self.client = _StubDTMClient()
-            self.config = config
+    class _StubClientWrapper:
+        def __init__(self, *_args, **_kwargs):  # noqa: ANN001
+            self._client = _StubDTMClient()
+            self.client = self
             self.rate_limit_delay = 0
-            self._http_counts: Dict[str, int] = {}
+            self.timeout = 0
 
-        def get_idp_admin0(self, **kwargs):
-            return self.client.get_idp_admin0(**kwargs)
+        def get_idp_admin0(self, **kwargs):  # noqa: ANN003
+            return self._client.get_idp_admin0(**kwargs)
 
-    monkeypatch.setattr(dtm_client, "DTMApiClient", _StubDTMApiClient)
+        def get_idp_admin0_data(self, **kwargs):  # noqa: ANN003
+            return self.get_idp_admin0(**kwargs)
+
+    monkeypatch.setenv("RESOLVER_SKIP_DTM", "1")
+    monkeypatch.setenv("DTM_FORCE_RUN", "1")
+    monkeypatch.setattr(dtm_client, "DTMApiClient", _StubClientWrapper)
     monkeypatch.setenv("DTM_API_KEY", "dummy-key")
     monkeypatch.setattr(
         dtm_client,
@@ -123,15 +104,15 @@ def test_chosen_value_columns_count_raw_frame(monkeypatch):
         lambda: ({"missing": [], "packages": [], "python": "3.11", "executable": "python"}, True),
     )
 
-    def _fake_discovery(cfg, metrics, *, api_key=None, client=None):
+    def _fake_discovery(cfg, metrics, *, api_key=None, client=None):  # noqa: ANN001, ANN002
         metrics["stage_used"] = "explicit_config"
         return dtm_client.DiscoveryResult(
-            countries=["DR Congo", "Côte d'Ivoire"],
+            countries=["Kenya"],
             frame=pd.DataFrame(),
             stage_used="explicit_config",
             report={
                 "used_stage": "explicit_config",
-                "configured_labels": ["DR Congo", "Côte d'Ivoire"],
+                "configured_labels": ["Kenya"],
                 "unresolved_labels": [],
             },
         )
@@ -142,22 +123,30 @@ def test_chosen_value_columns_count_raw_frame(monkeypatch):
         "load_config",
         lambda: {
             "enabled": True,
-            "api": {"countries": ["DR Congo", "Côte d'Ivoire"], "admin_levels": ["admin0"]},
+            "api": {"countries": ["Kenya"], "admin_levels": ["admin0"]},
             "field_aliases": {"idp_count": ["TotalIDPs"]},
         },
     )
     monkeypatch.setattr(dtm_client, "resolve_ingestion_window", lambda: (None, None))
-    monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dtm_client, "diagnostics_start_run", lambda *_a, **_k: object())
+    monkeypatch.setattr(dtm_client, "diagnostics_finalize_run", lambda *_a, **_k: {})
+    monkeypatch.setattr(dtm_client, "diagnostics_append_jsonl", lambda *_a, **_k: None)
+
+    sample_page = pd.DataFrame(
+        [
+            {
+                "CountryName": "Kenya",
+                "CountryISO3": "KEN",
+                "ReportingDate": "2024-01-15",
+                "TotalIDPs": 42,
+            }
+        ]
+    )
 
     def _fake_fetch_level_pages(client, level, **kwargs):  # noqa: ANN001, ANN003
-        if level != "admin0":
-            return [], 0, None
-        clean_kwargs = dict(kwargs)
-        clean_kwargs.pop("operation", None)
-        frame = client.get_idp_admin0(**clean_kwargs)
-        return ([frame], int(frame.shape[0]), "direct")
+        if level == "admin0":
+            return [sample_page], int(sample_page.shape[0]), "direct"
+        return [], 0, None
 
     monkeypatch.setattr(
         dtm_client,
@@ -170,12 +159,9 @@ def test_chosen_value_columns_count_raw_frame(monkeypatch):
 
     payload = json.loads(Path(dtm_client.RUN_DETAILS_PATH).read_text(encoding="utf-8"))
     extras = payload["extras"]
-    drops = extras["normalize"]["drop_reasons"]
-    assert drops["no_iso3"] == 1
-    assert drops["no_value_col"] == 1
-
-    chosen = {
-        entry["column"]: entry["count"]
-        for entry in extras["normalize"].get("chosen_value_columns", [])
-    }
-    assert chosen.get("TotalIDPs") == 2
+    skip_flags = extras.get("skip_flags", {})
+    assert skip_flags.get("RESOLVER_SKIP_DTM") is True
+    assert skip_flags.get("DTM_FORCE_RUN") is True
+    assert payload.get("status") == "ok"
+    normalize_block = extras.get("normalize", {})
+    assert normalize_block.get("rows_written", 0) > 0

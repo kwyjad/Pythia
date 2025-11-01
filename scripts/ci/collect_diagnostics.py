@@ -17,6 +17,19 @@ from string import Template
 from typing import Iterable, List, Mapping, MutableMapping, Optional
 
 DEFAULT_ART_DIR = ".ci/diagnostics"
+NORMALIZE_EXPECTED_KEYS = [
+    "no_iso3",
+    "no_value_col",
+    "bad_iso",
+    "unknown_country",
+    "missing_value",
+    "non_positive_value",
+    "non_integer_value",
+    "missing_as_of",
+    "future_as_of",
+    "invalid_semantics",
+    "other",
+]
 
 
 def _resolve_art_dir(argv: Iterable[str]) -> Path:
@@ -191,6 +204,166 @@ def _format_failures(junit: Mapping[str, object]) -> str:
     return "\n".join(lines) or "No test failures recorded."
 
 
+def _format_pytest_overview(junit: Mapping[str, object]) -> str:
+    if not isinstance(junit, Mapping) or junit.get("status") != "present":
+        return ""
+    totals = {
+        "tests": junit.get("tests", 0),
+        "failures": junit.get("failures", 0),
+        "errors": junit.get("errors", 0),
+        "skipped": junit.get("skipped", 0),
+        "time": junit.get("time", 0.0),
+    }
+    try:
+        totals["time"] = float(totals.get("time", 0.0))
+    except (TypeError, ValueError):
+        totals["time"] = 0.0
+    return "\n".join(
+        [
+            "| Metric | Count |",
+            "| --- | ---: |",
+            f"| Tests | {totals['tests']} |",
+            f"| Failures | {totals['failures']} |",
+            f"| Errors | {totals['errors']} |",
+            f"| Skipped | {totals['skipped']} |",
+            f"| Time (s) | {totals['time']:.2f} |",
+        ]
+    )
+
+
+def _dtm_debug_block(run_details_text: str) -> str:
+    if not run_details_text.strip():
+        return "Run-details JSON not captured."
+    try:
+        payload = json.loads(run_details_text)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        return f"Failed to parse run-details: {exc}"
+    if not isinstance(payload, Mapping):
+        return "Run-details payload is not a mapping."
+
+    extras = payload.get("extras") if isinstance(payload.get("extras"), Mapping) else {}
+    normalize_block = extras.get("normalize") if isinstance(extras, Mapping) else {}
+    if not isinstance(normalize_block, Mapping):
+        normalize_block = {}
+
+    drop_reasons = normalize_block.get("drop_reasons")
+    if not isinstance(drop_reasons, Mapping):
+        drop_reasons = {}
+    chosen_columns = normalize_block.get("chosen_value_columns")
+    if not isinstance(chosen_columns, list):
+        chosen_columns = []
+    config_block = normalize_block.get("config")
+    if not isinstance(config_block, Mapping):
+        config_block = extras.get("config") if isinstance(extras, Mapping) else {}
+        if not isinstance(config_block, Mapping):
+            config_block = {}
+
+    skip_flags = extras.get("skip_flags") if isinstance(extras, Mapping) else {}
+    if not isinstance(skip_flags, Mapping):
+        skip_flags = {}
+
+    env_flags = {
+        "RESOLVER_SKIP_DTM": os.environ.get("RESOLVER_SKIP_DTM", ""),
+        "DTM_FORCE_RUN": os.environ.get("DTM_FORCE_RUN", ""),
+        "DTM_CONFIG_PATH": os.environ.get("DTM_CONFIG_PATH", ""),
+    }
+
+    status = str(payload.get("status", "unknown"))
+    reason = payload.get("reason") or payload.get("zero_rows_reason")
+    rows_written = normalize_block.get("rows_written")
+    if rows_written is None:
+        rows_written = (
+            payload.get("rows", {}).get("written")
+            if isinstance(payload.get("rows"), Mapping)
+            else None
+        )
+
+    overview = {
+        "status": status,
+        "reason": reason,
+        "rows_written": rows_written,
+        "totals": payload.get("totals", {}),
+        "rows": payload.get("rows", {}),
+    }
+
+    lines: List[str] = []
+    lines.append("#### Run overview")
+    lines.append("```json")
+    lines.append(json.dumps(overview, indent=2, ensure_ascii=False))
+    lines.append("```")
+
+    lines.append("")
+    lines.append("#### Skip & environment flags")
+    lines.append("| Flag | Value | Source |")
+    lines.append("| --- | --- | --- |")
+    for key, value in sorted(skip_flags.items()):
+        lines.append(f"| `{key}` | `{bool(value)}` | run-details |")
+    for key, value in env_flags.items():
+        display = value if value else ""
+        lines.append(f"| `{key}` | `{display}` | env |")
+
+    countries_mode = config_block.get("countries_mode")
+    admin_levels = config_block.get("admin_levels")
+    if not isinstance(admin_levels, (list, tuple)):
+        admin_levels = []
+    lines.append("")
+    lines.append("#### Config summary")
+    lines.append(f"- countries_mode: `{countries_mode if countries_mode is not None else 'n/a'}`")
+    levels_text = ", ".join(str(level) for level in admin_levels) if admin_levels else "(none)"
+    lines.append(f"- admin_levels: {levels_text}")
+
+    lines.append("")
+    lines.append("#### Normalize drop reasons")
+    if drop_reasons:
+        lines.append("| Reason | Count |")
+        lines.append("| --- | ---: |")
+        for key in sorted(drop_reasons):
+            value = drop_reasons.get(key, 0)
+            try:
+                count_val = int(value)
+            except (TypeError, ValueError):
+                count_val = value
+            lines.append(f"| `{key}` | {count_val} |")
+    else:
+        lines.append("No drop reasons recorded.")
+    missing_keys = [key for key in NORMALIZE_EXPECTED_KEYS if key not in drop_reasons]
+    if missing_keys:
+        lines.append(
+            f"_Missing expected key(s): {', '.join(sorted(missing_keys))}_"
+        )
+
+    lines.append("")
+    lines.append("#### Value column usage")
+    if chosen_columns:
+        lines.append("| Column | Count |")
+        lines.append("| --- | ---: |")
+        for entry in chosen_columns:
+            if not isinstance(entry, Mapping):
+                continue
+            column = entry.get("column")
+            count = entry.get("count", 0)
+            lines.append(f"| `{column}` | {count} |")
+    else:
+        lines.append("No value column diagnostics recorded.")
+
+    fetch_block = extras.get("fetch") if isinstance(extras, Mapping) else {}
+    fetch_levels = fetch_block.get("levels") if isinstance(fetch_block, Mapping) else []
+    if fetch_levels:
+        lines.append("")
+        lines.append("#### Admin-level fetch summary")
+        lines.append("| Level | Calls | Rows | Elapsed (ms) |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for entry in fetch_levels:
+            if not isinstance(entry, Mapping):
+                continue
+            level = entry.get("level") or entry.get("name")
+            calls = entry.get("pages")
+            rows = entry.get("rows")
+            elapsed = entry.get("elapsed_ms") or entry.get("elapsed")
+            lines.append(f"| `{level}` | {calls} | {rows} | {elapsed} |")
+
+    return "\n".join(line for line in lines if line is not None).strip()
+
 def _selected_env_block() -> str:
     interesting = [
         "GITHUB_WORKFLOW",
@@ -266,12 +439,14 @@ def _render_summary(
     junit: Mapping[str, object],
     *,
     pytest_failures: str,
+    pytest_overview: str,
     env_block: str,
     lda_log: str,
     normalize_log: str,
     pip_freeze: str,
     duckdb_report: Mapping[str, object],
     run_details: str,
+    dtm_debug: str,
     pytest_tail: str,
 ) -> str:
     pytest_summary = "JUnit report: unavailable"
@@ -297,6 +472,8 @@ def _render_summary(
     pip_text = pip_freeze.strip() or "(pip freeze unavailable)"
     run_details_text = run_details.strip() or "{}"
     pytest_tail_text = pytest_tail.strip() or "(no pytest output captured)"
+    pytest_overview_text = pytest_overview.strip()
+    dtm_debug_text = dtm_debug.strip() or "(No DTM diagnostics captured)"
 
     tmpl = Template(
         textwrap.dedent(
@@ -317,6 +494,8 @@ def _render_summary(
             ## Pytest Summary
             $pytest_summary
 
+            $pytest_overview
+
             ## Pytest Failures (top entries)
             $pytest_failures
 
@@ -334,6 +513,9 @@ def _render_summary(
             ```json
             $run_details
             ```
+
+            ## DTM Debug
+            $dtm_debug
 
             ## Pytest output tail
             ```
@@ -369,9 +551,11 @@ def _render_summary(
         python_executable=env.get("python_executable", sys.executable),
         pytest_summary=pytest_summary,
         pytest_failures=pytest_failures,
+        pytest_overview=pytest_overview_text,
         env_block=env_text,
         pip_freeze=pip_text,
         run_details=run_details_text,
+        dtm_debug=dtm_debug_text,
         pytest_tail=pytest_tail_text,
         lda_log=lda_log,
         normalize_log=normalize_log,
@@ -444,16 +628,22 @@ def main(argv: Iterable[str] | None = None) -> int:
             if tail_lines:
                 pytest_tail = "\n".join(tail_lines[-400:])
 
+        pytest_failures_text = _format_failures(junit)
+        pytest_overview_text = _format_pytest_overview(junit)
+        dtm_debug_text = _dtm_debug_block(run_details)
+
         summary_text = _render_summary(
             env,
             junit,
-            pytest_failures=_format_failures(junit),
+            pytest_failures=pytest_failures_text,
+            pytest_overview=pytest_overview_text,
             env_block=_selected_env_block(),
             lda_log=lda_log,
             normalize_log=normalize_log,
             pip_freeze=pip_freeze,
             duckdb_report=duckdb_report,
             run_details=run_details,
+            dtm_debug=dtm_debug_text,
             pytest_tail=pytest_tail,
         )
 
