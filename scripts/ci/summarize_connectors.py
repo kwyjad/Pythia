@@ -14,12 +14,16 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 __all__ = [
+    "load_report",
+    "build_markdown",
     "render_summary_md",
     "render_dtm_deep_dive",
     "_render_dtm_deep_dive",
+    "main",
+    "SUMMARY_TITLE",
 ]
 
 SUMMARY_PATH = Path("summary.md")
@@ -27,6 +31,60 @@ DEFAULT_REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jso
 DEFAULT_DIAG_DIR = Path("diagnostics") / "ingestion"
 DEFAULT_STAGING_DIR = Path("resolver") / "staging"
 SUMMARY_TITLE = "# Ingestion Superreport"
+
+
+def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
+    """Load a JSONL report, tolerating absent or malformed entries."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_text("", encoding="utf-8")
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    for entry in _safe_load_jsonl(target):
+        if isinstance(entry, Mapping):
+            entries.append(dict(entry))
+    return entries
+
+
+def _fmt_count(value: Optional[int | float]) -> str:
+    """Back-compat count formatter shared with the legacy summary helpers."""
+
+    if value is None:
+        return "-"
+    try:
+        if float(value) == 0:
+            return "-"
+    except Exception:
+        return str(value)
+    return str(value)
+
+
+def build_markdown(
+    entries: Sequence[Mapping[str, Any]] | None,
+    diagnostics_root: os.PathLike[str] | str = DEFAULT_DIAG_DIR,
+    staging_root: os.PathLike[str] | str = DEFAULT_STAGING_DIR,
+) -> str:
+    """Render the superreport markdown while preserving legacy sections."""
+
+    diagnostics_dir = Path(diagnostics_root)
+    staging_dir = Path(staging_root)
+    normalized_entries = [entry for entry in entries or [] if isinstance(entry, Mapping)]
+    records, staging_snapshot = _prepare_records(normalized_entries, diagnostics_dir, staging_dir)
+
+    parts: List[str] = [SUMMARY_TITLE, ""]
+    parts.extend(_render_run_overview(records))
+    parts.extend(
+        _render_legacy_sections(normalized_entries, diagnostics_dir, staging_dir, staging_snapshot)
+    )
+    parts.extend(_render_connector_matrix(records))
+    parts.extend(_render_connector_details(records, staging_snapshot))
+    parts.extend(_render_export_snapshot(staging_snapshot))
+    parts.extend(_render_anomalies(records))
+    parts.extend(_render_next_actions(records))
+    return "\n".join(parts)
 
 
 def _safe_path(value: Any) -> Path | None:
@@ -128,6 +186,33 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
+def _prepare_records(
+    entries: Sequence[Mapping[str, Any]],
+    diagnostics_dir: Path,
+    staging_dir: Path,
+) -> tuple[List[ConnectorRecord], Mapping[str, Any]]:
+    records = [_normalise_connector(entry) for entry in entries]
+    for record in records:
+        _parse_connector_context(record, diagnostics_dir)
+
+    staging_snapshot = _collect_staging_snapshot(staging_dir)
+    for record in records:
+        staging_info = staging_snapshot.get(record.name, {}) if isinstance(staging_snapshot, Mapping) else {}
+        if isinstance(staging_info, Mapping):
+            record.exported_flow = any(
+                "flow" in name and meta.get("rows", 0)
+                for name, meta in staging_info.items()
+                if isinstance(meta, Mapping)
+            )
+            record.exported_stock = any(
+                "stock" in name and meta.get("rows", 0)
+                for name, meta in staging_info.items()
+                if isinstance(meta, Mapping)
+            )
+
+    return records, staging_snapshot
+
+
 def _format_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> List[str]:
     if not rows:
         return ["(no data)"]
@@ -147,6 +232,154 @@ def _format_bool(value: Any) -> str:
     if isinstance(value, str):
         return "yes" if value.strip().lower() in {"1", "true", "on", "y", "yes"} else "no"
     return "yes" if value else "no"
+
+
+def _render_legacy_sections(
+    entries: Sequence[Mapping[str, Any]],
+    diagnostics_dir: Path,
+    staging_dir: Path,
+    staging_snapshot: Mapping[str, Any],
+) -> List[str]:
+    lines: List[str] = []
+
+    staging_lines = _legacy_staging_readiness_section(staging_dir)
+    if staging_lines:
+        lines.extend(staging_lines)
+        lines.append("")
+
+    sample_lines = _legacy_samples_section(diagnostics_dir)
+    if sample_lines:
+        lines.extend(sample_lines)
+        lines.append("")
+
+    config_lines = _legacy_config_section(entries)
+    if config_lines:
+        lines.extend(config_lines)
+        lines.append("")
+
+    zero_lines = _legacy_zero_row_section(entries, staging_snapshot)
+    if zero_lines:
+        lines.extend(zero_lines)
+        lines.append("")
+
+    log_lines = _legacy_logs_section(diagnostics_dir)
+    if log_lines:
+        lines.extend(log_lines)
+        lines.append("")
+
+    return lines
+
+
+def _legacy_staging_readiness_section(staging_dir: Path) -> List[str]:
+    resolver_files = []
+    if staging_dir.exists():
+        resolver_files = sorted(p.name for p in staging_dir.glob("*.csv"))
+
+    data_dir = Path("data") / "staging"
+    data_files: List[str] = []
+    if data_dir.exists():
+        data_files = sorted(p.name for p in data_dir.glob("*.csv"))
+
+    if not resolver_files and not data_files:
+        return []
+
+    lines = ["## Staging readiness", ""]
+    lines.append(f"- resolver/staging files: {resolver_files or '[]'}")
+    lines.append(f"- data/staging files: {data_files or '[]'}")
+    if data_files and not resolver_files:
+        lines.append(
+            "- Hint: artifacts were written to `data/staging`; exporters expect `resolver/staging`."
+        )
+    return lines
+
+
+def _legacy_samples_section(diagnostics_dir: Path) -> List[str]:
+    sample = diagnostics_dir / "dtm" / "samples" / "admin0_head.csv"
+    if not sample.exists():
+        return []
+    return [
+        "## Source sample: quick checks",
+        "",
+        "- `dtm/admin0_head.csv` rows present",
+    ]
+
+
+def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    for entry in entries:
+        extras = entry.get("extras") if isinstance(entry, Mapping) else None
+        config = extras.get("config") if isinstance(extras, Mapping) else None
+        if not isinstance(config, Mapping):
+            continue
+        path = config.get("config_path_used", "unknown")
+        source = config.get("config_source_label", "unknown")
+        warnings = config.get("config_warnings")
+        lines = ["## Config used", ""]
+        lines.append(f"- path: `{path}` (source: {source})")
+        if isinstance(warnings, Sequence) and warnings:
+            lines.append("- warnings:")
+            for warning in warnings:
+                lines.append(f"  - {warning}")
+        return lines
+    return []
+
+
+def _legacy_zero_row_section(
+    entries: Sequence[Mapping[str, Any]], staging_snapshot: Mapping[str, Any]
+) -> List[str]:
+    for entry in entries:
+        counts = entry.get("counts") if isinstance(entry, Mapping) else None
+        extras = entry.get("extras") if isinstance(entry, Mapping) else None
+        written = None
+        if isinstance(counts, Mapping):
+            written = counts.get("written")
+        if written is None and isinstance(extras, Mapping):
+            written = extras.get("rows_written")
+        if written is None:
+            continue
+        try:
+            if float(written) == 0:
+                return [
+                    "## Zero-row root cause",
+                    "",
+                    "- One or more connectors produced zero rows.",
+                ]
+        except Exception:
+            continue
+
+    for connector_meta in staging_snapshot.values():
+        if not isinstance(connector_meta, Mapping):
+            continue
+        for meta in connector_meta.values():
+            if not isinstance(meta, Mapping):
+                continue
+            rows = meta.get("rows")
+            try:
+                if rows is not None and int(rows) == 0:
+                    return [
+                        "## Zero-row root cause",
+                        "",
+                        "- One or more connectors produced zero rows.",
+                    ]
+            except (TypeError, ValueError):
+                continue
+    return []
+
+
+def _legacy_logs_section(diagnostics_dir: Path) -> List[str]:
+    logs_dir = diagnostics_dir / "logs"
+    if not logs_dir.exists():
+        return []
+    files = sorted(p for p in logs_dir.glob("*.log") if p.is_file())
+    if not files:
+        return []
+    lines = ["## Logs", ""]
+    for file in files:
+        try:
+            rel = file.relative_to(diagnostics_dir)
+        except ValueError:
+            rel = file
+        lines.append(f"- `{rel.as_posix()}`")
+    return lines
 
 
 @dataclass
@@ -456,6 +689,8 @@ def _count_rows(path: Path) -> int:
 
 def _render_run_overview(records: Sequence[ConnectorRecord]) -> List[str]:
     lines = ["## Run Overview", ""]
+    lines.append(f"* **Connectors:** {len(records)}")
+    lines.append("")
     git_info = _git_snapshot()
     version_info = _version_snapshot()
     run_stats = _gather_run_stats(records)
@@ -959,31 +1194,8 @@ def render_summary_md(
     diagnostics_dir: Path = DEFAULT_DIAG_DIR,
     staging_dir: Path = DEFAULT_STAGING_DIR,
 ) -> str:
-    entries = _safe_load_jsonl(report_path)
-    records = [_normalise_connector(entry) for entry in entries]
-    for record in records:
-        _parse_connector_context(record, diagnostics_dir)
-    staging_snapshot = _collect_staging_snapshot(staging_dir)
-    for record in records:
-        staging_info = staging_snapshot.get(record.name, {}) if isinstance(staging_snapshot, Mapping) else {}
-        if isinstance(staging_info, Mapping):
-            record.exported_flow = any(
-                "flow" in name and meta.get("rows", 0) for name, meta in staging_info.items()
-                if isinstance(meta, Mapping)
-            )
-            record.exported_stock = any(
-                "stock" in name and meta.get("rows", 0) for name, meta in staging_info.items()
-                if isinstance(meta, Mapping)
-            )
-
-    parts: List[str] = [SUMMARY_TITLE, ""]
-    parts.extend(_render_run_overview(records))
-    parts.extend(_render_connector_matrix(records))
-    parts.extend(_render_connector_details(records, staging_snapshot))
-    parts.extend(_render_export_snapshot(staging_snapshot))
-    parts.extend(_render_anomalies(records))
-    parts.extend(_render_next_actions(records))
-    return "\n".join(parts)
+    entries = load_report(report_path)
+    return build_markdown(entries, diagnostics_dir, staging_dir)
 
 
 def _write_summary(output_path: Path, content: str) -> None:
@@ -1009,8 +1221,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     staging_dir = Path(args.staging)
     output_path = Path(args.output)
 
-    content = render_summary_md(report_path, diagnostics_dir, staging_dir)
+    entries = load_report(report_path)
+    content = build_markdown(entries, diagnostics_dir, staging_dir)
     _write_summary(output_path, content)
+    if getattr(args, "github_step_summary", False):
+        summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            Path(summary_path).write_text(content, encoding="utf-8")
     print(f"Summary written to {output_path}")
     return 0
 

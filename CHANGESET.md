@@ -23,3 +23,5 @@
 - fix(ci): repair summarize_connectors indentation, add syntax guard, and ensure import sanity test covers the module.
 - ci(summary): introduce ingestion superreport with per-connector error/why-zero capture, staging safeguards, offline tests, and workflow soft-fail hardening.
 - fix(ci/summarizer): restore _render_dtm_deep_dive compat shim, guard optional diagnostics, surface exported API line, and add import sanity coverage.
+
+- ci(summary): restore summarize_connectors public API (load_report, build_markdown, main, SUMMARY_TITLE) and summary._fmt_count; reintroduce sections required by fast-tests (staging readiness, samples, config used, zero-row root cause, logs).
