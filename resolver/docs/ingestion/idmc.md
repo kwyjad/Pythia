@@ -176,6 +176,16 @@ Use `--skip-network` or `IDMC_FORCE_CACHE_ONLY=1` to keep runs deterministic.
 Fixtures remain available under `resolver/ingestion/idmc/fixtures/` for offline
 testing and CI.
 
+### Zero-row guardrails & summary integration
+
+- The CLI now pre-creates `resolver/staging/idmc/` and writes a header-only
+  `flow.csv` whenever normalization yields zero rows so downstream exports do
+  not fail on missing files.
+- A compact `diagnostics/ingestion/idmc/why_zero.json` payload explains zero-row
+  outcomes (token presence, selectors, drop histogram, network attempts, and the
+  exact config path used). The CI summarizer renders this block in `summary.md`
+  to surface the root cause without digging through logs.
+
 ## Exports
 
 IDMC’s monthly **flow** series can be exported as resolution-ready facts when

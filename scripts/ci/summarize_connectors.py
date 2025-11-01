@@ -27,6 +27,7 @@ MISSING_REPORT_SUMMARY = (
 
 STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
 EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"]
+IDMC_WHY_ZERO_PATH = Path("diagnostics/ingestion/idmc/why_zero.json")
 
 
 def _relativize_path(raw: Any) -> str | None:
@@ -495,6 +496,58 @@ def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
     limited.sort(key=lambda item: item[0])
     parts = [f"{reason}={count}" for reason, count in limited[:REASON_HISTOGRAM_LIMIT]]
     return ", ".join(parts)
+
+
+def _render_idmc_why_zero(payload: Mapping[str, Any]) -> List[str]:
+    token_present = bool(payload.get("token_present"))
+    countries_count = _coerce_int(payload.get("countries_count"))
+    sample_raw = payload.get("countries_sample")
+    if isinstance(sample_raw, Sequence) and not isinstance(sample_raw, (str, bytes)):
+        sample_list = [str(item) for item in list(sample_raw) if str(item).strip()][:5]
+    else:
+        sample_list = []
+    sample_display = ", ".join(sample_list) if sample_list else "—"
+    if sample_list and countries_count > len(sample_list):
+        sample_display = sample_display + "…"
+    window_block = _ensure_dict(payload.get("window"))
+    window_start = window_block.get("start")
+    window_end = window_block.get("end")
+    start_display = str(window_start).strip() if window_start not in (None, "") else "—"
+    end_display = str(window_end).strip() if window_end not in (None, "") else "—"
+    if start_display == end_display:
+        window_display = start_display
+    else:
+        window_display = f"{start_display} → {end_display}"
+    filters_block = _ensure_dict(payload.get("filters"))
+    dropped_window = _coerce_int(filters_block.get("date_out_of_window"))
+    dropped_iso3 = _coerce_int(filters_block.get("no_iso3"))
+    dropped_value = _coerce_int(filters_block.get("no_value_col"))
+    network_attempted = bool(payload.get("network_attempted"))
+    config_source = str(payload.get("config_source") or "unknown")
+    config_path = _relativize_path(payload.get("config_path_used")) or "—"
+    warnings_raw = payload.get("loader_warnings") or []
+    if isinstance(warnings_raw, Sequence) and not isinstance(warnings_raw, (str, bytes)):
+        warnings_list = [str(item) for item in warnings_raw if str(item).strip()]
+    else:
+        warnings_list = []
+    lines = ["## IDMC — Why zero?", ""]
+    lines.append(f"- Token present: {str(token_present).lower()}")
+    lines.append(f"- Countries: {countries_count} (sample: {sample_display})")
+    lines.append(f"- Window: {window_display}")
+    lines.append(
+        "- Filters dropped: "
+        f"date_out_of_window={dropped_window}, no_iso3={dropped_iso3}, no_value_col={dropped_value}"
+    )
+    requests_attempted = payload.get("requests_attempted")
+    requests_display = _coerce_int(requests_attempted)
+    lines.append(
+        f"- Network attempted: {str(network_attempted).lower()}"
+        f" (requests={requests_display})"
+    )
+    lines.append(f"- Config: {config_source} — {config_path}")
+    if warnings_list:
+        lines.append(f"- Loader warnings: {'; '.join(warnings_list)}")
+    return lines
 
 
 def _truncate_text(value: Any, *, limit: int = 2048) -> str:
@@ -1660,24 +1713,24 @@ def build_markdown(
         else:
             lines.append("- **Status:** export summary unavailable")
 
-        if mapping_debug_records:
-            lines.append("")
-            lines.append("### Export mapping debug")
-            lines.append("")
-            limit = min(10, len(mapping_debug_records))
-            for record in mapping_debug_records[:limit]:
-                record_map = dict(record)
-                file_path = str(record_map.get("file") or "?")
-                matched = bool(record_map.get("matched"))
-                used_mapping = record_map.get("used_mapping")
-                lines.append(f"- `{file_path}`")
-                if matched:
-                    if used_mapping:
-                        lines.append(f"  - Matched: yes (`{used_mapping}`)")
-                    else:
-                        lines.append("  - Matched: yes")
+    if mapping_debug_records:
+        lines.append("")
+        lines.append("### Export mapping debug")
+        lines.append("")
+        limit = min(10, len(mapping_debug_records))
+        for record in mapping_debug_records[:limit]:
+            record_map = dict(record)
+            file_path = str(record_map.get("file") or "?")
+            matched = bool(record_map.get("matched"))
+            used_mapping = record_map.get("used_mapping")
+            lines.append(f"- `{file_path}`")
+            if matched:
+                if used_mapping:
+                    lines.append(f"  - Matched: yes (`{used_mapping}`)")
                 else:
-                    lines.append("  - Matched: no")
+                    lines.append("  - Matched: yes")
+            else:
+                lines.append("  - Matched: no")
                     reasons = record_map.get("reasons")
                     reason_parts: List[str] = []
                     if isinstance(reasons, Mapping):
@@ -1725,6 +1778,12 @@ def build_markdown(
                 lines.append(f"  - Columns: {columns_display}")
             if len(mapping_debug_records) > limit:
                 lines.append(f"(showing {limit} of {len(mapping_debug_records)} files)")
+        lines.append("")
+
+    idmc_why_zero = _safe_load_json(IDMC_WHY_ZERO_PATH)
+    if idmc_why_zero:
+        lines.append("")
+        lines.extend(_render_idmc_why_zero(idmc_why_zero))
         lines.append("")
 
     if dtm_entry:

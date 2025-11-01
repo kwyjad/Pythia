@@ -25,6 +25,8 @@ from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
 from .provenance import build_provenance, write_json
+from .staging import ensure_staging, write_header_if_empty
+from .why_zero import write_why_zero
 
 
 def _parse_csv(value: str | None, *, transform=None) -> List[str]:
@@ -177,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         for item in getattr(cfg, "_config_warnings", ())
         if str(item)
     ]
+
+    ensure_staging()
 
     env_force_cache_only = _env_truthy(os.getenv("IDMC_FORCE_CACHE_ONLY"))
     env_no_date_filter = _env_truthy(os.getenv("IDMC_NO_DATE_FILTER"))
@@ -378,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
             selectors,
             "No rows after filters. See drop_reasons.",
         )
+        write_header_if_empty()
 
     timings = timings_block(
         probe_ms=probe_ms,
@@ -493,13 +498,15 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     rows_fetched = sum(len(frame) for frame in data.values())
+    http_rollup = diagnostics.get("http") or {}
+    cache_stats = diagnostics.get("cache") or {}
 
     diagnostics_payload = {
         "status": status,
         "reason": reason,
         "mode": diagnostics.get("mode", "offline"),
-        "http": diagnostics.get("http", {}),
-        "cache": diagnostics.get("cache"),
+        "http": http_rollup,
+        "cache": cache_stats,
         "filters": diagnostics.get("filters"),
         "probe": probe_result,
         "timings": timings,
@@ -567,8 +574,6 @@ def main(argv: list[str] | None = None) -> int:
     if config_path_used:
         run_meta["config_path"] = str(config_path_used)
     diagnostics_payload["run_env"] = run_meta["env"]
-    http_rollup = diagnostics.get("http") or {}
-    cache_stats = diagnostics.get("cache") or {}
     drop_hist = {key: int(value) for key, value in (drops or {}).items()}
     normalize_stats = {
         "rows_fetched": int(rows_fetched),
@@ -585,6 +590,35 @@ def main(argv: list[str] | None = None) -> int:
         csv_manifest_path = f"{csv_export_path}.manifest.json"
         export_info.setdefault("manifests", {})["csv"] = csv_manifest_path
     notes = {"zero_rows": zero_rows} if zero_rows else {}
+    if rows == 0:
+        window_start = date_window.get("start")
+        window_end = date_window.get("end")
+        requests_raw = http_rollup.get("requests", 0)
+        try:
+            requests_count = int(requests_raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            requests_count = 0
+        why_zero_payload = {
+            "token_present": bool(os.getenv("IDMC_API_TOKEN", "").strip()),
+            "countries_count": len(selected_countries),
+            "countries_sample": selected_countries[:5],
+            "window": {
+                "start": str(window_start) if window_start is not None else None,
+                "end": str(window_end) if window_end is not None else None,
+            },
+            "filters": {
+                "date_out_of_window": int(drop_hist.get("date_out_of_window", 0)),
+                "no_iso3": int(drop_hist.get("no_iso3", 0)),
+                "no_value_col": int(drop_hist.get("no_value_col", 0)),
+            },
+            "network_attempted": requests_count > 0,
+            "requests_attempted": requests_count,
+            "config_source": config_source_label,
+            "config_path_used": str(config_path_used) if config_path_used else None,
+            "loader_warnings": config_warnings,
+        }
+        write_why_zero(why_zero_payload)
+        diagnostics_payload["why_zero"] = why_zero_payload
     provenance = build_provenance(
         run_meta=run_meta,
         reachability=probe_result or {},
