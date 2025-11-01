@@ -1,0 +1,25 @@
+enabled: true
+api:
+  base_url: "https://backend.idmcdb.org"  # override via env IDMC_BASE_URL if needed
+  endpoints:
+    idus_json: "/data/idus_view_flat"
+    idus_geo: "/api/idus-view-flat-geojson"
+    monthly_flow: ""
+    stock: ""
+  countries:
+    - Sudan
+    - South Sudan
+  series: ["stock", "flow"]
+  date_window:
+    start: "2025-06-01"
+    end: "2025-10-31"
+  token_env: "IDMC_API_TOKEN"  # optional bearer token (not required for IDU)
+field_aliases:
+  value_flow: ["new_displacements", "New displacements"]
+  value_stock: ["idps", "IDPs", "Total IDPs"]
+  date: ["date", "Date", "month", "Month", "ReportingDate"]
+  iso3: ["iso3", "ISO3", "Country ISO3", "CountryISO3"]
+cache:
+  dir: ".cache/idmc"            # override with IDMC_CACHE_DIR
+  ttl_seconds: 86400            # override with IDMC_CACHE_TTL_S
+  force_cache_only: false       # override with IDMC_FORCE_CACHE_ONLY
