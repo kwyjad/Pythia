@@ -558,57 +558,107 @@ def _legacy_zero_row_section(
         histogram = reason_histogram(zero_entries)
         if histogram:
             primary_reason = _display_reason(histogram.most_common(1)[0][0])
-            top_reasons = ", ".join(
-                f"{_display_reason(reason)} ({count})"
-                for reason, count in histogram.most_common(5)
-            )
         else:
             primary_reason = "unknown"
-            top_reasons = "—"
 
+        drop_reasons: Counter[str] = Counter()
         selectors_with_rows: List[str] = []
+        rows_received_total = 0
+        discovery_stages: List[str] = []
+
         for entry in zero_entries:
             extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
+
+            normalize_section = extras.get("normalize") if isinstance(extras, Mapping) else None
+            if isinstance(normalize_section, Mapping):
+                drop_hist = normalize_section.get("drop_reasons")
+                if isinstance(drop_hist, Mapping):
+                    for reason, count in drop_hist.items():
+                        try:
+                            numeric_count = int(count)
+                        except (TypeError, ValueError):
+                            continue
+                        drop_reasons[_display_reason(reason)] += numeric_count
+
             selector_payload = extras.get("selector") if isinstance(extras, Mapping) else None
-            if not isinstance(selector_payload, Mapping):
+            if isinstance(selector_payload, Mapping):
+                top_rows = selector_payload.get("top_by_rows")
+                if isinstance(top_rows, Sequence):
+                    for item in top_rows:
+                        selector_name: str | None = None
+                        rows_value: Any = None
+                        if isinstance(item, Mapping):
+                            selector_name = str(
+                                item.get("selector")
+                                or item.get("name")
+                                or item.get("id")
+                                or item.get("value")
+                                or ""
+                            ).strip() or None
+                            rows_value = item.get("rows") or item.get("row_count")
+                        elif isinstance(item, Sequence) and len(item) >= 2:
+                            selector_name = str(item[0]).strip() or None
+                            rows_value = item[1]
+                        if not selector_name:
+                            continue
+                        try:
+                            numeric_rows = int(rows_value)
+                        except (TypeError, ValueError):
+                            numeric_rows = None
+                        if numeric_rows is not None and numeric_rows > 0:
+                            selectors_with_rows.append(f"{selector_name} ({numeric_rows})")
+                        elif rows_value not in (None, "", 0):
+                            selectors_with_rows.append(f"{selector_name} ({rows_value})")
+
+            received_value: Any = None
+            if isinstance(extras, Mapping):
+                for key in ("rows_received", "rows_fetched", "rows_in", "rows_total"):
+                    if extras.get(key) is not None:
+                        received_value = extras.get(key)
+                        break
+            counts = entry.get("counts") if isinstance(entry.get("counts"), Mapping) else None
+            if received_value is None and isinstance(counts, Mapping):
+                received_value = counts.get("fetched")
+            try:
+                rows_received_total += int(received_value) if received_value is not None else 0
+            except (TypeError, ValueError):
                 continue
-            top_rows = selector_payload.get("top_by_rows")
-            if isinstance(top_rows, Sequence):
-                for item in top_rows:
-                    selector_name: str | None = None
-                    rows_value: Any = None
-                    if isinstance(item, Mapping):
-                        selector_name = str(
-                            item.get("selector")
-                            or item.get("name")
-                            or item.get("id")
-                            or item.get("value")
-                            or ""
-                        ).strip() or None
-                        rows_value = item.get("rows") or item.get("row_count")
-                    elif isinstance(item, Sequence) and len(item) >= 2:
-                        selector_name = str(item[0]).strip() or None
-                        rows_value = item[1]
-                    if not selector_name:
-                        continue
-                    try:
-                        numeric_rows = int(rows_value)
-                    except (TypeError, ValueError):
-                        numeric_rows = None
-                    if numeric_rows is not None and numeric_rows > 0:
-                        selectors_with_rows.append(f"{selector_name} ({numeric_rows})")
-                    elif rows_value not in (None, "", 0):
-                        selectors_with_rows.append(f"{selector_name} ({rows_value})")
+
+            discovery_payload = extras.get("discovery") if isinstance(extras, Mapping) else None
+            if isinstance(discovery_payload, Mapping):
+                report_payload = discovery_payload.get("report")
+                if isinstance(report_payload, Mapping):
+                    used_stage = report_payload.get("used_stage") or report_payload.get("stage")
+                    if isinstance(used_stage, str) and used_stage.strip():
+                        discovery_stages.append(used_stage.strip())
+
+        if not drop_reasons and histogram:
+            for reason, count in histogram.most_common(5):
+                drop_reasons[_display_reason(reason)] += count
 
         selectors_text = ", ".join(selectors_with_rows[:5]) if selectors_with_rows else "none"
+        if drop_reasons:
+            top_drop_reasons = ", ".join(
+                f"{reason} ({count})" for reason, count in drop_reasons.most_common(5)
+            )
+        else:
+            top_drop_reasons = "—"
+
+        stage_text = (
+            ", ".join(sorted({stage for stage in discovery_stages if stage}))
+            if discovery_stages
+            else "unknown"
+        )
 
         return [
             "## Zero-row root cause",
             "",
             "- One or more connectors produced zero rows.",
             f"- Primary reason: {primary_reason}",
-            f"- Top drop reasons: {top_reasons}",
+            f"- rows_received={rows_received_total}",
+            f"- Top drop reasons: {top_drop_reasons}",
             f"- Selectors with rows: {selectors_text}",
+            f"- stage={stage_text}",
         ]
 
     for connector_meta in staging_snapshot.values():
