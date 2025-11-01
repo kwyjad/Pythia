@@ -404,11 +404,11 @@ def _legacy_samples_section(diagnostics_dir: Path) -> List[str]:
     lines = ["## Source sample: quick checks", "", "- `dtm/admin0_head.csv` rows present"]
     iso_counts = top_value_counts_from_csv(sample, "CountryISO3")
     if iso_counts:
-        iso_text = ", ".join(f"{code} ({count})" for code, count in iso_counts)
+        iso_text = ", ".join(f"`{code}` ({count})" for code, count in iso_counts)
         lines.append(f"- CountryISO3 top 5: {iso_text}")
     admin_counts = top_value_counts_from_csv(sample, "admin0Name")
     if admin_counts:
-        admin_text = ", ".join(f"{name} ({count})" for name, count in admin_counts)
+        admin_text = ", ".join(f"`{name}` ({count})" for name, count in admin_counts)
         lines.append(f"- admin0Name top 5: {admin_text}")
     return lines
 
@@ -1399,6 +1399,9 @@ def _render_connector_matrix(
                 "dropped": None,
                 "parse_errors": None,
                 "meta_path": None,
+                "coverage": None,
+                "samples": None,
+                "coverage_note": None,
             },
         )
 
@@ -1460,6 +1463,19 @@ def _render_connector_matrix(
             if extras.get("meta_path") and not bucket.get("meta_path"):
                 bucket["meta_path"] = str(extras.get("meta_path"))
 
+        coverage_payload = entry.get("coverage")
+        if isinstance(coverage_payload, Mapping):
+            bucket["coverage"] = dict(coverage_payload)
+
+        samples_payload = entry.get("samples")
+        if isinstance(samples_payload, Mapping):
+            bucket["samples"] = dict(samples_payload)
+
+        if isinstance(extras, Mapping):
+            coverage_note = extras.get("coverage_note") or extras.get("coverage_note_pretty")
+            if coverage_note:
+                bucket["coverage_note"] = str(coverage_note)
+
     for record in records:
         aggregated.setdefault(
             record.name,
@@ -1486,12 +1502,74 @@ def _render_connector_matrix(
         lines.append(f"(deduplicated {'; '.join(dedupe_parts)})")
         lines.append("")
 
+    def _format_range(
+        payload: Mapping[str, Any] | None,
+        start_key: str,
+        end_key: str,
+        *,
+        alt_start: str | None = None,
+        alt_end: str | None = None,
+    ) -> str:
+        if not isinstance(payload, Mapping):
+            return EM_DASH
+
+        def _extract(key: str | None) -> str:
+            if not key:
+                return ""
+            raw = payload.get(key)
+            if raw is None:
+                return ""
+            return str(raw).strip()
+
+        start = _extract(start_key) or _extract(alt_start)
+        end = _extract(end_key) or _extract(alt_end)
+        if start and end:
+            return f"{start}/{end}"
+        return EM_DASH
+
+    def _format_top_pairs(value: Any) -> str:
+        pairs: List[tuple[str, Any]] = []
+        if isinstance(value, Mapping):
+            pairs = [(str(k), v) for k, v in value.items()]
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            for item in value:
+                if isinstance(item, Mapping):
+                    label = item.get("selector") or item.get("name") or item.get("country") or item.get("hazard") or item.get("value")
+                    count = item.get("rows") or item.get("count") or item.get("total") or item.get("times")
+                    if label:
+                        pairs.append((str(label), count))
+                elif isinstance(item, Sequence) and len(item) >= 2:
+                    pairs.append((str(item[0]), item[1]))
+        formatted: List[str] = []
+        for label, count in pairs[:5]:
+            clean_label = label.strip()
+            if not clean_label:
+                continue
+            try:
+                count_value: Any = int(count)
+            except (TypeError, ValueError):
+                count_value = count
+            formatted.append(f"`{clean_label}` ({count_value})")
+        return ", ".join(formatted) if formatted else EM_DASH
+
+    def _format_triplet(values: Sequence[Any]) -> str:
+        parts: List[str] = []
+        for value in values:
+            if value in (None, ""):
+                parts.append("0")
+                continue
+            try:
+                parts.append(str(int(value)))
+            except (TypeError, ValueError):
+                parts.append(str(value))
+        while len(parts) < 3:
+            parts.append("0")
+        return "/".join(parts[:3])
+
     lines.append(
-        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+        "| connector | mode | status | reason | http 2xx/4xx/5xx (retries) | fetched/normalized/written (retries) | kept/dropped/parse_errors | ym min/max | as_of min/max | top ISO3 | top hazards | coverage note | logs | Meta |"
     )
-    lines.append(
-        "| --- | --- | --- | --- | --- | --- | ---:| ---:| ---:| ---:| --- | ---:| --- |"
-    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
 
     for name in sorted(all_names):
         bucket = aggregated.get(name, {})
@@ -1503,16 +1581,19 @@ def _render_connector_matrix(
         reason_text = _display_reason(reason_value) if reason_value else EM_DASH
 
         http_counts = bucket.get("http")
-        if not http_counts and record and isinstance(record.http, Mapping):
+        if not http_counts and record and isinstance(record.http, Mapping) and record.http:
             http_counts = (
                 _coerce_int(record.http.get("2xx")),
                 _coerce_int(record.http.get("4xx")),
                 _coerce_int(record.http.get("5xx")),
                 _coerce_int(record.http.get("retries")),
             )
-        if not http_counts:
-            http_counts = (0, 0, 0, 0)
-        http_text = f"{http_counts[0]}/{http_counts[1]}/{http_counts[2]} ({http_counts[3]})"
+        if http_counts:
+            retries_value = http_counts[3] if len(http_counts) > 3 else 0
+            http_text = f"{http_counts[0]}/{http_counts[1]}/{http_counts[2]} ({retries_value})"
+        else:
+            http_text = EM_DASH
+            retries_value = 0
 
         counts_tuple = bucket.get("counts")
         if not counts_tuple and record:
@@ -1521,9 +1602,13 @@ def _render_connector_matrix(
                 record.rows_normalized,
                 record.rows_written,
             )
-        if not counts_tuple:
-            counts_tuple = (0, 0, 0)
-        counts_text = f"{counts_tuple[0]}/{counts_tuple[1]}/{counts_tuple[2]}"
+        if counts_tuple:
+            fetched_count = _coerce_int(counts_tuple[0])
+            normalized_count = _coerce_int(counts_tuple[1])
+            written_count = _coerce_int(counts_tuple[2])
+        else:
+            fetched_count = normalized_count = written_count = 0
+        counts_text = f"{fetched_count}/{normalized_count}/{written_count} ({retries_value})"
 
         kept_value = bucket.get("kept")
         record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
@@ -1533,6 +1618,8 @@ def _render_connector_matrix(
         meta_bucket = meta_info.get(name, {})
         if kept_value is None and meta_bucket.get("rows"):
             kept_value = meta_bucket.get("rows")
+        if kept_value is None and written_count:
+            kept_value = written_count
 
         dropped_value = bucket.get("dropped")
         parse_errors_value = bucket.get("parse_errors")
@@ -1547,9 +1634,6 @@ def _render_connector_matrix(
         log_path = logs_by_name.get(name)
         logs_cell = _display_path(log_path) if log_path is not None else EM_DASH
 
-        meta_rows = meta_bucket.get("rows") or 0
-        if meta_rows == 0 and kept_value not in (None, 0):
-            meta_rows = kept_value
         meta_paths = list(meta_bucket.get("paths") or [])
         if not meta_paths and bucket.get("meta_path"):
             meta_paths.append(Path(str(bucket["meta_path"])))
@@ -1563,37 +1647,57 @@ def _render_connector_matrix(
         else:
             meta_cell = EM_DASH
 
-        rows_written_value = bucket.get("rows_written")
-        if rows_written_value is None and record:
-            rows_written_value = record.rows_written
-        if rows_written_value is None and kept_value not in (None, EM_DASH):
-            try:
-                rows_written_value = int(kept_value)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                rows_written_value = kept_value
-        rows_written_text = _fmt_count(rows_written_value)
+        coverage_payload = bucket.get("coverage")
+        if not coverage_payload and record and isinstance(record.coverage, Mapping):
+            coverage_payload = record.coverage
+        ym_text = _format_range(coverage_payload, "ym_min", "ym_max", alt_start="ymMin", alt_end="ymMax")
+        asof_text = _format_range(
+            coverage_payload,
+            "as_of_min",
+            "as_of_max",
+            alt_start="asof_min",
+            alt_end="asof_max",
+        )
+
+        samples_payload = bucket.get("samples")
+        if not samples_payload and record and isinstance(record.samples, Mapping):
+            samples_payload = record.samples
+        if isinstance(samples_payload, Mapping):
+            top_iso_text = _format_top_pairs(samples_payload.get("top_iso3"))
+            hazard_source = samples_payload.get("top_hazard") or samples_payload.get("top_hazards")
+            top_hazard_text = _format_top_pairs(hazard_source)
+        else:
+            top_iso_text = top_hazard_text = EM_DASH
+
+        coverage_note_value = bucket.get("coverage_note")
+        if not coverage_note_value and isinstance(record_extras, Mapping):
+            coverage_note_value = record_extras.get("coverage_note") or record_extras.get("coverage_note_pretty")
+        coverage_note_text = str(coverage_note_value).strip() if coverage_note_value else EM_DASH
+
+        kept_triplet = _format_triplet((kept_value, dropped_value, parse_errors_value))
 
         lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {kept_triplet} | {ym} | {asof} | {top_iso} | {top_hazard} | {coverage_note} | {logs_cell} | {meta_cell} |".format(
                 name=name,
                 mode=mode,
                 status=status_value,
                 reason=reason_text,
                 http=http_text,
                 counts=counts_text,
-                written=rows_written_text,
-                kept=_fmt_count(kept_value),
-                dropped=_fmt_count(dropped_value),
-                parse_errors=_fmt_count(parse_errors_value),
+                kept_triplet=kept_triplet,
+                ym=ym_text,
+                asof=asof_text,
+                top_iso=top_iso_text,
+                top_hazard=top_hazard_text,
+                coverage_note=coverage_note_text,
                 logs_cell=logs_cell,
-                meta_rows=_fmt_count(meta_rows),
                 meta_cell=meta_cell,
             )
         )
 
     if not all_names:
         lines.append(
-            f"| — | real | — | — | 0/0/0 (0) | 0/0/0 | {_fmt_count(0)} | {_fmt_count(0)} | {_fmt_count(0)} | {_fmt_count(0)} | — | {_fmt_count(0)} | — |"
+            f"| — | real | — | — | {EM_DASH} | 0/0/0 (0) | 0/0/0 | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} |"
         )
 
     lines.append("")
