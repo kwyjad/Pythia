@@ -18,3 +18,4 @@
 - feat(precedence): add union tool, offline tests, opt-in canary workflow, and
   documentation updates.
 - ci(idmc): wire IDMC into monthly/backfill workflows with probe, harness defaults, and skip gating.
+- fix(dtm): prefer resolver/config for shared loader, surface config_path_used & countries_mode, restore fast tests.

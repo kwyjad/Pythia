@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import certifi
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 REASON_HISTOGRAM_LIMIT = 5
 
 DEFAULT_HTTP_KEYS = ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status")
@@ -26,6 +27,22 @@ MISSING_REPORT_SUMMARY = (
 
 STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
 EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"]
+
+
+def _relativize_path(raw: Any) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        path = Path(raw)
+    except (TypeError, ValueError):
+        return raw
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except Exception:
+        try:
+            return path.resolve().as_posix()
+        except Exception:
+            return str(path)
 
 
 def _ensure_dict(data: Any) -> Dict[str, Any]:
@@ -575,6 +592,32 @@ def _render_details(entry: Mapping[str, Any]) -> str:
 
     # Show API key configuration status for connectors that need it
     extras = _ensure_dict(entry.get("extras", {}))
+    config_block = _ensure_dict(extras.get("config"))
+    config_source = config_block.get("config_source_label") or extras.get("config_source")
+    if config_source:
+        bullets.append(f"- **Config source:** {config_source}")
+    config_warnings = config_block.get("config_warnings")
+    if isinstance(config_warnings, Sequence) and not isinstance(config_warnings, (str, bytes)):
+        joined_warnings = "; ".join(str(item) for item in config_warnings if str(item))
+        if joined_warnings:
+            bullets.append(f"- **Config warnings:** {joined_warnings}")
+
+    config_path_used = (
+        config_block.get("config_path_used")
+        or extras.get("config_path_used")
+        or extras.get("config_path")
+    )
+    countries_mode = (
+        config_block.get("countries_mode")
+        or _ensure_dict(config_block.get("config_parse")).get("countries_mode")
+    )
+    rel_config_path = _relativize_path(config_path_used)
+    if rel_config_path:
+        line = f"- Config: {rel_config_path}"
+        if countries_mode:
+            line += f" (countries_mode={countries_mode})"
+        bullets.append(line)
+
     if "api_key_configured" in extras:
         api_configured = extras["api_key_configured"]
         if api_configured:
@@ -966,22 +1009,33 @@ def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
     )
     countries_mode = str(config.get("countries_mode", "discovered")).strip().lower()
     warn_unapplied = bool(config_keys_found.get("countries")) and countries_mode == "discovered"
-    lines = [
-        "## Config used",
-        "",
-        f"- **Path:** `{config.get('config_path_used', 'unknown')}`",
-        f"- **Exists:** {_format_yes_no(config.get('config_exists'))}",
-        f"- **SHA256:** `{config.get('config_sha256', 'n/a')}`",
-        f"- **Countries mode:** `{config.get('countries_mode', 'discovered')}`",
-        f"- **Countries count:** {config.get('countries_count', 0)}",
-        f"- **Countries preview:** {preview_text}",
-        f"- **Selected ISO3 preview:** {selected_text}",
-        f"- **Admin levels:** {admin_text}",
-        f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
-        countries_parse_line,
-        admin_parse_line,
-        keys_line,
-    ]
+    source_label = config.get("config_source_label") or config.get("config_source")
+    raw_warnings = config.get("config_warnings")
+    warnings_list: List[str] = []
+    if isinstance(raw_warnings, Sequence) and not isinstance(raw_warnings, (str, bytes)):
+        warnings_list = [str(item) for item in raw_warnings if str(item)]
+
+    lines = ["## Config used", ""]
+    if source_label:
+        lines.append(f"- **Source:** {source_label}")
+    if warnings_list:
+        lines.append(f"- **Warnings:** {'; '.join(warnings_list)}")
+    lines.extend(
+        [
+            f"- **Path:** `{config.get('config_path_used', 'unknown')}`",
+            f"- **Exists:** {_format_yes_no(config.get('config_exists'))}",
+            f"- **SHA256:** `{config.get('config_sha256', 'n/a')}`",
+            f"- **Countries mode:** `{config.get('countries_mode', 'discovered')}`",
+            f"- **Countries count:** {config.get('countries_count', 0)}",
+            f"- **Countries preview:** {preview_text}",
+            f"- **Selected ISO3 preview:** {selected_text}",
+            f"- **Admin levels:** {admin_text}",
+            f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
+            countries_parse_line,
+            admin_parse_line,
+            keys_line,
+        ]
+    )
     if warn_unapplied:
         lines.append("- ⚠ config had api.countries but selector list not applied (check loader/version).")
     lines.append("")

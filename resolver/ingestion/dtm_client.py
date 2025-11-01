@@ -46,7 +46,11 @@ from tenacity import (
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion._shared.feature_flags import getenv_bool
-from resolver.ingestion._shared.run_io import count_csv_rows, write_json
+from resolver.ingestion._shared.config_loader import (
+    get_config_details,
+    load_connector_config,
+)
+from resolver.ingestion._shared.run_io import attach_config_source, count_csv_rows, write_json
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
     finalize_run as diagnostics_finalize_run,
@@ -66,8 +70,9 @@ from resolver.scripts.ingestion._dtm_debug_utils import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = _REPO_ROOT
 RESOLVER_ROOT = REPO_ROOT / "resolver"
-LEGACY_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
+INGESTION_CONFIG_PATH = (RESOLVER_ROOT / "ingestion" / "config" / "dtm.yml").resolve()
 REPO_CONFIG_PATH = (RESOLVER_ROOT / "config" / "dtm.yml").resolve()
+LEGACY_CONFIG_PATH = REPO_CONFIG_PATH  # Back-compat alias expected by tests
 SERIES_SEMANTICS_PATH = (RESOLVER_ROOT / "config" / "series_semantics.yml").resolve()
 
 
@@ -98,12 +103,12 @@ def _resolve_config_path() -> Path:
             candidate = candidate.resolve()
         return candidate
 
-    repo_cfg = (resolver_root / "config" / "dtm.yml").resolve()
-    if repo_cfg.exists():
-        return repo_cfg
-
     ingestion_cfg = (resolver_root / "ingestion" / "config" / "dtm.yml").resolve()
-    return ingestion_cfg
+    if ingestion_cfg.exists():
+        return ingestion_cfg
+
+    repo_cfg = (resolver_root / "config" / "dtm.yml").resolve()
+    return repo_cfg
 
 
 CONFIG_PATH = _resolve_config_path()
@@ -1259,7 +1264,7 @@ def _complete_soft_timeout_rescue(
         http_counters=http_payload,
         timings_ms=dict(timings_payload),
         discovery=discovery_struct,
-        diagnostics=None,
+        diagnostics=attach_config_source(None, "dtm"),
         status="ok",
         reason=zero_reason,
         zero_rows_reason=zero_reason,
@@ -1550,6 +1555,10 @@ class ConfigDict(dict):
     _source_path: Optional[str] = None
     _source_exists: bool = False
     _source_sha256: Optional[str] = None
+    _config_source_label: Optional[str] = None
+    _config_warnings: Tuple[str, ...] = ()
+    _config_ingestion_path: Optional[str] = None
+    _config_fallback_path: Optional[str] = None
 
 
 def _preflight_dependencies() -> Tuple[Dict[str, Any], bool]:
@@ -3367,17 +3376,65 @@ def _load_series_semantics_keywords() -> Dict[str, List[str]]:
 
 
 def load_config() -> Dict[str, Any]:
-    path = _resolve_config_path()
-    exists = path.exists()
+    env_override = (os.getenv("DTM_CONFIG_PATH") or "").strip()
     data: Dict[str, Any] = {}
     sha_prefix: Optional[str] = None
-    if exists:
-        raw_bytes = path.read_bytes()
-        sha_prefix = hashlib.sha256(raw_bytes).hexdigest()[:12]
-        text = raw_bytes.decode("utf-8")
-        parsed = yaml.safe_load(text) or {}
-        if isinstance(parsed, dict):
-            data = parsed
+    warnings: Tuple[str, ...] = ()
+    source_label = "ingestion"
+    ingestion_path = INGESTION_CONFIG_PATH
+    fallback_path = REPO_CONFIG_PATH
+
+    if env_override:
+        candidate = pathlib.Path(env_override).expanduser()
+        if not candidate.is_absolute():
+            candidate = (REPO_ROOT / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        path = candidate
+        if path.exists():
+            raw_bytes = path.read_bytes()
+            sha_prefix = hashlib.sha256(raw_bytes).hexdigest()[:12]
+            text = raw_bytes.decode("utf-8")
+            parsed = yaml.safe_load(text) or {}
+            if isinstance(parsed, dict):
+                data = parsed
+        else:
+            sha_prefix = None
+        source_label = "custom"
+    else:
+        try:
+            (
+                raw_data,
+                source_label,
+                resolved_path_obj,
+                loader_warning_list,
+            ) = load_connector_config("dtm")
+        except FileNotFoundError:
+            raw_data = {}
+            source_label = "resolver"
+            resolved_path_obj = _resolve_config_path()
+            loader_warning_list = ()
+        data = dict(raw_data or {})
+        details = get_config_details("dtm")
+        if details is not None:
+            path = details.path
+            ingestion_path = details.ingestion_path
+            fallback_path = details.fallback_path
+            warnings = details.warnings
+        else:
+            path = resolved_path_obj or _resolve_config_path()
+            ingestion_path = INGESTION_CONFIG_PATH
+            fallback_path = REPO_CONFIG_PATH
+            warnings = tuple(loader_warning_list)
+        if path.exists():
+            try:
+                raw_bytes = path.read_bytes()
+                sha_prefix = hashlib.sha256(raw_bytes).hexdigest()[:12]
+            except Exception:  # pragma: no cover - best effort hash
+                sha_prefix = None
+        else:
+            sha_prefix = None
+
     semantics_keywords = _load_series_semantics_keywords()
     existing_keywords = data.get("shock_keywords") if isinstance(data, dict) else {}
     merged_keywords = dict(semantics_keywords)
@@ -3428,10 +3485,15 @@ def load_config() -> Dict[str, Any]:
     }
 
     cfg = ConfigDict(data)
-    cfg._source_path = str(path.resolve())
-    cfg._source_exists = bool(exists)
+    resolved_path = path.resolve()
+    cfg._source_path = str(resolved_path)
+    cfg._source_exists = resolved_path.exists()
     cfg._source_sha256 = sha_prefix
     cfg._config_parse = config_parse
+    cfg._config_source_label = source_label
+    cfg._config_warnings = tuple(warnings)
+    cfg._config_ingestion_path = ingestion_path.as_posix()
+    cfg._config_fallback_path = fallback_path.as_posix()
     return _maybe_override_from_env(cfg)
 
 
@@ -3579,6 +3641,11 @@ def _run_offline_smoke(
 ) -> Tuple[int, str, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     LOG.info("offline-smoke: skip network -> rows=0 offline=True")
     ensure_zero_row_outputs(offline=True)
+    try:
+        load_config()
+    except Exception:  # pragma: no cover - diagnostics helper
+        LOG.debug("dtm: offline-smoke config load failed", exc_info=True)
+    config_details = get_config_details("dtm")
 
     timings_ms: Dict[str, int] = {"write": 0}
     deps_payload = {
@@ -3609,7 +3676,22 @@ def _run_offline_smoke(
     }
     extras_payload["staging_csv"] = str(OUT_PATH)
     extras_payload["staging_meta"] = str(META_PATH)
+    if config_details is not None:
+        config_payload: Dict[str, Any] = {
+            "config_source_label": config_details.source,
+            "config_path_used": config_details.path.as_posix(),
+            "ingestion_config_path": config_details.ingestion_path.as_posix(),
+            "legacy_config_path": config_details.fallback_path.as_posix(),
+        }
+        if config_details.warnings:
+            config_payload["config_warnings"] = list(config_details.warnings)
+        extras_payload["config"] = config_payload
+        extras_payload["config_source"] = config_details.source
 
+    diagnostics_block = attach_config_source(
+        {"mode": "offline-smoke", "offline": True},
+        "dtm",
+    )
     _write_meta(
         0,
         None,
@@ -3618,7 +3700,7 @@ def _run_offline_smoke(
         effective_params={},
         http_counters=http_payload,
         timings_ms=timings_ms,
-        diagnostics={"mode": "offline-smoke", "offline": True},
+        diagnostics=diagnostics_block,
         status="ok",
         reason=reason,
     )
@@ -3713,6 +3795,7 @@ def _finalize_skip_run(
         "requests": _package_version("requests"),
     }
 
+    diagnostics_block = attach_config_source({"mode": mode, "reason": reason}, "dtm")
     _write_meta(
         0,
         None,
@@ -3721,7 +3804,7 @@ def _finalize_skip_run(
         effective_params={},
         http_counters=http_payload,
         timings_ms={},
-        diagnostics={"mode": mode, "reason": reason},
+        diagnostics=diagnostics_block,
         status="skipped",
         reason=reason,
         zero_rows_reason=reason,
@@ -5554,6 +5637,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "config_path_used": config_path_text,
         "config_exists": bool(config_exists_initial),
         "config_sha256": config_sha_initial or "n/a",
+        "config_source_label": None,
         "countries_mode": None,
         "countries_count": 0,
         "countries_preview": [],
@@ -5563,6 +5647,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "config_parse": {"countries": [], "admin_levels": []},
         "config_keys_found": {"countries": False, "admin_levels": False},
         "config_countries_count": 0,
+        "config_warnings": [],
+        "ingestion_config_path": INGESTION_CONFIG_PATH.as_posix(),
+        "legacy_config_path": REPO_CONFIG_PATH.as_posix(),
     }
 
     if not offline_smoke and have_dtmapi and not env_auth_key:
@@ -5753,6 +5840,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config_source_path = getattr(cfg, "_source_path", config_source_path)
         config_exists_flag = bool(getattr(cfg, "_source_exists", config_exists_flag))
         config_sha_prefix = getattr(cfg, "_source_sha256", config_sha_prefix)
+        config_source_label = getattr(cfg, "_config_source_label", None)
+        config_loader_warnings = list(getattr(cfg, "_config_warnings", ()))
+        config_ingestion_path = getattr(cfg, "_config_ingestion_path", None)
+        config_fallback_path = getattr(cfg, "_config_fallback_path", None)
         config_extras = base_extras.setdefault("config", {})
         config_extras.update(
             {
@@ -5761,6 +5852,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "config_sha256": config_sha_prefix or "n/a",
             }
         )
+        if config_source_label:
+            config_extras["config_source_label"] = config_source_label
+        if config_ingestion_path:
+            config_extras["ingestion_config_path"] = str(config_ingestion_path)
+        if config_fallback_path:
+            config_extras["legacy_config_path"] = str(config_fallback_path)
+        if config_loader_warnings:
+            config_extras["config_warnings"] = config_loader_warnings
+        if config_source_label:
+            config_extras["config_source"] = config_source_label
         api_section = cfg.get("api") if isinstance(cfg.get("api"), Mapping) else {}
         configured_labels = _normalize_list(api_section.get("countries"))
         configured_iso3 = _resolve_configured_iso3(configured_labels)
@@ -6252,6 +6353,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     summary_extras["staging_meta"] = str(META_PATH)
     summary_extras["diagnostics_dir"] = str(DTM_DIAGNOSTICS_DIR)
 
+    diagnostics_payload = attach_config_source(
+        summary_extras.get("diagnostics"),
+        "dtm",
+    )
+    summary_extras["diagnostics"] = diagnostics_payload
     _write_meta(
         rows_written,
         window_start_iso,
@@ -6263,7 +6369,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         per_country_counts=per_country_counts_payload,
         failures=failures_payload,
         discovery=summary_extras.get("discovery"),
-        diagnostics=summary_extras.get("diagnostics"),
+        diagnostics=diagnostics_payload,
         status=status,
         reason=reason,
         zero_rows_reason=zero_rows_reason,

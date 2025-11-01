@@ -169,6 +169,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = load()
+    config_details = getattr(cfg, "_config_details", None)
+    config_source_label = str(getattr(cfg, "_config_source", "ingestion"))
+    config_path_used = getattr(cfg, "_config_path", None)
+    config_warnings = [
+        str(item)
+        for item in getattr(cfg, "_config_warnings", ())
+        if str(item)
+    ]
 
     env_force_cache_only = _env_truthy(os.getenv("IDMC_FORCE_CACHE_ONLY"))
     env_no_date_filter = _env_truthy(os.getenv("IDMC_NO_DATE_FILTER"))
@@ -511,6 +519,24 @@ def main(argv: list[str] | None = None) -> int:
         "chunks": diagnostics.get("chunks"),
     }
 
+    config_payload = {
+        "config_source_label": config_source_label,
+        "config_path_used": str(config_path_used) if config_path_used else None,
+    }
+    if config_details is not None:
+        ingestion_path = getattr(config_details, "ingestion_path", None)
+        fallback_path = getattr(config_details, "fallback_path", None)
+        if isinstance(ingestion_path, Path):
+            config_payload["ingestion_config_path"] = ingestion_path.as_posix()
+        if isinstance(fallback_path, Path):
+            config_payload["legacy_config_path"] = fallback_path.as_posix()
+    if config_warnings:
+        config_payload["config_warnings"] = config_warnings
+    diagnostics_payload["config"] = config_payload
+    diagnostics_payload["config_source"] = config_source_label
+    if config_warnings:
+        diagnostics_payload["warnings"] = config_warnings
+
     base_url_used = (args.base_url or cfg.api.base_url or "").rstrip("/")
     endpoints_used = {
         name: (
@@ -537,6 +563,9 @@ def main(argv: list[str] | None = None) -> int:
         "timings_ms": timings,
         "mode": diagnostics.get("mode", "offline"),
     }
+    run_meta["config_source"] = config_source_label
+    if config_path_used:
+        run_meta["config_path"] = str(config_path_used)
     diagnostics_payload["run_env"] = run_meta["env"]
     http_rollup = diagnostics.get("http") or {}
     cache_stats = diagnostics.get("cache") or {}

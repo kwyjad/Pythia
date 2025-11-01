@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "idmc.yml")
-DEFAULT_PATH = os.path.abspath(DEFAULT_PATH)
+from resolver.ingestion._shared.config_loader import (
+    get_config_details,
+    load_connector_config,
+)
+
+DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "idmc.yml"
 
 
 @dataclass
@@ -123,12 +128,45 @@ def _coerce_bool(value: object, default: bool) -> bool:
     return default
 
 
-def load(path: str | None = None) -> IdmcConfig:
+def _resolve_custom_path(raw_path: str | Path) -> Path:
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        return (Path.cwd() / candidate).resolve()
+    return candidate.resolve()
+
+
+def load(
+    path: str | os.PathLike[str] | None = None, *, strict_loader: bool = False
+) -> IdmcConfig:
     """Load the IDMC configuration from disk."""
 
-    cfg_path = path or DEFAULT_PATH
-    with open(cfg_path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
+    loader_warnings: Tuple[str, ...] = ()
+    source_label = "resolver"
+    resolved_path: Optional[Path] = None
+
+    if path is not None:
+        resolved_path = _resolve_custom_path(path)
+        with resolved_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        source_label = "custom"
+    else:
+        (
+            data,
+            source_label,
+            resolved_path,
+            loader_warning_list,
+        ) = load_connector_config("idmc", strict_mismatch=strict_loader)
+        details = get_config_details("idmc")
+        if details is not None:
+            resolved_path = details.path
+            loader_warnings = details.warnings
+        else:
+            resolved_path = resolved_path or DEFAULT_PATH
+            loader_warnings = tuple(loader_warning_list)
+        data = dict(data or {})
+
+    if not isinstance(data, dict):
+        data = {}
 
     api_block = data.get("api", {})
     alias_block = data.get("field_aliases", {})
@@ -165,7 +203,7 @@ def load(path: str | None = None) -> IdmcConfig:
     if env_force_cache_only is not None:
         cache_force_cache_only = _coerce_bool(env_force_cache_only, cache_force_cache_only)
 
-    return IdmcConfig(
+    config = IdmcConfig(
         enabled=bool(data.get("enabled", True)),
         api=ApiCfg(
             base_url=api_block.get("base_url", _default_base_url()),
@@ -201,3 +239,11 @@ def load(path: str | None = None) -> IdmcConfig:
             ),
         ),
     )
+
+    config._config_source = source_label  # type: ignore[attr-defined]
+    config._config_path = (
+        resolved_path.as_posix() if isinstance(resolved_path, Path) else None
+    )  # type: ignore[attr-defined]
+    config._config_warnings = tuple(loader_warnings)  # type: ignore[attr-defined]
+    config._config_details = get_config_details("idmc")  # type: ignore[attr-defined]
+    return config
