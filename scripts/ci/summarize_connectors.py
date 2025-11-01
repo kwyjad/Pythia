@@ -44,6 +44,12 @@ SUMMARY_TITLE = "# Ingestion Superreport"
 LEGACY_TITLE = "# Connector Diagnostics"
 EM_DASH = "—"
 
+CLASSIC_TABLE_HEADER = (
+    "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
+    "Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+)
+CLASSIC_TABLE_DIVIDER = "|---|---:|---|---|---|---|---:|---:|---:|---:|---|---:|---|"
+
 
 _LAST_STUB_REASON_ALIAS: str | None = None
 
@@ -1658,10 +1664,8 @@ def _render_connector_matrix(
             parts.append("0")
         return "/".join(parts[:3])
 
-    lines.append(
-        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Coverage note | Logs | Meta rows | Meta |"
-    )
-    lines.append("|---|---:|---|---|---|---|---:|---:|---:|---:|---|---|---:|---|")
+    lines.append(CLASSIC_TABLE_HEADER)
+    lines.append(CLASSIC_TABLE_DIVIDER)
 
     for name in sorted(all_names):
         bucket = aggregated.get(name, {})
@@ -1705,6 +1709,7 @@ def _render_connector_matrix(
 
         record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
 
+        rows_written_cell = f"{fetched_count}/{normalized_count}/{written_count}"
         rows_written_value = bucket.get("rows_written")
         if rows_written_value is None and isinstance(record_extras, Mapping):
             rows_written_value = record_extras.get("rows_written")
@@ -1713,15 +1718,16 @@ def _render_connector_matrix(
                 coerced_rows = _coerce_int(rows_written_value)
             except (TypeError, ValueError):
                 coerced_rows = rows_written_value
-            run_totals = record_extras.get("run_totals") if isinstance(record_extras, Mapping) else None
-            if coerced_rows and coerced_rows != "0":
+            run_totals = (
+                record_extras.get("run_totals") if isinstance(record_extras, Mapping) else None
+            )
+            if coerced_rows not in (None, 0, "0"):
                 rows_written_cell = str(coerced_rows)
-            elif run_totals is not None and rows_written_value is not None:
-                rows_written_cell = str(coerced_rows)
-            else:
-                rows_written_cell = f"{fetched_count}/{normalized_count}/{written_count}"
-        else:
-            rows_written_cell = f"{fetched_count}/{normalized_count}/{written_count}"
+            elif isinstance(run_totals, Mapping) and run_totals.get("rows_written") is not None:
+                try:
+                    rows_written_cell = str(_coerce_int(run_totals.get("rows_written")))
+                except (TypeError, ValueError):
+                    rows_written_cell = str(run_totals.get("rows_written"))
 
         kept = EM_DASH
         dropped = EM_DASH
@@ -1774,33 +1780,6 @@ def _render_connector_matrix(
                     rendered_paths.append(path_obj.as_posix())
             meta_cell = ", ".join(rendered_paths)
 
-        coverage_payload = bucket.get("coverage")
-        if not coverage_payload and record and isinstance(record.coverage, Mapping):
-            coverage_payload = record.coverage
-        ym_text = _format_range(coverage_payload, "ym_min", "ym_max", alt_start="ymMin", alt_end="ymMax")
-        asof_text = _format_range(
-            coverage_payload,
-            "as_of_min",
-            "as_of_max",
-            alt_start="asof_min",
-            alt_end="asof_max",
-        )
-
-        samples_payload = bucket.get("samples")
-        if not samples_payload and record and isinstance(record.samples, Mapping):
-            samples_payload = record.samples
-        if isinstance(samples_payload, Mapping):
-            top_iso_text = _format_top_pairs(samples_payload.get("top_iso3"))
-            hazard_source = samples_payload.get("top_hazard") or samples_payload.get("top_hazards")
-            top_hazard_text = _format_top_pairs(hazard_source)
-        else:
-            top_iso_text = top_hazard_text = EM_DASH
-
-        coverage_note_value = bucket.get("coverage_note")
-        if not coverage_note_value and isinstance(record_extras, Mapping):
-            coverage_note_value = record_extras.get("coverage_note") or record_extras.get("coverage_note_pretty")
-        coverage_note_text = str(coverage_note_value).strip() if coverage_note_value else EM_DASH
-
         if kept_value not in (None, 0, "0") and kept == EM_DASH:
             kept = str(kept_value)
         if dropped_value not in (None, 0, "0") and dropped == EM_DASH:
@@ -1809,7 +1788,7 @@ def _render_connector_matrix(
             parse_err = str(parse_errors_value)
 
         lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {coverage_note} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
                 name=name,
                 mode=mode,
                 status=status_value,
@@ -1820,7 +1799,6 @@ def _render_connector_matrix(
                 kept=kept,
                 dropped=dropped,
                 parse_errors=parse_err,
-                coverage_note=coverage_note_text,
                 logs_cell=logs_cell,
                 meta_rows=meta_rows_cell,
                 meta_cell=meta_cell,
@@ -1829,13 +1807,11 @@ def _render_connector_matrix(
 
     if not all_names:
         lines.append(
-            f"| — | real | — | — | {EM_DASH} | 0/0/0 (0) | 0/0/0 | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} |"
+            f"| — | real | — | — | {EM_DASH} | 0/0/0 (0) | 0/0/0 | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} |"
         )
 
     lines.append("")
-    legacy_header = (
-        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
-    )
+    legacy_header = CLASSIC_TABLE_HEADER
     lines.append("<!-- Legacy header retained for fast-test assertions -->")
     lines.append(legacy_header)
     if logs:

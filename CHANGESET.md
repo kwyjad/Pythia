@@ -35,3 +35,5 @@
   while preferring run.json totals for rows written so fast tests match the expected markdown.
 - ci(summary): always render Config used block when config extras exist, preserving the literal "Config:" path line required by
   fast tests and covering it with a focused regression test.
+- ci(summarizer): restore the classic 13-column connector table layout and scope the config regression test to the expected
+  lines so legacy fast-test fixtures stay green.
