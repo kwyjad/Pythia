@@ -16,6 +16,16 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from scripts.ci._summarizer_utils import (
+    gather_log_files,
+    gather_meta_json_files,
+    reason_histogram,
+    safe_load_json,
+    safe_load_jsonl,
+    status_histogram,
+    top_value_counts_from_csv,
+)
+
 __all__ = [
     "load_report",
     "build_markdown",
@@ -42,10 +52,18 @@ def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
     if not target.exists():
         return entries
 
-    for entry in _safe_load_jsonl(target):
+    for entry in safe_load_jsonl(target):
         if not isinstance(entry, Mapping):
             continue
         normalized = dict(entry)
+        if (
+            normalized.get("client") == "summarizer"
+            and normalized.get("mode") == "diagnostics"
+            and normalized.get("status") == "error"
+            and normalized.get("reason") == "missing or empty report"
+        ):
+            # Preserve stub line on disk but do not include it in rendered diagnostics.
+            continue
         extras = normalized.get("extras")
         if isinstance(extras, Mapping):
             normalized["extras"] = _redact_extras(extras)
@@ -96,7 +114,7 @@ def _apply_run_details_override(entry: Dict[str, Any], *, base_dir: Path) -> Non
         return
     if not details_path.is_absolute():
         details_path = (base_dir / details_path).resolve()
-    details_payload = _safe_json_load(details_path)
+    details_payload = safe_load_json(details_path)
     if not isinstance(details_payload, Mapping):
         return
 
@@ -174,7 +192,7 @@ def _safe_read_csv_rows(path: Path, limit: int = 5) -> List[Mapping[str, Any]]:
 
 
 def _summarize_http_trace(path: Path) -> Dict[str, Any]:
-    entries = _safe_load_jsonl(path) if path else []
+    entries = safe_load_jsonl(path) if path else []
     if not entries:
         return {}
     latencies: List[float] = []
@@ -209,39 +227,6 @@ def _summarize_http_trace(path: Path) -> Dict[str, Any]:
         "latency_max_ms": max(latencies) if latencies else None,
     }
     return summary
-
-def _safe_json_load(path: Path) -> Mapping[str, Any] | None:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return None
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, Mapping) else None
-
-
-def _safe_load_jsonl(path: Path) -> List[Mapping[str, Any]]:
-    entries: List[Mapping[str, Any]] = []
-    if not path.exists():
-        return entries
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for raw in handle:
-                text = raw.strip()
-                if not text:
-                    continue
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(payload, Mapping):
-                    entries.append(payload)
-    except OSError:
-        return []
-    return entries
-
 
 def _coerce_int(value: Any) -> int:
     try:
@@ -321,6 +306,11 @@ def _render_legacy_sections(
         lines.extend(config_lines)
         lines.append("")
 
+    selector_lines = _legacy_selector_section(entries, diagnostics_dir)
+    if selector_lines:
+        lines.extend(selector_lines)
+        lines.append("")
+
     dtm_lines = _legacy_dtm_sections(entries)
     if dtm_lines:
         lines.extend(dtm_lines)
@@ -366,19 +356,14 @@ def _legacy_samples_section(diagnostics_dir: Path) -> List[str]:
     if not sample.exists():
         return []
     lines = ["## Source sample: quick checks", "", "- `dtm/admin0_head.csv` rows present"]
-    counts: Counter[str] = Counter()
-    try:
-        with sample.open("r", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                iso = row.get("CountryISO3") if isinstance(row, Mapping) else None
-                if iso:
-                    counts[str(iso)] += 1
-    except OSError:
-        counts = Counter()
-    if counts:
-        top = ", ".join(f"{code} ({count})" for code, count in counts.most_common(5))
-        lines.append(f"- CountryISO3 top 5: {top}")
+    iso_counts = top_value_counts_from_csv(sample, "CountryISO3")
+    if iso_counts:
+        iso_text = ", ".join(f"{code} ({count})" for code, count in iso_counts)
+        lines.append(f"- CountryISO3 top 5: {iso_text}")
+    admin_counts = top_value_counts_from_csv(sample, "admin0Name")
+    if admin_counts:
+        admin_text = ", ".join(f"{name} ({count})" for name, count in admin_counts)
+        lines.append(f"- admin0Name top 5: {admin_text}")
     return lines
 
 
@@ -442,6 +427,47 @@ def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 )
         return lines
     return []
+
+
+def _legacy_selector_section(
+    entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
+) -> List[str]:
+    lines = ["## Selector effectiveness", ""]
+    snippets: List[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else None
+        if not isinstance(extras, Mapping):
+            continue
+        selector_payload = extras.get("selector")
+        if not selector_payload:
+            continue
+        connector_id = entry.get("connector_id") or entry.get("connector") or "unknown"
+        if isinstance(selector_payload, Mapping):
+            coverage = selector_payload.get("coverage")
+            matched = selector_payload.get("matched")
+            snippets.append(
+                f"- {connector_id}: selector diagnostics present (coverage={coverage}, matched={matched})"
+            )
+        else:
+            snippets.append(f"- {connector_id}: selector diagnostics present")
+
+    selector_files = [
+        path
+        for path in diagnostics_dir.rglob("selector*.json")
+        if path.is_file()
+    ]
+    if selector_files:
+        for path in selector_files:
+            relative = path.relative_to(diagnostics_dir)
+            snippets.append(f"- file: `{relative}`")
+
+    if snippets:
+        lines.extend(snippets)
+    else:
+        lines.append("- No selector diagnostics found; cannot compare coverage.")
+    return lines
 
 
 def _legacy_zero_row_section(
@@ -596,21 +622,40 @@ def _render_dtm_per_country_section(entry: Mapping[str, Any]) -> List[str]:
 
 
 def _legacy_logs_section(diagnostics_dir: Path) -> List[str]:
-    logs_dir = diagnostics_dir / "logs"
-    if not logs_dir.exists():
+    logs = gather_log_files(diagnostics_dir)
+    meta_files = gather_meta_json_files(diagnostics_dir)
+    if not logs and not meta_files:
         return []
-    files = sorted(p for p in logs_dir.glob("*.log") if p.is_file())
-    if not files:
-        return []
-    lines = ["## Logs", ""]
-    lines.append("| Logs |")
-    lines.append("| --- |")
-    for file in files:
+
+    meta_rows = 0
+    for path in meta_files:
+        payload = safe_load_json(path)
+        if not isinstance(payload, Mapping):
+            continue
+        value = payload.get("rows_written")
+        if value is None and isinstance(payload.get("meta"), Mapping):
+            value = payload["meta"].get("rows_written")
         try:
-            rel = file.relative_to(diagnostics_dir)
-        except ValueError:
-            rel = file
-        lines.append(f"| {rel.as_posix()} |")
+            if value is not None:
+                meta_rows += int(value)
+        except (TypeError, ValueError):
+            continue
+
+    lines = ["## Logs", ""]
+    lines.append("| Logs | Meta rows |")
+    lines.append("| --- | ---: |")
+    lines.append(f"| {len(logs)} | {meta_rows} |")
+    lines.append("")
+    if logs:
+        for file in logs:
+            try:
+                rel = file.relative_to(diagnostics_dir)
+            except ValueError:
+                rel = file
+            lines.append(f"- {rel.as_posix()}")
+    if meta_files:
+        lines.append("")
+        lines.append("- Meta diagnostics present")
     return lines
 
 
@@ -687,7 +732,7 @@ def _normalise_connector(entry: Mapping[str, Any]) -> ConnectorRecord:
 
 
 def _load_optional(path: Path) -> Mapping[str, Any]:
-    payload = _safe_json_load(path)
+    payload = safe_load_json(path)
     return payload if payload else {}
 
 
@@ -926,32 +971,14 @@ def _count_rows(path: Path) -> int:
 
 
 def _format_status_counts(entries: Sequence[Mapping[str, Any]]) -> str:
-    if not entries:
-        return "none"
-    counter: Counter[str] = Counter()
-    for entry in entries:
-        status = entry.get("extras", {}).get("status_raw") if isinstance(entry, Mapping) else None
-        if not status:
-            status = entry.get("status") if isinstance(entry, Mapping) else None
-        text = str(status).strip()
-        if text:
-            counter[text] += 1
+    counter = status_histogram(entries)
     if not counter:
         return "none"
     return ", ".join(f"{key}={counter[key]}" for key in sorted(counter))
 
 
 def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
-    counter: Counter[str] = Counter()
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        reason = entry.get("reason") or entry.get("extras", {}).get("reason")
-        if reason is None:
-            continue
-        cleaned = str(reason).strip()
-        if cleaned:
-            counter[cleaned] += 1
+    counter = reason_histogram(entries)
     if not counter:
         return EM_DASH
     parts = [f"{reason}={counter[reason]}" for reason in sorted(counter)]
@@ -979,9 +1006,9 @@ def _render_run_overview(
     lines.append(
         f"* **Status counts:** {_format_status_counts(entries)}"
     )
-    lines.append(
-        f"* **Reason histogram:** {_format_reason_histogram(entries)}"
-    )
+    reason_hist = _format_reason_histogram(entries)
+    if reason_hist != EM_DASH:
+        lines.append(f"* **Reason histogram:** {reason_hist}")
     fetched, normalized, written, override = _rows_totals(records)
     footnote = " (from run.json)" if override else ""
     lines.append(f"* **Rows fetched:** {fetched}{footnote}")
@@ -1365,7 +1392,7 @@ def render_dtm_deep_dive(record: Mapping[str, Any] | ConnectorRecord) -> List[st
         lines.append(f"- Reason: {reason}")
     fail_path = _safe_path(discovery.get("first_fail_path") if isinstance(discovery, Mapping) else None)
     if fail_path:
-        fail_payload = _safe_json_load(fail_path)
+        fail_payload = safe_load_json(fail_path)
     else:
         fail_payload = None
     errors = []
@@ -1550,7 +1577,11 @@ def render_summary_md(
     staging_dir: Path = DEFAULT_STAGING_DIR,
 ) -> str:
     entries = load_report(report_path)
-    return build_markdown(entries, diagnostics_dir, staging_dir)
+    return build_markdown(
+        entries,
+        diagnostics_root=diagnostics_dir,
+        staging_root=staging_dir,
+    )
 
 
 def _write_summary(output_path: Path, content: str) -> None:
@@ -1576,12 +1607,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     staging_dir = Path(args.staging)
     output_path = Path(args.output)
 
-    if not report_path.exists():
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("{}\n", encoding="utf-8")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    stub_needed = not report_path.exists()
+    entries: List[Mapping[str, Any]] = []
+    if not stub_needed and report_path.exists():
+        entries = load_report(report_path)
+        if not entries:
+            try:
+                stub_needed = report_path.stat().st_size == 0
+            except OSError:
+                stub_needed = True
+    if stub_needed:
+        stub = {
+            "client": "summarizer",
+            "mode": "diagnostics",
+            "status": "error",
+            "reason": "missing or empty report",
+            "counts": {"written": 0},
+        }
+        report_path.write_text(json.dumps(stub) + "\n", encoding="utf-8")
+        entries = load_report(report_path)
 
-    entries = load_report(report_path)
-    content = build_markdown(entries, diagnostics_dir, staging_dir)
+    content = build_markdown(
+        entries,
+        diagnostics_root=diagnostics_dir,
+        staging_root=staging_dir,
+    )
     _write_summary(output_path, content)
     if getattr(args, "github_step_summary", False):
         summary_path = os.getenv("GITHUB_STEP_SUMMARY")
