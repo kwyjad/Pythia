@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as _dt
 import json
 import os
@@ -12,13 +13,80 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import mean
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
+
+__all__ = [
+    "render_summary_md",
+    "render_dtm_deep_dive",
+    "_render_dtm_deep_dive",
+]
 
 SUMMARY_PATH = Path("summary.md")
 DEFAULT_REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
 DEFAULT_DIAG_DIR = Path("diagnostics") / "ingestion"
 DEFAULT_STAGING_DIR = Path("resolver") / "staging"
 SUMMARY_TITLE = "# Ingestion Superreport"
+
+
+def _safe_path(value: Any) -> Path | None:
+    if isinstance(value, str) and value.strip():
+        return Path(value)
+    return None
+
+
+def _safe_read_csv_rows(path: Path, limit: int = 5) -> List[Mapping[str, Any]]:
+    rows: List[Mapping[str, Any]] = []
+    if not path:
+        return rows
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for idx, row in enumerate(reader):
+                if idx >= limit:
+                    break
+                rows.append({key: value for key, value in row.items()})
+    except (OSError, ValueError, csv.Error):
+        return []
+    return rows
+
+
+def _summarize_http_trace(path: Path) -> Dict[str, Any]:
+    entries = _safe_load_jsonl(path) if path else []
+    if not entries:
+        return {}
+    latencies: List[float] = []
+    paths: Counter[str] = Counter()
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        endpoint = str(entry.get("path") or entry.get("endpoint") or "unknown")
+        paths[endpoint] += 1
+        latency = entry.get("elapsed_ms") or entry.get("latency_ms")
+        try:
+            latencies.append(float(latency))
+        except (TypeError, ValueError):
+            continue
+
+    latencies.sort()
+
+    def _percentile(percent: float) -> float | None:
+        if not latencies:
+            return None
+        if len(latencies) == 1:
+            return latencies[0]
+        idx = max(0, min(len(latencies) - 1, int(round(percent * (len(latencies) - 1)))))
+        return latencies[idx]
+
+    summary: Dict[str, Any] = {
+        "count": len(entries),
+        "paths": paths.most_common(5),
+        "latency_avg_ms": mean(latencies) if latencies else None,
+        "latency_p50_ms": _percentile(0.5),
+        "latency_p95_ms": _percentile(0.95),
+        "latency_max_ms": max(latencies) if latencies else None,
+    }
+    return summary
 
 def _safe_json_load(path: Path) -> Mapping[str, Any] | None:
     try:
@@ -446,6 +514,16 @@ def _render_run_overview(records: Sequence[ConnectorRecord]) -> List[str]:
     if "mem_total_mb" in resources:
         lines.append(f"- Memory: {resources.get('mem_available_mb')} MB free / {resources.get('mem_total_mb')} MB total")
     lines.append("")
+
+    module = sys.modules.get(__name__)
+    exported: List[str] = []
+    for name in ("render_summary_md", "render_dtm_deep_dive", "_render_dtm_deep_dive"):
+        if module and hasattr(module, name):
+            exported.append(name)
+    lines.append(
+        f"**Summarizer API (exported):** {', '.join(exported) if exported else '(none)'}"
+    )
+    lines.append("")
     return lines
 
 
@@ -618,9 +696,200 @@ def _render_connector_details(records: Sequence[ConnectorRecord], staging: Mappi
         if not record.why_zero and not record.error:
             lines.append("- No why-zero or error diagnostics captured")
         lines.append("")
+
+        dtm_section = render_dtm_deep_dive(record)
+        if dtm_section:
+            lines.extend(dtm_section)
+            lines.append("")
+
         lines.append("</details>")
         lines.append("")
     return lines
+
+
+def render_dtm_deep_dive(record: Mapping[str, Any] | ConnectorRecord) -> List[str]:
+    extras: Mapping[str, Any] | None
+    if isinstance(record, ConnectorRecord):
+        extras = record.extras if isinstance(record.extras, Mapping) else None
+    elif isinstance(record, Mapping):
+        maybe_extras = record.get("extras")
+        extras = maybe_extras if isinstance(maybe_extras, Mapping) else None
+    else:
+        extras = None
+
+    if not extras:
+        return []
+
+    dtm_meta = extras.get("dtm")
+    if not isinstance(dtm_meta, Mapping):
+        return []
+
+    lines: List[str] = ["## DTM Deep Dive", ""]
+
+    config = extras.get("config") if isinstance(extras.get("config"), Mapping) else {}
+    window = extras.get("window") if isinstance(extras.get("window"), Mapping) else {}
+
+    lines.append("### Overview")
+    lines.append(f"- SDK version: {dtm_meta.get('sdk_version') or 'unknown'}")
+    lines.append(f"- Base URL: {dtm_meta.get('base_url') or 'unknown'}")
+    lines.append(f"- Python: {dtm_meta.get('python_version') or 'unknown'}")
+    admin_levels = config.get("admin_levels") if isinstance(config, Mapping) else None
+    if isinstance(admin_levels, Sequence) and not isinstance(admin_levels, (str, bytes)):
+        admin_text = ", ".join(str(level) for level in admin_levels) or "(none)"
+    else:
+        admin_text = "(none)"
+    lines.append(f"- Admin levels: {admin_text}")
+    countries_mode = config.get("countries_mode") if isinstance(config, Mapping) else None
+    countries_count = config.get("countries_count") if isinstance(config, Mapping) else None
+    lines.append(
+        f"- Countries mode: {countries_mode or 'unknown'} (count={countries_count if countries_count is not None else 'n/a'})"
+    )
+    lines.append(
+        "- Window: {start} → {end}".format(
+            start=window.get("start_iso") or window.get("start") or "—",
+            end=window.get("end_iso") or window.get("end") or "—",
+        )
+    )
+    lines.append("")
+
+    lines.append("### Discovery")
+    discovery = extras.get("discovery") if isinstance(extras.get("discovery"), Mapping) else {}
+    stages = discovery.get("stages") if isinstance(discovery, Mapping) else None
+    if isinstance(stages, Sequence) and stages:
+        for stage in stages:
+            if not isinstance(stage, Mapping):
+                continue
+            lines.append(
+                "- {name}: status={status} http={http} attempts={attempts} latency={latency}ms".format(
+                    name=stage.get("name", "stage"),
+                    status=stage.get("status", "unknown"),
+                    http=stage.get("http_code", "n/a"),
+                    attempts=stage.get("attempts", "n/a"),
+                    latency=stage.get("latency_ms", "n/a"),
+                )
+            )
+    else:
+        lines.append("_No discovery stages recorded._")
+    reason = discovery.get("reason") if isinstance(discovery, Mapping) else None
+    if reason:
+        lines.append(f"- Reason: {reason}")
+    fail_path = _safe_path(discovery.get("first_fail_path") if isinstance(discovery, Mapping) else None)
+    if fail_path:
+        fail_payload = _safe_json_load(fail_path)
+    else:
+        fail_payload = None
+    errors = []
+    if isinstance(fail_payload, Mapping):
+        maybe_errors = fail_payload.get("errors")
+        if isinstance(maybe_errors, Sequence):
+            for item in maybe_errors:
+                if isinstance(item, Mapping):
+                    message = item.get("message") or item.get("detail")
+                    http_code = item.get("http_code") or item.get("code")
+                    if message or http_code:
+                        errors.append((http_code, message))
+    if errors:
+        lines.append("- Last failure snapshot:")
+        for http_code, message in errors:
+            detail = " ".join(str(part) for part in (http_code, message) if part)
+            lines.append(f"  - {detail}")
+    lines.append("")
+
+    lines.append("### HTTP Roll-up")
+    http_stats = extras.get("http") if isinstance(extras.get("http"), Mapping) else {}
+    lines.append(
+        "- Responses 2xx={two} 4xx={four} 5xx={five} retries={retries} timeouts={timeouts} last={last}".format(
+            two=_coerce_int(http_stats.get("count_2xx")),
+            four=_coerce_int(http_stats.get("count_4xx")),
+            five=_coerce_int(http_stats.get("count_5xx")),
+            retries=_coerce_int(http_stats.get("retries")),
+            timeouts=_coerce_int(http_stats.get("timeouts")),
+            last=http_stats.get("last_status", "n/a"),
+        )
+    )
+    artifacts = extras.get("artifacts") if isinstance(extras.get("artifacts"), Mapping) else {}
+    http_trace_summary = _summarize_http_trace(_safe_path(artifacts.get("http_trace")))
+    if http_trace_summary:
+        lines.append(
+            "- Trace latencies: p50={p50}ms p95={p95}ms max={max}ms (n={count})".format(
+                p50=int(http_trace_summary.get("latency_p50_ms") or 0),
+                p95=int(http_trace_summary.get("latency_p95_ms") or 0),
+                max=int(http_trace_summary.get("latency_max_ms") or 0),
+                count=http_trace_summary.get("count", 0),
+            )
+        )
+        if http_trace_summary.get("paths"):
+            lines.append("- Top endpoints:")
+            for endpoint, count in http_trace_summary["paths"]:
+                lines.append(f"  - {endpoint}: {count} hits")
+    else:
+        lines.append("- HTTP trace not available.")
+    lines.append("")
+
+    lines.append("### Normalization Snapshot")
+    normalize = extras.get("normalize") if isinstance(extras.get("normalize"), Mapping) else {}
+    if normalize:
+        lines.append(
+            "- Rows fetched={fetched} normalized={normalized} written={written}".format(
+                fetched=_coerce_int(normalize.get("rows_fetched")),
+                normalized=_coerce_int(normalize.get("rows_normalized")),
+                written=_coerce_int(normalize.get("rows_written")),
+            )
+        )
+        drop_reasons = normalize.get("drop_reasons") if isinstance(normalize.get("drop_reasons"), Mapping) else {}
+        if drop_reasons:
+            lines.append("- Drop reasons:")
+            for reason_name, count in sorted(drop_reasons.items(), key=lambda item: (-_coerce_int(item[1]), item[0])):
+                lines.append(f"  - {reason_name}: {_coerce_int(count)}")
+    else:
+        lines.append("- No normalization metrics recorded.")
+    rescue = extras.get("rescue_probe") if isinstance(extras.get("rescue_probe"), Mapping) else {}
+    attempts = rescue.get("tried") if isinstance(rescue, Mapping) else None
+    if isinstance(attempts, Sequence) and attempts:
+        lines.append("- Rescue probes:")
+        for attempt in attempts:
+            if not isinstance(attempt, Mapping):
+                continue
+            country = attempt.get("country", "unknown")
+            window_text = attempt.get("window", "unknown")
+            rows = attempt.get("rows", "n/a")
+            error_msg = attempt.get("error")
+            detail = f"  - {country} window={window_text} rows={rows}"
+            if error_msg:
+                detail += f" error={error_msg}"
+            lines.append(detail)
+    lines.append("")
+
+    lines.append("### Sample rows")
+    sample_rows = _safe_read_csv_rows(_safe_path(artifacts.get("samples")))
+    if sample_rows:
+        headers = list(sample_rows[0].keys()) if sample_rows else []
+        table_rows = [[row.get(header, "") for header in headers] for row in sample_rows]
+        lines.extend(_format_table(headers, table_rows))
+    else:
+        lines.append("_No sample rows captured._")
+    lines.append("")
+
+    lines.append("### Actionable next steps")
+    actions: List[str] = []
+    if _coerce_int(http_stats.get("count_4xx")):
+        actions.append("- Investigate HTTP 4xx responses (possible auth/config issues).")
+    if _coerce_int(normalize.get("rows_written")) == 0:
+        actions.append("- Review normalization outputs; zero rows written.")
+    if not sample_rows:
+        actions.append("- Capture sample rows for manual validation.")
+    if not actions:
+        actions.append("- No immediate blockers detected; monitor next run.")
+    lines.extend(actions)
+    lines.append("")
+
+    return lines
+
+
+def _render_dtm_deep_dive(*args: Any, **kwargs: Any) -> List[str]:
+    """Backwards-compatible shim for legacy imports in tests."""
+
+    return render_dtm_deep_dive(*args, **kwargs)
 
 
 def _render_export_snapshot(staging_snapshot: Mapping[str, Any]) -> List[str]:
