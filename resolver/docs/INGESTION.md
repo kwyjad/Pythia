@@ -1,5 +1,12 @@
 # Ingestion playbook
 
+## Connector configuration paths
+
+Connector YAMLs now have a single home under `resolver/ingestion/config/`.  A short guide covering the search order,
+fallback behaviour, and how to clean up legacy duplicates lives in
+[`ingestion/config_paths.md`](ingestion/config_paths.md).  Refer to it when adding a new connector or migrating an
+existing configuration.
+
 ## DTM connector troubleshooting
 
 ### Missing `id_or_path`

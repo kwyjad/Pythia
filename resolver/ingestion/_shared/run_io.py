@@ -6,7 +6,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Dict, Mapping, Sequence, Union
 
 
 log = logging.getLogger(__name__)
@@ -60,6 +60,68 @@ def append_jsonl(path: PathLike, obj: Any, *, encoding: str = "utf-8") -> Path:
         fh.write(line + "\n")
     log.debug("append_jsonl: %s (len=%d)", p, len(line))
     return p
+
+
+def attach_config_source(
+    diagnostics: Mapping[str, Any] | None, connector_name: str
+) -> Dict[str, Any]:
+    """Return ``diagnostics`` enriched with config source details."""
+
+    payload: Dict[str, Any] = dict(diagnostics or {})
+    try:  # Import lazily to avoid circular dependencies during startup
+        from resolver.ingestion._shared.config_loader import get_config_details
+    except Exception:  # pragma: no cover - defensive import guard
+        return payload
+
+    details = get_config_details(connector_name)
+    if not details:
+        return payload
+
+    payload["config_source"] = details.source
+    payload["config_path"] = details.path.as_posix()
+
+    config_block = payload.get("config")
+    if isinstance(config_block, Mapping):
+        config_payload = dict(config_block)
+    else:
+        config_payload = {}
+    config_payload.setdefault("config_source_label", details.source)
+    config_payload.setdefault("config_path_used", details.path.as_posix())
+    config_payload.setdefault("ingestion_config_path", details.ingestion_path.as_posix())
+    config_payload.setdefault("legacy_config_path", details.fallback_path.as_posix())
+    if details.warnings:
+        existing = config_payload.get("config_warnings")
+        warnings: list[str] = []
+        if isinstance(existing, Sequence) and not isinstance(existing, (str, bytes)):
+            warnings.extend(str(item) for item in existing if str(item))
+        warnings.extend(str(item) for item in details.warnings if str(item))
+        if warnings:
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for entry in warnings:
+                if entry not in seen:
+                    deduped.append(entry)
+                    seen.add(entry)
+            config_payload["config_warnings"] = deduped
+    payload["config"] = config_payload
+
+    existing_warnings = payload.get("warnings")
+    combined: list[str] = []
+    if isinstance(existing_warnings, Sequence) and not isinstance(
+        existing_warnings, (str, bytes)
+    ):
+        combined.extend(str(item) for item in existing_warnings if str(item))
+    combined.extend(str(item) for item in details.warnings if str(item))
+    if combined:
+        seen_messages: set[str] = set()
+        deduped_messages: list[str] = []
+        for message in combined:
+            if message not in seen_messages:
+                deduped_messages.append(message)
+                seen_messages.add(message)
+        payload["warnings"] = deduped_messages
+
+    return payload
 
 
 def count_csv_rows(csv_path: Path) -> int:

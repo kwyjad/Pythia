@@ -27,6 +27,9 @@ See `resolver/docs/CONFIGS.md` for overlay guidance and run
 `pytest -k export_config_yaml_valid` after editing
 `resolver/tools/export_config.yml`.
 
+Connector-specific configuration locations and the shared loader behaviour are documented in
+`resolver/docs/ingestion/config_paths.md`.
+
 ### (Optional) Run precedence selection locally
 Use the config-driven precedence scaffold to pick one monthly value per shock/country for audit and exploration.
 
