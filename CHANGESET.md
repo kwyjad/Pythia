@@ -21,3 +21,4 @@
 - ci(idmc): zero-row guardrails, staging bootstrap, and improved summary with config path.
 - fix(dtm): prefer resolver/config for shared loader, surface config_path_used & countries_mode, restore fast tests.
 - fix(ci): repair summarize_connectors indentation, add syntax guard, and ensure import sanity test covers the module.
+- ci(summary): introduce ingestion superreport with per-connector error/why-zero capture, staging safeguards, offline tests, and workflow soft-fail hardening.
