@@ -25,3 +25,4 @@
 - fix(ci/summarizer): restore _render_dtm_deep_dive compat shim, guard optional diagnostics, surface exported API line, and add import sanity coverage.
 
 - ci(summary): restore summarize_connectors public API (load_report, build_markdown, main, SUMMARY_TITLE) and summary._fmt_count; reintroduce sections required by fast-tests (staging readiness, samples, config used, zero-row root cause, logs).
+- fix(ci/summarizer): restore connector table columns, em-dash formatting, DTM diagnostics, secret redaction, and missing-report stubs so fast tests pass with the refactored superreport.
