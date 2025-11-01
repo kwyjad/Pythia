@@ -45,6 +45,7 @@ from tenacity import (
 )
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion._shared.run_io import count_csv_rows, write_json
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
@@ -786,6 +787,11 @@ def _get_dtm_key_and_header(*, warn_on_missing: bool = True) -> Tuple[str, Optio
         LOG.debug("dtm: API key sourced from legacy primary/secondary; header=%s", header_name)
         return header_name, legacy
 
+    helper_key = _clean(get_dtm_api_key())
+    if helper_key:
+        LOG.debug("dtm: API key sourced from dtm_auth helper; header=%s", header_name)
+        return header_name, helper_key
+
     if warn_on_missing:
         LOG.warning("dtm: No DTM API key found in environment.")
     return header_name, None
@@ -831,25 +837,29 @@ def _call_admin_level(client: Any, level: str, **kwargs: Any) -> Tuple[Any, str]
     )
 
     for name in candidates:
-        fn = getattr(client, name, None)
-        if not callable(fn):
-            continue
-        call_kwargs = filtered_kwargs
-        code = getattr(fn, "__code__", None)
-        if code is not None and getattr(code, "co_varnames", None):
-            allowed = set(code.co_varnames)
-            call_kwargs = {k: v for k, v in filtered_kwargs.items() if k in allowed}
-            if not call_kwargs and filtered_kwargs:
-                call_kwargs = filtered_kwargs
-        try:
-            result = fn(**call_kwargs)
-        except TypeError:
-            try:
-                result = fn(**filtered_kwargs)
-            except TypeError:
+        potential_targets = [client]
+        inner = getattr(client, "client", None)
+        if inner is not None and inner is not client:
+            potential_targets.append(inner)
+        for target_obj in potential_targets:
+            fn = getattr(target_obj, name, None)
+            if not callable(fn):
                 continue
-        setattr(client, "_dtm_last_method", name)
-        return result, name
+            payloads = [filtered_kwargs]
+            if filtered_kwargs is not kwargs:
+                payloads.append(kwargs)
+            for payload in payloads:
+                try:
+                    result = fn(**payload)
+                except TypeError:
+                    continue
+                setattr(target_obj, "_dtm_last_method", name)
+                if target_obj is not client:
+                    try:
+                        setattr(client, "_dtm_last_method", name)
+                    except Exception:
+                        pass
+                return result, name
     raise AttributeError(f"No callable for admin level '{level}' found on client")
 
 
@@ -3038,10 +3048,7 @@ class DTMApiClient:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return str(val).strip().lower() in {"1", "true", "y", "yes", "on"}
+    return getenv_bool(name, default=default)
 
 
 def bool_from_env_or_flag(name: str, flag_value: bool, *, default: bool = False) -> bool:
@@ -5243,8 +5250,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     no_date_filter = args.no_date_filter or _env_bool("DTM_NO_DATE_FILTER", False)
     offline_smoke = args.offline_smoke or _env_bool("DTM_OFFLINE_SMOKE", False)
-    skip_env_requested = _env_bool("RESOLVER_SKIP_DTM", False)
-    force_run_override = _env_bool("DTM_FORCE_RUN", False)
+    skip_env_requested = getenv_bool("RESOLVER_SKIP_DTM", default=False)
+    force_run_override = getenv_bool("DTM_FORCE_RUN", default=False)
     skip_requested = skip_env_requested and not force_run_override
     skip_flags = {
         "RESOLVER_SKIP_DTM": skip_env_requested,
@@ -6106,6 +6113,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     chosen_value_columns = [
         {"column": column, "count": count}
         for column, count in sorted(value_usage.items(), key=lambda item: (-item[1], item[0]))
+        if count > 0
     ]
     summary_extras.pop("drop_reasons_counter", None)
     summary_extras.pop("value_column_usage", None)

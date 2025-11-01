@@ -629,13 +629,17 @@ tests rely on:
   processed through the normalization pipeline.
 - `drop_reasons` — a dictionary containing counts for every standard key (present even when `0`):
   `no_iso3`, `no_value_col`, `bad_iso`, `unknown_country`, `missing_value`, `non_positive_value`,
-  `non_integer_value`, `missing_as_of`, `future_as_of`, `invalid_semantics`, and `other`.
+  `non_integer_value`, `missing_as_of`, `future_as_of`, `invalid_semantics`, `date_parse_failed`,
+  `date_out_of_window`, `no_country_match`, and `other`.
 - `chosen_value_columns` — ordered list of objects with `column` and `count` describing how many
   pre-normalization rows matched each candidate value column (for example the preferred
   `TotalIDPs`).
 - `config` — a sub-block exposing the effective configuration: `countries_mode` (for example
   `explicit_config`, `discovered`, or `static_iso3`) and the list of `admin_levels` attempted for
   the run.
+- `skip_flags` — when present, contains boolean evaluations of the controlling environment
+  variables. Flags use strict string parsing so values such as `"0"`, `"false"`, or `"no"` appear as
+  `false`, while `"1"`, `"true"`, or `"yes"` map to `true`.
 
 When new drop reasons are added, they should be appended to the canonical list while keeping the
 existing keys in place to avoid breaking analysis notebooks and the regression tests in

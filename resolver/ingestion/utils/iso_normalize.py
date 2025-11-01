@@ -180,7 +180,7 @@ def resolve_iso3(
         iso_candidate = to_iso3(value, aliases)
         if iso_candidate:
             iso_upper = iso_candidate.strip().upper()
-            return iso_upper, "bad_iso" if bad_iso_detected else None
+            return iso_upper, None
 
     if bad_iso_detected:
         return None, "bad_iso"
