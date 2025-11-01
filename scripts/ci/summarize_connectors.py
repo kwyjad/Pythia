@@ -1731,32 +1731,31 @@ def build_markdown(
                     lines.append("  - Matched: yes")
             else:
                 lines.append("  - Matched: no")
-                    reasons = record_map.get("reasons")
-                    reason_parts: List[str] = []
-                    if isinstance(reasons, Mapping):
-                        if reasons.get("regex_miss"):
-                            reason_parts.append("regex_miss")
-                        missing_cols = reasons.get("missing_columns") or []
-                        if missing_cols:
-                            cols_joined = ", ".join(str(col) for col in missing_cols)
-                            reason_parts.append(f"missing_columns=[{cols_joined}]")
-                        missing_any = reasons.get("missing_required_any") or []
-                        if missing_any:
-                            any_joined = ", ".join(str(group) for group in missing_any)
-                            reason_parts.append(f"missing_required_any=[{any_joined}]")
-                        extra_keys = [
-                            key
-                            for key in reasons
-                            if key
-                            not in {"regex_miss", "missing_columns", "missing_required_any"}
-                        ]
-                        for key in extra_keys:
-                            value = reasons.get(key)
-                            reason_parts.append(f"{key}={value}")
-                    if reason_parts:
-                        lines.append(f"  - Reason: {', '.join(reason_parts)}")
-                    else:
-                        lines.append("  - Reason: unknown")
+                reasons = record_map.get("reasons")
+                reason_parts: List[str] = []
+                if isinstance(reasons, Mapping):
+                    if reasons.get("regex_miss"):
+                        reason_parts.append("regex_miss")
+                    missing_cols = reasons.get("missing_columns") or []
+                    if missing_cols:
+                        cols_joined = ", ".join(str(col) for col in missing_cols)
+                        reason_parts.append(f"missing_columns=[{cols_joined}]")
+                    missing_any = reasons.get("missing_required_any") or []
+                    if missing_any:
+                        any_joined = ", ".join(str(group) for group in missing_any)
+                        reason_parts.append(f"missing_required_any=[{any_joined}]")
+                    extra_keys = [
+                        key
+                        for key in reasons
+                        if key not in {"regex_miss", "missing_columns", "missing_required_any"}
+                    ]
+                    for key in extra_keys:
+                        value = reasons.get(key)
+                        reason_parts.append(f"{key}={value}")
+                if reason_parts:
+                    lines.append(f"  - Reason: {', '.join(reason_parts)}")
+                else:
+                    lines.append("  - Reason: unknown")
                 dedupe_info = record_map.get("dedupe")
                 if isinstance(dedupe_info, Mapping):
                     keys = dedupe_info.get("keys") or []
@@ -1925,6 +1924,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.github_step_summary:
         append_to_summary(markdown)
     return 0 if load_error is None else 1
+
+
+def render_summary_md(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    dedupe_notes: Mapping[str, int] | None = None,
+    reachability: Mapping[str, Any] | None = None,
+    export_summary: Mapping[str, Any] | None = None,
+    mapping_debug: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    """Compatibility alias for callers expecting ``render_summary_md``."""
+
+    return build_markdown(
+        entries,
+        dedupe_notes=dedupe_notes,
+        reachability=reachability,
+        export_summary=export_summary,
+        mapping_debug=mapping_debug,
+    )
 
 
 if __name__ == "__main__":
