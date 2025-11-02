@@ -18,6 +18,8 @@ jobs:
       duckdb_label: default
       RESOLVER_EXPORT_ENABLE_FLOW: "0"
       RESOLVER_SKIP_DTM: "0"
+      PIP_CONSTRAINT: constraints-ci.txt
+      RESOLVER_DUCKDB_DISABLE_MERGE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,8 +48,8 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -c constraints-ci.txt -e '.[db,test]'
-          if [ -f resolver/requirements.txt ]; then pip install -c constraints-ci.txt -r resolver/requirements.txt; fi
+          pip install -c constraints-ci.txt -e '.[db,ingestion]'
+          pip install -c constraints-ci.txt pytest
 
       - name: Ensure CI helpers are executable
         run: |

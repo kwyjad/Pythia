@@ -19,6 +19,7 @@ jobs:
       RESOLVER_CACHE: "0"
       RESOLVER_DIAG: "1"
       RESOLVER_EXPORT_ENABLE_FLOW: "1"
+      PIP_CONSTRAINT: constraints-ci.txt
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,8 +38,8 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[db, test]" || python -m pip install -e .
-          python -m pip install duckdb pytest || true
+          python -m pip install -c constraints-ci.txt -e ".[db,ingestion]"
+          python -m pip install -c constraints-ci.txt duckdb pytest || true
 
       - name: Verify DuckDB import
         run: |
