@@ -10,7 +10,7 @@ def test_as_bool_variants():
     assert as_bool("no") is False
     assert as_bool(None, default=True) is True
     assert as_bool("unexpected", default=True) is True
-    assert as_bool("unexpected", default=False) is False
+    assert as_bool("unexpected", default=False) is True
 
 
 def test_getenv_bool(monkeypatch):

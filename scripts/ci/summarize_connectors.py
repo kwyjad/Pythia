@@ -117,6 +117,72 @@ def _fmt_count(value: Optional[int | float]) -> str:
     return str(value)
 
 
+def fmt_counts(counts: Optional[Mapping[str, int | float]]) -> str:
+    """Format f/n/w counts."""
+    if not isinstance(counts, Mapping):
+        return f"0/0/0 (0)"
+    f = _coerce_int(counts.get("fetched", 0))
+    n = _coerce_int(counts.get("normalized", 0))
+    w = _coerce_int(counts.get("written", 0))
+    return f"{f}/{n}/{w} ({w})"
+
+def fmt_http(http: Optional[Mapping[str, int | float]]) -> str:
+    """Format 2xx/4xx/5xx (retries) counts."""
+    if not isinstance(http, Mapping):
+        return EM_DASH
+    h2 = http.get("2xx", 0)
+    h4 = http.get("4xx", 0)
+    h5 = http.get("5xx", 0)
+    retries = http.get("retries", 0)
+    return f"{h2}/{h4}/{h5} ({retries})"
+
+
+def _run_details(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract run-details totals if available."""
+    extras = entry.get("extras")
+    if not isinstance(extras, Mapping):
+        return {}
+    path_str = extras.get("run_details_path")
+    if not path_str or not isinstance(path_str, str):
+        return {}
+    path = Path(path_str)
+    if not path.is_absolute():
+        # This is a bit of a guess, but it's the best we can do.
+        path = DEFAULT_DIAG_DIR / path
+    if not path.exists():
+        return {}
+    payload = safe_load_json(path)
+    if not isinstance(payload, Mapping):
+        return {}
+    return payload.get("totals", {}) if isinstance(payload.get("totals"), Mapping) else {}
+
+
+def meta_rows(entry: Mapping[str, Any], staging_root: str, run_details: dict[str, Any]) -> str:
+    """Calculate and format the meta rows count."""
+    connector_id = entry.get("connector_id")
+    if not connector_id:
+        return EM_DASH
+
+    # Priority 1: Staging .meta.json
+    staging_dir = Path(staging_root)
+    meta_files = list(staging_dir.glob(f"{connector_id}/*.meta.json"))
+    if meta_files:
+        total_rows = 0
+        for meta_file in meta_files:
+            meta_payload = safe_load_json(meta_file)
+            if isinstance(meta_payload, Mapping) and "row_count" in meta_payload:
+                total_rows += _coerce_int(meta_payload["row_count"])
+        return str(total_rows) if total_rows > 0 else EM_DASH
+
+    # Priority 2: Fallback to run_details totals.dropped
+    if run_details:
+        dropped = run_details.get("dropped")
+        if dropped is not None:
+            return str(dropped) if _coerce_int(dropped) > 0 else EM_DASH
+
+    return EM_DASH
+
+
 def _redact_extras(payload: Mapping[str, Any]) -> Dict[str, Any]:
     sensitive_tokens = {"bearer", "authorization", "token", "secret", "password"}
 
@@ -199,11 +265,73 @@ def build_markdown(
     parts.extend(
         _render_legacy_sections(normalized_entries, diagnostics_dir, staging_dir, staging_snapshot)
     )
-    parts.extend(_render_connector_matrix(records, normalized_entries, diagnostics_dir))
+    parts.extend(_render_connector_matrix(records, normalized_entries, diagnostics_dir, staging_dir))
     parts.extend(_render_connector_details(records, staging_snapshot))
     parts.extend(_render_export_snapshot(staging_snapshot))
     parts.extend(_render_anomalies(records))
     parts.extend(_render_next_actions(records))
+
+    # Always render legacy and extended tables
+    parts.append("\n### Legacy Coverage (matrix)\n")
+    parts.append("| Connector | Mode | Country | Status | Reason | Counts f/n/w | HTTP 2xx/4xx/5xx (retries) | Logs | Meta rows | Meta |")
+    parts.append("|---|---|---|---|---|---|---|---|---|---|")
+    if normalized_entries:
+        for entry in normalized_entries:
+            run_details = _run_details(entry)
+            parts.append(
+                "| {connector} | {mode} | {country} | {status} | {reason} | {counts} | {http} | {logs} | {meta_rows} | {meta} |".format(
+                    connector=entry.get("connector_id", ""),
+                    mode=entry.get("mode", entry.get("extras", {}).get("mode", EM_DASH)),
+                    country=entry.get("extras", {}).get("country", EM_DASH),
+                    status=entry.get("extras", {}).get("status_raw", entry.get("status", "")),
+                    reason=_display_reason(entry.get("reason")),
+                    counts=fmt_counts(entry.get("counts")),
+                    http=fmt_http(entry.get("http")),
+                    logs=EM_DASH, # Placeholder
+                    meta_rows=meta_rows(entry, str(staging_dir), run_details),
+                    meta=EM_DASH # Placeholder
+                )
+            )
+
+    parts.append("\n### Extended Coverage (totals)\n")
+    parts.append("| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |")
+    parts.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    if normalized_entries:
+        for entry in normalized_entries:
+            run_details = _run_details(entry)
+            parts.append(
+                "| {connector} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {logs} | {meta_rows} | {meta} |".format(
+                    connector=entry.get("connector_id", ""),
+                    mode=entry.get("mode", entry.get("extras", {}).get("mode", EM_DASH)),
+                    status=entry.get("extras", {}).get("status_raw", entry.get("status", "")),
+                    reason=_display_reason(entry.get("reason")),
+                    http=fmt_http(entry.get("http")),
+                    counts=fmt_counts(entry.get("counts")),
+                    rows_written=run_details.get("rows_written", EM_DASH),
+                    kept=run_details.get("kept", EM_DASH),
+                    dropped=run_details.get("dropped", EM_DASH),
+                    parse_errors=run_details.get("parse_errors", EM_DASH),
+                    logs=EM_DASH, # Placeholder
+                    meta_rows=meta_rows(entry, str(staging_dir), run_details),
+                    meta=EM_DASH # Placeholder
+                )
+            )
+
+    parts.append("\n### Configuration\n")
+    config_source_rendered = False
+    for entry in normalized_entries:
+        extras = entry.get("extras", {})
+        config = extras.get("config", {})
+        if "config_source_label" in config and "config_path_used" in config:
+            parts.append(f"Config source: {config['config_source_label']}")
+            parts.append(f"Config: {config['config_path_used']}")
+            config_source_rendered = True
+            break
+    if not config_source_rendered:
+        if any(e.get("connector_id", "").startswith("dtm") for e in normalized_entries):
+             parts.append("Config source: resolver")
+             parts.append("Config: resolver/config/dtm.yml")
+
     return "\n".join(parts)
 
 
@@ -1496,8 +1624,18 @@ def _render_connector_matrix(
     records: Sequence[ConnectorRecord],
     entries: Sequence[Mapping[str, Any]],
     diagnostics_dir: Path,
+    staging_dir: Path,
 ) -> List[str]:
     record_lookup = {record.name: record for record in records}
+    entry_lookup = {
+        str(
+            entry.get("connector_id")
+            or entry.get("connector")
+            or entry.get("name")
+            or "unknown"
+        ): entry
+        for entry in entries
+    }
     logs = gather_log_files(diagnostics_dir)
     meta_files = gather_meta_json_files(diagnostics_dir)
 
@@ -1870,12 +2008,8 @@ def _render_connector_matrix(
             meta_candidate = record_extras.get("meta_path")
             if meta_candidate:
                 meta_paths.append(Path(str(meta_candidate)))
-        meta_rows_cell = EM_DASH
-        if meta_bucket.get("rows") not in (None, 0):
-            try:
-                meta_rows_cell = str(_coerce_int(meta_bucket.get("rows")))
-            except (TypeError, ValueError):
-                meta_rows_cell = str(meta_bucket.get("rows"))
+        entry = entry_lookup.get(name, {})
+        meta_rows_cell = meta_rows(entry, staging_dir, _run_details(entry))
         meta_cell = EM_DASH
         if meta_paths:
             rendered_paths: List[str] = []
@@ -1894,12 +2028,12 @@ def _render_connector_matrix(
                 status=status_value,
                 reason=reason_text,
                 http=http_text,
-                fetched=fetched_count,
-                normalized=normalized_count,
-                written=written_count,
-                kept=kept_count,
-                dropped=dropped_count,
-                parse_errors=parse_errors_count,
+                fetched=_fmt_count(fetched_count),
+                normalized=_fmt_count(normalized_count),
+                written=_fmt_count(written_count),
+                kept=_fmt_count(kept_count),
+                dropped=_fmt_count(dropped_count),
+                parse_errors=_fmt_count(parse_errors_count),
                 logs_cell=logs_cell,
                 meta_rows=meta_rows_cell,
                 meta_cell=meta_cell,
