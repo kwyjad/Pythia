@@ -51,7 +51,6 @@ def test_summary_uses_dtm_run_totals(tmp_path: Path) -> None:
     dtm_rows = [line for line in markdown.splitlines() if line.startswith("| dtm_client |")]
     assert len(dtm_rows) == 1
     cells = [cell.strip() for cell in dtm_rows[0].strip("| ").split(" | ")]
-    assert cells[6] == "2"
     assert cells[7] == "2"
     assert cells[8] == "1"
     assert cells[9] == "1"

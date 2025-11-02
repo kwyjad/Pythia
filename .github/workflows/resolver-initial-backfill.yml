@@ -89,9 +89,6 @@ jobs:
       EMPTY_POLICY: ${{ inputs.empty_policy }}
       NO_DATE_FILTER: ${{ inputs.no_date_filter }}
       DTM_CONFIG_PATH: resolver/config/dtm.yml
-      RESOLVER_CONNECTORS_SOFT_FAIL: "1"
-      SUMMARY_VERBOSE: "1"
-      SUMMARY_LOG_TAIL_KB: "50"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -215,7 +212,7 @@ jobs:
           CMD_ARGS+=(--extra-args "idmc=--chunk-by-month")
           CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
           CONNECTOR_EXIT=0
-          python -m scripts.ci.run_connectors --soft-fail "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
+          python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
           exit ${CONNECTOR_EXIT}
 
       - name: Ensure diagnostics dirs exist (post-run)
@@ -242,7 +239,8 @@ jobs:
           fi
           python -m scripts.ci.summarize_connectors \
             --report diagnostics/ingestion/connectors_report.jsonl \
-            --out diagnostics/ingestion/summary.md
+            --out diagnostics/ingestion/summary.md \
+            --github-step-summary
 
       - name: Prime ingestion artifact placeholders
         if: always()

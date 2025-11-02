@@ -1,30 +1,28 @@
-"""Validate syntax for critical CI modules via ``py_compile``.
-
-This script is intentionally lightweight and should run before pytest in CI.
-"""
+#!/usr/bin/env python3
+"""Compile critical CI modules to catch syntax errors early."""
 from __future__ import annotations
 
 import py_compile
 import sys
 from pathlib import Path
 
-CRITICAL_MODULES = [
-    Path("scripts/ci/run_connectors.py"),
+FILES = [
     Path("scripts/ci/summarize_connectors.py"),
-    Path("resolver/ingestion/_shared/error_report.py"),
+    Path("scripts/ci/run_connectors.py"),
 ]
 
 
 def main() -> int:
-    failures = []
-    for module in CRITICAL_MODULES:
+    ok = True
+    for path in FILES:
         try:
-            py_compile.compile(str(module), doraise=True)
-            print(f"Syntax OK: {module}")
-        except py_compile.PyCompileError as exc:  # pragma: no cover - failure path
-            print(f"Syntax error in {module}: {exc}")
-            failures.append(module)
-    return 1 if failures else 0
+            py_compile.compile(str(path), doraise=True)
+        except Exception as exc:  # pragma: no cover - just prints errors
+            ok = False
+            print(f"[syntax-error] {path}: {exc}", file=sys.stderr)
+        else:
+            print(f"[syntax-ok] {path}")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

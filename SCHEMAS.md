@@ -21,9 +21,6 @@
 - [Ingestion Diagnostics Schema](#ingestion-diagnostics-schema)
 - [IDMC provenance manifest](#idmc-provenance-manifest)
 - [Export configuration (`resolver/tools/export_config.yml`)](#export-configuration-resolvertoolsexport_configyml)
-- [summary.md Superreport](#summarymd-superreport)
-- [diagnostics error.json](#diagnostics-errorjson)
-- [diagnostics why_zero.json](#diagnostics-why_zerojson)
 
 ## staging.common
 
@@ -647,67 +644,3 @@ tests rely on:
 When new drop reasons are added, they should be appended to the canonical list while keeping the
 existing keys in place to avoid breaking analysis notebooks and the regression tests in
 `resolver/tests/test_iso_normalize_and_drop_reasons.py`.
-
-## summary.md Superreport
-
-The CI summariser emits `diagnostics/ingestion/summary.md` on every run. The
-Markdown document is organised into these ordered sections:
-
-1. **Run Overview** — git snapshot, runtime metadata, environment flags,
-   secrets presence (boolean only), window selection, and a resource snapshot.
-2. **Connector Diagnostics Matrix** — one row per connector including status,
-   row counts, HTTP tallies, reachability details, configuration provenance,
-   date windows, export booleans, and flags for captured `why_zero`/`error`
-   payloads.
-3. **Connector Deep Dives** — `<details>` blocks per connector summarising
-   configuration inputs, reachability probes, HTTP roll-ups, drop histograms,
-   staging outputs, and why-zero/error excerpts.
-4. **Export & Snapshot** — inventory of staging artefacts with row counts and
-   flow/stock totals.
-5. **Anomaly & Trend Checks** — failure budget counts plus placeholders for
-   spike/coverage analysis when baselines are available.
-6. **Next Actions** — auto-generated follow-ups derived from captured
-   diagnostics.
-
-All sections render even when data is missing; empty values are displayed as
-`—`. Table column names are stable across releases.
-
-## diagnostics error.json
-
-Connector failures generate `diagnostics/ingestion/<connector>/error.json` via
-`resolver.ingestion._shared.error_report`. The payload is a JSON object with the
-following stable keys:
-
-| Field | Type | Description |
-| --- | --- | --- |
-| exit_code | integer \| null | Process exit code when captured. |
-| message | string \| null | High-level failure summary. |
-| stderr_tail | string \| null | Tail of captured stderr (clipped to ~50 KB). |
-| log_path | string \| null | Path to the connector log file, if provided. |
-| log_tail | string \| null | Tail of the log file when available. |
-| hints | array | Optional troubleshooting hints (strings). |
-| extras | object | Optional metadata (argv/env flags, etc.). |
-
-## diagnostics why_zero.json
-
-Connectors that finish without writing rows emit
-`diagnostics/ingestion/<connector>/why_zero.json`. The helper
-`resolver.ingestion.idmc.why_zero.build_payload` produces a JSON object with the
-following keys (stable unless noted):
-
-| Field | Type | Description |
-| --- | --- | --- |
-| token_present | boolean | Whether the required credential was present. |
-| countries_count | integer | Number of selectors/countries attempted. |
-| countries_sample | array | Up to five selectors for quick inspection. |
-| window | object | `{start: str\|null, end: str\|null}`. |
-| filters | object | Drop-reason histogram (for example `date_out_of_window`). |
-| network_attempted | boolean \| null | Whether HTTP requests were attempted. |
-| requests_attempted | integer \| null | Request count (best-effort). |
-| config_source | string \| null | Configuration source label. |
-| config_path_used | string \| null | Absolute or relative config path. |
-| loader_warnings | array | Loader/config warnings (strings). |
-| extras | object | Optional connector-specific context (best-effort). |
-
-Fields marked “best-effort” may be omitted when unavailable; the summariser
-renders such values as `—`.

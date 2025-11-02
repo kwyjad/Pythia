@@ -1,1056 +1,1220 @@
-"""Render ingestion connector diagnostics into a comprehensive summary."""
+"""Render ingestion connector diagnostics into Markdown summaries."""
+
 from __future__ import annotations
 
 import argparse
 import csv
-import datetime as _dt
 import json
-import logging
+import math
 import os
-import platform
-import shutil
-import subprocess
-import sys
-from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from collections import Counter
 from pathlib import Path
-from statistics import mean
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
-from scripts.ci._summarizer_utils import (
-    gather_log_files,
-    gather_meta_json_files,
-    reason_histogram,
-    safe_load_json,
-    safe_load_jsonl,
-    status_histogram,
-    top_value_counts_from_csv,
+import certifi
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REASON_HISTOGRAM_LIMIT = 5
+
+DEFAULT_HTTP_KEYS = ("2xx", "4xx", "5xx", "retries", "rate_limit_remaining", "last_status")
+SUMMARY_TITLE = "# Connector Diagnostics"
+MISSING_REPORT_SUMMARY = (
+    "# Ingestion Diagnostics\n\n"
+    "**No connectors report was produced.**  \n"
+    "This usually means the ingestion step failed early (e.g., setup or backfill window).  \n"
+    "Check earlier steps in the job log.\n"
 )
 
-__all__ = [
-    "load_report",
-    "build_markdown",
-    "render_summary_md",
-    "render_dtm_deep_dive",
-    "_render_dtm_deep_dive",
-    "main",
-    "SUMMARY_TITLE",
-]
-
-SUMMARY_PATH = Path("summary.md")
-DEFAULT_REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
-DEFAULT_DIAG_DIR = Path("diagnostics") / "ingestion"
-DEFAULT_STAGING_DIR = Path("resolver") / "staging"
-SUMMARY_TITLE = "# Ingestion Superreport"
-LEGACY_TITLE = "# Connector Diagnostics"
-EM_DASH = "—"
-
-logger = logging.getLogger(__name__)
-
-CLASSIC_TABLE_HEADER = (
-    "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
-    "Fetched | Normalized | Written | Kept | Dropped | Parse errors | "
-    "Logs | Meta rows | Meta |"
-)
-CLASSIC_TABLE_DIVIDER = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
+EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"]
+IDMC_WHY_ZERO_PATH = Path("diagnostics/ingestion/idmc/why_zero.json")
 
 
-_LAST_STUB_REASON_ALIAS: str | None = None
-
-
-def load_report(path: os.PathLike[str] | str) -> List[Dict[str, Any]]:
-    """Load a JSONL report, tolerating absent or malformed entries."""
-
-    global _LAST_STUB_REASON_ALIAS
-
-    target = Path(path)
-    raw_entries: List[Any] = []
-    if target.exists():
-        raw_entries = safe_load_jsonl(target)
-
-    entries: List[Dict[str, Any]] = []
-    _LAST_STUB_REASON_ALIAS = None
-    for entry in raw_entries:
-        if not isinstance(entry, Mapping):
-            continue
-        normalized = dict(entry)
-        reason_value = normalized.get("reason")
-        connector_id = str(normalized.get("connector_id") or "")
-        if (
-            connector_id == "_summary"
-            or (
-                normalized.get("client") == "summarizer"
-                and normalized.get("mode") == "diagnostics"
-            )
-        ) and (reason_value in {"missing or empty report", "missing-report"}):
-            _LAST_STUB_REASON_ALIAS = "missing-report"
-            continue
-        extras = normalized.get("extras")
-        if isinstance(extras, Mapping):
-            normalized["extras"] = _redact_extras(extras)
-        _apply_run_details_override(normalized, base_dir=target.parent)
-        entries.append(normalized)
-    return entries
-
-
-def _display_reason(reason: Any) -> str:
-    if reason is None:
-        return "unknown"
-    text = str(reason).strip()
-    if not text:
-        return "unknown"
-    if text.lower() == "missing or empty report":
-        return "missing-report"
-    return text
-
-
-def _fmt_count(value: Optional[int | float]) -> str:
-    """Back-compat count formatter shared with the legacy summary helpers."""
-
-    if value is None:
-        return EM_DASH
+def _relativize_path(raw: Any) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
     try:
-        if float(value) == 0:
-            return EM_DASH
+        path = Path(raw)
+    except (TypeError, ValueError):
+        return raw
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
     except Exception:
-        return str(value)
-    return str(value)
+        try:
+            return path.resolve().as_posix()
+        except Exception:
+            return str(path)
 
 
-def fmt_counts(counts: Optional[Mapping[str, int | float]]) -> str:
-    """Format f/n/w counts."""
-    if not isinstance(counts, Mapping):
-        return f"0/0/0 (0)"
-    f = _coerce_int(counts.get("fetched", 0))
-    n = _coerce_int(counts.get("normalized", 0))
-    w = _coerce_int(counts.get("written", 0))
-    return f"{f}/{n}/{w} ({w})"
-
-def fmt_http(http: Optional[Mapping[str, int | float]]) -> str:
-    """Format 2xx/4xx/5xx (retries) counts."""
-    if not isinstance(http, Mapping):
-        return EM_DASH
-    h2 = http.get("2xx", 0)
-    h4 = http.get("4xx", 0)
-    h5 = http.get("5xx", 0)
-    retries = http.get("retries", 0)
-    return f"{h2}/{h4}/{h5} ({retries})"
+def _ensure_dict(data: Any) -> Dict[str, Any]:
+    return dict(data) if isinstance(data, Mapping) else {}
 
 
-def _run_details(entry: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract run-details totals if available."""
-    extras = entry.get("extras")
-    if not isinstance(extras, Mapping):
-        return {}
-    path_str = extras.get("run_details_path")
-    if not path_str or not isinstance(path_str, str):
-        return {}
-    path = Path(path_str)
-    if not path.is_absolute():
-        # This is a bit of a guess, but it's the best we can do.
-        path = DEFAULT_DIAG_DIR / path
-    if not path.exists():
-        return {}
-    payload = safe_load_json(path)
-    if not isinstance(payload, Mapping):
-        return {}
-    return payload.get("totals", {}) if isinstance(payload.get("totals"), Mapping) else {}
+def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, Mapping) else None
 
 
-def meta_rows(entry: Mapping[str, Any], staging_root: str, run_details: dict[str, Any]) -> str:
-    """Calculate and format the meta rows count."""
-    connector_id = entry.get("connector_id")
-    if not connector_id:
-        return EM_DASH
+def _candidate_run_paths(raw_entry: Mapping[str, Any], connector_id: str) -> List[Path]:
+    extras = _ensure_dict(raw_entry.get("extras"))
+    candidates: List[Path] = []
+    direct_path = extras.get("run_details_path") or extras.get("run_path")
+    if isinstance(direct_path, str) and direct_path.strip():
+        candidates.append(Path(direct_path.strip()))
 
-    # Priority 1: Staging .meta.json
-    staging_dir = Path(staging_root)
-    meta_files = list(staging_dir.glob(f"{connector_id}/*.meta.json"))
-    if meta_files:
-        total_rows = 0
-        for meta_file in meta_files:
-            meta_payload = safe_load_json(meta_file)
-            if isinstance(meta_payload, Mapping) and "row_count" in meta_payload:
-                total_rows += _coerce_int(meta_payload["row_count"])
-        return str(total_rows) if total_rows > 0 else EM_DASH
+    slug = connector_id.replace(" ", "_") if connector_id else ""
+    alt_slug = slug[:-7] if slug.endswith("_client") else slug
+    labels = [label for label in {slug, alt_slug} if label]
 
-    # Priority 2: Fallback to run_details totals.dropped
-    if run_details:
-        dropped = run_details.get("dropped")
-        if dropped is not None:
-            return str(dropped) if _coerce_int(dropped) > 0 else EM_DASH
+    diagnostics_dir = extras.get("diagnostics_dir")
+    if isinstance(diagnostics_dir, str) and diagnostics_dir.strip():
+        diag_base = Path(diagnostics_dir.strip())
+        for label in labels:
+            candidates.append(diag_base / f"{label}_run.json")
+        candidates.append(diag_base / "run.json")
 
-    return EM_DASH
+    for label in labels:
+        candidates.append(Path("diagnostics/ingestion") / label / f"{label}_run.json")
 
-
-def _redact_extras(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    sensitive_tokens = {"bearer", "authorization", "token", "secret", "password"}
-
-    def _redact(value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return {key: _redact(val) for key, val in value.items()}
-        if isinstance(value, list):
-            return [_redact(item) for item in value]
-        if isinstance(value, str):
-            lowered = value.lower()
-            if any(token in lowered for token in sensitive_tokens):
-                return "***"
-        return value
-
-    return {key: _redact(val) for key, val in payload.items()}
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate.as_posix()
+        if key not in seen:
+            deduped.append(candidate)
+            seen.add(key)
+    return deduped
 
 
-def _apply_run_details_override(entry: Dict[str, Any], *, base_dir: Path) -> None:
-    extras = entry.get("extras")
-    if not isinstance(extras, Mapping):
-        return
-    details_path_value = extras.get("run_details_path")
-    if not details_path_value:
-        return
-    details_path = _safe_path(details_path_value)
-    if not details_path:
-        return
-    if not details_path.is_absolute():
-        details_path = (base_dir / details_path).resolve()
-    details_payload = safe_load_json(details_path)
-    if not isinstance(details_payload, Mapping):
-        return
-
-    counts = entry.setdefault("counts", {})
-    extras_dict = dict(extras)
-    override_applied = False
-    if isinstance(counts, Mapping):
-        rows_section = details_payload.get("rows") or details_payload.get("counts")
-        if isinstance(rows_section, Mapping):
-            for key in ("fetched", "normalized", "written"):
-                if key in rows_section and rows_section.get(key) is not None:
-                    override_applied = True
-                    try:
-                        counts[key] = int(rows_section[key])
-                    except (TypeError, ValueError):
-                        counts[key] = rows_section[key]
-        entry["counts"] = dict(counts)
-
-    totals = details_payload.get("totals")
-    if isinstance(totals, Mapping) and totals.get("rows_written") is not None:
-        override_applied = True
-        extras_dict["rows_written"] = totals.get("rows_written")
-        extras_dict["run_totals"] = dict(totals)
-
-    outputs = details_payload.get("outputs")
-    if isinstance(outputs, Mapping):
-        meta_path = outputs.get("meta") or outputs.get("meta_path")
-        if meta_path and not extras_dict.get("meta_path"):
-            extras_dict["meta_path"] = str(meta_path)
-
-    if override_applied:
-        extras_dict["counts_override_source"] = "run.json"
-    entry["extras"] = extras_dict
+def _extract_run_counts(payload: Mapping[str, Any]) -> Dict[str, int]:
+    rows_block = _ensure_dict(payload.get("rows"))
+    totals_block = _ensure_dict(payload.get("totals"))
+    counts = {
+        "fetched": payload.get("rows_fetched"),
+        "normalized": payload.get("rows_normalized"),
+        "written": payload.get("rows_written"),
+    }
+    if counts["fetched"] in (None, ""):
+        counts["fetched"] = rows_block.get("fetched")
+    if counts["normalized"] in (None, ""):
+        counts["normalized"] = rows_block.get("normalized")
+    if counts["written"] in (None, ""):
+        counts["written"] = rows_block.get("written")
+    if counts["written"] in (None, ""):
+        counts["written"] = totals_block.get("rows_written")
+    return {key: _coerce_int(value) for key, value in counts.items()}
 
 
-def build_markdown(
-    entries: Sequence[Mapping[str, Any]] | None,
-    diagnostics_root: os.PathLike[str] | str = DEFAULT_DIAG_DIR,
-    staging_root: os.PathLike[str] | str = DEFAULT_STAGING_DIR,
-) -> str:
-    """Render the superreport markdown while preserving legacy sections."""
+def _override_counts_from_run_json(
+    normalized_entry: Dict[str, Any], raw_entry: Mapping[str, Any]
+) -> bool:
+    counts = dict(_ensure_dict(normalized_entry.get("counts")))
+    connector_id = str(normalized_entry.get("connector_id") or "")
+    if counts and all(counts.get(key, 0) > 0 for key in ("fetched", "normalized", "written")):
+        return False
 
-    diagnostics_dir = Path(diagnostics_root)
-    staging_dir = Path(staging_root)
-    normalized_entries = [entry for entry in entries or [] if isinstance(entry, Mapping)]
-    records, staging_snapshot = _prepare_records(normalized_entries, diagnostics_dir, staging_dir)
-
-    parts: List[str] = [LEGACY_TITLE, "", SUMMARY_TITLE, ""]
-    parts.extend(_render_run_overview(records, normalized_entries))
-    parts.extend(
-        _render_legacy_sections(normalized_entries, diagnostics_dir, staging_dir, staging_snapshot)
-    )
-    parts.extend(_render_connector_matrix(records, normalized_entries, diagnostics_dir, staging_dir))
-    parts.extend(_render_connector_details(records, staging_snapshot))
-    parts.extend(_render_export_snapshot(staging_snapshot))
-    parts.extend(_render_anomalies(records))
-    parts.extend(_render_next_actions(records))
-
-    # Always render legacy and extended tables
-    parts.append("\n### Legacy Coverage (matrix)\n")
-    parts.append("| Connector | Mode | Country | Status | Reason | Counts f/n/w | HTTP 2xx/4xx/5xx (retries) | Logs | Meta rows | Meta |")
-    parts.append("|---|---|---|---|---|---|---|---|---|---|")
-    if normalized_entries:
-        for entry in normalized_entries:
-            run_details = _run_details(entry)
-            parts.append(
-                "| {connector} | {mode} | {country} | {status} | {reason} | {counts} | {http} | {logs} | {meta_rows} | {meta} |".format(
-                    connector=entry.get("connector_id", ""),
-                    mode=entry.get("mode", entry.get("extras", {}).get("mode", EM_DASH)),
-                    country=entry.get("extras", {}).get("country", EM_DASH),
-                    status=entry.get("extras", {}).get("status_raw", entry.get("status", "")),
-                    reason=_display_reason(entry.get("reason")),
-                    counts=fmt_counts(entry.get("counts")),
-                    http=fmt_http(entry.get("http")),
-                    logs=EM_DASH, # Placeholder
-                    meta_rows=meta_rows(entry, str(staging_dir), run_details),
-                    meta=EM_DASH # Placeholder
-                )
-            )
-
-    parts.append("\n### Extended Coverage (totals)\n")
-    parts.append("| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |")
-    parts.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-    if normalized_entries:
-        for entry in normalized_entries:
-            run_details = _run_details(entry)
-            parts.append(
-                "| {connector} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {logs} | {meta_rows} | {meta} |".format(
-                    connector=entry.get("connector_id", ""),
-                    mode=entry.get("mode", entry.get("extras", {}).get("mode", EM_DASH)),
-                    status=entry.get("extras", {}).get("status_raw", entry.get("status", "")),
-                    reason=_display_reason(entry.get("reason")),
-                    http=fmt_http(entry.get("http")),
-                    counts=fmt_counts(entry.get("counts")),
-                    rows_written=run_details.get("rows_written", EM_DASH),
-                    kept=run_details.get("kept", EM_DASH),
-                    dropped=run_details.get("dropped", EM_DASH),
-                    parse_errors=run_details.get("parse_errors", EM_DASH),
-                    logs=EM_DASH, # Placeholder
-                    meta_rows=meta_rows(entry, str(staging_dir), run_details),
-                    meta=EM_DASH # Placeholder
-                )
-            )
-
-    parts.append("\n### Configuration\n")
-    config_source_rendered = False
-    for entry in normalized_entries:
-        extras = entry.get("extras", {})
-        config = extras.get("config", {})
-        if "config_source_label" in config and "config_path_used" in config:
-            parts.append(f"Config source: {config['config_source_label']}")
-            parts.append(f"Config: {config['config_path_used']}")
-            config_source_rendered = True
-            break
-    if not config_source_rendered:
-        if any(e.get("connector_id", "").startswith("dtm") for e in normalized_entries):
-             parts.append("Config source: resolver")
-             parts.append("Config: resolver/config/dtm.yml")
-
-    return "\n".join(parts)
+    candidate_paths = _candidate_run_paths(raw_entry, connector_id)
+    seen: set[Path] = set()
+    for candidate in candidate_paths:
+        path = candidate
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        payload = _safe_load_json(path)
+        if not payload:
+            continue
+        run_counts = _extract_run_counts(payload)
+        fetched_override = run_counts.get("fetched", 0)
+        normalized_override = run_counts.get("normalized", 0)
+        written_override = run_counts.get("written", 0)
+        if fetched_override == 0:
+            fetched_override = normalized_override
+        if fetched_override == 0:
+            fetched_override = written_override
+        if normalized_override == 0 and fetched_override > 0:
+            normalized_override = fetched_override
+        applied = False
+        if fetched_override > 0 and fetched_override > counts.get("fetched", 0):
+            counts["fetched"] = fetched_override
+            applied = True
+        if normalized_override > 0 and normalized_override > counts.get("normalized", 0):
+            counts["normalized"] = normalized_override
+            applied = True
+        if written_override > 0 and written_override > counts.get("written", 0):
+            counts["written"] = written_override
+            applied = True
+        if applied:
+            extras = dict(normalized_entry.get("extras") or {})
+            extras["counts_override_source"] = "run.json"
+            extras["counts_override_path"] = path.as_posix()
+            normalized_entry["extras"] = extras
+            normalized_entry["counts"] = counts
+            return True
+    return False
 
 
-def _safe_path(value: Any) -> Path | None:
-    if isinstance(value, str) and value.strip():
-        return Path(value)
-    return None
-
-
-def _safe_read_csv_rows(path: Path, limit: int = 5) -> List[Mapping[str, Any]]:
-    rows: List[Mapping[str, Any]] = []
-    if not path:
-        return rows
+def _load_mapping_debug(path: Path) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for idx, row in enumerate(reader):
-                if idx >= limit:
-                    break
-                rows.append({key: value for key, value in row.items()})
-    except (OSError, ValueError, csv.Error):
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, Mapping):
+                    records.append(dict(parsed))
+    except OSError:
         return []
-    return rows
+    return records
 
-
-def _summarize_http_trace(path: Path) -> Dict[str, Any]:
-    entries = safe_load_jsonl(path) if path else []
-    if not entries:
-        return {}
-    latencies: List[float] = []
-    paths: Counter[str] = Counter()
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        endpoint = str(entry.get("path") or entry.get("endpoint") or "unknown")
-        paths[endpoint] += 1
-        latency = entry.get("elapsed_ms") or entry.get("latency_ms")
-        try:
-            latencies.append(float(latency))
-        except (TypeError, ValueError):
-            continue
-
-    latencies.sort()
-
-    def _percentile(percent: float) -> float | None:
-        if not latencies:
-            return None
-        if len(latencies) == 1:
-            return latencies[0]
-        idx = max(0, min(len(latencies) - 1, int(round(percent * (len(latencies) - 1)))))
-        return latencies[idx]
-
-    summary: Dict[str, Any] = {
-        "count": len(entries),
-        "paths": paths.most_common(5),
-        "latency_avg_ms": mean(latencies) if latencies else None,
-        "latency_p50_ms": _percentile(0.5),
-        "latency_p95_ms": _percentile(0.95),
-        "latency_max_ms": max(latencies) if latencies else None,
-    }
-    return summary
 
 def _coerce_int(value: Any) -> int:
     try:
-        return int(value)
+        return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
 
 
-def _prepare_records(
-    entries: Sequence[Mapping[str, Any]],
-    diagnostics_dir: Path,
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_count(value: Any) -> str:
+    try:
+        if value in (None, ""):
+            return "—"
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "—"
+    return "—" if number == 0 else str(number)
+
+
+def _format_bytes(size: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{size} B"
+
+
+def _collect_staging_inventory(path: Path) -> Dict[str, Any]:
+    files: List[Tuple[str, int]] = []
+    total_size = 0
+    count = 0
+    try:
+        if path.exists():
+            for entry in path.rglob("*"):
+                if not entry.is_file():
+                    continue
+                if entry.suffix.lower() not in STAGING_EXTENSIONS:
+                    continue
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    size = 0
+                files.append((entry.relative_to(path).as_posix(), size))
+                total_size += size
+                count += 1
+    except OSError:
+        pass
+    files.sort(key=lambda item: (-item[1], item[0]))
+    return {
+        "exists": path.exists(),
+        "count": count,
+        "total_size": total_size,
+        "files": files[:5],
+    }
+
+
+def _collect_export_summary(
     staging_dir: Path,
-) -> tuple[List[ConnectorRecord], Mapping[str, Any]]:
-    deduped: Dict[str, Mapping[str, Any]] = {}
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        key = str(
-            entry.get("connector_id")
-            or entry.get("name")
-            or entry.get("connector")
-            or "unknown"
+    config_path: Path,
+    preview_dir: Path,
+) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "rows": 0,
+        "headers": [],
+        "preview": [],
+        "warnings": [],
+        "sources": [],
+        "error": None,
+    }
+    try:
+        from resolver.tools.export_facts import ExportError, export_facts
+    except Exception as exc:  # pragma: no cover - defensive import
+        summary["error"] = f"import-error: {exc}"
+        return summary
+
+    if not staging_dir.exists():
+        summary["error"] = f"staging missing ({staging_dir})"
+        return summary
+    if not config_path.exists():
+        summary["error"] = f"config missing ({config_path})"
+        return summary
+
+    try:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        result = export_facts(
+            inp=staging_dir,
+            config_path=config_path,
+            out_dir=preview_dir,
         )
-        deduped[key] = entry
+    except ExportError as exc:
+        summary["error"] = str(exc)
+        return summary
+    except Exception as exc:  # pragma: no cover - defensive
+        summary["error"] = f"unexpected error: {exc}"
+        return summary
 
-    records = [_normalise_connector(payload) for payload in deduped.values()]
-    for record in records:
-        _parse_connector_context(record, diagnostics_dir)
+    df = result.dataframe
+    summary["rows"] = len(df)
+    if not df.empty:
+        desired_columns = [col for col in EXPORT_PREVIEW_COLUMNS if col in df.columns]
+        if not desired_columns:
+            desired_columns = list(df.columns[: min(6, len(df.columns))])
+        preview_df = df.loc[:, desired_columns].head(5)
+        summary["headers"] = desired_columns
+        summary["preview"] = [[str(cell) for cell in row] for row in preview_df.to_numpy().tolist()]
+    else:
+        summary["headers"] = [col for col in EXPORT_PREVIEW_COLUMNS if col in df.columns]
+        summary["preview"] = []
+    summary["warnings"] = list(result.warnings)
+    sources: List[Dict[str, Any]] = []
+    for detail in getattr(result, "sources", []):
+        try:
+            entry = {
+                "name": getattr(detail, "name", "unknown"),
+                "path": getattr(detail, "path", Path("?")).as_posix()
+                if hasattr(detail, "path")
+                else str(getattr(detail, "path", "?")),
+                "rows_in": getattr(detail, "rows_in", 0),
+                "rows_out": getattr(detail, "rows_out", 0),
+                "strategy": getattr(detail, "strategy", ""),
+                "warnings": list(getattr(detail, "warnings", [])),
+            }
+        except Exception:  # pragma: no cover - best effort
+            continue
+        sources.append(entry)
+    summary["sources"] = sources
+    summary["csv_path"] = result.csv_path.as_posix()
+    return summary
 
-    staging_snapshot = _collect_staging_snapshot(staging_dir)
-    for record in records:
-        staging_info = staging_snapshot.get(record.name, {}) if isinstance(staging_snapshot, Mapping) else {}
-        if isinstance(staging_info, Mapping):
-            record.exported_flow = any(
-                "flow" in name and meta.get("rows", 0)
-                for name, meta in staging_info.items()
-                if isinstance(meta, Mapping)
-            )
-            record.exported_stock = any(
-                "stock" in name and meta.get("rows", 0)
-                for name, meta in staging_info.items()
-                if isinstance(meta, Mapping)
-            )
 
-    return records, staging_snapshot
-
-
-def _format_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> List[str]:
-    if not rows:
-        return ["(no data)"]
-    header_line = "| " + " | ".join(headers) + " |"
-    divider = "| " + " | ".join(["---"] * len(headers)) + " |"
-    output = [header_line, divider]
-    for row in rows:
-        output.append("| " + " | ".join(str(cell) if cell not in (None, "") else "—" for cell in row) + " |")
-    return output
+def _format_meta_cell(
+    status_raw: Any,
+    extras: Mapping[str, Any] | None,
+    meta_json: Mapping[str, Any] | None,
+) -> str:
+    """Render the Meta cell value applying ok-empty and missing-count rules."""
+    try:
+        extras_map: Mapping[str, Any] = extras or {}
+        raw_status = status_raw or extras_map.get("status_raw")
+        if isinstance(raw_status, str) and raw_status.strip().lower() == "ok-empty":
+            return "—"
+        rows_written = extras_map.get("rows_written")
+        if rows_written is not None and _coerce_int(rows_written) == 0:
+            return "—"
+        row_count = (meta_json or {}).get("row_count")
+        return _fmt_count(row_count)
+    except Exception:
+        return "—"
 
 
-def _format_bool(value: Any) -> str:
+def _normalise_samples(values: Any) -> List[Tuple[str, int]]:
+    results: List[Tuple[str, int]] = []
+    if not isinstance(values, Iterable) or isinstance(values, (str, bytes)):
+        return results
+    for item in values:
+        if isinstance(item, (list, tuple)) and item:
+            label = str(item[0]) if len(item) >= 1 else ""
+            count = _coerce_int(item[1]) if len(item) >= 2 else 0
+            if label:
+                results.append((label, count))
+        elif isinstance(item, Mapping):
+            label = str(item.get("key") or item.get("label") or "")
+            count = _coerce_int(item.get("value"))
+            if label:
+                results.append((label, count))
+    return results
+
+
+def _clean_reason(reason: Any) -> str | None:
+    if reason is None:
+        return None
+    text = str(reason).strip()
+    if not text or text == "-":
+        return None
+    return text
+
+
+def _normalise_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
+    http_raw = _ensure_dict(entry.get("http"))
+    http: Dict[str, Any] = {key: http_raw.get(key) for key in DEFAULT_HTTP_KEYS}
+    counts_raw = _ensure_dict(entry.get("counts"))
+    counts = {
+        "fetched": _coerce_int(counts_raw.get("fetched")),
+        "normalized": _coerce_int(counts_raw.get("normalized")),
+        "written": _coerce_int(counts_raw.get("written")),
+    }
+    coverage_raw = _ensure_dict(entry.get("coverage"))
+    coverage = {
+        "ym_min": coverage_raw.get("ym_min") or None,
+        "ym_max": coverage_raw.get("ym_max") or None,
+        "as_of_min": coverage_raw.get("as_of_min") or None,
+        "as_of_max": coverage_raw.get("as_of_max") or None,
+    }
+    samples_raw = _ensure_dict(entry.get("samples"))
+    samples = {
+        "top_iso3": _normalise_samples(samples_raw.get("top_iso3")),
+        "top_hazard": _normalise_samples(samples_raw.get("top_hazard")),
+    }
+    extras = _ensure_dict(entry.get("extras"))
+    status_raw = str(
+        entry.get("status_raw")
+        or extras.get("status_raw")
+        or entry.get("status")
+        or "skipped"
+    )
+    exit_code = _coerce_int(entry.get("exit_code") if entry.get("exit_code") is not None else extras.get("exit_code"))
+    status = str(entry.get("status") or status_raw or "skipped")
+    if status_raw.lower() == "error" or (exit_code not in (None, 0)):
+        status = "error"
+
+    return {
+        "connector_id": str(entry.get("connector_id") or entry.get("name") or "unknown"),
+        "mode": str(entry.get("mode") or "real"),
+        "status": status,
+        "status_raw": status_raw,
+        "exit_code": exit_code,
+        "reason": _clean_reason(entry.get("reason")),
+        "started_at_utc": str(entry.get("started_at_utc") or ""),
+        "duration_ms": _coerce_int(entry.get("duration_ms")),
+        "http": http,
+        "counts": counts,
+        "coverage": coverage,
+        "samples": samples,
+        "extras": extras,
+    }
+
+
+def _load_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict(data) if isinstance(data, Mapping) else {}
+
+
+def load_report(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Report not found: {path}")
+    entries: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle, 1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+                raise RuntimeError(f"Unable to parse JSON on line {line_number}: {exc}") from exc
+            if isinstance(payload, Mapping):
+                normalised = _normalise_entry(payload)
+                _override_counts_from_run_json(normalised, payload)
+                entries.append(normalised)
+    return entries
+
+
+def deduplicate_entries(
+    entries: Sequence[Mapping[str, Any]]
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    grouped: Dict[Tuple[str, str], List[Tuple[int, Dict[str, Any]]]] = {}
+    for index, entry in enumerate(entries):
+        connector_id = str(entry.get("connector_id") or "unknown")
+        mode = str(entry.get("mode") or "real")
+        key = (connector_id, mode)
+        grouped.setdefault(key, []).append((index, dict(entry)))
+
+    deduped: List[Tuple[int, Dict[str, Any]]] = []
+    duplicates: Dict[str, int] = {}
+    for key, records in grouped.items():
+        if len(records) == 1:
+            deduped.append(records[0])
+            continue
+        records.sort(key=lambda item: ((item[1].get("started_at_utc") or ""), item[0]))
+        chosen = records[-1]
+        deduped.append(chosen)
+        connector_id, _mode = key
+        duplicates[connector_id] = duplicates.get(connector_id, 0) + len(records) - 1
+
+    deduped.sort(key=lambda item: item[0])
+    return [entry for _, entry in deduped], duplicates
+
+
+def _format_status_counts(entries: Sequence[Mapping[str, Any]]) -> str:
+    counts = Counter(str(entry.get("status") or "") for entry in entries)
+    if not counts:
+        return "none"
+    parts = [f"{status}={count}" for status, count in sorted(counts.items()) if status]
+    return ", ".join(parts) if parts else "none"
+
+
+def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
+    counter: Counter[str] = Counter()
+    for entry in entries:
+        reason = entry.get("reason")
+        if not reason:
+            continue
+        cleaned = str(reason).strip()
+        if cleaned:
+            counter[cleaned] += 1
+    if not counter:
+        return "—"
+    limited = list(counter.items())
+    limited.sort(key=lambda item: item[0])
+    parts = [f"{reason}={count}" for reason, count in limited[:REASON_HISTOGRAM_LIMIT]]
+    return ", ".join(parts)
+
+
+def _render_idmc_why_zero(payload: Mapping[str, Any]) -> List[str]:
+    token_present = bool(payload.get("token_present"))
+    countries_count = _coerce_int(payload.get("countries_count"))
+    sample_raw = payload.get("countries_sample")
+    if isinstance(sample_raw, Sequence) and not isinstance(sample_raw, (str, bytes)):
+        sample_list = [str(item) for item in list(sample_raw) if str(item).strip()][:5]
+    else:
+        sample_list = []
+    sample_display = ", ".join(sample_list) if sample_list else "—"
+    if sample_list and countries_count > len(sample_list):
+        sample_display = sample_display + "…"
+    window_block = _ensure_dict(payload.get("window"))
+    window_start = window_block.get("start")
+    window_end = window_block.get("end")
+    start_display = str(window_start).strip() if window_start not in (None, "") else "—"
+    end_display = str(window_end).strip() if window_end not in (None, "") else "—"
+    if start_display == end_display:
+        window_display = start_display
+    else:
+        window_display = f"{start_display} → {end_display}"
+    filters_block = _ensure_dict(payload.get("filters"))
+    dropped_window = _coerce_int(filters_block.get("date_out_of_window"))
+    dropped_iso3 = _coerce_int(filters_block.get("no_iso3"))
+    dropped_value = _coerce_int(filters_block.get("no_value_col"))
+    network_attempted = bool(payload.get("network_attempted"))
+    config_source = str(payload.get("config_source") or "unknown")
+    config_path = _relativize_path(payload.get("config_path_used")) or "—"
+    warnings_raw = payload.get("loader_warnings") or []
+    if isinstance(warnings_raw, Sequence) and not isinstance(warnings_raw, (str, bytes)):
+        warnings_list = [str(item) for item in warnings_raw if str(item).strip()]
+    else:
+        warnings_list = []
+    lines = ["## IDMC — Why zero?", ""]
+    lines.append(f"- Token present: {str(token_present).lower()}")
+    lines.append(f"- Countries: {countries_count} (sample: {sample_display})")
+    lines.append(f"- Window: {window_display}")
+    lines.append(
+        "- Filters dropped: "
+        f"date_out_of_window={dropped_window}, no_iso3={dropped_iso3}, no_value_col={dropped_value}"
+    )
+    requests_attempted = payload.get("requests_attempted")
+    requests_display = _coerce_int(requests_attempted)
+    lines.append(
+        f"- Network attempted: {str(network_attempted).lower()}"
+        f" (requests={requests_display})"
+    )
+    lines.append(f"- Config: {config_source} — {config_path}")
+    if warnings_list:
+        lines.append(f"- Loader warnings: {'; '.join(warnings_list)}")
+    return lines
+
+
+def _truncate_text(value: Any, *, limit: int = 2048) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
+
+
+def _format_duration(duration_ms: int) -> str:
+    if duration_ms <= 0:
+        return "—"
+    if duration_ms < 1000:
+        return f"{duration_ms} ms"
+    total_seconds = duration_ms / 1000
+    if total_seconds < 60:
+        return f"{total_seconds:.1f}s"
+    minutes, seconds = divmod(int(total_seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m{seconds:02d}s"
+
+
+def _format_rows(counts: Mapping[str, int]) -> str:
+    fetched = counts.get("fetched") or 0
+    normalized = counts.get("normalized") or 0
+    written = counts.get("written") or 0
+    return f"{fetched}/{normalized}/{written}"
+
+
+def _format_http(http: Mapping[str, Any]) -> str:
+    success = http.get("2xx") or 0
+    client = http.get("4xx") or 0
+    server = http.get("5xx") or 0
+    retries = http.get("retries") or 0
+    return f"{success}/{client}/{server} ({retries})"
+
+
+def _format_coverage(min_value: Any, max_value: Any) -> str:
+    start = str(min_value).strip() if min_value else ""
+    end = str(max_value).strip() if max_value else ""
+    if start and end:
+        if start == end:
+            return start
+        return f"{start} → {end}"
+    if start:
+        return start
+    if end:
+        return end
+    return "—"
+
+
+def _format_reason(reason: str | None) -> str:
+    return reason if reason else "—"
+
+
+def _format_sample_list(label: str, samples: Sequence[Tuple[str, int]]) -> str | None:
+    if not samples:
+        return None
+    items = [f"`{name}` ({count})" for name, count in samples if name]
+    if not items:
+        return None
+    return f"- **{label}:** {', '.join(items)}"
+
+
+def _format_optional_int(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        return str(int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _format_extras(extras: Mapping[str, Any]) -> str | None:
+    if not extras:
+        return None
+    items: List[str] = []
+    for key in sorted(extras.keys()):
+        value = extras.get(key)
+        if value in (None, ""):
+            continue
+        items.append(f"`{key}={value}`")
+    if not items:
+        return None
+    return f"- **Extras:** {', '.join(items)}"
+
+
+def _render_details(entry: Mapping[str, Any]) -> str:
+    connector = entry.get("connector_id", "unknown")
+    lines = ["<details>", f"<summary>{connector} diagnostics</summary>", ""]
+    bullets: List[str] = []
+
+    # Show API key configuration status for connectors that need it
+    extras = _ensure_dict(entry.get("extras", {}))
+    config_block = _ensure_dict(extras.get("config"))
+    config_source = config_block.get("config_source_label") or extras.get("config_source")
+    if config_source:
+        bullets.append(f"- **Config source:** {config_source}")
+    config_warnings = config_block.get("config_warnings")
+    if isinstance(config_warnings, Sequence) and not isinstance(config_warnings, (str, bytes)):
+        joined_warnings = "; ".join(str(item) for item in config_warnings if str(item))
+        if joined_warnings:
+            bullets.append(f"- **Config warnings:** {joined_warnings}")
+
+    config_path_used = (
+        config_block.get("config_path_used")
+        or extras.get("config_path_used")
+        or extras.get("config_path")
+    )
+    countries_mode = (
+        config_block.get("countries_mode")
+        or _ensure_dict(config_block.get("config_parse")).get("countries_mode")
+    )
+    rel_config_path = _relativize_path(config_path_used)
+    if rel_config_path:
+        line = f"- Config: {rel_config_path}"
+        if countries_mode:
+            line += f" (countries_mode={countries_mode})"
+        bullets.append(line)
+
+    if "api_key_configured" in extras:
+        api_configured = extras["api_key_configured"]
+        if api_configured:
+            bullets.append("- **API Key:** ✓ Configured")
+        else:
+            bullets.append("- **API Key:** ✗ Not configured")
+            bullets.append("- **Action Required:** Set `DTM_API_KEY` in GitHub secrets to fetch live data")
+
+    # Show mode (api, file, header-only) if available
+    mode_info = extras.get("mode")
+    if mode_info:
+        bullets.append(f"- **Mode:** {mode_info}")
+
+    top_iso3 = _format_sample_list("Top ISO3", entry.get("samples", {}).get("top_iso3", []))
+    if top_iso3:
+        bullets.append(top_iso3)
+    top_hazard = _format_sample_list("Top hazard", entry.get("samples", {}).get("top_hazard", []))
+    if top_hazard:
+        bullets.append(top_hazard)
+    http = entry.get("http", {})
+    rate_limit = http.get("rate_limit_remaining")
+    if rate_limit not in (None, ""):
+        bullets.append(f"- **Rate limit remaining:** {rate_limit}")
+    last_status = http.get("last_status")
+    if last_status not in (None, ""):
+        bullets.append(f"- **Last status:** {last_status}")
+
+    # Show additional extras, but filter out the ones we already displayed
+    filtered_extras = {
+        k: v for k, v in extras.items()
+        if k not in ("api_key_configured", "mode")
+    }
+    extras_line = _format_extras(filtered_extras)
+    if extras_line:
+        bullets.append(extras_line)
+
+    if not bullets:
+        bullets.append("- _No additional diagnostics recorded._")
+    lines.extend(bullets)
+    lines.append("")
+    lines.append("</details>")
+    return "\n".join(lines)
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    ordered = sorted(values)
+    rank = (percentile / 100.0) * (len(ordered) - 1)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return float(ordered[int(rank)])
+    frac = rank - lower
+    return float(ordered[lower] + (ordered[upper] - ordered[lower]) * frac)
+
+
+def _load_ndjson(path: Path) -> List[Mapping[str, Any]]:
+    entries: List[Mapping[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, Mapping):
+                    entries.append(payload)
+    except OSError:
+        return []
+    return entries
+
+
+def _aggregate_http_endpoints(trace_path: Path) -> List[Dict[str, Any]]:
+    entries = _load_ndjson(trace_path)
+    buckets: Dict[str, List[float]] = {}
+    for entry in entries:
+        path_value = str(entry.get("path") or entry.get("endpoint") or "").strip()
+        if not path_value:
+            continue
+        latency = entry.get("elapsed_ms") or entry.get("latency_ms")
+        parsed = _coerce_float(latency)
+        if parsed is None:
+            continue
+        buckets.setdefault(path_value, []).append(parsed)
+    results: List[Dict[str, Any]] = []
+    for endpoint, latencies in buckets.items():
+        if not latencies:
+            continue
+        ordered = sorted(latencies)
+        results.append(
+            {
+                "path": endpoint,
+                "count": len(ordered),
+                "p50_ms": int(round(_percentile(ordered, 50))),
+                "p95_ms": int(round(_percentile(ordered, 95))),
+                "max_ms": int(round(max(ordered))),
+            }
+        )
+    results.sort(key=lambda item: (-item["count"], item["path"]))
+    return results[:5]
+
+
+def _read_sample_rows(path: Path, limit: int = 10) -> Tuple[List[str], List[List[str]]]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            headers = next(reader, [])
+            rows = []
+            for idx, row in enumerate(reader):
+                if idx >= limit:
+                    break
+                rows.append([str(cell) for cell in row])
+    except OSError:
+        return [], []
+    return [str(header) for header in headers], rows
+
+
+def _format_markdown_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> List[str]:
+    if not headers or not rows:
+        return []
+    normalized_rows = [["" if cell is None else str(cell) for cell in row] for row in rows]
+    lines = ["| " + " | ".join(str(header) for header in headers) + " |"]
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    for row in normalized_rows:
+        lines.append("| " + " | ".join(row[: len(headers)]) + " |")
+    return lines
+
+
+def _load_discovery_errors(path: Path, limit: int = 2) -> List[str]:
+    payload = _safe_load_json(path)
+    if not payload:
+        return []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return []
+    snippets: List[str] = []
+    for entry in errors[:limit]:
+        if isinstance(entry, Mapping):
+            try:
+                snippet = json.dumps(entry, ensure_ascii=False)
+            except (TypeError, ValueError):
+                snippet = str(entry)
+        else:
+            snippet = str(entry)
+        snippets.append(snippet)
+    return snippets
+
+
+def _render_dtm_deep_dive(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    dtm = _ensure_dict(extras.get("dtm"))
+    config = _ensure_dict(extras.get("config"))
+    window = _ensure_dict(extras.get("window"))
+    discovery = _ensure_dict(extras.get("discovery"))
+    http_summary = _ensure_dict(extras.get("http"))
+    fetch = _ensure_dict(extras.get("fetch"))
+    normalize = _ensure_dict(extras.get("normalize"))
+    rescue = extras.get("rescue_probe")
+    rescue_entries = rescue.get("tried", []) if isinstance(rescue, Mapping) else []
+    artifacts = _ensure_dict(extras.get("artifacts"))
+
+    lines: List[str] = ["## DTM Deep Dive", ""]
+
+    lines.append("### Auth & SDK")
+    sdk_line = f"- **SDK Version:** `{dtm.get('sdk_version', 'unknown')}`"
+    base_line = f"- **Base URL:** `{dtm.get('base_url', 'unknown')}`"
+    python_line = f"- **Python:** `{dtm.get('python_version', 'unknown')}`"
+    lines.extend([sdk_line, base_line, python_line, ""])
+
+    lines.append("### Discovery")
+    stage_rows: List[List[str]] = []
+    for stage in discovery.get("stages", []):
+        if not isinstance(stage, Mapping):
+            continue
+        stage_rows.append(
+            [
+                str(stage.get("name") or stage.get("stage") or "—"),
+                str(stage.get("status") or "—"),
+                str(stage.get("http_code") or "—"),
+                str(stage.get("attempts") or "—"),
+                str(stage.get("latency_ms") or "—"),
+            ]
+        )
+    if stage_rows:
+        lines.extend(_format_markdown_table(["Stage", "Status", "HTTP", "Attempts", "Latency (ms)"], stage_rows))
+    else:
+        lines.append("_No discovery stages recorded._")
+    used_stage = discovery.get("used_stage") or "—"
+    reason = discovery.get("reason")
+    reason_text = f" (reason: {reason})" if reason else ""
+    lines.append(f"- **Used stage:** `{used_stage}`{reason_text}")
+    error_path = discovery.get("first_fail_path")
+    if isinstance(error_path, str) and error_path:
+        snippets = _load_discovery_errors(Path(error_path))
+        if snippets:
+            lines.append("- **Discovery errors:**")
+            for snippet in snippets:
+                lines.append(f"  - `{snippet}`")
+    lines.append("")
+
+    lines.append("### Effective Config")
+    countries_mode = config.get("countries_mode", "discovered")
+    lines.extend(
+        [
+            f"- **Config path:** `{config.get('config_path_used', 'unknown')}`",
+            f"- **Config exists:** {'yes' if config.get('config_exists') else 'no'}",
+            f"- **Config sha:** `{config.get('config_sha256', 'n/a')}`",
+            f"- **Admin levels:** {', '.join(config.get('admin_levels', []) or ['—'])}",
+            f"- **Countries mode:** `{countries_mode}` ({config.get('countries_count', 0)} selectors)",
+            f"- **Countries preview:** {', '.join(str(item) for item in config.get('countries_preview', []) or ['—'])}",
+            f"- **No date filter:** {config.get('no_date_filter', 0)}",
+            f"- **Window:** {window.get('start_iso') or '—'} → {window.get('end_iso') or '—'}",
+        ]
+    )
+    lines.append("")
+
+    lines.append("### HTTP Roll-up")
+    lines.extend(
+        [
+            f"- **2xx/4xx/5xx:** {http_summary.get('count_2xx', 0)}/"
+            f"{http_summary.get('count_4xx', 0)}/{http_summary.get('count_5xx', 0)}",
+            f"- **Retries:** {http_summary.get('retries', 0)}",
+            f"- **Timeouts:** {http_summary.get('timeouts', 0)}",
+            f"- **Last status:** {http_summary.get('last_status', '—')}",
+        ]
+    )
+    http_trace_path = artifacts.get("http_trace")
+    if isinstance(http_trace_path, str) and http_trace_path:
+        top_endpoints = _aggregate_http_endpoints(Path(http_trace_path))
+    else:
+        top_endpoints = []
+    if not top_endpoints:
+        top_endpoints = [item for item in http_summary.get("endpoints_top", []) if isinstance(item, Mapping)]
+    if top_endpoints:
+        endpoint_rows = [
+            [
+                str(item.get("path", "—")),
+                str(item.get("count", 0)),
+                str(item.get("p50_ms", "—")),
+                str(item.get("p95_ms", "—")),
+                str(item.get("max_ms", "—")),
+            ]
+            for item in top_endpoints
+        ]
+        lines.extend(_format_markdown_table(["Path", "Count", "p50 (ms)", "p95 (ms)", "Max (ms)"], endpoint_rows))
+    lines.append("")
+
+    lines.append("### Fetch Metrics")
+    lines.extend(
+        [
+            f"- **Pages:** {fetch.get('pages', 0)}",
+            f"- **Max page size:** {fetch.get('max_page_size') or '—'}",
+            f"- **Total rows received:** {fetch.get('total_received', 0)}",
+        ]
+    )
+    lines.append("")
+
+    lines.append("### Normalization")
+    lines.extend(
+        [
+            f"- **Rows fetched/normalized/written:** {normalize.get('rows_fetched', 0)}/"
+            f"{normalize.get('rows_normalized', 0)}/{normalize.get('rows_written', 0)}",
+        ]
+    )
+    drop_reasons = normalize.get("drop_reasons")
+    if isinstance(drop_reasons, Mapping) and drop_reasons:
+        drop_rows = [[str(reason), str(drop_reasons.get(reason, 0))] for reason in sorted(drop_reasons.keys())]
+        lines.extend(_format_markdown_table(["Reason", "Count"], drop_rows))
+    chosen_columns = normalize.get("chosen_value_columns")
+    if isinstance(chosen_columns, list) and chosen_columns:
+        chosen_rows = [
+            [str(item.get("column", "—")), str(item.get("count", 0))]
+            for item in chosen_columns
+            if isinstance(item, Mapping)
+        ]
+        if chosen_rows:
+            lines.extend(_format_markdown_table(["Value column", "Rows"], chosen_rows))
+    attempted_dates = normalize.get("attempted_date_columns")
+    if isinstance(attempted_dates, (list, tuple)) and attempted_dates:
+        lines.append("Attempted date columns: " + ", ".join(str(col) for col in attempted_dates))
+    used_date = normalize.get("date_col_used")
+    if used_date:
+        lines.append(f"Chosen date column: {used_date}")
+    bad_samples = normalize.get("bad_date_samples")
+    if isinstance(bad_samples, (list, tuple)) and bad_samples:
+        lines.append("Bad date samples: " + ", ".join(str(sample) for sample in bad_samples[:5]))
+    lines.append("")
+
+    samples_path = artifacts.get("samples")
+    if isinstance(samples_path, str) and samples_path:
+        headers, sample_rows = _read_sample_rows(Path(samples_path))
+        if sample_rows:
+            lines.append("### Sample rows")
+            lines.extend(_format_markdown_table(headers, sample_rows))
+            lines.append("")
+
+    if rescue_entries:
+        lines.append("### Zero-rows rescue")
+        rescue_rows = [
+            [str(item.get("country", "—")), str(item.get("window", "—")), str(item.get("rows", 0)), str(item.get("error", ""))]
+            for item in rescue_entries
+            if isinstance(item, Mapping)
+        ]
+        if rescue_rows:
+            lines.extend(_format_markdown_table(["Country", "Window", "Rows", "Error"], rescue_rows))
+        lines.append("")
+
+    lines.append("### Actionable next steps")
+    actions: List[str] = []
+    if any(str(stage.get("http_code")) in {"401", "403"} for stage in discovery.get("stages", []) if isinstance(stage, Mapping)):
+        actions.append("- Verify DTM API key permissions or request access for discovery endpoints (HTTP 401/403).")
+    drop_counts = normalize.get("drop_reasons") if isinstance(normalize.get("drop_reasons"), Mapping) else {}
+    if drop_counts and drop_counts.get("no_country_match"):
+        actions.append("- Review country aliases or explicit selectors; discovery skipped some countries.")
+    if drop_counts and drop_counts.get("no_iso3"):
+        actions.append("- Update ISO3 mapping/aliases; many rows lacked a resolvable ISO3 code.")
+    reason_text_lower = str(discovery.get("reason") or "").lower()
+    used_stage_text = str(discovery.get("used_stage") or "").lower()
+    if "static_iso3_minimal" in used_stage_text or "minimal" in reason_text_lower:
+        actions.append("- **Discovery fallback active:** Provide explicit `api.countries` or request discovery access to avoid the minimal static allowlist.")
+    if normalize.get("rows_written", 0) == 0:
+        actions.append("- Connector wrote zero rows; inspect window and rescue probe results for active countries.")
+    if not actions:
+        actions.append("- _No immediate blockers detected._")
+    lines.extend(actions)
+    lines.append("")
+    return lines
+
+
+def _format_yes_no(value: Any) -> str:
+    truthy = {"1", "true", "y", "yes", "on"}
     if isinstance(value, bool):
         return "yes" if value else "no"
     if isinstance(value, (int, float)):
         return "yes" if value else "no"
     if isinstance(value, str):
-        return "yes" if value.strip().lower() in {"1", "true", "on", "y", "yes"} else "no"
+        return "yes" if value.strip().lower() in truthy else "no"
     return "yes" if value else "no"
 
 
-def _render_legacy_sections(
-    entries: Sequence[Mapping[str, Any]],
-    diagnostics_dir: Path,
-    staging_dir: Path,
-    staging_snapshot: Mapping[str, Any],
-) -> List[str]:
-    lines: List[str] = []
-
-    staging_lines = _legacy_staging_readiness_section(staging_dir)
-    if staging_lines:
-        lines.extend(staging_lines)
-        lines.append("")
-
-    sample_lines = _legacy_samples_section(diagnostics_dir, entries)
-    if sample_lines:
-        lines.extend(sample_lines)
-        lines.append("")
-
-    config_lines = _legacy_config_section(entries, diagnostics_dir)
-    if config_lines:
-        lines.extend(config_lines)
-        lines.append("")
-
-    selector_lines = _legacy_selector_section(entries, diagnostics_dir)
-    if selector_lines:
-        lines.extend(selector_lines)
-        lines.append("")
-
-    dtm_lines = _legacy_dtm_sections(entries)
-    if dtm_lines:
-        lines.extend(dtm_lines)
-        lines.append("")
-
-    reachability_lines = _legacy_dtm_reachability_section(diagnostics_dir)
-    if reachability_lines:
-        lines.extend(reachability_lines)
-        lines.append("")
-
-    zero_lines = _legacy_zero_row_section(entries, staging_snapshot)
-    if zero_lines:
-        lines.extend(zero_lines)
-        lines.append("")
-
-    log_lines = _legacy_logs_section(entries, diagnostics_dir)
-    if log_lines:
-        lines.extend(log_lines)
-        lines.append("")
-
-    return lines
-
-
-def _legacy_staging_readiness_section(staging_dir: Path) -> List[str]:
-    resolver_files = []
-    if staging_dir.exists():
-        resolver_files = sorted(p.name for p in staging_dir.glob("*.csv"))
-
-    data_dir = Path("data") / "staging"
-    data_files: List[str] = []
-    if data_dir.exists():
-        data_files = sorted(p.name for p in data_dir.glob("*.csv"))
-
-    if not resolver_files and not data_files:
+def _render_config_section(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    config = _ensure_dict(extras.get("config"))
+    if not config:
         return []
-
-    lines = ["## Staging readiness", ""]
-    lines.append(f"- resolver/staging files: {resolver_files or '[]'}")
-    lines.append(f"- data/staging files: {data_files or '[]'}")
-    if data_files and not resolver_files:
-        lines.append(
-            "- Hint: artifacts were written to `data/staging`; exporters expect `resolver/staging` (set RESOLVER_OUTPUT_DIR=resolver/staging)."
-        )
-    return lines
-
-
-def _top_samples_from_entries(
-    entries: Sequence[Mapping[str, Any]], key: str
-) -> List[tuple[str, Any]]:
-    results: List[tuple[str, Any]] = []
-    for entry in entries:
-        samples = entry.get("samples") if isinstance(entry, Mapping) else None
-        if not isinstance(samples, Mapping):
-            continue
-        payload = samples.get(key)
-        pairs: List[tuple[str, Any]] = []
-        if isinstance(payload, Mapping):
-            pairs = [(str(k), v) for k, v in payload.items()]
-        elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
-            for item in payload:
-                if isinstance(item, Mapping):
-                    label = (
-                        item.get("iso")
-                        or item.get("country")
-                        or item.get("label")
-                        or item.get("name")
-                        or item.get("selector")
-                    )
-                    count_val = (
-                        item.get("rows")
-                        or item.get("count")
-                        or item.get("value")
-                        or item.get("total")
-                    )
-                    if label is not None and count_val is not None:
-                        pairs.append((str(label), count_val))
-                elif isinstance(item, Sequence) and len(item) >= 2:
-                    pairs.append((str(item[0]), item[1]))
-        for label, count_val in pairs:
-            clean = label.strip()
-            if not clean:
-                continue
-            try:
-                numeric = int(count_val)
-            except (TypeError, ValueError):
-                numeric = count_val
-            results.append((clean, numeric))
-            if len(results) >= 5:
-                return results[:5]
-    return results[:5]
-
-
-def _legacy_samples_section(
-    diagnostics_dir: Path, entries: Sequence[Mapping[str, Any]]
-) -> List[str]:
-    sample = diagnostics_dir / "dtm" / "samples" / "admin0_head.csv"
-    if not sample.exists():
-        lines = ["## Source sample: quick checks", ""]
+    config_parse = _ensure_dict(config.get("config_parse"))
+    config_keys_found = _ensure_dict(config.get("config_keys_found"))
+    admin_levels = config.get("admin_levels")
+    if isinstance(admin_levels, Iterable) and not isinstance(admin_levels, (str, bytes)):
+        admin_text = ", ".join(str(item) for item in admin_levels if str(item)) or "—"
     else:
-        lines = ["## Source sample: quick checks", "", "- `dtm/admin0_head.csv` rows present"]
-    iso_counts = top_value_counts_from_csv(sample, "CountryISO3") if sample.exists() else []
-    if not iso_counts:
-        iso_counts = _top_samples_from_entries(entries, "top_iso3")
-    if iso_counts:
-        iso_text = ", ".join(f"{code} ({count})" for code, count in iso_counts)
-        lines.append(f"- CountryISO3 top 5: {iso_text}")
-        legacy_iso = ", ".join(f"`{code}` ({count})" for code, count in iso_counts)
-        lines.append(f"- CountryISO3 sample (legacy): {legacy_iso}")
-    admin_counts = top_value_counts_from_csv(sample, "admin0Name") if sample.exists() else []
-    if admin_counts:
-        admin_text = ", ".join(f"{name} ({count})" for name, count in admin_counts)
-        lines.append(f"- admin0Name top 5: {admin_text}")
-    if len(lines) == 2:  # header + blank line with no bullets
-        lines.append("- No source samples found; cannot compare coverage.")
-    return lines
-
-
-def _legacy_config_section(
-    entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
-) -> List[str]:
-    config_path: str | None = None
-    config_source: str | None = None
-    chosen_payload: Mapping[str, Any] | None = None
-    config_from_metadata = False
-
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else None
-        config_block = extras.get("config") if isinstance(extras, Mapping) else None
-        candidate_source: str | None = None
-        candidate_path: str | None = None
-
-        if isinstance(config_block, Mapping):
-            raw_path = config_block.get("config_path_used") or config_block.get("config_path")
-            if isinstance(raw_path, str) and raw_path.strip():
-                candidate_path = raw_path
-            raw_source = config_block.get("config_source_label") or config_block.get("config_source")
-            if isinstance(raw_source, str) and raw_source.strip():
-                candidate_source = raw_source
-        if candidate_path is None and isinstance(extras, Mapping):
-            raw_path = extras.get("config_path_used") or extras.get("config_path")
-            if isinstance(raw_path, str) and raw_path.strip():
-                candidate_path = raw_path
-        if candidate_source is None and isinstance(extras, Mapping):
-            raw_source = extras.get("config_source") or extras.get("config_source_label")
-            if isinstance(raw_source, str) and raw_source.strip():
-                candidate_source = raw_source
-
-        label_lower = (candidate_source or "").strip().lower()
-        connector_name = str(
-            entry.get("connector_id")
-            or entry.get("connector")
-            or entry.get("name")
-            or "unknown"
-        )
-
-        if candidate_path:
-            if config_path is None or label_lower == "resolver":
-                config_path = candidate_path
-                config_source = candidate_source or config_source
-                chosen_payload = config_block if isinstance(config_block, Mapping) else extras
-                config_from_metadata = True
-                logger.debug(
-                    "Config path resolved from entry metadata for %s: %s",
-                    connector_name,
-                    config_path,
-                )
-            if label_lower == "resolver":
-                break
-        elif candidate_source and not config_source:
-            config_source = candidate_source
-            if chosen_payload is None and isinstance(config_block, Mapping):
-                chosen_payload = config_block
-
-    diagnostics_root = diagnostics_dir if isinstance(diagnostics_dir, Path) else Path(diagnostics_dir)
-    if config_path is None and diagnostics_root.exists():
-        for filename in ("why_zero.json", "manifest.json"):
-            for candidate in sorted(diagnostics_root.rglob(filename)):
-                payload = safe_load_json(candidate)
-                if not isinstance(payload, Mapping):
-                    continue
-                fallback_path = payload.get("config_path_used") or payload.get("config_path")
-                if isinstance(fallback_path, str) and fallback_path.strip():
-                    config_path = fallback_path
-                    config_source = (
-                        payload.get("config_source_label")
-                        or payload.get("config_source")
-                        or filename
-                    )
-                    chosen_payload = payload
-                    logger.debug(
-                        "Config path recovered from %s: %s",
-                        candidate,
-                        config_path,
-                    )
-                    break
-            if config_path is not None:
-                break
-
-    if config_path is None:
-        logger.warning("Unable to resolve config path from metadata or diagnostics artifacts.")
-        dtm_present = any(
-            "dtm" in str(
-                entry.get("connector_id")
-                or entry.get("connector")
-                or entry.get("name")
-                or ""
-            ).lower()
-            for entry in entries
-            if isinstance(entry, Mapping)
-        )
-        if dtm_present:
-            config_path = "resolver/config/dtm.yml"
-            logger.debug("Applying DTM default config path: %s", config_path)
-        else:
-            config_path = "unknown"
-    config_source = config_source or ("metadata" if config_from_metadata else "unknown")
-
-    lines = ["## Config used", ""]
-    lines.append(f"Config source: {config_source}")
-    lines.append(f"Config: {config_path}")
-
-    if not isinstance(chosen_payload, Mapping):
-        return lines
-
-    warnings = chosen_payload.get("config_warnings")
-    if isinstance(warnings, Sequence) and warnings:
-        lines.append("- Warnings:")
-        for warning in warnings:
-            lines.append(f"  - {warning}")
-
-    preview = chosen_payload.get("countries_preview")
-    if isinstance(preview, Sequence) and not isinstance(preview, (str, bytes)):
-        preview_text = ", ".join(str(item) for item in list(preview)[:5] if str(item)) or "—"
-        lines.append(f"- Countries preview: {preview_text}")
-
-    config_parse = (
-        chosen_payload.get("config_parse")
-        if isinstance(chosen_payload.get("config_parse"), Mapping)
-        else {}
-    )
-    config_keys_found = (
-        chosen_payload.get("config_keys_found")
-        if isinstance(chosen_payload.get("config_keys_found"), Mapping)
-        else {}
-    )
-    parse_countries: List[str] = []
-    raw_countries = config_parse.get("countries") if isinstance(config_parse, Mapping) else None
-    if isinstance(raw_countries, Sequence) and not isinstance(raw_countries, (str, bytes)):
+        admin_text = "—"
+    preview_values = config.get("countries_preview")
+    if isinstance(preview_values, Iterable) and not isinstance(preview_values, (str, bytes)):
+        preview_text = ", ".join(str(item) for item in list(preview_values)[:5] if str(item)) or "—"
+    else:
+        preview_text = "—"
+    selected_values = config.get("selected_iso3_preview")
+    if isinstance(selected_values, Iterable) and not isinstance(selected_values, (str, bytes)):
+        selected_text = ", ".join(str(item) for item in list(selected_values)[:10] if str(item)) or "—"
+    else:
+        selected_text = "—"
+    parse_countries = []
+    raw_countries = config_parse.get("countries")
+    if isinstance(raw_countries, Iterable) and not isinstance(raw_countries, (str, bytes)):
         parse_countries = [str(item) for item in raw_countries if str(item)]
-    parsed_admin_levels: List[str] = []
-    raw_levels = config_parse.get("admin_levels") if isinstance(config_parse, Mapping) else None
-    if isinstance(raw_levels, Sequence) and not isinstance(raw_levels, (str, bytes)):
+    parsed_admin_levels = []
+    raw_levels = config_parse.get("admin_levels")
+    if isinstance(raw_levels, Iterable) and not isinstance(raw_levels, (str, bytes)):
         parsed_admin_levels = [str(item) for item in raw_levels if str(item)]
-
     if parse_countries:
-        lines.append(f"- **Countries parse:** api.countries: found ({len(parse_countries)})")
+        countries_parse_line = f"- **Countries parse:** api.countries: found ({len(parse_countries)})"
     else:
-        lines.append("- **Countries parse:** api.countries: missing or empty")
-
+        countries_parse_line = "- **Countries parse:** api.countries: missing or empty"
     if parsed_admin_levels:
         levels_repr = ", ".join(parsed_admin_levels)
-        lines.append(f"- **Admin levels parse:** api.admin_levels: found ([{levels_repr}])")
+        admin_parse_line = f"- **Admin levels parse:** api.admin_levels: found ([{levels_repr}])"
     else:
-        lines.append("- **Admin levels parse:** api.admin_levels: missing or empty")
+        admin_parse_line = "- **Admin levels parse:** api.admin_levels: missing or empty"
+    keys_line = "- **Config keys found:** countries={0}, admin_levels={1}".format(
+        str(bool(config_keys_found.get("countries"))).lower(),
+        str(bool(config_keys_found.get("admin_levels"))).lower(),
+    )
+    countries_mode = str(config.get("countries_mode", "discovered")).strip().lower()
+    warn_unapplied = bool(config_keys_found.get("countries")) and countries_mode == "discovered"
+    source_label = config.get("config_source_label") or config.get("config_source")
+    raw_warnings = config.get("config_warnings")
+    warnings_list: List[str] = []
+    if isinstance(raw_warnings, Sequence) and not isinstance(raw_warnings, (str, bytes)):
+        warnings_list = [str(item) for item in raw_warnings if str(item)]
 
-    if isinstance(config_keys_found, Mapping):
-        countries_found = bool(config_keys_found.get("countries"))
-        admin_found = bool(config_keys_found.get("admin_levels"))
-        lines.append(
-            "- **Config keys found:** countries={c}, admin_levels={a}".format(
-                c=str(countries_found).lower(),
-                a=str(admin_found).lower(),
-            )
-        )
-        countries_mode = str(chosen_payload.get("countries_mode", "discovered")).strip().lower()
-        if countries_found and countries_mode == "discovered":
-            lines.append(
-                "- ⚠ config had api.countries but selector list not applied (check loader/version)."
-            )
-
-    return lines
-
-
-def _legacy_selector_section(
-    entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
-) -> List[str]:
-    top_selectors: List[str] = []
-    lines = ["## Selector effectiveness", ""]
-    snippets: List[str] = []
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else None
-        if not isinstance(extras, Mapping):
-            continue
-        selector_payload = extras.get("selector")
-        if not selector_payload:
-            continue
-        connector_id = entry.get("connector_id") or entry.get("connector") or "unknown"
-        if isinstance(selector_payload, Mapping):
-            top_payload = selector_payload.get("top_by_rows")
-            if isinstance(top_payload, Sequence):
-                for item in top_payload:
-                    selector_name: str | None = None
-                    rows_val: str | None = None
-                    if isinstance(item, Mapping):
-                        selector_name = str(
-                            item.get("selector")
-                            or item.get("name")
-                            or item.get("id")
-                            or item.get("value")
-                            or ""
-                        ).strip() or None
-                        rows_val = item.get("rows") or item.get("row_count")
-                    elif isinstance(item, Sequence) and len(item) >= 2:
-                        selector_name = str(item[0]).strip() or None
-                        rows_val = item[1]
-                    if not selector_name:
-                        continue
-                    summary_val = rows_val
-                    try:
-                        if summary_val is not None:
-                            summary_val = int(summary_val)
-                    except (TypeError, ValueError):
-                        summary_val = rows_val
-                    if summary_val is None:
-                        top_selectors.append(selector_name)
-                    else:
-                        top_selectors.append(f"{selector_name} ({summary_val})")
-            coverage = selector_payload.get("coverage")
-            matched = selector_payload.get("matched")
-            snippets.append(
-                f"- {connector_id}: selector diagnostics present (coverage={coverage}, matched={matched})"
-            )
-        else:
-            snippets.append(f"- {connector_id}: selector diagnostics present")
-
-    selector_files = [
-        path
-        for path in diagnostics_dir.rglob("selector*.json")
-        if path.is_file()
-    ]
-    if selector_files:
-        for path in selector_files:
-            relative = path.relative_to(diagnostics_dir)
-            snippets.append(f"- file: `{relative}`")
-
-    if top_selectors:
-        top_text = ", ".join(top_selectors[:5])
-    else:
-        top_text = "n/a"
-    lines.append(f"- Top selectors by rows: {top_text}")
-    if snippets:
-        lines.extend([""])
-        lines.extend(snippets)
-    else:
-        lines.append("- No selector diagnostics found; cannot compare coverage.")
-    return lines
-
-
-def _legacy_zero_row_section(
-    entries: Sequence[Mapping[str, Any]], staging_snapshot: Mapping[str, Any]
-) -> List[str]:
-    zero_entries: List[Mapping[str, Any]] = []
-    for entry in entries:
-        counts = entry.get("counts") if isinstance(entry, Mapping) else None
-        extras = entry.get("extras") if isinstance(entry, Mapping) else None
-        written = None
-        if isinstance(counts, Mapping):
-            written = counts.get("written")
-        if written is None and isinstance(extras, Mapping):
-            written = extras.get("rows_written")
-        if written is None:
-            continue
-        try:
-            if float(written) == 0:
-                zero_entries.append(entry)
-        except Exception:
-            continue
-
-    if zero_entries:
-        histogram = reason_histogram(zero_entries)
-        if histogram:
-            primary_reason = _display_reason(histogram.most_common(1)[0][0])
-        else:
-            primary_reason = "unknown"
-
-        drop_reasons: Counter[str] = Counter()
-        selectors_with_rows: List[str] = []
-        rows_received_total = 0
-        discovery_stages: List[str] = []
-
-        for entry in zero_entries:
-            extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-
-            normalize_section = extras.get("normalize") if isinstance(extras, Mapping) else None
-            if isinstance(normalize_section, Mapping):
-                drop_hist = normalize_section.get("drop_reasons")
-                if isinstance(drop_hist, Mapping):
-                    for reason, count in drop_hist.items():
-                        try:
-                            numeric_count = int(count)
-                        except (TypeError, ValueError):
-                            continue
-                        drop_reasons[_display_reason(reason)] += numeric_count
-
-            selector_payload = extras.get("selector") if isinstance(extras, Mapping) else None
-            if isinstance(selector_payload, Mapping):
-                top_rows = selector_payload.get("top_by_rows")
-                if isinstance(top_rows, Sequence):
-                    for item in top_rows:
-                        selector_name: str | None = None
-                        rows_value: Any = None
-                        if isinstance(item, Mapping):
-                            selector_name = str(
-                                item.get("selector")
-                                or item.get("name")
-                                or item.get("id")
-                                or item.get("value")
-                                or ""
-                            ).strip() or None
-                            rows_value = item.get("rows") or item.get("row_count")
-                        elif isinstance(item, Sequence) and len(item) >= 2:
-                            selector_name = str(item[0]).strip() or None
-                            rows_value = item[1]
-                        if not selector_name:
-                            continue
-                        try:
-                            numeric_rows = int(rows_value)
-                        except (TypeError, ValueError):
-                            numeric_rows = None
-                        if numeric_rows is not None and numeric_rows > 0:
-                            selectors_with_rows.append(f"{selector_name} ({numeric_rows})")
-                        elif rows_value not in (None, "", 0):
-                            selectors_with_rows.append(f"{selector_name} ({rows_value})")
-
-            received_value: Any = None
-            if isinstance(extras, Mapping):
-                for key in ("rows_received", "rows_fetched", "rows_in", "rows_total"):
-                    if extras.get(key) is not None:
-                        received_value = extras.get(key)
-                        break
-            counts = entry.get("counts") if isinstance(entry.get("counts"), Mapping) else None
-            if received_value is None and isinstance(counts, Mapping):
-                received_value = counts.get("fetched")
-            try:
-                rows_received_total += int(received_value) if received_value is not None else 0
-            except (TypeError, ValueError):
-                continue
-
-            discovery_payload = extras.get("discovery") if isinstance(extras, Mapping) else None
-            if isinstance(discovery_payload, Mapping):
-                report_payload = discovery_payload.get("report")
-                if isinstance(report_payload, Mapping):
-                    used_stage = report_payload.get("used_stage") or report_payload.get("stage")
-                    if isinstance(used_stage, str) and used_stage.strip():
-                        discovery_stages.append(used_stage.strip())
-
-        if not drop_reasons and histogram:
-            for reason, count in histogram.most_common(5):
-                drop_reasons[_display_reason(reason)] += count
-
-        selectors_text = ", ".join(selectors_with_rows[:5]) if selectors_with_rows else "none"
-        if drop_reasons:
-            top_drop_reasons = ", ".join(
-                f"{reason} ({count})" for reason, count in drop_reasons.most_common(5)
-            )
-        else:
-            top_drop_reasons = "—"
-
-        stage_text = (
-            ", ".join(sorted({stage for stage in discovery_stages if stage}))
-            if discovery_stages
-            else "unknown"
-        )
-
-        return [
-            "## Zero-row root cause",
-            "",
-            "- One or more connectors produced zero rows.",
-            f"- Primary reason: {primary_reason}",
-            f"- rows_received={rows_received_total}",
-            f"- Top drop reasons: {top_drop_reasons}",
-            f"- Selectors with rows: {selectors_text}",
-            f"- stage={stage_text}",
+    lines = ["## Config used", ""]
+    if source_label:
+        lines.append(f"- **Source:** {source_label}")
+    if warnings_list:
+        lines.append(f"- **Warnings:** {'; '.join(warnings_list)}")
+    lines.extend(
+        [
+            f"- **Path:** `{config.get('config_path_used', 'unknown')}`",
+            f"- **Exists:** {_format_yes_no(config.get('config_exists'))}",
+            f"- **SHA256:** `{config.get('config_sha256', 'n/a')}`",
+            f"- **Countries mode:** `{config.get('countries_mode', 'discovered')}`",
+            f"- **Countries count:** {config.get('countries_count', 0)}",
+            f"- **Countries preview:** {preview_text}",
+            f"- **Selected ISO3 preview:** {selected_text}",
+            f"- **Admin levels:** {admin_text}",
+            f"- **No date filter:** {_format_yes_no(config.get('no_date_filter'))}",
+            countries_parse_line,
+            admin_parse_line,
+            keys_line,
         ]
-
-    for connector_meta in staging_snapshot.values():
-        if not isinstance(connector_meta, Mapping):
-            continue
-        for meta in connector_meta.values():
-            if not isinstance(meta, Mapping):
-                continue
-            rows = meta.get("rows")
-            try:
-                if rows is not None and int(rows) == 0:
-                    return [
-                        "## Zero-row root cause",
-                        "",
-                        "- One or more connectors produced zero rows.",
-                        "- Primary reason: unknown",
-                        "- Top drop reasons: —",
-                    ]
-            except (TypeError, ValueError):
-                continue
-    return []
-
-
-def _legacy_dtm_sections(entries: Sequence[Mapping[str, Any]]) -> List[str]:
-    target: Mapping[str, Any] | None = None
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        connector_id = str(entry.get("connector_id") or "")
-        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-        if connector_id == "dtm_client" or (
-            isinstance(extras, Mapping)
-            and (extras.get("date_filter") or extras.get("per_country"))
-        ):
-            target = entry
-            break
-    if not target:
-        return []
-
-    lines: List[str] = []
-    date_filter_lines = _render_dtm_date_filter_section(target)
-    if date_filter_lines:
-        lines.extend(date_filter_lines)
-        lines.append("")
-    per_country_lines = _render_dtm_per_country_section(target)
-    if per_country_lines:
-        lines.extend(per_country_lines)
-        lines.append("")
+    )
+    if warn_unapplied:
+        lines.append("- ⚠ config had api.countries but selector list not applied (check loader/version).")
+    lines.append("")
     return lines
 
 
-def _render_dtm_date_filter_section(entry: Mapping[str, Any]) -> List[str]:
-    extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-    date_filter = extras.get("date_filter") if isinstance(extras, Mapping) else None
-    if not isinstance(date_filter, Mapping):
+def _render_source_sample_quick_checks() -> List[str]:
+    sample_path = Path("diagnostics/ingestion/dtm/samples/admin0_head.csv")
+    lines = ["## Source sample: quick checks", ""]
+    if not sample_path.exists():
+        lines.append("- **admin0_head.csv:** not present")
+        lines.append("")
+        return lines
+
+    iso_counter: Counter[str] = Counter()
+    name_counter: Counter[str] = Counter()
+    has_iso_column = False
+    has_admin_column = False
+    try:
+        with sample_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = [str(field).strip() for field in (reader.fieldnames or [])]
+            has_iso_column = "CountryISO3" in fieldnames
+            has_admin_column = "admin0Name" in fieldnames
+            for row in reader:
+                if not isinstance(row, Mapping):
+                    continue
+                if has_iso_column:
+                    iso_value = str(row.get("CountryISO3") or "").strip()
+                    if iso_value:
+                        iso_counter[iso_value] += 1
+                if has_admin_column:
+                    name_value = str(row.get("admin0Name") or "").strip()
+                    if name_value:
+                        name_counter[name_value] += 1
+    except Exception:
+        lines.append("- **admin0_head.csv:** unable to read (see artifact)")
+        lines.append("")
+        return lines
+
+    if not has_iso_column:
+        lines.append("- **CountryISO3 top 5:** column not present")
+    elif iso_counter:
+        top_iso = ", ".join(f"{code} ({count})" for code, count in iso_counter.most_common(5))
+        lines.append(f"- **CountryISO3 top 5:** {top_iso}")
+    else:
+        lines.append("- **CountryISO3 top 5:** —")
+
+    if not has_admin_column:
+        lines.append("- **admin0Name top 5:** column not present")
+    elif name_counter:
+        top_names = ", ".join(f"{name} ({count})" for name, count in name_counter.most_common(5))
+        lines.append(f"- **admin0Name top 5:** {top_names}")
+    else:
+        lines.append("- **admin0Name top 5:** —")
+
+    lines.append("")
+    return lines
+
+
+def _format_staging_line(label: str, stats: Mapping[str, Any]) -> str:
+    if not stats.get("exists"):
+        return f"- **{label}:** not present"
+    count = _coerce_int(stats.get("count"))
+    size_text = _format_bytes(int(stats.get("total_size", 0))) if count else "0 B"
+    if count == 0:
+        return f"- **{label}:** empty (0 files)"
+    files = stats.get("files") if isinstance(stats.get("files"), list) else []
+    if files:
+        preview = ", ".join(
+            f"{name} ({_format_bytes(size)})" for name, size in files if isinstance(name, str)
+        )
+        if preview:
+            return f"- **{label}:** {count} files ({size_text}) — top: {preview}"
+    return f"- **{label}:** {count} files ({size_text})"
+
+
+def _render_staging_readiness(entry: Mapping[str, Any]) -> List[str]:
+    resolver_path = Path("resolver/staging")
+    legacy_path = Path("data/staging")
+    resolver_stats = _collect_staging_inventory(resolver_path)
+    legacy_stats = _collect_staging_inventory(legacy_path)
+
+    lines = ["## Staging readiness", ""]
+    lines.append(_format_staging_line("resolver/staging", resolver_stats))
+    lines.append(_format_staging_line("data/staging", legacy_stats))
+
+    resolver_count = _coerce_int(resolver_stats.get("count"))
+    legacy_count = _coerce_int(legacy_stats.get("count"))
+    if resolver_count == 0 and legacy_count > 0:
+        lines.append("")
+        lines.append(
+            "**Export reads `resolver/staging` but ingest wrote to `data/staging`. "
+            "Fix: set `RESOLVER_OUTPUT_DIR=resolver/staging` in the ingest job.**"
+        )
+    elif resolver_count == 0 and legacy_count == 0:
+        lines.append("")
+        lines.append("**No staging inputs found; derive/export will have nothing to process.**")
+    lines.append("")
+    return lines
+
+
+def _render_dtm_date_filter(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    date_filter = _ensure_dict(extras.get("date_filter"))
+    if not date_filter:
         return []
 
     parsed_ok = _coerce_int(date_filter.get("parsed_ok"))
     parsed_total = _coerce_int(date_filter.get("parsed_total"))
-    percentage = (
-        f"{round((parsed_ok / parsed_total) * 100):d}%" if parsed_total else "0%"
-    )
+    percentage = "—"
+    if parsed_total:
+        percentage = f"{(parsed_ok / parsed_total) * 100:.1f}%"
+    min_date = date_filter.get("min_date") or "—"
+    max_date = date_filter.get("max_date") or "—"
     inside = _coerce_int(date_filter.get("inside"))
     outside = _coerce_int(date_filter.get("outside"))
     parse_failed = _coerce_int(date_filter.get("parse_failed"))
-    min_date = date_filter.get("min_date") or EM_DASH
-    max_date = date_filter.get("max_date") or EM_DASH
-    window_start = date_filter.get("window_start") or EM_DASH
-    window_end = date_filter.get("window_end") or EM_DASH
+    window_start = date_filter.get("window_start") or "—"
+    window_end = date_filter.get("window_end") or "—"
     inclusive_text = "inclusive" if date_filter.get("inclusive", True) else "exclusive"
-    skipped = _format_bool(date_filter.get("skipped"))
-    column_used = str(date_filter.get("date_column_used") or EM_DASH)
-    drop_counts = date_filter.get("drop_counts") if isinstance(date_filter.get("drop_counts"), Mapping) else {}
-    artifacts = extras.get("artifacts") if isinstance(extras.get("artifacts"), Mapping) else {}
-    sample_path = artifacts.get("normalize_drops") if isinstance(artifacts, Mapping) else None
+    skipped = _format_yes_no(date_filter.get("skipped"))
+    column_used = str(date_filter.get("date_column_used") or "—")
+    drop_counts = _ensure_dict(date_filter.get("drop_counts"))
+    artifacts = _ensure_dict(extras.get("artifacts"))
+    sample_path = artifacts.get("normalize_drops")
 
     lines = ["## DTM Date Filter", ""]
     lines.append(f"- **Date column:** `{column_used}`")
@@ -1062,7 +1226,7 @@ def _render_dtm_date_filter_section(entry: Mapping[str, Any]) -> List[str]:
         lines.append(f"- **Parse failures:** {parse_failed}")
     lines.append(f"- **Window:** {window_start} → {window_end} ({inclusive_text})")
     lines.append(f"- **Skipped filter:** {skipped}")
-    if isinstance(drop_counts, Mapping) and drop_counts:
+    if drop_counts:
         formatted = ", ".join(
             f"{reason} ({_coerce_int(count)})" for reason, count in sorted(drop_counts.items())
         )
@@ -1070,1436 +1234,716 @@ def _render_dtm_date_filter_section(entry: Mapping[str, Any]) -> List[str]:
             lines.append(f"- **Drop reasons:** {formatted}")
     if isinstance(sample_path, str) and sample_path:
         lines.append(f"- **Drop sample:** `{sample_path}`")
+    lines.append("")
     return lines
 
 
-def _render_dtm_per_country_section(entry: Mapping[str, Any]) -> List[str]:
-    extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-    per_country = extras.get("per_country") if isinstance(extras, Mapping) else None
-    if not isinstance(per_country, list) or not per_country:
+def _render_dtm_per_country(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    per_country_raw = extras.get("per_country")
+    if not isinstance(per_country_raw, list) or not per_country_raw:
         return []
 
-    header = ["country", "level", "param", "pages", "rows", "skipped_no_match", "reason"]
     rows: List[List[str]] = []
-    for item in per_country:
+    for item in per_country_raw:
         if not isinstance(item, Mapping):
             continue
-        country = str(item.get("country") or EM_DASH)
-        level = str(item.get("level") or EM_DASH)
-        param = str(item.get("param") or EM_DASH)
+        country = str(item.get("country") or "—")
+        level = str(item.get("level") or "—")
+        param = str(item.get("param") or "")
         if param.lower() == "iso3":
             param = "CountryISO3"
         elif param.lower() == "name":
             param = "CountryName"
-        pages = str(_coerce_int(item.get("pages")))
-        rows_count = str(_coerce_int(item.get("rows")))
-        skipped = str(item.get("skipped_no_match") or "")
+        pages = _coerce_int(item.get("pages"))
+        rows_count = _coerce_int(item.get("rows"))
+        skipped = bool(item.get("skipped_no_match"))
         reason = str(item.get("reason") or "")
-        rows.append([country, level, param, pages, rows_count, skipped, reason])
-
+        skipped_text = reason if skipped and reason else ("yes" if skipped else "")
+        rows.append(
+            [
+                country,
+                level,
+                param or "—",
+                str(pages),
+                str(rows_count),
+                skipped_text,
+            ]
+        )
     if not rows:
         return []
 
+    header = ["Country", "Level", "Param", "Pages", "Rows", "Skipped"]
     lines = ["## DTM per-country results", ""]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("| " + " | ".join(["---"] * len(header)) + " |")
     for row in rows:
         lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
     return lines
 
 
-def _legacy_dtm_reachability_section(diagnostics_dir: Path) -> List[str]:
-    reachability_path = diagnostics_dir / "dtm" / "reachability.json"
-    payload = safe_load_json(reachability_path)
-    if not isinstance(payload, (Mapping, list)):
+def _render_zero_row_root_cause(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    counts = _ensure_dict(entry.get("counts"))
+    rows_written = _coerce_int(counts.get("written")) or _coerce_int(extras.get("rows_written"))
+    if rows_written:
         return []
 
-    def _host_port_snippet(info: Mapping[str, Any]) -> str | None:
-        host = info.get("host") or info.get("hostname") or info.get("ip") or info.get("name")
-        port = info.get("port")
-        if (host and port) or (host and isinstance(port, (str, int)) and str(port).strip()):
-            return f"{host}:{port}"
-        url = info.get("url") or info.get("endpoint")
-        if isinstance(url, str) and url:
-            try:
-                from urllib.parse import urlparse
-
-                parsed = urlparse(url if "://" in url else f"https://{url}")
-                if parsed.hostname and parsed.port:
-                    return f"{parsed.hostname}:{parsed.port}"
-            except Exception:
-                return None
-        return None
-
-    lines = ["## DTM Reachability", ""]
-    summary_lines: List[str] = []
-    endpoints: List[str] = []
-
-    def _record_endpoint(info: Mapping[str, Any]) -> None:
-        snippet = _host_port_snippet(info)
-        if snippet:
-            endpoints.append(f"- {snippet}")
-
-    if isinstance(payload, Mapping):
-        overall = payload.get("overall_status") or payload.get("status") or payload.get("ok")
-        if overall is not None:
-            summary_lines.append(f"- Overall: {overall}")
-        target_host = payload.get("target_host") or payload.get("host")
-        target_port = payload.get("target_port") or payload.get("port")
-        if target_host and target_port:
-            endpoints.append(f"- {target_host}:{target_port}")
-        checks = payload.get("checks") or payload.get("endpoints") or payload.get("results") or payload.get("probes")
-        if isinstance(checks, Mapping):
-            for name, info in sorted(checks.items()):
-                if not isinstance(info, Mapping):
-                    continue
-                _record_endpoint({"host": info.get("host") or name, "port": info.get("port"), "url": info.get("url")})
-        elif isinstance(checks, list):
-            for info in checks:
-                if isinstance(info, Mapping):
-                    _record_endpoint(info)
-        if not summary_lines:
-            summary_lines.append("- Reachability diagnostics present.")
-    elif isinstance(payload, list):
-        for info in payload:
-            if isinstance(info, Mapping):
-                _record_endpoint(info)
-
-    if endpoints:
-        summary_lines.extend(endpoints)
-    elif not summary_lines:
-        summary_lines.append("- Reachability diagnostics present.")
-
-    egress = payload.get("egress") if isinstance(payload, Mapping) else None
-    if isinstance(egress, Mapping):
-        for name, info in sorted(egress.items()):
-            text: Any = None
-            if isinstance(info, Mapping):
-                text = info.get("text") or info.get("ip")
-            elif isinstance(info, (str, int, float)):
-                text = info
-            if text is not None:
-                summary_lines.append(f"- egress {name}={text}")
-
-    lines.extend(summary_lines)
-    return lines
-
-
-def _legacy_logs_section(
-    entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
-) -> List[str]:
-    return []
-
-
-@dataclass
-class ConnectorRecord:
-    name: str
-    status: str
-    mode: str = "real"
-    reason: str | None = None
-    started_at: str | None = None
-    duration_ms: int = 0
-    counts: Dict[str, int] = field(default_factory=dict)
-    http: Dict[str, Any] = field(default_factory=dict)
-    extras: Dict[str, Any] = field(default_factory=dict)
-    coverage: Dict[str, Any] = field(default_factory=dict)
-    samples: Dict[str, Any] = field(default_factory=dict)
-    reachability: Dict[str, Any] = field(default_factory=dict)
-    config_source: str | None = None
-    config_path: str | None = None
-    countries_count: int | None = None
-    countries_sample: List[str] = field(default_factory=list)
-    window_start: str | None = None
-    window_end: str | None = None
-    exported_flow: bool | None = None
-    exported_stock: bool | None = None
-    why_zero: Mapping[str, Any] | None = None
-    error: Mapping[str, Any] | None = None
-    drop_histogram: Mapping[str, int] = field(default_factory=dict)
-    loader_warnings: List[str] = field(default_factory=list)
-    detail_blocks: Dict[str, Any] = field(default_factory=dict)
-    meta: Dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def rows_fetched(self) -> int:
-        return _coerce_int(self.counts.get("fetched"))
-
-    @property
-    def rows_normalized(self) -> int:
-        return _coerce_int(self.counts.get("normalized"))
-
-    @property
-    def rows_written(self) -> int:
-        return _coerce_int(self.counts.get("written"))
-
-
-def _normalise_connector(entry: Mapping[str, Any]) -> ConnectorRecord:
-    name = str(entry.get("connector_id") or entry.get("name") or "unknown")
-    status = str(entry.get("status") or entry.get("status_raw") or "unknown").lower()
-    mode = str(entry.get("mode") or entry.get("extras", {}).get("mode") or "real")
-    extras = dict(entry.get("extras") or {})
-    counts = dict(entry.get("counts") or {})
-    http = dict(entry.get("http") or {})
-    coverage = dict(entry.get("coverage") or {})
-    samples = dict(entry.get("samples") or {})
-    started_at = entry.get("started_at_utc") or extras.get("started_at_utc")
-    duration_ms = _coerce_int(entry.get("duration_ms") or extras.get("duration_ms"))
-    reason = entry.get("reason") or extras.get("reason")
-    meta = dict(entry.get("meta") or {})
-    record = ConnectorRecord(
-        name=name,
-        status=status,
-        mode=mode,
-        reason=str(reason) if reason else None,
-        started_at=str(started_at) if started_at else None,
-        duration_ms=duration_ms,
-        counts={key: _coerce_int(value) for key, value in counts.items()},
-        http=http,
-        extras=extras,
-        coverage=coverage,
-        samples=samples,
-        meta=meta,
+    reason = extras.get("zero_rows_reason") or extras.get("status_raw") or entry.get("status_raw")
+    normalize = _ensure_dict(extras.get("normalize"))
+    drop_reasons = _ensure_dict(normalize.get("drop_reasons"))
+    sorted_reasons = sorted(
+        ((str(key), _coerce_int(value)) for key, value in drop_reasons.items()),
+        key=lambda item: (-item[1], item[0]),
     )
-    return record
+    top_reasons = [f"{label} ({count})" for label, count in sorted_reasons if count][:3]
 
-
-def _load_optional(path: Path) -> Mapping[str, Any]:
-    payload = safe_load_json(path)
-    return payload if payload else {}
-
-
-def _parse_connector_context(record: ConnectorRecord, base_dir: Path) -> None:
-    connector_dir = base_dir / record.name
-    reachability_path = connector_dir / "reachability.json"
-    manifest_path = connector_dir / "manifest.json"
-    normalize_path = connector_dir / "normalize.json"
-    drop_path = connector_dir / "drop_reasons.json"
-    why_zero_path = connector_dir / "why_zero.json"
-    error_path = connector_dir / "error.json"
-    http_summary_path = connector_dir / "http_summary.json"
-
-    record.reachability = dict(_load_optional(reachability_path))
-    record.detail_blocks["manifest"] = _load_optional(manifest_path)
-
-    normalize_payload = _load_optional(normalize_path)
-    if normalize_payload:
-        drop_hist = normalize_payload.get("drop_reasons")
-        if isinstance(drop_hist, Mapping):
-            record.drop_histogram = {str(k): _coerce_int(v) for k, v in drop_hist.items()}
-        chosen = normalize_payload.get("chosen_columns")
-        if isinstance(chosen, Mapping):
-            record.detail_blocks["chosen_columns"] = chosen
-
-    drop_payload = _load_optional(drop_path)
-    if drop_payload and not record.drop_histogram:
-        if isinstance(drop_payload, Mapping):
-            record.drop_histogram = {str(k): _coerce_int(v) for k, v in drop_payload.items()}
-
-    why_payload = _load_optional(why_zero_path)
-    if why_payload:
-        record.why_zero = why_payload
-        warnings = why_payload.get("loader_warnings")
-        if isinstance(warnings, list):
-            record.loader_warnings = [str(item) for item in warnings if str(item)]
-        record.config_source = why_payload.get("config_source") or record.config_source
-        path = why_payload.get("config_path_used")
-        if isinstance(path, str):
-            record.config_path = path
-        record.countries_count = why_payload.get("countries_count")
-        sample = why_payload.get("countries_sample")
-        if isinstance(sample, list):
-            record.countries_sample = [str(item) for item in sample if str(item)]
-
-    error_payload = _load_optional(error_path)
-    if error_payload:
-        record.error = error_payload
-
-    http_summary = _load_optional(http_summary_path)
-    if http_summary:
-        record.detail_blocks["http_summary"] = http_summary
-
-    config_block = record.extras.get("config") if isinstance(record.extras, Mapping) else {}
-    if isinstance(config_block, Mapping):
-        if not record.config_source:
-            record.config_source = str(config_block.get("config_source_label") or config_block.get("config_source") or "") or None
-        if not record.config_path:
-            path = config_block.get("config_path_used") or config_block.get("config_path")
-            if isinstance(path, str):
-                record.config_path = path
-        warnings = config_block.get("config_warnings")
-        if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)):
-            record.loader_warnings.extend(str(item) for item in warnings if str(item))
-    sample_block = record.samples.get("top_iso3") if isinstance(record.samples, Mapping) else None
-    if isinstance(sample_block, list) and not record.countries_sample:
-        record.countries_sample = [
-            str(item[0]) if isinstance(item, (list, tuple)) and item else str(item)
-            for item in sample_block[:5]
-        ]
-    coverage = record.coverage
-    record.window_start = str(coverage.get("ym_min") or coverage.get("as_of_min") or "") or None
-    record.window_end = str(coverage.get("ym_max") or coverage.get("as_of_max") or "") or None
-
-
-def _gather_run_stats(records: Sequence[ConnectorRecord]) -> Dict[str, Any]:
-    earliest: _dt.datetime | None = None
-    latest: _dt.datetime | None = None
-    for record in records:
-        if record.started_at:
-            try:
-                start = _dt.datetime.fromisoformat(record.started_at.replace("Z", "+00:00"))
-            except ValueError:
-                start = None
-        else:
-            start = None
-        if start:
-            duration = _dt.timedelta(milliseconds=record.duration_ms)
-            end = start + duration
-            if earliest is None or start < earliest:
-                earliest = start
-            if latest is None or end > latest:
-                latest = end
-    return {
-        "start": earliest.isoformat() if earliest else None,
-        "end": latest.isoformat() if latest else None,
-        "duration": str(latest - earliest) if earliest and latest else None,
-    }
-
-
-def _git_snapshot() -> Dict[str, Any]:
-    def _run(*cmd: str) -> str | None:
-        try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
-        except OSError:
-            return None
-        output = result.stdout.strip()
-        return output or None
-
-    sha = _run("git", "rev-parse", "HEAD")
-    branch = _run("git", "rev-parse", "--abbrev-ref", "HEAD")
-    dirty = bool(_run("git", "status", "--porcelain"))
-    return {"sha": sha, "branch": branch, "dirty": dirty}
-
-
-def _version_snapshot() -> Dict[str, Any]:
-    snapshot = {
-        "python": sys.version.split()[0],
-        "pip": None,
-        "duckdb": None,
-        "pandas": None,
-        "platform": platform.platform(),
-        "glibc": None,
-        "timezone": os.environ.get("TZ"),
-        "locale": os.environ.get("LC_ALL") or os.environ.get("LANG"),
-    }
-    try:
-        import pip  # type: ignore
-
-        snapshot["pip"] = getattr(pip, "__version__", None)
-    except Exception:
-        snapshot["pip"] = None
-    try:
-        import duckdb  # type: ignore
-
-        snapshot["duckdb"] = getattr(duckdb, "__version__", None)
-    except Exception:
-        pass
-    try:
-        import pandas  # type: ignore
-
-        snapshot["pandas"] = getattr(pandas, "__version__", None)
-    except Exception:
-        pass
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None)
-        version = getattr(libc, "gnu_get_libc_version", None)
-        if callable(version):
-            snapshot["glibc"] = version().decode("utf-8") if hasattr(version(), "decode") else version()
-    except Exception:
-        snapshot["glibc"] = None
-    return snapshot
-
-
-def _env_flags() -> Dict[str, Any]:
-    flags = {key: value for key, value in os.environ.items() if key.startswith("RESOLVER_")}
-    for key in ("SUMMARY_VERBOSE", "SUMMARY_LOG_TAIL_KB", "ONLY_CONNECTOR", "EMPTY_POLICY"):
-        value = os.environ.get(key)
-        if value is not None:
-            flags[key] = value
-    return dict(sorted(flags.items()))
-
-
-def _secret_presence() -> Dict[str, bool]:
-    secrets = {}
-    for key in sorted(os.environ.keys()):
-        if any(token in key for token in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")):
-            secrets[key] = bool(os.environ.get(key, "").strip())
-    return secrets
-
-
-def _date_windows(records: Sequence[ConnectorRecord]) -> Dict[str, Any]:
-    global_window = {
-        "start": os.environ.get("RESOLVER_GLOBAL_WINDOW_START"),
-        "end": os.environ.get("RESOLVER_GLOBAL_WINDOW_END"),
-    }
-    per_connector: Dict[str, Dict[str, Any]] = {}
-    for record in records:
-        if record.window_start or record.window_end:
-            per_connector[record.name] = {
-                "start": record.window_start,
-                "end": record.window_end,
-            }
-    return {"global": global_window, "per_connector": per_connector}
-
-
-def _resource_snapshot() -> Dict[str, Any]:
-    disk = shutil.disk_usage(".")
-    info: Dict[str, Any] = {
-        "disk_free_mb": int(disk.free / (1024 * 1024)),
-        "disk_total_mb": int(disk.total / (1024 * 1024)),
-    }
-    try:
-        import psutil  # type: ignore
-
-        mem = psutil.virtual_memory()
-        info["mem_total_mb"] = int(mem.total / (1024 * 1024))
-        info["mem_available_mb"] = int(mem.available / (1024 * 1024))
-    except Exception:
-        pass
-    return info
-
-
-def _collect_staging_snapshot(staging_dir: Path) -> Dict[str, Any]:
-    snapshot: Dict[str, Dict[str, Any]] = {}
-    if not staging_dir.exists():
-        return snapshot
-    for connector_dir in staging_dir.iterdir():
-        if not connector_dir.is_dir():
-            continue
-        metrics: Dict[str, Any] = {}
-        for file in connector_dir.iterdir():
-            if not file.is_file() or file.suffix.lower() not in {".csv", ".tsv", ".json", ".parquet", ".jsonl"}:
+    per_country = extras.get("per_country_counts")
+    total_selectors = 0
+    selectors_with_rows = 0
+    if isinstance(per_country, list):
+        for item in per_country:
+            if not isinstance(item, Mapping):
                 continue
-            try:
-                size = file.stat().st_size
-            except OSError:
-                size = 0
-            rows = _count_rows(file)
-            metrics[file.name] = {"path": file.as_posix(), "size": size, "rows": rows}
-        snapshot[connector_dir.name] = metrics
-    return snapshot
+            total_selectors += 1
+            if _coerce_int(item.get("rows")) > 0:
+                selectors_with_rows += 1
 
+    discovery = _ensure_dict(extras.get("discovery"))
+    fetch = _ensure_dict(extras.get("fetch"))
 
-def _count_rows(path: Path) -> int:
-    if path.suffix.lower() not in {".csv", ".tsv"}:
-        return 0
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            next(handle, None)
-            return sum(1 for _ in handle)
-    except OSError:
-        return 0
-
-
-def _format_status_counts(entries: Sequence[Mapping[str, Any]]) -> str:
-    counter = status_histogram(entries)
-    if not counter:
-        return "none"
-    return ", ".join(f"{key}={counter[key]}" for key in sorted(counter))
-
-
-def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
-    counter = reason_histogram(entries)
-    if counter:
-        parts = [f"{_display_reason(reason)}={counter[reason]}" for reason in sorted(counter)]
-        return ", ".join(parts)
-    if _LAST_STUB_REASON_ALIAS:
-        return f"{_LAST_STUB_REASON_ALIAS}=1"
-    return EM_DASH
-
-
-def _rows_totals(records: Sequence[ConnectorRecord]) -> tuple[int, int, int, bool]:
-    fetched = sum(record.rows_fetched for record in records)
-    normalized = sum(record.rows_normalized for record in records)
-    written = sum(record.rows_written for record in records)
-    override = any(
-        isinstance(record.extras, Mapping)
-        and record.extras.get("counts_override_source") == "run.json"
-        for record in records
-    )
-    return fetched, normalized, written, override
-
-
-def _render_run_overview(
-    records: Sequence[ConnectorRecord],
-    entries: Sequence[Mapping[str, Any]],
-) -> List[str]:
-    lines = ["## Run Overview", ""]
-    lines.append(f"* **Connectors:** {len(records)}")
-    lines.append(
-        f"* **Status counts:** {_format_status_counts(entries)}"
-    )
-    reason_hist = _format_reason_histogram(entries)
-    if reason_hist != EM_DASH:
-        lines.append(f"* **Reason histogram:** {reason_hist}")
-    fetched, normalized, written, override = _rows_totals(records)
-    footnote = " (from run.json)" if override else ""
-    lines.append(f"* **Rows fetched:** {fetched}{footnote}")
-    lines.append(f"* **Rows normalized:** {normalized}{footnote}")
-    lines.append(f"* **Rows written:** {written}{footnote}")
-    lines.append("")
-    git_info = _git_snapshot()
-    version_info = _version_snapshot()
-    run_stats = _gather_run_stats(records)
-    flags = _env_flags()
-    secrets = _secret_presence()
-    windows = _date_windows(records)
-    resources = _resource_snapshot()
-
-    lines.append("### Git & Timing")
-    lines.append(f"- Commit: `{git_info.get('sha') or 'unknown'}` (branch: {git_info.get('branch') or 'unknown'})")
-    lines.append(f"- Dirty workspace: {_format_bool(git_info.get('dirty'))}")
-    lines.append(f"- Start: {run_stats.get('start') or 'n/a'}")
-    lines.append(f"- End: {run_stats.get('end') or 'n/a'}")
-    lines.append(f"- Duration: {run_stats.get('duration') or 'n/a'}")
-    lines.append("")
-
-    lines.append("### Host & Versions")
-    lines.append(f"- Python: {version_info.get('python')}")
-    lines.append(f"- pip: {version_info.get('pip') or 'unknown'}")
-    lines.append(f"- duckdb: {version_info.get('duckdb') or 'unknown'}")
-    lines.append(f"- pandas: {version_info.get('pandas') or 'unknown'}")
-    lines.append(f"- Platform: {version_info.get('platform')}")
-    lines.append(f"- glibc: {version_info.get('glibc') or 'unknown'}")
-    lines.append(f"- Locale: {version_info.get('locale') or 'unknown'}")
-    lines.append(f"- Timezone: {version_info.get('timezone') or 'unknown'}")
-    lines.append("")
-
-    lines.append("### Global Flags")
-    if flags:
-        for key, value in flags.items():
-            lines.append(f"- `{key}` = `{value}`")
-    else:
-        lines.append("- (no RESOLVER_* flags detected)")
-    lines.append("")
-
-    lines.append("### Secrets Presence")
-    if secrets:
-        for key, present in secrets.items():
-            lines.append(f"- {key}: {_format_bool(present)}")
-    else:
-        lines.append("- (no matching secrets detected)")
-    lines.append("")
-
-    lines.append("### Date Windows")
-    global_window = windows["global"]
-    lines.append(f"- Global: {global_window.get('start') or '—'} → {global_window.get('end') or '—'}")
-    per_connector = windows["per_connector"]
-    if per_connector:
-        for connector, window in sorted(per_connector.items()):
-            lines.append(f"- {connector}: {window.get('start') or '—'} → {window.get('end') or '—'}")
-    lines.append("")
-
-    lines.append("### Resources")
-    lines.append(f"- Disk free: {resources.get('disk_free_mb')} MB")
-    lines.append(f"- Disk total: {resources.get('disk_total_mb')} MB")
-    if "mem_total_mb" in resources:
-        lines.append(f"- Memory: {resources.get('mem_available_mb')} MB free / {resources.get('mem_total_mb')} MB total")
-    lines.append("")
-
-    module = sys.modules.get(__name__)
-    exported: List[str] = []
-    for name in ("render_summary_md", "render_dtm_deep_dive", "_render_dtm_deep_dive"):
-        if module and hasattr(module, name):
-            exported.append(name)
-    lines.append(
-        f"**Summarizer API (exported):** {', '.join(exported) if exported else '(none)'}"
-    )
-    lines.append("")
-    return lines
-
-
-def _render_connector_matrix(
-    records: Sequence[ConnectorRecord],
-    entries: Sequence[Mapping[str, Any]],
-    diagnostics_dir: Path,
-    staging_dir: Path,
-) -> List[str]:
-    record_lookup = {record.name: record for record in records}
-    entry_lookup = {
-        str(
-            entry.get("connector_id")
-            or entry.get("connector")
-            or entry.get("name")
-            or "unknown"
-        ): entry
-        for entry in entries
-    }
-    logs = gather_log_files(diagnostics_dir)
-    meta_files = gather_meta_json_files(diagnostics_dir)
-
-    logs_by_name = {path.stem: path for path in logs}
-    meta_info: Dict[str, Dict[str, Any]] = {}
-    for meta_path in meta_files:
-        connector_name = meta_path.parent.name or meta_path.stem
-        bucket = meta_info.setdefault(connector_name, {"rows": 0, "paths": []})
-        bucket["paths"].append(meta_path)
-        payload = safe_load_json(meta_path)
-        rows_value: Any = None
-        if isinstance(payload, Mapping):
-            rows_value = payload.get("rows_written") or payload.get("rows")
-            meta_payload = payload.get("meta") if isinstance(payload.get("meta"), Mapping) else None
-            if rows_value is None and isinstance(meta_payload, Mapping):
-                rows_value = meta_payload.get("rows_written") or meta_payload.get("rows")
-        try:
-            if rows_value is not None:
-                bucket["rows"] += int(rows_value)
-        except (TypeError, ValueError):
-            continue
-
-    def _prefer(existing: Any, new_value: Any) -> Any:
-        if new_value is None:
-            return existing
-        if isinstance(new_value, str) and not new_value.strip():
-            return existing
-        return new_value
-
-    def _display_path(path: Path | None) -> str:
-        if not path:
-            return EM_DASH
-        candidates = [diagnostics_dir.parent.parent, diagnostics_dir.parent, diagnostics_dir]
-        for base in candidates:
-            if not isinstance(base, Path):
-                continue
-            try:
-                rel = path.relative_to(base)
-            except ValueError:
-                continue
-            text = rel.as_posix()
-            if text:
-                return text
-        return path.as_posix()
-
-    aggregated: Dict[str, Dict[str, Any]] = {}
-    duplicates: Dict[str, int] = {}
-
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        name = str(
-            entry.get("connector_id")
-            or entry.get("connector")
-            or entry.get("name")
-            or "unknown"
-        )
-        if name in aggregated:
-            duplicates[name] = duplicates.get(name, 0) + 1
-        bucket = aggregated.setdefault(
-            name,
-            {
-                "mode": None,
-                "status": None,
-                "reason": None,
-                "http": None,
-                "counts": None,
-                "rows_written": None,
-                "kept": None,
-                "dropped": None,
-                "parse_errors": None,
-                "meta_path": None,
-                "coverage": None,
-                "samples": None,
-                "coverage_note": None,
-            },
-        )
-
-        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else {}
-        bucket["mode"] = _prefer(bucket.get("mode"), entry.get("mode") or extras.get("mode"))
-        status_value = extras.get("status_raw") or entry.get("status")
-        bucket["status"] = _prefer(bucket.get("status"), status_value)
-        reason_value = entry.get("reason")
-        if reason_value is None and isinstance(extras, Mapping):
-            reason_value = extras.get("reason")
-        bucket["reason"] = _prefer(bucket.get("reason"), reason_value)
-
-        counts = entry.get("counts") if isinstance(entry.get("counts"), Mapping) else {}
-        if counts:
-            bucket["counts"] = (
-                _coerce_int(counts.get("fetched")),
-                _coerce_int(counts.get("normalized")),
-                _coerce_int(counts.get("written")),
-            )
-            bucket["rows_written"] = _coerce_int(counts.get("written"))
-
-        http_payload = entry.get("http") if isinstance(entry.get("http"), Mapping) else {}
-        if http_payload:
-            bucket["http"] = (
-                _coerce_int(http_payload.get("2xx")),
-                _coerce_int(http_payload.get("4xx")),
-                _coerce_int(http_payload.get("5xx")),
-                _coerce_int(http_payload.get("retries")),
-            )
-
-        run_totals = extras.get("run_totals") if isinstance(extras, Mapping) else None
-        if isinstance(run_totals, Mapping):
-            if run_totals.get("rows_written") is not None:
-                bucket["kept"] = _prefer(
-                    bucket.get("kept"), _coerce_int(run_totals.get("rows_written"))
-                )
-                bucket["rows_written"] = _prefer(
-                    bucket.get("rows_written"), _coerce_int(run_totals.get("rows_written"))
-                )
-            if run_totals.get("dropped") is not None:
-                bucket["dropped"] = _prefer(
-                    bucket.get("dropped"), _coerce_int(run_totals.get("dropped"))
-                )
-            if run_totals.get("parse_errors") is not None:
-                bucket["parse_errors"] = _prefer(
-                    bucket.get("parse_errors"), _coerce_int(run_totals.get("parse_errors"))
-                )
-        if isinstance(extras, Mapping):
-            if extras.get("rows_written") is not None and bucket.get("kept") is None:
-                try:
-                    bucket["kept"] = _coerce_int(extras.get("rows_written"))
-                except (TypeError, ValueError):
-                    bucket["kept"] = extras.get("rows_written")
-            if extras.get("rows_written") is not None and bucket.get("rows_written") is None:
-                try:
-                    bucket["rows_written"] = _coerce_int(extras.get("rows_written"))
-                except (TypeError, ValueError):
-                    bucket["rows_written"] = extras.get("rows_written")
-            if extras.get("meta_path") and not bucket.get("meta_path"):
-                bucket["meta_path"] = str(extras.get("meta_path"))
-
-        coverage_payload = entry.get("coverage")
-        if isinstance(coverage_payload, Mapping):
-            bucket["coverage"] = dict(coverage_payload)
-
-        samples_payload = entry.get("samples")
-        if isinstance(samples_payload, Mapping):
-            bucket["samples"] = dict(samples_payload)
-
-        if isinstance(extras, Mapping):
-            coverage_note = extras.get("coverage_note") or extras.get("coverage_note_pretty")
-            if coverage_note:
-                bucket["coverage_note"] = str(coverage_note)
-
-    for record in records:
-        aggregated.setdefault(
-            record.name,
-            {
-                "mode": record.mode,
-                "status": record.status,
-                "reason": record.reason,
-                "http": None,
-                "counts": None,
-                "rows_written": None,
-                "kept": None,
-                "dropped": None,
-                "parse_errors": None,
-                "meta_path": None,
-            },
-        )
-
-    all_names = set(aggregated) | set(logs_by_name) | set(meta_info) | set(record_lookup)
-    lines = ["## Connector Diagnostics Matrix", ""]
-    if duplicates:
-        dedupe_parts = [
-            f"{count} duplicate entries for {name}" for name, count in sorted(duplicates.items())
-        ]
-        lines.append(f"(deduplicated {'; '.join(dedupe_parts)})")
-        lines.append("")
-
-    def _format_range(
-        payload: Mapping[str, Any] | None,
-        start_key: str,
-        end_key: str,
-        *,
-        alt_start: str | None = None,
-        alt_end: str | None = None,
-    ) -> str:
-        if not isinstance(payload, Mapping):
-            return EM_DASH
-
-        def _extract(key: str | None) -> str:
-            if not key:
-                return ""
-            raw = payload.get(key)
-            if raw is None:
-                return ""
-            return str(raw).strip()
-
-        start = _extract(start_key) or _extract(alt_start)
-        end = _extract(end_key) or _extract(alt_end)
-        if start and end:
-            return f"{start}/{end}"
-        return EM_DASH
-
-    def _format_top_pairs(value: Any) -> str:
-        pairs: List[tuple[str, Any]] = []
-        if isinstance(value, Mapping):
-            pairs = [(str(k), v) for k, v in value.items()]
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            for item in value:
-                if isinstance(item, Mapping):
-                    label = item.get("selector") or item.get("name") or item.get("country") or item.get("hazard") or item.get("value")
-                    count = item.get("rows") or item.get("count") or item.get("total") or item.get("times")
-                    if label:
-                        pairs.append((str(label), count))
-                elif isinstance(item, Sequence) and len(item) >= 2:
-                    pairs.append((str(item[0]), item[1]))
-        formatted: List[str] = []
-        for label, count in pairs[:5]:
-            clean_label = label.strip()
-            if not clean_label:
-                continue
-            try:
-                count_value: Any = int(count)
-            except (TypeError, ValueError):
-                count_value = count
-            formatted.append(f"`{clean_label}` ({count_value})")
-        return ", ".join(formatted) if formatted else EM_DASH
-
-    def _format_triplet(values: Sequence[Any]) -> str:
-        parts: List[str] = []
-        for value in values:
-            if value in (None, ""):
-                parts.append("0")
-                continue
-            try:
-                parts.append(str(int(value)))
-            except (TypeError, ValueError):
-                parts.append(str(value))
-        while len(parts) < 3:
-            parts.append("0")
-        return "/".join(parts[:3])
-
-    def _format_country_cell(
-        record: ConnectorRecord | None, bucket_payload: Mapping[str, Any]
-    ) -> str:
-        if record:
-            if record.countries_sample:
-                return ", ".join(record.countries_sample[:3])
-            record_extras = record.extras if isinstance(record.extras, Mapping) else {}
-            if isinstance(record_extras, Mapping):
-                country_value = record_extras.get("country")
-                if isinstance(country_value, str) and country_value.strip():
-                    return country_value.strip()
-                countries_list = record_extras.get("countries")
-                if isinstance(countries_list, Sequence) and not isinstance(
-                    countries_list, (str, bytes)
-                ):
-                    values = [
-                        str(item).strip()
-                        for item in countries_list
-                        if str(item).strip()
-                    ]
-                    if values:
-                        return ", ".join(values[:3])
-            if record.countries_count:
-                return str(record.countries_count)
-
-        samples_payload = (
-            bucket_payload.get("samples")
-            if isinstance(bucket_payload, Mapping)
-            else None
-        )
-        if isinstance(samples_payload, Mapping):
-            top_iso = samples_payload.get("top_iso3")
-            if isinstance(top_iso, Sequence) and not isinstance(top_iso, (str, bytes)):
-                iso_values: List[str] = []
-                for item in top_iso:
-                    iso_candidate: Any | None = None
-                    if isinstance(item, Mapping):
-                        iso_candidate = (
-                            item.get("selector")
-                            or item.get("name")
-                            or item.get("country")
-                            or item.get("value")
-                        )
-                    elif isinstance(item, Sequence) and item:
-                        iso_candidate = item[0]
-                    else:
-                        iso_candidate = item
-                    if iso_candidate is None:
-                        continue
-                    iso_text = str(iso_candidate).strip()
-                    if not iso_text:
-                        continue
-                    iso_values.append(iso_text)
-                    if len(iso_values) >= 3:
-                        break
-                if iso_values:
-                    return ", ".join(iso_values)
-
-        return EM_DASH
-
-    lines.append(CLASSIC_TABLE_HEADER)
-    lines.append(CLASSIC_TABLE_DIVIDER)
-
-    for name in sorted(all_names):
-        bucket = aggregated.get(name, {})
-        record = record_lookup.get(name)
-
-        mode = bucket.get("mode") or (record.mode if record else "real")
-        status_value = bucket.get("status") or (record.status if record else EM_DASH)
-        reason_value = bucket.get("reason") or (record.reason if record else None)
-        reason_text = _display_reason(reason_value) if reason_value else EM_DASH
-
-        http_counts = bucket.get("http")
-        if not http_counts and record and isinstance(record.http, Mapping) and record.http:
-            http_counts = (
-                _coerce_int(record.http.get("2xx")),
-                _coerce_int(record.http.get("4xx")),
-                _coerce_int(record.http.get("5xx")),
-                _coerce_int(record.http.get("retries")),
-            )
-        http_text = EM_DASH
-        retries_value = 0
-        if http_counts:
-            counts_tuple = tuple(_coerce_int(val) for val in http_counts[:3])
-            retries_value = _coerce_int(http_counts[3]) if len(http_counts) > 3 else 0
-            if any(counts_tuple):
-                http_text = f"{counts_tuple[0]}/{counts_tuple[1]}/{counts_tuple[2]} ({retries_value})"
-
-        counts_tuple = bucket.get("counts")
-        if not counts_tuple and record:
-            counts_tuple = (
-                record.rows_fetched,
-                record.rows_normalized,
-                record.rows_written,
-            )
-        if counts_tuple:
-            fetched_count = _coerce_int(counts_tuple[0])
-            normalized_count = _coerce_int(counts_tuple[1])
-            written_count = _coerce_int(counts_tuple[2])
-        else:
-            fetched_count = normalized_count = written_count = 0
-
-        rows_written_fallback = bucket.get("rows_written")
-        if rows_written_fallback not in (None, ""):
-            fallback_value = _coerce_int(rows_written_fallback)
-            if not written_count:
-                written_count = fallback_value
-        if not written_count and record:
-            written_count = record.rows_written
-
-        kept_value: Any = bucket.get("kept")
-        if kept_value in (None, ""):
-            kept_value = rows_written_fallback
-        if kept_value in (None, "") and record:
-            kept_value = record.rows_written
-        kept_count = _coerce_int(kept_value)
-
-        dropped_count = _coerce_int(bucket.get("dropped"))
-        parse_errors_count = _coerce_int(bucket.get("parse_errors"))
-
-        record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
-        meta_bucket = meta_info.get(name, {})
-
-        log_path = logs_by_name.get(name)
-        logs_cell = _display_path(log_path) if log_path is not None else EM_DASH
-
-        meta_paths = list(meta_bucket.get("paths") or [])
-        if not meta_paths and bucket.get("meta_path"):
-            meta_paths.append(Path(str(bucket["meta_path"])))
-        if not meta_paths and isinstance(record_extras, Mapping):
-            meta_candidate = record_extras.get("meta_path")
-            if meta_candidate:
-                meta_paths.append(Path(str(meta_candidate)))
-        entry = entry_lookup.get(name, {})
-        meta_rows_cell = meta_rows(entry, staging_dir, _run_details(entry))
-        meta_cell = EM_DASH
-        if meta_paths:
-            rendered_paths: List[str] = []
-            for raw_path in meta_paths[:2]:
-                path_obj = raw_path if isinstance(raw_path, Path) else Path(str(raw_path))
-                if diagnostics_dir in path_obj.parents:
-                    rendered_paths.append(_display_path(path_obj))
-                else:
-                    rendered_paths.append(path_obj.as_posix())
-            meta_cell = ", ".join(rendered_paths)
-
-        lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {fetched} | {normalized} | {written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
-                name=name,
-                mode=mode,
-                status=status_value,
-                reason=reason_text,
-                http=http_text,
-                fetched=_fmt_count(fetched_count),
-                normalized=_fmt_count(normalized_count),
-                written=_fmt_count(written_count),
-                kept=_fmt_count(kept_count),
-                dropped=_fmt_count(dropped_count),
-                parse_errors=_fmt_count(parse_errors_count),
-                logs_cell=logs_cell,
-                meta_rows=meta_rows_cell,
-                meta_cell=meta_cell,
-            )
-        )
-
-    if not all_names:
-        logger.debug("No connector entries provided; emitting legacy header without rows.")
-
-    lines.append("")
-    if logs:
-        for file in logs:
-            try:
-                rel = file.relative_to(diagnostics_dir)
-            except ValueError:
-                rel = file
-            lines.append(f"- {rel.as_posix()}")
-    else:
-        lines.append("- No log files discovered.")
-    if meta_files:
-        lines.append("")
-        lines.append("- Meta diagnostics present")
-    elif logs:
-        lines.append("")
-        lines.append("- No meta diagnostics found.")
-    return lines
-
-
-def _render_connector_details(records: Sequence[ConnectorRecord], staging: Mapping[str, Any]) -> List[str]:
-    lines: List[str] = ["## Connector Deep Dives", ""]
-    for record in sorted(records, key=lambda item: item.name):
-        lines.append("<details>")
-        lines.append(f"<summary>{record.name}: status={record.status}</summary>")
-        lines.append("")
-
-        lines.append("### Config & Inputs")
-        lines.append(f"- Config source: {record.config_source or 'unknown'}")
-        lines.append(f"- Config path: {record.config_path or 'unknown'}")
-        if record.loader_warnings:
-            lines.append(f"- Loader warnings: {'; '.join(record.loader_warnings)}")
-        if record.countries_sample:
-            sample_text = ", ".join(record.countries_sample)
-            lines.append(f"- Countries ({record.countries_count or len(record.countries_sample)}): {sample_text}")
-        else:
-            lines.append("- Countries: n/a")
-        lines.append(f"- Window: {record.window_start or '—'} → {record.window_end or '—'}")
-        series = record.extras.get("series")
-        if series:
-            lines.append(f"- Series requested: {series}")
-        flags = record.extras.get("flags")
-        if flags:
-            lines.append(f"- Flags: {flags}")
-        if isinstance(record.extras, Mapping):
-            extras_pairs: List[str] = []
-            for key, value in sorted(record.extras.items()):
-                if key in {"series", "flags"}:
-                    continue
-                if value in (None, "", [], {}, ()):  # skip empties
-                    continue
-                if isinstance(value, (dict, list, tuple)):
-                    continue
-                extras_pairs.append(f"{key}={value}")
-            if extras_pairs:
-                lines.append(f"- Extras: {', '.join(extras_pairs)}")
-        lines.append("")
-
-        lines.append("### Reachability & HTTP")
-        reach = record.reachability or {}
-        lines.append(f"- DNS → IP: {reach.get('dns_ip') or 'n/a'}")
-        lines.append(f"- TCP latency: {reach.get('tcp_ms') or 'n/a'} ms")
-        lines.append(f"- TLS ok: {reach.get('tls_ok') if 'tls_ok' in reach else 'n/a'}")
-        http = record.http or {}
-        lines.append(
-            "- HTTP summary: requests={req} 2xx={s} 4xx={c} 5xx={e} retries={r} timeouts={t}".format(
-                req=_coerce_int(http.get("requests") or http.get("total")),
-                s=_coerce_int(http.get("2xx")),
-                c=_coerce_int(http.get("4xx")),
-                e=_coerce_int(http.get("5xx")),
-                r=_coerce_int(http.get("retries")),
-                t=_coerce_int(http.get("timeouts")),
-            )
-        )
-        http_summary = record.detail_blocks.get("http_summary") or {}
-        endpoints = http_summary.get("endpoints")
-        if isinstance(endpoints, list) and endpoints:
-            lines.append("- Endpoints:")
-            for endpoint in endpoints[:5]:
-                if not isinstance(endpoint, Mapping):
-                    continue
-                lines.append(
-                    "  - {path}: {count} req (p95={p95}ms max={max}ms)".format(
-                        path=endpoint.get("path", "unknown"),
-                        count=endpoint.get("count", "?"),
-                        p95=endpoint.get("p95_ms", "?"),
-                        max=endpoint.get("max_ms", "?"),
-                    )
-                )
-        lines.append("")
-
-        lines.append("### Normalization & Filters")
-        drop_hist = record.drop_histogram or {}
-        if drop_hist:
-            for reason, count in sorted(drop_hist.items(), key=lambda item: (-item[1], item[0])):
-                lines.append(f"- Drop {reason}: {count}")
-        else:
-            lines.append("- Drop reasons: none recorded")
-        lines.append(f"- Rows fetched/normalized/written: {record.rows_fetched}/{record.rows_normalized}/{record.rows_written}")
-        lines.append("")
-
-        lines.append("### Outputs")
-        staging_info = staging.get(record.name, {}) if isinstance(staging, Mapping) else {}
-        if staging_info:
-            for file_name, meta in staging_info.items():
-                lines.append(
-                    f"- {file_name}: rows={meta.get('rows', 0)} size={meta.get('size', 0)}"
-                )
-        else:
-            lines.append("- No staging outputs found")
-        lines.append("")
-
-        lines.append("### Why-Zero or Error")
-        if record.why_zero:
-            lines.append(f"- Why-zero payload: {json.dumps(record.why_zero, indent=2)[:400]}")
-        if record.error:
-            lines.append(f"- Error exit code: {record.error.get('exit_code')}")
-            stderr_tail = record.error.get("stderr_tail") or record.error.get("log_tail")
-            if stderr_tail:
-                lines.append("- Log tail:")
-                snippet = str(stderr_tail)
-                for line in snippet.splitlines()[:10]:
-                    lines.append(f"  {line}")
-        if not record.why_zero and not record.error:
-            lines.append("- No why-zero or error diagnostics captured")
-        lines.append("")
-
-        dtm_section = render_dtm_deep_dive(record)
-        if dtm_section:
-            lines.extend(dtm_section)
-            lines.append("")
-
-        lines.append("</details>")
-        lines.append("")
-    return lines
-
-
-def render_dtm_deep_dive(record: Mapping[str, Any] | ConnectorRecord) -> List[str]:
-    extras: Mapping[str, Any] | None
-    if isinstance(record, ConnectorRecord):
-        extras = record.extras if isinstance(record.extras, Mapping) else None
-    elif isinstance(record, Mapping):
-        maybe_extras = record.get("extras")
-        extras = maybe_extras if isinstance(maybe_extras, Mapping) else None
-    else:
-        extras = None
-
-    if not extras:
-        return []
-
-    dtm_meta = extras.get("dtm")
-    if not isinstance(dtm_meta, Mapping):
-        return []
-
-    lines: List[str] = ["## DTM Deep Dive", ""]
-
-    config = extras.get("config") if isinstance(extras.get("config"), Mapping) else {}
-    window = extras.get("window") if isinstance(extras.get("window"), Mapping) else {}
-
-    lines.append("### Overview")
-    lines.append(f"- SDK version: {dtm_meta.get('sdk_version') or 'unknown'}")
-    lines.append(f"- Base URL: {dtm_meta.get('base_url') or 'unknown'}")
-    lines.append(f"- Python: {dtm_meta.get('python_version') or 'unknown'}")
-    admin_levels = config.get("admin_levels") if isinstance(config, Mapping) else None
-    if isinstance(admin_levels, Sequence) and not isinstance(admin_levels, (str, bytes)):
-        admin_text = ", ".join(str(level) for level in admin_levels) or "(none)"
-    else:
-        admin_text = "(none)"
-    lines.append(f"- Admin levels: {admin_text}")
-    countries_mode = config.get("countries_mode") if isinstance(config, Mapping) else None
-    countries_count = config.get("countries_count") if isinstance(config, Mapping) else None
-    lines.append(
-        f"- Countries mode: {countries_mode or 'unknown'} (count={countries_count if countries_count is not None else 'n/a'})"
-    )
-    lines.append(
-        "- Window: {start} → {end}".format(
-            start=window.get("start_iso") or window.get("start") or "—",
-            end=window.get("end_iso") or window.get("end") or "—",
-        )
-    )
-    lines.append("")
-
-    lines.append("### Discovery")
-    discovery = extras.get("discovery") if isinstance(extras.get("discovery"), Mapping) else {}
-    stages = discovery.get("stages") if isinstance(discovery, Mapping) else None
-    if isinstance(stages, Sequence) and stages:
-        for stage in stages:
-            if not isinstance(stage, Mapping):
-                continue
-            lines.append(
-                "- {name}: status={status} http={http} attempts={attempts} latency={latency}ms".format(
-                    name=stage.get("name", "stage"),
-                    status=stage.get("status", "unknown"),
-                    http=stage.get("http_code", "n/a"),
-                    attempts=stage.get("attempts", "n/a"),
-                    latency=stage.get("latency_ms", "n/a"),
-                )
-            )
-    else:
-        lines.append("_No discovery stages recorded._")
-    reason = discovery.get("reason") if isinstance(discovery, Mapping) else None
+    bullets: List[str] = []
     if reason:
-        lines.append(f"- Reason: {reason}")
-    fail_path = _safe_path(discovery.get("first_fail_path") if isinstance(discovery, Mapping) else None)
-    if fail_path:
-        fail_payload = safe_load_json(fail_path)
-    else:
-        fail_payload = None
-    errors = []
-    if isinstance(fail_payload, Mapping):
-        maybe_errors = fail_payload.get("errors")
-        if isinstance(maybe_errors, Sequence):
-            for item in maybe_errors:
-                if isinstance(item, Mapping):
-                    message = item.get("message") or item.get("detail")
-                    http_code = item.get("http_code") or item.get("code")
-                    if message or http_code:
-                        errors.append((http_code, message))
-    if errors:
-        lines.append("- Last failure snapshot:")
-        for http_code, message in errors:
-            detail = " ".join(str(part) for part in (http_code, message) if part)
-            lines.append(f"  - {detail}")
-    lines.append("")
-
-    lines.append("### HTTP Roll-up")
-    http_stats = extras.get("http") if isinstance(extras.get("http"), Mapping) else {}
-    lines.append(
-        "- Responses 2xx={two} 4xx={four} 5xx={five} retries={retries} timeouts={timeouts} last={last}".format(
-            two=_coerce_int(http_stats.get("count_2xx")),
-            four=_coerce_int(http_stats.get("count_4xx")),
-            five=_coerce_int(http_stats.get("count_5xx")),
-            retries=_coerce_int(http_stats.get("retries")),
-            timeouts=_coerce_int(http_stats.get("timeouts")),
-            last=http_stats.get("last_status", "n/a"),
+        bullets.append(f"- **Primary reason:** {reason}")
+    if top_reasons:
+        bullets.append(f"- **Top drop reasons:** {', '.join(top_reasons)}")
+    if total_selectors:
+        bullets.append(
+            f"- **Selectors with rows:** {selectors_with_rows}/{total_selectors}"
         )
-    )
-    artifacts = extras.get("artifacts") if isinstance(extras.get("artifacts"), Mapping) else {}
-    http_trace_summary = _summarize_http_trace(_safe_path(artifacts.get("http_trace")))
-    if http_trace_summary:
-        lines.append(
-            "- Trace latencies: p50={p50}ms p95={p95}ms max={max}ms (n={count})".format(
-                p50=int(http_trace_summary.get("latency_p50_ms") or 0),
-                p95=int(http_trace_summary.get("latency_p95_ms") or 0),
-                max=int(http_trace_summary.get("latency_max_ms") or 0),
-                count=http_trace_summary.get("count", 0),
+    discovery_stage = discovery.get("used_stage") if discovery else None
+    discovery_reason = discovery.get("reason") if discovery else None
+    report = discovery.get("report") if isinstance(discovery, Mapping) else None
+    if isinstance(report, Mapping):
+        discovery_stage = discovery_stage or report.get("used_stage")
+        discovery_reason = discovery_reason or report.get("reason")
+    if discovery_stage or discovery_reason:
+        stage_text = discovery_stage or "—"
+        if discovery_reason:
+            bullets.append(f"- **Discovery:** stage={stage_text} reason={discovery_reason}")
+        else:
+            bullets.append(f"- **Discovery stage:** {stage_text}")
+    total_received = _coerce_int(fetch.get("total_received")) if fetch else 0
+    pages = _coerce_int(fetch.get("pages")) if fetch else 0
+    if total_received or pages:
+        bullets.append(
+            f"- **Fetch totals:** rows_received={total_received} pages={pages}"
+        )
+
+    if not bullets:
+        return []
+
+    lines = ["## Zero-row root cause", ""]
+    lines.extend(bullets)
+    lines.append("")
+    return lines
+
+
+def _render_selector_effectiveness(entry: Mapping[str, Any]) -> List[str]:
+    extras = _ensure_dict(entry.get("extras"))
+    counts_raw = extras.get("per_country_counts")
+    if not isinstance(counts_raw, list) or not counts_raw:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in counts_raw:
+        if not isinstance(item, Mapping):
+            continue
+        normalized.append(
+            {
+                "country": str(item.get("country") or item.get("selector") or item.get("iso3") or "unknown"),
+                "rows": _coerce_int(item.get("rows")),
+                "level": str(item.get("level") or "—"),
+                "operation": str(item.get("operation") or "—"),
+            }
+        )
+    if not normalized:
+        return []
+    total = len(normalized)
+    with_rows = sum(1 for entry in normalized if entry["rows"] > 0)
+    hit_rate = f"{with_rows}/{total}"
+    top = sorted(normalized, key=lambda item: (-item["rows"], item["country"]))[:5]
+    lines = ["## Selector effectiveness", ""]
+    lines.append(f"- **Selectors attempted:** {total}")
+    lines.append(f"- **Selectors with rows:** {with_rows}")
+    lines.append(f"- **Hit rate:** {hit_rate}")
+    if top:
+        lines.append("- **Top selectors by rows:**")
+        for entry in top:
+            operation = entry["operation"] if entry["operation"] not in {"", "—"} else "all"
+            lines.append(
+                f"  - `{entry['country']}` level={entry['level']} rows={entry['rows']} (operation={operation})"
             )
-        )
-        if http_trace_summary.get("paths"):
-            lines.append("- Top endpoints:")
-            for endpoint, count in http_trace_summary["paths"]:
-                lines.append(f"  - {endpoint}: {count} hits")
-    else:
-        lines.append("- HTTP trace not available.")
     lines.append("")
+    return lines
 
-    lines.append("### Normalization Snapshot")
-    normalize = extras.get("normalize") if isinstance(extras.get("normalize"), Mapping) else {}
-    if normalize:
-        lines.append(
-            "- Rows fetched={fetched} normalized={normalized} written={written}".format(
-                fetched=_coerce_int(normalize.get("rows_fetched")),
-                normalized=_coerce_int(normalize.get("rows_normalized")),
-                written=_coerce_int(normalize.get("rows_written")),
+
+def _extract_common_name(subject: Any) -> str:
+    if isinstance(subject, (list, tuple)):
+        for group in subject:
+            if isinstance(group, (list, tuple)):
+                for key, value in group:
+                    if str(key).lower() in {"commonname", "cn"}:
+                        return str(value)
+    return ""
+
+
+def _render_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
+    lines = ["## DTM Reachability", ""]
+    if not reachability:
+        lines.append("- **diagnostics/ingestion/dtm/reachability.json:** not present")
+        lines.append("")
+        return lines
+    target = reachability.get("target_host", "dtmapi.iom.int")
+    port = reachability.get("target_port", 443)
+    lines.append(f"- **Target:** `{target}:{port}`")
+    captured_start = reachability.get("generated_at")
+    captured_end = reachability.get("completed_at")
+    if captured_start or captured_end:
+        lines.append(f"- **Captured:** {captured_start or '—'} → {captured_end or '—'}")
+
+    dns = _ensure_dict(reachability.get("dns"))
+    dns_records = []
+    for entry in dns.get("records", []):
+        if isinstance(entry, Mapping):
+            address = entry.get("address")
+            family = entry.get("family")
+            if address:
+                dns_records.append(f"{address}{f' ({family})' if family else ''}")
+    if dns.get("error"):
+        dns_line = f"- **DNS:** error={dns.get('error')}"
+    else:
+        dns_line = f"- **DNS:** {', '.join(dns_records) if dns_records else '—'}"
+    if dns.get("elapsed_ms") is not None:
+        dns_line += f" ({dns.get('elapsed_ms')}ms)"
+    lines.append(dns_line)
+
+    tcp = _ensure_dict(reachability.get("tcp"))
+    if tcp.get("ok"):
+        peer = tcp.get("peer")
+        if isinstance(peer, (list, tuple)):
+            peer_text = ":".join(str(part) for part in peer)
+        else:
+            peer_text = str(peer or "")
+        tcp_line = "- **TCP:** ok"
+        if tcp.get("elapsed_ms") is not None:
+            tcp_line += f" in {tcp.get('elapsed_ms')}ms"
+        if peer_text:
+            tcp_line += f" (peer={peer_text})"
+    else:
+        tcp_line = "- **TCP:** failed"
+        if tcp.get("error"):
+            tcp_line += f" ({tcp.get('error')})"
+        if tcp.get("elapsed_ms") is not None:
+            tcp_line += f" after {tcp.get('elapsed_ms')}ms"
+    lines.append(tcp_line)
+
+    tls = _ensure_dict(reachability.get("tls"))
+    if tls.get("ok"):
+        tls_line = "- **TLS:** ok"
+        if tls.get("elapsed_ms") is not None:
+            tls_line += f" in {tls.get('elapsed_ms')}ms"
+        subject_cn = _extract_common_name(tls.get("subject"))
+        issuer_cn = _extract_common_name(tls.get("issuer"))
+        details: List[str] = []
+        if subject_cn:
+            details.append(f"CN={subject_cn}")
+        if issuer_cn:
+            details.append(f"issuer={issuer_cn}")
+        if tls.get("not_after"):
+            details.append(f"expires={tls.get('not_after')}")
+        if details:
+            tls_line += f" ({', '.join(details)})"
+    else:
+        tls_line = "- **TLS:** failed"
+        if tls.get("error"):
+            tls_line += f" ({tls.get('error')})"
+    lines.append(tls_line)
+
+    curl = _ensure_dict(reachability.get("curl_head"))
+    if curl.get("error"):
+        curl_line = f"- **HTTP HEAD (curl):** error={curl.get('error')}"
+    else:
+        status_line = curl.get("status_line") or "n/a"
+        curl_line = f"- **HTTP HEAD (curl):** {status_line}"
+    if curl.get("exit_code") is not None:
+        curl_line += f" [exit={curl.get('exit_code')}]"
+    if curl.get("stderr"):
+        curl_line += f" (stderr={_truncate_text(curl.get('stderr'))})"
+    lines.append(curl_line)
+
+    egress = _ensure_dict(reachability.get("egress"))
+    egress_parts: List[str] = []
+    for key, value in egress.items():
+        info = _ensure_dict(value)
+        if info.get("error"):
+            display = f"error={info.get('error')}"
+        else:
+            text = info.get("text") or info.get("status_code") or "n/a"
+            display = str(text)
+        egress_parts.append(f"{key}={display}")
+    if egress_parts:
+        lines.append(f"- **Egress IPs:** {', '.join(egress_parts)}")
+
+    lines.append(f"- **CA bundle:** {reachability.get('ca_bundle', certifi.where())}")
+    lines.append(f"- **Python/requests:** {reachability.get('python_version', 'unknown')} / {reachability.get('requests_version', 'unknown')}")
+    lines.append("")
+    return lines
+
+
+def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    headers = [
+        "Connector",
+        "Mode",
+        "Status",
+        "Reason",
+        "Duration",
+        "2xx/4xx/5xx (retries)",
+        "Rows (f/n/w)",
+        "Kept",
+        "Dropped",
+        "ParseErrs",
+        "Coverage (ym)",
+        "Coverage (as_of)",
+        "Logs",
+        "Meta rows",
+        "Meta",
+    ]
+    logs_dir = Path("diagnostics/ingestion/logs")
+    rows: List[List[str]] = []
+    dtm_run_path: Path | None = None
+    dtm_run_data: Dict[str, Any] | None = None
+    for entry in entries:
+        coverage = entry.get("coverage", {})
+        connector_id = str(entry.get("connector_id"))
+        log_path = logs_dir / f"{connector_id}.log"
+        extras = _ensure_dict(entry.get("extras"))
+        counts_map = _ensure_dict(entry.get("counts"))
+        rows_written_extra = extras.get("rows_written")
+        if rows_written_extra is not None:
+            rows_written_value = _coerce_int(rows_written_extra)
+        else:
+            rows_written_value = _coerce_int(counts_map.get("written"))
+        config_issues_path = extras.get("config_issues_path")
+        log_cell = str(log_path) if log_path.exists() else "—"
+        if connector_id == "dtm_client" and config_issues_path:
+            config_path_text = str(config_issues_path)
+            log_cell = (
+                f"{log_cell} / {config_path_text}"
+                if log_cell != "—"
+                else config_path_text
             )
+        meta_path_raw = extras.get("meta_path")
+        meta_cell = "—"
+        meta_payload: Mapping[str, Any] | None = None
+        if meta_path_raw:
+            meta_path = Path(str(meta_path_raw))
+            if meta_path.exists():
+                meta_cell = str(meta_path)
+                loaded = _safe_load_json(meta_path)
+                if isinstance(loaded, Mapping):
+                    meta_payload = loaded
+        reason_text = entry.get("reason")
+        status_text = str(entry.get("status"))
+        kept_cell = "—"
+        dropped_cell = "—"
+        parse_cell = "—"
+        if connector_id == "dtm_client":
+            status_raw = str(extras.get("status_raw") or status_text)
+            if status_raw == "ok-empty" or rows_written_value == 0:
+                status_text = "ok-empty"
+                if not reason_text:
+                    reason_text = "header-only (0 rows)"
+                kept_cell = "—"
+                dropped_cell = "—"
+                parse_cell = "—"
+            elif status_raw:
+                status_text = status_raw
+            run_details_raw = extras.get("run_details_path")
+            candidate_path = (
+                Path(str(run_details_raw))
+                if run_details_raw
+                else Path("diagnostics/ingestion/dtm_run.json")
+            )
+            if dtm_run_data is None or candidate_path != dtm_run_path:
+                dtm_run_path = candidate_path
+                dtm_run_data = _load_json(candidate_path)
+            totals = _ensure_dict(dtm_run_data.get("totals")) if dtm_run_data else {}
+            kept_value = totals.get("kept")
+            dropped_value = totals.get("dropped")
+            parse_value = totals.get("parse_errors")
+            if status_text != "ok-empty":
+                if kept_value is not None:
+                    kept_cell = _format_optional_int(kept_value)
+                elif totals.get("rows_after") is not None:
+                    kept_cell = _format_optional_int(totals.get("rows_after"))
+                elif totals.get("rows_written") is not None:
+                    kept_cell = _format_optional_int(totals.get("rows_written"))
+                if dropped_value is not None:
+                    dropped_cell = _format_optional_int(dropped_value)
+                if parse_value is not None:
+                    parse_cell = _format_optional_int(parse_value)
+        if (
+            connector_id == "dtm_client"
+            and isinstance(reason_text, str)
+            and "missing id_or_path" in reason_text
+        ):
+            invalid_count = extras.get("invalid_sources")
+            status = str(entry.get("status") or "").strip() or "skipped"
+            if invalid_count:
+                reason_text = f"{status}: missing id_or_path ({invalid_count})"
+            else:
+                reason_text = f"{status}: missing id_or_path"
+        reason_cell = _format_reason(reason_text)
+        status_raw_normalized = (
+            str(extras.get("status_raw") or entry.get("status_raw") or status_text)
+            .strip()
+            .lower()
         )
-        drop_reasons = normalize.get("drop_reasons") if isinstance(normalize.get("drop_reasons"), Mapping) else {}
-        if drop_reasons:
-            lines.append("- Drop reasons:")
-            for reason_name, count in sorted(drop_reasons.items(), key=lambda item: (-_coerce_int(item[1]), item[0])):
-                lines.append(f"  - {reason_name}: {_coerce_int(count)}")
-    else:
-        lines.append("- No normalization metrics recorded.")
-    rescue = extras.get("rescue_probe") if isinstance(extras.get("rescue_probe"), Mapping) else {}
-    attempts = rescue.get("tried") if isinstance(rescue, Mapping) else None
-    if isinstance(attempts, Sequence) and attempts:
-        lines.append("- Rescue probes:")
-        for attempt in attempts:
-            if not isinstance(attempt, Mapping):
-                continue
-            country = attempt.get("country", "unknown")
-            window_text = attempt.get("window", "unknown")
-            rows = attempt.get("rows", "n/a")
-            error_msg = attempt.get("error")
-            detail = f"  - {country} window={window_text} rows={rows}"
-            if error_msg:
-                detail += f" error={error_msg}"
-            lines.append(detail)
-    lines.append("")
-
-    lines.append("### Sample rows")
-    sample_rows = _safe_read_csv_rows(_safe_path(artifacts.get("samples")))
-    if sample_rows:
-        headers = list(sample_rows[0].keys()) if sample_rows else []
-        table_rows = [[row.get(header, "") for header in headers] for row in sample_rows]
-        lines.extend(_format_table(headers, table_rows))
-    else:
-        lines.append("_No sample rows captured._")
-    lines.append("")
-
-    lines.append("### Actionable next steps")
-    actions: List[str] = []
-    if _coerce_int(http_stats.get("count_4xx")):
-        actions.append("- Investigate HTTP 4xx responses (possible auth/config issues).")
-    if _coerce_int(normalize.get("rows_written")) == 0:
-        actions.append("- Review normalization outputs; zero rows written.")
-    if not sample_rows:
-        actions.append("- Capture sample rows for manual validation.")
-    if not actions:
-        actions.append("- No immediate blockers detected; monitor next run.")
-    lines.extend(actions)
-    lines.append("")
-
+        meta_rows_cell = _format_meta_cell(status_raw_normalized, extras, meta_payload)
+        rows.append(
+            [
+                connector_id,
+                str(entry.get("mode")),
+                status_text,
+                reason_cell,
+                _format_duration(entry.get("duration_ms", 0)),
+                _format_http(entry.get("http", {})),
+                _format_rows(entry.get("counts", {})),
+                kept_cell,
+                dropped_cell,
+                parse_cell,
+                _format_coverage(coverage.get("ym_min"), coverage.get("ym_max")),
+                _format_coverage(coverage.get("as_of_min"), coverage.get("as_of_max")),
+                log_cell,
+                meta_rows_cell,
+                meta_cell,
+            ]
+        )
+    if not rows:
+        rows.append(["—"] * len(headers))
+    lines = ["| " + " | ".join(headers) + " |"]
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
     return lines
 
 
-def _render_dtm_deep_dive(*args: Any, **kwargs: Any) -> List[str]:
-    """Backwards-compatible shim for legacy imports in tests."""
-
-    return render_dtm_deep_dive(*args, **kwargs)
-
-
-def _render_export_snapshot(staging_snapshot: Mapping[str, Any]) -> List[str]:
-    lines = ["## Export & Snapshot", ""]
-    total_rows_flow = 0
-    total_rows_stock = 0
-    if staging_snapshot:
-        for connector, files in staging_snapshot.items():
-            lines.append(f"- {connector} staging:")
-            for file_name, meta in files.items():
-                path = meta.get("path")
-                rows = meta.get("rows", 0)
-                lines.append(f"  - {file_name}: rows={rows} path={path}")
-                if "flow" in file_name:
-                    total_rows_flow += rows
-                if "stock" in file_name:
-                    total_rows_stock += rows
-    else:
-        lines.append("- No staging artifacts found")
-    lines.append("")
-    lines.append(f"- Rows written (flow): {total_rows_flow}")
-    lines.append(f"- Rows written (stock): {total_rows_stock}")
-    lines.append("")
-    return lines
-
-
-def _render_anomalies(records: Sequence[ConnectorRecord]) -> List[str]:
-    lines = ["## Anomaly & Trend Checks", ""]
-    status_counts = Counter(record.status for record in records)
-    lines.append("### Failure Budget")
-    lines.append(
-        f"- ok={status_counts.get('ok', 0)} error={status_counts.get('error', 0)} zero={status_counts.get('zero', 0)} skipped={status_counts.get('skipped', 0)}"
-    )
-    if status_counts.get("error"):
-        lines.append("- Recommendation: investigate errors; soft-fail considered if persistent.")
-    else:
-        lines.append("- No errors recorded.")
-    lines.append("")
-
-    lines.append("### Spike Guard")
-    lines.append("- Baseline data unavailable in offline mode; skip z-score analysis.")
-    lines.append("")
-
-    lines.append("### Coverage Change")
-    lines.append("- Previous summary not found; cannot compare coverage.")
-    lines.append("")
-    return lines
-
-
-def _render_next_actions(records: Sequence[ConnectorRecord]) -> List[str]:
-    lines = ["## Next Actions", ""]
-    actions: List[str] = []
-    for record in records:
-        if record.error:
-            actions.append(f"- Investigate `{record.name}` failure (exit {record.error.get('exit_code')}).")
-        elif record.why_zero:
-            actions.append(f"- Review `{record.name}` why-zero details; confirm window and token configuration.")
-    if not actions:
-        actions.append("- No critical follow-up detected; monitor next scheduled run.")
-    lines.extend(actions)
-    lines.append("")
-    return lines
-
-
-def render_summary_md(
-    report_path: Path = DEFAULT_REPORT_PATH,
-    diagnostics_dir: Path = DEFAULT_DIAG_DIR,
-    staging_dir: Path = DEFAULT_STAGING_DIR,
+def build_markdown(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    dedupe_notes: Mapping[str, int] | None = None,
+    reachability: Mapping[str, Any] | None = None,
+    export_summary: Mapping[str, Any] | None = None,
+    mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
-    entries = load_report(report_path)
-    return build_markdown(
-        entries,
-        diagnostics_root=diagnostics_dir,
-        staging_root=staging_dir,
+    sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
+    total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
+    total_normalized = sum(entry.get("counts", {}).get("normalized", 0) for entry in sorted_entries)
+    total_written = sum(entry.get("counts", {}).get("written", 0) for entry in sorted_entries)
+    dtm_entry = next((entry for entry in sorted_entries if entry.get("connector_id") == "dtm_client"), None)
+    mapping_debug_records = list(mapping_debug or [])
+
+    override_note = any(
+        _ensure_dict(entry.get("extras")).get("counts_override_source") == "run.json"
+        for entry in sorted_entries
     )
+    footnote = " (from run.json)" if override_note else ""
+
+    lines = [SUMMARY_TITLE, "", "## Run Summary", ""]
+    lines.append(f"* **Connectors:** {len(sorted_entries)}")
+    lines.append(f"* **Status counts:** {_format_status_counts(sorted_entries)}")
+    lines.append(f"* **Reason histogram:** {_format_reason_histogram(sorted_entries)}")
+    lines.append(f"* **Rows fetched:** {total_fetched}{footnote}")
+    lines.append(f"* **Rows normalized:** {total_normalized}{footnote}")
+    lines.append(f"* **Rows written:** {total_written}{footnote}")
+    lines.append("")
+
+    export_info = export_summary or {}
+    export_error = export_info.get("error")
+    if export_info or export_error or mapping_debug_records:
+        lines.append("## Export Facts")
+        lines.append("")
+        if export_error:
+            lines.append(f"- **Status:** {export_error}")
+        elif export_info:
+            rows_written = export_info.get("rows", 0)
+            csv_path = export_info.get("csv_path")
+            lines.append(f"- **facts.csv rows:** {rows_written}")
+            if csv_path:
+                lines.append(f"- **facts.csv path:** `{csv_path}`")
+            preview_headers = export_info.get("headers") or []
+            preview_rows = export_info.get("preview") or []
+            table_lines = _format_markdown_table(preview_headers, preview_rows)
+            if table_lines:
+                lines.append("")
+                lines.extend(table_lines)
+            warnings_list = [str(w) for w in export_info.get("warnings", []) if str(w)]
+            if warnings_list:
+                lines.append("")
+                lines.append("**Mapping warnings:**")
+                for warning in warnings_list:
+                    lines.append(f"- {warning}")
+            sources_details = export_info.get("sources") or []
+            if sources_details:
+                lines.append("")
+                lines.append("**Source mappings:**")
+                for detail in sources_details:
+                    name = detail.get("name", "unknown")
+                    strategy = detail.get("strategy", "")
+                    rows_in = detail.get("rows_in", 0)
+                    rows_out = detail.get("rows_out", 0)
+                    summary_line = f"- `{name}` ({strategy or 'config'}): in={rows_in}, out={rows_out}"
+                    warnings_detail = detail.get("warnings") or []
+                    if warnings_detail:
+                        joined = "; ".join(str(w) for w in warnings_detail if str(w))
+                        if joined:
+                            summary_line += f" — warnings: {joined}"
+                    lines.append(summary_line)
+        else:
+            lines.append("- **Status:** export summary unavailable")
+
+    if mapping_debug_records:
+        lines.append("")
+        lines.append("### Export mapping debug")
+        lines.append("")
+        limit = min(10, len(mapping_debug_records))
+        for record in mapping_debug_records[:limit]:
+            record_map = dict(record)
+            file_path = str(record_map.get("file") or "?")
+            matched = bool(record_map.get("matched"))
+            used_mapping = record_map.get("used_mapping")
+            lines.append(f"- `{file_path}`")
+            if matched:
+                if used_mapping:
+                    lines.append(f"  - Matched: yes (`{used_mapping}`)")
+                else:
+                    lines.append("  - Matched: yes")
+            else:
+                lines.append("  - Matched: no")
+                reasons = record_map.get("reasons")
+                reason_parts: List[str] = []
+                if isinstance(reasons, Mapping):
+                    if reasons.get("regex_miss"):
+                        reason_parts.append("regex_miss")
+                    missing_cols = reasons.get("missing_columns") or []
+                    if missing_cols:
+                        cols_joined = ", ".join(str(col) for col in missing_cols)
+                        reason_parts.append(f"missing_columns=[{cols_joined}]")
+                    missing_any = reasons.get("missing_required_any") or []
+                    if missing_any:
+                        any_joined = ", ".join(str(group) for group in missing_any)
+                        reason_parts.append(f"missing_required_any=[{any_joined}]")
+                    extra_keys = [
+                        key
+                        for key in reasons
+                        if key not in {"regex_miss", "missing_columns", "missing_required_any"}
+                    ]
+                    for key in extra_keys:
+                        value = reasons.get(key)
+                        reason_parts.append(f"{key}={value}")
+                if reason_parts:
+                    lines.append(f"  - Reason: {', '.join(reason_parts)}")
+                else:
+                    lines.append("  - Reason: unknown")
+                dedupe_info = record_map.get("dedupe")
+                if isinstance(dedupe_info, Mapping):
+                    keys = dedupe_info.get("keys") or []
+                    keep_value = dedupe_info.get("keep")
+                    key_list = [str(key) for key in keys]
+                    if key_list or keep_value:
+                        keys_display = ", ".join(key_list) if key_list else "∅"
+                        keep_display = str(keep_value) if keep_value else "last"
+                        lines.append(f"  - Dedupe: keys={keys_display} (keep={keep_display})")
+                raw_columns = record_map.get("columns")
+                if isinstance(raw_columns, Sequence) and not isinstance(raw_columns, (str, bytes)):
+                    columns_list = [str(col) for col in list(raw_columns)]
+                elif raw_columns not in (None, ""):
+                    columns_list = [str(raw_columns)]
+                else:
+                    columns_list = []
+                first_cols = columns_list[:6]
+                columns_display = ", ".join(first_cols) if first_cols else "∅"
+                lines.append(f"  - Columns: {columns_display}")
+            if len(mapping_debug_records) > limit:
+                lines.append(f"(showing {limit} of {len(mapping_debug_records)} files)")
+        lines.append("")
+
+    idmc_why_zero = _safe_load_json(IDMC_WHY_ZERO_PATH)
+    if idmc_why_zero:
+        lines.append("")
+        lines.extend(_render_idmc_why_zero(idmc_why_zero))
+        lines.append("")
+
+    if dtm_entry:
+        config_section = _render_config_section(dtm_entry)
+        if config_section:
+            lines.extend(config_section)
+        date_filter_section = _render_dtm_date_filter(dtm_entry)
+        if date_filter_section:
+            lines.extend(date_filter_section)
+        staging_section = _render_staging_readiness(dtm_entry)
+        if staging_section:
+            lines.extend(staging_section)
+        per_country_section = _render_dtm_per_country(dtm_entry)
+        if per_country_section:
+            lines.extend(per_country_section)
+        sample_section = _render_source_sample_quick_checks()
+        if sample_section:
+            lines.extend(sample_section)
+        zero_rows_section = _render_zero_row_root_cause(dtm_entry)
+        if zero_rows_section:
+            lines.extend(zero_rows_section)
+        selector_section = _render_selector_effectiveness(dtm_entry)
+        if selector_section:
+            lines.extend(selector_section)
+
+    reachability_section = _render_reachability_section(reachability or {})
+    if reachability_section:
+        lines.extend(reachability_section)
+
+    lines.append("## Per-Connector Table")
+    lines.append("")
+    lines.extend(_build_table(sorted_entries))
+    lines.append("")
+    if dedupe_notes:
+        for connector_id in sorted(dedupe_notes):
+            count = dedupe_notes[connector_id]
+            if count:
+                lines.append(f"(deduplicated {count} duplicate entries for {connector_id})")
+        if any(count for count in dedupe_notes.values()):
+            lines.append("")
+    for entry in sorted_entries:
+        lines.append(_render_details(entry))
+        lines.append("")
+    if dtm_entry:
+        lines.append("")
+        lines.extend(_render_dtm_deep_dive(dtm_entry))
+    return "\n".join(lines).strip() + "\n"
 
 
-def _write_summary(output_path: Path, content: str) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(content, encoding="utf-8")
+def write_markdown(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def append_to_summary(content: str) -> None:
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    try:
+        with open(summary_path, "a", encoding="utf-8") as handle:
+            handle.write(content)
+            if not content.endswith("\n"):
+                handle.write("\n")
+    except OSError:  # pragma: no cover - environment specific
+        pass
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report", default=str(DEFAULT_REPORT_PATH))
-    parser.add_argument("--diagnostics", default=str(DEFAULT_DIAG_DIR))
-    parser.add_argument("--staging", default=str(DEFAULT_STAGING_DIR))
-    parser.add_argument("--output", default=str(SUMMARY_PATH))
-    parser.add_argument("--out", dest="output")
-    parser.add_argument("--github-step-summary", action="store_true", help=argparse.SUPPRESS)
-    return parser.parse_args(argv if argv is not None else [])
+    parser.add_argument("--report", required=True, help="Path to connectors_report.jsonl")
+    parser.add_argument("--out", required=True, help="Path for the rendered summary.md")
+    parser.add_argument(
+        "--github-step-summary",
+        action="store_true",
+        help="When set, also append the Markdown to $GITHUB_STEP_SUMMARY",
+    )
+    return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = Path(args.report)
-    diagnostics_dir = Path(args.diagnostics)
-    staging_dir = Path(args.staging)
-    output_path = Path(args.output)
-
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    existing_lines: List[str] = []
-    if report_path.exists():
-        try:
-            existing_lines = [
-                line
-                for line in report_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-        except OSError:
-            existing_lines = []
-    if not report_path.exists() or not existing_lines:
-        stub_payload = {
-            "connector_id": "_summary",
+    out_path = Path(args.out)
+    if not report_path.exists():
+        stub = {
+            "connector_id": "unknown",
             "mode": "real",
             "status": "error",
+            "status_raw": "error",
             "reason": "missing-report",
-            "counts": {"fetched": 0, "normalized": 0, "written": 0},
-            "http": {"2xx": 0, "4xx": 0, "5xx": 0, "retries": 0},
+            "http": {},
+            "counts": {},
+            "extras": {
+                "hint": "connector did not start or preflight failed",
+                "exit_code": 1,
+                "status_raw": "error",
+            },
         }
-        report_path.write_text(json.dumps(stub_payload) + "\n", encoding="utf-8")
-        existing_lines = [json.dumps(stub_payload)]
-
-    entries = load_report(report_path)
-
-    content = build_markdown(
-        entries,
-        diagnostics_root=diagnostics_dir,
-        staging_root=staging_dir,
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(stub))
+            handle.write("\n")
+    load_error: str | None = None
+    try:
+        entries = load_report(report_path)
+    except Exception as exc:
+        load_error = str(exc)
+        stub_entry = {
+            "connector_id": "summarizer",
+            "mode": "real",
+            "status": "error",
+            "status_raw": "error",
+            "reason": f"summarizer-error: {load_error}",
+            "http": {},
+            "counts": {},
+            "extras": {"exit_code": 1, "status_raw": "error", "hint": "summarizer encountered an error"},
+        }
+        entries = [stub_entry]
+    deduped_entries, dedupe_notes = deduplicate_entries(entries)
+    export_summary = _collect_export_summary(
+        Path("resolver/staging"),
+        Path("resolver/tools/export_config.yml"),
+        Path("diagnostics/ingestion/export_preview"),
     )
-    _write_summary(output_path, content)
-    if getattr(args, "github_step_summary", False):
-        summary_path = os.getenv("GITHUB_STEP_SUMMARY")
-        if summary_path:
-            Path(summary_path).write_text(content, encoding="utf-8")
-    print(f"Summary written to {output_path}")
-    return 0
+    mapping_debug_records = _load_mapping_debug(
+        Path("diagnostics/ingestion/export_preview/mapping_debug.jsonl")
+    )
+    reachability_path = Path("diagnostics/ingestion/dtm/reachability.json")
+    reachability_payload = _safe_load_json(reachability_path) or {}
+    markdown = build_markdown(
+        deduped_entries,
+        dedupe_notes=dedupe_notes,
+        reachability=reachability_payload,
+        export_summary=export_summary,
+        mapping_debug=mapping_debug_records,
+    )
+    write_markdown(out_path, markdown)
+    if args.github_step_summary:
+        append_to_summary(markdown)
+    return 0 if load_error is None else 1
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
-    raise SystemExit(main(sys.argv[1:]))
+def render_summary_md(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    dedupe_notes: Mapping[str, int] | None = None,
+    reachability: Mapping[str, Any] | None = None,
+    export_summary: Mapping[str, Any] | None = None,
+    mapping_debug: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    """Compatibility alias for callers expecting ``render_summary_md``."""
+
+    return build_markdown(
+        entries,
+        dedupe_notes=dedupe_notes,
+        reachability=reachability,
+        export_summary=export_summary,
+        mapping_debug=mapping_debug,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

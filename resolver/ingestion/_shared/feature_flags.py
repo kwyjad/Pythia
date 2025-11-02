@@ -5,18 +5,21 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-FALSE_SET = {"0", "false", "no", "", "off"}
+TRUE_SET = {"1", "true", "t", "yes", "y", "on"}
+FALSE_SET = {"0", "false", "f", "no", "n", "off", ""}
 
 
 def as_bool(value: Optional[str], default: bool = False) -> bool:
-    """Interpret *value* as a boolean using common textual conventions.
+    """Interpret *value* as a boolean using common textual conventions."""
 
-    Values are considered false if they are "0", "false", "no", "", or "off"
-    (case-insensitive). All other non-None values are considered true.
-    """
     if value is None:
         return default
-    return str(value).strip().lower() not in FALSE_SET
+    text = str(value).strip().lower()
+    if text in TRUE_SET:
+        return True
+    if text in FALSE_SET:
+        return False
+    return default
 
 
 def getenv_bool(name: str, default: bool = False) -> bool:
@@ -25,4 +28,4 @@ def getenv_bool(name: str, default: bool = False) -> bool:
     return as_bool(os.getenv(name), default=default)
 
 
-__all__ = ["FALSE_SET", "as_bool", "getenv_bool"]
+__all__ = ["TRUE_SET", "FALSE_SET", "as_bool", "getenv_bool"]
