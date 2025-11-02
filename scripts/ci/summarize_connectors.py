@@ -5,6 +5,7 @@ import argparse
 import csv
 import datetime as _dt
 import json
+import logging
 import os
 import platform
 import shutil
@@ -44,11 +45,14 @@ SUMMARY_TITLE = "# Ingestion Superreport"
 LEGACY_TITLE = "# Connector Diagnostics"
 EM_DASH = "—"
 
+logger = logging.getLogger(__name__)
+
 CLASSIC_TABLE_HEADER = (
     "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
-    "Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    "Fetched | Normalized | Written | Kept | Dropped | Parse errors | "
+    "Logs | Meta rows | Meta |"
 )
-CLASSIC_TABLE_DIVIDER = "|---|---:|---|---|---|---|---:|---:|---:|---|---:|---|"
+CLASSIC_TABLE_DIVIDER = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
 _LAST_STUB_REASON_ALIAS: str | None = None
@@ -347,7 +351,7 @@ def _render_legacy_sections(
         lines.extend(sample_lines)
         lines.append("")
 
-    config_lines = _legacy_config_section(entries)
+    config_lines = _legacy_config_section(entries, diagnostics_dir)
     if config_lines:
         lines.extend(config_lines)
         lines.append("")
@@ -474,69 +478,135 @@ def _legacy_samples_section(
     return lines
 
 
-def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
-    preferred: Mapping[str, Any] | None = None
-    fallback: Mapping[str, Any] | None = None
-    preferred_extras: Mapping[str, Any] | None = None
-    fallback_extras: Mapping[str, Any] | None = None
+def _legacy_config_section(
+    entries: Sequence[Mapping[str, Any]], diagnostics_dir: Path
+) -> List[str]:
+    config_path: str | None = None
+    config_source: str | None = None
+    chosen_payload: Mapping[str, Any] | None = None
+    config_from_metadata = False
 
     for entry in entries:
-        extras = entry.get("extras") if isinstance(entry, Mapping) else None
-        config = extras.get("config") if isinstance(extras, Mapping) else None
-        if not isinstance(config, Mapping):
+        if not isinstance(entry, Mapping):
             continue
+        extras = entry.get("extras") if isinstance(entry.get("extras"), Mapping) else None
+        config_block = extras.get("config") if isinstance(extras, Mapping) else None
+        candidate_source: str | None = None
+        candidate_path: str | None = None
 
-        label = str(
-            config.get("config_source_label")
-            or (extras.get("config_source") if isinstance(extras, Mapping) else "")
-            or ""
-        ).strip()
+        if isinstance(config_block, Mapping):
+            raw_path = config_block.get("config_path_used") or config_block.get("config_path")
+            if isinstance(raw_path, str) and raw_path.strip():
+                candidate_path = raw_path
+            raw_source = config_block.get("config_source_label") or config_block.get("config_source")
+            if isinstance(raw_source, str) and raw_source.strip():
+                candidate_source = raw_source
+        if candidate_path is None and isinstance(extras, Mapping):
+            raw_path = extras.get("config_path_used") or extras.get("config_path")
+            if isinstance(raw_path, str) and raw_path.strip():
+                candidate_path = raw_path
+        if candidate_source is None and isinstance(extras, Mapping):
+            raw_source = extras.get("config_source") or extras.get("config_source_label")
+            if isinstance(raw_source, str) and raw_source.strip():
+                candidate_source = raw_source
 
-        if fallback is None:
-            fallback = config
-            fallback_extras = extras if isinstance(extras, Mapping) else None
+        label_lower = (candidate_source or "").strip().lower()
+        connector_name = str(
+            entry.get("connector_id")
+            or entry.get("connector")
+            or entry.get("name")
+            or "unknown"
+        )
 
-        if label.lower() == "resolver":
-            preferred = config
-            preferred_extras = extras if isinstance(extras, Mapping) else None
-            break
+        if candidate_path:
+            if config_path is None or label_lower == "resolver":
+                config_path = candidate_path
+                config_source = candidate_source or config_source
+                chosen_payload = config_block if isinstance(config_block, Mapping) else extras
+                config_from_metadata = True
+                logger.debug(
+                    "Config path resolved from entry metadata for %s: %s",
+                    connector_name,
+                    config_path,
+                )
+            if label_lower == "resolver":
+                break
+        elif candidate_source and not config_source:
+            config_source = candidate_source
+            if chosen_payload is None and isinstance(config_block, Mapping):
+                chosen_payload = config_block
 
-    chosen = preferred or fallback
-    chosen_extras = preferred_extras or fallback_extras
+    diagnostics_root = diagnostics_dir if isinstance(diagnostics_dir, Path) else Path(diagnostics_dir)
+    if config_path is None and diagnostics_root.exists():
+        for filename in ("why_zero.json", "manifest.json"):
+            for candidate in sorted(diagnostics_root.rglob(filename)):
+                payload = safe_load_json(candidate)
+                if not isinstance(payload, Mapping):
+                    continue
+                fallback_path = payload.get("config_path_used") or payload.get("config_path")
+                if isinstance(fallback_path, str) and fallback_path.strip():
+                    config_path = fallback_path
+                    config_source = (
+                        payload.get("config_source_label")
+                        or payload.get("config_source")
+                        or filename
+                    )
+                    chosen_payload = payload
+                    logger.debug(
+                        "Config path recovered from %s: %s",
+                        candidate,
+                        config_path,
+                    )
+                    break
+            if config_path is not None:
+                break
 
-    if not isinstance(chosen, Mapping):
-        return []
+    if config_path is None:
+        logger.warning("Unable to resolve config path from metadata or diagnostics artifacts.")
+        dtm_present = any(
+            "dtm" in str(
+                entry.get("connector_id")
+                or entry.get("connector")
+                or entry.get("name")
+                or ""
+            ).lower()
+            for entry in entries
+            if isinstance(entry, Mapping)
+        )
+        if dtm_present:
+            config_path = "resolver/config/dtm.yml"
+            logger.debug("Applying DTM default config path: %s", config_path)
+        else:
+            config_path = "unknown"
+    config_source = config_source or ("metadata" if config_from_metadata else "unknown")
 
-    path = (
-        chosen.get("config_path_used")
-        or (chosen_extras.get("config_path_used") if isinstance(chosen_extras, Mapping) else None)
-        or "unknown"
-    )
-    source = (
-        chosen.get("config_source_label")
-        or (chosen_extras.get("config_source") if isinstance(chosen_extras, Mapping) else None)
-        or "unknown"
-    )
-    warnings = chosen.get("config_warnings")
+    lines = ["## Config used", ""]
+    lines.append(f"Config source: {config_source}")
+    lines.append(f"Config: {config_path}")
 
-    lines = ["## Config used"]
-    lines.append("")
-    lines.append(f"Config source: {source}")
-    lines.append(f"Config: {path}")
+    if not isinstance(chosen_payload, Mapping):
+        return lines
 
+    warnings = chosen_payload.get("config_warnings")
     if isinstance(warnings, Sequence) and warnings:
         lines.append("- Warnings:")
         for warning in warnings:
             lines.append(f"  - {warning}")
 
-    preview = chosen.get("countries_preview")
+    preview = chosen_payload.get("countries_preview")
     if isinstance(preview, Sequence) and not isinstance(preview, (str, bytes)):
         preview_text = ", ".join(str(item) for item in list(preview)[:5] if str(item)) or "—"
         lines.append(f"- Countries preview: {preview_text}")
 
-    config_parse = chosen.get("config_parse") if isinstance(chosen.get("config_parse"), Mapping) else {}
+    config_parse = (
+        chosen_payload.get("config_parse")
+        if isinstance(chosen_payload.get("config_parse"), Mapping)
+        else {}
+    )
     config_keys_found = (
-        chosen.get("config_keys_found") if isinstance(chosen.get("config_keys_found"), Mapping) else {}
+        chosen_payload.get("config_keys_found")
+        if isinstance(chosen_payload.get("config_keys_found"), Mapping)
+        else {}
     )
     parse_countries: List[str] = []
     raw_countries = config_parse.get("countries") if isinstance(config_parse, Mapping) else None
@@ -567,9 +637,11 @@ def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 a=str(admin_found).lower(),
             )
         )
-        countries_mode = str(chosen.get("countries_mode", "discovered")).strip().lower()
+        countries_mode = str(chosen_payload.get("countries_mode", "discovered")).strip().lower()
         if countries_found and countries_mode == "discovered":
-            lines.append("- ⚠ config had api.countries but selector list not applied (check loader/version).")
+            lines.append(
+                "- ⚠ config had api.countries but selector list not applied (check loader/version)."
+            )
 
     return lines
 
@@ -1665,8 +1737,73 @@ def _render_connector_matrix(
             parts.append("0")
         return "/".join(parts[:3])
 
+    def _format_country_cell(
+        record: ConnectorRecord | None, bucket_payload: Mapping[str, Any]
+    ) -> str:
+        if record:
+            if record.countries_sample:
+                return ", ".join(record.countries_sample[:3])
+            record_extras = record.extras if isinstance(record.extras, Mapping) else {}
+            if isinstance(record_extras, Mapping):
+                country_value = record_extras.get("country")
+                if isinstance(country_value, str) and country_value.strip():
+                    return country_value.strip()
+                countries_list = record_extras.get("countries")
+                if isinstance(countries_list, Sequence) and not isinstance(
+                    countries_list, (str, bytes)
+                ):
+                    values = [
+                        str(item).strip()
+                        for item in countries_list
+                        if str(item).strip()
+                    ]
+                    if values:
+                        return ", ".join(values[:3])
+            if record.countries_count:
+                return str(record.countries_count)
+
+        samples_payload = (
+            bucket_payload.get("samples")
+            if isinstance(bucket_payload, Mapping)
+            else None
+        )
+        if isinstance(samples_payload, Mapping):
+            top_iso = samples_payload.get("top_iso3")
+            if isinstance(top_iso, Sequence) and not isinstance(top_iso, (str, bytes)):
+                iso_values: List[str] = []
+                for item in top_iso:
+                    iso_candidate: Any | None = None
+                    if isinstance(item, Mapping):
+                        iso_candidate = (
+                            item.get("selector")
+                            or item.get("name")
+                            or item.get("country")
+                            or item.get("value")
+                        )
+                    elif isinstance(item, Sequence) and item:
+                        iso_candidate = item[0]
+                    else:
+                        iso_candidate = item
+                    if iso_candidate is None:
+                        continue
+                    iso_text = str(iso_candidate).strip()
+                    if not iso_text:
+                        continue
+                    iso_values.append(iso_text)
+                    if len(iso_values) >= 3:
+                        break
+                if iso_values:
+                    return ", ".join(iso_values)
+
+        return EM_DASH
+
     lines.append(CLASSIC_TABLE_HEADER)
     lines.append(CLASSIC_TABLE_DIVIDER)
+
+    def _resolve_count(primary: Any, fallback: Any = 0) -> int:
+        if primary not in (None, ""):
+            return _coerce_int(primary)
+        return _coerce_int(fallback)
 
     for name in sorted(all_names):
         bucket = aggregated.get(name, {})
@@ -1706,43 +1843,13 @@ def _render_connector_matrix(
             written_count = _coerce_int(counts_tuple[2])
         else:
             fetched_count = normalized_count = written_count = 0
-        counts_text = f"{fetched_count}/{normalized_count}/{written_count} ({retries_value})"
 
-        rows_written_cell = EM_DASH
-        rows_written_value = bucket.get("rows_written")
-        if rows_written_value not in (None, 0, "0"):
-            try:
-                rows_written_cell = str(_coerce_int(rows_written_value))
-            except (TypeError, ValueError):
-                rows_written_cell = str(rows_written_value)
-        elif written_count not in (None, 0):
-            rows_written_cell = str(written_count)
+        kept_count = _resolve_count(bucket.get("kept"), record.rows_written if record else 0)
+        dropped_count = _resolve_count(bucket.get("dropped"))
+        parse_errors_count = _resolve_count(bucket.get("parse_errors"))
 
         record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
-
-        kept = EM_DASH
-        dropped = EM_DASH
-        parse_err = EM_DASH
-
-        kept_value = bucket.get("kept")
-        if kept_value is None and isinstance(record_extras, Mapping):
-            if record_extras.get("rows_written") is not None:
-                kept_value = _coerce_int(record_extras.get("rows_written"))
         meta_bucket = meta_info.get(name, {})
-        if kept_value is None and meta_bucket.get("rows"):
-            kept_value = meta_bucket.get("rows")
-        if kept_value is None and written_count:
-            kept_value = written_count
-
-        dropped_value = bucket.get("dropped")
-        parse_errors_value = bucket.get("parse_errors")
-        if isinstance(record_extras, Mapping):
-            run_totals = record_extras.get("run_totals")
-            if isinstance(run_totals, Mapping):
-                if dropped_value is None and run_totals.get("dropped") is not None:
-                    dropped_value = _coerce_int(run_totals.get("dropped"))
-                if parse_errors_value is None and run_totals.get("parse_errors") is not None:
-                    parse_errors_value = _coerce_int(run_totals.get("parse_errors"))
 
         log_path = logs_by_name.get(name)
         logs_cell = _display_path(log_path) if log_path is not None else EM_DASH
@@ -1771,25 +1878,19 @@ def _render_connector_matrix(
                     rendered_paths.append(path_obj.as_posix())
             meta_cell = ", ".join(rendered_paths)
 
-        if kept_value not in (None, 0, "0") and kept == EM_DASH:
-            kept = str(kept_value)
-        if dropped_value not in (None, 0, "0") and dropped == EM_DASH:
-            dropped = str(dropped_value)
-        if parse_errors_value not in (None, 0, "0") and parse_err == EM_DASH:
-            parse_err = str(parse_errors_value)
-
         lines.append(
-            "| {name} | {mode} | {status} | {reason} | {http} | {counts} | {rows_written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {fetched} | {normalized} | {written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
                 name=name,
                 mode=mode,
                 status=status_value,
                 reason=reason_text,
                 http=http_text,
-                counts=counts_text,
-                rows_written=rows_written_cell,
-                kept=kept,
-                dropped=dropped,
-                parse_errors=parse_err,
+                fetched=fetched_count,
+                normalized=normalized_count,
+                written=written_count,
+                kept=kept_count,
+                dropped=dropped_count,
+                parse_errors=parse_errors_count,
                 logs_cell=logs_cell,
                 meta_rows=meta_rows_cell,
                 meta_cell=meta_cell,
@@ -1797,7 +1898,7 @@ def _render_connector_matrix(
         )
 
     if not all_names:
-        lines.append("| - | - | - | - | - | - | - | - | - | - | - | 0 | - |")
+        logger.debug("No connector entries provided; emitting legacy header without rows.")
 
     lines.append("")
     if logs:
