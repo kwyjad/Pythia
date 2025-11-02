@@ -37,8 +37,13 @@
 ## scripts.ci.summarize_connectors
 
 - `build_markdown(...)` always renders the legacy diagnostics matrix header and divider
-  even when no connector rows are available so fast diagnostics continue to find the
-  expected table framing.
+  even when no connector rows are available. The header is:
+
+  `| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Fetched | Normalized | Written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |`
+
+  Counts are emitted as individual integer columns (`Fetched`, `Normalized`, `Written`,
+  `Kept`, `Dropped`, `Parse errors`) defaulting to `0` when diagnostics omit the values.
+  `Status` prefers the raw connector status (`extras.status_raw`) when provided.
 - The "Config used" section always includes two literal lines: `Config source: <value>`
   and `Config: <path>`.
 - Config path resolution order: connector metadata (`extras.config.*`),

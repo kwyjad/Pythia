@@ -48,10 +48,11 @@ EM_DASH = "—"
 logger = logging.getLogger(__name__)
 
 CLASSIC_TABLE_HEADER = (
-    "| Connector | Mode | Country | Status | Reason | Counts f/n/w | "
-    "HTTP 2xx/4xx/5xx (retries) | Logs | Meta rows | Meta |"
+    "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
+    "Fetched | Normalized | Written | Kept | Dropped | Parse errors | "
+    "Logs | Meta rows | Meta |"
 )
-CLASSIC_TABLE_DIVIDER = "|---|---|---|---|---|---|---|---|---|---|"
+CLASSIC_TABLE_DIVIDER = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
 _LAST_STUB_REASON_ALIAS: str | None = None
@@ -1837,7 +1838,24 @@ def _render_connector_matrix(
             written_count = _coerce_int(counts_tuple[2])
         else:
             fetched_count = normalized_count = written_count = 0
-        counts_text = f"{fetched_count}/{normalized_count}/{written_count}"
+
+        rows_written_fallback = bucket.get("rows_written")
+        if rows_written_fallback not in (None, ""):
+            fallback_value = _coerce_int(rows_written_fallback)
+            if not written_count:
+                written_count = fallback_value
+        if not written_count and record:
+            written_count = record.rows_written
+
+        kept_value: Any = bucket.get("kept")
+        if kept_value in (None, ""):
+            kept_value = rows_written_fallback
+        if kept_value in (None, "") and record:
+            kept_value = record.rows_written
+        kept_count = _coerce_int(kept_value)
+
+        dropped_count = _coerce_int(bucket.get("dropped"))
+        parse_errors_count = _coerce_int(bucket.get("parse_errors"))
 
         record_extras = record.extras if (record and isinstance(record.extras, Mapping)) else {}
         meta_bucket = meta_info.get(name, {})
@@ -1869,17 +1887,19 @@ def _render_connector_matrix(
                     rendered_paths.append(path_obj.as_posix())
             meta_cell = ", ".join(rendered_paths)
 
-        country_cell = _format_country_cell(record, bucket)
-
         lines.append(
-            "| {name} | {mode} | {country} | {status} | {reason} | {counts} | {http} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
+            "| {name} | {mode} | {status} | {reason} | {http} | {fetched} | {normalized} | {written} | {kept} | {dropped} | {parse_errors} | {logs_cell} | {meta_rows} | {meta_cell} |".format(
                 name=name,
                 mode=mode,
-                country=country_cell,
                 status=status_value,
                 reason=reason_text,
-                counts=counts_text,
                 http=http_text,
+                fetched=fetched_count,
+                normalized=normalized_count,
+                written=written_count,
+                kept=kept_count,
+                dropped=dropped_count,
+                parse_errors=parse_errors_count,
                 logs_cell=logs_cell,
                 meta_rows=meta_rows_cell,
                 meta_cell=meta_cell,

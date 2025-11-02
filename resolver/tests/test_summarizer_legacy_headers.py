@@ -7,9 +7,10 @@ from resolver.diagnostics.ingestion import summarize_connectors as shim
 from scripts.ci import summarize_connectors as sc
 
 HEADER = (
-    "| Connector | Mode | Country | Status | Reason | Counts f/n/w | HTTP 2xx/4xx/5xx (retries) | Logs | Meta rows | Meta |"
+    "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
+    "Fetched | Normalized | Written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
 )
-DIVIDER = "|---|---|---|---|---|---|---|---|---|---|"
+DIVIDER = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
 def _extract_matrix_rows(markdown: str) -> List[str]:
@@ -49,9 +50,14 @@ def test_counts_and_http_columns_have_expected_format():
     rows = _extract_matrix_rows(markdown)
     row_line = next(line for line in rows if line.startswith("| demo "))
     cells = [cell.strip() for cell in row_line.strip().strip("|").split("|")]
-    assert len(cells) == 10
-    assert re.fullmatch(r"\d+/\d+/\d+", cells[5])
-    assert re.fullmatch(r"\d+/\d+/\d+ \(\d+\)", cells[6])
+    assert len(cells) == 14
+    assert cells[5] == "1"
+    assert cells[6] == "2"
+    assert cells[7] == "3"
+    assert cells[8] == "3"
+    assert cells[9] == "0"
+    assert cells[10] == "0"
+    assert re.fullmatch(r"\d+/\d+/\d+ \(\d+\)", cells[4])
 
 
 def test_diagnostics_wrapper_matches_ci(tmp_path):
