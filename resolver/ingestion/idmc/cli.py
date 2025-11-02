@@ -25,8 +25,8 @@ from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
 from .provenance import build_provenance, write_json
-from .staging import ensure_staging, write_header_if_empty
-from .why_zero import write_why_zero
+from .staging import ensure_header_pair
+from .why_zero import build_payload, write_why_zero
 
 
 def _parse_csv(value: str | None, *, transform=None) -> List[str]:
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         if str(item)
     ]
 
-    ensure_staging()
+    ensure_header_pair()
 
     env_force_cache_only = _env_truthy(os.getenv("IDMC_FORCE_CACHE_ONLY"))
     env_no_date_filter = _env_truthy(os.getenv("IDMC_NO_DATE_FILTER"))
@@ -382,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
             selectors,
             "No rows after filters. See drop_reasons.",
         )
-        write_header_if_empty()
+        ensure_header_pair()
 
     timings = timings_block(
         probe_ms=probe_ms,
@@ -598,25 +598,28 @@ def main(argv: list[str] | None = None) -> int:
             requests_count = int(requests_raw)  # type: ignore[arg-type]
         except (TypeError, ValueError):  # pragma: no cover - defensive
             requests_count = 0
-        why_zero_payload = {
-            "token_present": bool(os.getenv("IDMC_API_TOKEN", "").strip()),
-            "countries_count": len(selected_countries),
-            "countries_sample": selected_countries[:5],
-            "window": {
+        why_zero_payload = build_payload(
+            token_present=bool(os.getenv("IDMC_API_TOKEN", "").strip()),
+            countries=selected_countries,
+            window={
                 "start": str(window_start) if window_start is not None else None,
                 "end": str(window_end) if window_end is not None else None,
             },
-            "filters": {
+            filters={
                 "date_out_of_window": int(drop_hist.get("date_out_of_window", 0)),
                 "no_iso3": int(drop_hist.get("no_iso3", 0)),
                 "no_value_col": int(drop_hist.get("no_value_col", 0)),
             },
-            "network_attempted": requests_count > 0,
-            "requests_attempted": requests_count,
-            "config_source": config_source_label,
-            "config_path_used": str(config_path_used) if config_path_used else None,
-            "loader_warnings": config_warnings,
-        }
+            network_attempted=requests_count > 0,
+            requests_attempted=requests_count,
+            config_source=config_source_label,
+            config_path_used=str(config_path_used) if config_path_used else None,
+            loader_warnings=config_warnings,
+            extras={
+                "selectors": selectors,
+                "http_requests": http_rollup.get("requests"),
+            },
+        )
         write_why_zero(why_zero_payload)
         diagnostics_payload["why_zero"] = why_zero_payload
     provenance = build_provenance(

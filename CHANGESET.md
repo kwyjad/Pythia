@@ -21,3 +21,25 @@
 - ci(idmc): zero-row guardrails, staging bootstrap, and improved summary with config path.
 - fix(dtm): prefer resolver/config for shared loader, surface config_path_used & countries_mode, restore fast tests.
 - fix(ci): repair summarize_connectors indentation, add syntax guard, and ensure import sanity test covers the module.
+- ci(summary): introduce ingestion superreport with per-connector error/why-zero capture, staging safeguards, offline tests, and workflow soft-fail hardening.
+- fix(ci/summarizer): restore _render_dtm_deep_dive compat shim, guard optional diagnostics, surface exported API line, and add import sanity coverage.
+
+- ci(summary): restore summarize_connectors public API (load_report, build_markdown, main, SUMMARY_TITLE) and summary._fmt_count; reintroduce sections required by fast-tests (staging readiness, samples, config used, zero-row root cause, logs).
+- fix(ci/summarizer): restore connector table columns, em-dash formatting, DTM diagnostics, secret redaction, and missing-report stubs so fast tests pass with the refactored superreport.
+- ci(summary): restore public API strings, selector effectiveness section, top-5 sample histograms, logs/meta table, and CLI missing-report stub for the best-ever summary.
+- fix(ci/summarizer): align literals for config line, missing-report stub, selector phrasing, logs/meta table, and zero-row primary reason to unblock fast tests.
+- ci(summary): restore legacy headings, config literals, logs/meta per-connector table, reason aliasing, DTM reachability section, and zero-row drop summary for full fast-test parity.
+- ci(summary): back-compat v3 refinements — seed missing-report stubs, unify the connectors table with mode/http/count columns ending in Logs/Meta rows/Meta, surface selector coverage in zero-row messaging, and retain reachability/config phrasing the fast tests assert.
+- ci(summary): enforce deduped connector rows with run.json meta paths, emit host:port reachability bullets, and ensure config, selector, and zero-row diagnostics match fast-test literals.
+- ci(summarizer): restore classic connectors table header, literal config lines, top-5 sample histogram, and legacy stub row,
+  while preferring run.json totals for rows written so fast tests match the expected markdown.
+- ci(summary): always render Config used block when config extras exist, preserving the literal "Config:" path line required by
+  fast tests and covering it with a focused regression test.
+- ci(summarizer): restore the classic 13-column connector table layout and scope the config regression test to the expected
+  lines so legacy fast-test fixtures stay green.
+- ci(summarizer): keep the literal config path line in the summary while maintaining the classic table layout required by the
+  fast-test suite.
+- ci(summary): reinstate the Rows written column in the connector table, feed it from run.json totals, and update stub coverage
+  so the classic fast-test expectations stay satisfied.
+- ci(summary): trim the connector table back to the 13-column legacy header while retaining the literal "Config:" path line so
+  the remaining fast-test regressions clear.
