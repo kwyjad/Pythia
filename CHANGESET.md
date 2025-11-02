@@ -41,3 +41,5 @@
   fast-test suite.
 - ci(summary): reinstate the Rows written column in the connector table, feed it from run.json totals, and update stub coverage
   so the classic fast-test expectations stay satisfied.
+- ci(summary): trim the connector table back to the 13-column legacy header while retaining the literal "Config:" path line so
+  the remaining fast-test regressions clear.

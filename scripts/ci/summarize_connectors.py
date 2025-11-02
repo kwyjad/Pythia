@@ -46,9 +46,9 @@ EM_DASH = "—"
 
 CLASSIC_TABLE_HEADER = (
     "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | "
-    "Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+    "Counts f/n/w | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
 )
-CLASSIC_TABLE_DIVIDER = "|---|---:|---|---|---|---|---:|---:|---:|---:|---|---:|---|"
+CLASSIC_TABLE_DIVIDER = "|---|---:|---|---|---|---|---:|---:|---:|---|---:|---|"
 
 
 _LAST_STUB_REASON_ALIAS: str | None = None
