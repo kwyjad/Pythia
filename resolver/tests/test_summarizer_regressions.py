@@ -48,6 +48,6 @@ def test_logs_meta_three_column_headers(tmp_path):
     (logs_dir / "alpha.log").write_text("x", encoding="utf-8")
     markdown = sc.build_markdown([], diagnostics_root=diag_root)
     header = (
-        "| Connector | Mode | Status | Reason | HTTP 2xx/4xx/5xx (retries) | Counts f/n/w | Rows written | Kept | Dropped | Parse errors | Logs | Meta rows | Meta |"
+        "| Connector | Mode | Country | Status | Reason | Counts f/n/w | HTTP 2xx/4xx/5xx (retries) | Logs | Meta rows | Meta |"
     )
     assert header in markdown

@@ -33,3 +33,17 @@
 ## TypeScript / JavaScript
 
 (none)
+
+## scripts.ci.summarize_connectors
+
+- `build_markdown(...)` always renders the legacy diagnostics matrix header and divider
+  even when no connector rows are available so fast diagnostics continue to find the
+  expected table framing.
+- The "Config used" section always includes two literal lines: `Config source: <value>`
+  and `Config: <path>`.
+- Config path resolution order: connector metadata (`extras.config.*`),
+  `diagnostics/ingestion/**/why_zero.json`, `diagnostics/ingestion/**/manifest.json`,
+  the DTM fallback (`resolver/config/dtm.yml`), and finally `unknown` when nothing can be
+  discovered.
+- `resolver/diagnostics/ingestion/summarize_connectors.py` re-exports the CI summarizer
+  helpers so imports and diagnostics CLI entrypoints share a single implementation.
