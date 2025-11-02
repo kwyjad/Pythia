@@ -519,9 +519,10 @@ def _legacy_config_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
     )
     warnings = chosen.get("config_warnings")
 
-    lines = ["## Config used", ""]
-    lines.append(f"- Config source: {source}")
-    lines.append(f"- Config: {path}")
+    lines = ["## Config used"]
+    lines.append("")
+    lines.append(f"Config source: {source}")
+    lines.append(f"Config: {path}")
 
     if isinstance(warnings, Sequence) and warnings:
         lines.append("- Warnings:")
@@ -1796,14 +1797,9 @@ def _render_connector_matrix(
         )
 
     if not all_names:
-        lines.append(
-            f"| — | real | — | — | {EM_DASH} | 0/0/0 (0) | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} | {EM_DASH} |"
-        )
+        lines.append("| - | - | - | - | - | - | - | - | - | - | - | 0 | - |")
 
     lines.append("")
-    legacy_header = CLASSIC_TABLE_HEADER
-    lines.append("<!-- Legacy header retained for fast-test assertions -->")
-    lines.append(legacy_header)
     if logs:
         for file in logs:
             try:
