@@ -52,3 +52,6 @@
   discovered.
 - `resolver/diagnostics/ingestion/summarize_connectors.py` re-exports the CI summarizer
   helpers so imports and diagnostics CLI entrypoints share a single implementation.
+
+- **Boolean env parsing:** All boolean-like flags are read via `getenv_bool`, treating `0/false/no/off/""` as False.
+- **Superreport meta-row display:** Aggregated meta row count of `0` renders as **“—”** (em dash), not the numeral `0`.

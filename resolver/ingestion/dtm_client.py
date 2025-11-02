@@ -45,11 +45,11 @@ from tenacity import (
 )
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion._shared.config_loader import (
     get_config_details,
     load_connector_config,
 )
+from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion._shared.run_io import attach_config_source, count_csv_rows, write_json
 from resolver.ingestion.diagnostics_emitter import (
     append_jsonl as diagnostics_append_jsonl,
@@ -3056,14 +3056,10 @@ class DTMApiClient:
         return None
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    return getenv_bool(name, default=default)
-
-
 def bool_from_env_or_flag(name: str, flag_value: bool, *, default: bool = False) -> bool:
     if flag_value:
         return True
-    return _env_bool(name, default)
+    return getenv_bool(name, default)
 
 
 def _ensure_http_counts(counts: Optional[MutableMapping[str, int]]) -> MutableMapping[str, int]:
