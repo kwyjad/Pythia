@@ -156,3 +156,4 @@ ${RESOLVER_DATA_DIR}/
 !resolver/diagnostics/ingestion/__init__.py
 !resolver/diagnostics/ingestion/summarize_connectors.py
 !resolver/diagnostics/
+!scripts/diagnostics/
