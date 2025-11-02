@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import dataclasses
 import json
 import os
@@ -29,7 +28,6 @@ def _env_truthy(value: str | None) -> bool:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
-from resolver.ingestion._shared.error_report import write_error_report
 from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
@@ -71,8 +69,6 @@ CONNECTOR_METADATA: Dict[str, ConnectorMetadata] = {
 
 LOGS_DIR = Path("diagnostics") / "ingestion" / "logs"
 REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
-STAGING_DIR = Path("resolver") / "staging"
-STAGING_HEADER = ["iso3", "as_of_date", "metric", "value", "series_semantics", "source"]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -102,11 +98,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Optional connector-specific environment overrides. Can be repeated, e.g. "
             "--extra-env 'dtm_client=DTM_NO_DATE_FILTER=1'"
         ),
-    )
-    parser.add_argument(
-        "--soft-fail",
-        action="store_true",
-        help="Continue running remaining connectors even if one fails.",
     )
     if argv is None:
         argv = []
@@ -263,26 +254,6 @@ def _resolve_connectors(env: Dict[str, str]) -> List[str]:
     return raw_list or list(DEFAULT_CONNECTORS)
 
 
-def _ensure_header_only_staging(connector: str) -> None:
-    """Create empty staging CSVs for ``connector`` (idempotent)."""
-
-    base = STAGING_DIR / connector
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
-    for metric in ("flow", "stock"):
-        path = base / f"{metric}.csv"
-        if path.exists():
-            continue
-        try:
-            with path.open("w", encoding="utf-8", newline="") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(STAGING_HEADER)
-        except OSError:
-            continue
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else [])
     extra_args = _parse_extra_args(args.extra_args)
@@ -327,11 +298,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         env["RESOLVER_SKIP_IDMC"] = "0" if token_present else "1"
 
     connectors = _resolve_connectors(env)
-    soft_fail = bool(args.soft_fail) or _env_truthy(env.get("RESOLVER_CONNECTORS_SOFT_FAIL"))
-    try:
-        log_tail_limit = int(env.get("SUMMARY_LOG_TAIL_KB", "50"))
-    except ValueError:
-        log_tail_limit = 50
     if not connectors:
         print("no connectors requested; exiting")
         return 0
@@ -441,32 +407,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             except OSError:
                 pass
         print(f"=== DONE {name} (rc={rc}) ===")
-        if rc != 0:
-            error_dir = diag_base / name
-            try:
-                write_error_report(
-                    error_dir,
-                    exit_code=rc,
-                    message=f"{name} exited with {rc}",
-                    log_path=log_path,
-                    log_tail_kb=log_tail_limit,
-                    extras={
-                        "argv": cmd,
-                        "default_args": default_args,
-                        "env_flags": env_flags,
-                        "user_flags": user_flags,
-                    },
-                )
-            except Exception as exc:
-                print(f"failed to write error report for {name}: {exc}", file=sys.stderr)
-            _ensure_header_only_staging(name)
-            if not soft_fail and overall_rc == 0:
-                overall_rc = rc
-        elif rc == 0:
-            _ensure_header_only_staging(name)  # ensure staging directories exist
+        if rc != 0 and overall_rc == 0:
+            overall_rc = rc
     print(f"connectors_report entries written: {len(records)}")
-    return 0 if soft_fail else overall_rc
+    return overall_rc
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main())
