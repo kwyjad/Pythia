@@ -1,61 +1,71 @@
-"""Lightweight diagnostics summarizer for connectors."""
+"""Diagnostics shim that delegates to the CI summarizer implementation."""
 
 from __future__ import annotations
 
-import argparse
-import json
-from pathlib import Path
-from typing import Dict, List
+import os
+from typing import Any, Mapping, Sequence
+
+# This module delegates to the CI summarizer to preserve single-source legacy behavior.
+from scripts.ci import summarize_connectors as _ci
+
+SUMMARY_PATH = _ci.SUMMARY_PATH
+SUMMARY_TITLE = _ci.SUMMARY_TITLE
+LEGACY_TITLE = _ci.LEGACY_TITLE
+DEFAULT_DIAG_DIR = _ci.DEFAULT_DIAG_DIR
+DEFAULT_STAGING_DIR = _ci.DEFAULT_STAGING_DIR
 
 
-def build_summary(staging_dir: str) -> Dict[str, object]:
-    staging_path = Path(staging_dir)
-    report: Dict[str, object] = {
-        "staging_exists": staging_path.exists(),
-        "files": [],
-        "rows_total": 0,
-    }
+def load_report(path: os.PathLike[str] | str) -> list[Mapping[str, Any]]:
+    """Proxy to :func:`scripts.ci.summarize_connectors.load_report`."""
 
-    if not staging_path.exists():
-        return report
-
-    files: List[Dict[str, object]] = []
-    rows_total = 0
-
-    for csv_path in staging_path.rglob("*.csv"):
-        try:
-            with csv_path.open("r", encoding="utf-8", errors="ignore") as handle:
-                rows = sum(1 for _ in handle) - 1
-            rows = max(rows, 0)
-            files.append({"path": str(csv_path), "rows": rows})
-            rows_total += rows
-        except Exception:
-            files.append({"path": str(csv_path), "rows": "unreadable"})
-
-    report["files"] = files
-    report["rows_total"] = rows_total
-    return report
+    return _ci.load_report(path)
 
 
-def _cli() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize connector staging CSV outputs")
-    parser.add_argument("--staging", default="data/staging", help="Path to the staging root")
-    parser.add_argument(
-        "--out",
-        default=".ci/diagnostics/connectors-summary.json",
-        help="Destination path for the JSON summary",
+def build_markdown(
+    entries: Sequence[Mapping[str, Any]] | None,
+    diagnostics_root: os.PathLike[str] | str = DEFAULT_DIAG_DIR,
+    staging_root: os.PathLike[str] | str = DEFAULT_STAGING_DIR,
+) -> str:
+    """Render markdown via the CI summarizer implementation."""
+
+    return _ci.build_markdown(entries, diagnostics_root=diagnostics_root, staging_root=staging_root)
+
+
+def render_summary_md(
+    entries: Sequence[Mapping[str, Any]] | None,
+    *,
+    diagnostics_root: os.PathLike[str] | str = DEFAULT_DIAG_DIR,
+    staging_root: os.PathLike[str] | str = DEFAULT_STAGING_DIR,
+    output_path: os.PathLike[str] | str | None = None,
+) -> str:
+    """Proxy to :func:`scripts.ci.summarize_connectors.render_summary_md`."""
+
+    return _ci.render_summary_md(
+        entries,
+        diagnostics_root=diagnostics_root,
+        staging_root=staging_root,
+        output_path=output_path,
     )
-    return parser.parse_args()
 
 
-def main() -> None:
-    args = _cli()
-    summary = build_summary(args.staging)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point delegating to :func:`scripts.ci.summarize_connectors.main`."""
+
+    return _ci.main(argv)
 
 
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "SUMMARY_PATH",
+    "SUMMARY_TITLE",
+    "LEGACY_TITLE",
+    "DEFAULT_DIAG_DIR",
+    "DEFAULT_STAGING_DIR",
+    "load_report",
+    "build_markdown",
+    "render_summary_md",
+    "main",
+]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
