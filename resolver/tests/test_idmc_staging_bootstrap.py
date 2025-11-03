@@ -97,7 +97,10 @@ def test_why_zero_json_includes_config_details(monkeypatch, tmp_path):
     assert payload["token_present"] is True
     assert payload["countries_count"] == 2
     assert payload["countries_sample"] == ["AAA", "BBB"]
+    assert payload["countries_source"] == "config list"
+    assert payload["date_window"] == {"start": "2024-01-01", "end": "2024-01-31"}
     assert payload["window"] == {"start": "2024-01-01", "end": "2024-01-31"}
+    assert payload["series"] == ["stock", "flow"]
     assert payload["network_attempted"] is False
     assert payload["config_source"] == "ingestion"
     assert payload["config_path_used"] == str(tmp_path / "resolver" / "config" / "idmc.yml")
