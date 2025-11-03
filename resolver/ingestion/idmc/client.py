@@ -14,7 +14,10 @@ from urllib.parse import urlencode
 
 import pandas as pd
 
-from resolver.ingestion.utils.country_utils import load_all_iso3, resolve_countries
+from resolver.ingestion.utils.country_utils import (
+    read_countries_override_from_env,
+    resolve_countries,
+)
 
 from .cache import cache_get, cache_key, cache_put
 from .diagnostics import (
@@ -493,27 +496,24 @@ def fetch(
     if not chunk_ranges:
         chunk_ranges = [(window_start, window_end)]
 
-    config_countries = resolve_countries(cfg.api.countries)
-    selected_raw = list(
-        dict.fromkeys(
-            [
-                str(value).strip().upper()
-                for value in (only_countries or cfg.api.countries)
-                if str(value).strip()
-            ]
-        )
-    )
-    selected_countries = (
-        resolve_countries(list(only_countries))
-        if only_countries is not None
-        else config_countries
-    )
-    master_set = set(load_all_iso3())
-    invalid = [code for code in selected_raw if code not in master_set]
+    override_raw = read_countries_override_from_env()
+    config_countries = resolve_countries(cfg.api.countries, override_raw)
+
+    selected_countries: List[str] = list(config_countries)
+    if only_countries is not None:
+        override_list = list(only_countries)
+        override_resolved = resolve_countries(override_list)
+        if override_resolved:
+            selected_countries = override_resolved
+        else:
+            LOGGER.warning(
+                "Provided only_countries filter resolved to zero valid ISO3 codes; retaining %d configured countries",
+                len(selected_countries),
+            )
+
     LOGGER.info(
-        "IDMC country scope: %d codes (invalid=%d) sample=%s",
+        "IDMC country scope: %d codes (sample=%s)",
         len(selected_countries),
-        len(invalid),
         ", ".join(selected_countries[:10]),
     )
     countries = list(selected_countries)

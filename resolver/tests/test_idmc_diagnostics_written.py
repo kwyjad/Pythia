@@ -91,7 +91,11 @@ def test_idmc_diagnostics_summary_written(monkeypatch, tmp_path):
     monkeypatch.setattr(idmc_cli, "maybe_map_hazards", _stub_maybe_map)
     monkeypatch.setattr(idmc_cli, "write_connectors_line", _noop_write_connectors_line)
     monkeypatch.setattr(idmc_cli, "build_provenance", _stub_provenance)
-    monkeypatch.setattr(idmc_cli, "resolve_countries", lambda _values=None: ["AAA", "BBB", "CCC"])
+    monkeypatch.setattr(
+        idmc_cli,
+        "resolve_countries",
+        lambda _values=None, _env_value=None, **_kwargs: ["AAA", "BBB", "CCC"],
+    )
 
     exit_code = idmc_cli.main(["--skip-network"])
     assert exit_code == 0
@@ -99,6 +103,6 @@ def test_idmc_diagnostics_summary_written(monkeypatch, tmp_path):
     summary_path = tmp_path / "diagnostics" / "ingestion" / "idmc" / "summary.md"
     assert summary_path.exists()
     content = summary_path.read_text(encoding="utf-8")
-    assert "Countries resolved:" in content
-    match = re.search(r"Countries resolved: (\d+)", content)
+    assert "## Countries" in content
+    match = re.search(r"Resolved count: (\d+)", content)
     assert match is not None and int(match.group(1)) > 0

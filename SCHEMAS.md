@@ -330,6 +330,10 @@ structured overrides (all mirrored by environment variables):
 - The IDMC staging directory (`resolver/staging/idmc/`) may contain both
   `flow.csv` and `stock.csv`; the exporter reports row counts for each file even
   when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
+- Zero-row diagnostics (`diagnostics/ingestion/idmc/why_zero.json`) capture token
+  presence, resolved country counts and samples, the source of the country list,
+  selected series, and the active date window; the file is written whenever
+  `--debug` is supplied or when no rows survive normalization.【F:resolver/ingestion/idmc/cli.py†L889-L936】
 - When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
   normalized schema temporarily includes optional columns `hazard_code`,
   `hazard_label`, and `hazard_class`.

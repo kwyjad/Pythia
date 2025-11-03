@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from resolver.ingestion.utils.country_utils import resolve_countries
+from resolver.ingestion.utils.country_utils import (
+    read_countries_override_from_env,
+    resolve_countries,
+)
 
 from .client import fetch
 from .config import load
@@ -47,8 +50,11 @@ Mode: {mode}
 Token: {token_status}
 Series: {series_display}
 Date window: {date_window}
-Countries resolved: {countries_count}
-Sample: {countries_sample_display}
+
+## Countries
+- Resolved count: {countries_count}
+- Sample: {countries_sample_display}
+- Source: {countries_source_display}
 
 ## Endpoints
 {endpoints_block}
@@ -324,18 +330,39 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
-    countries_source = "config"
-    config_countries = resolve_countries(getattr(cfg.api, "countries", []))
+    config_countries_raw = list(getattr(cfg.api, "countries", []))
+    override_raw = read_countries_override_from_env()
+    config_countries = resolve_countries(config_countries_raw, override_raw)
+
+    countries_source = "config list"
+    if override_raw:
+        countries_source = "env(IDMC_COUNTRIES)"
+    elif not config_countries_raw:
+        countries_source = "config (all countries)"
+
+    selected_countries = list(config_countries)
+
+    if env_countries:
+        env_override = resolve_countries(env_countries)
+        if env_override:
+            selected_countries = env_override
+            countries_source = "env(IDMC_ONLY_COUNTRIES)"
+        else:
+            LOGGER.warning(
+                "Environment filter IDMC_ONLY_COUNTRIES did not match any ISO3 codes; retaining %d configured countries",
+                len(selected_countries),
+            )
+
     if cli_countries:
-        countries_source = "cli"
-        selected_countries = resolve_countries(cli_countries)
-    elif env_countries:
-        countries_source = "env"
-        selected_countries = resolve_countries(env_countries)
-    else:
-        selected_countries = config_countries
-    if not selected_countries:
-        selected_countries = config_countries
+        cli_override = resolve_countries(cli_countries)
+        if cli_override:
+            selected_countries = cli_override
+            countries_source = "cli(--only-countries)"
+        else:
+            LOGGER.warning(
+                "CLI --only-countries override did not match any ISO3 codes; retaining %d configured countries",
+                len(selected_countries),
+            )
 
     config_series = [
         str(value).strip().lower()
@@ -359,8 +386,9 @@ def main(argv: list[str] | None = None) -> int:
         selected_series = ["flow"]
 
     LOGGER.debug(
-        "Country scope source=%s resolved=%d sample=%s",
+        "Country scope source=%s override_env=%s resolved=%d sample=%s",
         countries_source,
+        "yes" if override_raw else "no",
         len(selected_countries),
         ", ".join(selected_countries[:10]),
     )
@@ -809,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Chunks enabled: {bool(chunks_info.get('enabled'))} (count={chunks_info.get('count', 0)})"
         )
 
+    countries_sample_display = ", ".join(selected_countries[:10]) or "(none)"
+
     summary_context = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_sha": _resolve_git_sha(),
@@ -819,8 +849,8 @@ def main(argv: list[str] | None = None) -> int:
         "series_display": ", ".join(selected_series) or "(none)",
         "date_window": date_window_display,
         "countries_count": len(selected_countries),
-        "countries_sample_display": ", ".join(selected_countries[:10])
-        or "(none)",
+        "countries_sample_display": countries_sample_display,
+        "countries_source_display": countries_source,
         "endpoints_block": _format_bullets(
             f"{name}: {url}" for name, url in endpoints_used.items()
         ),
@@ -874,7 +904,8 @@ def main(argv: list[str] | None = None) -> int:
         csv_manifest_path = f"{csv_export_path}.manifest.json"
         export_info.setdefault("manifests", {})["csv"] = csv_manifest_path
     notes = {"zero_rows": zero_rows} if zero_rows else {}
-    if rows == 0:
+    should_write_why_zero = rows == 0 or bool(args.debug)
+    if should_write_why_zero:
         window_start = date_window.get("start")
         window_end = date_window.get("end")
         requests_raw = http_rollup.get("requests", 0)
@@ -882,11 +913,18 @@ def main(argv: list[str] | None = None) -> int:
             requests_count = int(requests_raw)  # type: ignore[arg-type]
         except (TypeError, ValueError):  # pragma: no cover - defensive
             requests_count = 0
+        countries_sample = selected_countries[:10]
         why_zero_payload = {
-            "token_present": bool(os.getenv("IDMC_API_TOKEN", "").strip()),
+            "token_present": bool(token_present),
             "countries_count": len(selected_countries),
-            "countries_sample": selected_countries[:5],
+            "countries_sample": countries_sample,
+            "countries_source": countries_source,
+            "series": list(selected_series),
             "window": {
+                "start": str(window_start) if window_start is not None else None,
+                "end": str(window_end) if window_end is not None else None,
+            },
+            "date_window": {
                 "start": str(window_start) if window_start is not None else None,
                 "end": str(window_end) if window_end is not None else None,
             },
@@ -901,6 +939,8 @@ def main(argv: list[str] | None = None) -> int:
             "config_path_used": str(config_path_used) if config_path_used else None,
             "loader_warnings": config_warnings,
         }
+        if override_raw and countries_source != "cli(--only-countries)" and countries_source != "env(IDMC_ONLY_COUNTRIES)":
+            why_zero_payload["countries_override"] = "env(IDMC_COUNTRIES)"
         write_why_zero(why_zero_payload)
         diagnostics_payload["why_zero"] = why_zero_payload
     provenance = build_provenance(

@@ -92,7 +92,11 @@ def test_idmc_cli_debug_flag(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(idmc_cli, "maybe_map_hazards", _stub_maybe_map)
     monkeypatch.setattr(idmc_cli, "write_connectors_line", _noop_write_connectors_line)
     monkeypatch.setattr(idmc_cli, "build_provenance", _stub_provenance)
-    monkeypatch.setattr(idmc_cli, "resolve_countries", lambda _values=None: ["AAA", "BBB"])
+    monkeypatch.setattr(
+        idmc_cli,
+        "resolve_countries",
+        lambda _values=None, _env_value=None, **_kwargs: ["AAA", "BBB"],
+    )
 
     caplog.set_level(logging.DEBUG)
     exit_code = idmc_cli.main(["--skip-network", "--debug"])
