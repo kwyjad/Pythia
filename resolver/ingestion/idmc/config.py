@@ -83,7 +83,7 @@ class ApiCfg:
     base_url: str = field(default_factory=_default_base_url)
     endpoints: Dict[str, str] = field(default_factory=_default_endpoints)
     countries: List[str] = field(default_factory=list)
-    series: List[str] = field(default_factory=lambda: ["flow"])
+    series: List[str] = field(default_factory=lambda: ["stock", "flow"])
     date_window: DateWindow = field(default_factory=DateWindow)
     token_env: str = "IDMC_API_TOKEN"
 
@@ -190,12 +190,12 @@ def load(
         str(value).strip().lower()
         for value in api_block.get("series", [])
         if str(value).strip()
-    ] or ["flow"]
+    ] or ["stock", "flow"]
 
     countries = env_countries if env_countries is not None else config_countries
     series = env_series if env_series is not None else config_series
     if not series:
-        series = ["flow"]
+        series = ["stock", "flow"]
 
     cache_force_cache_only = _coerce_bool(
         cache_block.get("force_cache_only"), _default_force_cache_only()

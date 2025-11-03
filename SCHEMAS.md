@@ -327,6 +327,9 @@ structured overrides (all mirrored by environment variables):
   variable attached to HTTP requests.
 - Normalization and diagnostics semantics are documented in
   `resolver/docs/ingestion/idmc.md`.
+- The IDMC staging directory (`resolver/staging/idmc/`) may contain both
+  `flow.csv` and `stock.csv`; the exporter reports row counts for each file even
+  when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
 - When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
   normalized schema temporarily includes optional columns `hazard_code`,
   `hazard_label`, and `hazard_class`.

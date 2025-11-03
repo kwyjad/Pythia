@@ -2262,6 +2262,52 @@ def export_facts(
             unmatched_set.add(str(detail.path))
 
     unmatched_set.update(str(path) for path in unmatched_paths)
+    matched_paths = {
+        str(entry.get("path"))
+        for entry in matched_entries
+        if entry.get("path")
+    }
+    idmc_candidates: Dict[str, Path] = {}
+    for file_path in files:
+        if "idmc" not in file_path.as_posix().lower():
+            continue
+        name = file_path.name.lower()
+        if name in {"flow.csv", "stock.csv"} and name not in idmc_candidates:
+            idmc_candidates[name] = file_path
+    for filename, staging_path in idmc_candidates.items():
+        path_str = staging_path.as_posix()
+        if path_str in matched_paths:
+            matched_entries[:] = [
+                entry
+                for entry in matched_entries
+                if str(entry.get("path")) != path_str
+            ]
+            matched_paths.discard(path_str)
+        try:
+            frame = _read_one(staging_path)
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            LOGGER.debug("Failed to inspect IDMC staging %s: %s", path_str, exc)
+            continue
+        rows_in = int(len(frame))
+        detail = SourceApplication(
+            name=f"idmc_{filename.split('.')[0]}",
+            path=staging_path,
+            rows_in=rows_in,
+            rows_mapped=rows_in,
+            rows_after_filters=rows_in,
+            rows_after_aggregate=rows_in,
+            rows_after_dedupe=rows_in,
+            strategy="idmc-staging",
+        )
+        entry = detail.as_report_entry()
+        entry.setdefault("mapping", {})
+        entry.setdefault("warnings", [])
+        matched_entries.append(entry)
+        matched_paths.add(path_str)
+        if path_str in unmatched_set:
+            unmatched_set.discard(path_str)
+        LOGGER.debug("IDMC staging detected: %s rows=%d", path_str, rows_in)
+
     unmatched_files = sorted(unmatched_set)
     dropped_by_filter = {
         key: int(drop_hist_total.get(key, 0))

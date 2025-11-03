@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import io
+import logging
 import os
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, Iterable, List
+
+from resolver.ingestion.utils.country_utils import resolve_countries
 
 from .client import fetch
 from .config import load
 from .diagnostics import (
     debug_block,
+    diagnostics_dir,
     tick,
     timings_block,
     to_ms,
@@ -26,6 +33,112 @@ from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
 from .provenance import build_provenance, write_json
 from .staging import ensure_staging, write_header_if_empty
+
+LOGGER = logging.getLogger(__name__)
+SUMMARY_TEMPLATE_PATH = Path("resolver/diagnostics/templates/idmc_summary.md.j2")
+SUMMARY_TEMPLATE_FALLBACK = """# IDMC ingestion summary
+
+Run at: {timestamp}
+Git SHA: {git_sha}
+Config source: {config_source}
+Config path: {config_path}
+
+Mode: {mode}
+Token: {token_status}
+Series: {series_display}
+Date window: {date_window}
+Countries resolved: {countries_count}
+Sample: {countries_sample_display}
+
+## Endpoints
+{endpoints_block}
+
+## Attempts
+{attempts_block}
+
+## Performance
+{performance_block}
+
+## Rate limiting
+{rate_limit_block}
+
+## Datasets
+{dataset_block}
+
+## Staging
+{staging_block}
+
+Notes:
+{notes_block}
+"""
+
+
+def _format_bullets(items: Iterable[str]) -> str:
+    entries = [str(item).strip() for item in items if str(item).strip()]
+    if not entries:
+        return "- (none)"
+    return "\n".join(f"- {entry}" for entry in entries)
+
+
+def _count_csv_rows(path: Path) -> int | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            rows = sum(1 for _ in reader)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:  # pragma: no cover - defensive logging only
+        LOGGER.debug("Failed to inspect %s: %s", path, exc)
+        return None
+    return max(rows - 1, 0)
+
+
+def _resolve_git_sha() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            )
+            .strip()
+        )
+    except Exception:  # pragma: no cover - informational only
+        return "unknown"
+
+
+def _render_summary(context: Dict[str, Any]) -> str:
+    template = SUMMARY_TEMPLATE_FALLBACK
+    if SUMMARY_TEMPLATE_PATH.exists():
+        try:
+            template = SUMMARY_TEMPLATE_PATH.read_text(encoding="utf-8")
+        except OSError as exc:  # pragma: no cover - defensive logging only
+            LOGGER.debug("Failed to read summary template %s: %s", SUMMARY_TEMPLATE_PATH, exc)
+    return template.format(**context)
+
+
+def _write_summary(context: Dict[str, Any]) -> Path | None:
+    try:
+        diag_path = Path(diagnostics_dir())
+        summary_path = diag_path / "summary.md"
+        summary_text = _render_summary(context)
+        summary_path.write_text(summary_text, encoding="utf-8")
+        LOGGER.debug("Wrote IDMC summary to %s", summary_path)
+        return summary_path
+    except Exception as exc:  # pragma: no cover - diagnostics should not fail run
+        LOGGER.warning("Failed to write IDMC summary: %s", exc)
+        return None
+
+
+def _enable_debug_logging() -> None:
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    root.setLevel(logging.DEBUG)
+    for handler in root.handlers:
+        handler.setLevel(logging.DEBUG)
+    LOGGER.debug("Debug logging enabled for IDMC CLI")
 from .why_zero import write_why_zero
 
 
@@ -58,6 +171,11 @@ def _env_int(value: str | None) -> int | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser("idmc")
     parser.add_argument("--skip-network", action="store_true", help="Force offline mode")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug logging and diagnostics",
+    )
     parser.add_argument(
         "--strict-empty",
         action="store_true",
@@ -170,6 +288,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.debug:
+        _enable_debug_logging()
+        os.environ["RESOLVER_DEBUG"] = "1"
+    else:
+        LOGGER.debug("Debug flag not set for this run")
+
     cfg = load()
     config_details = getattr(cfg, "_config_details", None)
     config_source_label = str(getattr(cfg, "_config_source", "ingestion"))
@@ -200,19 +324,51 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
-    selected_countries: List[str] = cli_countries or env_countries or [
-        country.upper() for country in cfg.api.countries
-    ]
-    if not selected_countries:
-        selected_countries = []
+    countries_source = "config"
+    config_countries = resolve_countries(getattr(cfg.api, "countries", []))
+    if cli_countries:
+        countries_source = "cli"
+        selected_countries = resolve_countries(cli_countries)
+    elif env_countries:
+        countries_source = "env"
+        selected_countries = resolve_countries(env_countries)
     else:
-        selected_countries = list(dict.fromkeys(selected_countries))
+        selected_countries = config_countries
+    if not selected_countries:
+        selected_countries = config_countries
 
-    selected_series: List[str] = cli_series or env_series or ["flow"]
+    config_series = [
+        str(value).strip().lower()
+        for value in getattr(cfg.api, "series", [])
+        if str(value).strip()
+    ]
+    if not config_series:
+        config_series = ["stock", "flow"]
+    series_source = "config"
+    selected_series_raw: List[str]
+    if cli_series:
+        series_source = "cli"
+        selected_series_raw = cli_series
+    elif env_series:
+        series_source = "env"
+        selected_series_raw = env_series
+    else:
+        selected_series_raw = config_series
+    selected_series = list(dict.fromkeys(selected_series_raw or ["flow"]))
     if not selected_series:
         selected_series = ["flow"]
-    else:
-        selected_series = list(dict.fromkeys(selected_series))
+
+    LOGGER.debug(
+        "Country scope source=%s resolved=%d sample=%s",
+        countries_source,
+        len(selected_countries),
+        ", ".join(selected_countries[:10]),
+    )
+    LOGGER.debug(
+        "Series selection source=%s values=%s",
+        series_source,
+        ", ".join(selected_series),
+    )
 
     enable_export = bool(args.enable_export)
     if env_enable_export is not None:
@@ -398,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         "window_days": window_days,
         "only_countries": selected_countries,
         "series": selected_series,
+        "countries_source": countries_source,
+        "series_source": series_source,
         "force_cache_only": force_cache_only,
         "enable_export": enable_export,
         "write_outputs": write_outputs,
@@ -413,6 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_concurrency": max_concurrency,
         "max_bytes": max_bytes,
         "chunk_by_month": chunk_by_month,
+        "debug": bool(args.debug),
     }
 
     feature_flag_states = {
@@ -447,6 +606,8 @@ def main(argv: list[str] | None = None) -> int:
     debug = debug_block(
         selected_series=selected_series,
         selected_countries_count=len(selected_countries),
+        countries_source=countries_source,
+        series_source=series_source,
         cache_mode=diagnostics.get("mode", "offline"),
     )
 
@@ -551,6 +712,129 @@ def main(argv: list[str] | None = None) -> int:
         )
         for name, endpoint in cfg.api.endpoints.items()
     }
+    token_env_name = getattr(cfg.api, "token_env", "IDMC_API_TOKEN")
+    token_present = bool(os.getenv(token_env_name, "").strip())
+    token_status = "present" if token_present else "absent"
+
+    diag_filters = diagnostics.get("filters") or {}
+    filter_start = diag_filters.get("window_start")
+    filter_end = diag_filters.get("window_end")
+    window_parts = [
+        f"start={filter_start or '∅'}",
+        f"end={filter_end or '∅'}",
+    ]
+    if window_days is not None:
+        window_parts.append(f"window_days={window_days}")
+    if effective_no_date_filter:
+        window_parts.append("filter=disabled")
+    date_window_display = ", ".join(window_parts)
+
+    dataset_lines = [
+        f"{name}: {int(len(frame))} rows"
+        for name, frame in data.items()
+    ]
+    staging_dir = Path("resolver/staging/idmc")
+    staged_counts: Dict[str, str] = {}
+    staging_entries: List[str] = []
+    for filename in ("flow.csv", "stock.csv"):
+        path_candidate = staging_dir / filename
+        row_count = _count_csv_rows(path_candidate)
+        if row_count is None:
+            staging_entries.append(f"{path_candidate.as_posix()}: missing")
+            staged_counts[filename] = "missing"
+        else:
+            staging_entries.append(
+                f"{path_candidate.as_posix()}: present (rows={row_count})"
+            )
+            staged_counts[filename] = str(row_count)
+
+    cache_info = http_rollup.get("cache") or {}
+    latency = http_rollup.get("latency_ms") or {}
+    attempts_lines = [
+        f"Requests attempted: {int(http_rollup.get('requests', 0) or 0)}",
+        f"Retries: {int(http_rollup.get('retries', 0) or 0)}",
+        f"Last status: {http_rollup.get('status_last') or 'n/a'}",
+        f"Cache hits/misses: {int(cache_info.get('hits', 0) or 0)}/{int(cache_info.get('misses', 0) or 0)}",
+        f"Retry-after events: {int(http_rollup.get('retry_after_events', 0) or 0)}",
+    ]
+    if latency:
+        attempts_lines.append(
+            "Latency ms (p50/p95/max): {p50}/{p95}/{max}".format(
+                p50=int(latency.get("p50", 0) or 0),
+                p95=int(latency.get("p95", 0) or 0),
+                max=int(latency.get("max", 0) or 0),
+            )
+        )
+
+    performance = diagnostics.get("performance") or {}
+    performance_lines = [
+        f"Duration (s): {performance.get('duration_s', 0)}",
+        f"Wire bytes: {performance.get('wire_bytes', 0)}",
+        f"Body bytes: {performance.get('body_bytes', 0)}",
+        f"Throughput (KiB/s): {performance.get('throughput_kibps', 0)}",
+        f"Records/sec: {performance.get('records_per_sec', 0)}",
+        f"Rows fetched: {rows_fetched}",
+        f"Rows normalized: {rows}",
+        f"Rows written: {rows}",
+    ]
+
+    rate_limit_info = diagnostics.get("rate_limit") or {}
+    rate_limit_lines = [
+        f"Rate limit (req/s): {rate_limit_info.get('req_per_sec', 0)}",
+        f"Max concurrency: {rate_limit_info.get('max_concurrency', 0)}",
+        f"Retries: {rate_limit_info.get('retries', 0)}",
+        f"Retry-after wait (s): {rate_limit_info.get('retry_after_wait_s', 0)}",
+        f"Rate-limit wait (s): {rate_limit_info.get('rate_limit_wait_s', 0)}",
+        f"Planned wait (s): {rate_limit_info.get('planned_wait_s', 0)}",
+    ]
+
+    notes_lines = [
+        f"Debug flag: {'on' if args.debug else 'off'}",
+        f"Countries source: {countries_source}",
+        f"Series source: {series_source}",
+        f"Token env: {token_env_name}",
+        "Staged rows: "
+        + ", ".join(f"{name}={value}" for name, value in staged_counts.items()),
+    ]
+    if status != "ok":
+        note_reason = f" ({reason})" if reason else ""
+        notes_lines.append(f"Run status: {status}{note_reason}")
+    if rows == 0:
+        notes_lines.append("0 normalized rows (inspect drop reasons)")
+    if config_warnings:
+        notes_lines.append("Config warnings: " + "; ".join(config_warnings))
+    chunks_info = diagnostics.get("chunks") or {}
+    if chunks_info:
+        notes_lines.append(
+            f"Chunks enabled: {bool(chunks_info.get('enabled'))} (count={chunks_info.get('count', 0)})"
+        )
+
+    summary_context = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "git_sha": _resolve_git_sha(),
+        "config_source": config_source_label,
+        "config_path": str(config_path_used) if config_path_used else "n/a",
+        "mode": diagnostics.get("mode", "offline"),
+        "token_status": token_status,
+        "series_display": ", ".join(selected_series) or "(none)",
+        "date_window": date_window_display,
+        "countries_count": len(selected_countries),
+        "countries_sample_display": ", ".join(selected_countries[:10])
+        or "(none)",
+        "endpoints_block": _format_bullets(
+            f"{name}: {url}" for name, url in endpoints_used.items()
+        ),
+        "attempts_block": _format_bullets(attempts_lines),
+        "performance_block": _format_bullets(performance_lines),
+        "rate_limit_block": _format_bullets(rate_limit_lines),
+        "dataset_block": _format_bullets(dataset_lines),
+        "staging_block": _format_bullets(staging_entries),
+        "notes_block": _format_bullets(notes_lines),
+    }
+    summary_path = _write_summary(summary_context)
+    if summary_path:
+        samples["summary"] = summary_path.as_posix()
+
     run_meta = {
         "cmd": "resolver.ingestion.idmc.cli",
         "args": vars(args),

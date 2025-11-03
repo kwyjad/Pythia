@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import math
 import os
 import threading
@@ -12,6 +13,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import pandas as pd
+
+from resolver.ingestion.utils.country_utils import load_all_iso3, resolve_countries
 
 from .cache import cache_get, cache_key, cache_put
 from .diagnostics import (
@@ -30,6 +33,8 @@ RAW_DIAG_DIR = os.path.join("diagnostics", "ingestion", "idmc", "raw")
 
 _CACHE_LOCKS: Dict[str, threading.Lock] = {}
 _CACHE_LOCKS_LOCK = threading.Lock()
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _ensure_dir(path: str) -> str:
@@ -233,6 +238,13 @@ def fetch_idu_json(
         "attempt_durations_ms": [],
         "latency_ms": {"p50": 0, "p95": 0, "max": 0},
     }
+    LOGGER.debug(
+        "IDMC request planned: chunk=%s url=%s params=%s",
+        chunk_label or "full",
+        url,
+        query,
+    )
+
     diagnostics: Dict[str, Any] = {
         "mode": "fixture",
         "url": url,
@@ -253,6 +265,7 @@ def fetch_idu_json(
         cache_stats["hits"] = 1
         cache_stats.update(cache_entry.metadata)
         diagnostics["mode"] = "cache"
+        LOGGER.debug("IDMC cache hit for %s", url)
     elif use_cache_only:
         payload = _read_json_fixture("idus_view_flat.json")
         rows = _normalise_rows(payload)
@@ -269,6 +282,12 @@ def fetch_idu_json(
         diagnostics["filters"] = filters
         diagnostics["mode"] = "fixture"
         diagnostics["reason"] = "cache-miss-cache-only"
+        LOGGER.debug(
+            "IDMC cache-only fallback: chunk=%s rows=%d filtered=%d",
+            chunk_label or "full",
+            len(rows),
+            len(frame),
+        )
         return frame.reset_index(drop=True), diagnostics
 
     if body is None and not use_cache_only:
@@ -319,6 +338,12 @@ def fetch_idu_json(
                     payload_body = payload_body or b""
                     cache_entry = cache_put(cache_dir, key, payload_body, metadata)
                     body = cache_entry.body or payload_body
+            LOGGER.debug(
+                "IDMC HTTP fetch complete: status=%s wire_bytes=%s body_bytes=%s",
+                status,
+                http_diag.get("wire_bytes"),
+                http_diag.get("body_bytes"),
+            )
         except HttpRequestError as exc:
             http_info.update(
                 {
@@ -378,6 +403,12 @@ def fetch_idu_json(
         }
         diagnostics["filters"] = filters
         diagnostics.setdefault("reason", "cache-miss")
+        LOGGER.debug(
+            "IDMC fixture fallback: chunk=%s rows=%d filtered=%d",
+            chunk_label or "full",
+            len(rows),
+            len(frame),
+        )
         return frame.reset_index(drop=True), diagnostics
 
     payload: Dict[str, Any]
@@ -403,6 +434,12 @@ def fetch_idu_json(
         "rows_after": len(frame),
     }
     diagnostics["filters"] = filters
+    LOGGER.debug(
+        "IDMC parsed payload: chunk=%s rows_before=%d rows_after=%d",
+        chunk_label or "full",
+        len(rows),
+        len(frame),
+    )
     return frame.reset_index(drop=True), diagnostics
 
 
@@ -433,6 +470,12 @@ def fetch(
     limiter = TokenBucket(rate, sleep_fn=_rate_sleep) if rate and rate > 0 else None
 
     window_start, window_end = _window_from_days(window_days)
+    LOGGER.debug(
+        "Resolved IDMC window: start=%s end=%s window_days=%s",
+        window_start,
+        window_end,
+        window_days,
+    )
     if max_bytes is None:
         raw_max_bytes = os.getenv("IDMC_MAX_BYTES")
         if raw_max_bytes is not None:
@@ -450,12 +493,41 @@ def fetch(
     if not chunk_ranges:
         chunk_ranges = [(window_start, window_end)]
 
-    countries = list(only_countries or cfg.api.countries)
+    config_countries = resolve_countries(cfg.api.countries)
+    selected_raw = list(
+        dict.fromkeys(
+            [
+                str(value).strip().upper()
+                for value in (only_countries or cfg.api.countries)
+                if str(value).strip()
+            ]
+        )
+    )
+    selected_countries = (
+        resolve_countries(list(only_countries))
+        if only_countries is not None
+        else config_countries
+    )
+    master_set = set(load_all_iso3())
+    invalid = [code for code in selected_raw if code not in master_set]
+    LOGGER.info(
+        "IDMC country scope: %d codes (invalid=%d) sample=%s",
+        len(selected_countries),
+        len(invalid),
+        ", ".join(selected_countries[:10]),
+    )
+    countries = list(selected_countries)
 
     jobs: List[Tuple[int, Optional[date], Optional[date]]] = [
         (index, start, end)
         for index, (start, end) in enumerate(chunk_ranges)
     ]
+
+    LOGGER.debug(
+        "Planned %d chunk(s) for IDMC fetch (chunk_by_month=%s)",
+        len(jobs),
+        chunk_by_month,
+    )
 
     frames: Dict[int, pd.DataFrame] = {}
     chunk_diags: Dict[int, Dict[str, Any]] = {}
@@ -475,6 +547,13 @@ def fetch(
             chunk_start=start,
             chunk_end=end,
             chunk_label=label,
+        )
+        LOGGER.debug(
+            "Fetched chunk %s: rows=%d mode=%s status=%s",
+            label,
+            len(frame),
+            diag.get("mode"),
+            (diag.get("http") or {}).get("status_last"),
         )
         return index, frame, diag
 
