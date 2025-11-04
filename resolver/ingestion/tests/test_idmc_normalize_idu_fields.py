@@ -35,11 +35,54 @@ def test_idmc_normalize_idu_fields():
     ]
     assert len(tidy) == 2
     assert set(tidy["iso3"]) == {"SDN", "COD"}
-    assert set(tidy["as_of_date"]) == {"2024-02-29", "2024-01-31"}
+    assert set(pd.to_datetime(tidy["as_of_date"], errors="raise").dt.date) == {
+        pd.Timestamp("2024-02-29").date(),
+        pd.Timestamp("2024-01-31").date(),
+    }
     assert set(tidy["metric"]) == {"idp_displacement_new_idmc"}
     assert set(tidy["series_semantics"]) == {"new"}
-    assert tidy.loc[tidy["iso3"] == "SDN", "value"].item() == 800
+    assert tidy.loc[tidy["iso3"] == "SDN", "value"].item() == 1500
 
     assert drops["no_iso3"] >= 1
     assert drops["date_parse_failed"] >= 1
-    assert drops["dup_event"] == 1
+    assert drops["dup_event"] == 0
+
+
+def test_idmc_normalize_monthly_rollup():
+    raw = pd.DataFrame(
+        [
+            {
+                "iso3": "AFG",
+                "displacement_start_date": "2024-04-01",
+                "displacement_end_date": "2024-04-30",
+                "figure": 100,
+            },
+            {
+                "iso3": "AFG",
+                "displacement_end_date": "2024-04-15",
+                "figure": 50,
+            },
+            {
+                "iso3": "PAK",
+                "displacement_start_date": "2024-04-10",
+                "figure": 25,
+            },
+        ]
+    )
+
+    tidy, drops = normalize_all(
+        {"monthly_flow": raw},
+        {
+            "value_flow": ["figure"],
+            "value_stock": [],
+            "date": ["displacement_start_date"],
+            "iso3": ["iso3"],
+        },
+        {"start": "2024-04-01", "end": "2024-04-30"},
+    )
+
+    assert len(tidy) == 2
+    afg_row = tidy[tidy["iso3"] == "AFG"].iloc[0]
+    assert afg_row["value"] == 150
+    assert afg_row["as_of_date"] == "2024-04-30"
+    assert drops["date_parse_failed"] == 0

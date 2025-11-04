@@ -725,6 +725,12 @@ def main(argv: list[str] | None = None) -> int:
         selected_series,
         map_hazards=map_hazards,
     )
+    if not tidy.empty and "as_of_date" in tidy.columns:
+        LOGGER.debug(
+            "IDMC normalized as_of_date dtype=%s sample=%s",
+            tidy["as_of_date"].dtype,
+            list(tidy["as_of_date"].head(3)),
+        )
     tidy, unmapped_hazards = maybe_map_hazards(tidy, map_hazards)
     normalize_ms = to_ms(tick() - normalize_start)
 
