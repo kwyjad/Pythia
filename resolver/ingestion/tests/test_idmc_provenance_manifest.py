@@ -9,7 +9,7 @@ def test_idmc_manifest_shape_and_redaction(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("IDMC_API_TOKEN", "supersecret-token")
 
-    exit_code = cli.main(["--skip-network"])
+    exit_code = cli.main(["--network-mode", "fixture"])
     assert exit_code == 0
 
     manifest_path = Path("diagnostics/ingestion/idmc/manifest.json")
@@ -39,7 +39,8 @@ def test_idmc_manifest_shape_and_redaction(tmp_path, monkeypatch):
 
     run_block = manifest["run"]
     assert run_block["cmd"] == "resolver.ingestion.idmc.cli"
-    assert run_block["args"]["skip_network"] is True
+    assert run_block["args"]["network_mode"] == "fixture"
+    assert run_block["network_mode"] == "fixture"
 
     env_block = run_block.get("env", {})
     assert "IDMC_API_TOKEN" in env_block

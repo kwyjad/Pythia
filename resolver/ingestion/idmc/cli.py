@@ -9,14 +9,14 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, cast
 
 from resolver.ingestion.utils.country_utils import (
     read_countries_override_from_env,
     resolve_countries,
 )
 
-from .client import fetch
+from .client import NETWORK_MODES, NetworkMode, fetch
 from .config import load
 from .diagnostics import (
     debug_block,
@@ -178,6 +178,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser("idmc")
     parser.add_argument("--skip-network", action="store_true", help="Force offline mode")
     parser.add_argument(
+        "--network-mode",
+        choices=NETWORK_MODES,
+        default=None,
+        help="Network behaviour: live (default), cache_only, or fixture",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose debug logging and diagnostics",
@@ -330,6 +336,28 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
+    raw_network_mode = args.network_mode or os.getenv("IDMC_NETWORK_MODE")
+    network_mode: NetworkMode
+    if raw_network_mode:
+        candidate = str(raw_network_mode).strip().lower()
+        if candidate not in NETWORK_MODES:
+            parser.error(
+                f"Invalid network mode '{raw_network_mode}'. Choose from {', '.join(NETWORK_MODES)}."
+            )
+        network_mode = cast(NetworkMode, candidate)
+    elif args.skip_network:
+        network_mode = cast(NetworkMode, "fixture")
+    elif env_force_cache_only:
+        network_mode = cast(NetworkMode, "cache_only")
+    elif env_force_cache_only is None and cfg.cache.force_cache_only:
+        network_mode = cast(NetworkMode, "cache_only")
+    else:
+        network_mode = cast(NetworkMode, "live")
+
+    cfg.cache.force_cache_only = network_mode == "cache_only"
+
+    LOGGER.info("Effective network mode: %s", network_mode)
+
     config_countries_raw = list(getattr(cfg.api, "countries", []))
     override_raw = read_countries_override_from_env()
     config_countries = resolve_countries(config_countries_raw, override_raw)
@@ -475,13 +503,8 @@ def main(argv: list[str] | None = None) -> int:
 
     probe_result = None
     probe_start = tick()
-    force_cache_only = cfg.cache.force_cache_only
-    if env_force_cache_only is not None:
-        force_cache_only = bool(env_force_cache_only)
 
-    cfg.cache.force_cache_only = force_cache_only
-
-    if not args.skip_network and not force_cache_only:
+    if network_mode == "live":
         try:
             probe_result = probe_reachability(
                 ProbeOptions(base_url=args.base_url or cfg.api.base_url)
@@ -493,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     fetch_start = tick()
     data, diagnostics = fetch(
         cfg,
-        skip_network=bool(args.skip_network),
+        network_mode=network_mode,
         soft_timeouts=True,
         window_days=window_days,
         only_countries=selected_countries,
@@ -584,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
         "series": selected_series,
         "countries_source": countries_source,
         "series_source": series_source,
-        "force_cache_only": force_cache_only,
+        "network_mode": network_mode,
         "enable_export": enable_export,
         "write_outputs": write_outputs,
         "write_candidates": write_candidates,
@@ -689,11 +712,15 @@ def main(argv: list[str] | None = None) -> int:
     rows_fetched = sum(len(frame) for frame in data.values())
     http_rollup = diagnostics.get("http") or {}
     cache_stats = diagnostics.get("cache") or {}
+    effective_network_mode = str(diagnostics.get("network_mode", network_mode))
+    http_status_counts = diagnostics.get("http_status_counts")
 
     diagnostics_payload = {
         "status": status,
         "reason": reason,
         "mode": diagnostics.get("mode", "offline"),
+        "network_mode": effective_network_mode,
+        "http_status_counts": http_status_counts,
         "http": http_rollup,
         "cache": cache_stats,
         "filters": diagnostics.get("filters"),
@@ -793,6 +820,16 @@ def main(argv: list[str] | None = None) -> int:
                 max=int(latency.get("max", 0) or 0),
             )
         )
+    if http_status_counts:
+        attempts_lines.append(
+            "HTTP status counts: 2xx={two} 4xx={four} 5xx={five}".format(
+                two=int(http_status_counts.get("2xx", 0) or 0),
+                four=int(http_status_counts.get("4xx", 0) or 0),
+                five=int(http_status_counts.get("5xx", 0) or 0),
+            )
+        )
+    elif effective_network_mode != "live":
+        attempts_lines.append("HTTP status counts: n/a in non-live mode")
 
     performance = diagnostics.get("performance") or {}
     performance_lines = [
@@ -816,7 +853,10 @@ def main(argv: list[str] | None = None) -> int:
         f"Planned wait (s): {rate_limit_info.get('planned_wait_s', 0)}",
     ]
 
+    response_mode = diagnostics.get("mode", "offline")
+
     notes_lines = [
+        f"Network mode: {effective_network_mode}",
         f"Debug flag: {'on' if args.debug else 'off'}",
         f"Countries source: {countries_source}",
         f"Series source: {series_source}",
@@ -824,6 +864,8 @@ def main(argv: list[str] | None = None) -> int:
         "Staged rows: "
         + ", ".join(f"{name}={value}" for name, value in staged_counts.items()),
     ]
+    if response_mode != effective_network_mode:
+        notes_lines.append(f"Response mode: {response_mode}")
     if status != "ok":
         note_reason = f" ({reason})" if reason else ""
         notes_lines.append(f"Run status: {status}{note_reason}")
@@ -844,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
         "git_sha": _resolve_git_sha(),
         "config_source": config_source_label,
         "config_path": str(config_path_used) if config_path_used else "n/a",
-        "mode": diagnostics.get("mode", "offline"),
+        "mode": effective_network_mode,
         "token_status": token_status,
         "series_display": ", ".join(selected_series) or "(none)",
         "date_window": date_window_display,
@@ -876,13 +918,15 @@ def main(argv: list[str] | None = None) -> int:
                 "IDMC_REQ_PER_SEC",
                 "IDMC_MAX_CONCURRENCY",
                 "IDMC_FORCE_CACHE_ONLY",
+                "IDMC_NETWORK_MODE",
             ]
         },
         "egress_ip": (probe_result or {}).get("egress_ip") if isinstance(probe_result, dict) else None,
         "base_url": base_url_used or None,
         "endpoints": endpoints_used,
         "timings_ms": timings,
-        "mode": diagnostics.get("mode", "offline"),
+        "mode": response_mode,
+        "network_mode": effective_network_mode,
     }
     run_meta["config_source"] = config_source_label
     if config_path_used:
@@ -914,7 +958,16 @@ def main(argv: list[str] | None = None) -> int:
         except (TypeError, ValueError):  # pragma: no cover - defensive
             requests_count = 0
         countries_sample = selected_countries[:10]
+        http_counts_zero = None
+        if isinstance(http_status_counts, dict):
+            http_counts_zero = {
+                "2xx": int(http_status_counts.get("2xx", 0) or 0),
+                "4xx": int(http_status_counts.get("4xx", 0) or 0),
+                "5xx": int(http_status_counts.get("5xx", 0) or 0),
+            }
         why_zero_payload = {
+            "network_mode": effective_network_mode,
+            "http_status_counts": http_counts_zero,
             "token_present": bool(token_present),
             "countries_count": len(selected_countries),
             "countries_sample": countries_sample,

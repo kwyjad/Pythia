@@ -32,7 +32,8 @@ def _stub_config(config_path):
 
 def _stub_fetch(*_args, **_kwargs):
     diagnostics = {
-        "mode": "offline",
+        "mode": "fixture",
+        "network_mode": "fixture",
         "http": {
             "requests": 0,
             "retries": 0,
@@ -43,6 +44,7 @@ def _stub_fetch(*_args, **_kwargs):
         },
         "cache": {"hits": 0, "misses": 0},
         "filters": {"window_start": None, "window_end": None, "countries": []},
+        "http_status_counts": None,
         "performance": {
             "requests": 0,
             "wire_bytes": 0,
@@ -97,7 +99,7 @@ def test_idmc_diagnostics_summary_written(monkeypatch, tmp_path):
         lambda _values=None, _env_value=None, **_kwargs: ["AAA", "BBB", "CCC"],
     )
 
-    exit_code = idmc_cli.main(["--skip-network"])
+    exit_code = idmc_cli.main(["--network-mode", "fixture"])
     assert exit_code == 0
 
     summary_path = tmp_path / "diagnostics" / "ingestion" / "idmc" / "summary.md"

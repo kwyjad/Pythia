@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -38,6 +38,9 @@ _CACHE_LOCKS: Dict[str, threading.Lock] = {}
 _CACHE_LOCKS_LOCK = threading.Lock()
 
 LOGGER = logging.getLogger(__name__)
+
+NetworkMode = Literal["live", "cache_only", "fixture"]
+NETWORK_MODES: Tuple[NetworkMode, ...] = ("live", "cache_only", "fixture")
 
 
 def _ensure_dir(path: str) -> str:
@@ -193,7 +196,7 @@ def fetch_idu_json(
     window_start: Optional[date] = None,
     window_end: Optional[date] = None,
     only_countries: Iterable[str] | None = None,
-    skip_network: bool = False,
+    network_mode: NetworkMode = "live",
     rate_limiter: TokenBucket | None = None,
     max_bytes: Optional[int] = None,
     chunk_start: Optional[date] = None,
@@ -255,10 +258,48 @@ def fetch_idu_json(
         "http": http_info,
         "filters": {},
         "raw_path": None,
-        "chunk": {"start": chunk_start.isoformat() if chunk_start else None, "end": chunk_end.isoformat() if chunk_end else None},
+        "chunk": {
+            "start": chunk_start.isoformat() if chunk_start else None,
+            "end": chunk_end.isoformat() if chunk_end else None,
+        },
+        "network_mode": network_mode,
     }
 
-    use_cache_only = skip_network or cfg.cache.force_cache_only
+    def _build_frame(rows: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        frame = pd.DataFrame(rows)
+        frame = _filter_range(frame, chunk_start or window_start, chunk_end or window_end)
+        frame = _filter_countries(frame, only_countries or [])
+        filters = {
+            "window_start": (chunk_start or window_start).isoformat()
+            if (chunk_start or window_start)
+            else None,
+            "window_end": (chunk_end or window_end).isoformat()
+            if (chunk_end or window_end)
+            else None,
+            "countries": sorted(
+                {c.strip().upper() for c in (only_countries or []) if c and c.strip()}
+            ),
+            "rows_before": len(rows),
+            "rows_after": len(frame),
+        }
+        diagnostics["filters"] = filters
+        return frame.reset_index(drop=True), filters
+
+    if network_mode == "fixture":
+        payload = _read_json_fixture("idus_view_flat.json")
+        rows = _normalise_rows(payload)
+        frame, filters = _build_frame(rows)
+        diagnostics["mode"] = "fixture"
+        diagnostics["reason"] = "network-mode-fixture"
+        LOGGER.debug(
+            "IDMC fixture mode: chunk=%s rows=%d filtered=%d",
+            chunk_label or "full",
+            filters.get("rows_before", 0),
+            filters.get("rows_after", 0),
+        )
+        return frame, diagnostics
+
+    use_cache_only = network_mode == "cache_only"
     cache_entry = cache_get(cache_dir, key, None if use_cache_only else ttl_seconds)
     body: bytes | None = None
     body_path: Optional[str] = None
@@ -270,28 +311,17 @@ def fetch_idu_json(
         diagnostics["mode"] = "cache"
         LOGGER.debug("IDMC cache hit for %s", url)
     elif use_cache_only:
-        payload = _read_json_fixture("idus_view_flat.json")
-        rows = _normalise_rows(payload)
-        frame = pd.DataFrame(rows)
-        frame = _filter_range(frame, chunk_start or window_start, chunk_end or window_end)
-        frame = _filter_countries(frame, only_countries or [])
-        filters = {
-            "window_start": (chunk_start or window_start).isoformat() if (chunk_start or window_start) else None,
-            "window_end": (chunk_end or window_end).isoformat() if (chunk_end or window_end) else None,
-            "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-            "rows_before": len(rows),
-            "rows_after": len(frame),
-        }
-        diagnostics["filters"] = filters
-        diagnostics["mode"] = "fixture"
+        cache_stats["misses"] = 1
+        frame, filters = _build_frame([])
+        diagnostics["mode"] = "cache"
         diagnostics["reason"] = "cache-miss-cache-only"
         LOGGER.debug(
-            "IDMC cache-only fallback: chunk=%s rows=%d filtered=%d",
+            "IDMC cache-only miss: chunk=%s rows=%d filtered=%d mode=cache_only",
             chunk_label or "full",
-            len(rows),
-            len(frame),
+            filters.get("rows_before", 0),
+            filters.get("rows_after", 0),
         )
-        return frame.reset_index(drop=True), diagnostics
+        return frame, diagnostics
 
     if body is None and not use_cache_only:
         stream_tmp = f"{cache_path}.partial"
@@ -373,20 +403,16 @@ def fetch_idu_json(
             diagnostics["error"] = exc.diagnostics
             payload = _read_json_fixture("idus_view_flat.json")
             rows = _normalise_rows(payload)
-            frame = pd.DataFrame(rows)
-            frame = _filter_range(frame, chunk_start or window_start, chunk_end or window_end)
-            frame = _filter_countries(frame, only_countries or [])
-            filters = {
-                "window_start": (chunk_start or window_start).isoformat() if (chunk_start or window_start) else None,
-                "window_end": (chunk_end or window_end).isoformat() if (chunk_end or window_end) else None,
-                "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-                "rows_before": len(rows),
-                "rows_after": len(frame),
-            }
-            diagnostics["filters"] = filters
+            frame, filters = _build_frame(rows)
             if not cache_stats["hit"]:
                 cache_stats["misses"] = 1
-            return frame.reset_index(drop=True), diagnostics
+            LOGGER.debug(
+                "IDMC HTTP error fallback: chunk=%s rows=%d filtered=%d",
+                chunk_label or "full",
+                filters.get("rows_before", 0),
+                filters.get("rows_after", 0),
+            )
+            return frame, diagnostics
 
     if body is None and body_path is None:
         cache_stats.setdefault("misses", 0)
@@ -394,25 +420,15 @@ def fetch_idu_json(
             cache_stats["misses"] = 1
         payload = _read_json_fixture("idus_view_flat.json")
         rows = _normalise_rows(payload)
-        frame = pd.DataFrame(rows)
-        frame = _filter_range(frame, chunk_start or window_start, chunk_end or window_end)
-        frame = _filter_countries(frame, only_countries or [])
-        filters = {
-            "window_start": (chunk_start or window_start).isoformat() if (chunk_start or window_start) else None,
-            "window_end": (chunk_end or window_end).isoformat() if (chunk_end or window_end) else None,
-            "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-            "rows_before": len(rows),
-            "rows_after": len(frame),
-        }
-        diagnostics["filters"] = filters
+        frame, filters = _build_frame(rows)
         diagnostics.setdefault("reason", "cache-miss")
         LOGGER.debug(
             "IDMC fixture fallback: chunk=%s rows=%d filtered=%d",
             chunk_label or "full",
-            len(rows),
-            len(frame),
+            filters.get("rows_before", 0),
+            filters.get("rows_after", 0),
         )
-        return frame.reset_index(drop=True), diagnostics
+        return frame, diagnostics
 
     payload: Dict[str, Any]
     if body is not None:
@@ -426,30 +442,20 @@ def fetch_idu_json(
         diagnostics["raw_path"] = _write_raw_snapshot(key, raw_bytes)
 
     rows = _normalise_rows(payload)
-    frame = pd.DataFrame(rows)
-    frame = _filter_range(frame, chunk_start or window_start, chunk_end or window_end)
-    frame = _filter_countries(frame, only_countries or [])
-    filters = {
-        "window_start": (chunk_start or window_start).isoformat() if (chunk_start or window_start) else None,
-        "window_end": (chunk_end or window_end).isoformat() if (chunk_end or window_end) else None,
-        "countries": sorted({c.strip().upper() for c in only_countries or [] if c.strip()}),
-        "rows_before": len(rows),
-        "rows_after": len(frame),
-    }
-    diagnostics["filters"] = filters
+    frame, filters = _build_frame(rows)
     LOGGER.debug(
         "IDMC parsed payload: chunk=%s rows_before=%d rows_after=%d",
         chunk_label or "full",
-        len(rows),
-        len(frame),
+        filters.get("rows_before", 0),
+        filters.get("rows_after", 0),
     )
-    return frame.reset_index(drop=True), diagnostics
+    return frame, diagnostics
 
 
 def fetch(
     cfg: IdmcConfig,
     *,
-    skip_network: bool = False,
+    network_mode: NetworkMode = "live",
     soft_timeouts: bool = True,  # noqa: ARG001 - future compatibility
     window_days: Optional[int] = 30,
     only_countries: Iterable[str] | None = None,
@@ -462,6 +468,16 @@ def fetch(
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
     """Return payloads for downstream normalization and diagnostics."""
 
+    if network_mode not in NETWORK_MODES:
+        raise ValueError(f"Unsupported IDMC network mode: {network_mode}")
+
+    LOGGER.info("IDMC network mode: %s", network_mode)
+    if network_mode != "live":
+        LOGGER.warning(
+            "Running in %s – no network calls will be made; results may be empty unless cache/fixtures exist.",
+            network_mode,
+        )
+
     if rate_per_sec is not None:
         rate = rate_per_sec
     else:
@@ -470,7 +486,9 @@ def fetch(
             rate = float(raw_rate)
         except ValueError:  # pragma: no cover - defensive
             rate = 0.5
-    limiter = TokenBucket(rate, sleep_fn=_rate_sleep) if rate and rate > 0 else None
+    limiter = None
+    if network_mode == "live" and rate and rate > 0:
+        limiter = TokenBucket(rate, sleep_fn=_rate_sleep)
 
     window_start, window_end = _window_from_days(window_days)
     LOGGER.debug(
@@ -541,7 +559,7 @@ def fetch(
             window_start=window_start,
             window_end=window_end,
             only_countries=countries,
-            skip_network=skip_network,
+            network_mode=network_mode,
             rate_limiter=limiter,
             max_bytes=max_bytes,
             chunk_start=start,
@@ -586,6 +604,8 @@ def fetch(
     total_rate_wait = 0.0
     total_duration_s = 0.0
     total_planned_wait = 0.0
+    status_counts = {"2xx": 0, "4xx": 0, "5xx": 0}
+    rows_before_total = 0
     attempt_latencies: List[int] = []
     cache_hits = 0
     cache_misses = 0
@@ -619,6 +639,13 @@ def fetch(
         status = http_block.get("status_last")
         if status is not None:
             last_status = status
+            if network_mode == "live" and isinstance(status, int):
+                if 200 <= status < 300:
+                    status_counts["2xx"] += 1
+                elif 400 <= status < 500:
+                    status_counts["4xx"] += 1
+                elif 500 <= status < 600:
+                    status_counts["5xx"] += 1
         chunk = diag.get("chunk", {})
         chunk_start = chunk.get("start")
         chunk_end = chunk.get("end")
@@ -626,6 +653,8 @@ def fetch(
             datetime.fromisoformat(chunk_start).date() if chunk_start else None,
             datetime.fromisoformat(chunk_end).date() if chunk_end else None,
         )
+        filters_block = diag.get("filters") or {}
+        rows_before_total += int(filters_block.get("rows_before", 0) or 0)
         chunk_entries.append(
             {
                 "month": label,
@@ -679,7 +708,13 @@ def fetch(
     )
 
     diagnostics: Dict[str, Any] = {
-        "mode": "online" if any(diag.get("mode") == "online" for diag in chunk_diags.values()) else ("cache" if any(diag.get("mode") == "cache" for diag in chunk_diags.values()) else "fixture"),
+        "mode": "online"
+        if any(diag.get("mode") == "online" for diag in chunk_diags.values())
+        else (
+            "cache"
+            if any(diag.get("mode") == "cache" for diag in chunk_diags.values())
+            else "fixture"
+        ),
         "http": http_summary,
         "cache": {
             "dir": cfg.cache.dir,
@@ -690,11 +725,15 @@ def fetch(
             "window_start": window_start.isoformat() if window_start else None,
             "window_end": window_end.isoformat() if window_end else None,
             "countries": sorted({c.strip().upper() for c in countries if c.strip()}),
+            "rows_before": rows_before_total,
+            "rows_after": total_rows,
         },
         "raw_path": raw_path,
         "performance": performance,
         "rate_limit": rate_limit_info,
         "chunks": chunks_info,
+        "network_mode": network_mode,
+        "http_status_counts": status_counts if network_mode == "live" else None,
     }
 
     return data, diagnostics

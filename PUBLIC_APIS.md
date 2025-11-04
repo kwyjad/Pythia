@@ -15,7 +15,7 @@
 
 - `config.IdmcConfig` now exposes `api.base_url`, named `endpoints`, and `cache`
   controls (`dir`, `ttl_seconds`, `force_cache_only`).
-- `client.fetch(cfg, *, skip_network=False, window_days=30, only_countries=None,
+- `client.fetch(cfg, *, network_mode="live", window_days=30, only_countries=None,
   base_url=None, cache_ttl=None)` returns the offline fixtures plus an
   `idus_view_flat` DataFrame and diagnostics with probe/http/cache fields.
 - `http.http_get(url, *, headers=None, timeout=10.0, retries=2, backoff_s=0.5)`
