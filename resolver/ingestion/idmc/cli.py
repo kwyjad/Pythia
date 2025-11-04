@@ -944,6 +944,7 @@ def main(argv: list[str] | None = None) -> int:
         "2xx": int((http_status_counts_raw or {}).get("2xx", 0) or 0),
         "4xx": int((http_status_counts_raw or {}).get("4xx", 0) or 0),
         "5xx": int((http_status_counts_raw or {}).get("5xx", 0) or 0),
+        "other": int((http_status_counts_raw or {}).get("other", 0) or 0),
     }
     requests_planned_raw = diagnostics.get("requests_planned")
     try:
@@ -985,6 +986,12 @@ def main(argv: list[str] | None = None) -> int:
         "performance": diagnostics.get("performance"),
         "rate_limit": diagnostics.get("rate_limit"),
         "chunks": diagnostics.get("chunks"),
+        "date_column": diagnostics.get("date_column"),
+        "select_columns": diagnostics.get("select_columns"),
+        "schema_probe": diagnostics.get("schema_probe"),
+        "chunk_errors": int(diagnostics.get("chunk_errors", 0) or 0),
+        "fetch_errors": diagnostics.get("fetch_errors"),
+        "exceptions_by_type": diagnostics.get("exceptions_by_type"),
     }
 
     config_payload = {
@@ -1061,6 +1068,10 @@ def main(argv: list[str] | None = None) -> int:
         "resolution_ready": rows_resolution_ready,
         "staged": staged_counts_serializable,
     }
+    total_staged_rows = sum(
+        value or 0 for value in staged_counts_serializable.values() if value is not None
+    )
+    diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
 
     cache_info = http_rollup.get("cache") or {}
     latency = http_rollup.get("latency_ms") or {}
@@ -1081,10 +1092,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     if http_status_counts:
         attempts_lines.append(
-            "HTTP status counts: 2xx={two} 4xx={four} 5xx={five}".format(
+            "HTTP status counts: 2xx={two} 4xx={four} 5xx={five} other={other}".format(
                 two=int(http_status_counts.get("2xx", 0) or 0),
                 four=int(http_status_counts.get("4xx", 0) or 0),
                 five=int(http_status_counts.get("5xx", 0) or 0),
+                other=int(http_status_counts.get("other", 0) or 0),
             )
         )
     elif effective_network_mode != "live":
@@ -1129,6 +1141,31 @@ def main(argv: list[str] | None = None) -> int:
         f"Rows (resolution-ready): {rows_resolution_ready}",
         f"Staged rows: {staged_notes}",
     ]
+    date_column_used = diagnostics.get("date_column") or "n/a"
+    notes_lines.append(f"Date column: {date_column_used}")
+    notes_lines.append(
+        "HTTP non-2xx: 4xx={four} 5xx={five} other={other}".format(
+            four=http_status_counts.get("4xx", 0),
+            five=http_status_counts.get("5xx", 0),
+            other=http_status_counts.get("other", 0),
+        )
+    )
+    notes_lines.append(
+        f"Chunk errors: {int(diagnostics.get('chunk_errors', 0) or 0)}"
+    )
+    exceptions_summary = diagnostics.get("exceptions_by_type") or {}
+    if exceptions_summary:
+        formatted_entries: List[str] = []
+        for name, value in sorted(exceptions_summary.items()):
+            if value is None:
+                continue
+            try:
+                rendered = int(value)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                rendered = value
+            formatted_entries.append(f"{name}={rendered}")
+        if formatted_entries:
+            notes_lines.append("Exceptions by type: " + ", ".join(formatted_entries))
     if response_mode != effective_network_mode:
         notes_lines.append(f"Response mode: {response_mode}")
     if status != "ok":
@@ -1284,11 +1321,10 @@ def main(argv: list[str] | None = None) -> int:
 
     write_connectors_line(diagnostics_payload)
 
-    if status == "error":
-        exit_code = 2
-        if reason in {"empty-policy-fail", "strict-empty-0-rows"}:
-            exit_code = 1
-        raise SystemExit(exit_code)
+    if empty_policy == "fail" and total_staged_rows == 0:
+        raise SystemExit(1)
+    if status == "error" and reason not in {"empty-policy-fail", "strict-empty-0-rows"}:
+        raise SystemExit(2)
     return 0
 
 

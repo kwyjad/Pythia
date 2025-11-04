@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple
 from urllib.parse import urlencode
 import urllib.request
 
@@ -36,7 +36,7 @@ HERE = os.path.dirname(__file__)
 FIXTURES_DIR = os.path.join(HERE, "fixtures")
 RAW_DIAG_DIR = os.path.join("diagnostics", "ingestion", "idmc", "raw")
 
-IDU_POSTGREST_COLUMNS = (
+DEFAULT_POSTGREST_COLUMNS = (
     "iso3",
     "figure",
     "displacement_start_date",
@@ -45,7 +45,8 @@ IDU_POSTGREST_COLUMNS = (
     "displacement_type",
 )
 IDU_POSTGREST_LIMIT = 10000
-ISO3_BATCH_SIZE = 35
+ISO3_BATCH_SIZE = 20
+SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
 _CACHE_LOCKS: Dict[str, threading.Lock] = {}
 _CACHE_LOCKS_LOCK = threading.Lock()
@@ -113,13 +114,22 @@ def _filter_countries(frame: pd.DataFrame, only_countries: Iterable[str]) -> pd.
     return frame.loc[mask]
 
 
-def _filter_range(frame: pd.DataFrame, start: Optional[date], end: Optional[date]) -> pd.DataFrame:
+def _filter_range(
+    frame: pd.DataFrame,
+    start: Optional[date],
+    end: Optional[date],
+    *,
+    column: str = "displacement_date",
+) -> pd.DataFrame:
     if start is None and end is None:
         return frame
-    if "displacement_date" not in frame.columns:
+    target_column = column if column in frame.columns else None
+    if target_column is None and column != "displacement_date":
+        target_column = "displacement_date" if "displacement_date" in frame.columns else None
+    if target_column is None:
         return frame
     try:
-        dates = pd.to_datetime(frame["displacement_date"], errors="coerce")
+        dates = pd.to_datetime(frame[target_column], errors="coerce")
     except Exception:  # pragma: no cover - defensive
         return frame
     mask = pd.Series(True, index=frame.index)
@@ -213,6 +223,118 @@ def _batch_iso3(codes: Iterable[str], *, batch_size: int = ISO3_BATCH_SIZE) -> L
     return batches
 
 
+def _probe_idu_schema(
+    cfg: IdmcConfig,
+    *,
+    base_url: Optional[str] = None,
+    network_mode: NetworkMode = "live",
+    rate_limiter: TokenBucket | None = None,
+) -> Tuple[str, List[str], Dict[str, Any]]:
+    """Inspect the IDU view to determine available columns and the date field."""
+
+    default_date_column = "displacement_date"
+    default_columns = list(DEFAULT_POSTGREST_COLUMNS)
+    diagnostics: Dict[str, Any] = {
+        "url": None,
+        "status": None,
+        "columns": [],
+        "error": None,
+        "skipped": False,
+    }
+
+    if network_mode != "live":
+        diagnostics["skipped"] = True
+        diagnostics["date_column"] = default_date_column
+        diagnostics["columns"] = default_columns
+        return default_date_column, default_columns, diagnostics
+
+    base = (base_url or cfg.api.base_url).rstrip("/")
+    endpoint = cfg.api.endpoints.get("idus_json", "/data/idus_view_flat")
+    query = urlencode(SCHEMA_PROBE_QUERY, safe="*.,()")
+    url = f"{base}{endpoint}?{query}"
+    diagnostics["url"] = url
+
+    try:
+        status, headers, body, http_diag = http_get(
+            url,
+            timeout=10.0,
+            retries=1,
+            backoff_s=0.1,
+            rate_limiter=rate_limiter,
+            headers={"Accept": "application/json"},
+        )
+    except HttpRequestError as exc:
+        diagnostics["error"] = exc.message
+        diagnostics["http_error"] = exc.diagnostics
+        diagnostics["date_column"] = default_date_column
+        diagnostics["columns"] = default_columns
+        LOGGER.warning(
+            "idmc: schema probe failed with HttpRequestError; defaulting to %s",
+            default_date_column,
+        )
+        return default_date_column, default_columns, diagnostics
+    except Exception as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = str(exc)
+        diagnostics["date_column"] = default_date_column
+        diagnostics["columns"] = default_columns
+        LOGGER.warning(
+            "idmc: schema probe encountered %s; defaulting to %s",
+            type(exc).__name__,
+            default_date_column,
+        )
+        return default_date_column, default_columns, diagnostics
+
+    diagnostics["status"] = status
+    diagnostics["http"] = http_diag
+    diagnostics["status_bucket"] = _http_status_bucket(status)
+
+    columns: Set[str] = set()
+    payload: Any = None
+    if body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - defensive
+            diagnostics["error"] = f"json:{type(exc).__name__}"
+        else:
+            for row in _normalise_rows(payload):
+                if isinstance(row, dict):
+                    columns.update(str(key) for key in row.keys())
+
+    diagnostics["columns"] = sorted(columns)
+
+    if not columns:
+        diagnostics.setdefault("note", "no-columns")
+        diagnostics["date_column"] = default_date_column
+        return default_date_column, default_columns, diagnostics
+
+    date_column = default_date_column
+    for candidate in ("displacement_date", "event_date", "date"):
+        if candidate in columns:
+            date_column = candidate
+            break
+    else:
+        if {"displacement_start_date", "displacement_end_date"}.issubset(columns):
+            date_column = "displacement_end_date"
+
+    select_columns = [
+        column for column in DEFAULT_POSTGREST_COLUMNS if column in columns
+    ]
+    for candidate in ("event_date", "date"):
+        if candidate in columns and candidate not in select_columns:
+            select_columns.append(candidate)
+    if date_column not in select_columns:
+        select_columns.append(date_column)
+    if (
+        date_column == "displacement_end_date"
+        and "displacement_start_date" in columns
+        and "displacement_start_date" not in select_columns
+    ):
+        select_columns.append("displacement_start_date")
+
+    diagnostics["date_column"] = date_column
+    return date_column, select_columns or default_columns, diagnostics
+
+
 def _postgrest_filters(
     *,
     chunk_start: Optional[date],
@@ -222,11 +344,13 @@ def _postgrest_filters(
     iso_batch: Optional[List[str]],
     offset: int,
     limit: int,
+    date_column: Optional[str],
+    select_columns: Iterable[str],
 ) -> List[Tuple[str, str]]:
     """Build PostgREST query parameters for the IDU endpoint."""
 
     params: List[Tuple[str, str]] = [
-        ("select", ",".join(IDU_POSTGREST_COLUMNS)),
+        ("select", ",".join(select_columns)),
         ("limit", str(limit)),
     ]
     if offset:
@@ -234,10 +358,11 @@ def _postgrest_filters(
 
     start_bound = chunk_start or window_start
     end_bound = chunk_end or window_end
-    if start_bound:
-        params.append(("displacement_start_date", f"gte.{start_bound.isoformat()}"))
-    if end_bound:
-        params.append(("displacement_end_date", f"lte.{end_bound.isoformat()}"))
+    if date_column:
+        if start_bound:
+            params.append((date_column, f"gte.{start_bound.isoformat()}"))
+        if end_bound:
+            params.append((date_column, f"lte.{end_bound.isoformat()}"))
     if iso_batch:
         joined = ",".join(sorted({code.strip().upper() for code in iso_batch if code.strip()}))
         if joined:
@@ -391,6 +516,8 @@ def fetch_idu_json(
     chunk_start: Optional[date] = None,
     chunk_end: Optional[date] = None,
     chunk_label: Optional[str] = None,
+    date_column: Optional[str] = None,
+    select_columns: Optional[Iterable[str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Fetch the IDU flat JSON payload for a specific window."""
 
@@ -455,9 +582,24 @@ def fetch_idu_json(
         "fallback": None,
     }
 
+    select_list: List[str] = []
+    for column in list(select_columns or DEFAULT_POSTGREST_COLUMNS):
+        if isinstance(column, str) and column and column not in select_list:
+            select_list.append(column)
+    if not select_list:
+        select_list = list(DEFAULT_POSTGREST_COLUMNS)
+    date_filter_column = date_column or "displacement_date"
+    diagnostics["date_column"] = date_filter_column
+    diagnostics["select_columns"] = list(select_list)
+
     def _build_frame(rows: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         frame = pd.DataFrame(rows)
-        frame = _filter_range(frame, chunk_start or window_start, chunk_end or window_end)
+        frame = _filter_range(
+            frame,
+            chunk_start or window_start,
+            chunk_end or window_end,
+            column=date_filter_column,
+        )
         frame = _filter_countries(frame, only_countries or [])
         filters = {
             "window_start": (chunk_start or window_start).isoformat()
@@ -495,6 +637,8 @@ def fetch_idu_json(
     raw_paths: List[str] = []
     request_index = 0
     mode = "cache" if use_cache_only else "online"
+    fetch_errors: List[Dict[str, Any]] = []
+    chunk_error = False
 
     def _record_exception(name: str) -> None:
         bucket = diagnostics["http"].setdefault("exception_counts", {})
@@ -518,6 +662,8 @@ def fetch_idu_json(
                         iso_batch=iso_batch,
                         offset=offset,
                         limit=IDU_POSTGREST_LIMIT,
+                        date_column=date_filter_column,
+                        select_columns=select_list,
                     )
                 )
                 url = f"{base}{endpoint}?{urlencode(params, safe='.,()')}"
@@ -625,16 +771,73 @@ def fetch_idu_json(
                         diagnostics["mode"] = "online"
                         diagnostics["error"] = exc.diagnostics
                         _record_exception(exc.__class__.__name__)
-                        bucket = _http_status_bucket(
-                            exc.diagnostics.get("status")
+                        error_diag = exc.diagnostics or {}
+                        status_error = error_diag.get("status")
+                        if status_error is not None:
+                            bucket = _http_status_bucket(status_error)
+                            if bucket:
+                                http_info["status_counts"][bucket] += 1
+                            http_info["status_last"] = status_error
+                        attempts_error = int(error_diag.get("attempts", 1) or 1)
+                        http_info["requests"] += attempts_error
+                        http_info["retries"] += int(error_diag.get("retries", 0) or 0)
+                        http_info["duration_s"] += float(
+                            error_diag.get("duration_s", 0.0) or 0.0
                         )
-                        if bucket:
-                            http_info["status_counts"][bucket] += 1
-                        if not _hdx_fallback_enabled():
-                            raise
-                        diagnostics["fallback"] = {"type": "hdx", "reason": "http-error"}
-                        LOGGER.info("idmc: HDX fallback enabled and used (http-error)")
-                        raise
+                        http_info["backoff_s"] += float(
+                            error_diag.get("backoff_s", 0.0) or 0.0
+                        )
+                        http_info["wire_bytes"] += int(
+                            error_diag.get("wire_bytes", 0) or 0
+                        )
+                        http_info["body_bytes"] += int(
+                            error_diag.get("body_bytes", 0) or 0
+                        )
+                        retry_after_err = error_diag.get("retry_after_s", []) or []
+                        http_info["retry_after_events"] += len(retry_after_err)
+                        http_info["retry_after_s"].extend(retry_after_err)
+                        http_info["rate_limit_wait_s"].extend(
+                            error_diag.get("rate_limit_wait_s", []) or []
+                        )
+                        http_info["planned_sleep_s"].extend(
+                            error_diag.get("planned_sleep_s", []) or []
+                        )
+                        attempt_times = error_diag.get("attempt_durations_s", []) or []
+                        http_info["attempt_durations_ms"].extend(
+                            [int(round(value * 1000)) for value in attempt_times]
+                        )
+                        cache_record["error"] = exc.__class__.__name__
+                        cache_record["status"] = status_error
+                        cache_stats["entries"].append(cache_record)
+                        diagnostics["requests"].append(
+                            {
+                                "url": url,
+                                "status": status_error,
+                                "cache": "miss",
+                                "error": exc.__class__.__name__,
+                            }
+                        )
+                        exceptions_list = error_diag.get("exceptions")
+                        snippet = None
+                        if isinstance(exceptions_list, list) and exceptions_list:
+                            last_exc = exceptions_list[-1]
+                            if isinstance(last_exc, dict):
+                                snippet = (
+                                    last_exc.get("message")
+                                    or last_exc.get("reason")
+                                )
+                        fetch_errors.append(
+                            {
+                                "chunk": chunk_label or "full",
+                                "url": url,
+                                "iso_batch": cache_params["iso_batch"],
+                                "exception": exc.__class__.__name__,
+                                "status": status_error,
+                                "message": snippet,
+                            }
+                        )
+                        chunk_error = True
+                        break
                     except Exception as exc:  # pragma: no cover - defensive
                         _record_exception(type(exc).__name__)
                         if not _hdx_fallback_enabled():
@@ -693,6 +896,9 @@ def fetch_idu_json(
                     break
                 offset += IDU_POSTGREST_LIMIT
 
+            if chunk_error:
+                break
+
         diagnostics["mode"] = mode
     except Exception:
         if not _hdx_fallback_enabled():
@@ -734,6 +940,8 @@ def fetch_idu_json(
     diagnostics["raw_path"] = raw_paths[-1] if raw_paths else None
     frame, filters = _build_frame(rows)
     diagnostics["filters"] = filters
+    diagnostics["fetch_errors"] = fetch_errors
+    diagnostics["chunk_error"] = bool(chunk_error)
     http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
     diagnostics["http"] = http_info
     diagnostics["cache"] = cache_stats
@@ -906,6 +1114,14 @@ def fetch(
         }
         return {"monthly_flow": empty_frame}, diagnostics
 
+    schema_date_column, select_columns, schema_probe_diag = _probe_idu_schema(
+        cfg,
+        base_url=base_url,
+        network_mode=network_mode,
+        rate_limiter=limiter,
+    )
+    LOGGER.info("Using IDU date column: %s", schema_date_column)
+
     jobs: List[Tuple[int, Optional[date], Optional[date]]] = [
         (index, start, end)
         for index, (start, end) in enumerate(chunk_ranges)
@@ -935,6 +1151,8 @@ def fetch(
             chunk_start=start,
             chunk_end=end,
             chunk_label=label,
+            date_column=schema_date_column,
+            select_columns=select_columns,
         )
         LOGGER.debug(
             "Fetched chunk %s: rows=%d mode=%s status=%s",
@@ -974,7 +1192,7 @@ def fetch(
     total_rate_wait = 0.0
     total_duration_s = 0.0
     total_planned_wait = 0.0
-    status_counts = {"2xx": 0, "4xx": 0, "5xx": 0}
+    status_counts = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
     rows_before_total = 0
     attempt_latencies: List[int] = []
     cache_hits = 0
@@ -982,6 +1200,9 @@ def fetch(
     raw_path = None
     chunk_entries: List[Dict[str, Any]] = []
     last_status = None
+    exceptions_by_type: Dict[str, int] = {}
+    total_chunk_errors = 0
+    all_fetch_errors: List[Dict[str, Any]] = []
 
     for index in sorted(chunk_diags):
         diag = chunk_diags[index]
@@ -1006,16 +1227,24 @@ def fetch(
         cache_misses += int(cache_block.get("misses", 0) or 0)
         if diag.get("raw_path"):
             raw_path = diag["raw_path"]
+        status_counts_block = http_block.get("status_counts") or {}
+        for bucket in ("2xx", "4xx", "5xx", "other"):
+            status_counts[bucket] += int(status_counts_block.get(bucket, 0) or 0)
         status = http_block.get("status_last")
         if status is not None:
             last_status = status
-            if network_mode == "live" and isinstance(status, int):
-                if 200 <= status < 300:
-                    status_counts["2xx"] += 1
-                elif 400 <= status < 500:
-                    status_counts["4xx"] += 1
-                elif 500 <= status < 600:
-                    status_counts["5xx"] += 1
+        exceptions_block = http_block.get("exception_counts") or {}
+        for name, value in exceptions_block.items():
+            try:
+                count = int(value)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                count = 0
+            exceptions_by_type[name] = exceptions_by_type.get(name, 0) + count
+        if diag.get("chunk_error"):
+            total_chunk_errors += 1
+        fetch_diag_entries = diag.get("fetch_errors") or []
+        if isinstance(fetch_diag_entries, list):
+            all_fetch_errors.extend(fetch_diag_entries)
         chunk = diag.get("chunk", {})
         chunk_start = chunk.get("start")
         chunk_end = chunk.get("end")
@@ -1051,6 +1280,7 @@ def fetch(
         "wire_bytes": total_wire_bytes,
         "body_bytes": total_body_bytes,
         "retry_after_events": total_retry_after_events,
+        "status_counts": status_counts,
     }
 
     data: Dict[str, pd.DataFrame] = {"monthly_flow": combined}
@@ -1104,6 +1334,12 @@ def fetch(
         "chunks": chunks_info,
         "network_mode": network_mode,
         "http_status_counts": status_counts if network_mode == "live" else None,
+        "date_column": schema_date_column,
+        "select_columns": list(select_columns),
+        "schema_probe": schema_probe_diag,
+        "chunk_errors": total_chunk_errors,
+        "fetch_errors": all_fetch_errors,
+        "exceptions_by_type": exceptions_by_type,
         "window": {
             "start": window_start.isoformat() if window_start else None,
             "end": window_end.isoformat() if window_end else None,
