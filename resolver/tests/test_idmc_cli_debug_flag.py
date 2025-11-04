@@ -68,7 +68,16 @@ def _stub_fetch(*_args, **_kwargs):
 
 
 def _stub_normalize(*_args, **_kwargs):
-    frame = pd.DataFrame(columns=["iso3", "date", "value"])
+    frame = pd.DataFrame(
+        columns=[
+            "iso3",
+            "as_of_date",
+            "metric",
+            "value",
+            "series_semantics",
+            "source",
+        ]
+    )
     return frame, {}
 
 

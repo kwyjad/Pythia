@@ -107,6 +107,34 @@ sources:
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
+  - name: idmc_flow
+    match:
+      filename_regex: "(?i)resolver/staging/idmc/flow\\.csv$|(?i)^flow\\.csv$"
+      required_columns: [iso3, as_of_date, value]
+    map:
+      iso3:
+        from: iso3
+        ops: [trim, uppercase]
+      as_of_date:
+        from: as_of_date
+        ops: [to_date]
+      metric:
+        const: idp_displacement_new_idmc
+      value:
+        from: value
+        ops: [to_number]
+      series_semantics:
+        const: new
+      semantics:
+        const: new
+      source:
+        const: IDMC
+    filters:
+      - keep_if_not_null: [iso3, as_of_date, value]
+      - keep_if_positive: [value]
+    dedupe:
+      keys: [iso3, as_of_date, metric]
+      keep: last
 metrics:
   idp_displacement_new_dtm:
     enabled: true
@@ -117,6 +145,6 @@ metrics:
     series_semantics: stock
     source: IOM DTM (admin0)
   idp_displacement_new_idmc:
-    enabled: false
+    enabled: true
     series_semantics: new
     source: IDMC

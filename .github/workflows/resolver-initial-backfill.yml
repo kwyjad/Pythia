@@ -209,8 +209,13 @@ jobs:
           if [ "${{ inputs.force_fake }}" = "true" ]; then
             CMD_ARGS+=(--extra-env "dtm_client=DTM_FORCE_FAKE=1")
           fi
-          CMD_ARGS+=(--extra-args "idmc=--chunk-by-month")
+          CMD_ARGS+=(--extra-args "idmc=--chunk-by-month \
+            --start ${RESOLVER_START_ISO} --end ${RESOLVER_END_ISO} \
+            --enable-export --write-outputs --series flow,stock")
           CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=live")
+          # While diagnosing IDMC runs, you can append --debug via:
+          # CMD_ARGS+=(--extra-args "idmc=--debug")
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
           exit ${CONNECTOR_EXIT}

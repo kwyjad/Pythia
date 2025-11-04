@@ -7,9 +7,9 @@ import io
 import logging
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, cast
+from typing import Any, Dict, Iterable, List, Optional, cast
 
 from resolver.ingestion.utils.country_utils import (
     read_countries_override_from_env,
@@ -174,6 +174,27 @@ def _env_int(value: str | None) -> int | None:
         return None
 
 
+def _first_env_value(*names: str) -> Optional[str]:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return value
+    return None
+
+
+def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        LOGGER.warning("Invalid %s date '%s'; ignoring", label, value)
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser("idmc")
     parser.add_argument("--skip-network", action="store_true", help="Force offline mode")
@@ -195,6 +216,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--no-date-filter", action="store_true", help="Disable date filtering"
+    )
+    parser.add_argument(
+        "--start",
+        type=str,
+        default=None,
+        help="Explicit start date (YYYY-MM-DD) for the fetch window",
+    )
+    parser.add_argument(
+        "--end",
+        type=str,
+        default=None,
+        help="Explicit end date (YYYY-MM-DD) for the fetch window",
     )
     parser.add_argument(
         "--window-days",
@@ -321,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
     env_force_cache_only = _env_truthy(os.getenv("IDMC_FORCE_CACHE_ONLY"))
     env_no_date_filter = _env_truthy(os.getenv("IDMC_NO_DATE_FILTER"))
     env_window_days = _env_int(os.getenv("IDMC_WINDOW_DAYS"))
+    env_window_start = _first_env_value("RESOLVER_START_ISO", "BACKFILL_START_ISO")
+    env_window_end = _first_env_value("RESOLVER_END_ISO", "BACKFILL_END_ISO")
     env_countries = _parse_csv(os.getenv("IDMC_ONLY_COUNTRIES"), transform=str.upper)
     env_series = _parse_csv(os.getenv("IDMC_SERIES"), transform=lambda value: value.lower())
     env_enable_export = _env_truthy(os.getenv("IDMC_ENABLE_EXPORT"))
@@ -426,6 +461,39 @@ def main(argv: list[str] | None = None) -> int:
         ", ".join(selected_series),
     )
 
+    cfg_window = getattr(cfg.api, "date_window", None)
+    cfg_window_start = getattr(cfg_window, "start", None)
+    cfg_window_end = getattr(cfg_window, "end", None)
+
+    raw_start_iso = args.start or env_window_start
+    raw_end_iso = args.end or env_window_end
+    window_source = "unset"
+    if args.start or args.end:
+        window_source = "cli"
+    elif env_window_start or env_window_end:
+        window_source = "env"
+    if raw_start_iso is None and raw_end_iso is None:
+        raw_start_iso = cfg_window_start
+        raw_end_iso = cfg_window_end
+        if raw_start_iso or raw_end_iso:
+            window_source = "config"
+
+    window_start_date = _parse_iso_date(raw_start_iso, "start")
+    window_end_date = _parse_iso_date(raw_end_iso, "end")
+    if window_start_date and window_end_date and window_start_date > window_end_date:
+        LOGGER.warning(
+            "Start date %s is after end date %s; swapping", window_start_date, window_end_date
+        )
+        window_start_date, window_end_date = window_end_date, window_start_date
+
+    window_start_iso = window_start_date.isoformat() if window_start_date else None
+    window_end_iso = window_end_date.isoformat() if window_end_date else None
+
+    if window_source == "unset" and not window_start_iso and not window_end_iso:
+        LOGGER.warning(
+            "No explicit start/end window provided; diagnostics will report a null window"
+        )
+
     enable_export = bool(args.enable_export)
     if env_enable_export is not None:
         enable_export = enable_export or bool(env_enable_export)
@@ -492,13 +560,31 @@ def main(argv: list[str] | None = None) -> int:
         effective_no_date_filter = effective_no_date_filter or bool(env_no_date_filter)
 
     window_days = None
-    if not effective_no_date_filter:
+    if effective_no_date_filter:
+        window_source = "disabled"
+        window_start_date = None
+        window_end_date = None
+        window_start_iso = None
+        window_end_iso = None
+    elif window_start_iso is None and window_end_iso is None:
         if args.window_days is not None:
             window_days = args.window_days
         elif env_window_days is not None:
             window_days = env_window_days
         else:
             window_days = 30
+
+    if window_start_iso or window_end_iso:
+        LOGGER.info(
+            "Effective date window: start=%s end=%s source=%s",
+            window_start_iso or "∅",
+            window_end_iso or "∅",
+            window_source,
+        )
+    elif window_days is not None:
+        LOGGER.info("Effective rolling window: %d day(s)", window_days)
+    else:
+        LOGGER.info("Date window disabled")
     overall_start = tick()
 
     probe_result = None
@@ -518,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg,
         network_mode=network_mode,
         soft_timeouts=True,
+        window_start=window_start_date,
+        window_end=window_end_date,
         window_days=window_days,
         only_countries=selected_countries,
         base_url=args.base_url,
@@ -529,12 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     fetch_ms = to_ms(tick() - fetch_start)
 
-    date_window = {
-        "start": cfg.api.date_window.start,
-        "end": cfg.api.date_window.end,
-    }
-    if args.no_date_filter:
-        date_window = {"start": None, "end": None}
+    date_window = {"start": window_start_iso, "end": window_end_iso}
 
     normalize_start = tick()
     tidy, drops = normalize_all(
@@ -551,6 +634,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     tidy, unmapped_hazards = maybe_map_hazards(tidy, map_hazards)
     normalize_ms = to_ms(tick() - normalize_start)
+
+    resolution_ready_facts = build_resolution_ready_facts(tidy)
+    rows_resolution_ready = int(len(resolution_ready_facts))
+    staging_dir_path = Path("resolver/staging/idmc")
+    staging_dir_path.mkdir(parents=True, exist_ok=True)
+    flow_staging_path = staging_dir_path / "flow.csv"
+    if resolution_ready_facts.empty:
+        flow_staging_path = Path(write_header_if_empty(flow_staging_path.as_posix()))
+    else:
+        resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
     rows = len(tidy)
     buffer = io.StringIO()
@@ -581,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
     selectors = {
         "only_countries": selected_countries,
         "window_days": window_days,
+        "window_start": window_start_iso,
+        "window_end": window_end_iso,
         "series": selected_series,
     }
     zero_rows = None
@@ -603,6 +698,9 @@ def main(argv: list[str] | None = None) -> int:
         "strict_empty": bool(args.strict_empty),
         "no_date_filter": effective_no_date_filter,
         "window_days": window_days,
+        "window_start": window_start_iso,
+        "window_end": window_end_iso,
+        "window_source": window_source,
         "only_countries": selected_countries,
         "series": selected_series,
         "countries_source": countries_source,
@@ -664,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
 
     exports_payload = {}
     if enable_export:
-        facts_frame = build_resolution_ready_facts(tidy)
+        facts_frame = resolution_ready_facts
         facts_summary = summarise_facts(facts_frame)
         buffer = io.StringIO()
         facts_frame.head(10).to_csv(buffer, index=False)
@@ -713,7 +811,18 @@ def main(argv: list[str] | None = None) -> int:
     http_rollup = diagnostics.get("http") or {}
     cache_stats = diagnostics.get("cache") or {}
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
-    http_status_counts = diagnostics.get("http_status_counts")
+    http_status_counts_raw = diagnostics.get("http_status_counts") or {}
+    http_status_counts = {
+        "2xx": int((http_status_counts_raw or {}).get("2xx", 0) or 0),
+        "4xx": int((http_status_counts_raw or {}).get("4xx", 0) or 0),
+        "5xx": int((http_status_counts_raw or {}).get("5xx", 0) or 0),
+    }
+    requests_planned_raw = diagnostics.get("requests_planned")
+    try:
+        requests_planned = int(requests_planned_raw) if requests_planned_raw is not None else None
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        requests_planned = None
+    requests_executed = int(http_rollup.get("requests", 0) or 0)
 
     diagnostics_payload = {
         "status": status,
@@ -728,7 +837,15 @@ def main(argv: list[str] | None = None) -> int:
         "timings": timings,
         "rows_fetched": rows_fetched,
         "rows_normalized": rows,
+        "rows_resolution_ready": rows_resolution_ready,
         "rows_written": rows,
+        "window": {
+            "start": window_start_iso,
+            "end": window_end_iso,
+            "source": window_source,
+        },
+        "requests_planned": requests_planned,
+        "requests_executed": requests_executed,
         "drop_reasons": drops,
         "samples": samples,
         "zero_rows": zero_rows,
@@ -782,6 +899,8 @@ def main(argv: list[str] | None = None) -> int:
         window_parts.append(f"window_days={window_days}")
     if effective_no_date_filter:
         window_parts.append("filter=disabled")
+    if window_source:
+        window_parts.append(f"source={window_source}")
     date_window_display = ", ".join(window_parts)
 
     dataset_lines = [
@@ -789,19 +908,31 @@ def main(argv: list[str] | None = None) -> int:
         for name, frame in data.items()
     ]
     staging_dir = Path("resolver/staging/idmc")
-    staged_counts: Dict[str, str] = {}
+    staged_counts: Dict[str, Optional[int]] = {}
     staging_entries: List[str] = []
     for filename in ("flow.csv", "stock.csv"):
         path_candidate = staging_dir / filename
         row_count = _count_csv_rows(path_candidate)
         if row_count is None:
             staging_entries.append(f"{path_candidate.as_posix()}: missing")
-            staged_counts[filename] = "missing"
+            staged_counts[filename] = None
         else:
             staging_entries.append(
                 f"{path_candidate.as_posix()}: present (rows={row_count})"
             )
-            staged_counts[filename] = str(row_count)
+            staged_counts[filename] = int(row_count)
+
+    staged_counts_serializable = {
+        name: (int(value) if value is not None else None)
+        for name, value in staged_counts.items()
+    }
+    diagnostics_payload["rows_staged"] = staged_counts_serializable
+    diagnostics_payload["rows"] = {
+        "raw": rows_fetched,
+        "normalized": rows,
+        "resolution_ready": rows_resolution_ready,
+        "staged": staged_counts_serializable,
+    }
 
     cache_info = http_rollup.get("cache") or {}
     latency = http_rollup.get("latency_ms") or {}
@@ -855,14 +986,20 @@ def main(argv: list[str] | None = None) -> int:
 
     response_mode = diagnostics.get("mode", "offline")
 
+    staged_notes = ", ".join(
+        f"{name}={value if value is not None else 'missing'}"
+        for name, value in staged_counts.items()
+    ) or "(none)"
     notes_lines = [
         f"Network mode: {effective_network_mode}",
         f"Debug flag: {'on' if args.debug else 'off'}",
         f"Countries source: {countries_source}",
         f"Series source: {series_source}",
+        f"Window source: {window_source}",
         f"Token env: {token_env_name}",
-        "Staged rows: "
-        + ", ".join(f"{name}={value}" for name, value in staged_counts.items()),
+        f"Requests planned/executed: {requests_planned or 0}/{requests_executed}",
+        f"Rows (resolution-ready): {rows_resolution_ready}",
+        f"Staged rows: {staged_notes}",
     ]
     if response_mode != effective_network_mode:
         notes_lines.append(f"Response mode: {response_mode}")
@@ -950,13 +1087,8 @@ def main(argv: list[str] | None = None) -> int:
     notes = {"zero_rows": zero_rows} if zero_rows else {}
     should_write_why_zero = rows == 0 or bool(args.debug)
     if should_write_why_zero:
-        window_start = date_window.get("start")
-        window_end = date_window.get("end")
-        requests_raw = http_rollup.get("requests", 0)
-        try:
-            requests_count = int(requests_raw)  # type: ignore[arg-type]
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            requests_count = 0
+        window_start = window_start_iso
+        window_end = window_end_iso
         countries_sample = selected_countries[:10]
         http_counts_zero = None
         if isinstance(http_status_counts, dict):
@@ -974,20 +1106,29 @@ def main(argv: list[str] | None = None) -> int:
             "countries_source": countries_source,
             "series": list(selected_series),
             "window": {
-                "start": str(window_start) if window_start is not None else None,
-                "end": str(window_end) if window_end is not None else None,
+                "start": str(window_start) if window_start else None,
+                "end": str(window_end) if window_end else None,
+                "source": window_source,
             },
             "date_window": {
-                "start": str(window_start) if window_start is not None else None,
-                "end": str(window_end) if window_end is not None else None,
+                "start": str(window_start) if window_start else None,
+                "end": str(window_end) if window_end else None,
             },
+            "window_source": window_source,
             "filters": {
                 "date_out_of_window": int(drop_hist.get("date_out_of_window", 0)),
                 "no_iso3": int(drop_hist.get("no_iso3", 0)),
                 "no_value_col": int(drop_hist.get("no_value_col", 0)),
             },
-            "network_attempted": requests_count > 0,
-            "requests_attempted": requests_count,
+            "network_attempted": requests_executed > 0,
+            "requests_attempted": requests_executed,
+            "requests_planned": requests_planned,
+            "rows": {
+                "raw": rows_fetched,
+                "normalized": rows,
+                "resolution_ready": rows_resolution_ready,
+                "staged": staged_counts_serializable,
+            },
             "config_source": config_source_label,
             "config_path_used": str(config_path_used) if config_path_used else None,
             "loader_warnings": config_warnings,

@@ -63,13 +63,28 @@ def _common_stubs(monkeypatch, tmp_path: Path, expected_mode: str, http_counts, 
             "chunks": {"enabled": False, "count": 0, "by_month": []},
             "http_status_counts": http_counts,
         }
-        return {"monthly_flow": pd.DataFrame(columns=["iso3", "value"])}, diagnostics
+        frame = pd.DataFrame(
+            [{"displacement_date": "2024-01-05", "figure": 10, "iso3": "AAA"}]
+        )
+        return {"monthly_flow": frame}, diagnostics
 
     monkeypatch.setattr(idmc_cli, "fetch", _fake_fetch)
     monkeypatch.setattr(
         idmc_cli,
         "normalize_all",
-        lambda *_args, **_kwargs: (pd.DataFrame(columns=["iso3", "value"]), {}),
+        lambda *_args, **_kwargs: (
+            pd.DataFrame(
+                columns=[
+                    "iso3",
+                    "as_of_date",
+                    "metric",
+                    "value",
+                    "series_semantics",
+                    "source",
+                ]
+            ),
+            {},
+        ),
     )
     monkeypatch.setattr(
         idmc_cli,
@@ -127,13 +142,13 @@ def test_idmc_network_mode_fixture(monkeypatch, tmp_path):
     assert observed_modes == ["fixture"]
     payload = captured[-1]
     assert payload["network_mode"] == "fixture"
-    assert payload["http_status_counts"] is None
+    assert payload["http_status_counts"] == {"2xx": 0, "4xx": 0, "5xx": 0}
 
     why_zero_path = tmp_path / "diagnostics" / "ingestion" / "idmc" / "why_zero.json"
     assert why_zero_path.exists()
     why_zero_payload = json.loads(why_zero_path.read_text(encoding="utf-8"))
     assert why_zero_payload["network_mode"] == "fixture"
-    assert why_zero_payload["http_status_counts"] is None
+    assert why_zero_payload["http_status_counts"] == {"2xx": 0, "4xx": 0, "5xx": 0}
 
 
 def test_idmc_network_mode_cache_only(monkeypatch, tmp_path):
@@ -151,10 +166,10 @@ def test_idmc_network_mode_cache_only(monkeypatch, tmp_path):
     payload = captured[-1]
     assert payload["network_mode"] == "cache_only"
     assert payload["http"]["requests"] == 0
-    assert payload["http_status_counts"] is None
+    assert payload["http_status_counts"] == {"2xx": 0, "4xx": 0, "5xx": 0}
 
     why_zero_path = tmp_path / "diagnostics" / "ingestion" / "idmc" / "why_zero.json"
     assert why_zero_path.exists()
     why_zero_payload = json.loads(why_zero_path.read_text(encoding="utf-8"))
     assert why_zero_payload["network_mode"] == "cache_only"
-    assert why_zero_payload["http_status_counts"] is None
+    assert why_zero_payload["http_status_counts"] == {"2xx": 0, "4xx": 0, "5xx": 0}

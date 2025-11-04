@@ -46,7 +46,19 @@ def _stub_fetch(*_args, **_kwargs):
 
 
 def _stub_normalize(*_args, **_kwargs):
-    return pd.DataFrame(columns=["iso3", "date", "value"]), {}
+    return (
+        pd.DataFrame(
+            columns=[
+                "iso3",
+                "as_of_date",
+                "metric",
+                "value",
+                "series_semantics",
+                "source",
+            ]
+        ),
+        {},
+    )
 
 
 def _stub_maybe_map(frame, *_args, **_kwargs):
@@ -101,11 +113,19 @@ def test_why_zero_json_includes_config_details(monkeypatch, tmp_path):
     assert payload["countries_sample"] == ["AAA", "BBB"]
     assert payload["countries_source"] == "config list"
     assert payload["date_window"] == {"start": "2024-01-01", "end": "2024-01-31"}
-    assert payload["window"] == {"start": "2024-01-01", "end": "2024-01-31"}
+    assert payload["window"] == {
+        "start": "2024-01-01",
+        "end": "2024-01-31",
+        "source": "config",
+    }
+    assert payload["window_source"] == "config"
     assert payload["series"] == ["stock", "flow"]
     assert payload["network_mode"] == "fixture"
-    assert payload["http_status_counts"] is None
+    assert payload["http_status_counts"] == {"2xx": 0, "4xx": 0, "5xx": 0}
     assert payload["network_attempted"] is False
+    assert payload["requests_planned"] is None
+    assert payload["rows"]["raw"] == 0
+    assert payload["rows"]["staged"]["flow.csv"] == 0
     assert payload["config_source"] == "ingestion"
     assert payload["config_path_used"] == str(tmp_path / "resolver" / "config" / "idmc.yml")
     assert payload["loader_warnings"] == ["ingestion=resolver"]
