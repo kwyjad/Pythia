@@ -11,6 +11,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, cast
 
+import pandas as pd
+
 from resolver.ingestion.utils.country_utils import (
     read_countries_override_from_env,
     resolve_countries,
@@ -30,7 +32,7 @@ from .diagnostics import (
     write_unmapped_hazards_preview,
     zero_rows_rescue,
 )
-from .export import build_resolution_ready_facts, summarise_facts
+from .export import FLOW_METRIC, build_resolution_ready_facts, summarise_facts
 from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
@@ -77,6 +79,16 @@ Date window: {date_window}
 Notes:
 {notes_block}
 """
+
+STOCK_METRIC = "idp_displacement_stock_idmc"
+
+
+def _parse_empty_policy(value: str | None) -> str:
+    candidate = (value or "allow").strip().lower()
+    if candidate in {"allow", "warn", "fail"}:
+        return candidate
+    LOGGER.warning("Invalid EMPTY_POLICY '%s'; defaulting to allow", value)
+    return "allow"
 
 
 def _format_bullets(items: Iterable[str]) -> str:
@@ -339,6 +351,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         LOGGER.debug("Debug flag not set for this run")
 
+    empty_policy = _parse_empty_policy(os.getenv("EMPTY_POLICY"))
+    if args.strict_empty:
+        empty_policy = "fail"
+
     cfg = load()
     config_details = getattr(cfg, "_config_details", None)
     config_source_label = str(getattr(cfg, "_config_source", "ingestion"))
@@ -568,11 +584,16 @@ def main(argv: list[str] | None = None) -> int:
         window_end_iso = None
     elif window_start_iso is None and window_end_iso is None:
         if args.window_days is not None:
-            window_days = args.window_days
+            window_days = max(int(args.window_days), 0)
         elif env_window_days is not None:
-            window_days = env_window_days
-        else:
-            window_days = 30
+            window_days = max(int(env_window_days), 0)
+
+    skip_due_to_window = (
+        not effective_no_date_filter
+        and window_start_iso is None
+        and window_end_iso is None
+        and window_days is None
+    )
 
     if window_start_iso or window_end_iso:
         LOGGER.info(
@@ -583,8 +604,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif window_days is not None:
         LOGGER.info("Effective rolling window: %d day(s)", window_days)
-    else:
+    elif not skip_due_to_window:
         LOGGER.info("Date window disabled")
+    else:
+        LOGGER.warning(
+            "No date window provided; running with zero-row outcome (EMPTY_POLICY=%s)",
+            empty_policy,
+        )
     overall_start = tick()
 
     probe_result = None
@@ -599,23 +625,90 @@ def main(argv: list[str] | None = None) -> int:
             probe_result = {"error": str(exc)}
     probe_ms = to_ms(tick() - probe_start)
 
-    fetch_start = tick()
-    data, diagnostics = fetch(
-        cfg,
-        network_mode=network_mode,
-        soft_timeouts=True,
-        window_start=window_start_date,
-        window_end=window_end_date,
-        window_days=window_days,
-        only_countries=selected_countries,
-        base_url=args.base_url,
-        cache_ttl=args.cache_ttl,
-        rate_per_sec=rate_limit,
-        max_concurrency=max_concurrency,
-        max_bytes=max_bytes,
-        chunk_by_month=chunk_by_month,
-    )
-    fetch_ms = to_ms(tick() - fetch_start)
+    if skip_due_to_window:
+        empty_frame = pd.DataFrame(
+            columns=[
+                "iso3",
+                "as_of_date",
+                "metric",
+                "value",
+                "series_semantics",
+                "source",
+            ]
+        )
+        data = {"monthly_flow": empty_frame}
+        countries_scope = sorted(
+            {c.strip().upper() for c in selected_countries if c.strip()}
+        )
+        diagnostics = {
+            "mode": "offline",
+            "network_mode": network_mode,
+            "http": {
+                "requests": 0,
+                "retries": 0,
+                "status_last": None,
+                "latency_ms": {"p50": 0, "p95": 0, "max": 0},
+                "wire_bytes": 0,
+                "body_bytes": 0,
+                "retry_after_events": 0,
+            },
+            "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+            "filters": {
+                "window_start": None,
+                "window_end": None,
+                "countries": countries_scope,
+                "rows_before": 0,
+                "rows_after": 0,
+            },
+            "performance": {
+                "requests": 0,
+                "wire_bytes": 0,
+                "body_bytes": 0,
+                "duration_s": 0,
+                "throughput_kibps": 0,
+                "records_per_sec": 0,
+            },
+            "rate_limit": {
+                "req_per_sec": float(rate_limit or 0.0),
+                "max_concurrency": int(max_concurrency or 1),
+                "retries": 0,
+                "retry_after_events": 0,
+                "retry_after_wait_s": 0.0,
+                "rate_limit_wait_s": 0.0,
+                "planned_wait_s": 0.0,
+            },
+            "chunks": {"enabled": False, "count": 0, "by_month": []},
+            "http_status_counts": {
+                "2xx": 0,
+                "4xx": 0,
+                "5xx": 0,
+            }
+            if network_mode == "live"
+            else None,
+            "raw_path": None,
+            "requests_planned": 0,
+            "requests_executed": 0,
+            "window": {"start": None, "end": None, "window_days": None},
+        }
+        fetch_ms = 0
+    else:
+        fetch_start = tick()
+        data, diagnostics = fetch(
+            cfg,
+            network_mode=network_mode,
+            soft_timeouts=True,
+            window_start=window_start_date,
+            window_end=window_end_date,
+            window_days=window_days,
+            only_countries=selected_countries,
+            base_url=args.base_url,
+            cache_ttl=args.cache_ttl,
+            rate_per_sec=rate_limit,
+            max_concurrency=max_concurrency,
+            max_bytes=max_bytes,
+            chunk_by_month=chunk_by_month,
+        )
+        fetch_ms = to_ms(tick() - fetch_start)
 
     date_window = {"start": window_start_iso, "end": window_end_iso}
 
@@ -635,7 +728,11 @@ def main(argv: list[str] | None = None) -> int:
     tidy, unmapped_hazards = maybe_map_hazards(tidy, map_hazards)
     normalize_ms = to_ms(tick() - normalize_start)
 
-    resolution_ready_facts = build_resolution_ready_facts(tidy)
+    flow_input = tidy
+    if "metric" in tidy.columns and not tidy.empty:
+        metric_series = tidy["metric"].astype(str).str.lower()
+        flow_input = tidy.loc[metric_series == FLOW_METRIC].copy()
+    resolution_ready_facts = build_resolution_ready_facts(flow_input)
     rows_resolution_ready = int(len(resolution_ready_facts))
     staging_dir_path = Path("resolver/staging/idmc")
     staging_dir_path.mkdir(parents=True, exist_ok=True)
@@ -645,6 +742,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
+    selected_series_normalized = {
+        str(series).strip().lower() for series in selected_series if str(series).strip()
+    }
+    stock_staging_path = staging_dir_path / "stock.csv"
+    stock_rows = pd.DataFrame(columns=tidy.columns)
+    if "metric" in tidy.columns and not tidy.empty:
+        metric_series = tidy["metric"].astype(str).str.lower()
+        stock_rows = tidy.loc[metric_series == STOCK_METRIC].copy()
+    if not stock_rows.empty:
+        stock_rows.to_csv(stock_staging_path, index=False)
+    elif "stock" in selected_series_normalized:
+        write_header_if_empty(stock_staging_path.as_posix())
+
     rows = len(tidy)
     buffer = io.StringIO()
     tidy.head(10).to_csv(buffer, index=False)
@@ -652,10 +762,15 @@ def main(argv: list[str] | None = None) -> int:
     drop_path = write_drop_reasons(drops)
 
     status = "ok"
-    reason = None
-    if rows == 0 and args.strict_empty:
-        status = "error"
-        reason = "strict-empty-0-rows"
+    reason: Optional[str] = None
+    if rows == 0:
+        if empty_policy == "fail":
+            status = "error"
+            reason = "strict-empty-0-rows" if args.strict_empty else "empty-policy-fail"
+        elif empty_policy == "warn":
+            LOGGER.warning("EMPTY_POLICY=warn: 0 IDMC rows normalised")
+        else:
+            LOGGER.info("EMPTY_POLICY=allow: 0 IDMC rows normalised")
 
     samples = {"normalized_preview": preview_path, "drop_reasons": drop_path}
     if diagnostics.get("raw_path"):
@@ -677,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         "window_start": window_start_iso,
         "window_end": window_end_iso,
         "series": selected_series,
+        "empty_policy": empty_policy,
     }
     zero_rows = None
     if rows == 0:
@@ -1157,9 +1273,13 @@ def main(argv: list[str] | None = None) -> int:
     write_connectors_line(diagnostics_payload)
 
     if status == "error":
-        raise SystemExit(2)
+        exit_code = 2
+        if reason in {"empty-policy-fail", "strict-empty-0-rows"}:
+            exit_code = 1
+        raise SystemExit(exit_code)
     return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
     raise SystemExit(main())
+

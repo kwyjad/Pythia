@@ -52,6 +52,7 @@ The CLI is opt-in only; wiring into automated workflows will happen in a later c
 
 - Navigate to **Actions → Resolver — Initial Backfill** and trigger the workflow (override `months_back`, `only_connector`, or `log_level` if you need a narrower or more verbose run).
 - The workflow executes the live connectors, freezes `resolver/snapshots/<YYYY-MM>/` for each of the requested months, and dual-writes into DuckDB so downstream selectors stay in sync.
+- The initial backfill job now forwards explicit IDMC options (`--start/--end`, `--enable-export`, `--write-outputs`, and `--series flow,stock`) and exports `IDMC_NETWORK_MODE=live` so the connector stages `resolver/staging/idmc/flow.csv` (and `stock.csv` when present) straight from the live API response.【F:.github/workflows/resolver-initial-backfill.yml†L149-L167】【F:resolver/ingestion/idmc/cli.py†L629-L655】
 - The final job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` and uploads `context/facts_last12.jsonl` plus `context/facts_last12.parquet` alongside the snapshot artifacts.
 - After the run completes download the combined artifact, confirm each `manifest.json` row count, and hand the bundle to the Forecaster deployment.
 
