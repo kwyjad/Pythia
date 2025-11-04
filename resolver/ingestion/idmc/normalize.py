@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import calendar
+import logging
 from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
 
@@ -10,6 +11,7 @@ import pandas as pd
 from resolver.ingestion.utils.iso_normalize import to_iso3
 
 SOURCE_NAME = "IDMC"
+LOGGER = logging.getLogger(__name__)
 
 
 def _coerce_month_end(values: pd.Series) -> pd.Series:
@@ -83,6 +85,27 @@ def _normalize_monthly_flow(
     *,
     map_hazards: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    if raw.empty:
+        LOGGER.debug("normalize_flow: empty input")
+        empty = pd.DataFrame(
+            columns=[
+                "iso3",
+                "as_of_date",
+                "metric",
+                "value",
+                "series_semantics",
+                "source",
+            ]
+        )
+        return empty, {
+            "date_parse_failed": 0,
+            "no_iso3": 0,
+            "no_value_col": 0,
+            "date_out_of_window": 0,
+            "negative_value": 0,
+            "dup_event": 0,
+        }
+
     drops = {
         "date_parse_failed": 0,
         "no_iso3": 0,
@@ -158,20 +181,37 @@ def _normalize_monthly_flow(
     normalized = normalized[normalized["value"] >= 0]
     drops["negative_value"] += before - len(normalized)
 
+    if normalized.empty:
+        return normalized.reset_index(drop=True), drops
+
+    normalized["as_of_date"] = pd.to_datetime(
+        normalized["as_of_date"], errors="coerce", utc=False
+    )
+
+    if normalized["as_of_date"].notna().any():
+        start_raw = (date_window or {}).get("start")
+        end_raw = (date_window or {}).get("end")
+        start_dt = pd.to_datetime(start_raw, errors="coerce")
+        end_dt = pd.to_datetime(end_raw, errors="coerce")
+
+        if not pd.isna(start_dt):
+            before = len(normalized)
+            normalized = normalized[normalized["as_of_date"] >= start_dt]
+            drops["date_out_of_window"] += before - len(normalized)
+        if not pd.isna(end_dt):
+            before = len(normalized)
+            normalized = normalized[normalized["as_of_date"] <= end_dt]
+            drops["date_out_of_window"] += before - len(normalized)
+    else:
+        rows = int(len(normalized))
+        drops["date_parse_failed"] += rows
+        if rows:
+            LOGGER.debug("normalize_flow: all dates NaT after coercion")
+        return normalized.head(0).reset_index(drop=True), drops
+
     before = len(normalized)
     normalized = normalized.dropna(subset=["as_of_date"])
     drops["date_parse_failed"] += before - len(normalized)
-
-    start = (date_window or {}).get("start")
-    end = (date_window or {}).get("end")
-    if start:
-        before = len(normalized)
-        normalized = normalized[normalized["as_of_date"] >= start]
-        drops["date_out_of_window"] += before - len(normalized)
-    if end:
-        before = len(normalized)
-        normalized = normalized[normalized["as_of_date"] <= end]
-        drops["date_out_of_window"] += before - len(normalized)
 
     before = len(normalized)
     normalized = (

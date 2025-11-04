@@ -750,6 +750,12 @@ def main(argv: list[str] | None = None) -> int:
     if "metric" in tidy.columns and not tidy.empty:
         metric_series = tidy["metric"].astype(str).str.lower()
         stock_rows = tidy.loc[metric_series == STOCK_METRIC].copy()
+    if flow_input.empty and stock_rows.empty:
+        window_repr = f"{window_start_iso or 'None'}..{window_end_iso or 'None'}"
+        LOGGER.info(
+            "IDMC normalization yielded 0 rows (window=%s); respecting empty_policy",
+            window_repr,
+        )
     if not stock_rows.empty:
         stock_rows.to_csv(stock_staging_path, index=False)
     elif "stock" in selected_series_normalized:
