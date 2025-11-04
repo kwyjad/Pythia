@@ -130,10 +130,23 @@ def _normalize_monthly_flow(
     date_series = _first_non_null(raw, date_candidates)
     value_series = pd.to_numeric(_first_non_null(raw, value_candidates), errors="coerce")
 
+    def _safe_datetime(series_name: str) -> pd.Series:
+        series = raw.get(series_name)
+        if series is None:
+            return pd.Series([pd.NaT] * len(raw), index=raw.index)
+        return pd.to_datetime(series, errors="coerce")
+
+    end_dates = _safe_datetime("displacement_end_date")
+    start_dates = _safe_datetime("displacement_start_date")
+    event_dates = pd.to_datetime(date_series, errors="coerce")
+
+    month_candidates = end_dates.fillna(start_dates).fillna(event_dates)
+    month_end = month_candidates.dt.to_period("M").dt.to_timestamp("M")
+
     normalized = pd.DataFrame(
         {
             "iso3": iso_series,
-            "as_of_date": _coerce_month_end(date_series),
+            "as_of_date": month_end,
             "metric": "idp_displacement_new_idmc",
             "value": value_series,
             "series_semantics": "new",
@@ -213,15 +226,18 @@ def _normalize_monthly_flow(
     normalized = normalized.dropna(subset=["as_of_date"])
     drops["date_parse_failed"] += before - len(normalized)
 
-    before = len(normalized)
-    normalized = (
-        normalized.sort_values("value", ascending=False)
-        .drop_duplicates(["iso3", "as_of_date", "metric"], keep="first")
+    aggregated = (
+        normalized.groupby(["iso3", "as_of_date", "metric"], as_index=False)
+        .agg({"value": "sum"})
+        .sort_values(["iso3", "as_of_date"])
         .reset_index(drop=True)
     )
-    drops["dup_event"] += before - len(normalized)
 
-    return normalized, drops
+    aggregated["series_semantics"] = "new"
+    aggregated["source"] = SOURCE_NAME
+    aggregated["as_of_date"] = aggregated["as_of_date"].dt.date.astype(str)
+
+    return aggregated, drops
 
 
 def normalize_all(

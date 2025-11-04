@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import io
 import json
 import logging
 import math
@@ -11,6 +12,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 from urllib.parse import urlencode
+import urllib.request
 
 import pandas as pd
 
@@ -33,6 +35,17 @@ from .rate_limit import TokenBucket
 HERE = os.path.dirname(__file__)
 FIXTURES_DIR = os.path.join(HERE, "fixtures")
 RAW_DIAG_DIR = os.path.join("diagnostics", "ingestion", "idmc", "raw")
+
+IDU_POSTGREST_COLUMNS = (
+    "iso3",
+    "figure",
+    "displacement_start_date",
+    "displacement_end_date",
+    "displacement_date",
+    "displacement_type",
+)
+IDU_POSTGREST_LIMIT = 10000
+ISO3_BATCH_SIZE = 35
 
 _CACHE_LOCKS: Dict[str, threading.Lock] = {}
 _CACHE_LOCKS_LOCK = threading.Lock()
@@ -188,6 +201,182 @@ def _latency_block(attempts_ms: List[int]) -> Dict[str, int]:
     }
 
 
+def _batch_iso3(codes: Iterable[str], *, batch_size: int = ISO3_BATCH_SIZE) -> List[List[str]]:
+    """Return upper-cased ISO3 batches for safe URL construction."""
+
+    cleaned = [code.strip().upper() for code in codes if code and code.strip()]
+    if not cleaned:
+        return []
+    batches: List[List[str]] = []
+    for index in range(0, len(cleaned), max(batch_size, 1)):
+        batches.append(cleaned[index : index + batch_size])
+    return batches
+
+
+def _postgrest_filters(
+    *,
+    chunk_start: Optional[date],
+    chunk_end: Optional[date],
+    window_start: Optional[date],
+    window_end: Optional[date],
+    iso_batch: Optional[List[str]],
+    offset: int,
+    limit: int,
+) -> List[Tuple[str, str]]:
+    """Build PostgREST query parameters for the IDU endpoint."""
+
+    params: List[Tuple[str, str]] = [
+        ("select", ",".join(IDU_POSTGREST_COLUMNS)),
+        ("limit", str(limit)),
+    ]
+    if offset:
+        params.append(("offset", str(offset)))
+
+    start_bound = chunk_start or window_start
+    end_bound = chunk_end or window_end
+    if start_bound:
+        params.append(("displacement_start_date", f"gte.{start_bound.isoformat()}"))
+    if end_bound:
+        params.append(("displacement_end_date", f"lte.{end_bound.isoformat()}"))
+    if iso_batch:
+        joined = ",".join(sorted({code.strip().upper() for code in iso_batch if code.strip()}))
+        if joined:
+            params.append(("iso3", f"in.({joined})"))
+    return params
+
+
+def _http_status_bucket(status: Optional[int]) -> Optional[str]:
+    if status is None:
+        return None
+    if 200 <= status < 300:
+        return "2xx"
+    if 400 <= status < 500:
+        return "4xx"
+    if 500 <= status < 600:
+        return "5xx"
+    return "other"
+
+
+def _hdx_fallback_enabled() -> bool:
+    raw = os.getenv("IDMC_ALLOW_HDX_FALLBACK", "0").strip().lower()
+    return raw not in {"", "0", "false", "no"}
+
+
+def _hdx_dataset_slug() -> str:
+    return os.getenv(
+        "IDMC_HDX_DATASET",
+        "internal-displacement-monitoring-centre-idmc-idu",
+    )
+
+
+def _hdx_base_url() -> str:
+    return os.getenv("HDX_BASE", "https://data.humdata.org").rstrip("/")
+
+
+def _hdx_package_show_url(dataset: str) -> str:
+    base = _hdx_base_url()
+    return f"{base}/api/3/action/package_show?id={dataset}"
+
+
+def _read_csv_from_bytes(payload: bytes) -> pd.DataFrame:
+    buffer = io.BytesIO(payload)
+    return pd.read_csv(buffer)
+
+
+def _hdx_download_resource(url: str, *, timeout: float = 30.0) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "pythia-idmc/1.0"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    dataset = _hdx_dataset_slug()
+    package_url = _hdx_package_show_url(dataset)
+    diagnostics: Dict[str, Any] = {
+        "dataset": dataset,
+        "package_url": package_url,
+        "resource_url": None,
+    }
+    try:
+        with urllib.request.urlopen(package_url, timeout=30.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"package_show_failed:{type(exc).__name__}"
+        raise
+
+    if not payload.get("success"):
+        diagnostics["error"] = "package_show_unsuccessful"
+        raise RuntimeError("HDX package_show unsuccessful")
+
+    result = payload.get("result") or {}
+    resources = result.get("resources") or []
+    csv_candidates = [
+        resource
+        for resource in resources
+        if str(resource.get("format", "")).lower() == "csv"
+        and "idus" in str(resource.get("name", "")).lower()
+    ]
+    if not csv_candidates:
+        diagnostics["error"] = "no_csv_resource"
+        raise RuntimeError("HDX IDU CSV resource not found")
+
+    resource = max(
+        csv_candidates,
+        key=lambda item: item.get("last_modified") or item.get("created") or "",
+    )
+    resource_url = resource.get("url")
+    diagnostics["resource_url"] = resource_url
+    if not resource_url:
+        diagnostics["error"] = "resource_missing_url"
+        raise RuntimeError("HDX CSV resource missing URL")
+
+    payload_bytes = _hdx_download_resource(resource_url)
+    frame = _read_csv_from_bytes(payload_bytes)
+    return frame, diagnostics
+
+
+def _hdx_filter(
+    frame: pd.DataFrame,
+    *,
+    iso_batches: List[List[str]],
+    chunk_start: Optional[date],
+    chunk_end: Optional[date],
+    window_start: Optional[date],
+    window_end: Optional[date],
+) -> pd.DataFrame:
+    working = frame.copy()
+    if iso_batches:
+        allowed = {code for batch in iso_batches for code in batch}
+        iso_columns = [
+            column
+            for column in ("iso3", "ISO3", "Country ISO3", "CountryISO3")
+            if column in working.columns
+        ]
+        if iso_columns:
+            iso_column = iso_columns[0]
+            working = working[
+                working[iso_column].astype(str).str.upper().isin(allowed)
+            ]
+
+    start_bound = chunk_start or window_start
+    end_bound = chunk_end or window_end
+    if start_bound or end_bound:
+        for column in [
+            "displacement_end_date",
+            "displacement_start_date",
+            "displacement_date",
+        ]:
+            if column not in working.columns:
+                continue
+            dates = pd.to_datetime(working[column], errors="coerce")
+            if start_bound:
+                working = working[dates >= pd.Timestamp(start_bound)]
+            if end_bound:
+                working = working[dates <= pd.Timestamp(end_bound)]
+            break
+    return working.reset_index(drop=True)
+
+
 def fetch_idu_json(
     cfg: IdmcConfig,
     *,
@@ -207,27 +396,24 @@ def fetch_idu_json(
 
     base = (base_url or cfg.api.base_url).rstrip("/")
     endpoint = cfg.api.endpoints.get("idus_json", "/data/idus_view_flat")
-    query: Dict[str, str] = {}
-    if chunk_start:
-        query["start"] = chunk_start.isoformat()
-    if chunk_end:
-        query["end"] = chunk_end.isoformat()
-    url = f"{base}{endpoint}"
-    if query:
-        url = f"{url}?{urlencode(query)}"
-    params = {"chunk": chunk_label or "full", **query}
-    key = cache_key(url, params=params)
+    base_params: Dict[str, str] = {
+        "chunk": chunk_label or "full",
+        "window_start": (chunk_start or window_start).isoformat()
+        if (chunk_start or window_start)
+        else None,
+        "window_end": (chunk_end or window_end).isoformat()
+        if (chunk_end or window_end)
+        else None,
+    }
     cache_dir = cfg.cache.dir
     ttl_seconds = cache_ttl if cache_ttl is not None else cfg.cache.ttl_seconds
-    cache_path = os.path.join(cache_dir, f"{key}.bin")
     cache_stats: Dict[str, Any] = {
         "dir": cache_dir,
-        "key": key,
-        "path": cache_path,
         "ttl_seconds": ttl_seconds,
         "hit": False,
         "hits": 0,
         "misses": 0,
+        "entries": [],
     }
     http_info: Dict[str, Any] = {
         "requests": 0,
@@ -243,26 +429,30 @@ def fetch_idu_json(
         "planned_sleep_s": [],
         "attempt_durations_ms": [],
         "latency_ms": {"p50": 0, "p95": 0, "max": 0},
+        "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0},
+        "exception_counts": {},
     }
     LOGGER.debug(
-        "IDMC request planned: chunk=%s url=%s params=%s",
+        "IDMC request planned: chunk=%s window_start=%s window_end=%s",
         chunk_label or "full",
-        url,
-        query,
+        base_params.get("window_start"),
+        base_params.get("window_end"),
     )
 
     diagnostics: Dict[str, Any] = {
         "mode": "fixture",
-        "url": url,
+        "url": None,
         "cache": cache_stats,
         "http": http_info,
         "filters": {},
         "raw_path": None,
+        "requests": [],
         "chunk": {
             "start": chunk_start.isoformat() if chunk_start else None,
             "end": chunk_end.isoformat() if chunk_end else None,
         },
         "network_mode": network_mode,
+        "fallback": None,
     }
 
     def _build_frame(rows: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -300,149 +490,253 @@ def fetch_idu_json(
         return frame, diagnostics
 
     use_cache_only = network_mode == "cache_only"
-    cache_entry = cache_get(cache_dir, key, None if use_cache_only else ttl_seconds)
-    body: bytes | None = None
-    body_path: Optional[str] = None
-    if cache_entry is not None:
-        body = cache_entry.body
-        cache_stats["hit"] = True
-        cache_stats["hits"] = 1
-        cache_stats.update(cache_entry.metadata)
-        diagnostics["mode"] = "cache"
-        LOGGER.debug("IDMC cache hit for %s", url)
-    elif use_cache_only:
-        cache_stats["misses"] = 1
-        frame, filters = _build_frame([])
-        diagnostics["mode"] = "cache"
-        diagnostics["reason"] = "cache-miss-cache-only"
-        LOGGER.debug(
-            "IDMC cache-only miss: chunk=%s rows=%d filtered=%d mode=cache_only",
-            chunk_label or "full",
-            filters.get("rows_before", 0),
-            filters.get("rows_after", 0),
-        )
-        return frame, diagnostics
+    iso_batches = _batch_iso3(only_countries or [])
+    rows: List[Dict[str, Any]] = []
+    raw_paths: List[str] = []
+    request_index = 0
+    mode = "cache" if use_cache_only else "online"
 
-    if body is None and not use_cache_only:
-        stream_tmp = f"{cache_path}.partial"
-        try:
-            status, headers, payload_body, http_diag = http_get(
-                url,
-                timeout=10.0,
-                retries=2,
-                backoff_s=0.5,
-                rate_limiter=rate_limiter,
-                max_bytes=max_bytes,
-                stream_path=stream_tmp,
-            )
-            http_info.update(
-                {
-                    "requests": http_diag.get("attempts", 1),
-                    "retries": http_diag.get("retries", 0),
-                    "status_last": status,
-                    "duration_s": http_diag.get("duration_s", 0.0),
-                    "backoff_s": http_diag.get("backoff_s", 0.0),
-                    "wire_bytes": http_diag.get("wire_bytes", 0),
-                    "body_bytes": http_diag.get("body_bytes", 0),
-                    "retry_after_events": len(http_diag.get("retry_after_s", []) or []),
-                    "retry_after_s": http_diag.get("retry_after_s", []),
-                    "rate_limit_wait_s": http_diag.get("rate_limit_wait_s", []),
-                    "planned_sleep_s": http_diag.get("planned_sleep_s", []),
-                    "attempt_durations_ms": [int(round(value * 1000)) for value in http_diag.get("attempt_durations_s", [])],
+    def _record_exception(name: str) -> None:
+        bucket = diagnostics["http"].setdefault("exception_counts", {})
+        bucket[name] = bucket.get(name, 0) + 1
+
+    try:
+        for iso_batch in iso_batches or [None]:
+            offset = 0
+            while True:
+                params = [
+                    (key, value)
+                    for key, value in base_params.items()
+                    if value is not None
+                ]
+                params.extend(
+                    _postgrest_filters(
+                        chunk_start=chunk_start,
+                        chunk_end=chunk_end,
+                        window_start=window_start,
+                        window_end=window_end,
+                        iso_batch=iso_batch,
+                        offset=offset,
+                        limit=IDU_POSTGREST_LIMIT,
+                    )
+                )
+                url = f"{base}{endpoint}?{urlencode(params, safe='.,()')}"
+                diagnostics["url"] = url
+                cache_params = {
+                    **{k: v for k, v in base_params.items() if v is not None},
+                    "iso_batch": ",".join(iso_batch) if iso_batch else "*",
+                    "offset": offset,
+                    "limit": IDU_POSTGREST_LIMIT,
                 }
-            )
-            http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
-            diagnostics["mode"] = "online"
-            metadata = {
-                "status": status,
-                "headers": headers,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-            }
-            cache_stats["misses"] = 1
-            cache_stats.update(metadata)
-            with _cache_lock(key):
-                if http_diag.get("streamed_to"):
-                    final_path = cache_path
-                    if os.path.exists(stream_tmp):
-                        os.replace(stream_tmp, final_path)
-                    cache_put(cache_dir, key, final_path, metadata)
-                    body_path = final_path
+                key = cache_key(url, params=cache_params)
+                cache_path = os.path.join(cache_dir, f"{key}.bin")
+                cache_entry = cache_get(
+                    cache_dir,
+                    key,
+                    None if use_cache_only else ttl_seconds,
+                )
+                payload_body: Optional[bytes] = None
+                body_path: Optional[str] = None
+                status: Optional[int] = None
+                headers: Dict[str, str] = {}
+                http_diag: Dict[str, Any] = {}
+                cache_record = {
+                    "key": key,
+                    "path": cache_path,
+                    "offset": offset,
+                    "iso_batch": cache_params["iso_batch"],
+                }
+                if cache_entry is not None:
+                    cache_stats["hits"] += 1
+                    cache_stats["hit"] = True
+                    cache_record.update(cache_entry.metadata)
+                    payload_body = cache_entry.body
+                    mode = "cache"
+                    diagnostics["requests"].append(
+                        {
+                            "url": url,
+                            "status": cache_entry.metadata.get("status"),
+                            "cache": "hit",
+                        }
+                    )
+                elif use_cache_only:
+                    cache_stats["misses"] += 1
+                    cache_stats["hit"] = False
+                    diagnostics["requests"].append(
+                        {
+                            "url": url,
+                            "status": None,
+                            "cache": "miss",
+                        }
+                    )
+                    break
                 else:
-                    payload_body = payload_body or b""
-                    cache_entry = cache_put(cache_dir, key, payload_body, metadata)
-                    body = cache_entry.body or payload_body
-            LOGGER.debug(
-                "IDMC HTTP fetch complete: status=%s wire_bytes=%s body_bytes=%s",
-                status,
-                http_diag.get("wire_bytes"),
-                http_diag.get("body_bytes"),
-            )
-        except HttpRequestError as exc:
-            http_info.update(
-                {
-                    "requests": exc.diagnostics.get("attempts", 0),
-                    "retries": exc.diagnostics.get("retries", 0),
-                    "status_last": exc.diagnostics.get("status"),
-                    "duration_s": exc.diagnostics.get("duration_s", 0.0),
-                    "backoff_s": exc.diagnostics.get("backoff_s", 0.0),
-                    "wire_bytes": exc.diagnostics.get("wire_bytes", 0),
-                    "body_bytes": exc.diagnostics.get("body_bytes", 0),
-                    "retry_after_events": len(exc.diagnostics.get("retry_after_s", []) or []),
-                    "retry_after_s": exc.diagnostics.get("retry_after_s", []),
-                    "rate_limit_wait_s": exc.diagnostics.get("rate_limit_wait_s", []),
-                    "planned_sleep_s": exc.diagnostics.get("planned_sleep_s", []),
-                    "attempt_durations_ms": [
-                        int(round(value * 1000))
-                        for value in exc.diagnostics.get("attempt_durations_s", [])
-                    ],
-                }
-            )
-            http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
-            diagnostics["mode"] = "fixture"
-            diagnostics["reason"] = "http-error"
-            diagnostics["error"] = exc.diagnostics
-            payload = _read_json_fixture("idus_view_flat.json")
-            rows = _normalise_rows(payload)
-            frame, filters = _build_frame(rows)
-            if not cache_stats["hit"]:
-                cache_stats["misses"] = 1
-            LOGGER.debug(
-                "IDMC HTTP error fallback: chunk=%s rows=%d filtered=%d",
-                chunk_label or "full",
-                filters.get("rows_before", 0),
-                filters.get("rows_after", 0),
-            )
-            return frame, diagnostics
+                    cache_stats["misses"] += 1
+                    request_index += 1
+                    try:
+                        LOGGER.debug("IDMC GET %s", url)
+                        status, headers, payload_body, http_diag = http_get(
+                            url,
+                            timeout=10.0,
+                            retries=2,
+                            backoff_s=0.5,
+                            rate_limiter=rate_limiter,
+                            max_bytes=max_bytes,
+                            stream_path=f"{cache_path}.partial",
+                            headers={"Accept": "application/json"},
+                        )
+                        bucket = _http_status_bucket(status)
+                        if bucket:
+                            http_info["status_counts"].setdefault(bucket, 0)
+                            http_info["status_counts"][bucket] += 1
+                        diagnostics["requests"].append(
+                            {
+                                "url": url,
+                                "status": status,
+                                "elapsed_ms": int(
+                                    round(
+                                        (http_diag.get("duration_s") or 0.0) * 1000
+                                    )
+                                ),
+                                "cache": "miss",
+                            }
+                        )
+                        metadata = {
+                            "status": status,
+                            "headers": headers,
+                            "fetched_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        cache_record.update(metadata)
+                        with _cache_lock(key):
+                            if http_diag.get("streamed_to"):
+                                final_path = cache_path
+                                tmp_path = f"{cache_path}.partial"
+                                if os.path.exists(tmp_path):
+                                    os.replace(tmp_path, final_path)
+                                cache_put(cache_dir, key, final_path, metadata)
+                                body_path = final_path
+                            else:
+                                payload_body = payload_body or b""
+                                cache_entry = cache_put(
+                                    cache_dir, key, payload_body, metadata
+                                )
+                                payload_body = cache_entry.body or payload_body
+                    except HttpRequestError as exc:
+                        diagnostics["mode"] = "online"
+                        diagnostics["error"] = exc.diagnostics
+                        _record_exception(exc.__class__.__name__)
+                        bucket = _http_status_bucket(
+                            exc.diagnostics.get("status")
+                        )
+                        if bucket:
+                            http_info["status_counts"][bucket] += 1
+                        if not _hdx_fallback_enabled():
+                            raise
+                        diagnostics["fallback"] = {"type": "hdx", "reason": "http-error"}
+                        LOGGER.info("idmc: HDX fallback enabled and used (http-error)")
+                        raise
+                    except Exception as exc:  # pragma: no cover - defensive
+                        _record_exception(type(exc).__name__)
+                        if not _hdx_fallback_enabled():
+                            raise
+                        diagnostics["fallback"] = {
+                            "type": "hdx",
+                            "reason": f"exception:{type(exc).__name__}",
+                        }
+                        LOGGER.info(
+                            "idmc: HDX fallback enabled and used (%s)",
+                            type(exc).__name__,
+                        )
+                        raise
 
-    if body is None and body_path is None:
-        cache_stats.setdefault("misses", 0)
-        if not cache_stats["hit"]:
-            cache_stats["misses"] = 1
-        payload = _read_json_fixture("idus_view_flat.json")
-        rows = _normalise_rows(payload)
-        frame, filters = _build_frame(rows)
-        diagnostics.setdefault("reason", "cache-miss")
-        LOGGER.debug(
-            "IDMC fixture fallback: chunk=%s rows=%d filtered=%d",
-            chunk_label or "full",
-            filters.get("rows_before", 0),
-            filters.get("rows_after", 0),
+                cache_stats["entries"].append(cache_record)
+                if cache_entry is None and use_cache_only:
+                    break
+
+                if payload_body is None and cache_entry is None and not body_path:
+                    break
+
+                if payload_body is None and body_path:
+                    with open(body_path, "rb") as handle:
+                        payload_body = handle.read()
+
+                if payload_body is None:
+                    break
+
+                payload = json.loads(payload_body.decode("utf-8"))
+                raw_paths.append(_write_raw_snapshot(key, payload_body))
+                chunk_rows = _normalise_rows(payload)
+                rows.extend(chunk_rows)
+
+                http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
+                http_info["retries"] += int(http_diag.get("retries", 0) or 0)
+                http_info["status_last"] = status or http_info["status_last"]
+                http_info["duration_s"] += float(http_diag.get("duration_s", 0.0) or 0.0)
+                http_info["backoff_s"] += float(http_diag.get("backoff_s", 0.0) or 0.0)
+                http_info["wire_bytes"] += int(http_diag.get("wire_bytes", 0) or 0)
+                http_info["body_bytes"] += int(http_diag.get("body_bytes", 0) or 0)
+                retry_after = http_diag.get("retry_after_s", []) or []
+                http_info["retry_after_events"] += len(retry_after)
+                http_info["retry_after_s"].extend(retry_after)
+                http_info["rate_limit_wait_s"].extend(
+                    http_diag.get("rate_limit_wait_s", []) or []
+                )
+                http_info["planned_sleep_s"].extend(
+                    http_diag.get("planned_sleep_s", []) or []
+                )
+                attempts = http_diag.get("attempt_durations_s", []) or []
+                http_info["attempt_durations_ms"].extend(
+                    [int(round(value * 1000)) for value in attempts]
+                )
+
+                if len(chunk_rows) < IDU_POSTGREST_LIMIT:
+                    break
+                offset += IDU_POSTGREST_LIMIT
+
+        diagnostics["mode"] = mode
+    except Exception:
+        if not _hdx_fallback_enabled():
+            raise
+        try:
+            fallback_frame, fallback_diag = _hdx_fetch_latest_csv()
+        except Exception as fallback_exc:  # pragma: no cover - network dependent
+            diagnostics["fallback"] = {
+                "type": "hdx",
+                "error": str(fallback_exc),
+            }
+            raise
+        diagnostics["fallback"] = {
+            "type": "hdx",
+            **fallback_diag,
+        }
+        iso_batches = iso_batches or []
+        filtered = _hdx_filter(
+            fallback_frame,
+            iso_batches=iso_batches,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            window_start=window_start,
+            window_end=window_end,
         )
+        diagnostics["mode"] = "fallback"
+        LOGGER.info(
+            "idmc: HDX fallback enabled and used (rows=%d)",
+            len(filtered),
+        )
+        frame, filters = _build_frame(filtered.to_dict("records"))
+        diagnostics["filters"] = filters
+        diagnostics["raw_path"] = None
+        http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
+        diagnostics["http"] = http_info
+        diagnostics["cache"] = cache_stats
         return frame, diagnostics
 
-    payload: Dict[str, Any]
-    if body is not None:
-        payload = json.loads(body.decode("utf-8"))
-        diagnostics["raw_path"] = _write_raw_snapshot(key, body)
-    else:
-        body_path = body_path or cache_path
-        with open(body_path, "rb") as handle:
-            raw_bytes = handle.read()
-        payload = json.loads(raw_bytes.decode("utf-8"))
-        diagnostics["raw_path"] = _write_raw_snapshot(key, raw_bytes)
-
-    rows = _normalise_rows(payload)
+    diagnostics["raw_path"] = raw_paths[-1] if raw_paths else None
     frame, filters = _build_frame(rows)
+    diagnostics["filters"] = filters
+    http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
+    diagnostics["http"] = http_info
+    diagnostics["cache"] = cache_stats
     LOGGER.debug(
         "IDMC parsed payload: chunk=%s rows_before=%d rows_after=%d",
         chunk_label or "full",
