@@ -33,10 +33,12 @@ def _stub_config(config_path: Path) -> SimpleNamespace:
 
 def _stub_fetch(*_args, **_kwargs):
     return {}, {
-        "mode": "offline",
+        "mode": "fixture",
+        "network_mode": "fixture",
         "http": {"requests": 0},
         "cache": {},
         "filters": {},
+        "http_status_counts": None,
         "performance": {},
         "rate_limit": {},
         "chunks": {},
@@ -69,7 +71,7 @@ def _run_cli(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(idmc_cli, "maybe_map_hazards", _stub_maybe_map)
     monkeypatch.setattr(idmc_cli, "write_connectors_line", _noop_write_connectors_line)
     monkeypatch.setattr(idmc_cli, "build_provenance", _stub_provenance)
-    exit_code = idmc_cli.main(["--skip-network"])
+    exit_code = idmc_cli.main(["--network-mode", "fixture"])
     assert exit_code == 0
 
 
@@ -101,6 +103,8 @@ def test_why_zero_json_includes_config_details(monkeypatch, tmp_path):
     assert payload["date_window"] == {"start": "2024-01-01", "end": "2024-01-31"}
     assert payload["window"] == {"start": "2024-01-01", "end": "2024-01-31"}
     assert payload["series"] == ["stock", "flow"]
+    assert payload["network_mode"] == "fixture"
+    assert payload["http_status_counts"] is None
     assert payload["network_attempted"] is False
     assert payload["config_source"] == "ingestion"
     assert payload["config_path_used"] == str(tmp_path / "resolver" / "config" / "idmc.yml")

@@ -22,7 +22,7 @@ def test_fetch_uses_cache_when_forced(monkeypatch, tmp_path):
     cfg.cache.force_cache_only = True
     endpoint = cfg.api.endpoints["idus_json"]
     url = f"{cfg.api.base_url.rstrip('/')}{endpoint}"
-    key = cache.cache_key(url, params=None)
+    key = cache.cache_key(url, params={"chunk": "full"})
 
     fixture_path = Path(client.FIXTURES_DIR) / "idus_view_flat.json"
     payload_bytes = fixture_path.read_bytes()
@@ -30,7 +30,7 @@ def test_fetch_uses_cache_when_forced(monkeypatch, tmp_path):
 
     data, diagnostics = client.fetch(
         cfg,
-        skip_network=False,
+        network_mode="cache_only",
         window_days=None,
         only_countries=["SDN"],
     )
@@ -41,8 +41,11 @@ def test_fetch_uses_cache_when_forced(monkeypatch, tmp_path):
     assert frame.iloc[0]["figure"] == 800
 
     assert diagnostics["mode"] == "cache"
+    assert diagnostics["network_mode"] == "cache_only"
     assert diagnostics["http"]["requests"] == 0
-    assert diagnostics["cache"]["hit"] is True
+    assert diagnostics["http_status_counts"] is None
+    assert diagnostics["cache"]["hits"] == 1
+    assert diagnostics["cache"]["misses"] == 0
     assert diagnostics["filters"]["countries"] == ["SDN"]
     assert diagnostics["filters"]["rows_after"] == 1
     assert Path(diagnostics["raw_path"]).is_file()
