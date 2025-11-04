@@ -550,6 +550,68 @@ def fetch(
     )
     countries = list(selected_countries)
 
+    if window_start is None and window_end is None and window_days is None:
+        LOGGER.warning(
+            "IDMC fetch invoked without a date window; returning empty payload",
+        )
+        empty_frame = pd.DataFrame(
+            columns=[
+                "iso3",
+                "as_of_date",
+                "metric",
+                "value",
+                "series_semantics",
+                "source",
+            ]
+        )
+        countries_scope = sorted({c.strip().upper() for c in countries if c.strip()})
+        diagnostics = {
+            "mode": "offline",
+            "http": {
+                "requests": 0,
+                "retries": 0,
+                "status_last": None,
+                "latency_ms": {"p50": 0, "p95": 0, "max": 0},
+                "wire_bytes": 0,
+                "body_bytes": 0,
+                "retry_after_events": 0,
+            },
+            "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+            "filters": {
+                "window_start": None,
+                "window_end": None,
+                "countries": countries_scope,
+                "rows_before": 0,
+                "rows_after": 0,
+            },
+            "performance": build_performance_block(
+                requests=0,
+                wire_bytes=0,
+                body_bytes=0,
+                duration_s=0.0,
+                rows=0,
+            ),
+            "rate_limit": build_rate_limit_block(
+                req_per_sec=float(rate) if rate else 0.0,
+                max_concurrency=int(max_concurrency or 1),
+                retries=0,
+                retry_after_events=0,
+                retry_after_wait_s=0.0,
+                rate_limit_wait_s=0.0,
+                planned_wait_s=0.0,
+            ),
+            "chunks": build_chunks_block(False, [], count=0),
+            "network_mode": network_mode,
+            "http_status_counts": {"2xx": 0, "4xx": 0, "5xx": 0}
+            if network_mode == "live"
+            else None,
+            "raw_path": None,
+            "requests_planned": 0,
+            "requests_executed": 0,
+            "window": {"start": None, "end": None, "window_days": None},
+        }
+        return {"monthly_flow": empty_frame}, diagnostics
+
     jobs: List[Tuple[int, Optional[date], Optional[date]]] = [
         (index, start, end)
         for index, (start, end) in enumerate(chunk_ranges)
