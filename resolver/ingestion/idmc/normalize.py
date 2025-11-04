@@ -130,6 +130,10 @@ def _normalize_monthly_flow(
     date_series = _first_non_null(raw, date_candidates)
     value_series = pd.to_numeric(_first_non_null(raw, value_candidates), errors="coerce")
 
+    event_column = next((column for column in date_candidates if column in raw.columns), None)
+    if event_column is not None:
+        raw[event_column] = pd.to_datetime(raw[event_column], errors="coerce")
+
     def _safe_datetime(series_name: str) -> pd.Series:
         series = raw.get(series_name)
         if series is None:
@@ -140,8 +144,9 @@ def _normalize_monthly_flow(
     start_dates = _safe_datetime("displacement_start_date")
     event_dates = pd.to_datetime(date_series, errors="coerce")
 
-    month_candidates = end_dates.fillna(start_dates).fillna(event_dates)
-    month_end = month_candidates.dt.to_period("M").dt.to_timestamp("M")
+    month_candidates = end_dates.combine_first(start_dates).combine_first(event_dates)
+    month_periods = month_candidates.dt.to_period("M")
+    month_end = month_periods.dt.to_timestamp(how="end").dt.normalize()
 
     normalized = pd.DataFrame(
         {
@@ -201,26 +206,26 @@ def _normalize_monthly_flow(
         normalized["as_of_date"], errors="coerce", utc=False
     )
 
-    if normalized["as_of_date"].notna().any():
-        start_raw = (date_window or {}).get("start")
-        end_raw = (date_window or {}).get("end")
-        start_dt = pd.to_datetime(start_raw, errors="coerce")
-        end_dt = pd.to_datetime(end_raw, errors="coerce")
-
-        if not pd.isna(start_dt):
-            before = len(normalized)
-            normalized = normalized[normalized["as_of_date"] >= start_dt]
-            drops["date_out_of_window"] += before - len(normalized)
-        if not pd.isna(end_dt):
-            before = len(normalized)
-            normalized = normalized[normalized["as_of_date"] <= end_dt]
-            drops["date_out_of_window"] += before - len(normalized)
-    else:
+    if not normalized["as_of_date"].notna().any():
         rows = int(len(normalized))
         drops["date_parse_failed"] += rows
         if rows:
             LOGGER.debug("normalize_flow: all dates NaT after coercion")
         return normalized.head(0).reset_index(drop=True), drops
+
+    start_raw = (date_window or {}).get("start")
+    end_raw = (date_window or {}).get("end")
+    start_dt = pd.to_datetime(start_raw, errors="coerce")
+    end_dt = pd.to_datetime(end_raw, errors="coerce")
+
+    if not pd.isna(start_dt):
+        before = len(normalized)
+        normalized = normalized[normalized["as_of_date"] >= start_dt]
+        drops["date_out_of_window"] += before - len(normalized)
+    if not pd.isna(end_dt):
+        before = len(normalized)
+        normalized = normalized[normalized["as_of_date"] <= end_dt]
+        drops["date_out_of_window"] += before - len(normalized)
 
     before = len(normalized)
     normalized = normalized.dropna(subset=["as_of_date"])
@@ -235,7 +240,12 @@ def _normalize_monthly_flow(
 
     aggregated["series_semantics"] = "new"
     aggregated["source"] = SOURCE_NAME
-    aggregated["as_of_date"] = aggregated["as_of_date"].dt.date.astype(str)
+
+    if not aggregated.empty and not pd.api.types.is_datetime64_any_dtype(aggregated["as_of_date"]):
+        aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce")
+
+    if "as_of_date" in aggregated.columns and not aggregated.empty:
+        LOGGER.debug("normalize_flow: as_of_date dtype=%s", aggregated["as_of_date"].dtype)
 
     return aggregated, drops
 
