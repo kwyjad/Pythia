@@ -457,6 +457,8 @@ def fetch(
     *,
     network_mode: NetworkMode = "live",
     soft_timeouts: bool = True,  # noqa: ARG001 - future compatibility
+    window_start: Optional[date] = None,
+    window_end: Optional[date] = None,
     window_days: Optional[int] = 30,
     only_countries: Iterable[str] | None = None,
     base_url: Optional[str] = None,
@@ -490,7 +492,19 @@ def fetch(
     if network_mode == "live" and rate and rate > 0:
         limiter = TokenBucket(rate, sleep_fn=_rate_sleep)
 
-    window_start, window_end = _window_from_days(window_days)
+    resolved_start = window_start
+    resolved_end = window_end
+    if resolved_start and resolved_end and resolved_start > resolved_end:
+        LOGGER.debug(
+            "Provided window start %s is after end %s; swapping",
+            resolved_start,
+            resolved_end,
+        )
+        resolved_start, resolved_end = resolved_end, resolved_start
+    if resolved_start is None and resolved_end is None:
+        resolved_start, resolved_end = _window_from_days(window_days)
+    window_start = resolved_start
+    window_end = resolved_end
     LOGGER.debug(
         "Resolved IDMC window: start=%s end=%s window_days=%s",
         window_start,
@@ -734,6 +748,13 @@ def fetch(
         "chunks": chunks_info,
         "network_mode": network_mode,
         "http_status_counts": status_counts if network_mode == "live" else None,
+        "window": {
+            "start": window_start.isoformat() if window_start else None,
+            "end": window_end.isoformat() if window_end else None,
+            "window_days": window_days,
+        },
+        "requests_planned": len(jobs),
+        "requests_executed": total_requests,
     }
 
     return data, diagnostics
