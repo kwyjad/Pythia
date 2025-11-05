@@ -544,6 +544,11 @@ def _render_idmc_why_zero(payload: Mapping[str, Any]) -> List[str]:
         f"- Network attempted: {str(network_attempted).lower()}"
         f" (requests={requests_display})"
     )
+    zero_reason = payload.get("zero_rows_reason")
+    rows_block = _ensure_dict(payload.get("rows"))
+    normalized_rows = _coerce_int(rows_block.get("normalized"))
+    if zero_reason and normalized_rows == 0:
+        lines.append(f"- Zero rows reason: {zero_reason}")
     lines.append(f"- Config: {config_source} — {config_path}")
     if warnings_list:
         lines.append(f"- Loader warnings: {'; '.join(warnings_list)}")
@@ -1615,6 +1620,45 @@ def _render_idmc_reachability_section(reachability: Mapping[str, Any]) -> List[s
     return lines
 
 
+def _render_hdx_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
+    lines = ["## HDX Reachability", ""]
+    if not reachability:
+        lines.append("- **diagnostics/ingestion/idmc/hdx_probe.json:** not present")
+        lines.append("")
+        return lines
+
+    dataset = reachability.get("dataset") or reachability.get("target", {}).get(
+        "dataset"
+    )
+    if dataset:
+        lines.append(f"- **Dataset:** `{dataset}`")
+
+    package_status = reachability.get("package_status_code")
+    if package_status is not None:
+        lines.append(f"- **package_show:** status={package_status}")
+
+    resource_status = reachability.get("resource_status_code")
+    resource_url = reachability.get("resource_url")
+    if resource_status is not None or resource_url:
+        status_text = (
+            f"status={resource_status}" if resource_status is not None else "status=unknown"
+        )
+        if resource_url:
+            status_text += f" url={resource_url}"
+        lines.append(f"- **Resource:** {status_text}")
+
+    resource_bytes = reachability.get("resource_bytes")
+    if resource_bytes is not None:
+        lines.append(f"- **Bytes downloaded:** {resource_bytes}")
+
+    error_text = reachability.get("error")
+    if error_text:
+        lines.append(f"- **Error:** {error_text}")
+
+    lines.append("")
+    return lines
+
+
 def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
     headers = [
         "Connector",
@@ -1759,6 +1803,7 @@ def build_markdown(
     dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
     idmc_reachability: Mapping[str, Any] | None = None,
+    hdx_reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
@@ -1931,6 +1976,10 @@ def build_markdown(
     if idmc_section:
         lines.extend(idmc_section)
 
+    hdx_section = _render_hdx_reachability_section(hdx_reachability or {})
+    if hdx_section:
+        lines.extend(hdx_section)
+
     lines.append("## Per-Connector Table")
     lines.append("")
     lines.extend(_build_table(sorted_entries))
@@ -2034,11 +2083,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     reachability_payload = _safe_load_json(reachability_path) or {}
     idmc_reachability_path = Path("diagnostics/ingestion/idmc/probe.json")
     idmc_reachability_payload = _safe_load_json(idmc_reachability_path) or {}
+    hdx_reachability_path = Path("diagnostics/ingestion/idmc/hdx_probe.json")
+    hdx_reachability_payload = _safe_load_json(hdx_reachability_path) or {}
     markdown = build_markdown(
         deduped_entries,
         dedupe_notes=dedupe_notes,
         reachability=reachability_payload,
         idmc_reachability=idmc_reachability_payload,
+        hdx_reachability=hdx_reachability_payload,
         export_summary=export_summary,
         mapping_debug=mapping_debug_records,
     )
@@ -2054,6 +2106,7 @@ def render_summary_md(
     dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
     idmc_reachability: Mapping[str, Any] | None = None,
+    hdx_reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
@@ -2064,6 +2117,7 @@ def render_summary_md(
         dedupe_notes=dedupe_notes,
         reachability=reachability,
         idmc_reachability=idmc_reachability,
+        hdx_reachability=hdx_reachability,
         export_summary=export_summary,
         mapping_debug=mapping_debug,
     )

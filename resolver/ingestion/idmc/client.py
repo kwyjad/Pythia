@@ -10,9 +10,10 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
 from urllib.parse import urlencode
-import urllib.request
+
+import requests
 
 import pandas as pd
 
@@ -518,7 +519,7 @@ def _http_status_bucket(status: Optional[int | str]) -> Optional[str]:
 def _hdx_dataset_slug() -> str:
     return os.getenv(
         "IDMC_HDX_DATASET",
-        "internal-displacement-monitoring-centre-idmc-idu",
+        "preliminary-internal-displacement-updates",
     )
 
 
@@ -536,10 +537,22 @@ def _read_csv_from_bytes(payload: bytes) -> pd.DataFrame:
     return pd.read_csv(buffer)
 
 
-def _hdx_download_resource(url: str, *, timeout: float = 30.0) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "pythia-idmc/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
+def _hdx_download_resource(url: str, *, timeout: float = 30.0) -> Tuple[bytes, Dict[str, Any]]:
+    headers = {"User-Agent": "Pythia-IDMC/1.0", "Accept": "text/csv"}
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=timeout,
+        allow_redirects=True,
+    )
+    diagnostics: Dict[str, Any] = {
+        "status_code": response.status_code,
+    }
+    response.raise_for_status()
+    payload = response.content
+    diagnostics["bytes"] = len(payload)
+    diagnostics["content_length"] = response.headers.get("Content-Length")
+    return payload, diagnostics
 
 
 def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -550,11 +563,16 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         "package_url": package_url,
         "resource_url": None,
     }
+    headers = {"Accept": "application/json", "User-Agent": "Pythia-IDMC/1.0"}
     try:
-        with urllib.request.urlopen(package_url, timeout=30.0) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:  # pragma: no cover - network dependent
-        diagnostics["error"] = f"package_show_failed:{type(exc).__name__}"
+        response = requests.get(package_url, headers=headers, timeout=30.0)
+        diagnostics["package_status_code"] = response.status_code
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"package_show_failed:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["package_status_code"] = getattr(exc.response, "status_code", None)
         raise
 
     if not payload.get("success"):
@@ -563,27 +581,39 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
     result = payload.get("result") or {}
     resources = result.get("resources") or []
-    csv_candidates = [
-        resource
-        for resource in resources
-        if str(resource.get("format", "")).lower() == "csv"
-        and "idus" in str(resource.get("name", "")).lower()
-    ]
+    csv_candidates = []
+    for resource in resources:
+        if str(resource.get("format", "")).lower() != "csv":
+            continue
+        name = str(resource.get("name", "")).lower()
+        url = str(resource.get("url", "")).lower()
+        preferred = "idus_view_flat" in name or "idus_view_flat" in url
+        last_modified = resource.get("last_modified") or resource.get("created") or ""
+        csv_candidates.append((preferred, last_modified, resource))
     if not csv_candidates:
         diagnostics["error"] = "no_csv_resource"
         raise RuntimeError("HDX IDU CSV resource not found")
 
-    resource = max(
-        csv_candidates,
-        key=lambda item: item.get("last_modified") or item.get("created") or "",
-    )
+    csv_candidates.sort(key=lambda item: (item[0], item[1]))
+    _, _, resource = csv_candidates[-1]
+    diagnostics["resource_preferred"] = bool(csv_candidates[-1][0])
     resource_url = resource.get("url")
     diagnostics["resource_url"] = resource_url
     if not resource_url:
         diagnostics["error"] = "resource_missing_url"
         raise RuntimeError("HDX CSV resource missing URL")
 
-    payload_bytes = _hdx_download_resource(resource_url)
+    try:
+        payload_bytes, resource_diag = _hdx_download_resource(resource_url)
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"resource_download_failed:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["resource_status_code"] = getattr(exc.response, "status_code", None)
+        raise
+
+    diagnostics["resource_status_code"] = resource_diag.get("status_code")
+    diagnostics["resource_bytes"] = resource_diag.get("bytes")
+    diagnostics["resource_content_length"] = resource_diag.get("content_length")
     frame = _read_csv_from_bytes(payload_bytes)
     return frame, diagnostics
 
@@ -647,6 +677,7 @@ def fetch_idu_json(
     date_column: Optional[str] = None,
     select_columns: Optional[Iterable[str]] = None,
     allow_fallback: bool = False,
+    fallback_loader: Optional[Callable[[], Tuple[pd.DataFrame, Dict[str, Any]]]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Fetch the IDU flat JSON payload for a specific window."""
 
@@ -741,6 +772,36 @@ def fetch_idu_json(
     )
     http_info["verify"] = diagnostics["http_verify"]
     zero_row_reasons: Dict[str, str] = {}
+
+    fallback_frame_cached: Optional[pd.DataFrame] = None
+    fallback_diag_cached: Optional[Dict[str, Any]] = None
+
+    def _fetch_hdx_fallback() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        nonlocal fallback_frame_cached, fallback_diag_cached
+        frame: pd.DataFrame
+        diag: Dict[str, Any]
+        if fallback_loader is not None:
+            frame, diag = fallback_loader()
+        else:
+            frame, diag = _hdx_fetch_latest_csv()
+        fallback_frame_cached = frame
+        fallback_diag_cached = dict(diag)
+        return frame, dict(fallback_diag_cached)
+
+    def _merge_fallback_metadata(entry: Dict[str, Any], diag: Mapping[str, Any]) -> None:
+        metadata_keys = (
+            "dataset",
+            "package_url",
+            "package_status_code",
+            "resource_url",
+            "resource_status_code",
+            "resource_bytes",
+            "resource_content_length",
+        )
+        for key in metadata_keys:
+            value = diag.get(key) if isinstance(diag, Mapping) else None
+            if value is not None and key not in entry:
+                entry[key] = value
 
     select_list: List[str] = []
     for column in list(select_columns or DEFAULT_POSTGREST_COLUMNS):
@@ -1105,6 +1166,15 @@ def fetch_idu_json(
                                 should_use_fallback = True
                             elif not is_2xx_status:
                                 should_use_fallback = True
+                        if chunk_name:
+                            reason_value: str
+                            if error_kind:
+                                reason_value = str(error_kind)
+                            elif status_display is not None:
+                                reason_value = str(status_display)
+                            else:
+                                reason_value = "http_error"
+                            zero_row_reasons[chunk_name] = reason_value
                         if should_use_fallback:
                             fallback_diag_entry: Dict[str, Any] = {
                                 "type": "hdx",
@@ -1113,9 +1183,15 @@ def fetch_idu_json(
                                 "chunk": chunk_name,
                                 "used": False,
                             }
+                            if error_kind:
+                                zero_row_reasons[chunk_name] = str(error_kind)
+                            elif status_display and chunk_name:
+                                zero_row_reasons[chunk_name] = str(status_display)
+                            else:
+                                zero_row_reasons[chunk_name] = "http_error"
                             try:
-                                fallback_frame, fallback_diag = _hdx_fetch_latest_csv()
-                                fallback_diag_entry.update(fallback_diag)
+                                fallback_frame, fallback_diag = _fetch_hdx_fallback()
+                                _merge_fallback_metadata(fallback_diag_entry, fallback_diag)
                                 filtered = _hdx_filter(
                                     fallback_frame,
                                     iso_batches=iso_batches or [],
@@ -1149,6 +1225,7 @@ def fetch_idu_json(
                                 )
                             except Exception as fallback_exc:  # pragma: no cover - network dependent
                                 fallback_diag_entry["error"] = str(fallback_exc)
+                                zero_row_reasons[chunk_name] = "fallback_http_error"
                                 LOGGER.warning(
                                     "idmc: HDX fallback failed for chunk %s (%s)",
                                     chunk_name,
@@ -1274,22 +1351,25 @@ def fetch_idu_json(
                 break
 
         diagnostics["mode"] = mode
-    except Exception:
+    except Exception as exc:
         if not allow_fallback:
             raise
         try:
-            fallback_frame, fallback_diag = _hdx_fetch_latest_csv()
+            fallback_frame, fallback_diag = _fetch_hdx_fallback()
         except Exception as fallback_exc:  # pragma: no cover - network dependent
             diagnostics["fallback"] = {
                 "type": "hdx",
                 "error": str(fallback_exc),
             }
+            zero_row_reasons[chunk_label or "full"] = "fallback_http_error"
             raise
-        diagnostics["fallback"] = {
+        fallback_entry: Dict[str, Any] = {
             "type": "hdx",
             "used": True,
-            **fallback_diag,
+            "reason": f"exception:{type(exc).__name__}",
         }
+        _merge_fallback_metadata(fallback_entry, fallback_diag)
+        diagnostics["fallback"] = fallback_entry
         diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
         filtered = _hdx_filter(
@@ -1302,6 +1382,7 @@ def fetch_idu_json(
         )
         fallback_rows = filtered.to_dict("records")
         diagnostics["fallback"]["rows"] = len(fallback_rows)
+        fallback_entry["rows"] = len(fallback_rows)
         fallback_attempt = {
             "chunk": chunk_label or "full",
             "via": "hdx_fallback",
@@ -1453,6 +1534,21 @@ def fetch(
         else getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
     )
 
+    fallback_lock = threading.Lock()
+    fallback_frame_cache_fetch: Optional[pd.DataFrame] = None
+    fallback_diag_cache_fetch: Optional[Dict[str, Any]] = None
+
+    def _load_hdx_fallback_cached() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        nonlocal fallback_frame_cache_fetch, fallback_diag_cache_fetch
+        with fallback_lock:
+            if fallback_frame_cache_fetch is None or fallback_diag_cache_fetch is None:
+                frame, diag = _hdx_fetch_latest_csv()
+                fallback_frame_cache_fetch = frame
+                fallback_diag_cache_fetch = dict(diag)
+            frame = fallback_frame_cache_fetch
+            diag_copy = dict(fallback_diag_cache_fetch)
+        return frame, diag_copy
+
     if should_return_empty(window_start, window_end, window_days):
         LOGGER.warning(
             "IDMC fetch invoked without a date window; returning empty payload",
@@ -1574,6 +1670,7 @@ def fetch(
             date_column=schema_date_column,
             select_columns=select_columns,
             allow_fallback=fallback_allowed,
+            fallback_loader=_load_hdx_fallback_cached if fallback_allowed else None,
         )
         LOGGER.debug(
             "Fetched chunk %s: rows=%d mode=%s status=%s",
@@ -1848,6 +1945,19 @@ def fetch(
         fallback_summary["details"] = fallback_details
     elif fallback_used_total:
         fallback_summary = {"used": True, "rows": int(fallback_rows_total)}
+    if fallback_summary and fallback_diag_cache_fetch:
+        for meta_key in (
+            "dataset",
+            "package_url",
+            "package_status_code",
+            "resource_url",
+            "resource_status_code",
+            "resource_bytes",
+            "resource_content_length",
+        ):
+            meta_value = fallback_diag_cache_fetch.get(meta_key)
+            if meta_value is not None and meta_key not in fallback_summary:
+                fallback_summary[meta_key] = meta_value
 
     performance = build_performance_block(
         requests=total_requests,
