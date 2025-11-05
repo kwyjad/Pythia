@@ -339,6 +339,19 @@ structured overrides (all mirrored by environment variables):
   any extra buckets counted internally; additional counters (timeouts, other
   exceptions) are reported via `http_status_counts_extended` without affecting
   the contract validated by the fast tests.【F:resolver/ingestion/idmc/client.py†L1188-L1342】【F:resolver/ingestion/idmc/cli.py†L926-L1201】
+- `http_attempt_summary` adds `planned`, `ok_2xx`, `status_4xx`, `status_5xx`,
+  `status_other`, `timeouts`, and `other_exceptions` so summaries can quote
+  high-level traffic alongside the canonical status buckets, and
+  `http_timeouts` captures the effective connect/read timeouts used for the
+  run.【F:resolver/ingestion/idmc/cli.py†L560-L1280】【F:resolver/ingestion/idmc/client.py†L506-L1106】
+- Fallback diagnostics now expose `fallback_used` (boolean) and enrich
+  `fallback` with reason, status, rows, and errors; `attempts` entries include
+  per-chunk `status`, `rows`, and optional `zero_rows_reason` so timeout-driven
+  zero rows can be identified quickly.【F:resolver/ingestion/idmc/client.py†L820-L1150】
+- `zero_rows_reasons` maps chunk labels to the recorded cause (for example
+  `timeout` or `timeout_fallback_empty`) when no rows survive after filtering,
+  and `summary.md` includes the reachability probe output alongside the HTTP and
+  fallback counters for auditors.【F:resolver/ingestion/idmc/client.py†L1106-L1160】【F:resolver/diagnostics/templates/idmc_summary.md.j2†L1-L27】
 - When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
   normalized schema temporarily includes optional columns `hazard_code`,
   `hazard_label`, and `hazard_class`.
