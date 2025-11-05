@@ -1,10 +1,11 @@
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from resolver.tests.utils import run as run_proc
 
 SCRIPT = Path(__file__).resolve().parents[1] / "ingestion" / "run_all_stubs.py"
 
@@ -27,7 +28,7 @@ def test_run_all_stubs_creates_structured_logs(tmp_path):
         f"{project_root}:{existing_path}" if existing_path else project_root
     )
 
-    result = subprocess.run(
+    result = run_proc(
         [
             sys.executable,
             str(SCRIPT),

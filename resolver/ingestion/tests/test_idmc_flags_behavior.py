@@ -2,7 +2,6 @@
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from resolver.ingestion.idmc.export import (
     FLOW_METRIC,
     FLOW_SERIES_SEMANTICS,
 )
+from resolver.tests.utils import run as run_proc
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -38,7 +38,7 @@ def run_cli(tmp_path, monkeypatch, *extra_args, env_extra=None):
         "--skip-network",
         *extra_args,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = run_proc(cmd, capture_output=True, text=True, env=env)
 
     connectors_path = tmp_path / "diagnostics" / "ingestion" / "connectors.jsonl"
     assert connectors_path.exists(), result.stderr

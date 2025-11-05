@@ -79,6 +79,7 @@ def _collect_pip_freeze() -> None:
             check=False,
             capture_output=True,
             text=True,
+            timeout=60,
         )
     except OSError:
         return

@@ -2542,19 +2542,32 @@ def _write_level_sample(df: pd.DataFrame, level: str, limit: int = 50) -> None:
 
 
 def _append_request_log(entry: Mapping[str, Any]) -> None:
+    payload = dict(entry)
+    payload.setdefault("ts", datetime.now(timezone.utc).isoformat())
+    if "url_template" not in payload:
+        path_value = payload.get("path")
+        payload["url_template"] = str(path_value) if path_value else "unknown"
+    if "status" not in payload:
+        payload["status"] = "unknown"
+    if "level" not in payload:
+        payload["level"] = entry.get("level")
+    if "operation" not in payload:
+        payload["operation"] = entry.get("operation")
     try:
         DTM_HTTP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with DTM_HTTP_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, default=str))
+            handle.write(json.dumps(payload, default=str))
             handle.write("\n")
     except Exception:  # pragma: no cover - diagnostics only
         LOG.debug("Unable to append DTM request log entry", exc_info=True)
 
 
 def _resolve_idp_value_column(df: pd.DataFrame, aliases: Sequence[str]) -> Optional[str]:
+    lookup = {str(column).casefold(): column for column in df.columns}
     for alias in aliases:
-        if alias in df.columns:
-            return alias
+        column = lookup.get(str(alias).casefold())
+        if column is not None:
+            return column
 
     pattern = re.compile(r"(?i)^(?:num|total).*(idp)")
     candidates = [column for column in df.columns if pattern.search(column)]
@@ -3529,7 +3542,9 @@ def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def ensure_header_only() -> None:
-    ensure_headers(OUT_PATH, COLUMNS)
+    """Write the canonical schema header to the primary staging CSV."""
+
+    _write_header_only_csv(OUT_PATH, CANONICAL_HEADERS)
     ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
 
 
@@ -4287,7 +4302,13 @@ def _fetch_api_data(
     }
     summary.setdefault("extras", {})["effective_params"] = effective_params
 
-    base_idp_aliases = ["TotalIDPs", "IDPTotal", "numPresentIdpInd"]
+    base_idp_aliases = [
+        "TotalIDPs",
+        "IDPTotal",
+        "numPresentIdpInd",
+        "num_present_idp_ind",
+        "total_people_idp",
+    ]
     LOG.info(
         "effective: dates %s → %s; admin_levels=%s; country_mode=%s; discovered_countries=%d; idp_aliases=%s",
         from_date or "-",
@@ -6092,22 +6113,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     zero_rows = status != "error" and kept_count == 0
     if status != "error":
         if zero_rows:
+            if zero_rows_reason is None:
+                zero_rows_reason = "no_rows_after_normalize"
             ensure_zero_row_outputs(offline=OFFLINE)
             totals["rows_written"] = 0
             totals["kept"] = 0
             extras["rows_total"] = 0
             extras["rows_written"] = 0
             summary_extras["rows_written"] = 0
-            if zero_rows_reason:
-                extras.setdefault("zero_rows_reason", zero_rows_reason)
-                diagnostics_payload = extras.get("diagnostics")
-                if isinstance(diagnostics_payload, Mapping):
-                    diagnostics_map = dict(diagnostics_payload)
-                else:
-                    diagnostics_map = {}
-                diagnostics_map["zero_rows_reason"] = zero_rows_reason
-                extras["diagnostics"] = diagnostics_map
-                summary_extras.setdefault("zero_rows_reason", zero_rows_reason)
+            extras.setdefault("zero_rows_reason", zero_rows_reason)
+            diagnostics_payload = extras.get("diagnostics")
+            if isinstance(diagnostics_payload, Mapping):
+                diagnostics_map = dict(diagnostics_payload)
+            else:
+                diagnostics_map = {}
+            diagnostics_map["zero_rows_reason"] = zero_rows_reason
+            extras["diagnostics"] = diagnostics_map
+            summary_extras.setdefault("zero_rows_reason", zero_rows_reason)
             reason = summary.get("reason") or reason or "header-only; kept=0"
             status = "ok-empty"
         else:
@@ -6229,6 +6251,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         resolved_raw = countries_info.get("resolved", [])
         if isinstance(resolved_raw, list):
             resolved_countries = [item for item in resolved_raw if item]
+    if not resolved_countries:
+        config_parse_block = config_extras.get("config_parse") if isinstance(config_extras, Mapping) else None
+        if isinstance(config_parse_block, Mapping):
+            parsed_candidates = [
+                str(item)
+                for item in config_parse_block.get("countries", [])
+                if str(item).strip()
+            ]
+            if parsed_candidates:
+                resolved_countries = parsed_candidates
 
     summary_extras["dtm"] = {
         "sdk_version": discovery_info.get("sdk_version") or _dtm_sdk_version(),

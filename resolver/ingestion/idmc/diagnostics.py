@@ -61,6 +61,23 @@ def debug_block(**fields: Any) -> Dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+def serialize_http_status_counts(counts: Mapping[str, Any] | None) -> Dict[str, int]:
+    """Render HTTP status counters with the canonical three PostgREST buckets."""
+
+    buckets = ("2xx", "4xx", "5xx")
+    if counts is None:
+        return {bucket: 0 for bucket in buckets}
+
+    serialized: Dict[str, int] = {}
+    for bucket in buckets:
+        value = counts.get(bucket, 0)
+        try:
+            serialized[bucket] = int(value or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            serialized[bucket] = 0
+    return serialized
+
+
 def performance_block(
     *,
     requests: int,

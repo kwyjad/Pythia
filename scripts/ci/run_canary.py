@@ -59,7 +59,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     cmd = [sys.executable, "-m", "pytest", "--maxfail=0", "--disable-warnings", "-q", *CANARY_TESTS]
     print("[canary] Command:", " ".join(cmd))
     start = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    timeout_seconds = int(os.environ.get("CANARY_TIMEOUT_SECONDS", "600"))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
     duration = time.time() - start
     output = (result.stdout or "") + (result.stderr or "")
 

@@ -18,6 +18,21 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     """Ensure DTM integration tests run unless explicitly skipped."""
     os.environ.pop("RESOLVER_SKIP_DTM", None)
 
+
+@pytest.fixture(scope="session", autouse=True)
+def _fast_tests_offline_env() -> None:
+    """Default fast-test runs to offline-friendly settings and diagnostics."""
+
+    defaults = {
+        "PYTHONFAULTHANDLER": "1",
+        "RESOLVER_OFFLINE": "1",
+    }
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
+
+    yield
+
+
 CI_ENV_VAR = "GITHUB_ACTIONS"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPORTS_DIR = REPO_ROOT / "exports"

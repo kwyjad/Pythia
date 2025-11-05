@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 from resolver.ingestion.dtm_client import CANONICAL_COLUMNS
+from resolver.tests.utils import run as run_proc
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONNECTORS_REPORT = REPO_ROOT / "diagnostics" / "connectors_report.jsonl"
@@ -32,7 +32,7 @@ def test_connectors_report_entry_is_emitted() -> None:
     STAGING_CSV.unlink(missing_ok=True)
 
     env = _clean_environment()
-    result = subprocess.run(
+    result = run_proc(
         [sys.executable, "-m", "resolver.ingestion.dtm_client", "--offline-smoke"],
         check=False,
         env=env,

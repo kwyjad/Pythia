@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, cast
 
 import pandas as pd
 
+from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion.utils.country_utils import (
     read_countries_override_from_env,
     resolve_countries,
@@ -26,6 +27,7 @@ from .diagnostics import (
     tick,
     timings_block,
     to_ms,
+    serialize_http_status_counts,
     write_connectors_line,
     write_drop_reasons,
     write_sample_preview,
@@ -295,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Partition long windows into month chunks",
     )
     parser.add_argument(
+        "--allow-hdx-fallback",
+        action="store_true",
+        help="Enable HDX CSV fallback when PostgREST requests fail",
+    )
+    parser.add_argument(
         "--enable-export",
         action="store_true",
         help="Enable resolution-ready facts export preview",
@@ -408,6 +415,13 @@ def main(argv: list[str] | None = None) -> int:
     cfg.cache.force_cache_only = network_mode == "cache_only"
 
     LOGGER.info("Effective network mode: %s", network_mode)
+
+    allow_hdx_fallback = bool(
+        args.allow_hdx_fallback
+        or getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
+    )
+    if allow_hdx_fallback:
+        LOGGER.info("HDX fallback enabled via flag/env")
 
     config_countries_raw = list(getattr(cfg.api, "countries", []))
     override_raw = read_countries_override_from_env()
@@ -707,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
             max_concurrency=max_concurrency,
             max_bytes=max_bytes,
             chunk_by_month=chunk_by_month,
+            allow_hdx_fallback=allow_hdx_fallback,
         )
         fetch_ms = to_ms(tick() - fetch_start)
 
@@ -939,12 +954,13 @@ def main(argv: list[str] | None = None) -> int:
     http_rollup = diagnostics.get("http") or {}
     cache_stats = diagnostics.get("cache") or {}
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
-    http_status_counts_raw = diagnostics.get("http_status_counts") or {}
-    http_status_counts = {
-        "2xx": int((http_status_counts_raw or {}).get("2xx", 0) or 0),
-        "4xx": int((http_status_counts_raw or {}).get("4xx", 0) or 0),
-        "5xx": int((http_status_counts_raw or {}).get("5xx", 0) or 0),
-    }
+    http_status_counts_raw = diagnostics.get("http_status_counts")
+    http_status_counts = serialize_http_status_counts(http_status_counts_raw)
+    http_status_counts_extended = diagnostics.get("http_status_counts_extended") or {}
+    try:
+        http_status_other = int((http_status_counts_extended or {}).get("other", 0) or 0)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        http_status_other = 0
     requests_planned_raw = diagnostics.get("requests_planned")
     try:
         requests_planned = int(requests_planned_raw) if requests_planned_raw is not None else None
@@ -958,6 +974,9 @@ def main(argv: list[str] | None = None) -> int:
         "mode": diagnostics.get("mode", "offline"),
         "network_mode": effective_network_mode,
         "http_status_counts": http_status_counts,
+        "http_status_counts_extended": (
+            dict(http_status_counts_extended) if http_status_counts_extended else None
+        ),
         "http": http_rollup,
         "cache": cache_stats,
         "filters": diagnostics.get("filters"),
@@ -985,6 +1004,12 @@ def main(argv: list[str] | None = None) -> int:
         "performance": diagnostics.get("performance"),
         "rate_limit": diagnostics.get("rate_limit"),
         "chunks": diagnostics.get("chunks"),
+        "date_column": diagnostics.get("date_column"),
+        "select_columns": diagnostics.get("select_columns"),
+        "schema_probe": diagnostics.get("schema_probe"),
+        "chunk_errors": int(diagnostics.get("chunk_errors", 0) or 0),
+        "fetch_errors": diagnostics.get("fetch_errors"),
+        "exceptions_by_type": diagnostics.get("exceptions_by_type"),
     }
 
     config_payload = {
@@ -1061,6 +1086,10 @@ def main(argv: list[str] | None = None) -> int:
         "resolution_ready": rows_resolution_ready,
         "staged": staged_counts_serializable,
     }
+    total_staged_rows = sum(
+        value or 0 for value in staged_counts_serializable.values() if value is not None
+    )
+    diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
 
     cache_info = http_rollup.get("cache") or {}
     latency = http_rollup.get("latency_ms") or {}
@@ -1087,6 +1116,8 @@ def main(argv: list[str] | None = None) -> int:
                 five=int(http_status_counts.get("5xx", 0) or 0),
             )
         )
+        if http_status_other:
+            attempts_lines.append(f"HTTP status (other): other={http_status_other}")
     elif effective_network_mode != "live":
         attempts_lines.append("HTTP status counts: n/a in non-live mode")
 
@@ -1129,6 +1160,31 @@ def main(argv: list[str] | None = None) -> int:
         f"Rows (resolution-ready): {rows_resolution_ready}",
         f"Staged rows: {staged_notes}",
     ]
+    date_column_used = diagnostics.get("date_column") or "n/a"
+    notes_lines.append(f"Date column: {date_column_used}")
+    non_two_buckets = [
+        f"4xx={int(http_status_counts.get('4xx', 0) or 0)}",
+        f"5xx={int(http_status_counts.get('5xx', 0) or 0)}",
+    ]
+    if http_status_other:
+        non_two_buckets.append(f"other={http_status_other}")
+    notes_lines.append("HTTP non-2xx: " + " ".join(non_two_buckets))
+    notes_lines.append(
+        f"Chunk errors: {int(diagnostics.get('chunk_errors', 0) or 0)}"
+    )
+    exceptions_summary = diagnostics.get("exceptions_by_type") or {}
+    if exceptions_summary:
+        formatted_entries: List[str] = []
+        for name, value in sorted(exceptions_summary.items()):
+            if value is None:
+                continue
+            try:
+                rendered = int(value)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                rendered = value
+            formatted_entries.append(f"{name}={rendered}")
+        if formatted_entries:
+            notes_lines.append("Exceptions by type: " + ", ".join(formatted_entries))
     if response_mode != effective_network_mode:
         notes_lines.append(f"Response mode: {response_mode}")
     if status != "ok":
@@ -1218,13 +1274,7 @@ def main(argv: list[str] | None = None) -> int:
         window_start = window_start_iso
         window_end = window_end_iso
         countries_sample = selected_countries[:10]
-        http_counts_zero = None
-        if isinstance(http_status_counts, dict):
-            http_counts_zero = {
-                "2xx": int(http_status_counts.get("2xx", 0) or 0),
-                "4xx": int(http_status_counts.get("4xx", 0) or 0),
-                "5xx": int(http_status_counts.get("5xx", 0) or 0),
-            }
+        http_counts_zero = dict(http_status_counts)
         why_zero_payload = {
             "network_mode": effective_network_mode,
             "http_status_counts": http_counts_zero,
@@ -1284,11 +1334,10 @@ def main(argv: list[str] | None = None) -> int:
 
     write_connectors_line(diagnostics_payload)
 
-    if status == "error":
-        exit_code = 2
-        if reason in {"empty-policy-fail", "strict-empty-0-rows"}:
-            exit_code = 1
-        raise SystemExit(exit_code)
+    if empty_policy == "fail" and total_staged_rows == 0:
+        raise SystemExit(1)
+    if status == "error" and reason not in {"empty-policy-fail", "strict-empty-0-rows"}:
+        raise SystemExit(2)
     return 0
 
 

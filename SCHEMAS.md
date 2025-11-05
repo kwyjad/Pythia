@@ -334,6 +334,11 @@ structured overrides (all mirrored by environment variables):
   presence, resolved country counts and samples, the source of the country list,
   selected series, and the active date window; the file is written whenever
   `--debug` is supplied or when no rows survive normalization.【F:resolver/ingestion/idmc/cli.py†L889-L936】
+- HTTP status telemetry exposes a strict three-key mapping under
+  `http_status_counts` (`{"2xx": int, "4xx": int, "5xx": int}`) regardless of
+  any extra buckets counted internally; additional counters (timeouts, other
+  exceptions) are reported via `http_status_counts_extended` without affecting
+  the contract validated by the fast tests.【F:resolver/ingestion/idmc/client.py†L1188-L1342】【F:resolver/ingestion/idmc/cli.py†L926-L1201】
 - When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
   normalized schema temporarily includes optional columns `hazard_code`,
   `hazard_label`, and `hazard_class`.

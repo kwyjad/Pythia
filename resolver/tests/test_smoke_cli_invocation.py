@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import shlex
-import subprocess
 import sys
 
+from resolver.tests.utils import run as run_proc
 
 def test_load_and_derive_accepts_period_before_subcommand() -> None:
     cmd = (
@@ -14,7 +14,7 @@ def test_load_and_derive_accepts_period_before_subcommand() -> None:
         " load-canonical"
         " --in data/staging/ci-smoke/canonical"
     )
-    result = subprocess.run(
+    result = run_proc(
         cmd,
         shell=True,
         capture_output=True,
