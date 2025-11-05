@@ -51,6 +51,8 @@ IDU_POSTGREST_LIMIT = 10000
 ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
+HDX_MIN_BYTES = 10_000
+
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_READ_TIMEOUT_S = 25.0
 
@@ -523,6 +525,16 @@ def _hdx_dataset_slug() -> str:
     )
 
 
+def _hdx_resource_id() -> Optional[str]:
+    for name in ("IDMC_HDX_RESOURCE_ID", "IDMC_HDX_RESOURCE"):
+        raw = os.getenv(name)
+        if raw:
+            value = str(raw).strip()
+            if value:
+                return value
+    return None
+
+
 def _hdx_base_url() -> str:
     return os.getenv("HDX_BASE", "https://data.humdata.org").rstrip("/")
 
@@ -561,7 +573,6 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
     diagnostics: Dict[str, Any] = {
         "dataset": dataset,
         "package_url": package_url,
-        "resource_url": None,
     }
     headers = {"Accept": "application/json", "User-Agent": "Pythia-IDMC/1.0"}
     try:
@@ -573,49 +584,164 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         diagnostics["error"] = f"package_show_failed:{exc.__class__.__name__}"
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics["package_status_code"] = getattr(exc.response, "status_code", None)
-        raise
+        return pd.DataFrame(), diagnostics
 
     if not payload.get("success"):
         diagnostics["error"] = "package_show_unsuccessful"
-        raise RuntimeError("HDX package_show unsuccessful")
+        return pd.DataFrame(), diagnostics
 
     result = payload.get("result") or {}
     resources = result.get("resources") or []
-    csv_candidates = []
+    csv_candidates: List[Dict[str, Any]] = []
     for resource in resources:
-        if str(resource.get("format", "")).lower() != "csv":
+        if not isinstance(resource, Mapping):
             continue
-        name = str(resource.get("name", "")).lower()
-        url = str(resource.get("url", "")).lower()
-        preferred = "idus_view_flat" in name or "idus_view_flat" in url
-        last_modified = resource.get("last_modified") or resource.get("created") or ""
-        csv_candidates.append((preferred, last_modified, resource))
+        fmt = str(resource.get("format", "")).lower()
+        if fmt not in {"csv", "text/csv"}:
+            continue
+        name = str(resource.get("name", ""))
+        url = str(resource.get("url", ""))
+        identifier = str(resource.get("id", ""))
+        stamp = str(resource.get("last_modified") or resource.get("created") or "")
+        csv_candidates.append(
+            {
+                "id": identifier.strip(),
+                "url": url.strip(),
+                "name": name.strip(),
+                "preferred": "idus_view_flat" in name.lower()
+                or "idus_view_flat" in url.lower(),
+                "timestamp": stamp,
+            }
+        )
+    diagnostics["resource_candidates"] = len(csv_candidates)
+
     if not csv_candidates:
         diagnostics["error"] = "no_csv_resource"
-        raise RuntimeError("HDX IDU CSV resource not found")
+        diagnostics["zero_rows_reason"] = "fallback_no_valid_resource"
+        return pd.DataFrame(), diagnostics
 
-    csv_candidates.sort(key=lambda item: (item[0], item[1]))
-    _, _, resource = csv_candidates[-1]
-    diagnostics["resource_preferred"] = bool(csv_candidates[-1][0])
-    resource_url = resource.get("url")
-    diagnostics["resource_url"] = resource_url
-    if not resource_url:
-        diagnostics["error"] = "resource_missing_url"
-        raise RuntimeError("HDX CSV resource missing URL")
+    csv_candidates.sort(key=lambda item: (item["timestamp"], item["id"]))
 
-    try:
-        payload_bytes, resource_diag = _hdx_download_resource(resource_url)
-    except requests.RequestException as exc:  # pragma: no cover - network dependent
-        diagnostics["error"] = f"resource_download_failed:{exc.__class__.__name__}"
-        diagnostics["exception"] = exc.__class__.__name__
-        diagnostics["resource_status_code"] = getattr(exc.response, "status_code", None)
-        raise
+    selection_errors: List[Dict[str, Any]] = []
+    selected_frame: Optional[pd.DataFrame] = None
+    selected_diag: Dict[str, Any] = {}
+    attempted: Set[str] = set()
+    configured_resource = _hdx_resource_id()
 
-    diagnostics["resource_status_code"] = resource_diag.get("status_code")
-    diagnostics["resource_bytes"] = resource_diag.get("bytes")
-    diagnostics["resource_content_length"] = resource_diag.get("content_length")
-    frame = _read_csv_from_bytes(payload_bytes)
-    return frame, diagnostics
+    def _resource_key(info: Mapping[str, Any]) -> str:
+        candidate = str(info.get("id") or "").strip()
+        if candidate:
+            return candidate
+        return str(info.get("url") or "").strip()
+
+    def _attempt(info: Mapping[str, Any], reason: str) -> None:
+        nonlocal selected_frame, selected_diag
+        if selected_frame is not None:
+            return
+        key = _resource_key(info)
+        if key in attempted:
+            return
+        attempted.add(key)
+        resource_url = str(info.get("url") or "").strip()
+        attempt_diag: Dict[str, Any] = {
+            "resource_id": info.get("id") or None,
+            "resource_name": info.get("name") or None,
+            "resource_selection": reason,
+        }
+        if not resource_url:
+            attempt_diag["error"] = "resource_missing_url"
+            selection_errors.append(attempt_diag)
+            return
+        try:
+            payload_bytes, resource_diag = _hdx_download_resource(resource_url)
+        except requests.RequestException as exc:  # pragma: no cover - network dependent
+            attempt_diag["error"] = f"download_failed:{exc.__class__.__name__}"
+            attempt_diag["exception"] = exc.__class__.__name__
+            attempt_diag["resource_status_code"] = getattr(
+                exc.response, "status_code", None
+            )
+            attempt_diag["resource_url"] = resource_url
+            selection_errors.append(attempt_diag)
+            return
+
+        attempt_diag["resource_status_code"] = resource_diag.get("status_code")
+        attempt_diag["resource_bytes"] = resource_diag.get("bytes")
+        attempt_diag["resource_content_length"] = resource_diag.get("content_length")
+        attempt_diag["resource_url"] = resource_url
+
+        frame = _read_csv_from_bytes(payload_bytes)
+        attempt_diag["resource_rows"] = int(frame.shape[0])
+        attempt_diag["resource_columns"] = list(frame.columns)
+
+        normalized_columns = {
+            str(column).strip().lower() for column in frame.columns if str(column).strip()
+        }
+        has_iso3 = "iso3" in normalized_columns
+        has_value = bool({"figure", "new_displacements"} & normalized_columns)
+        if not has_iso3 or not has_value:
+            attempt_diag["error"] = "missing_required_columns"
+            attempt_diag["missing_columns"] = {
+                "iso3": not has_iso3,
+                "value": not has_value,
+            }
+            selection_errors.append(attempt_diag)
+            return
+
+        byte_count = attempt_diag.get("resource_bytes")
+        try:
+            byte_int = int(byte_count) if byte_count is not None else len(payload_bytes)
+        except (TypeError, ValueError):
+            byte_int = len(payload_bytes)
+        if byte_int < HDX_MIN_BYTES:
+            attempt_diag["error"] = "resource_too_small"
+            attempt_diag["resource_bytes"] = byte_int
+            attempt_diag["min_bytes"] = HDX_MIN_BYTES
+            selection_errors.append(attempt_diag)
+            return
+
+        attempt_diag["resource_bytes"] = byte_int
+        attempt_diag["resource_preferred"] = bool(info.get("preferred"))
+        selected_frame = frame
+        selected_diag = attempt_diag
+
+    if configured_resource:
+        for candidate in csv_candidates:
+            if candidate.get("id") == configured_resource:
+                _attempt(candidate, "configured_id")
+                break
+        if selected_frame is None:
+            diagnostics["resource_configured_id"] = configured_resource
+
+    if selected_frame is None:
+        for candidate in csv_candidates:
+            if candidate.get("preferred"):
+                _attempt(candidate, "preferred")
+                if selected_frame is not None:
+                    break
+
+    if selected_frame is None:
+        for candidate in csv_candidates:
+            _attempt(candidate, "fallback")
+            if selected_frame is not None:
+                break
+
+    if selected_frame is None:
+        diagnostics["error"] = "no_valid_resource"
+        diagnostics["zero_rows_reason"] = "fallback_no_valid_resource"
+        if selection_errors:
+            diagnostics["resource_errors"] = selection_errors
+        return pd.DataFrame(), diagnostics
+
+    diagnostics.update(selected_diag)
+    if selection_errors:
+        diagnostics["resource_errors"] = selection_errors
+    LOGGER.info(
+        "idmc.hdx: using resource %s rows=%d bytes=%s",
+        diagnostics.get("resource_id") or diagnostics.get("resource_url") or "unknown",
+        int(selected_diag.get("resource_rows", 0)),
+        selected_diag.get("resource_bytes"),
+    )
+    return selected_frame, diagnostics
 
 
 def _hdx_filter(
@@ -778,6 +904,8 @@ def fetch_idu_json(
 
     def _fetch_hdx_fallback() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         nonlocal fallback_frame_cached, fallback_diag_cached
+        if fallback_frame_cached is not None and fallback_diag_cached is not None:
+            return fallback_frame_cached, dict(fallback_diag_cached)
         frame: pd.DataFrame
         diag: Dict[str, Any]
         if fallback_loader is not None:
@@ -793,10 +921,18 @@ def fetch_idu_json(
             "dataset",
             "package_url",
             "package_status_code",
+            "resource_id",
+            "resource_name",
+            "resource_selection",
             "resource_url",
             "resource_status_code",
             "resource_bytes",
             "resource_content_length",
+            "resource_rows",
+            "resource_columns",
+            "resource_preferred",
+            "zero_rows_reason",
+            "resource_errors",
         )
         for key in metadata_keys:
             value = diag.get(key) if isinstance(diag, Mapping) else None
@@ -1369,6 +1505,9 @@ def fetch_idu_json(
             "reason": f"exception:{type(exc).__name__}",
         }
         _merge_fallback_metadata(fallback_entry, fallback_diag)
+        fallback_zero_reason = str(fallback_diag.get("zero_rows_reason") or "")
+        if fallback_zero_reason:
+            fallback_entry["zero_rows_reason"] = fallback_zero_reason
         diagnostics["fallback"] = fallback_entry
         diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
@@ -1389,8 +1528,12 @@ def fetch_idu_json(
             "rows": len(fallback_rows),
         }
         if len(fallback_rows) == 0:
-            fallback_attempt["zero_rows_reason"] = "timeout_fallback_empty"
-            zero_row_reasons[chunk_label or "full"] = "timeout_fallback_empty"
+            if fallback_zero_reason:
+                fallback_attempt["zero_rows_reason"] = fallback_zero_reason
+                zero_row_reasons[chunk_label or "full"] = fallback_zero_reason
+            else:
+                fallback_attempt["zero_rows_reason"] = "timeout_fallback_empty"
+                zero_row_reasons[chunk_label or "full"] = "timeout_fallback_empty"
         else:
             zero_row_reasons.pop(chunk_label or "full", None)
         diagnostics["attempts"].append(fallback_attempt)

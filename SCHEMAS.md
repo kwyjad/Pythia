@@ -331,10 +331,17 @@ structured overrides (all mirrored by environment variables):
   `flow.csv` and `stock.csv`; the exporter reports row counts for each file even
   when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
 - When staging outputs are requested (for example via `--write-outputs`,
-  `--enable-export`, `RESOLVER_OUTPUT_DIR`, or by running in fixture/cache-only
-  modes), the connector ensures `resolver/staging/idmc/flow.csv` exists with the
-  canonical header even if normalization yielded zero rows so downstream
-  exporters still detect the file.【F:resolver/ingestion/idmc/cli.py†L720-L910】【F:resolver/ingestion/idmc/staging.py†L9-L26】
+  `--enable-export`, `RESOLVER_EXPORT_ENABLE_FLOW`, `RESOLVER_OUTPUT_DIR`, or by
+  running in fixture/cache-only modes), the connector ensures
+  `resolver/staging/idmc/flow.csv` exists with the canonical
+  `iso3,as_of_date,metric,value,series_semantics,source` header even if
+  normalization yielded zero rows so downstream exporters still detect the
+  file.【F:resolver/ingestion/idmc/cli.py†L720-L910】【F:resolver/ingestion/idmc/staging.py†L9-L26】【F:resolver/tools/export_config.yml†L90-L116】
+- The HDX fallback fetch downloads the configured `IDMC_HDX_RESOURCE_ID`
+  (defaulting to the `idus_view_flat` CSV) once per run, verifies the payload is
+  at least 10 KB and still exposes the `iso3`/`figure` columns, caches the frame
+  for all month chunks, and records the resource id/URL/byte count so diagnostics
+  and CI summaries show the exact asset used.【F:resolver/ingestion/idmc/client.py†L531-L673】【F:scripts/ci/probe_hdx_reachability.py†L9-L210】【F:scripts/ci/summarize_connectors.py†L1617-L1653】
 - Zero-row diagnostics (`diagnostics/ingestion/idmc/why_zero.json`) capture token
   presence, resolved country counts and samples, the source of the country list,
   selected series, the effective window (`window.start`/`window.end`/`window_source`),

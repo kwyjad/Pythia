@@ -570,11 +570,24 @@ def main(argv: list[str] | None = None) -> int:
         )
     env_write_empty = _env_truthy(os.getenv("IDMC_WRITE_EMPTY"))
     write_empty_outputs = bool(write_outputs or (env_write_empty or False))
+    export_feature_flags = {
+        "RESOLVER_EXPORT_ENABLE_IDMC": _env_truthy(
+            os.getenv("RESOLVER_EXPORT_ENABLE_IDMC")
+        ),
+        "RESOLVER_EXPORT_ENABLE_FLOW": _env_truthy(
+            os.getenv("RESOLVER_EXPORT_ENABLE_FLOW")
+        ),
+    }
+    export_feature_enabled = any(value for value in export_feature_flags.values())
+    if export_feature_flags.get("RESOLVER_EXPORT_ENABLE_FLOW"):
+        enable_export = True
+
     export_requested = bool(
         write_outputs
         or enable_export
         or write_empty_outputs
         or resolver_output_dir_env
+        or export_feature_enabled
     )
     if network_mode != "live":
         export_requested = True
@@ -633,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     }
     export_feature_enabled = any(value for value in export_feature_flags.values())
+    if export_feature_flags.get("RESOLVER_EXPORT_ENABLE_FLOW"):
+        enable_export = True
 
     effective_no_date_filter = bool(args.no_date_filter)
     if env_no_date_filter is not None:
@@ -792,14 +807,16 @@ def main(argv: list[str] | None = None) -> int:
         or getattr(args, "write_outputs", False)
         or bool(env_write_empty)
         or resolver_output_dir_env
+        or export_feature_enabled
     )
     if export_requested:
         flow_export_requested = True
-    if resolution_ready_facts.empty:
-        if flow_export_requested:
-            header_line = ",".join(FACT_COLUMNS)
-            flow_staging_path.write_text(header_line + "\n", encoding="utf-8")
-    else:
+    if flow_export_requested:
+        flow_frame = resolution_ready_facts
+        if flow_frame.empty:
+            flow_frame = pd.DataFrame(columns=FACT_COLUMNS)
+        flow_frame.to_csv(flow_staging_path, index=False)
+    elif not resolution_ready_facts.empty:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
     selected_series_normalized = {
@@ -1349,6 +1366,15 @@ def main(argv: list[str] | None = None) -> int:
     resource_status = fallback_info.get("resource_status_code")
     if resource_status is not None:
         fallback_lines.append(f"Resource status: {resource_status}")
+    resource_id = fallback_info.get("resource_id")
+    if resource_id:
+        fallback_lines.append(f"Resource id: {resource_id}")
+    resource_selection = fallback_info.get("resource_selection")
+    if resource_selection:
+        fallback_lines.append(f"Resource selection: {resource_selection}")
+    resource_bytes = fallback_info.get("resource_bytes")
+    if resource_bytes is not None:
+        fallback_lines.append(f"Resource bytes: {resource_bytes}")
     fallback_rows = fallback_info.get("rows")
     if fallback_rows is not None:
         fallback_lines.append(f"Rows: {fallback_rows}")
@@ -1360,6 +1386,11 @@ def main(argv: list[str] | None = None) -> int:
         fallback_lines.append(f"Resource: {_trim_text(resource_url)}")
     elif fallback_info.get("package_url"):
         fallback_lines.append(f"Package: {_trim_text(fallback_info.get('package_url'))}")
+    resource_errors = fallback_info.get("resource_errors")
+    if resource_errors:
+        fallback_lines.append(
+            f"Resource fallbacks tried: {len(resource_errors)}"
+        )
 
     chunk_attempts_block = _format_bullets(chunk_attempt_lines)
     http_attempts_block = _format_bullets(http_counters_lines)
@@ -1484,6 +1515,7 @@ def main(argv: list[str] | None = None) -> int:
         "staging_block": _format_bullets(staging_entries),
         "fallback_block": fallback_block,
         "notes_block": _format_bullets(notes_lines),
+        "zero_rows_reason": zero_rows_reason_value or "n/a",
     }
     summary_path = _write_summary(summary_context)
     if summary_path:

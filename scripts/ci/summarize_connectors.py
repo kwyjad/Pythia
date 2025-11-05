@@ -1637,6 +1637,12 @@ def _render_hdx_reachability_section(reachability: Mapping[str, Any]) -> List[st
     if package_status is not None:
         lines.append(f"- **package_show:** status={package_status}")
 
+    resource_id = reachability.get("resource_id") or reachability.get("target", {}).get(
+        "resource_id"
+    )
+    if resource_id:
+        lines.append(f"- **Resource id:** `{resource_id}`")
+
     resource_status = reachability.get("resource_status_code")
     resource_url = reachability.get("resource_url")
     if resource_status is not None or resource_url:
@@ -1647,13 +1653,36 @@ def _render_hdx_reachability_section(reachability: Mapping[str, Any]) -> List[st
             status_text += f" url={resource_url}"
         lines.append(f"- **Resource:** {status_text}")
 
+    threshold = reachability.get("bytes_threshold") or 0
     resource_bytes = reachability.get("resource_bytes")
     if resource_bytes is not None:
-        lines.append(f"- **Bytes downloaded:** {resource_bytes}")
+        bytes_ok = reachability.get("bytes_ok")
+        suffix = " (ok)" if bytes_ok else " (below minimum)"
+        if threshold:
+            lines.append(
+                f"- **Bytes downloaded:** {resource_bytes} / min {threshold}{suffix}"
+            )
+        else:
+            lines.append(f"- **Bytes downloaded:** {resource_bytes}{suffix}")
+
+    header_line = reachability.get("header_line")
+    if header_line:
+        lines.append(f"- **Header sample:** `{header_line}`")
+        header_checks = []
+        if reachability.get("header_has_iso3"):
+            header_checks.append("iso3")
+        if reachability.get("header_has_value"):
+            header_checks.append("figure/new_displacements")
+        if header_checks:
+            lines.append(f"- **Header contains:** {', '.join(header_checks)}")
 
     error_text = reachability.get("error")
     if error_text:
         lines.append(f"- **Error:** {error_text}")
+
+    resource_error = reachability.get("resource_error")
+    if resource_error and resource_error != error_text:
+        lines.append(f"- **Resource error:** {resource_error}")
 
     lines.append("")
     return lines

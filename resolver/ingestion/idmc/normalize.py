@@ -89,14 +89,14 @@ def _normalize_monthly_flow(
     if raw.empty:
         LOGGER.debug("normalize_flow: empty input")
         empty = pd.DataFrame(
-            columns=[
-                "iso3",
-                "as_of_date",
-                "metric",
-                "value",
-                "series_semantics",
-                "source",
-            ]
+            {
+                "iso3": pd.Series(dtype="string"),
+                "as_of_date": pd.Series(dtype="datetime64[ns]"),
+                "metric": pd.Series(dtype="string"),
+                "value": pd.Series(dtype="Int64"),
+                "series_semantics": pd.Series(dtype="string"),
+                "source": pd.Series(dtype="string"),
+            }
         )
         return empty, {
             "date_parse_failed": 0,
@@ -130,6 +130,7 @@ def _normalize_monthly_flow(
     iso_series = _normalize_iso(_first_non_null(raw, iso_candidates))
     date_series = _first_non_null(raw, date_candidates)
     value_series = pd.to_numeric(_first_non_null(raw, value_candidates), errors="coerce")
+    value_series = value_series.astype(pd.Int64Dtype())
 
     event_column = next((column for column in date_candidates if column in raw.columns), None)
     if event_column is not None:
@@ -242,10 +243,24 @@ def _normalize_monthly_flow(
     aggregated["series_semantics"] = "new"
     aggregated["source"] = SOURCE_NAME
 
+    if not aggregated.empty:
+        aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())
+
     if not aggregated.empty and not pd.api.types.is_datetime64_any_dtype(aggregated["as_of_date"]):
         aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce")
 
-    if "as_of_date" in aggregated.columns and not aggregated.empty:
+    if aggregated.empty:
+        aggregated = aggregated.astype(
+            {
+                "iso3": "string",
+                "as_of_date": "datetime64[ns]",
+                "metric": "string",
+                "value": pd.Int64Dtype(),
+                "series_semantics": "string",
+                "source": "string",
+            }
+        )
+    elif "as_of_date" in aggregated.columns:
         LOGGER.debug("normalize_flow: as_of_date dtype=%s", aggregated["as_of_date"].dtype)
 
     return aggregated, drops
@@ -287,14 +302,14 @@ def normalize_all(
     if not tidy_frames:
         return (
             pd.DataFrame(
-                columns=[
-                    "iso3",
-                    "as_of_date",
-                    "metric",
-                    "value",
-                    "series_semantics",
-                    "source",
-                ]
+                {
+                    "iso3": pd.Series(dtype="string"),
+                    "as_of_date": pd.Series(dtype="datetime64[ns]"),
+                    "metric": pd.Series(dtype="string"),
+                    "value": pd.Series(dtype=pd.Int64Dtype()),
+                    "series_semantics": pd.Series(dtype="string"),
+                    "source": pd.Series(dtype="string"),
+                }
             ),
             aggregate_drops,
         )
