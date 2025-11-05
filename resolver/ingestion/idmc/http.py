@@ -1,15 +1,33 @@
 """HTTP helpers for the IDMC connector."""
 from __future__ import annotations
 
+import errno
 import os
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 import requests
 from requests import Response
-from requests.exceptions import RequestException, Timeout
+from requests.exceptions import (
+    ChunkedEncodingError,
+    ConnectTimeout,
+    ConnectionError as RequestsConnectionError,
+    ProxyError,
+    ReadTimeout,
+    RequestException,
+    SSLError as RequestsSSLError,
+    Timeout,
+)
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    MaxRetryError,
+    NewConnectionError,
+    ProtocolError,
+    SSLError as Urllib3SSLError,
+)
 
 from .rate_limit import TokenBucket, parse_retry_after
 
@@ -22,6 +40,7 @@ class HttpRequestError(Exception):
 
     message: str
     diagnostics: Dict[str, object]
+    kind: str = "error"
 
     def __post_init__(self) -> None:
         super().__init__(self.message)
@@ -37,11 +56,66 @@ def _apply_token(headers: MutableMapping[str, str]) -> None:
 
 
 def _resolve_user_agent() -> str:
-    for name in ("IDMC_USER_AGENT", "RELIEFWEB_USER_AGENT"):
+    for name in ("IDMC_USER_AGENT", "RELIEFWEB_USER_AGENT", "RELIEFWEB_APPNAME"):
         value = os.getenv(name, "").strip()
         if value:
             return value
     return "Pythia-IDMC/1.0 (+contact)"
+
+
+def _classify_errno(err: OSError) -> str:
+    if err.errno in {errno.ETIMEDOUT, errno.EHOSTUNREACH}:
+        return "connect_timeout"
+    if err.errno == errno.ECONNREFUSED:
+        return "conn_refused"
+    if err.errno == errno.ECONNRESET:
+        return "conn_reset"
+    if err.errno == errno.ENETUNREACH:
+        return "network_unreachable"
+    if err.errno == errno.EHOSTDOWN:
+        return "host_down"
+    return "os_error"
+
+
+def _classify_exception(exc: Exception) -> str:
+    if isinstance(exc, HttpRequestError):
+        return exc.kind
+    if isinstance(exc, ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(exc, (ReadTimeout, Timeout, ConnectTimeoutError)):
+        return "read_timeout"
+    if isinstance(exc, (RequestsSSLError, Urllib3SSLError, ssl.SSLError)):
+        return "ssl_error"
+    if isinstance(exc, ProxyError):
+        return "proxy_error"
+    if isinstance(exc, ChunkedEncodingError):
+        return "unexpected_eof"
+    if isinstance(exc, socket.timeout):
+        return "socket_timeout"
+    if isinstance(exc, RequestsConnectionError):
+        reason = getattr(exc, "__cause__", None) or getattr(exc, "args", [None])[0]
+        if isinstance(reason, (NewConnectionError, MaxRetryError)):
+            reason = getattr(reason, "__cause__", None) or getattr(reason, "args", [None])[0]
+        if isinstance(reason, socket.gaierror):
+            return "dns_error"
+        if isinstance(reason, OSError):
+            return _classify_errno(reason)
+        if isinstance(reason, ProtocolError):
+            return "protocol_error"
+        if isinstance(reason, ssl.SSLError):
+            return "ssl_error"
+        if isinstance(reason, socket.timeout):
+            return "connect_timeout"
+        if isinstance(reason, str):
+            lowered = reason.lower()
+            if "dns" in lowered or "gaierror" in lowered:
+                return "dns_error"
+            if "refused" in lowered:
+                return "conn_refused"
+        return "connection_error"
+    if isinstance(exc, OSError):
+        return _classify_errno(exc)
+    return exc.__class__.__name__.lower()
 
 
 def _normalise_timeout(value: float | Tuple[float, float]) -> Tuple[float, float]:
@@ -77,14 +151,15 @@ def http_get(
     url: str,
     *,
     headers: Optional[Mapping[str, str]] = None,
-    timeout: float | Tuple[float, float] = 10.0,
-    retries: int = 2,
+    timeout: float | Tuple[float, float] = (5.0, 20.0),
+    retries: int = 1,
     backoff_s: float = 0.5,
     rate_limiter: TokenBucket | None = None,
     max_bytes: Optional[int] = None,
     stream_path: Optional[str] = None,
     chunk_size: int = 64 * 1024,
     sleep_fn: Callable[[float], None] = time.sleep,
+    verify: bool | str = True,
 ) -> Tuple[int | str, Dict[str, str], bytes | None, Dict[str, object]]:
     """Perform a GET request with retries, rate limiting, and diagnostics."""
 
@@ -110,6 +185,7 @@ def http_get(
     last_status: int | str | None = None
     last_headers: Dict[str, str] = {}
     last_exception: Optional[str] = None
+    last_exception_kind: Optional[str] = None
     timeout_hit = False
 
     timeout_tuple = _normalise_timeout(timeout)
@@ -132,6 +208,7 @@ def http_get(
                     headers=request_headers,
                     timeout=timeout_tuple,
                     stream=True,
+                    verify=verify,
                 )
                 status = int(response.status_code)
                 last_status = status
@@ -157,9 +234,11 @@ def http_get(
                             "type": "HTTPError",
                             "status": status,
                             "message": message,
+                            "kind": "http_error",
                         }
                     )
                     last_exception = "HTTPError"
+                    last_exception_kind = "http_error"
                     elapsed = time.monotonic() - started
                     total_elapsed += elapsed
                     attempt_durations.append(elapsed)
@@ -235,12 +314,14 @@ def http_get(
                 timeout_hit = True
                 last_status = "timeout"
                 last_exception = err.__class__.__name__
+                last_exception_kind = _classify_exception(err)
                 exceptions.append(
                     {
                         "attempt": attempt,
                         "type": err.__class__.__name__,
                         "message": message,
                         "timeout": True,
+                        "kind": last_exception_kind,
                     }
                 )
             except RequestException as err:  # pragma: no cover - network dependent
@@ -270,6 +351,7 @@ def http_get(
                     reason_text = str(reason) if reason is not None else None
                 except Exception:  # pragma: no cover - defensive
                     reason_text = repr(reason)
+                last_exception_kind = _classify_exception(err)
                 exceptions.append(
                     {
                         "attempt": attempt,
@@ -277,6 +359,7 @@ def http_get(
                         "status": status,
                         "message": str(err),
                         "reason": reason_text,
+                        "kind": last_exception_kind,
                     }
                 )
                 last_exception = err.__class__.__name__
@@ -287,23 +370,27 @@ def http_get(
                 timeout_hit = True
                 last_status = "timeout"
                 last_exception = err.__class__.__name__
+                last_exception_kind = _classify_exception(err)
                 exceptions.append(
                     {
                         "attempt": attempt,
                         "type": err.__class__.__name__,
                         "message": str(err),
                         "timeout": True,
+                        "kind": last_exception_kind,
                     }
                 )
             except Exception as err:  # pragma: no cover - defensive
                 elapsed = time.monotonic() - started
                 total_elapsed += elapsed
                 attempt_durations.append(elapsed)
+                last_exception_kind = _classify_exception(err)
                 exceptions.append(
                     {
                         "attempt": attempt,
                         "type": err.__class__.__name__,
                         "message": str(err),
+                        "kind": last_exception_kind,
                     }
                 )
                 last_exception = err.__class__.__name__
@@ -338,5 +425,10 @@ def http_get(
         "planned_sleep_s": planned_waits,
         "timeout": timeout_hit,
         "exception_type": last_exception,
+        "exception_kind": last_exception_kind,
     }
-    raise HttpRequestError(f"GET {url} failed", diagnostics)
+    raise HttpRequestError(
+        f"GET {url} failed",
+        diagnostics,
+        kind=last_exception_kind or ("timeout" if timeout_hit else "error"),
+    )

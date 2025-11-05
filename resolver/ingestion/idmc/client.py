@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
 from urllib.parse import urlencode
 import urllib.request
 
@@ -61,6 +61,27 @@ LOGGER = logging.getLogger(__name__)
 NetworkMode = Literal["live", "cache_only", "fixture"]
 NETWORK_MODES: Tuple[NetworkMode, ...] = ("live", "cache_only", "fixture")
 
+NETWORK_ERROR_KINDS = {
+    "connect_timeout",
+    "read_timeout",
+    "timeout",
+    "socket_timeout",
+    "ssl_error",
+    "dns_error",
+    "proxy_error",
+    "connection_error",
+    "conn_refused",
+    "conn_reset",
+    "network_unreachable",
+    "host_down",
+    "os_error",
+}
+
+if os.getenv("IDMC_PROXY"):
+    proxy_value = os.getenv("IDMC_PROXY")
+    os.environ.setdefault("HTTPS_PROXY", proxy_value)
+    os.environ.setdefault("HTTP_PROXY", proxy_value)
+
 
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
@@ -73,27 +94,78 @@ def _trim_url(url: str, limit: int = 160) -> str:
     return url[: max(limit - 3, 1)] + "..."
 
 
-def _env_timeout(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw.strip())
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        LOGGER.warning("Invalid %s=%r; using default %.1f", name, raw, default)
-        return default
-    if value < 0:
-        LOGGER.warning("Negative %s=%r; using default %.1f", name, raw, default)
-        return default
-    return float(value)
+def _env_timeout(name: str, default: float, *, aliases: Iterable[str] = ()) -> float:
+    for candidate in (name, *aliases):
+        raw = os.getenv(candidate)
+        if raw is None:
+            continue
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            LOGGER.warning("Invalid %s=%r; using default %.1f", candidate, raw, default)
+            return default
+        if value < 0:
+            LOGGER.warning("Negative %s=%r; using default %.1f", candidate, raw, default)
+            return default
+        return float(value)
+    return default
 
 
 def _http_timeouts() -> Tuple[float, float]:
-    connect = _env_timeout("IDMC_HTTP_CONNECT_TIMEOUT_S", DEFAULT_CONNECT_TIMEOUT_S)
-    read = _env_timeout("IDMC_HTTP_READ_TIMEOUT_S", DEFAULT_READ_TIMEOUT_S)
+    connect = _env_timeout(
+        "IDMC_HTTP_CONNECT_TIMEOUT_S",
+        DEFAULT_CONNECT_TIMEOUT_S,
+        aliases=(
+            "IDMC_HTTP_TIMEOUT_CONNECT",
+            "IDMC_HTTP_CONNECT_TIMEOUT",
+            "IDMC_HTTP_TIMEOUT_CONNECT_S",
+        ),
+    )
+    read = _env_timeout(
+        "IDMC_HTTP_READ_TIMEOUT_S",
+        DEFAULT_READ_TIMEOUT_S,
+        aliases=(
+            "IDMC_HTTP_TIMEOUT_READ",
+            "IDMC_HTTP_READ_TIMEOUT",
+            "IDMC_HTTP_TIMEOUT_READ_S",
+        ),
+    )
     if read <= 0:
         read = DEFAULT_READ_TIMEOUT_S
     return connect, read
+
+
+def _resolve_http_user_agent() -> str:
+    for name in ("IDMC_USER_AGENT", "RELIEFWEB_USER_AGENT", "RELIEFWEB_APPNAME"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return "Pythia-IDMC/1.0 (+contact)"
+
+
+def _build_http_headers(extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _resolve_http_user_agent(),
+    }
+    if extra:
+        headers.update({str(key): str(value) for key, value in extra.items()})
+    return headers
+
+
+def _http_verify() -> bool | str:
+    raw = os.getenv("IDMC_HTTP_VERIFY")
+    if raw is None:
+        return True
+    candidate = raw.strip()
+    if not candidate:
+        return True
+    lowered = candidate.lower()
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    return candidate
 
 
 def _cache_lock(key: str) -> threading.Lock:
@@ -295,23 +367,36 @@ def _probe_idu_schema(
     query = urlencode(SCHEMA_PROBE_QUERY, safe="*.,()")
     url = f"{base}{endpoint}?{query}"
     diagnostics["url"] = url
+    connect_timeout_s, read_timeout_s = _http_timeouts()
+    schema_timeout = (
+        max(connect_timeout_s, 0.1),
+        max(min(read_timeout_s, 10.0), max(connect_timeout_s, 0.1)),
+    )
+    diagnostics["timeout_s"] = {"connect": schema_timeout[0], "read": schema_timeout[1]}
+    verify_setting = _http_verify()
+    diagnostics["verify"] = verify_setting if isinstance(verify_setting, str) else bool(verify_setting)
+    request_headers = _build_http_headers()
+    diagnostics["headers"] = dict(request_headers)
 
     try:
         status, headers, body, http_diag = http_get(
             url,
-            timeout=10.0,
+            timeout=schema_timeout,
             retries=1,
             backoff_s=0.1,
             rate_limiter=rate_limiter,
-            headers={"Accept": "application/json"},
+            headers=request_headers,
+            verify=verify_setting,
         )
     except HttpRequestError as exc:
         diagnostics["error"] = exc.message
         diagnostics["http_error"] = exc.diagnostics
+        diagnostics["error_kind"] = exc.kind
         diagnostics["date_column"] = default_date_column
         diagnostics["columns"] = default_columns
         LOGGER.warning(
-            "idmc: schema probe failed with HttpRequestError; defaulting to %s",
+            "idmc: schema probe failed with HttpRequestError kind=%s; defaulting to %s",
+            exc.kind,
             default_date_column,
         )
         return default_date_column, default_columns, diagnostics
@@ -650,6 +735,11 @@ def fetch_idu_json(
         "connect_s": connect_timeout_s,
         "read_s": read_timeout_s,
     }
+    verify_setting = _http_verify()
+    diagnostics["http_verify"] = (
+        verify_setting if isinstance(verify_setting, str) else bool(verify_setting)
+    )
+    http_info["verify"] = diagnostics["http_verify"]
     zero_row_reasons: Dict[str, str] = {}
 
     select_list: List[str] = []
@@ -799,14 +889,16 @@ def fetch_idu_json(
                     diagnostics["http_attempt_summary"]["planned"] += 1
                     try:
                         LOGGER.debug("IDMC GET %s", url)
-                        status, headers, payload_body, http_diag = http_get(
+                        status, response_headers, payload_body, http_diag = http_get(
                             url,
                             timeout=(connect_timeout_s, read_timeout_s),
-                            retries=2,
+                            retries=1,
                             backoff_s=0.5,
                             rate_limiter=rate_limiter,
                             max_bytes=max_bytes,
                             stream_path=f"{cache_path}.partial",
+                            headers=_build_http_headers(),
+                            verify=verify_setting,
                         )
                         bucket = _http_status_bucket(status)
                         if bucket:
@@ -841,7 +933,7 @@ def fetch_idu_json(
                         )
                         metadata = {
                             "status": status,
-                            "headers": headers,
+                            "headers": response_headers,
                             "fetched_at": datetime.now(timezone.utc).isoformat(),
                         }
                         cache_record.update(metadata)
@@ -868,13 +960,19 @@ def fetch_idu_json(
                         status_display: int | str | None = status_error
                         if error_diag.get("timeout"):
                             status_display = "timeout"
+                        error_kind = getattr(exc, "kind", None) or exc.__class__.__name__
                         bucket = _http_status_bucket(status_display)
                         if bucket:
                             http_info["status_counts"].setdefault(bucket, 0)
                             http_info["status_counts"][bucket] += 1
-                        http_info["status_last"] = status_display
                         summary_counters = diagnostics["http_attempt_summary"]
-                        if status_display == "timeout":
+                        is_timeout_kind = error_kind in {
+                            "connect_timeout",
+                            "read_timeout",
+                            "timeout",
+                            "socket_timeout",
+                        }
+                        if is_timeout_kind or status_display == "timeout":
                             http_info["timeouts"] += 1
                             summary_counters["timeouts"] += 1
                         elif isinstance(status_display, int):
@@ -893,9 +991,13 @@ def fetch_idu_json(
                         else:
                             http_info["requests_other"] += 1
                             summary_counters["status_other"] += 1
-                        if not error_diag.get("timeout") and status_error is None:
-                            http_info["other_exceptions"] += 1
-                            summary_counters["other_exceptions"] += 1
+                            if error_kind in NETWORK_ERROR_KINDS:
+                                http_info["other_exceptions"] += 1
+                                summary_counters["other_exceptions"] += 1
+                        last_status_value: int | str | None = status_display
+                        if error_kind in NETWORK_ERROR_KINDS:
+                            last_status_value = None
+                        http_info["status_last"] = last_status_value
                         attempts_error = int(error_diag.get("attempts", 1) or 1)
                         http_info["requests"] += attempts_error
                         http_info["retries"] += int(error_diag.get("retries", 0) or 0)
@@ -924,7 +1026,7 @@ def fetch_idu_json(
                         http_info["attempt_durations_ms"].extend(
                             [int(round(value * 1000)) for value in attempt_times]
                         )
-                        cache_record["error"] = exc.__class__.__name__
+                        cache_record["error"] = error_kind
                         cache_record["status"] = status_display
                         cache_stats["entries"].append(cache_record)
                         diagnostics["requests"].append(
@@ -933,6 +1035,7 @@ def fetch_idu_json(
                                 "status": status_display,
                                 "cache": "miss",
                                 "error": exc.__class__.__name__,
+                                "error_kind": error_kind,
                                 "via": "http_get",
                             }
                         )
@@ -954,6 +1057,7 @@ def fetch_idu_json(
                             "via": "http_get",
                             "status": status_display,
                             "error": exc.__class__.__name__,
+                            "error_kind": error_kind,
                         }
                         if status_display == "timeout":
                             attempt_entry["zero_rows_reason"] = "timeout"
@@ -965,21 +1069,27 @@ def fetch_idu_json(
                                 "url": url,
                                 "iso_batch": cache_params["iso_batch"],
                                 "exception": exc.__class__.__name__,
+                                "kind": error_kind,
                                 "status": status_display,
                                 "message": snippet,
                             }
                         )
                         http_info["last_error"] = {
                             "type": exc.__class__.__name__,
+                            "kind": error_kind,
                             "message": snippet or str(exc),
                         }
                         http_info["last_error_url"] = url
                         http_info["last_exception"] = exc.__class__.__name__
+                        http_info["last_exception_kind"] = error_kind
+                        exception_counts = http_info.setdefault("exception_counts", {})
+                        exception_counts[error_kind] = exception_counts.get(error_kind, 0) + 1
                         LOGGER.debug(
-                            "idmc: chunk=%s via=http_get status=%s error=%s url=%s",
+                            "idmc: chunk=%s via=http_get status=%s error=%s kind=%s url=%s",
                             chunk_name,
                             status_display,
                             exc.__class__.__name__,
+                            error_kind,
                             _trim_url(url),
                         )
                         if allow_fallback:
@@ -1516,6 +1626,8 @@ def fetch(
     last_error_info: Optional[Dict[str, Any]] = None
     last_error_url: Optional[str] = None
     last_exception: Optional[str] = None
+    last_exception_kind: Optional[str] = None
+    verify_value: Optional[object] = None
 
     for index in sorted(chunk_diags):
         diag = chunk_diags[index]
@@ -1587,6 +1699,10 @@ def fetch(
             last_error_url = http_block.get("last_error_url")
         if http_block.get("last_exception"):
             last_exception = http_block.get("last_exception")
+        if http_block.get("last_exception_kind"):
+            last_exception_kind = http_block.get("last_exception_kind")
+        if verify_value is None and http_block.get("verify") is not None:
+            verify_value = http_block.get("verify")
         exceptions_block = http_block.get("exception_counts") or {}
         for name, value in exceptions_block.items():
             try:
@@ -1686,6 +1802,10 @@ def fetch(
         http_summary["last_error_url"] = last_error_url
     if last_exception:
         http_summary["last_exception"] = last_exception
+    if last_exception_kind:
+        http_summary["last_exception_kind"] = last_exception_kind
+    if verify_value is not None:
+        http_summary["verify"] = verify_value
 
     data: Dict[str, pd.DataFrame] = {"monthly_flow": combined}
 

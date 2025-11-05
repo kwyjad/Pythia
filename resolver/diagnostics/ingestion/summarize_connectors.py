@@ -34,6 +34,13 @@ def build_summary(staging_dir: str) -> Dict[str, object]:
 
     report["files"] = files
     report["rows_total"] = rows_total
+    probe_path = staging_path.parent / "idmc" / "probe.json"
+    try:
+        if probe_path.exists():
+            probe_data = json.loads(probe_path.read_text(encoding="utf-8"))
+            report["idmc_probe"] = probe_data
+    except Exception:
+        report["idmc_probe"] = "unreadable"
     return report
 
 
