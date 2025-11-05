@@ -34,7 +34,7 @@ from .diagnostics import (
     write_unmapped_hazards_preview,
     zero_rows_rescue,
 )
-from .export import FLOW_METRIC, build_resolution_ready_facts, summarise_facts
+from .export import FACT_COLUMNS, FLOW_METRIC, build_resolution_ready_facts, summarise_facts
 from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
@@ -779,14 +779,26 @@ def main(argv: list[str] | None = None) -> int:
         flow_input = tidy.loc[metric_series == FLOW_METRIC].copy()
     resolution_ready_facts = build_resolution_ready_facts(flow_input)
     rows_resolution_ready = int(len(resolution_ready_facts))
-    staging_dir_path = Path("resolver/staging/idmc")
+    staging_root = (
+        Path(resolver_output_dir_env).expanduser()
+        if resolver_output_dir_env
+        else Path("resolver/staging")
+    )
+    staging_dir_path = staging_root / "idmc"
     staging_dir_path.mkdir(parents=True, exist_ok=True)
     flow_staging_path = staging_dir_path / "flow.csv"
+    flow_export_requested = bool(
+        args.enable_export
+        or getattr(args, "write_outputs", False)
+        or bool(env_write_empty)
+        or resolver_output_dir_env
+    )
+    if export_requested:
+        flow_export_requested = True
     if resolution_ready_facts.empty:
-        if export_requested:
-            flow_staging_path = Path(
-                write_header_if_empty(flow_staging_path.as_posix())
-            )
+        if flow_export_requested:
+            header_line = ",".join(FACT_COLUMNS)
+            flow_staging_path.write_text(header_line + "\n", encoding="utf-8")
     else:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
@@ -849,13 +861,21 @@ def main(argv: list[str] | None = None) -> int:
         "empty_policy": empty_policy,
     }
     zero_rows = None
+    zero_rows_reason_value: Optional[str] = None
     if rows == 0:
+        filters_block = diagnostics.get("filters") or {}
+        fallback_info = diagnostics.get("fallback") or {}
+        zero_rows_reason_value = filters_block.get("zero_rows_reason") or fallback_info.get(
+            "reason"
+        )
+        if zero_rows_reason_value is not None:
+            zero_rows_reason_value = str(zero_rows_reason_value)
         zero_rows = zero_rows_rescue(
             selectors,
             "No rows after filters. See drop_reasons.",
         )
-        if export_requested:
-            write_header_if_empty(flow_staging_path.as_posix())
+        if zero_rows_reason_value:
+            zero_rows["zero_rows_reason"] = zero_rows_reason_value
 
     timings = timings_block(
         probe_ms=probe_ms,
@@ -1100,7 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
         for name, frame in data.items()
     ]
 
-    staging_dir = Path("resolver/staging/idmc")
+    staging_dir = staging_dir_path
     staged_counts: Dict[str, Optional[int]] = {}
     staging_entries: List[str] = []
     for filename in ("flow.csv", "stock.csv"):
@@ -1126,6 +1146,8 @@ def main(argv: list[str] | None = None) -> int:
         "resolution_ready": rows_resolution_ready,
         "staged": staged_counts_serializable,
     }
+    if zero_rows_reason_value:
+        diagnostics_payload["zero_rows_reason"] = zero_rows_reason_value
     diagnostics_payload["outputs"] = {
         "write_outputs": bool(write_outputs),
         "resolver_output_dir": resolver_output_dir_env,
@@ -1321,15 +1343,23 @@ def main(argv: list[str] | None = None) -> int:
     fallback_status = fallback_info.get("status")
     if fallback_status:
         fallback_lines.append(f"Status: {fallback_status}")
+    package_status = fallback_info.get("package_status_code")
+    if package_status is not None:
+        fallback_lines.append(f"Package status: {package_status}")
+    resource_status = fallback_info.get("resource_status_code")
+    if resource_status is not None:
+        fallback_lines.append(f"Resource status: {resource_status}")
     fallback_rows = fallback_info.get("rows")
     if fallback_rows is not None:
         fallback_lines.append(f"Rows: {fallback_rows}")
     fallback_error = fallback_info.get("error")
     if fallback_error:
         fallback_lines.append(f"Error: {fallback_error}")
-    fallback_source = fallback_info.get("resource_url") or fallback_info.get("package_url")
-    if fallback_source:
-        fallback_lines.append(f"Source: {_trim_text(fallback_source)}")
+    resource_url = fallback_info.get("resource_url")
+    if resource_url:
+        fallback_lines.append(f"Resource: {_trim_text(resource_url)}")
+    elif fallback_info.get("package_url"):
+        fallback_lines.append(f"Package: {_trim_text(fallback_info.get('package_url'))}")
 
     chunk_attempts_block = _format_bullets(chunk_attempt_lines)
     http_attempts_block = _format_bullets(http_counters_lines)
@@ -1384,6 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
     notes_lines.append(f"HDX fallback used: {'yes' if fallback_used_flag else 'no'}")
     if fallback_error:
         notes_lines.append(f"Fallback error: {fallback_error}")
+    if zero_rows_reason_value:
+        notes_lines.append(f"Zero rows reason: {zero_rows_reason_value}")
     date_column_used = diagnostics.get("date_column") or "n/a"
     notes_lines.append(f"Date column: {date_column_used}")
     non_two_buckets = [
@@ -1547,6 +1579,8 @@ def main(argv: list[str] | None = None) -> int:
             "config_path_used": str(config_path_used) if config_path_used else None,
             "loader_warnings": config_warnings,
         }
+        if zero_rows_reason_value:
+            why_zero_payload["zero_rows_reason"] = zero_rows_reason_value
         if override_raw and countries_source != "cli(--only-countries)" and countries_source != "env(IDMC_ONLY_COUNTRIES)":
             why_zero_payload["countries_override"] = "env(IDMC_COUNTRIES)"
         write_why_zero(why_zero_payload)

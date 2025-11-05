@@ -159,6 +159,12 @@ jobs:
           set -euo pipefail
           python -m scripts.ci.probe_idmc_reprise || true
 
+      - name: Probe HDX reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.probe_hdx_reachability || true
+
       - name: Run connectors (with per-connector log tee)
         env:
           RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}

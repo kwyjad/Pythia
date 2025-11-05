@@ -359,13 +359,16 @@ structured overrides (all mirrored by environment variables):
   which paths were produced, and how many rows landed in `flow.csv`, making
   `summary.md` and downstream diagnostics honest about zero-row outcomes.【F:resolver/ingestion/idmc/cli.py†L340-L438】【F:resolver/ingestion/idmc/cli.py†L1100-L1290】
 - Fallback diagnostics now expose `fallback_used` (boolean) and enrich
-  `fallback` with reason, status, rows, and errors; `attempts` entries include
-  per-chunk `status`, `rows`, and optional `zero_rows_reason` so timeout-driven
-  zero rows can be identified quickly.【F:resolver/ingestion/idmc/client.py†L820-L1150】
+  `fallback` with reason, status, rows, and HDX metadata (dataset, URLs, and
+  HTTP status codes); `attempts` entries include per-chunk `status`, `rows`, and
+  optional `zero_rows_reason` so timeout- and fallback-driven zero rows can be
+  identified quickly.【F:resolver/ingestion/idmc/client.py†L820-L1150】【F:resolver/ingestion/idmc/client.py†L1580-L1960】
 - `zero_rows_reasons` maps chunk labels to the recorded cause (for example
-  `timeout` or `timeout_fallback_empty`) when no rows survive after filtering,
-  and `summary.md` includes the reachability probe output alongside the HTTP and
-  fallback counters for auditors.【F:resolver/ingestion/idmc/client.py†L1106-L1160】【F:resolver/diagnostics/templates/idmc_summary.md.j2†L1-L27】
+  `dns_error`, `fallback_http_error`, or `timeout_fallback_empty`) when no rows
+  survive after filtering, and the CLI surfaces the first reason in
+  `why_zero.json` and the summary notes. `summary.md` now includes the
+  reachability probes (IDMC live API and HDX package/resource checks) alongside
+  the HTTP and fallback counters for auditors.【F:resolver/ingestion/idmc/client.py†L1106-L1160】【F:resolver/ingestion/idmc/cli.py†L720-L1310】【F:scripts/ci/summarize_connectors.py†L1880-L1960】
 - When hazard mapping is enabled (`--map-hazards` or `IDMC_MAP_HAZARDS=1`), the
   normalized schema temporarily includes optional columns `hazard_code`,
   `hazard_label`, and `hazard_class`.
