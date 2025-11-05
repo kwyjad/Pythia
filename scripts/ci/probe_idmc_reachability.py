@@ -1,5 +1,6 @@
-"""Reachability diagnostics for the IDMC IDU endpoint."""
 from __future__ import annotations
+
+"""Connectivity probe for the live IDMC IDU endpoint."""
 
 import json
 import os
@@ -17,12 +18,21 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - defensive
     certifi = None  # type: ignore
 
+
 BASE = os.getenv("IDMC_BASE_URL", "https://backend.idmcdb.org").rstrip("/")
 ENDPOINT = os.getenv("IDMC_PROBE_ENDPOINT", "/data/idus_view_flat")
 QUERY = os.getenv("IDMC_PROBE_QUERY", "select=id&limit=1")
 TIMEOUT = float(os.getenv("IDMC_PROBE_TIMEOUT", "5"))
 DIAG_DIR = Path("diagnostics/ingestion/idmc")
 SUMMARY_PATH = Path("diagnostics/ingestion/summary.md")
+
+
+def _resolve_user_agent() -> str:
+    for name in ("IDMC_USER_AGENT", "RELIEFWEB_USER_AGENT"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return "Pythia-IDMC/1.0 (+contact)"
 
 
 def _now() -> str:
@@ -101,14 +111,15 @@ def probe_tls(host: str, port: int) -> Dict[str, Any]:
 def probe_http(url: str) -> Dict[str, Any]:
     started = time.monotonic()
     payload: Dict[str, Any] = {"status": None, "bytes": 0}
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "pythia-idmc-probe/1.0",
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
+    user_agent = _resolve_user_agent()
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    }
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    payload["user_agent"] = user_agent
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             body = response.read(2048)
@@ -149,32 +160,68 @@ def append_summary(block: str) -> None:
 
 
 def build_summary(payload: Dict[str, Any]) -> str:
-    lines = ["## IDMC reachability", f"Timestamp: {_now()}\n"]
-    http = payload.get("http", {})
+    lines = ["## IDMC Reachability", f"Timestamp: {_now()}\n"]
     lines.append(f"- Base URL: {payload.get('base_url')}")
-    lines.append(f"- Endpoint: {payload.get('probe_url')}")
-    status = http.get("status")
-    if status is not None:
-        lines.append(f"- HTTP status: {status} ({http.get('bytes', 0)} bytes)")
-    if "error" in http:
-        lines.append(f"- HTTP error: {http['error']}")
+    lines.append(f"- Probe URL: {payload.get('probe_url')}")
+
+    dns = payload.get("dns", {})
+    dns_records = dns.get("records") or []
+    if dns_records:
+        sample = ", ".join(sorted(record.get("address", "?") for record in dns_records[:3]))
+        lines.append(
+            f"- DNS: {len(dns_records)} record(s) in {dns.get('elapsed_ms')} ms ({sample})"
+        )
+    elif dns.get("error"):
+        lines.append(f"- DNS error: {dns['error']}")
+
+    tcp = payload.get("tcp", {})
+    if tcp.get("ok"):
+        peer = tcp.get("peer")
+        peer_display = f"{peer[0]}:{peer[1]}" if peer else "ok"
+        lines.append(
+            f"- TCP: ok in {tcp.get('elapsed_ms')} ms (peer {peer_display})"
+        )
+        egress = tcp.get("egress")
+        if egress:
+            lines.append(f"- Egress IP: {egress[0]}")
+    elif tcp.get("error"):
+        lines.append(f"- TCP error: {tcp['error']}")
+
     tls = payload.get("tls", {})
     if tls.get("ok"):
-        lines.append(f"- TLS: {tls.get('version')} cipher {tls.get('cipher')}")
+        lines.append(
+            "- TLS: {version} {cipher} (elapsed {elapsed} ms)".format(
+                version=tls.get("version"),
+                cipher=tls.get("cipher"),
+                elapsed=tls.get("elapsed_ms"),
+            )
+        )
+        issuer = tls.get("issuer")
+        if issuer:
+            lines.append(f"- TLS issuer: {issuer}")
     elif tls.get("error"):
         lines.append(f"- TLS error: {tls['error']}")
-    dns = payload.get("dns", {})
-    records = dns.get("records") or []
-    if records:
-        sample = ", ".join(sorted(record["address"] for record in records[:3]))
-        lines.append(f"- DNS resolved: {sample}")
-    tcp = payload.get("tcp", {})
-    if tcp.get("egress"):
-        lines.append(f"- Egress IP: {tcp['egress'][0]}")
+
+    http = payload.get("http", {})
+    status = http.get("status")
+    if status is not None:
+        lines.append(
+            "- HTTP GET: status {status} ({bytes} bytes in {elapsed} ms)".format(
+                status=status,
+                bytes=http.get("bytes", 0),
+                elapsed=http.get("elapsed_ms"),
+            )
+        )
+    if http.get("error"):
+        lines.append(f"- HTTP error: {http['error']}")
+    if http.get("user_agent"):
+        lines.append(f"- User-Agent: {http['user_agent']}")
+
     bundle = payload.get("ca_bundle", {})
     paths = bundle.get("paths") or []
     if paths:
         lines.append(f"- CA bundle: {paths[0]}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -199,6 +246,9 @@ def main() -> int:
     payload["tcp"] = probe_tcp(host, port)
     payload["tls"] = probe_tls(host, port)
     payload["http"] = probe_http(probe_url)
+    tcp = payload["tcp"]
+    if isinstance(tcp, dict) and tcp.get("egress"):
+        payload["egress_ip"] = tcp["egress"][0]
     payload["ca_bundle"] = ca_bundle_info()
 
     DIAG_DIR.mkdir(parents=True, exist_ok=True)

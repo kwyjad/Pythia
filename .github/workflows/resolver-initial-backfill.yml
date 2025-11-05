@@ -211,9 +211,14 @@ jobs:
           fi
           CMD_ARGS+=(--extra-args "idmc=--chunk-by-month \
             --start ${RESOLVER_START_ISO} --end ${RESOLVER_END_ISO} \
-            --enable-export --write-outputs --series flow,stock")
+            --enable-export --write-outputs --series flow,stock \
+            --allow-hdx-fallback")
           CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=live")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_ALLOW_HDX_FALLBACK=1")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_CONNECT_TIMEOUT_S=5")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_READ_TIMEOUT_S=25")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_USER_AGENT=Pythia-IDMC/1.0 (+contact)")
           # While diagnosing IDMC runs, you can append --debug via:
           # CMD_ARGS+=(--extra-args "idmc=--debug")
           CONNECTOR_EXIT=0

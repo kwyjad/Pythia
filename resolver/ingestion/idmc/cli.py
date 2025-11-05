@@ -100,6 +100,13 @@ def _format_bullets(items: Iterable[str]) -> str:
     return "\n".join(f"- {entry}" for entry in entries)
 
 
+def _trim_text(value: str, limit: int = 160) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 3, 1)] + "..."
+
+
 def _count_csv_rows(path: Path) -> int | None:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -952,6 +959,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows_fetched = sum(len(frame) for frame in data.values())
     http_rollup = diagnostics.get("http") or {}
+    http_attempt_summary = diagnostics.get("http_attempt_summary") or {}
     cache_stats = diagnostics.get("cache") or {}
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
     http_status_counts_raw = diagnostics.get("http_status_counts")
@@ -966,6 +974,12 @@ def main(argv: list[str] | None = None) -> int:
         requests_planned = int(requests_planned_raw) if requests_planned_raw is not None else None
     except (TypeError, ValueError):  # pragma: no cover - defensive
         requests_planned = None
+    if requests_planned is None:
+        summary_planned = (diagnostics.get("http_attempt_summary") or {}).get("planned")
+        try:
+            requests_planned = int(summary_planned) if summary_planned is not None else None
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            requests_planned = None
     requests_executed = int(http_rollup.get("requests", 0) or 0)
 
     diagnostics_payload = {
@@ -978,6 +992,7 @@ def main(argv: list[str] | None = None) -> int:
             dict(http_status_counts_extended) if http_status_counts_extended else None
         ),
         "http": http_rollup,
+        "http_attempt_summary": http_attempt_summary,
         "cache": cache_stats,
         "filters": diagnostics.get("filters"),
         "probe": probe_result,
@@ -1010,6 +1025,9 @@ def main(argv: list[str] | None = None) -> int:
         "chunk_errors": int(diagnostics.get("chunk_errors", 0) or 0),
         "fetch_errors": diagnostics.get("fetch_errors"),
         "exceptions_by_type": diagnostics.get("exceptions_by_type"),
+        "fallback_used": bool(diagnostics.get("fallback_used")),
+        "http_timeouts": diagnostics.get("http_timeouts"),
+        "attempts_detail": diagnostics.get("attempts"),
     }
 
     config_payload = {
@@ -1121,6 +1139,141 @@ def main(argv: list[str] | None = None) -> int:
     elif effective_network_mode != "live":
         attempts_lines.append("HTTP status counts: n/a in non-live mode")
 
+    http_counters_lines = [
+        f"Planned HTTP requests: {int(http_attempt_summary.get('planned', 0) or 0)}",
+        f"2xx responses: {int(http_attempt_summary.get('ok_2xx', 0) or 0)}",
+        f"4xx responses: {int(http_attempt_summary.get('status_4xx', 0) or 0)}",
+        f"5xx responses: {int(http_attempt_summary.get('status_5xx', 0) or 0)}",
+        f"Other responses: {int(http_attempt_summary.get('status_other', 0) or 0)}",
+        f"Timeouts: {int(http_attempt_summary.get('timeouts', 0) or 0)}",
+        f"Other exceptions: {int(http_attempt_summary.get('other_exceptions', 0) or 0)}",
+    ]
+    timeouts_cfg = diagnostics.get("http_timeouts") or {}
+    if timeouts_cfg:
+        http_counters_lines.append(
+            "Timeout config (s): connect={connect} read={read}".format(
+                connect=timeouts_cfg.get("connect_s"),
+                read=timeouts_cfg.get("read_s"),
+            )
+        )
+    last_error_info = http_rollup.get("last_error") or {}
+    if last_error_info:
+        http_counters_lines.append(
+            "Last error: {etype} ({msg})".format(
+                etype=last_error_info.get("type"),
+                msg=last_error_info.get("message"),
+            )
+        )
+    last_error_url = http_rollup.get("last_error_url")
+    if last_error_url:
+        http_counters_lines.append(
+            f"Last error URL: {_trim_text(last_error_url)}"
+        )
+
+    chunk_attempt_lines: List[str] = []
+    for entry in diagnostics.get("attempts") or []:
+        if not isinstance(entry, dict):
+            continue
+        parts: List[str] = []
+        chunk_name = entry.get("chunk") or "full"
+        parts.append(f"chunk={chunk_name}")
+        via = entry.get("via")
+        if via:
+            parts.append(f"via={via}")
+        status_val = entry.get("status")
+        if status_val is not None:
+            parts.append(f"status={status_val}")
+        rows_val = entry.get("rows")
+        if rows_val is not None:
+            parts.append(f"rows={rows_val}")
+        error_val = entry.get("error")
+        if error_val:
+            parts.append(f"error={error_val}")
+        reason_val = entry.get("zero_rows_reason")
+        if reason_val:
+            parts.append(f"reason={reason_val}")
+        chunk_attempt_lines.append("; ".join(parts))
+
+    reachability_lines: List[str] = []
+    if isinstance(probe_result, dict) and probe_result:
+        base = probe_result.get("base_url")
+        if base:
+            reachability_lines.append(f"Base URL: {base}")
+        dns_info = probe_result.get("dns") or {}
+        if dns_info:
+            if dns_info.get("ok"):
+                count = len(dns_info.get("records") or [])
+                reachability_lines.append(
+                    f"DNS ok ({count} record(s)) in {dns_info.get('elapsed_ms')} ms"
+                )
+            elif dns_info.get("error"):
+                reachability_lines.append(f"DNS error: {dns_info.get('error')}")
+        tcp_info = probe_result.get("tcp") or {}
+        if tcp_info:
+            if tcp_info.get("ok"):
+                peer = tcp_info.get("peer")
+                peer_display = f"{peer[0]}:{peer[1]}" if peer else "ok"
+                reachability_lines.append(
+                    f"TCP ok ({peer_display}) in {tcp_info.get('elapsed_ms')} ms"
+                )
+                egress = tcp_info.get("egress_ip")
+                if not egress and isinstance(tcp_info.get("egress"), (list, tuple)):
+                    egress = tcp_info.get("egress")[0]
+                if egress:
+                    reachability_lines.append(f"Egress IP: {egress}")
+            elif tcp_info.get("error"):
+                reachability_lines.append(f"TCP error: {tcp_info.get('error')}")
+        tls_info = probe_result.get("tls") or {}
+        if tls_info:
+            if tls_info.get("ok"):
+                protocol = tls_info.get("protocol") or tls_info.get("version")
+                cipher = tls_info.get("cipher")
+                reachability_lines.append(
+                    "TLS ok ({protocol} {cipher}) in {elapsed} ms".format(
+                        protocol=protocol or "n/a",
+                        cipher=cipher or "",
+                        elapsed=tls_info.get("elapsed_ms"),
+                    ).strip()
+                )
+            elif tls_info.get("error"):
+                reachability_lines.append(f"TLS error: {tls_info.get('error')}")
+        http_head = probe_result.get("http_head") or {}
+        if http_head:
+            if http_head.get("ok"):
+                reachability_lines.append(
+                    f"HTTP HEAD: {http_head.get('status')} in {http_head.get('elapsed_ms')} ms"
+                )
+            elif http_head.get("error"):
+                reachability_lines.append(f"HTTP HEAD error: {http_head.get('error')}")
+        if not reachability_lines and probe_result.get("error"):
+            reachability_lines.append(f"Probe error: {probe_result.get('error')}")
+    if not reachability_lines:
+        reachability_lines.append("Probe skipped or unavailable")
+
+    fallback_info = diagnostics.get("fallback") or {}
+    fallback_used_flag = bool(diagnostics.get("fallback_used"))
+    fallback_lines = [f"Used: {'yes' if fallback_used_flag else 'no'}"]
+    fallback_reason = fallback_info.get("reason")
+    if fallback_reason:
+        fallback_lines.append(f"Reason: {fallback_reason}")
+    fallback_status = fallback_info.get("status")
+    if fallback_status:
+        fallback_lines.append(f"Status: {fallback_status}")
+    fallback_rows = fallback_info.get("rows")
+    if fallback_rows is not None:
+        fallback_lines.append(f"Rows: {fallback_rows}")
+    fallback_error = fallback_info.get("error")
+    if fallback_error:
+        fallback_lines.append(f"Error: {fallback_error}")
+    fallback_source = fallback_info.get("resource_url") or fallback_info.get("package_url")
+    if fallback_source:
+        fallback_lines.append(f"Source: {_trim_text(fallback_source)}")
+
+    chunk_attempts_block = _format_bullets(chunk_attempt_lines)
+    http_attempts_block = _format_bullets(http_counters_lines)
+    reachability_block = _format_bullets(reachability_lines)
+    fallback_block = _format_bullets(fallback_lines)
+
     performance = diagnostics.get("performance") or {}
     performance_lines = [
         f"Duration (s): {performance.get('duration_s', 0)}",
@@ -1160,6 +1313,9 @@ def main(argv: list[str] | None = None) -> int:
         f"Rows (resolution-ready): {rows_resolution_ready}",
         f"Staged rows: {staged_notes}",
     ]
+    notes_lines.append(f"HDX fallback used: {'yes' if fallback_used_flag else 'no'}")
+    if fallback_error:
+        notes_lines.append(f"Fallback error: {fallback_error}")
     date_column_used = diagnostics.get("date_column") or "n/a"
     notes_lines.append(f"Date column: {date_column_used}")
     non_two_buckets = [
@@ -1217,11 +1373,15 @@ def main(argv: list[str] | None = None) -> int:
         "endpoints_block": _format_bullets(
             f"{name}: {url}" for name, url in endpoints_used.items()
         ),
+        "reachability_block": reachability_block,
+        "http_attempts_block": http_attempts_block,
         "attempts_block": _format_bullets(attempts_lines),
+        "chunk_attempts_block": chunk_attempts_block,
         "performance_block": _format_bullets(performance_lines),
         "rate_limit_block": _format_bullets(rate_limit_lines),
         "dataset_block": _format_bullets(dataset_lines),
         "staging_block": _format_bullets(staging_entries),
+        "fallback_block": fallback_block,
         "notes_block": _format_bullets(notes_lines),
     }
     summary_path = _write_summary(summary_context)

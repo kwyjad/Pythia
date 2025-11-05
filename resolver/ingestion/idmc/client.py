@@ -50,6 +50,9 @@ IDU_POSTGREST_LIMIT = 10000
 ISO3_BATCH_SIZE = 20
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
+DEFAULT_CONNECT_TIMEOUT_S = 5.0
+DEFAULT_READ_TIMEOUT_S = 25.0
+
 _CACHE_LOCKS: Dict[str, threading.Lock] = {}
 _CACHE_LOCKS_LOCK = threading.Lock()
 
@@ -62,6 +65,35 @@ NETWORK_MODES: Tuple[NetworkMode, ...] = ("live", "cache_only", "fixture")
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _trim_url(url: str, limit: int = 160) -> str:
+    if len(url) <= limit:
+        return url
+    return url[: max(limit - 3, 1)] + "..."
+
+
+def _env_timeout(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        LOGGER.warning("Invalid %s=%r; using default %.1f", name, raw, default)
+        return default
+    if value < 0:
+        LOGGER.warning("Negative %s=%r; using default %.1f", name, raw, default)
+        return default
+    return float(value)
+
+
+def _http_timeouts() -> Tuple[float, float]:
+    connect = _env_timeout("IDMC_HTTP_CONNECT_TIMEOUT_S", DEFAULT_CONNECT_TIMEOUT_S)
+    read = _env_timeout("IDMC_HTTP_READ_TIMEOUT_S", DEFAULT_READ_TIMEOUT_S)
+    if read <= 0:
+        read = DEFAULT_READ_TIMEOUT_S
+    return connect, read
 
 
 def _cache_lock(key: str) -> threading.Lock:
@@ -372,7 +404,11 @@ def _postgrest_filters(
     return params
 
 
-def _http_status_bucket(status: Optional[int]) -> Optional[str]:
+def _http_status_bucket(status: Optional[int | str]) -> Optional[str]:
+    if isinstance(status, str):
+        if status == "timeout":
+            return "timeout"
+        return "other"
     if status is None:
         return None
     if 200 <= status < 300:
@@ -554,8 +590,17 @@ def fetch_idu_json(
         "planned_sleep_s": [],
         "attempt_durations_ms": [],
         "latency_ms": {"p50": 0, "p95": 0, "max": 0},
-        "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0},
+        "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0},
         "exception_counts": {},
+        "requests_ok_2xx": 0,
+        "requests_4xx": 0,
+        "requests_5xx": 0,
+        "requests_other": 0,
+        "timeouts": 0,
+        "other_exceptions": 0,
+        "last_error": None,
+        "last_error_url": None,
+        "last_exception": None,
     }
     LOGGER.debug(
         "IDMC request planned: chunk=%s window_start=%s window_end=%s",
@@ -580,7 +625,24 @@ def fetch_idu_json(
         "network_mode": network_mode,
         "fallback": None,
         "fallback_allowed": allow_fallback,
+        "fallback_used": False,
+        "http_attempt_summary": {
+            "planned": 0,
+            "ok_2xx": 0,
+            "status_4xx": 0,
+            "status_5xx": 0,
+            "status_other": 0,
+            "timeouts": 0,
+            "other_exceptions": 0,
+        },
     }
+
+    connect_timeout_s, read_timeout_s = _http_timeouts()
+    diagnostics["http_timeouts"] = {
+        "connect_s": connect_timeout_s,
+        "read_s": read_timeout_s,
+    }
+    zero_row_reasons: Dict[str, str] = {}
 
     select_list: List[str] = []
     for column in list(select_columns or DEFAULT_POSTGREST_COLUMNS):
@@ -726,22 +788,36 @@ def fetch_idu_json(
                 else:
                     cache_stats["misses"] += 1
                     request_index += 1
+                    diagnostics["http_attempt_summary"]["planned"] += 1
                     try:
                         LOGGER.debug("IDMC GET %s", url)
                         status, headers, payload_body, http_diag = http_get(
                             url,
-                            timeout=10.0,
+                            timeout=(connect_timeout_s, read_timeout_s),
                             retries=2,
                             backoff_s=0.5,
                             rate_limiter=rate_limiter,
                             max_bytes=max_bytes,
                             stream_path=f"{cache_path}.partial",
-                            headers={"Accept": "application/json"},
                         )
                         bucket = _http_status_bucket(status)
                         if bucket:
                             http_info["status_counts"].setdefault(bucket, 0)
                             http_info["status_counts"][bucket] += 1
+                        http_info["status_last"] = status
+                        summary_counters = diagnostics["http_attempt_summary"]
+                        if 200 <= status < 300:
+                            http_info["requests_ok_2xx"] += 1
+                            summary_counters["ok_2xx"] += 1
+                        elif 400 <= status < 500:
+                            http_info["requests_4xx"] += 1
+                            summary_counters["status_4xx"] += 1
+                        elif 500 <= status < 600:
+                            http_info["requests_5xx"] += 1
+                            summary_counters["status_5xx"] += 1
+                        else:
+                            http_info["requests_other"] += 1
+                            summary_counters["status_other"] += 1
                         diagnostics["requests"].append(
                             {
                                 "url": url,
@@ -781,11 +857,37 @@ def fetch_idu_json(
                         _record_exception(exc.__class__.__name__)
                         error_diag = exc.diagnostics or {}
                         status_error = error_diag.get("status")
-                        if status_error is not None:
-                            bucket = _http_status_bucket(status_error)
-                            if bucket:
-                                http_info["status_counts"][bucket] += 1
-                            http_info["status_last"] = status_error
+                        status_display: int | str | None = status_error
+                        if error_diag.get("timeout"):
+                            status_display = "timeout"
+                        bucket = _http_status_bucket(status_display)
+                        if bucket:
+                            http_info["status_counts"].setdefault(bucket, 0)
+                            http_info["status_counts"][bucket] += 1
+                        http_info["status_last"] = status_display
+                        summary_counters = diagnostics["http_attempt_summary"]
+                        if status_display == "timeout":
+                            http_info["timeouts"] += 1
+                            summary_counters["timeouts"] += 1
+                        elif isinstance(status_display, int):
+                            if 200 <= status_display < 300:
+                                http_info["requests_ok_2xx"] += 1
+                                summary_counters["ok_2xx"] += 1
+                            elif 400 <= status_display < 500:
+                                http_info["requests_4xx"] += 1
+                                summary_counters["status_4xx"] += 1
+                            elif 500 <= status_display < 600:
+                                http_info["requests_5xx"] += 1
+                                summary_counters["status_5xx"] += 1
+                            else:
+                                http_info["requests_other"] += 1
+                                summary_counters["status_other"] += 1
+                        else:
+                            http_info["requests_other"] += 1
+                            summary_counters["status_other"] += 1
+                        if not error_diag.get("timeout") and status_error is None:
+                            http_info["other_exceptions"] += 1
+                            summary_counters["other_exceptions"] += 1
                         attempts_error = int(error_diag.get("attempts", 1) or 1)
                         http_info["requests"] += attempts_error
                         http_info["retries"] += int(error_diag.get("retries", 0) or 0)
@@ -815,12 +917,12 @@ def fetch_idu_json(
                             [int(round(value * 1000)) for value in attempt_times]
                         )
                         cache_record["error"] = exc.__class__.__name__
-                        cache_record["status"] = status_error
+                        cache_record["status"] = status_display
                         cache_stats["entries"].append(cache_record)
                         diagnostics["requests"].append(
                             {
                                 "url": url,
-                                "status": status_error,
+                                "status": status_display,
                                 "cache": "miss",
                                 "error": exc.__class__.__name__,
                                 "via": "http_get",
@@ -836,36 +938,49 @@ def fetch_idu_json(
                                     or last_exc.get("reason")
                                 )
                         chunk_name = chunk_label or "full"
-                        diagnostics["attempts"].append(
-                            {
-                                "chunk": chunk_name,
-                                "via": "http_get",
-                                "status": status_error,
-                                "error": exc.__class__.__name__,
-                            }
-                        )
+                        status_display: int | str | None = status_error
+                        if error_diag.get("timeout"):
+                            status_display = "timeout"
+                        attempt_entry = {
+                            "chunk": chunk_name,
+                            "via": "http_get",
+                            "status": status_display,
+                            "error": exc.__class__.__name__,
+                        }
+                        if status_display == "timeout":
+                            attempt_entry["zero_rows_reason"] = "timeout"
+                            zero_row_reasons[chunk_name] = "timeout"
+                        diagnostics["attempts"].append(attempt_entry)
                         fetch_errors.append(
                             {
                                 "chunk": chunk_name,
                                 "url": url,
                                 "iso_batch": cache_params["iso_batch"],
                                 "exception": exc.__class__.__name__,
-                                "status": status_error,
+                                "status": status_display,
                                 "message": snippet,
                             }
                         )
+                        http_info["last_error"] = {
+                            "type": exc.__class__.__name__,
+                            "message": snippet or str(exc),
+                        }
+                        http_info["last_error_url"] = url
+                        http_info["last_exception"] = exc.__class__.__name__
                         LOGGER.debug(
-                            "idmc: chunk=%s via=http_get status=%s error=%s",
+                            "idmc: chunk=%s via=http_get status=%s error=%s url=%s",
                             chunk_name,
-                            status_error,
+                            status_display,
                             exc.__class__.__name__,
+                            _trim_url(url),
                         )
                         if allow_fallback:
                             fallback_diag_entry: Dict[str, Any] = {
                                 "type": "hdx",
                                 "reason": "http_error",
-                                "status": status_error,
+                                "status": status_display,
                                 "chunk": chunk_name,
+                                "used": False,
                             }
                             try:
                                 fallback_frame, fallback_diag = _hdx_fetch_latest_csv()
@@ -881,13 +996,21 @@ def fetch_idu_json(
                                 fallback_rows = filtered.to_dict("records")
                                 rows.extend(fallback_rows)
                                 fallback_diag_entry["rows"] = len(fallback_rows)
-                                diagnostics["attempts"].append(
-                                    {
-                                        "chunk": chunk_name,
-                                        "via": "hdx_fallback",
-                                        "rows": len(fallback_rows),
-                                    }
-                                )
+                                fallback_diag_entry["used"] = True
+                                diagnostics["fallback_used"] = True
+                                fallback_attempt = {
+                                    "chunk": chunk_name,
+                                    "via": "hdx_fallback",
+                                    "rows": len(fallback_rows),
+                                }
+                                if len(fallback_rows) == 0:
+                                    fallback_attempt["zero_rows_reason"] = (
+                                        "timeout_fallback_empty"
+                                    )
+                                    zero_row_reasons[chunk_name] = "timeout_fallback_empty"
+                                else:
+                                    zero_row_reasons.pop(chunk_name, None)
+                                diagnostics["attempts"].append(fallback_attempt)
                                 LOGGER.debug(
                                     "idmc: chunk=%s via=hdx_fallback rows=%d",
                                     chunk_name,
@@ -974,10 +1097,11 @@ def fetch_idu_json(
                     }
                 )
                 LOGGER.debug(
-                    "idmc: chunk=%s via=http_get status=%s rows=%d",
+                    "idmc: chunk=%s via=http_get status=%s rows=%d url=%s",
                     chunk_label or "full",
                     status,
                     len(chunk_rows),
+                    _trim_url(url),
                 )
 
                 http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
@@ -1022,15 +1146,10 @@ def fetch_idu_json(
             raise
         diagnostics["fallback"] = {
             "type": "hdx",
+            "used": True,
             **fallback_diag,
         }
-        diagnostics["attempts"].append(
-            {
-                "chunk": chunk_label or "full",
-                "via": "hdx_fallback",
-                "status": "ok",
-            }
-        )
+        diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
         filtered = _hdx_filter(
             fallback_frame,
@@ -1040,12 +1159,25 @@ def fetch_idu_json(
             window_start=window_start,
             window_end=window_end,
         )
+        fallback_rows = filtered.to_dict("records")
+        diagnostics["fallback"]["rows"] = len(fallback_rows)
+        fallback_attempt = {
+            "chunk": chunk_label or "full",
+            "via": "hdx_fallback",
+            "rows": len(fallback_rows),
+        }
+        if len(fallback_rows) == 0:
+            fallback_attempt["zero_rows_reason"] = "timeout_fallback_empty"
+            zero_row_reasons[chunk_label or "full"] = "timeout_fallback_empty"
+        else:
+            zero_row_reasons.pop(chunk_label or "full", None)
+        diagnostics["attempts"].append(fallback_attempt)
         diagnostics["mode"] = "fallback"
         LOGGER.info(
             "idmc: HDX fallback enabled and used (rows=%d)",
-            len(filtered),
+            len(fallback_rows),
         )
-        frame, filters = _build_frame(filtered.to_dict("records"))
+        frame, filters = _build_frame(fallback_rows)
         diagnostics["filters"] = filters
         diagnostics["raw_path"] = None
         http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
@@ -1058,6 +1190,11 @@ def fetch_idu_json(
     diagnostics["filters"] = filters
     diagnostics["fetch_errors"] = fetch_errors
     diagnostics["chunk_error"] = bool(chunk_error)
+    if zero_row_reasons:
+        diagnostics["zero_rows_reasons"] = dict(zero_row_reasons)
+        if not filters.get("rows_after"):
+            first_reason = next(iter(zero_row_reasons.values()))
+            diagnostics["filters"]["zero_rows_reason"] = first_reason
     http_info["latency_ms"] = _latency_block(http_info.get("attempt_durations_ms", []))
     diagnostics["http"] = http_info
     diagnostics["cache"] = cache_stats
@@ -1179,6 +1316,16 @@ def fetch(
         LOGGER.warning(
             "IDMC fetch invoked without a date window; returning empty payload",
         )
+        connect_timeout_s, read_timeout_s = _http_timeouts()
+        http_attempt_summary = {
+            "planned": 0,
+            "ok_2xx": 0,
+            "status_4xx": 0,
+            "status_5xx": 0,
+            "status_other": 0,
+            "timeouts": 0,
+            "other_exceptions": 0,
+        }
         empty_frame = pd.DataFrame(
             columns=[
                 "iso3",
@@ -1238,6 +1385,11 @@ def fetch(
             "requests_executed": 0,
             "window": {"start": None, "end": None, "window_days": None},
             "fallback_allowed": fallback_allowed,
+            "http_attempt_summary": http_attempt_summary,
+            "http_timeouts": {"connect_s": connect_timeout_s, "read_s": read_timeout_s},
+            "attempts": [],
+            "fallback": None,
+            "fallback_used": False,
         }
         return {"monthly_flow": empty_frame}, diagnostics
 
@@ -1320,7 +1472,7 @@ def fetch(
     total_rate_wait = 0.0
     total_duration_s = 0.0
     total_planned_wait = 0.0
-    status_counts = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
+    status_counts = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0}
     rows_before_total = 0
     attempt_latencies: List[int] = []
     cache_hits = 0
@@ -1331,9 +1483,42 @@ def fetch(
     exceptions_by_type: Dict[str, int] = {}
     total_chunk_errors = 0
     all_fetch_errors: List[Dict[str, Any]] = []
+    zero_rows_reasons_all: Dict[str, str] = {}
+    aggregated_attempts: List[Dict[str, Any]] = []
+    http_attempt_summary_totals = {
+        "planned": 0,
+        "ok_2xx": 0,
+        "status_4xx": 0,
+        "status_5xx": 0,
+        "status_other": 0,
+        "timeouts": 0,
+        "other_exceptions": 0,
+    }
+    http_timeouts_cfg: Optional[Dict[str, Any]] = None
+    fallback_used_total = False
+    fallback_rows_total = 0
+    fallback_details: List[Dict[str, Any]] = []
+    fallback_primary: Optional[Dict[str, Any]] = None
+    total_timeouts = 0
+    total_ok_2xx = 0
+    total_4xx = 0
+    total_5xx = 0
+    total_other_responses = 0
+    total_other_exceptions = 0
+    last_error_info: Optional[Dict[str, Any]] = None
+    last_error_url: Optional[str] = None
+    last_exception: Optional[str] = None
 
     for index in sorted(chunk_diags):
         diag = chunk_diags[index]
+        chunk = diag.get("chunk", {}) or {}
+        chunk_start = chunk.get("start")
+        chunk_end = chunk.get("end")
+        label = _chunk_label(
+            datetime.fromisoformat(chunk_start).date() if chunk_start else None,
+            datetime.fromisoformat(chunk_end).date() if chunk_end else None,
+        )
+
         http_block = diag.get("http", {})
         cache_block = diag.get("cache", {})
         total_requests += int(http_block.get("requests", 0) or 0)
@@ -1356,11 +1541,44 @@ def fetch(
         if diag.get("raw_path"):
             raw_path = diag["raw_path"]
         status_counts_block = http_block.get("status_counts") or {}
-        for bucket in ("2xx", "4xx", "5xx", "other"):
-            status_counts[bucket] += int(status_counts_block.get(bucket, 0) or 0)
+        for bucket in ("2xx", "4xx", "5xx", "other", "timeout"):
+            try:
+                status_counts[bucket] += int(status_counts_block.get(bucket, 0) or 0)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                continue
         status = http_block.get("status_last")
         if status is not None:
             last_status = status
+        try:
+            total_timeouts += int(http_block.get("timeouts", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            total_timeouts += 0
+        try:
+            total_ok_2xx += int(http_block.get("requests_ok_2xx", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            total_ok_2xx += 0
+        try:
+            total_4xx += int(http_block.get("requests_4xx", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            total_4xx += 0
+        try:
+            total_5xx += int(http_block.get("requests_5xx", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            total_5xx += 0
+        try:
+            total_other_responses += int(http_block.get("requests_other", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            total_other_responses += 0
+        try:
+            total_other_exceptions += int(http_block.get("other_exceptions", 0) or 0)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            total_other_exceptions += 0
+        if http_block.get("last_error"):
+            last_error_info = http_block.get("last_error")
+        if http_block.get("last_error_url"):
+            last_error_url = http_block.get("last_error_url")
+        if http_block.get("last_exception"):
+            last_exception = http_block.get("last_exception")
         exceptions_block = http_block.get("exception_counts") or {}
         for name, value in exceptions_block.items():
             try:
@@ -1373,15 +1591,49 @@ def fetch(
         fetch_diag_entries = diag.get("fetch_errors") or []
         if isinstance(fetch_diag_entries, list):
             all_fetch_errors.extend(fetch_diag_entries)
-        chunk = diag.get("chunk", {})
-        chunk_start = chunk.get("start")
-        chunk_end = chunk.get("end")
-        label = _chunk_label(
-            datetime.fromisoformat(chunk_start).date() if chunk_start else None,
-            datetime.fromisoformat(chunk_end).date() if chunk_end else None,
-        )
+        summary_block = diag.get("http_attempt_summary") or {}
+        for key in http_attempt_summary_totals:
+            try:
+                http_attempt_summary_totals[key] += int(summary_block.get(key, 0) or 0)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                continue
+        if http_timeouts_cfg is None:
+            timeouts_block = diag.get("http_timeouts")
+            if isinstance(timeouts_block, dict) and timeouts_block:
+                http_timeouts_cfg = dict(timeouts_block)
+        attempts_block = diag.get("attempts") or []
+        for attempt in attempts_block:
+            if isinstance(attempt, dict):
+                attempt_entry = dict(attempt)
+                attempt_entry.setdefault("chunk", label)
+                aggregated_attempts.append(attempt_entry)
+        fallback_block = diag.get("fallback")
+        if isinstance(fallback_block, dict) and fallback_block:
+            fallback_entry = dict(fallback_block)
+            fallback_entry.setdefault("chunk", label)
+            fallback_details.append(fallback_entry)
+            try:
+                fallback_rows_total += int(fallback_entry.get("rows", 0) or 0)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                fallback_rows_total += 0
+            if fallback_entry.get("used"):
+                fallback_used_total = True
+                fallback_primary = fallback_entry
+            elif fallback_primary is None:
+                fallback_primary = fallback_entry
+        if diag.get("fallback_used"):
+            fallback_used_total = True
         filters_block = diag.get("filters") or {}
         rows_before_total += int(filters_block.get("rows_before", 0) or 0)
+        zero_reason_value = filters_block.get("zero_rows_reason")
+        if zero_reason_value and label:
+            zero_rows_reasons_all.setdefault(label, str(zero_reason_value))
+        diag_zero_rows = diag.get("zero_rows_reasons")
+        if isinstance(diag_zero_rows, dict):
+            for key, value in diag_zero_rows.items():
+                if value is None:
+                    continue
+                zero_rows_reasons_all[str(key)] = str(value)
         chunk_entries.append(
             {
                 "month": label,
@@ -1411,9 +1663,41 @@ def fetch(
         "retry_after_events": total_retry_after_events,
         "status_counts": status_counts_serialized,
         "status_counts_extended": dict(status_counts),
+        "timeouts": total_timeouts,
+        "requests_ok_2xx": total_ok_2xx,
+        "requests_4xx": total_4xx,
+        "requests_5xx": total_5xx,
+        "requests_other": total_other_responses,
+        "other_exceptions": total_other_exceptions,
     }
+    if exceptions_by_type:
+        http_summary["exception_counts"] = dict(exceptions_by_type)
+    if last_error_info:
+        http_summary["last_error"] = last_error_info
+    if last_error_url:
+        http_summary["last_error_url"] = last_error_url
+    if last_exception:
+        http_summary["last_exception"] = last_exception
 
     data: Dict[str, pd.DataFrame] = {"monthly_flow": combined}
+
+    if http_timeouts_cfg is None:
+        connect_timeout_s, read_timeout_s = _http_timeouts()
+        http_timeouts_cfg = {"connect_s": connect_timeout_s, "read_s": read_timeout_s}
+
+    fallback_summary: Optional[Dict[str, Any]] = None
+    if fallback_details:
+        fallback_summary = {}
+        if fallback_primary:
+            for key, value in fallback_primary.items():
+                if key in {"rows", "used"}:
+                    continue
+                fallback_summary.setdefault(key, value)
+        fallback_summary["used"] = bool(fallback_used_total)
+        fallback_summary["rows"] = int(fallback_rows_total)
+        fallback_summary["details"] = fallback_details
+    elif fallback_used_total:
+        fallback_summary = {"used": True, "rows": int(fallback_rows_total)}
 
     performance = build_performance_block(
         requests=total_requests,
@@ -1477,9 +1761,23 @@ def fetch(
             "end": window_end.isoformat() if window_end else None,
             "window_days": window_days,
         },
-        "requests_planned": len(jobs),
+        "requests_planned": int(http_attempt_summary_totals.get("planned", 0) or len(jobs)),
         "requests_executed": total_requests,
         "fallback_allowed": fallback_allowed,
+        "http_attempt_summary": http_attempt_summary_totals,
+        "attempts": aggregated_attempts,
+        "fallback": fallback_summary,
+        "fallback_used": bool(fallback_used_total),
+        "http_timeouts": http_timeouts_cfg,
     }
+    if zero_rows_reasons_all:
+        diagnostics["zero_rows_reasons"] = dict(zero_rows_reasons_all)
+        filters_block = diagnostics.get("filters") or {}
+        if not filters_block.get("zero_rows_reason") and int(filters_block.get("rows_after", 0) or 0) == 0:
+            first_reason = next(iter(zero_rows_reasons_all.values()), None)
+            if first_reason is not None:
+                filters_block = dict(filters_block)
+                filters_block["zero_rows_reason"] = first_reason
+                diagnostics["filters"] = filters_block
 
     return data, diagnostics

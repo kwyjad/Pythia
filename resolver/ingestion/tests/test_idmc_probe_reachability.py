@@ -41,8 +41,8 @@ def test_probe_idmc_records_status(monkeypatch, tmp_path: Path):
     assert rc == 0
 
     summary_text = summary_path.read_text(encoding="utf-8")
-    assert "IDMC reachability" in summary_text
-    assert "HTTP status: 200" in summary_text
+    assert "## IDMC Reachability" in summary_text
+    assert "HTTP GET: status 200" in summary_text
     assert "Egress IP: 10.0.0.1" in summary_text
 
     payload = (diag_dir / "reachability.json").read_text(encoding="utf-8")
