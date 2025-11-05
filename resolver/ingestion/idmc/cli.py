@@ -7,7 +7,7 @@ import io
 import logging
 import os
 import subprocess
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, cast
 
@@ -217,6 +217,21 @@ def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
     except ValueError:
         LOGGER.warning("Invalid %s date '%s'; ignoring", label, value)
         return None
+
+
+def _resolve_window_from_flags_or_env(
+    args, env_start: Optional[str] = None, env_end: Optional[str] = None
+) -> tuple[Optional[date], Optional[date]]:
+    """Resolve the requested window from CLI flags or workflow env vars."""
+
+    if args.start or args.end:
+        return _parse_iso_date(args.start, "start"), _parse_iso_date(args.end, "end")
+
+    if env_start is None:
+        env_start = _first_env_value("RESOLVER_START_ISO", "BACKFILL_START_ISO")
+    if env_end is None:
+        env_end = _first_env_value("RESOLVER_END_ISO", "BACKFILL_END_ISO")
+    return _parse_iso_date(env_start, "start"), _parse_iso_date(env_end, "end")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -506,41 +521,28 @@ def main(argv: list[str] | None = None) -> int:
     cfg_window_start = getattr(cfg_window, "start", None)
     cfg_window_end = getattr(cfg_window, "end", None)
 
-    raw_start_iso = args.start or env_window_start
-    raw_end_iso = args.end or env_window_end
+    window_start_date, window_end_date = _resolve_window_from_flags_or_env(
+        args, env_start=env_window_start, env_end=env_window_end
+    )
     window_source = "unset"
     if args.start or args.end:
         window_source = "cli"
     elif env_window_start or env_window_end:
         window_source = "env"
-    if raw_start_iso is None and raw_end_iso is None:
-        raw_start_iso = cfg_window_start
-        raw_end_iso = cfg_window_end
-        if raw_start_iso or raw_end_iso:
+    if window_source == "unset" and (cfg_window_start or cfg_window_end):
+        window_start_date = _parse_iso_date(cfg_window_start, "start")
+        window_end_date = _parse_iso_date(cfg_window_end, "end")
+        if window_start_date or window_end_date:
             window_source = "config"
 
-    window_start_date = _parse_iso_date(raw_start_iso, "start")
-    window_end_date = _parse_iso_date(raw_end_iso, "end")
     if window_start_date and window_end_date and window_start_date > window_end_date:
         LOGGER.warning(
             "Start date %s is after end date %s; swapping", window_start_date, window_end_date
         )
         window_start_date, window_end_date = window_end_date, window_start_date
 
-    if window_start_date is None and window_end_date is None and window_source == "unset":
-        fallback_end = datetime.now(timezone.utc).date()
-        fallback_start = fallback_end - timedelta(days=30)
-        window_start_date = fallback_start
-        window_end_date = fallback_end
-        window_source = "fallback(now-30d)"
-
     window_start_iso = window_start_date.isoformat() if window_start_date else None
     window_end_iso = window_end_date.isoformat() if window_end_date else None
-
-    if not (window_start_iso or window_end_iso):
-        LOGGER.warning(
-            "No explicit start/end window provided; diagnostics will report a null window"
-        )
 
     enable_export = bool(args.enable_export)
     if env_enable_export is not None:
@@ -657,9 +659,51 @@ def main(argv: list[str] | None = None) -> int:
         LOGGER.info("Date window disabled")
     else:
         LOGGER.warning(
-            "No date window provided; running with zero-row outcome (EMPTY_POLICY=%s)",
+            "No start/end provided; skipping IDMC fetch (empty_policy=%s).",
             empty_policy,
         )
+    if skip_due_to_window:
+        token_env_name = getattr(cfg.api, "token_env", "IDMC_API_TOKEN")
+        token_present = bool(os.getenv(token_env_name, "").strip())
+        countries_scope = sorted(
+            {c.strip().upper() for c in selected_countries if c.strip()}
+        )
+        why_zero_payload = {
+            "reason": "no_window",
+            "network_mode": network_mode,
+            "token_present": token_present,
+            "window": {"start": None, "end": None, "source": window_source},
+            "date_window": {"start": None, "end": None},
+            "window_source": window_source,
+            "countries": countries_scope,
+            "countries_count": len(selected_countries),
+            "countries_sample": selected_countries[:10],
+            "countries_source": countries_source,
+            "series": list(selected_series),
+            "network_attempted": False,
+            "requests_attempted": 0,
+            "requests_planned": 0,
+            "rows": {
+                "raw": 0,
+                "normalized": 0,
+                "resolution_ready": 0,
+                "staged": {},
+            },
+            "empty_policy": empty_policy,
+        }
+        write_why_zero(why_zero_payload)
+        connectors_payload = {
+            "status": "ok-empty" if empty_policy != "fail" else "error-empty",
+            "reason": "no_window",
+            "rows": 0,
+            "window": {"start": None, "end": None, "source": window_source},
+            "network_mode": network_mode,
+            "empty_policy": empty_policy,
+        }
+        write_connectors_line(connectors_payload)
+        if empty_policy == "fail":
+            return 1
+        return 0
     overall_start = tick()
 
     probe_result = None
@@ -674,91 +718,24 @@ def main(argv: list[str] | None = None) -> int:
             probe_result = {"error": str(exc)}
     probe_ms = to_ms(tick() - probe_start)
 
-    if skip_due_to_window:
-        empty_frame = pd.DataFrame(
-            columns=[
-                "iso3",
-                "as_of_date",
-                "metric",
-                "value",
-                "series_semantics",
-                "source",
-            ]
-        )
-        data = {"monthly_flow": empty_frame}
-        countries_scope = sorted(
-            {c.strip().upper() for c in selected_countries if c.strip()}
-        )
-        diagnostics = {
-            "mode": "offline",
-            "network_mode": network_mode,
-            "http": {
-                "requests": 0,
-                "retries": 0,
-                "status_last": None,
-                "latency_ms": {"p50": 0, "p95": 0, "max": 0},
-                "wire_bytes": 0,
-                "body_bytes": 0,
-                "retry_after_events": 0,
-            },
-            "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
-            "filters": {
-                "window_start": None,
-                "window_end": None,
-                "countries": countries_scope,
-                "rows_before": 0,
-                "rows_after": 0,
-            },
-            "performance": {
-                "requests": 0,
-                "wire_bytes": 0,
-                "body_bytes": 0,
-                "duration_s": 0,
-                "throughput_kibps": 0,
-                "records_per_sec": 0,
-            },
-            "rate_limit": {
-                "req_per_sec": float(rate_limit or 0.0),
-                "max_concurrency": int(max_concurrency or 1),
-                "retries": 0,
-                "retry_after_events": 0,
-                "retry_after_wait_s": 0.0,
-                "rate_limit_wait_s": 0.0,
-                "planned_wait_s": 0.0,
-            },
-            "chunks": {"enabled": False, "count": 0, "by_month": []},
-            "http_status_counts": {
-                "2xx": 0,
-                "4xx": 0,
-                "5xx": 0,
-            }
-            if network_mode == "live"
-            else None,
-            "raw_path": None,
-            "requests_planned": 0,
-            "requests_executed": 0,
-            "window": {"start": None, "end": None, "window_days": None},
-        }
-        fetch_ms = 0
-    else:
-        fetch_start = tick()
-        data, diagnostics = fetch(
-            cfg,
-            network_mode=network_mode,
-            soft_timeouts=True,
-            window_start=window_start_date,
-            window_end=window_end_date,
-            window_days=window_days,
-            only_countries=selected_countries,
-            base_url=args.base_url,
-            cache_ttl=args.cache_ttl,
-            rate_per_sec=rate_limit,
-            max_concurrency=max_concurrency,
-            max_bytes=max_bytes,
-            chunk_by_month=chunk_by_month,
-            allow_hdx_fallback=allow_hdx_fallback,
-        )
-        fetch_ms = to_ms(tick() - fetch_start)
+    fetch_start = tick()
+    data, diagnostics = fetch(
+        cfg,
+        network_mode=network_mode,
+        soft_timeouts=True,
+        window_start=window_start_date,
+        window_end=window_end_date,
+        window_days=window_days,
+        only_countries=selected_countries,
+        base_url=args.base_url,
+        cache_ttl=args.cache_ttl,
+        rate_per_sec=rate_limit,
+        max_concurrency=max_concurrency,
+        max_bytes=max_bytes,
+        chunk_by_month=chunk_by_month,
+        allow_hdx_fallback=allow_hdx_fallback,
+    )
+    fetch_ms = to_ms(tick() - fetch_start)
 
     date_window = {"start": window_start_iso, "end": window_end_iso}
 
