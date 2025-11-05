@@ -3542,7 +3542,9 @@ def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def ensure_header_only() -> None:
-    _write_header_only_csv(OUT_PATH, RESCUE_HEADERS)
+    """Write the canonical schema header to the primary staging CSV."""
+
+    _write_header_only_csv(OUT_PATH, CANONICAL_HEADERS)
     ensure_manifest_for_csv(OUT_PATH, schema_version="dtm_displacement.v1", source_id="dtm")
 
 
