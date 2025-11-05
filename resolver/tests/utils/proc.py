@@ -13,7 +13,7 @@ def run(
     *,
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
-    check: bool = True,
+    check: bool = False,
     capture_output: bool = False,
     text: bool = False,
     timeout: Optional[int] = None,

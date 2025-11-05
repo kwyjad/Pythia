@@ -574,6 +574,10 @@ def test_http_trace_written(
     ]
     assert lines
     assert all("country" in entry for entry in lines)
+    assert all("url_template" in entry for entry in lines)
+    assert all("status" in entry for entry in lines)
+    assert all("level" in entry for entry in lines)
+    assert all("ts" in entry for entry in lines)
 
 
 def test_country_kwargs_switch_on_iso3() -> None:

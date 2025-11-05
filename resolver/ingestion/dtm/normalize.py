@@ -39,16 +39,19 @@ def detect_value_column(
     """
 
     chosen: list[ValueColumnEntry] = []
+    column_lookup = {str(column).casefold(): column for column in df.columns}
     for alias in aliases:
-        if alias not in df.columns:
+        alias_key = str(alias).casefold()
+        column_name = column_lookup.get(alias_key)
+        if column_name is None:
             continue
-        numeric = pd.to_numeric(df[alias], errors="coerce")
+        numeric = pd.to_numeric(df[column_name], errors="coerce")
         count = int(numeric.notna().sum())
         LOG.debug("normalize.detect_value_column candidate=%s count=%d", alias, count)
         if count > 0:
-            chosen.append({"column": alias, "count": count})
-            LOG.debug("normalize.detect_value_column selected=%s", alias)
-            return alias, chosen
+            chosen.append({"column": column_name, "count": count})
+            LOG.debug("normalize.detect_value_column selected=%s", column_name)
+            return column_name, chosen
     LOG.debug("normalize.detect_value_column no column matched from %s", list(aliases))
     return None, []
 

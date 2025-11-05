@@ -26,9 +26,6 @@ def _fast_tests_offline_env() -> None:
     defaults = {
         "PYTHONFAULTHANDLER": "1",
         "RESOLVER_OFFLINE": "1",
-        "IDMC_NETWORK_MODE": "fixture",
-        "DTM_FORCE_FAKE": "1",
-        "DTM_SOFT_TIMEOUTS": "1",
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
