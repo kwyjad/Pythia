@@ -16,6 +16,7 @@ import urllib.request
 
 import pandas as pd
 
+from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion.utils.country_utils import (
     read_countries_override_from_env,
     resolve_countries,
@@ -383,11 +384,6 @@ def _http_status_bucket(status: Optional[int]) -> Optional[str]:
     return "other"
 
 
-def _hdx_fallback_enabled() -> bool:
-    raw = os.getenv("IDMC_ALLOW_HDX_FALLBACK", "0").strip().lower()
-    return raw not in {"", "0", "false", "no"}
-
-
 def _hdx_dataset_slug() -> str:
     return os.getenv(
         "IDMC_HDX_DATASET",
@@ -519,6 +515,7 @@ def fetch_idu_json(
     chunk_label: Optional[str] = None,
     date_column: Optional[str] = None,
     select_columns: Optional[Iterable[str]] = None,
+    allow_fallback: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Fetch the IDU flat JSON payload for a specific window."""
 
@@ -575,12 +572,14 @@ def fetch_idu_json(
         "filters": {},
         "raw_path": None,
         "requests": [],
+        "attempts": [],
         "chunk": {
             "start": chunk_start.isoformat() if chunk_start else None,
             "end": chunk_end.isoformat() if chunk_end else None,
         },
         "network_mode": network_mode,
         "fallback": None,
+        "fallback_allowed": allow_fallback,
     }
 
     select_list: List[str] = []
@@ -682,6 +681,7 @@ def fetch_idu_json(
                     key,
                     None if use_cache_only else ttl_seconds,
                 )
+                cached_entry = cache_entry
                 payload_body: Optional[bytes] = None
                 body_path: Optional[str] = None
                 status: Optional[int] = None
@@ -693,7 +693,13 @@ def fetch_idu_json(
                     "offset": offset,
                     "iso_batch": cache_params["iso_batch"],
                 }
-                if cache_entry is not None:
+                refresh_live_chunk = (
+                    network_mode == "live"
+                    and isinstance(chunk_label, str)
+                    and chunk_label
+                    and chunk_label != "full"
+                )
+                if cache_entry is not None and not refresh_live_chunk:
                     cache_stats["hits"] += 1
                     cache_stats["hit"] = True
                     cache_record.update(cache_entry.metadata)
@@ -746,6 +752,7 @@ def fetch_idu_json(
                                     )
                                 ),
                                 "cache": "miss",
+                                "via": "http_get",
                             }
                         )
                         metadata = {
@@ -816,6 +823,7 @@ def fetch_idu_json(
                                 "status": status_error,
                                 "cache": "miss",
                                 "error": exc.__class__.__name__,
+                                "via": "http_get",
                             }
                         )
                         exceptions_list = error_diag.get("exceptions")
@@ -827,9 +835,18 @@ def fetch_idu_json(
                                     last_exc.get("message")
                                     or last_exc.get("reason")
                                 )
+                        chunk_name = chunk_label or "full"
+                        diagnostics["attempts"].append(
+                            {
+                                "chunk": chunk_name,
+                                "via": "http_get",
+                                "status": status_error,
+                                "error": exc.__class__.__name__,
+                            }
+                        )
                         fetch_errors.append(
                             {
-                                "chunk": chunk_label or "full",
+                                "chunk": chunk_name,
                                 "url": url,
                                 "iso_batch": cache_params["iso_batch"],
                                 "exception": exc.__class__.__name__,
@@ -837,11 +854,87 @@ def fetch_idu_json(
                                 "message": snippet,
                             }
                         )
+                        LOGGER.debug(
+                            "idmc: chunk=%s via=http_get status=%s error=%s",
+                            chunk_name,
+                            status_error,
+                            exc.__class__.__name__,
+                        )
+                        if allow_fallback:
+                            fallback_diag_entry: Dict[str, Any] = {
+                                "type": "hdx",
+                                "reason": "http_error",
+                                "status": status_error,
+                                "chunk": chunk_name,
+                            }
+                            try:
+                                fallback_frame, fallback_diag = _hdx_fetch_latest_csv()
+                                fallback_diag_entry.update(fallback_diag)
+                                filtered = _hdx_filter(
+                                    fallback_frame,
+                                    iso_batches=iso_batches or [],
+                                    chunk_start=chunk_start,
+                                    chunk_end=chunk_end,
+                                    window_start=window_start,
+                                    window_end=window_end,
+                                )
+                                fallback_rows = filtered.to_dict("records")
+                                rows.extend(fallback_rows)
+                                fallback_diag_entry["rows"] = len(fallback_rows)
+                                diagnostics["attempts"].append(
+                                    {
+                                        "chunk": chunk_name,
+                                        "via": "hdx_fallback",
+                                        "rows": len(fallback_rows),
+                                    }
+                                )
+                                LOGGER.debug(
+                                    "idmc: chunk=%s via=hdx_fallback rows=%d",
+                                    chunk_name,
+                                    len(fallback_rows),
+                                )
+                            except Exception as fallback_exc:  # pragma: no cover - network dependent
+                                fallback_diag_entry["error"] = str(fallback_exc)
+                                LOGGER.warning(
+                                    "idmc: HDX fallback failed for chunk %s (%s)",
+                                    chunk_name,
+                                    type(fallback_exc).__name__,
+                                )
+                            diagnostics["fallback"] = fallback_diag_entry
+                        elif cached_entry is not None and cached_entry.body:
+                            payload_body = cached_entry.body
+                            cache_record.update(cached_entry.metadata)
+                            mode = "cache"
+                            diagnostics["requests"].append(
+                                {
+                                    "url": url,
+                                    "status": cached_entry.metadata.get("status"),
+                                    "cache": "hit",
+                                    "via": "cache_refresh",
+                                }
+                            )
+                            payload = json.loads(payload_body.decode("utf-8"))
+                            raw_paths.append(_write_raw_snapshot(key, payload_body))
+                            chunk_rows = _normalise_rows(payload)
+                            rows.extend(chunk_rows)
+                            diagnostics["attempts"].append(
+                                {
+                                    "chunk": chunk_name,
+                                    "via": "cache_refresh",
+                                    "rows": len(chunk_rows),
+                                }
+                            )
+                            LOGGER.debug(
+                                "idmc: chunk=%s served from cache after error rows=%d",
+                                chunk_name,
+                                len(chunk_rows),
+                            )
+                            break
                         chunk_error = True
                         break
                     except Exception as exc:  # pragma: no cover - defensive
                         _record_exception(type(exc).__name__)
-                        if not _hdx_fallback_enabled():
+                        if not allow_fallback:
                             raise
                         diagnostics["fallback"] = {
                             "type": "hdx",
@@ -871,6 +964,21 @@ def fetch_idu_json(
                 raw_paths.append(_write_raw_snapshot(key, payload_body))
                 chunk_rows = _normalise_rows(payload)
                 rows.extend(chunk_rows)
+
+                diagnostics["attempts"].append(
+                    {
+                        "chunk": chunk_label or "full",
+                        "via": "http_get",
+                        "status": status,
+                        "rows": len(chunk_rows),
+                    }
+                )
+                LOGGER.debug(
+                    "idmc: chunk=%s via=http_get status=%s rows=%d",
+                    chunk_label or "full",
+                    status,
+                    len(chunk_rows),
+                )
 
                 http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
                 http_info["retries"] += int(http_diag.get("retries", 0) or 0)
@@ -902,7 +1010,7 @@ def fetch_idu_json(
 
         diagnostics["mode"] = mode
     except Exception:
-        if not _hdx_fallback_enabled():
+        if not allow_fallback:
             raise
         try:
             fallback_frame, fallback_diag = _hdx_fetch_latest_csv()
@@ -916,6 +1024,13 @@ def fetch_idu_json(
             "type": "hdx",
             **fallback_diag,
         }
+        diagnostics["attempts"].append(
+            {
+                "chunk": chunk_label or "full",
+                "via": "hdx_fallback",
+                "status": "ok",
+            }
+        )
         iso_batches = iso_batches or []
         filtered = _hdx_filter(
             fallback_frame,
@@ -970,6 +1085,7 @@ def fetch(
     max_concurrency: int = 1,
     max_bytes: Optional[int] = None,
     chunk_by_month: bool = False,
+    allow_hdx_fallback: Optional[bool] = None,
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
     """Return payloads for downstream normalization and diagnostics."""
 
@@ -1053,6 +1169,12 @@ def fetch(
     )
     countries = list(selected_countries)
 
+    fallback_allowed = (
+        allow_hdx_fallback
+        if allow_hdx_fallback is not None
+        else getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
+    )
+
     if window_start is None and window_end is None and window_days is None:
         LOGGER.warning(
             "IDMC fetch invoked without a date window; returning empty payload",
@@ -1115,6 +1237,7 @@ def fetch(
             "requests_planned": 0,
             "requests_executed": 0,
             "window": {"start": None, "end": None, "window_days": None},
+            "fallback_allowed": fallback_allowed,
         }
         return {"monthly_flow": empty_frame}, diagnostics
 
@@ -1157,6 +1280,7 @@ def fetch(
             chunk_label=label,
             date_column=schema_date_column,
             select_columns=select_columns,
+            allow_fallback=fallback_allowed,
         )
         LOGGER.debug(
             "Fetched chunk %s: rows=%d mode=%s status=%s",
@@ -1355,6 +1479,7 @@ def fetch(
         },
         "requests_planned": len(jobs),
         "requests_executed": total_requests,
+        "fallback_allowed": fallback_allowed,
     }
 
     return data, diagnostics

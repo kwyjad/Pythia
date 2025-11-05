@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, cast
 
 import pandas as pd
 
+from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion.utils.country_utils import (
     read_countries_override_from_env,
     resolve_countries,
@@ -296,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Partition long windows into month chunks",
     )
     parser.add_argument(
+        "--allow-hdx-fallback",
+        action="store_true",
+        help="Enable HDX CSV fallback when PostgREST requests fail",
+    )
+    parser.add_argument(
         "--enable-export",
         action="store_true",
         help="Enable resolution-ready facts export preview",
@@ -409,6 +415,13 @@ def main(argv: list[str] | None = None) -> int:
     cfg.cache.force_cache_only = network_mode == "cache_only"
 
     LOGGER.info("Effective network mode: %s", network_mode)
+
+    allow_hdx_fallback = bool(
+        args.allow_hdx_fallback
+        or getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
+    )
+    if allow_hdx_fallback:
+        LOGGER.info("HDX fallback enabled via flag/env")
 
     config_countries_raw = list(getattr(cfg.api, "countries", []))
     override_raw = read_countries_override_from_env()
@@ -708,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
             max_concurrency=max_concurrency,
             max_bytes=max_bytes,
             chunk_by_month=chunk_by_month,
+            allow_hdx_fallback=allow_hdx_fallback,
         )
         fetch_ms = to_ms(tick() - fetch_start)
 
