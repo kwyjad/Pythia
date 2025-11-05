@@ -581,11 +581,20 @@ def _format_rows(counts: Mapping[str, int]) -> str:
 
 
 def _format_http(http: Mapping[str, Any]) -> str:
-    success = http.get("2xx") or 0
-    client = http.get("4xx") or 0
-    server = http.get("5xx") or 0
-    retries = http.get("retries") or 0
-    return f"{success}/{client}/{server} ({retries})"
+    status_counts = {}
+    raw_counts = http.get("status_counts") or http
+    if isinstance(raw_counts, Mapping):
+        status_counts = {key: raw_counts.get(key) for key in ("2xx", "4xx", "5xx")}
+    success = _coerce_int(status_counts.get("2xx"))
+    client = _coerce_int(status_counts.get("4xx"))
+    server = _coerce_int(status_counts.get("5xx"))
+    retries = _coerce_int(http.get("retries"))
+    summary = f"{success}/{client}/{server} ({retries})"
+    if success == 0 and client == 0 and server == 0:
+        last_kind = http.get("last_exception_kind") or http.get("last_exception")
+        if last_kind:
+            summary += f"; neterr={last_kind}"
+    return summary
 
 
 def _format_coverage(min_value: Any, max_value: Any) -> str:
@@ -1501,6 +1510,111 @@ def _render_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _render_idmc_reachability_section(reachability: Mapping[str, Any]) -> List[str]:
+    lines = ["## IDMC Reachability", ""]
+    if not reachability:
+        lines.append("- **diagnostics/ingestion/idmc/probe.json:** not present")
+        lines.append("")
+        return lines
+
+    target = _ensure_dict(reachability.get("target"))
+    host = target.get("host", "backend.idmcdb.org")
+    port = target.get("port", 443)
+    lines.append(f"- **Target:** `{host}:{port}`")
+    captured_start = reachability.get("generated_at") or reachability.get("captured_at")
+    captured_end = reachability.get("completed_at")
+    if captured_start or captured_end:
+        lines.append(f"- **Captured:** {captured_start or '—'} → {captured_end or '—'}")
+
+    dns = _ensure_dict(reachability.get("dns"))
+    dns_records: List[str] = []
+    for entry in dns.get("records", []):
+        if isinstance(entry, Mapping):
+            address = entry.get("address")
+            family = entry.get("family")
+            if address:
+                dns_records.append(
+                    f"{address}{f' ({family})' if family else ''}"
+                )
+    if dns.get("error"):
+        dns_line = f"- **DNS:** error={dns.get('error')}"
+    else:
+        dns_line = f"- **DNS:** {', '.join(dns_records) if dns_records else '—'}"
+    if dns.get("elapsed_ms") is not None:
+        dns_line += f" ({dns.get('elapsed_ms')}ms)"
+    lines.append(dns_line)
+
+    tcp = _ensure_dict(reachability.get("tcp"))
+    if tcp:
+        if tcp.get("ok"):
+            peer = tcp.get("peer")
+            if isinstance(peer, (list, tuple)):
+                peer_text = ":".join(str(part) for part in peer)
+            else:
+                peer_text = str(peer or "")
+            tcp_line = "- **TCP:** ok"
+            if tcp.get("elapsed_ms") is not None:
+                tcp_line += f" in {tcp.get('elapsed_ms')}ms"
+            if peer_text:
+                tcp_line += f" (peer={peer_text})"
+        else:
+            tcp_line = f"- **TCP:** error={tcp.get('error', 'unknown')}"
+            if tcp.get("elapsed_ms") is not None:
+                tcp_line += f" after {tcp.get('elapsed_ms')}ms"
+        lines.append(tcp_line)
+
+    tls = _ensure_dict(reachability.get("tls"))
+    if tls:
+        if tls.get("ok"):
+            tls_line = "- **TLS:** ok"
+            version = tls.get("version")
+            cipher = tls.get("cipher")
+            if version:
+                tls_line += f" version={version}"
+            if cipher:
+                tls_line += f" cipher={cipher}"
+            if tls.get("elapsed_ms") is not None:
+                tls_line += f" ({tls.get('elapsed_ms')}ms)"
+        else:
+            tls_line = f"- **TLS:** error={tls.get('error', 'unknown')}"
+            if tls.get("elapsed_ms") is not None:
+                tls_line += f" after {tls.get('elapsed_ms')}ms"
+        lines.append(tls_line)
+
+    http = _ensure_dict(reachability.get("http"))
+    if http:
+        if http.get("status_code") is not None:
+            http_line = f"- **HTTP GET:** status={http.get('status_code')}"
+            if http.get("elapsed_ms") is not None:
+                http_line += f" ({http.get('elapsed_ms')}ms)"
+        else:
+            error_text = http.get("exception") or http.get("error") or "unknown"
+            http_line = f"- **HTTP GET:** error={error_text}"
+            if http.get("elapsed_ms") is not None:
+                http_line += f" after {http.get('elapsed_ms')}ms"
+        lines.append(http_line)
+
+    egress = reachability.get("egress") or {}
+    egress_ip = None
+    if isinstance(egress, Mapping):
+        for key in ("ifconfig.me", "ipify"):
+            entry = _ensure_dict(egress.get(key))
+            if entry.get("text"):
+                egress_ip = entry.get("text")
+                break
+    if egress_ip:
+        lines.append(f"- **Egress IP:** {egress_ip}")
+
+    ca_bundle = reachability.get("ca_bundle") or tls.get("ca_bundle")
+    if ca_bundle:
+        lines.append(f"- **CA bundle:** {ca_bundle}")
+    verify = http.get("verify") if isinstance(http, Mapping) else None
+    if verify is not None:
+        lines.append(f"- **Verify TLS:** {verify}")
+    lines.append("")
+    return lines
+
+
 def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
     headers = [
         "Connector",
@@ -1644,6 +1758,7 @@ def build_markdown(
     *,
     dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
+    idmc_reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
@@ -1812,6 +1927,10 @@ def build_markdown(
     if reachability_section:
         lines.extend(reachability_section)
 
+    idmc_section = _render_idmc_reachability_section(idmc_reachability or {})
+    if idmc_section:
+        lines.extend(idmc_section)
+
     lines.append("## Per-Connector Table")
     lines.append("")
     lines.extend(_build_table(sorted_entries))
@@ -1913,10 +2032,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     reachability_path = Path("diagnostics/ingestion/dtm/reachability.json")
     reachability_payload = _safe_load_json(reachability_path) or {}
+    idmc_reachability_path = Path("diagnostics/ingestion/idmc/probe.json")
+    idmc_reachability_payload = _safe_load_json(idmc_reachability_path) or {}
     markdown = build_markdown(
         deduped_entries,
         dedupe_notes=dedupe_notes,
         reachability=reachability_payload,
+        idmc_reachability=idmc_reachability_payload,
         export_summary=export_summary,
         mapping_debug=mapping_debug_records,
     )
@@ -1931,6 +2053,7 @@ def render_summary_md(
     *,
     dedupe_notes: Mapping[str, int] | None = None,
     reachability: Mapping[str, Any] | None = None,
+    idmc_reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
@@ -1940,6 +2063,7 @@ def render_summary_md(
         entries,
         dedupe_notes=dedupe_notes,
         reachability=reachability,
+        idmc_reachability=idmc_reachability,
         export_summary=export_summary,
         mapping_debug=mapping_debug,
     )

@@ -215,7 +215,7 @@ def test_idmc_cli_no_window_strict_fails(monkeypatch, tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     exit_code = idmc_cli.main([])
 
-    assert exit_code == 1
+    assert exit_code == 2
     assert fetch_calls == []
     assert why_zero_calls and why_zero_calls[0]["reason"] == "no_window"
     assert any("skipping IDMC fetch" in record.message for record in caplog.records)

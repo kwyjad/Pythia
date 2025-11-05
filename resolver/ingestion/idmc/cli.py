@@ -702,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         write_connectors_line(connectors_payload)
         if empty_policy == "fail":
-            return 1
+            return 2
         return 0
     overall_start = tick()
 
