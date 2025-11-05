@@ -9,7 +9,7 @@ import os
 import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, cast
+from typing import Any, Dict, Iterable, List, Mapping, Optional, cast
 
 import pandas as pd
 
@@ -813,8 +813,14 @@ def main(argv: list[str] | None = None) -> int:
         flow_export_requested = True
     if flow_export_requested:
         flow_frame = resolution_ready_facts
+        required_columns = ["iso3", "as_of_date", "metric", "value", "series_semantics", "source"]
         if flow_frame.empty:
-            flow_frame = pd.DataFrame(columns=FACT_COLUMNS)
+            flow_frame = pd.DataFrame(columns=required_columns)
+        else:
+            for column in required_columns:
+                if column not in flow_frame.columns:
+                    flow_frame[column] = pd.NA
+            flow_frame = flow_frame.loc[:, required_columns]
         flow_frame.to_csv(flow_staging_path, index=False)
     elif not resolution_ready_facts.empty:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
@@ -1360,12 +1366,18 @@ def main(argv: list[str] | None = None) -> int:
     fallback_status = fallback_info.get("status")
     if fallback_status:
         fallback_lines.append(f"Status: {fallback_status}")
+    source_tag = fallback_info.get("source_tag")
+    if source_tag:
+        fallback_lines.append(f"Source tag: {source_tag}")
     package_status = fallback_info.get("package_status_code")
     if package_status is not None:
         fallback_lines.append(f"Package status: {package_status}")
     resource_status = fallback_info.get("resource_status_code")
     if resource_status is not None:
         fallback_lines.append(f"Resource status: {resource_status}")
+    helix_status = fallback_info.get("status_code")
+    if helix_status is not None and helix_status != resource_status:
+        fallback_lines.append(f"Helix status: {helix_status}")
     resource_id = fallback_info.get("resource_id")
     if resource_id:
         fallback_lines.append(f"Resource id: {resource_id}")
@@ -1375,6 +1387,9 @@ def main(argv: list[str] | None = None) -> int:
     resource_bytes = fallback_info.get("resource_bytes")
     if resource_bytes is not None:
         fallback_lines.append(f"Resource bytes: {resource_bytes}")
+    helix_bytes = fallback_info.get("bytes")
+    if helix_bytes is not None:
+        fallback_lines.append(f"Helix bytes: {helix_bytes}")
     fallback_rows = fallback_info.get("rows")
     if fallback_rows is not None:
         fallback_lines.append(f"Rows: {fallback_rows}")
@@ -1386,11 +1401,27 @@ def main(argv: list[str] | None = None) -> int:
         fallback_lines.append(f"Resource: {_trim_text(resource_url)}")
     elif fallback_info.get("package_url"):
         fallback_lines.append(f"Package: {_trim_text(fallback_info.get('package_url'))}")
+    request_url = fallback_info.get("request_url")
+    if request_url:
+        fallback_lines.append(f"Helix request: {_trim_text(request_url)}")
     resource_errors = fallback_info.get("resource_errors")
     if resource_errors:
         fallback_lines.append(
             f"Resource fallbacks tried: {len(resource_errors)}"
         )
+    hdx_attempt = fallback_info.get("hdx_attempt")
+    if isinstance(hdx_attempt, Mapping):
+        attempt_resource = hdx_attempt.get("resource_id") or hdx_attempt.get("resource_url")
+        attempt_reason = hdx_attempt.get("zero_rows_reason") or hdx_attempt.get("error")
+        details = []
+        if attempt_resource:
+            details.append(f"resource={attempt_resource}")
+        if attempt_reason:
+            details.append(f"reason={attempt_reason}")
+        if hdx_attempt.get("resource_bytes") is not None:
+            details.append(f"bytes={hdx_attempt.get('resource_bytes')}")
+        if details:
+            fallback_lines.append("HDX attempt: " + ", ".join(details))
 
     chunk_attempts_block = _format_bullets(chunk_attempt_lines)
     http_attempts_block = _format_bullets(http_counters_lines)

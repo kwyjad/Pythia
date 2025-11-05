@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -52,6 +52,10 @@ ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
 HDX_MIN_BYTES = 10_000
+HDX_DEFAULT_RESOURCE_ID = "1ace9c2a-7daf-4563-ac15-f2aa5071cd40"
+HDX_DEFAULT_GID = "123456789"
+
+HELIX_DEFAULT_BASE = "https://helix-tools-api.idmcdb.org"
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_READ_TIMEOUT_S = 25.0
@@ -532,7 +536,7 @@ def _hdx_resource_id() -> Optional[str]:
             value = str(raw).strip()
             if value:
                 return value
-    return None
+    return HDX_DEFAULT_RESOURCE_ID
 
 
 def _hdx_base_url() -> str:
@@ -567,7 +571,15 @@ def _hdx_download_resource(url: str, *, timeout: float = 30.0) -> Tuple[bytes, D
     return payload, diagnostics
 
 
-def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def _hdx_resolve_gid_default() -> str:
+    raw = os.getenv("IDMC_HDX_GID")
+    if raw is None:
+        return HDX_DEFAULT_GID
+    cleaned = str(raw).strip()
+    return cleaned or HDX_DEFAULT_GID
+
+
+def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
     dataset = _hdx_dataset_slug()
     package_url = _hdx_package_show_url(dataset)
     diagnostics: Dict[str, Any] = {
@@ -588,10 +600,12 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
 
     if not payload.get("success"):
         diagnostics["error"] = "package_show_unsuccessful"
-        return pd.DataFrame(), diagnostics
+        return None, diagnostics
 
     result = payload.get("result") or {}
     resources = result.get("resources") or []
+    resource_target = _hdx_resource_id()
+    diagnostics["resource_target"] = resource_target
     csv_candidates: List[Dict[str, Any]] = []
     for resource in resources:
         if not isinstance(resource, Mapping):
@@ -599,18 +613,18 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         fmt = str(resource.get("format", "")).lower()
         if fmt not in {"csv", "text/csv"}:
             continue
-        name = str(resource.get("name", ""))
-        url = str(resource.get("url", ""))
-        identifier = str(resource.get("id", ""))
+        identifier = str(resource.get("id", "")).strip()
+        url = str(resource.get("url", "")).strip()
+        name = str(resource.get("name", "")).strip()
         stamp = str(resource.get("last_modified") or resource.get("created") or "")
         csv_candidates.append(
             {
-                "id": identifier.strip(),
-                "url": url.strip(),
-                "name": name.strip(),
+                "id": identifier,
+                "url": url,
+                "name": name,
+                "timestamp": stamp,
                 "preferred": "idus_view_flat" in name.lower()
                 or "idus_view_flat" in url.lower(),
-                "timestamp": stamp,
             }
         )
     diagnostics["resource_candidates"] = len(csv_candidates)
@@ -618,130 +632,230 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
     if not csv_candidates:
         diagnostics["error"] = "no_csv_resource"
         diagnostics["zero_rows_reason"] = "fallback_no_valid_resource"
-        return pd.DataFrame(), diagnostics
+        return None, diagnostics
 
-    csv_candidates.sort(key=lambda item: (item["timestamp"], item["id"]))
-
-    selection_errors: List[Dict[str, Any]] = []
-    selected_frame: Optional[pd.DataFrame] = None
-    selected_diag: Dict[str, Any] = {}
-    attempted: Set[str] = set()
-    configured_resource = _hdx_resource_id()
-
-    def _resource_key(info: Mapping[str, Any]) -> str:
-        candidate = str(info.get("id") or "").strip()
-        if candidate:
-            return candidate
-        return str(info.get("url") or "").strip()
-
-    def _attempt(info: Mapping[str, Any], reason: str) -> None:
-        nonlocal selected_frame, selected_diag
-        if selected_frame is not None:
-            return
-        key = _resource_key(info)
-        if key in attempted:
-            return
-        attempted.add(key)
-        resource_url = str(info.get("url") or "").strip()
-        attempt_diag: Dict[str, Any] = {
-            "resource_id": info.get("id") or None,
-            "resource_name": info.get("name") or None,
-            "resource_selection": reason,
-        }
-        if not resource_url:
-            attempt_diag["error"] = "resource_missing_url"
-            selection_errors.append(attempt_diag)
-            return
-        try:
-            payload_bytes, resource_diag = _hdx_download_resource(resource_url)
-        except requests.RequestException as exc:  # pragma: no cover - network dependent
-            attempt_diag["error"] = f"download_failed:{exc.__class__.__name__}"
-            attempt_diag["exception"] = exc.__class__.__name__
-            attempt_diag["resource_status_code"] = getattr(
-                exc.response, "status_code", None
-            )
-            attempt_diag["resource_url"] = resource_url
-            selection_errors.append(attempt_diag)
-            return
-
-        attempt_diag["resource_status_code"] = resource_diag.get("status_code")
-        attempt_diag["resource_bytes"] = resource_diag.get("bytes")
-        attempt_diag["resource_content_length"] = resource_diag.get("content_length")
-        attempt_diag["resource_url"] = resource_url
-
-        frame = _read_csv_from_bytes(payload_bytes)
-        attempt_diag["resource_rows"] = int(frame.shape[0])
-        attempt_diag["resource_columns"] = list(frame.columns)
-
-        normalized_columns = {
-            str(column).strip().lower() for column in frame.columns if str(column).strip()
-        }
-        has_iso3 = "iso3" in normalized_columns
-        has_value = bool({"figure", "new_displacements"} & normalized_columns)
-        if not has_iso3 or not has_value:
-            attempt_diag["error"] = "missing_required_columns"
-            attempt_diag["missing_columns"] = {
-                "iso3": not has_iso3,
-                "value": not has_value,
-            }
-            selection_errors.append(attempt_diag)
-            return
-
-        byte_count = attempt_diag.get("resource_bytes")
-        try:
-            byte_int = int(byte_count) if byte_count is not None else len(payload_bytes)
-        except (TypeError, ValueError):
-            byte_int = len(payload_bytes)
-        if byte_int < HDX_MIN_BYTES:
-            attempt_diag["error"] = "resource_too_small"
-            attempt_diag["resource_bytes"] = byte_int
-            attempt_diag["min_bytes"] = HDX_MIN_BYTES
-            selection_errors.append(attempt_diag)
-            return
-
-        attempt_diag["resource_bytes"] = byte_int
-        attempt_diag["resource_preferred"] = bool(info.get("preferred"))
-        selected_frame = frame
-        selected_diag = attempt_diag
-
-    if configured_resource:
+    selected: Optional[Dict[str, Any]] = None
+    if resource_target:
         for candidate in csv_candidates:
-            if candidate.get("id") == configured_resource:
-                _attempt(candidate, "configured_id")
+            if candidate.get("id") == resource_target:
+                selected = dict(candidate)
+                diagnostics["resource_selection"] = "configured_id"
                 break
-        if selected_frame is None:
-            diagnostics["resource_configured_id"] = configured_resource
+        diagnostics["resource_configured_id"] = resource_target
 
-    if selected_frame is None:
-        for candidate in csv_candidates:
-            if candidate.get("preferred"):
-                _attempt(candidate, "preferred")
-                if selected_frame is not None:
-                    break
+    if selected is None:
+        preferred = [c for c in csv_candidates if c.get("preferred")]
+        if preferred:
+            selected = dict(preferred[-1])
+            diagnostics["resource_selection"] = "preferred"
 
-    if selected_frame is None:
-        for candidate in csv_candidates:
-            _attempt(candidate, "fallback")
-            if selected_frame is not None:
-                break
+    if selected is None:
+        selected = dict(csv_candidates[-1])
+        diagnostics["resource_selection"] = "fallback"
 
-    if selected_frame is None:
-        diagnostics["error"] = "no_valid_resource"
+    diagnostics["resource_id"] = selected.get("id")
+    diagnostics["resource_name"] = selected.get("name")
+
+    resource_url = str(selected.get("url") or "").strip()
+    if not resource_url:
+        diagnostics["error"] = "resource_missing_url"
         diagnostics["zero_rows_reason"] = "fallback_no_valid_resource"
-        if selection_errors:
-            diagnostics["resource_errors"] = selection_errors
+        diagnostics.setdefault("resource_errors", []).append(
+            {"id": selected.get("id"), "error": "missing_url"}
+        )
+        return None, diagnostics
+
+    parsed = urlparse(resource_url)
+    if "docs.google.com" in parsed.netloc:
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        gid_original: Optional[str] = None
+        gid_updated: Optional[str] = None
+        new_pairs: List[Tuple[str, str]] = []
+        has_gid = False
+        for key, value in query_pairs:
+            if key == "gid":
+                has_gid = True
+                gid_original = value
+                if value in {"", "0", "0.0"}:
+                    gid_updated = _hdx_resolve_gid_default()
+                    new_pairs.append((key, gid_updated))
+                else:
+                    new_pairs.append((key, value))
+            else:
+                new_pairs.append((key, value))
+        if not has_gid:
+            gid_updated = _hdx_resolve_gid_default()
+            new_pairs.append(("gid", gid_updated))
+        if gid_original is not None:
+            diagnostics["resource_gid_original"] = gid_original
+        if gid_updated is not None:
+            diagnostics["resource_gid_used"] = gid_updated
+        resource_url = urlunparse(
+            parsed._replace(query=urlencode(new_pairs, doseq=True))
+        )
+
+    diagnostics["resource_url"] = resource_url
+
+    try:
+        payload_bytes, payload_diag = _hdx_download_resource(resource_url)
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"resource_http_error:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics.setdefault("resource_errors", []).append(
+            {"id": selected.get("id"), "error": diagnostics["error"]}
+        )
+        diagnostics["resource_status_code"] = getattr(
+            getattr(exc, "response", None), "status_code", None
+        )
+        diagnostics["zero_rows_reason"] = "fallback_http_error"
+        return None, diagnostics
+
+    diagnostics["resource_status_code"] = payload_diag.get("status_code")
+    diagnostics["resource_bytes"] = payload_diag.get("bytes")
+    diagnostics["resource_content_length"] = payload_diag.get("content_length")
+    diagnostics["min_bytes"] = HDX_MIN_BYTES
+
+    try:
+        frame = _read_csv_from_bytes(payload_bytes)
+    except Exception as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = f"csv_parse_error:{exc.__class__.__name__}"
+        diagnostics.setdefault("resource_errors", []).append(
+            {"id": selected.get("id"), "error": diagnostics["error"]}
+        )
+        diagnostics["zero_rows_reason"] = "hdx_empty_or_bad_header"
+        return None, diagnostics
+
+    diagnostics["resource_rows"] = len(frame)
+    diagnostics["resource_columns"] = list(frame.columns)
+    diagnostics["source"] = "hdx"
+
+    if frame.empty:
+        diagnostics["zero_rows_reason"] = "hdx_empty_or_bad_header"
+        diagnostics.setdefault("resource_errors", []).append(
+            {"id": selected.get("id"), "error": "empty_csv"}
+        )
+        return None, diagnostics
+
+    lowered_columns = {str(column).strip().lower() for column in frame.columns}
+    has_iso3 = "iso3" in lowered_columns
+    has_value = any(
+        candidate in lowered_columns for candidate in {"figure", "new displacements"}
+    )
+    if not has_iso3 or not has_value:
+        diagnostics["zero_rows_reason"] = "hdx_empty_or_bad_header"
+        missing: List[str] = []
+        if not has_iso3:
+            missing.append("iso3")
+        if not has_value:
+            missing.append("figure/new_displacements")
+        diagnostics.setdefault("resource_errors", []).append(
+            {"id": selected.get("id"), "error": f"missing:{','.join(missing)}"}
+        )
+        return None, diagnostics
+
+    try:
+        byte_int = int(diagnostics.get("resource_bytes", 0) or 0)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        byte_int = 0
+    if byte_int and byte_int < HDX_MIN_BYTES:
+        diagnostics.setdefault("resource_errors", []).append(
+            {"id": selected.get("id"), "error": "below_minimum"}
+        )
+
+    return frame, diagnostics
+
+
+def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    frame, diagnostics = _hdx_fetch_once()
+    if frame is None:
+        return pd.DataFrame(), diagnostics
+    return frame, diagnostics
+
+
+def _helix_client_id() -> Optional[str]:
+    raw = os.getenv("IDMC_HELIX_CLIENT_ID")
+    if raw is None:
+        return None
+    cleaned = str(raw).strip()
+    return cleaned or None
+
+
+def _helix_base_url() -> str:
+    base = os.getenv("IDMC_HELIX_BASE", HELIX_DEFAULT_BASE)
+    return str(base).strip().rstrip("/") or HELIX_DEFAULT_BASE
+
+
+def _helix_fetch_csv(
+    *,
+    start_date: Optional[date],
+    end_date: Optional[date],
+    iso3_list: Iterable[str],
+    timeout: float = 60.0,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    client_id = _helix_client_id()
+    if not client_id:
+        raise RuntimeError("IDMC_HELIX_CLIENT_ID not configured")
+
+    today = date.today()
+    start = start_date or end_date or today
+    end = end_date or start_date or today
+    if start > end:
+        start, end = end, start
+
+    params: List[Tuple[str, str]] = [
+        ("client_id", client_id),
+        ("start_year", str(start.year)),
+        ("end_year", str(end.year)),
+        (
+            "release_environment",
+            str(os.getenv("IDMC_HELIX_ENV", "RELEASE") or "RELEASE").upper(),
+        ),
+    ]
+
+    iso_set = sorted({code.strip().upper() for code in iso3_list if code and code.strip()})
+    if iso_set:
+        params.append(("iso3__in", ",".join(iso_set)))
+
+    base_url = _helix_base_url()
+    endpoint = f"{base_url}/external-api/gidd/displacements/displacement-export/"
+
+    sanitized_params = [(key, value) for key, value in params if key != "client_id"]
+    diagnostics: Dict[str, Any] = {
+        "url": endpoint,
+        "request_url": f"{endpoint}?{urlencode(sanitized_params, doseq=True)}"
+        if sanitized_params
+        else endpoint,
+        "source": "helix",
+        "source_tag": "idmc_gidd",
+    }
+
+    headers = {"Accept": "text/csv", "User-Agent": _resolve_http_user_agent()}
+    try:
+        response = requests.get(endpoint, params=dict(params), headers=headers, timeout=timeout)
+        diagnostics["status_code"] = response.status_code
+        response.raise_for_status()
+        payload = response.content or b""
+        diagnostics["bytes"] = len(payload)
+        diagnostics["content_length"] = response.headers.get("Content-Length")
+        frame = _read_csv_from_bytes(payload)
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"helix_http_error:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["status_code"] = getattr(exc.response, "status_code", None)
+        diagnostics["zero_rows_reason"] = "helix_http_error"
+        return pd.DataFrame(), diagnostics
+    except Exception as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = f"helix_parse_error:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["zero_rows_reason"] = "helix_parse_error"
         return pd.DataFrame(), diagnostics
 
-    diagnostics.update(selected_diag)
-    if selection_errors:
-        diagnostics["resource_errors"] = selection_errors
-    LOGGER.info(
-        "idmc.hdx: using resource %s rows=%d bytes=%s",
-        diagnostics.get("resource_id") or diagnostics.get("resource_url") or "unknown",
-        int(selected_diag.get("resource_rows", 0)),
-        selected_diag.get("resource_bytes"),
-    )
-    return selected_frame, diagnostics
+    diagnostics["rows"] = int(frame.shape[0])
+    diagnostics["columns"] = list(frame.columns)
+    if frame.empty:
+        diagnostics["zero_rows_reason"] = "helix_empty"
+
+    return frame, diagnostics
 
 
 def _hdx_filter(
@@ -901,20 +1015,79 @@ def fetch_idu_json(
 
     fallback_frame_cached: Optional[pd.DataFrame] = None
     fallback_diag_cached: Optional[Dict[str, Any]] = None
+    fallback_source_cached: Optional[str] = None
+    helix_enabled_local = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
 
     def _fetch_hdx_fallback() -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        nonlocal fallback_frame_cached, fallback_diag_cached
+        nonlocal fallback_frame_cached, fallback_diag_cached, fallback_source_cached
         if fallback_frame_cached is not None and fallback_diag_cached is not None:
-            return fallback_frame_cached, dict(fallback_diag_cached)
-        frame: pd.DataFrame
-        diag: Dict[str, Any]
+            diag_copy = dict(fallback_diag_cached)
+            if fallback_source_cached:
+                diag_copy.setdefault("source_tag", fallback_source_cached)
+            return fallback_frame_cached, diag_copy
+
         if fallback_loader is not None:
             frame, diag = fallback_loader()
-        else:
-            frame, diag = _hdx_fetch_latest_csv()
-        fallback_frame_cached = frame
-        fallback_diag_cached = dict(diag)
-        return frame, dict(fallback_diag_cached)
+            diag_copy = dict(diag)
+            source_tag_raw = str(
+                diag_copy.get("source_tag") or diag_copy.get("source") or "idmc_idu"
+            )
+            normalized_source = (
+                "idmc_gidd"
+                if source_tag_raw.lower() in {"helix", "idmc_gidd"}
+                else "idmc_idu"
+            )
+            diag_copy.setdefault("source_tag", normalized_source)
+            fallback_frame_cached = frame
+            fallback_diag_cached = dict(diag_copy)
+            fallback_source_cached = normalized_source
+            return frame, dict(diag_copy)
+
+        hdx_frame, hdx_diag = _hdx_fetch_once()
+        diag_copy: Dict[str, Any]
+        source_tag = "idmc_idu"
+        if hdx_frame is not None and not hdx_frame.empty:
+            diag_copy = dict(hdx_diag)
+            diag_copy.setdefault("source_tag", source_tag)
+            fallback_frame_cached = hdx_frame
+            fallback_diag_cached = dict(diag_copy)
+            fallback_source_cached = source_tag
+            return hdx_frame, dict(diag_copy)
+
+        diag_copy = dict(hdx_diag)
+        diag_copy.setdefault("source_tag", source_tag)
+        diag_copy.setdefault("zero_rows_reason", "hdx_empty_or_bad_header")
+        frame_candidate = hdx_frame if hdx_frame is not None else pd.DataFrame()
+
+        helix_iso_scope: Iterable[str] = only_countries or cfg.api.countries or []
+        if helix_enabled_local and _helix_client_id():
+            try:
+                helix_frame, helix_diag = _helix_fetch_csv(
+                    start_date=window_start,
+                    end_date=window_end,
+                    iso3_list=helix_iso_scope,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                diag_copy.setdefault("helix_error", str(exc))
+                if "zero_rows_reason" not in diag_copy:
+                    diag_copy["zero_rows_reason"] = "helix_exception"
+            else:
+                helix_diag = dict(helix_diag)
+                helix_diag.setdefault("source_tag", "idmc_gidd")
+                helix_diag.setdefault("hdx_attempt", diag_copy)
+                if helix_frame is not None and not helix_frame.empty:
+                    helix_diag.pop("zero_rows_reason", None)
+                fallback_frame_cached = helix_frame
+                fallback_diag_cached = dict(helix_diag)
+                fallback_source_cached = "idmc_gidd"
+                return helix_frame, dict(helix_diag)
+
+        fallback_frame_cached = frame_candidate
+        fallback_diag_cached = dict(diag_copy)
+        fallback_source_cached = source_tag
+        diag_result = dict(diag_copy)
+        diag_result.setdefault("source_tag", source_tag)
+        return frame_candidate, diag_result
 
     def _merge_fallback_metadata(entry: Dict[str, Any], diag: Mapping[str, Any]) -> None:
         metadata_keys = (
@@ -933,6 +1106,14 @@ def fetch_idu_json(
             "resource_preferred",
             "zero_rows_reason",
             "resource_errors",
+            "request_url",
+            "status_code",
+            "bytes",
+            "content_length",
+            "source",
+            "source_tag",
+            "hdx_attempt",
+            "helix_error",
         )
         for key in metadata_keys:
             value = diag.get(key) if isinstance(diag, Mapping) else None
@@ -1328,6 +1509,18 @@ def fetch_idu_json(
                             try:
                                 fallback_frame, fallback_diag = _fetch_hdx_fallback()
                                 _merge_fallback_metadata(fallback_diag_entry, fallback_diag)
+                                source_candidate = (
+                                    fallback_diag_entry.get("source_tag")
+                                    or fallback_diag.get("source_tag")
+                                    or fallback_diag.get("source")
+                                )
+                                fallback_source_tag_inner = str(source_candidate or "idmc_idu")
+                                if fallback_source_tag_inner.lower() == "helix":
+                                    fallback_source_tag_inner = "idmc_gidd"
+                                fallback_diag_entry["source_tag"] = fallback_source_tag_inner
+                                fallback_diag_entry["type"] = (
+                                    "helix" if fallback_source_tag_inner == "idmc_gidd" else "hdx"
+                                )
                                 filtered = _hdx_filter(
                                     fallback_frame,
                                     iso_batches=iso_batches or [],
@@ -1336,6 +1529,8 @@ def fetch_idu_json(
                                     window_start=window_start,
                                     window_end=window_end,
                                 )
+                                filtered = filtered.copy()
+                                filtered["idmc_source"] = fallback_source_tag_inner
                                 fallback_rows = filtered.to_dict("records")
                                 rows.extend(fallback_rows)
                                 fallback_diag_entry["rows"] = len(fallback_rows)
@@ -1343,14 +1538,25 @@ def fetch_idu_json(
                                 diagnostics["fallback_used"] = True
                                 fallback_attempt = {
                                     "chunk": chunk_name,
-                                    "via": "hdx_fallback",
+                                    "via": "helix_fallback"
+                                    if fallback_source_tag_inner == "idmc_gidd"
+                                    else "hdx_fallback",
                                     "rows": len(fallback_rows),
                                 }
                                 if len(fallback_rows) == 0:
-                                    fallback_attempt["zero_rows_reason"] = (
-                                        "timeout_fallback_empty"
+                                    fallback_zero_reason = str(
+                                        fallback_diag_entry.get("zero_rows_reason") or ""
                                     )
-                                    zero_row_reasons[chunk_name] = "timeout_fallback_empty"
+                                    if fallback_zero_reason:
+                                        fallback_attempt["zero_rows_reason"] = (
+                                            fallback_zero_reason
+                                        )
+                                        zero_row_reasons[chunk_name] = fallback_zero_reason
+                                    else:
+                                        fallback_attempt["zero_rows_reason"] = (
+                                            "timeout_fallback_empty"
+                                        )
+                                        zero_row_reasons[chunk_name] = "timeout_fallback_empty"
                                 else:
                                     zero_row_reasons.pop(chunk_name, None)
                                 diagnostics["attempts"].append(fallback_attempt)
@@ -1499,12 +1705,23 @@ def fetch_idu_json(
             }
             zero_row_reasons[chunk_label or "full"] = "fallback_http_error"
             raise
+        raw_source = fallback_diag.get("source_tag") or fallback_diag.get("source")
+        fallback_source_tag = str(raw_source or "idmc_idu")
+        if fallback_source_tag.lower() == "helix":
+            fallback_source_tag = "idmc_gidd"
         fallback_entry: Dict[str, Any] = {
             "type": "hdx",
             "used": True,
             "reason": f"exception:{type(exc).__name__}",
+            "source_tag": fallback_source_tag,
         }
         _merge_fallback_metadata(fallback_entry, fallback_diag)
+        merged_source = str(fallback_entry.get("source_tag") or fallback_source_tag)
+        if merged_source.lower() == "helix":
+            merged_source = "idmc_gidd"
+        fallback_entry["source_tag"] = merged_source
+        fallback_entry["type"] = "helix" if merged_source == "idmc_gidd" else "hdx"
+        fallback_source_tag = merged_source
         fallback_zero_reason = str(fallback_diag.get("zero_rows_reason") or "")
         if fallback_zero_reason:
             fallback_entry["zero_rows_reason"] = fallback_zero_reason
@@ -1519,13 +1736,18 @@ def fetch_idu_json(
             window_start=window_start,
             window_end=window_end,
         )
+        filtered = filtered.copy()
+        filtered["idmc_source"] = fallback_source_tag
         fallback_rows = filtered.to_dict("records")
         diagnostics["fallback"]["rows"] = len(fallback_rows)
         fallback_entry["rows"] = len(fallback_rows)
         fallback_attempt = {
             "chunk": chunk_label or "full",
-            "via": "hdx_fallback",
+            "via": "helix_fallback"
+            if fallback_source_tag == "idmc_gidd"
+            else "hdx_fallback",
             "rows": len(fallback_rows),
+            "source_tag": fallback_source_tag,
         }
         if len(fallback_rows) == 0:
             if fallback_zero_reason:
@@ -1680,16 +1902,53 @@ def fetch(
     fallback_lock = threading.Lock()
     fallback_frame_cache_fetch: Optional[pd.DataFrame] = None
     fallback_diag_cache_fetch: Optional[Dict[str, Any]] = None
+    fallback_source_cache_fetch: Optional[str] = None
+    helix_enabled = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
 
-    def _load_hdx_fallback_cached() -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        nonlocal fallback_frame_cache_fetch, fallback_diag_cache_fetch
+    def _resolve_fallback_frame() -> Tuple[pd.DataFrame, Dict[str, Any], str]:
+        hdx_frame, hdx_diag = _hdx_fetch_once()
+        if hdx_frame is not None and not hdx_frame.empty:
+            diag_copy = dict(hdx_diag)
+            diag_copy.setdefault("source_tag", "idmc_idu")
+            return hdx_frame, diag_copy, "idmc_idu"
+
+        diag_copy = dict(hdx_diag)
+        diag_copy.setdefault("source_tag", "idmc_idu")
+        if helix_enabled and _helix_client_id():
+            try:
+                helix_frame, helix_diag = _helix_fetch_csv(
+                    start_date=window_start,
+                    end_date=window_end,
+                    iso3_list=countries,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                diag_copy.setdefault("helix_error", str(exc))
+                if "zero_rows_reason" not in diag_copy:
+                    diag_copy["zero_rows_reason"] = "helix_exception"
+            else:
+                helix_diag = dict(helix_diag)
+                helix_diag.setdefault("source_tag", "idmc_gidd")
+                helix_diag.setdefault("hdx_attempt", diag_copy)
+                if helix_frame is not None and not helix_frame.empty:
+                    helix_diag.pop("zero_rows_reason", None)
+                return helix_frame, helix_diag, "idmc_gidd"
+
+        if hdx_frame is None:
+            return pd.DataFrame(), diag_copy, "idmc_idu"
+        return hdx_frame, diag_copy, "idmc_idu"
+
+    def _load_fallback_cached() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        nonlocal fallback_frame_cache_fetch, fallback_diag_cache_fetch, fallback_source_cache_fetch
         with fallback_lock:
             if fallback_frame_cache_fetch is None or fallback_diag_cache_fetch is None:
-                frame, diag = _hdx_fetch_latest_csv()
+                frame, diag, source_tag = _resolve_fallback_frame()
                 fallback_frame_cache_fetch = frame
                 fallback_diag_cache_fetch = dict(diag)
+                fallback_source_cache_fetch = source_tag
             frame = fallback_frame_cache_fetch
             diag_copy = dict(fallback_diag_cache_fetch)
+            if fallback_source_cache_fetch:
+                diag_copy.setdefault("source_tag", fallback_source_cache_fetch)
         return frame, diag_copy
 
     if should_return_empty(window_start, window_end, window_days):
@@ -1813,7 +2072,7 @@ def fetch(
             date_column=schema_date_column,
             select_columns=select_columns,
             allow_fallback=fallback_allowed,
-            fallback_loader=_load_hdx_fallback_cached if fallback_allowed else None,
+            fallback_loader=_load_fallback_cached if fallback_allowed else None,
         )
         LOGGER.debug(
             "Fetched chunk %s: rows=%d mode=%s status=%s",
@@ -2097,6 +2356,14 @@ def fetch(
             "resource_status_code",
             "resource_bytes",
             "resource_content_length",
+            "request_url",
+            "status_code",
+            "bytes",
+            "content_length",
+            "source_tag",
+            "source",
+            "helix_error",
+            "hdx_attempt",
         ):
             meta_value = fallback_diag_cache_fetch.get(meta_key)
             if meta_value is not None and meta_key not in fallback_summary:

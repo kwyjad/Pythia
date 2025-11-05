@@ -126,11 +126,15 @@ def _normalize_monthly_flow(
         + field_aliases.get("date", [])
     )
     value_candidates = _dedupe_preserve_order(["figure"] + field_aliases.get("value_flow", []))
+    source_candidates = _dedupe_preserve_order(["idmc_source", "source"])
 
     iso_series = _normalize_iso(_first_non_null(raw, iso_candidates))
     date_series = _first_non_null(raw, date_candidates)
     value_series = pd.to_numeric(_first_non_null(raw, value_candidates), errors="coerce")
     value_series = value_series.astype(pd.Int64Dtype())
+    source_series = _first_non_null(raw, source_candidates)
+    if source_series.empty:
+        source_series = pd.Series([pd.NA] * len(raw))
 
     event_column = next((column for column in date_candidates if column in raw.columns), None)
     if event_column is not None:
@@ -157,7 +161,8 @@ def _normalize_monthly_flow(
             "metric": FLOW_METRIC_NAME,
             "value": value_series,
             "series_semantics": "new",
-            "source": SOURCE_NAME,
+            "source": source_series,
+            "source_override": source_series,
         }
     )
 
@@ -233,15 +238,28 @@ def _normalize_monthly_flow(
     normalized = normalized.dropna(subset=["as_of_date"])
     drops["date_parse_failed"] += before - len(normalized)
 
+    aggregation_mapping = {"value": "sum"}
+    if "source_override" in normalized.columns:
+        aggregation_mapping["source_override"] = "first"
+
     aggregated = (
         normalized.groupby(["iso3", "as_of_date", "metric"], as_index=False)
-        .agg({"value": "sum"})
+        .agg(aggregation_mapping)
         .sort_values(["iso3", "as_of_date"])
         .reset_index(drop=True)
     )
 
     aggregated["series_semantics"] = "new"
-    aggregated["source"] = SOURCE_NAME
+    if "source_override" in aggregated.columns:
+        source_values = (
+            aggregated.pop("source_override")
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        aggregated["source"] = source_values.where(source_values != "", SOURCE_NAME)
+    else:
+        aggregated["source"] = SOURCE_NAME
 
     if not aggregated.empty:
         aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())

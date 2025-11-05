@@ -89,6 +89,9 @@ jobs:
       EMPTY_POLICY: ${{ inputs.empty_policy }}
       NO_DATE_FILTER: ${{ inputs.no_date_filter }}
       DTM_CONFIG_PATH: resolver/config/dtm.yml
+      IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
+      IDMC_HELIX_ENV: RELEASE
+      RESOLVER_EXPORT_ENABLE_FLOW: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -255,8 +258,11 @@ jobs:
           CMD_ARGS+=(--extra-env "idmc=RELIEFWEB_APPNAME=${RELIEFWEB_APPNAME}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=live")
           CMD_ARGS+=(--extra-env "idmc=IDMC_ALLOW_HDX_FALLBACK=1")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_USE_HELIX_IF_IDU_UNREACHABLE=1")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HDX_DATASET=preliminary-internal-displacement-updates")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HDX_RESOURCE_ID=1ace9c2a-7daf-4563-ac15-f2aa5071cd40")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_HELIX_CLIENT_ID=${IDMC_HELIX_CLIENT_ID}")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_HELIX_ENV=${IDMC_HELIX_ENV}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_VERIFY=${IDMC_HTTP_VERIFY}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_TIMEOUT_CONNECT=${IDMC_HTTP_TIMEOUT_CONNECT}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_TIMEOUT_READ=${IDMC_HTTP_TIMEOUT_READ}")
@@ -293,6 +299,15 @@ jobs:
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary
+
+      - name: Probe Helix reachability
+        if: always()
+        env:
+          IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
+          IDMC_HELIX_ENV: RELEASE
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.probe_helix_reachability || true
 
       - name: Prime ingestion artifact placeholders
         if: always()
