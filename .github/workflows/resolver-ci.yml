@@ -40,6 +40,10 @@ jobs:
           python -m pip install -e ".[db, test]" || python -m pip install -e .
           python -m pip install duckdb pytest || true
 
+      - name: Validate workflow YAML
+        run: |
+          python scripts/ci/validate_workflows.py
+
       - name: Verify DuckDB import
         run: |
           python - <<'PY'

@@ -179,6 +179,7 @@ jobs:
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"
           # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
+        shell: bash
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
@@ -228,24 +229,24 @@ jobs:
           } >> "${GITHUB_ENV}"
           IDMC_WINDOW_END="${RESOLVER_END_ISO}"
           IDMC_WINDOW_START=$(python - <<'PY'
-import os
-from datetime import date
+          import os
+          from datetime import date
 
-end_raw = os.environ.get("RESOLVER_END_ISO")
-if not end_raw:
-    raise SystemExit("RESOLVER_END_ISO not set")
-end = date.fromisoformat(end_raw)
-months_back = 5
-year = end.year
-month = end.month
-for _ in range(months_back):
-    month -= 1
-    if month == 0:
-        month = 12
-        year -= 1
-start = date(year, month, 1)
-print(start.isoformat())
-PY
+          end_raw = os.environ.get("RESOLVER_END_ISO")
+          if not end_raw:
+              raise SystemExit("RESOLVER_END_ISO not set")
+          end = date.fromisoformat(end_raw)
+          months_back = 5
+          year = end.year
+          month = end.month
+          for _ in range(months_back):
+              month -= 1
+              if month == 0:
+                  month = 12
+                  year -= 1
+          start = date(year, month, 1)
+          print(start.isoformat())
+          PY
           )
           CMD_ARGS+=(--extra-args "idmc=--start ${IDMC_WINDOW_START} --end ${IDMC_WINDOW_END} \
             --chunk-by-month --enable-export --write-outputs --series flow \
