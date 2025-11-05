@@ -74,9 +74,10 @@ def test_idmc_batches_iso3s_max_25():
     assert all(len(batch) <= 25 for batch in batches)
 
 
-def test_idmc_per_chunk_http_error_does_not_abort(monkeypatch):
+def test_idmc_per_chunk_http_error_does_not_abort(monkeypatch, tmp_path):
     cfg = IdmcConfig()
     cfg.api.countries = ["AFG"]
+    cfg.cache.dir = (tmp_path / "cache").as_posix()
 
     def fake_probe(*_args, **_kwargs):
         return "displacement_date", ["iso3", "figure", "displacement_date"], {
@@ -88,7 +89,7 @@ def test_idmc_per_chunk_http_error_does_not_abort(monkeypatch):
 
     def fake_http_get(url, **_kwargs):
         call_state["calls"] += 1
-        if "chunk=2023-01" in url:
+        if "displacement_date=gte.2023-01-01" in url:
             diagnostics = {
                 "status": 500,
                 "attempts": 1,
@@ -138,7 +139,9 @@ def test_idmc_per_chunk_http_error_does_not_abort(monkeypatch):
     assert diagnostics["chunk_errors"] == 1
     counts = diagnostics["http_status_counts"]
     assert set(counts.keys()) == {"2xx", "4xx", "5xx"}
-    assert diagnostics.get("http_status_counts_extended", {}).get("other", 0) >= 0
+    http_extended = diagnostics.get("http_extended", {})
+    other_bucket = (http_extended.get("status_counts") or {}).get("other", 0)
+    assert other_bucket >= 0
     assert call_state["calls"] >= 2
 
 
@@ -200,12 +203,6 @@ def test_idmc_empty_but_not_fail_policy_returns_ok(monkeypatch, tmp_path):
             "status_last": 500,
             "latency_ms": {"p50": 0, "p95": 0, "max": 0},
             "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0},
-            "status_counts_extended": {
-                "2xx": 0,
-                "4xx": 0,
-                "5xx": 0,
-                "other": 1,
-            },
         },
         "cache": {"dir": ".cache", "hits": 0, "misses": 0},
         "filters": {"window_start": None, "window_end": None, "countries": []},
@@ -217,11 +214,17 @@ def test_idmc_empty_but_not_fail_policy_returns_ok(monkeypatch, tmp_path):
         "date_column": "displacement_date",
         "select_columns": ["iso3", "figure", "displacement_date"],
         "http_status_counts": {"2xx": 0, "4xx": 0, "5xx": 0},
-        "http_status_counts_extended": {
-            "2xx": 0,
-            "4xx": 0,
-            "5xx": 0,
-            "other": 1,
+        "http_extended": {
+            "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 1, "timeout": 0},
+            "timeouts": 0,
+            "requests_ok_2xx": 0,
+            "requests_4xx": 0,
+            "requests_5xx": 0,
+            "requests_other": 0,
+            "other_exceptions": 0,
+            "exceptions_by_type": {},
+            "requests_planned": 1,
+            "requests_executed": 1,
         },
         "performance": {
             "requests": 1,

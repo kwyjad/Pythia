@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 import requests
+import threading
 from requests import Response
 from requests.exceptions import (
     ChunkedEncodingError,
@@ -21,6 +22,7 @@ from requests.exceptions import (
     SSLError as RequestsSSLError,
     Timeout,
 )
+from requests.adapters import HTTPAdapter
 from urllib3.exceptions import (
     ConnectTimeoutError,
     MaxRetryError,
@@ -190,7 +192,7 @@ def http_get(
 
     timeout_tuple = _normalise_timeout(timeout)
 
-    session = requests.Session()
+    session = _shared_session()
     try:
         for attempt in attempts:
             if rate_limiter is not None:
@@ -432,3 +434,32 @@ def http_get(
         diagnostics,
         kind=last_exception_kind or ("timeout" if timeout_hit else "error"),
     )
+_SESSION: requests.Session | None = None
+_SESSION_FACTORY: object | None = None
+_SESSION_LOCK = threading.Lock()
+
+
+def _safe_mount(session: requests.Session, prefix: str, adapter: HTTPAdapter) -> None:
+    """Attempt to mount an adapter without breaking mocked sessions."""
+
+    mount = getattr(session, "mount", None)
+    if not callable(mount):
+        return
+    try:
+        mount(prefix, adapter)
+    except Exception:  # pragma: no cover - defensive against stubs
+        return
+
+
+def _shared_session() -> requests.Session:
+    global _SESSION, _SESSION_FACTORY
+    factory = requests.Session
+    with _SESSION_LOCK:
+        if _SESSION is None or _SESSION_FACTORY is not factory:
+            session = factory()
+            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=40)
+            _safe_mount(session, "https://", adapter)
+            _safe_mount(session, "http://", adapter)
+            _SESSION = session
+            _SESSION_FACTORY = factory
+        return _SESSION

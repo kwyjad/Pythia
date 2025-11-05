@@ -568,6 +568,18 @@ def main(argv: list[str] | None = None) -> int:
             "Auto-enabling --write-outputs (RESOLVER_OUTPUT_DIR=%s)",
             resolver_output_dir_env,
         )
+    env_write_empty = _env_truthy(os.getenv("IDMC_WRITE_EMPTY"))
+    write_empty_outputs = bool(write_outputs or (env_write_empty or False))
+    export_requested = bool(
+        write_outputs
+        or enable_export
+        or write_empty_outputs
+        or resolver_output_dir_env
+    )
+    if network_mode != "live":
+        export_requested = True
+    if export_requested:
+        write_empty_outputs = True
 
     write_candidates = bool(args.write_candidates)
     if env_write_candidates is not None:
@@ -771,7 +783,10 @@ def main(argv: list[str] | None = None) -> int:
     staging_dir_path.mkdir(parents=True, exist_ok=True)
     flow_staging_path = staging_dir_path / "flow.csv"
     if resolution_ready_facts.empty:
-        flow_staging_path = Path(write_header_if_empty(flow_staging_path.as_posix()))
+        if export_requested:
+            flow_staging_path = Path(
+                write_header_if_empty(flow_staging_path.as_posix())
+            )
     else:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
@@ -791,7 +806,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if not stock_rows.empty:
         stock_rows.to_csv(stock_staging_path, index=False)
-    elif "stock" in selected_series_normalized:
+    elif "stock" in selected_series_normalized and write_empty_outputs:
         write_header_if_empty(stock_staging_path.as_posix())
 
     rows = len(tidy)
@@ -839,7 +854,8 @@ def main(argv: list[str] | None = None) -> int:
             selectors,
             "No rows after filters. See drop_reasons.",
         )
-        write_header_if_empty()
+        if export_requested:
+            write_header_if_empty(flow_staging_path.as_posix())
 
     timings = timings_block(
         probe_ms=probe_ms,
@@ -863,6 +879,8 @@ def main(argv: list[str] | None = None) -> int:
         "network_mode": network_mode,
         "enable_export": enable_export,
         "write_outputs": write_outputs,
+        "write_empty": write_empty_outputs,
+        "export_requested": export_requested,
         "write_candidates": write_candidates,
         "out_dir": args.out_dir,
         "candidates_out": args.candidates_out,
@@ -969,9 +987,9 @@ def main(argv: list[str] | None = None) -> int:
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
     http_status_counts_raw = diagnostics.get("http_status_counts")
     http_status_counts = serialize_http_status_counts(http_status_counts_raw)
-    http_status_counts_extended = diagnostics.get("http_status_counts_extended") or {}
+    http_extended = diagnostics.get("http_extended") or {}
     try:
-        http_status_other = int((http_status_counts_extended or {}).get("other", 0) or 0)
+        http_status_other = int((http_extended.get("status_counts") or {}).get("other", 0) or 0)
     except (TypeError, ValueError):  # pragma: no cover - defensive
         http_status_other = 0
     requests_planned_raw = diagnostics.get("requests_planned")
@@ -993,9 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
         "mode": diagnostics.get("mode", "offline"),
         "network_mode": effective_network_mode,
         "http_status_counts": http_status_counts,
-        "http_status_counts_extended": (
-            dict(http_status_counts_extended) if http_status_counts_extended else None
-        ),
+        "http_extended": dict(http_extended) if http_extended else None,
         "http": http_rollup,
         "http_attempt_summary": http_attempt_summary,
         "cache": cache_stats,
@@ -1487,7 +1503,14 @@ def main(argv: list[str] | None = None) -> int:
         window_start = window_start_iso
         window_end = window_end_iso
         countries_sample = selected_countries[:10]
-        http_counts_zero = dict(http_status_counts)
+        http_counts_zero = {
+            bucket: int(http_status_counts.get(bucket, 0) or 0)
+            for bucket in ("2xx", "4xx", "5xx")
+        }
+        network_attempted = requests_executed > 0
+        planned_for_payload = requests_planned
+        if not network_attempted and planned_for_payload in (0, None):
+            planned_for_payload = None
         why_zero_payload = {
             "network_mode": effective_network_mode,
             "http_status_counts": http_counts_zero,
@@ -1511,9 +1534,9 @@ def main(argv: list[str] | None = None) -> int:
                 "no_iso3": int(drop_hist.get("no_iso3", 0)),
                 "no_value_col": int(drop_hist.get("no_value_col", 0)),
             },
-            "network_attempted": requests_executed > 0,
+            "network_attempted": network_attempted,
             "requests_attempted": requests_executed,
-            "requests_planned": requests_planned,
+            "requests_planned": planned_for_payload,
             "rows": {
                 "raw": rows_fetched,
                 "normalized": rows,
