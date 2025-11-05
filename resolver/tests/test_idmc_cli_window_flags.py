@@ -38,10 +38,10 @@ def _normalized_frame():
             {
                 "iso3": "AAA",
                 "as_of_date": "2024-01-31",
-                "metric": "idp_displacement_new_idmc",
+                "metric": "new_displacements",
                 "value": 100,
                 "series_semantics": "new",
-                "source": "IDMC",
+                "source": "idmc_idu",
             }
         ]
     )

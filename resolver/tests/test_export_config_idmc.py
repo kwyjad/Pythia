@@ -15,10 +15,10 @@ def test_export_config_maps_idmc_flow(monkeypatch, tmp_path):
             {
                 "iso3": "AAA",
                 "as_of_date": "2024-06-30",
-                "metric": "idp_displacement_new_idmc",
+                "metric": "new_displacements",
                 "value": 123,
                 "series_semantics": "new",
-                "source": "IDMC",
+                "source": "idmc_idu",
             }
         ]
     )
@@ -34,7 +34,7 @@ def test_export_config_maps_idmc_flow(monkeypatch, tmp_path):
 
     df = result.dataframe
     assert not df.empty
-    idmc_rows = df[df["metric"] == "idp_displacement_new_idmc"].reset_index(drop=True)
+    idmc_rows = df[df["metric"] == "new_displacements"].reset_index(drop=True)
     assert len(idmc_rows) == 1
     assert idmc_rows.iloc[0]["value"] == "123"
 

@@ -47,7 +47,7 @@ DEFAULT_POSTGREST_COLUMNS = (
     "displacement_type",
 )
 IDU_POSTGREST_LIMIT = 10000
-ISO3_BATCH_SIZE = 20
+ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
@@ -610,7 +610,7 @@ def fetch_idu_json(
     )
 
     diagnostics: Dict[str, Any] = {
-        "mode": "fixture",
+        "mode": network_mode,
         "url": None,
         "cache": cache_stats,
         "http": http_info,

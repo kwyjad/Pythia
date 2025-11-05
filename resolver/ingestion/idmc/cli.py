@@ -7,7 +7,7 @@ import io
 import logging
 import os
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, cast
 
@@ -74,6 +74,9 @@ Date window: {date_window}
 
 ## Datasets
 {dataset_block}
+
+## Outputs
+{outputs_block}
 
 ## Staging
 {staging_block}
@@ -397,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     env_max_concurrency = _env_int(os.getenv("IDMC_MAX_CONCURRENCY"))
     env_max_bytes = _env_int(os.getenv("IDMC_MAX_BYTES"))
     env_chunk_by_month = _env_truthy(os.getenv("IDMC_CHUNK_BY_MONTH"))
+    resolver_output_dir_env = os.getenv("RESOLVER_OUTPUT_DIR")
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
@@ -523,10 +527,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         window_start_date, window_end_date = window_end_date, window_start_date
 
+    if window_start_date is None and window_end_date is None and window_source == "unset":
+        fallback_end = datetime.now(timezone.utc).date()
+        fallback_start = fallback_end - timedelta(days=30)
+        window_start_date = fallback_start
+        window_end_date = fallback_end
+        window_source = "fallback(now-30d)"
+
     window_start_iso = window_start_date.isoformat() if window_start_date else None
     window_end_iso = window_end_date.isoformat() if window_end_date else None
 
-    if window_source == "unset" and not window_start_iso and not window_end_iso:
+    if not (window_start_iso or window_end_iso):
         LOGGER.warning(
             "No explicit start/end window provided; diagnostics will report a null window"
         )
@@ -535,9 +546,26 @@ def main(argv: list[str] | None = None) -> int:
     if env_enable_export is not None:
         enable_export = enable_export or bool(env_enable_export)
 
+    default_out_dir = parser.get_default("out_dir")
+    staging_out_dir = None
+    if resolver_output_dir_env:
+        staging_out_dir = (Path(resolver_output_dir_env).expanduser() / "idmc").as_posix()
+        if args.out_dir == default_out_dir:
+            args.out_dir = staging_out_dir
+            LOGGER.info(
+                "Redirecting IDMC outputs to %s (RESOLVER_OUTPUT_DIR)", args.out_dir
+            )
+
     write_outputs = bool(args.write_outputs)
     if env_write_outputs is not None:
         write_outputs = write_outputs or bool(env_write_outputs)
+    if resolver_output_dir_env and not write_outputs:
+        write_outputs = True
+        args.write_outputs = True
+        LOGGER.info(
+            "Auto-enabling --write-outputs (RESOLVER_OUTPUT_DIR=%s)",
+            resolver_output_dir_env,
+        )
 
     write_candidates = bool(args.write_candidates)
     if env_write_candidates is not None:
@@ -1078,6 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{name}: {int(len(frame))} rows"
         for name, frame in data.items()
     ]
+
     staging_dir = Path("resolver/staging/idmc")
     staged_counts: Dict[str, Optional[int]] = {}
     staging_entries: List[str] = []
@@ -1104,10 +1133,50 @@ def main(argv: list[str] | None = None) -> int:
         "resolution_ready": rows_resolution_ready,
         "staged": staged_counts_serializable,
     }
+    diagnostics_payload["outputs"] = {
+        "write_outputs": bool(write_outputs),
+        "resolver_output_dir": resolver_output_dir_env,
+        "out_dir": args.out_dir,
+        "enabled": bool(export_details.get("enabled")),
+        "rows": int(export_details.get("rows", 0) or 0),
+        "paths": export_details.get("paths", {}),
+        "reason": export_details.get("reason"),
+    }
     total_staged_rows = sum(
         value or 0 for value in staged_counts_serializable.values() if value is not None
     )
     diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
+
+    outputs_lines: List[str] = [
+        "Write outputs: {flag}".format(
+            flag="yes" if write_outputs else "no",
+        )
+    ]
+    if resolver_output_dir_env:
+        outputs_lines.append(f"RESOLVER_OUTPUT_DIR: {resolver_output_dir_env}")
+    if staging_out_dir:
+        outputs_lines.append(f"Staging out dir: {staging_out_dir}")
+    flow_rows = staged_counts_serializable.get("flow.csv")
+    if flow_rows is None:
+        outputs_lines.append("Staged flow.csv: missing")
+    else:
+        outputs_lines.append(f"Staged flow.csv: rows={flow_rows}")
+    export_paths_block = export_details.get("paths") if isinstance(export_details, dict) else {}
+    if isinstance(export_paths_block, dict) and export_paths_block:
+        csv_path = export_paths_block.get("csv")
+        parquet_path = export_paths_block.get("parquet")
+        if csv_path:
+            outputs_lines.append(
+                f"Facts CSV: {csv_path} (rows={export_details.get('rows', 0)})"
+            )
+        if parquet_path:
+            outputs_lines.append(f"Facts Parquet: {parquet_path}")
+    elif export_details.get("enabled"):
+        outputs_lines.append("Facts export enabled but no paths reported")
+    elif write_outputs:
+        reason = export_details.get("reason")
+        if reason:
+            outputs_lines.append(f"Facts export skipped: {reason}")
 
     cache_info = http_rollup.get("cache") or {}
     latency = http_rollup.get("latency_ms") or {}
@@ -1313,6 +1382,12 @@ def main(argv: list[str] | None = None) -> int:
         f"Rows (resolution-ready): {rows_resolution_ready}",
         f"Staged rows: {staged_notes}",
     ]
+    notes_lines.append(
+        "Write outputs: {flag} (out_dir={path})".format(
+            flag="yes" if write_outputs else "no",
+            path=args.out_dir,
+        )
+    )
     notes_lines.append(f"HDX fallback used: {'yes' if fallback_used_flag else 'no'}")
     if fallback_error:
         notes_lines.append(f"Fallback error: {fallback_error}")
@@ -1380,6 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
         "performance_block": _format_bullets(performance_lines),
         "rate_limit_block": _format_bullets(rate_limit_lines),
         "dataset_block": _format_bullets(dataset_lines),
+        "outputs_block": _format_bullets(outputs_lines),
         "staging_block": _format_bullets(staging_entries),
         "fallback_block": fallback_block,
         "notes_block": _format_bullets(notes_lines),

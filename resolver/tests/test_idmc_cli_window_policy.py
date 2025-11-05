@@ -194,10 +194,10 @@ def test_idmc_export_enabled_writes_csvs(monkeypatch, tmp_path):
             {
                 "iso3": "AAA",
                 "as_of_date": "2024-02-29",
-                "metric": "idp_displacement_new_idmc",
+                "metric": "new_displacements",
                 "value": 5,
                 "series_semantics": "new",
-                "source": "IDMC",
+                "source": "idmc_idu",
             },
             {
                 "iso3": "BBB",

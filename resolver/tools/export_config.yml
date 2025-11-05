@@ -119,7 +119,7 @@ sources:
         from: as_of_date
         ops: [to_date]
       metric:
-        const: idp_displacement_new_idmc
+        const: new_displacements
       value:
         from: value
         ops: [to_number]
@@ -128,7 +128,7 @@ sources:
       semantics:
         const: new
       source:
-        const: IDMC
+        const: idmc_idu
     filters:
       - keep_if_not_null: [iso3, as_of_date, value]
       - keep_if_positive: [value]
@@ -144,7 +144,7 @@ metrics:
     enabled: true
     series_semantics: stock
     source: IOM DTM (admin0)
-  idp_displacement_new_idmc:
+  new_displacements:
     enabled: true
     series_semantics: new
-    source: IDMC
+    source: idmc_idu

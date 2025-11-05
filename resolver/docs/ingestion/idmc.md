@@ -92,7 +92,7 @@ offline tests: it records planned waits without actually sleeping.
   keeping the maximum value observed (`dup_event`).
 - **Non-negative guardrail:** negative values are dropped before deduping
   (`negative_value`).
-- **Output schema:** `metric=idp_displacement_new_idmc`,
+- **Output schema:** `metric=new_displacements`,
   `series_semantics=new`, `source=IDMC`.
 
 ## Hazard mapping (optional)
@@ -216,7 +216,7 @@ shared facts contract documented in `SCHEMAS.md` and include:
 
 - `iso3`
 - `as_of_date`
-- `metric` (`idp_displacement_new_idmc`)
+- `metric` (`new_displacements`)
 - `value`
 - `series_semantics` (`new`)
 - `source` (`IDMC`)

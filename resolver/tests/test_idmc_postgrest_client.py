@@ -67,11 +67,11 @@ def test_idmc_idu_builds_filters_for_single_date_col():
     assert all(key != "displacement_start_date" for key, _ in params)
 
 
-def test_idmc_batches_iso3s_max_20():
+def test_idmc_batches_iso3s_max_25():
     codes = [f"C{i:03d}" for i in range(198)]
     batches = _batch_iso3(codes)
-    assert len(batches) == 10
-    assert all(len(batch) <= 20 for batch in batches)
+    assert len(batches) == 8
+    assert all(len(batch) <= 25 for batch in batches)
 
 
 def test_idmc_per_chunk_http_error_does_not_abort(monkeypatch):

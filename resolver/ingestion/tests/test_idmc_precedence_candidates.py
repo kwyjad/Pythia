@@ -14,15 +14,15 @@ def test_to_candidates_from_normalized(monkeypatch):
             {
                 "iso3": "nga",
                 "as_of_date": "2024-03-31",
-                "metric": "idp_displacement_new_idmc",
+                "metric": "new_displacements",
                 "value": "1500",
                 "series_semantics": "new",
-                "source": "IDMC",
+                "source": "idmc_idu",
             },
             {
                 "iso3": " ",
                 "as_of_date": "invalid",
-                "metric": "idp_displacement_new_idmc",
+                "metric": "new_displacements",
                 "value": "bad",
             },
         ]
