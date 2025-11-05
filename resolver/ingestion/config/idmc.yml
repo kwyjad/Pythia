@@ -13,7 +13,7 @@ api:
     end:
   token_env: "IDMC_API_TOKEN"  # optional bearer token (not required for IDU)
 field_aliases:
-  value_flow: ["new_displacements", "New displacements"]
+  value_flow: ["new_displacements", "New displacements", "figure"]
   value_stock: ["idps", "IDPs", "Total IDPs"]
   date: ["date", "Date", "month", "Month", "ReportingDate"]
   iso3: ["iso3", "ISO3", "Country ISO3", "CountryISO3"]
