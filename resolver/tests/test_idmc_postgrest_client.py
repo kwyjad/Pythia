@@ -136,7 +136,9 @@ def test_idmc_per_chunk_http_error_does_not_abort(monkeypatch):
     frame = data["monthly_flow"]
     assert len(frame) == 1
     assert diagnostics["chunk_errors"] == 1
-    assert diagnostics["http_status_counts"]["other"] >= 0
+    counts = diagnostics["http_status_counts"]
+    assert set(counts.keys()) == {"2xx", "4xx", "5xx"}
+    assert diagnostics.get("http_status_counts_extended", {}).get("other", 0) >= 0
     assert call_state["calls"] >= 2
 
 
@@ -197,7 +199,13 @@ def test_idmc_empty_but_not_fail_policy_returns_ok(monkeypatch, tmp_path):
             "retries": 0,
             "status_last": 500,
             "latency_ms": {"p50": 0, "p95": 0, "max": 0},
-            "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 1},
+            "status_counts": {"2xx": 0, "4xx": 0, "5xx": 0},
+            "status_counts_extended": {
+                "2xx": 0,
+                "4xx": 0,
+                "5xx": 0,
+                "other": 1,
+            },
         },
         "cache": {"dir": ".cache", "hits": 0, "misses": 0},
         "filters": {"window_start": None, "window_end": None, "countries": []},
@@ -208,7 +216,13 @@ def test_idmc_empty_but_not_fail_policy_returns_ok(monkeypatch, tmp_path):
         ],
         "date_column": "displacement_date",
         "select_columns": ["iso3", "figure", "displacement_date"],
-        "http_status_counts": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 1},
+        "http_status_counts": {"2xx": 0, "4xx": 0, "5xx": 0},
+        "http_status_counts_extended": {
+            "2xx": 0,
+            "4xx": 0,
+            "5xx": 0,
+            "other": 1,
+        },
         "performance": {
             "requests": 1,
             "wire_bytes": 0,

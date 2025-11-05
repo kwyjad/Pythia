@@ -26,6 +26,7 @@ from .diagnostics import (
     tick,
     timings_block,
     to_ms,
+    serialize_http_status_counts,
     write_connectors_line,
     write_drop_reasons,
     write_sample_preview,
@@ -939,13 +940,13 @@ def main(argv: list[str] | None = None) -> int:
     http_rollup = diagnostics.get("http") or {}
     cache_stats = diagnostics.get("cache") or {}
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
-    http_status_counts_raw = diagnostics.get("http_status_counts") or {}
-    http_status_counts = {
-        "2xx": int((http_status_counts_raw or {}).get("2xx", 0) or 0),
-        "4xx": int((http_status_counts_raw or {}).get("4xx", 0) or 0),
-        "5xx": int((http_status_counts_raw or {}).get("5xx", 0) or 0),
-        "other": int((http_status_counts_raw or {}).get("other", 0) or 0),
-    }
+    http_status_counts_raw = diagnostics.get("http_status_counts")
+    http_status_counts = serialize_http_status_counts(http_status_counts_raw)
+    http_status_counts_extended = diagnostics.get("http_status_counts_extended") or {}
+    try:
+        http_status_other = int((http_status_counts_extended or {}).get("other", 0) or 0)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        http_status_other = 0
     requests_planned_raw = diagnostics.get("requests_planned")
     try:
         requests_planned = int(requests_planned_raw) if requests_planned_raw is not None else None
@@ -959,6 +960,9 @@ def main(argv: list[str] | None = None) -> int:
         "mode": diagnostics.get("mode", "offline"),
         "network_mode": effective_network_mode,
         "http_status_counts": http_status_counts,
+        "http_status_counts_extended": (
+            dict(http_status_counts_extended) if http_status_counts_extended else None
+        ),
         "http": http_rollup,
         "cache": cache_stats,
         "filters": diagnostics.get("filters"),
@@ -1092,13 +1096,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     if http_status_counts:
         attempts_lines.append(
-            "HTTP status counts: 2xx={two} 4xx={four} 5xx={five} other={other}".format(
+            "HTTP status counts: 2xx={two} 4xx={four} 5xx={five}".format(
                 two=int(http_status_counts.get("2xx", 0) or 0),
                 four=int(http_status_counts.get("4xx", 0) or 0),
                 five=int(http_status_counts.get("5xx", 0) or 0),
-                other=int(http_status_counts.get("other", 0) or 0),
             )
         )
+        if http_status_other:
+            attempts_lines.append(f"HTTP status (other): other={http_status_other}")
     elif effective_network_mode != "live":
         attempts_lines.append("HTTP status counts: n/a in non-live mode")
 
@@ -1143,13 +1148,13 @@ def main(argv: list[str] | None = None) -> int:
     ]
     date_column_used = diagnostics.get("date_column") or "n/a"
     notes_lines.append(f"Date column: {date_column_used}")
-    notes_lines.append(
-        "HTTP non-2xx: 4xx={four} 5xx={five} other={other}".format(
-            four=http_status_counts.get("4xx", 0),
-            five=http_status_counts.get("5xx", 0),
-            other=http_status_counts.get("other", 0),
-        )
-    )
+    non_two_buckets = [
+        f"4xx={int(http_status_counts.get('4xx', 0) or 0)}",
+        f"5xx={int(http_status_counts.get('5xx', 0) or 0)}",
+    ]
+    if http_status_other:
+        non_two_buckets.append(f"other={http_status_other}")
+    notes_lines.append("HTTP non-2xx: " + " ".join(non_two_buckets))
     notes_lines.append(
         f"Chunk errors: {int(diagnostics.get('chunk_errors', 0) or 0)}"
     )
@@ -1255,13 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
         window_start = window_start_iso
         window_end = window_end_iso
         countries_sample = selected_countries[:10]
-        http_counts_zero = None
-        if isinstance(http_status_counts, dict):
-            http_counts_zero = {
-                "2xx": int(http_status_counts.get("2xx", 0) or 0),
-                "4xx": int(http_status_counts.get("4xx", 0) or 0),
-                "5xx": int(http_status_counts.get("5xx", 0) or 0),
-            }
+        http_counts_zero = dict(http_status_counts)
         why_zero_payload = {
             "network_mode": effective_network_mode,
             "http_status_counts": http_counts_zero,

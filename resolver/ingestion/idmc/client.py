@@ -26,6 +26,7 @@ from .diagnostics import (
     chunks_block as build_chunks_block,
     performance_block as build_performance_block,
     rate_limit_block as build_rate_limit_block,
+    serialize_http_status_counts,
 )
 from .chunking import split_by_month
 from .config import IdmcConfig
@@ -1104,7 +1105,10 @@ def fetch(
             ),
             "chunks": build_chunks_block(False, [], count=0),
             "network_mode": network_mode,
-            "http_status_counts": {"2xx": 0, "4xx": 0, "5xx": 0}
+            "http_status_counts": serialize_http_status_counts(None)
+            if network_mode == "live"
+            else None,
+            "http_status_counts_extended": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
             if network_mode == "live"
             else None,
             "raw_path": None,
@@ -1271,6 +1275,7 @@ def fetch(
         # fall back to attempts if duration unavailable
         total_seconds = sum(value / 1000.0 for value in attempt_latencies)
     total_seconds = max(total_seconds, 0.001)
+    status_counts_serialized = serialize_http_status_counts(status_counts)
     http_summary = {
         "requests": total_requests,
         "retries": total_retries,
@@ -1280,7 +1285,8 @@ def fetch(
         "wire_bytes": total_wire_bytes,
         "body_bytes": total_body_bytes,
         "retry_after_events": total_retry_after_events,
-        "status_counts": status_counts,
+        "status_counts": status_counts_serialized,
+        "status_counts_extended": dict(status_counts),
     }
 
     data: Dict[str, pd.DataFrame] = {"monthly_flow": combined}
@@ -1333,7 +1339,9 @@ def fetch(
         "rate_limit": rate_limit_info,
         "chunks": chunks_info,
         "network_mode": network_mode,
-        "http_status_counts": status_counts if network_mode == "live" else None,
+        "http_status_counts": status_counts_serialized if network_mode == "live" else None,
+        "http_status_counts_extended":
+            dict(status_counts) if network_mode == "live" else None,
         "date_column": schema_date_column,
         "select_columns": list(select_columns),
         "schema_probe": schema_probe_diag,
