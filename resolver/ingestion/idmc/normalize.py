@@ -10,7 +10,8 @@ import pandas as pd
 
 from resolver.ingestion.utils.iso_normalize import to_iso3
 
-SOURCE_NAME = "IDMC"
+SOURCE_NAME = "idmc_idu"
+FLOW_METRIC_NAME = "new_displacements"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -152,7 +153,7 @@ def _normalize_monthly_flow(
         {
             "iso3": iso_series,
             "as_of_date": month_end,
-            "metric": "idp_displacement_new_idmc",
+            "metric": FLOW_METRIC_NAME,
             "value": value_series,
             "series_semantics": "new",
             "source": SOURCE_NAME,

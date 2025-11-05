@@ -332,8 +332,11 @@ structured overrides (all mirrored by environment variables):
   when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
 - Zero-row diagnostics (`diagnostics/ingestion/idmc/why_zero.json`) capture token
   presence, resolved country counts and samples, the source of the country list,
-  selected series, and the active date window; the file is written whenever
-  `--debug` is supplied or when no rows survive normalization.【F:resolver/ingestion/idmc/cli.py†L889-L936】
+  selected series, the effective window (`window.start`/`window.end`/`window_source`),
+  request counters (`requests_planned`, `requests_attempted`), HTTP status buckets,
+  and the staged/exported row totals so the file explains whether the run skipped
+  the network or produced empty data; it is written whenever `--debug` is supplied
+  or when no rows survive normalization.【F:resolver/ingestion/idmc/cli.py†L889-L972】
 - HTTP status telemetry exposes a strict three-key mapping under
   `http_status_counts` (`{"2xx": int, "4xx": int, "5xx": int}`) regardless of
   any extra buckets counted internally; additional counters (timeouts, other
@@ -344,6 +347,10 @@ structured overrides (all mirrored by environment variables):
   high-level traffic alongside the canonical status buckets, and
   `http_timeouts` captures the effective connect/read timeouts used for the
   run.【F:resolver/ingestion/idmc/cli.py†L560-L1280】【F:resolver/ingestion/idmc/client.py†L506-L1106】
+- `http.last_error`, `http.last_error_url`, and the `outputs` block record the
+  most recent failure (class/message/URL) alongside whether facts were written,
+  which paths were produced, and how many rows landed in `flow.csv`, making
+  `summary.md` and downstream diagnostics honest about zero-row outcomes.【F:resolver/ingestion/idmc/cli.py†L340-L438】【F:resolver/ingestion/idmc/cli.py†L1100-L1290】
 - Fallback diagnostics now expose `fallback_used` (boolean) and enrich
   `fallback` with reason, status, rows, and errors; `attempts` entries include
   per-chunk `status`, `rows`, and optional `zero_rows_reason` so timeout-driven

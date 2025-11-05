@@ -17,10 +17,10 @@ def test_precedence_selection_prefers_idmc(monkeypatch):
             {
                 "iso3": "sdn",
                 "as_of_date": "2024-03-31",
-                "metric": "idp_displacement_new_idmc",
+                "metric": "new_displacements",
                 "value": 1200,
                 "series_semantics": "new",
-                "source": "IDMC",
+                "source": "idmc_idu",
             }
         ]
     )

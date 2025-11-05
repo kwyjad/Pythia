@@ -14,7 +14,7 @@ FACT_COLUMNS: List[str] = [
     "source",
 ]
 
-FLOW_METRIC = "idp_displacement_new_idmc"
+FLOW_METRIC = "new_displacements"
 FLOW_SERIES_SEMANTICS = "new"
 
 

@@ -39,7 +39,7 @@ def test_idmc_normalize_idu_fields():
         pd.Timestamp("2024-02-29").date(),
         pd.Timestamp("2024-01-31").date(),
     }
-    assert set(tidy["metric"]) == {"idp_displacement_new_idmc"}
+    assert set(tidy["metric"]) == {"new_displacements"}
     assert set(tidy["series_semantics"]) == {"new"}
     assert tidy.loc[tidy["iso3"] == "SDN", "value"].item() == 1500
 
@@ -84,5 +84,5 @@ def test_idmc_normalize_monthly_rollup():
     assert len(tidy) == 2
     afg_row = tidy[tidy["iso3"] == "AFG"].iloc[0]
     assert afg_row["value"] == 150
-    assert afg_row["as_of_date"] == "2024-04-30"
+    assert afg_row["as_of_date"] == pd.Timestamp("2024-04-30")
     assert drops["date_parse_failed"] == 0

@@ -25,7 +25,7 @@ CANDIDATE_COLS = [
 ]
 
 _METRIC_MAP: Dict[str, str] = {
-    "idp_displacement_new_idmc": "internal_displacement_new",
+    "new_displacements": "internal_displacement_new",
 }
 _METHOD_NOTE = "IDU preliminary; ~180d rolling window"
 

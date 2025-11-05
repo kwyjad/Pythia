@@ -39,3 +39,6 @@ dev = ["ipykernel"]
 test = ["duckdb", "httpx", "pytest"]
 connectors = ["dtmapi"]
 ingestion = ["dtmapi", "pandas", "python-dateutil"]
+
+[tool.poe.tasks]
+test-idmc-cli = "pytest -q resolver/tests/test_idmc_cli_*"

@@ -47,7 +47,7 @@ DEFAULT_POSTGREST_COLUMNS = (
     "displacement_type",
 )
 IDU_POSTGREST_LIMIT = 10000
-ISO3_BATCH_SIZE = 20
+ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
@@ -111,6 +111,14 @@ def fetch_offline(skip_network: bool = True) -> Dict[str, pd.DataFrame]:
     monthly = pd.read_csv(os.path.join(FIXTURES_DIR, "sample_monthly.csv"))
     annual = pd.read_csv(os.path.join(FIXTURES_DIR, "sample_annual.csv"))
     return {"monthly_flow": monthly, "stock": annual}
+
+
+def should_return_empty(
+    window_start: Optional[date], window_end: Optional[date], window_days: Optional[int]
+) -> bool:
+    """Return ``True`` when the caller did not request any time window."""
+
+    return window_start is None and window_end is None and window_days is None
 
 
 def _read_json_fixture(name: str) -> Dict[str, Any]:
@@ -610,7 +618,7 @@ def fetch_idu_json(
     )
 
     diagnostics: Dict[str, Any] = {
-        "mode": "fixture",
+        "mode": network_mode,
         "url": None,
         "cache": cache_stats,
         "http": http_info,
@@ -1312,7 +1320,7 @@ def fetch(
         else getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
     )
 
-    if window_start is None and window_end is None and window_days is None:
+    if should_return_empty(window_start, window_end, window_days):
         LOGGER.warning(
             "IDMC fetch invoked without a date window; returning empty payload",
         )

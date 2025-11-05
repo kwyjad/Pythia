@@ -51,7 +51,7 @@ def test_idmc_connector_contract_monthly_flow():
         "source",
     ]
 
-    assert (tidy_first["metric"] == "idp_displacement_new_idmc").all()
+    assert (tidy_first["metric"] == "new_displacements").all()
     assert (tidy_first["series_semantics"] == "new").all()
     assert (tidy_first["value"] >= 0).all()
     assert tidy_first["iso3"].str.match(r"^[A-Z]{3}$").all()

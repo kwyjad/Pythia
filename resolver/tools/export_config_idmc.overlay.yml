@@ -1,9 +1,9 @@
 # Example overlay for IDMC metrics (not loaded by default)
 metrics:
-  idp_displacement_new_idmc:
+  new_displacements:
     enabled: false
     series_semantics: new
-    source: IDMC
+    source: idmc_idu
   idp_displacement_stock_idmc:
     enabled: false
     series_semantics: stock
