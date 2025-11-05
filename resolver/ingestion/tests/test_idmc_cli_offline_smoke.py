@@ -1,8 +1,10 @@
 """Smoke test for the offline IDMC CLI."""
 import json
 import os
-import subprocess
 import sys
+
+
+from resolver.tests.utils import run as run_proc
 
 
 def read_last_connector_line() -> dict:
@@ -15,7 +17,7 @@ def read_last_connector_line() -> dict:
 def test_idmc_offline_cli_smoke(tmp_path, monkeypatch):
     os.makedirs(os.path.join("diagnostics", "ingestion", "idmc"), exist_ok=True)
     cmd = [sys.executable, "-m", "resolver.ingestion.idmc.cli", "--skip-network"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_proc(cmd, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
     line = read_last_connector_line()

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 import duckdb
 import pandas as pd
+
+from resolver.tests.utils import run as run_proc
 
 CANONICAL_COLUMNS = [
     "event_id",
@@ -112,7 +113,7 @@ def test_cli_loads_derives_and_exports(tmp_path: Path, monkeypatch) -> None:
         "1",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = run_proc(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise AssertionError(
             f"CLI failed: {result.returncode}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"

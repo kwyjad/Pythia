@@ -4,7 +4,6 @@ from __future__ import annotations
 import csv
 import os
 import re
-import subprocess
 import sys
 import time
 import warnings
@@ -12,6 +11,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 
 import pytest
+
+from resolver.tests.utils import run as run_proc
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INGESTION_DIR = REPO_ROOT / "resolver" / "ingestion"
@@ -269,7 +270,7 @@ def test_ingestion_connector_offline_smoke(connector_path: Path) -> None:
 
     module_name = f"resolver.ingestion.{connector_path.stem}"
     cmd = [sys.executable, "-m", module_name]
-    result = subprocess.run(
+    result = run_proc(
         cmd,
         cwd=REPO_ROOT,
         env=_build_child_env(dataset),

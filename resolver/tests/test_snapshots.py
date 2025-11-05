@@ -1,12 +1,12 @@
 from __future__ import annotations
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from resolver.tests.test_utils import SNAPS, read_parquet
+from resolver.tests.utils import run as run_proc
 
 def test_any_snapshot_parquet_reads_and_has_core_columns():
     if not SNAPS.exists():
@@ -56,7 +56,7 @@ def test_snapshot_cli_creates_monthly_artifacts(tmp_path, monkeypatch):
         "--overwrite",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_proc(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         pytest.fail(f"snapshot_cli failed: {result.stderr}\n{result.stdout}")
 

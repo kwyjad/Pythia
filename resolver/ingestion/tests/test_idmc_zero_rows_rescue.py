@@ -1,8 +1,10 @@
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+
+from resolver.tests.utils import run as run_proc
 
 
 def test_idmc_zero_rows_rescue(tmp_path):
@@ -19,7 +21,7 @@ def test_idmc_zero_rows_rescue(tmp_path):
     if connectors_path.exists():
         before = connectors_path.read_text(encoding="utf-8").splitlines()
 
-    subprocess.run(
+    run_proc(
         [
             sys.executable,
             "-m",

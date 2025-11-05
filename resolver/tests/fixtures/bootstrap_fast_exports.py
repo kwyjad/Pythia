@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ import pandas as pd
 
 from resolver.db.runtime_flags import USE_DUCKDB
 from resolver.ingestion._fast_fixtures import resolve_fast_fixtures_mode
+from resolver.tests.utils import run as run_proc
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - keep logging quiet in libraries
@@ -81,7 +81,7 @@ def _run_load_and_derive(staging_root: Path, snapshots_root: Path, db_path: Path
         "--allow-negatives",
         "1",
     ]
-    subprocess.run(cmd, check=True, env=env)
+    run_proc(cmd, check=True, env=env)
 
 
 @lru_cache(maxsize=1)

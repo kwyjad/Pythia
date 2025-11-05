@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 import yaml
+
+from resolver.tests.utils import run as run_proc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,7 @@ def run_generator(tmp_path: Path, schema: dict, *extra_args: str) -> Path:
         "--sort",
         *extra_args,
     ]
-    subprocess.run(args, check=True)
+    run_proc(args, check=True)
     return output_path
 
 
@@ -169,7 +170,7 @@ def test_fail_on_missing_description(tmp_path):
         str(output_path),
         "--fail-on-missing-desc",
     ]
-    proc = subprocess.run(args, capture_output=True, text=True)
+    proc = run_proc(args, capture_output=True, text=True)
     assert proc.returncode != 0
     assert "Missing descriptions for" in proc.stderr
     assert "facts.country_iso3" in proc.stderr

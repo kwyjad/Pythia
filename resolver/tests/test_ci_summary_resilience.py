@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 
+from resolver.tests.utils import run as run_proc
+
+
 def _run_summary(tmp_path: Path) -> str:
     script = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "make_ai_summary.py"
-    subprocess.run([sys.executable, str(script)], cwd=tmp_path, check=True)
+    run_proc([sys.executable, str(script)], cwd=tmp_path, check=True)
     summary = tmp_path / ".ci" / "diagnostics" / "SUMMARY.md"
     return summary.read_text(encoding="utf-8")
 

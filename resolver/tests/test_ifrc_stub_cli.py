@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
+from resolver.tests.utils import run as run_proc
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -19,7 +19,7 @@ def _run_stub(output: Path) -> None:
         "--out",
         str(output),
     ]
-    subprocess.run(cmd, check=True, cwd=_repo_root(), capture_output=True, text=True)
+    run_proc(cmd, check=True, cwd=_repo_root(), capture_output=True, text=True)
 
 
 def test_ifrc_stub_accepts_directory(tmp_path: Path) -> None:
