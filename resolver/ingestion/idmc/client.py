@@ -119,6 +119,7 @@ def _http_timeouts() -> Tuple[float, float]:
             "IDMC_HTTP_TIMEOUT_CONNECT",
             "IDMC_HTTP_CONNECT_TIMEOUT",
             "IDMC_HTTP_TIMEOUT_CONNECT_S",
+            "IDMC_CONNECT_TIMEOUT",
         ),
     )
     read = _env_timeout(
@@ -128,6 +129,7 @@ def _http_timeouts() -> Tuple[float, float]:
             "IDMC_HTTP_TIMEOUT_READ",
             "IDMC_HTTP_READ_TIMEOUT",
             "IDMC_HTTP_TIMEOUT_READ_S",
+            "IDMC_READ_TIMEOUT",
         ),
     )
     if read <= 0:
@@ -650,14 +652,12 @@ def fetch_idu_json(
 
     base = (base_url or cfg.api.base_url).rstrip("/")
     endpoint = cfg.api.endpoints.get("idus_json", "/data/idus_view_flat")
+    window_start_iso = (chunk_start or window_start).isoformat() if (chunk_start or window_start) else None
+    window_end_iso = (chunk_end or window_end).isoformat() if (chunk_end or window_end) else None
     base_params: Dict[str, str] = {
         "chunk": chunk_label or "full",
-        "window_start": (chunk_start or window_start).isoformat()
-        if (chunk_start or window_start)
-        else None,
-        "window_end": (chunk_end or window_end).isoformat()
-        if (chunk_end or window_end)
-        else None,
+        "window_start": window_start_iso,
+        "window_end": window_end_iso,
     }
     cache_dir = cfg.cache.dir
     ttl_seconds = cache_ttl if cache_ttl is not None else cfg.cache.ttl_seconds
@@ -773,6 +773,7 @@ def fetch_idu_json(
             ),
             "rows_before": len(rows),
             "rows_after": len(frame),
+            "chunk_label": chunk_label or "full",
         }
         diagnostics["filters"] = filters
         return frame.reset_index(drop=True), filters
@@ -808,25 +809,20 @@ def fetch_idu_json(
         for iso_batch in iso_batches or [None]:
             offset = 0
             while True:
-                params = [
-                    (key, value)
-                    for key, value in base_params.items()
-                    if value is not None
-                ]
-                params.extend(
-                    _postgrest_filters(
-                        chunk_start=chunk_start,
-                        chunk_end=chunk_end,
-                        window_start=window_start,
-                        window_end=window_end,
-                        iso_batch=iso_batch,
-                        offset=offset,
-                        limit=IDU_POSTGREST_LIMIT,
-                        date_column=date_filter_column,
-                        select_columns=select_list,
-                    )
+                request_params = _postgrest_filters(
+                    chunk_start=chunk_start,
+                    chunk_end=chunk_end,
+                    window_start=window_start,
+                    window_end=window_end,
+                    iso_batch=iso_batch,
+                    offset=offset,
+                    limit=IDU_POSTGREST_LIMIT,
+                    date_column=date_filter_column,
+                    select_columns=select_list,
                 )
-                url = f"{base}{endpoint}?{urlencode(params, safe='.,()')}"
+                url = f"{base}{endpoint}"
+                if request_params:
+                    url = f"{url}?{urlencode(request_params, safe='.,()')}"
                 diagnostics["url"] = url
                 cache_params = {
                     **{k: v for k, v in base_params.items() if v is not None},
@@ -859,6 +855,10 @@ def fetch_idu_json(
                     and chunk_label
                     and chunk_label != "full"
                 )
+                request_params_serialized = [
+                    {"key": key, "value": value} for key, value in request_params
+                ]
+                diagnostics["postgrest_params"] = request_params_serialized
                 if cache_entry is not None and not refresh_live_chunk:
                     cache_stats["hits"] += 1
                     cache_stats["hit"] = True
@@ -870,6 +870,7 @@ def fetch_idu_json(
                             "url": url,
                             "status": cache_entry.metadata.get("status"),
                             "cache": "hit",
+                            "params": request_params_serialized,
                         }
                     )
                 elif use_cache_only:
@@ -880,6 +881,7 @@ def fetch_idu_json(
                             "url": url,
                             "status": None,
                             "cache": "miss",
+                            "params": request_params_serialized,
                         }
                     )
                     break
@@ -929,6 +931,7 @@ def fetch_idu_json(
                                 ),
                                 "cache": "miss",
                                 "via": "http_get",
+                                "params": request_params_serialized,
                             }
                         )
                         metadata = {
@@ -1092,7 +1095,17 @@ def fetch_idu_json(
                             error_kind,
                             _trim_url(url),
                         )
+                        should_use_fallback = False
                         if allow_fallback:
+                            is_2xx_status = (
+                                isinstance(status_display, int)
+                                and 200 <= status_display < 300
+                            )
+                            if is_timeout_kind or status_display == "timeout":
+                                should_use_fallback = True
+                            elif not is_2xx_status:
+                                should_use_fallback = True
+                        if should_use_fallback:
                             fallback_diag_entry: Dict[str, Any] = {
                                 "type": "hdx",
                                 "reason": "http_error",
@@ -1142,35 +1155,45 @@ def fetch_idu_json(
                                     type(fallback_exc).__name__,
                                 )
                             diagnostics["fallback"] = fallback_diag_entry
-                        elif cached_entry is not None and cached_entry.body:
-                            payload_body = cached_entry.body
-                            cache_record.update(cached_entry.metadata)
-                            mode = "cache"
-                            diagnostics["requests"].append(
-                                {
-                                    "url": url,
-                                    "status": cached_entry.metadata.get("status"),
-                                    "cache": "hit",
-                                    "via": "cache_refresh",
-                                }
-                            )
-                            payload = json.loads(payload_body.decode("utf-8"))
-                            raw_paths.append(_write_raw_snapshot(key, payload_body))
-                            chunk_rows = _normalise_rows(payload)
-                            rows.extend(chunk_rows)
-                            diagnostics["attempts"].append(
-                                {
+                        else:
+                            if allow_fallback:
+                                diagnostics["fallback"] = {
+                                    "type": "hdx",
+                                    "reason": "http_error_not_triggered",
+                                    "status": status_display,
                                     "chunk": chunk_name,
-                                    "via": "cache_refresh",
-                                    "rows": len(chunk_rows),
+                                    "used": False,
                                 }
-                            )
-                            LOGGER.debug(
-                                "idmc: chunk=%s served from cache after error rows=%d",
-                                chunk_name,
-                                len(chunk_rows),
-                            )
-                            break
+                            if cached_entry is not None and cached_entry.body:
+                                payload_body = cached_entry.body
+                                cache_record.update(cached_entry.metadata)
+                                mode = "cache"
+                                diagnostics["requests"].append(
+                                    {
+                                        "url": url,
+                                        "status": cached_entry.metadata.get("status"),
+                                        "cache": "hit",
+                                        "via": "cache_refresh",
+                                        "params": request_params_serialized,
+                                    }
+                                )
+                                payload = json.loads(payload_body.decode("utf-8"))
+                                raw_paths.append(_write_raw_snapshot(key, payload_body))
+                                chunk_rows = _normalise_rows(payload)
+                                rows.extend(chunk_rows)
+                                diagnostics["attempts"].append(
+                                    {
+                                        "chunk": chunk_name,
+                                        "via": "cache_refresh",
+                                        "rows": len(chunk_rows),
+                                    }
+                                )
+                                LOGGER.debug(
+                                    "idmc: chunk=%s served from cache after error rows=%d",
+                                    chunk_name,
+                                    len(chunk_rows),
+                                )
+                                break
                         chunk_error = True
                         break
                     except Exception as exc:  # pragma: no cover - defensive
@@ -1786,7 +1809,6 @@ def fetch(
         "body_bytes": total_body_bytes,
         "retry_after_events": total_retry_after_events,
         "status_counts": status_counts_serialized,
-        "status_counts_extended": dict(status_counts),
         "timeouts": total_timeouts,
         "requests_ok_2xx": total_ok_2xx,
         "requests_4xx": total_4xx,
@@ -1876,8 +1898,6 @@ def fetch(
         "chunks": chunks_info,
         "network_mode": network_mode,
         "http_status_counts": status_counts_serialized if network_mode == "live" else None,
-        "http_status_counts_extended":
-            dict(status_counts) if network_mode == "live" else None,
         "date_column": schema_date_column,
         "select_columns": list(select_columns),
         "schema_probe": schema_probe_diag,
@@ -1898,6 +1918,21 @@ def fetch(
         "fallback_used": bool(fallback_used_total),
         "http_timeouts": http_timeouts_cfg,
     }
+    if network_mode == "live":
+        diagnostics["http_extended"] = {
+            "status_counts": dict(status_counts),
+            "timeouts": total_timeouts,
+            "requests_ok_2xx": total_ok_2xx,
+            "requests_4xx": total_4xx,
+            "requests_5xx": total_5xx,
+            "requests_other": total_other_responses,
+            "other_exceptions": total_other_exceptions,
+            "exceptions_by_type": dict(exceptions_by_type),
+            "requests_planned": int(
+                http_attempt_summary_totals.get("planned", 0) or len(jobs)
+            ),
+            "requests_executed": total_requests,
+        }
     if zero_rows_reasons_all:
         diagnostics["zero_rows_reasons"] = dict(zero_rows_reasons_all)
         filters_block = diagnostics.get("filters") or {}

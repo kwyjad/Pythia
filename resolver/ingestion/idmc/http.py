@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 import requests
+import threading
 from requests import Response
 from requests.exceptions import (
     ChunkedEncodingError,
@@ -21,6 +22,7 @@ from requests.exceptions import (
     SSLError as RequestsSSLError,
     Timeout,
 )
+from requests.adapters import HTTPAdapter
 from urllib3.exceptions import (
     ConnectTimeoutError,
     MaxRetryError,
@@ -190,7 +192,7 @@ def http_get(
 
     timeout_tuple = _normalise_timeout(timeout)
 
-    session = requests.Session()
+    session = _shared_session()
     try:
         for attempt in attempts:
             if rate_limiter is not None:
@@ -432,3 +434,17 @@ def http_get(
         diagnostics,
         kind=last_exception_kind or ("timeout" if timeout_hit else "error"),
     )
+_SESSION: requests.Session | None = None
+_SESSION_LOCK = threading.Lock()
+
+
+def _shared_session() -> requests.Session:
+    global _SESSION
+    with _SESSION_LOCK:
+        if _SESSION is None:
+            session = requests.Session()
+            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=40)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            _SESSION = session
+        return _SESSION

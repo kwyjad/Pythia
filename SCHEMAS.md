@@ -330,6 +330,10 @@ structured overrides (all mirrored by environment variables):
 - The IDMC staging directory (`resolver/staging/idmc/`) may contain both
   `flow.csv` and `stock.csv`; the exporter reports row counts for each file even
   when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
+- When `--write-outputs` is supplied (or `IDMC_WRITE_EMPTY=1`), the connector
+  ensures `resolver/staging/idmc/flow.csv` exists with the canonical header even
+  if normalization yielded zero rows so downstream exporters still detect the
+  file.【F:resolver/ingestion/idmc/cli.py†L720-L804】【F:resolver/ingestion/idmc/staging.py†L9-L26】
 - Zero-row diagnostics (`diagnostics/ingestion/idmc/why_zero.json`) capture token
   presence, resolved country counts and samples, the source of the country list,
   selected series, the effective window (`window.start`/`window.end`/`window_source`),
@@ -339,9 +343,10 @@ structured overrides (all mirrored by environment variables):
   or when no rows survive normalization.【F:resolver/ingestion/idmc/cli.py†L889-L972】
 - HTTP status telemetry exposes a strict three-key mapping under
   `http_status_counts` (`{"2xx": int, "4xx": int, "5xx": int}`) regardless of
-  any extra buckets counted internally; additional counters (timeouts, other
-  exceptions) are reported via `http_status_counts_extended` without affecting
-  the contract validated by the fast tests.【F:resolver/ingestion/idmc/client.py†L1188-L1342】【F:resolver/ingestion/idmc/cli.py†L926-L1201】
+  any extra buckets counted internally; additional counters (timeouts, request
+  totals, exception histograms) are reported via the non-asserted
+  `http_extended` block without affecting the contract validated by the fast
+  tests.【F:resolver/ingestion/idmc/client.py†L1820-L1894】【F:resolver/ingestion/idmc/cli.py†L960-L1150】
 - `http_attempt_summary` adds `planned`, `ok_2xx`, `status_4xx`, `status_5xx`,
   `status_other`, `timeouts`, and `other_exceptions` so summaries can quote
   high-level traffic alongside the canonical status buckets, and
