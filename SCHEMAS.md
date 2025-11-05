@@ -330,17 +330,19 @@ structured overrides (all mirrored by environment variables):
 - The IDMC staging directory (`resolver/staging/idmc/`) may contain both
   `flow.csv` and `stock.csv`; the exporter reports row counts for each file even
   when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
-- When `--write-outputs` is supplied (or `IDMC_WRITE_EMPTY=1`), the connector
-  ensures `resolver/staging/idmc/flow.csv` exists with the canonical header even
-  if normalization yielded zero rows so downstream exporters still detect the
-  file.【F:resolver/ingestion/idmc/cli.py†L720-L804】【F:resolver/ingestion/idmc/staging.py†L9-L26】
+- When staging outputs are requested (for example via `--write-outputs`,
+  `--enable-export`, `RESOLVER_OUTPUT_DIR`, or by running in fixture/cache-only
+  modes), the connector ensures `resolver/staging/idmc/flow.csv` exists with the
+  canonical header even if normalization yielded zero rows so downstream
+  exporters still detect the file.【F:resolver/ingestion/idmc/cli.py†L720-L910】【F:resolver/ingestion/idmc/staging.py†L9-L26】
 - Zero-row diagnostics (`diagnostics/ingestion/idmc/why_zero.json`) capture token
   presence, resolved country counts and samples, the source of the country list,
   selected series, the effective window (`window.start`/`window.end`/`window_source`),
-  request counters (`requests_planned`, `requests_attempted`), HTTP status buckets,
-  and the staged/exported row totals so the file explains whether the run skipped
-  the network or produced empty data; it is written whenever `--debug` is supplied
-  or when no rows survive normalization.【F:resolver/ingestion/idmc/cli.py†L889-L972】
+  request counters (`requests_planned`, `requests_attempted`, `network_attempted`),
+  HTTP status buckets, and the staged/exported row totals so the file explains
+  whether the run skipped the network or produced empty data; it is written
+  whenever `--debug` is supplied or when no rows survive
+  normalization.【F:resolver/ingestion/idmc/cli.py†L904-L1550】
 - HTTP status telemetry exposes a strict three-key mapping under
   `http_status_counts` (`{"2xx": int, "4xx": int, "5xx": int}`) regardless of
   any extra buckets counted internally; additional counters (timeouts, request

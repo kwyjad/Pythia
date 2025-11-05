@@ -435,16 +435,31 @@ def http_get(
         kind=last_exception_kind or ("timeout" if timeout_hit else "error"),
     )
 _SESSION: requests.Session | None = None
+_SESSION_FACTORY: object | None = None
 _SESSION_LOCK = threading.Lock()
 
 
+def _safe_mount(session: requests.Session, prefix: str, adapter: HTTPAdapter) -> None:
+    """Attempt to mount an adapter without breaking mocked sessions."""
+
+    mount = getattr(session, "mount", None)
+    if not callable(mount):
+        return
+    try:
+        mount(prefix, adapter)
+    except Exception:  # pragma: no cover - defensive against stubs
+        return
+
+
 def _shared_session() -> requests.Session:
-    global _SESSION
+    global _SESSION, _SESSION_FACTORY
+    factory = requests.Session
     with _SESSION_LOCK:
-        if _SESSION is None:
-            session = requests.Session()
+        if _SESSION is None or _SESSION_FACTORY is not factory:
+            session = factory()
             adapter = HTTPAdapter(pool_connections=16, pool_maxsize=40)
-            session.mount("https://", adapter)
-            session.mount("http://", adapter)
+            _safe_mount(session, "https://", adapter)
+            _safe_mount(session, "http://", adapter)
             _SESSION = session
+            _SESSION_FACTORY = factory
         return _SESSION
