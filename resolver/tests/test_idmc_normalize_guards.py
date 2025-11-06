@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from resolver.ingestion.idmc.normalize import _normalize_monthly_flow
+from resolver.ingestion.idmc.normalize import _normalize_monthly_flow, normalize_all
 
 
 def _aliases() -> dict:
@@ -104,3 +104,100 @@ def test_idmc_as_of_date_dtype_survives_noop_window():
     assert not normalized.empty
     assert pd.api.types.is_datetime64_any_dtype(normalized["as_of_date"])  # noqa: PD013
     assert list(normalized["as_of_date"]) == [pd.Timestamp("2024-05-31"), pd.Timestamp("2024-06-30")]
+
+
+def _flow_aliases() -> dict:
+    return {
+        "value_flow": ["figure", "new_displacements"],
+        "value_stock": [],
+        "date": ["displacement_end_date", "displacement_date", "event_date"],
+        "iso3": ["iso3", "ISO3"],
+    }
+
+
+def test_idmc_header_contract_empty_and_nonempty():
+    empty, drops = normalize_all(
+        {"monthly_flow": pd.DataFrame()},
+        _flow_aliases(),
+        {"start": None, "end": None},
+        selected_series=["flow"],
+    )
+
+    expected_columns = [
+        "iso3",
+        "as_of_date",
+        "metric",
+        "value",
+        "series_semantics",
+        "source",
+    ]
+
+    assert list(empty.columns) == expected_columns
+    assert empty.empty
+    assert drops["date_parse_failed"] == 0
+    assert str(empty["as_of_date"].dtype) == "datetime64[ns]"
+
+    raw = pd.DataFrame(
+        [
+            {
+                "ISO3": "FRA",
+                "figure": 10,
+                "displacement_end_date": "2024-03-29",
+                "idmc_source": "idmc_gidd",
+            },
+            {
+                "ISO3": "FRA",
+                "figure": 5,
+                "displacement_end_date": "2024-03-01",
+                "idmc_source": "idmc_gidd",
+            },
+        ]
+    )
+
+    frame, drops_nonempty = normalize_all(
+        {"monthly_flow": raw},
+        _flow_aliases(),
+        {"start": "2024-03-01", "end": "2024-03-31"},
+        selected_series=["flow"],
+    )
+
+    assert drops_nonempty["date_out_of_window"] == 0
+    assert list(frame.columns) == expected_columns
+    assert not frame.empty
+    assert set(frame["metric"]) == {"new_displacements"}
+    assert set(frame["series_semantics"]) == {"new"}
+    assert set(frame["source"]) == {"idmc_gidd"}
+
+
+def test_idmc_as_of_date_is_datetime():
+    raw = pd.DataFrame(
+        [
+            {
+                "iso3": "COL",
+                "figure": 11,
+                "displacement_date": "2024-05-05",
+                "idmc_source": "idmc_idu",
+            },
+            {
+                "iso3": "COL",
+                "figure": 13,
+                "displacement_date": "2024-06-15",
+                "idmc_source": "idmc_idu",
+            },
+        ]
+    )
+
+    frame, drops = normalize_all(
+        {"monthly_flow": raw},
+        _flow_aliases(),
+        {"start": "2024-05-01", "end": "2024-06-30"},
+        selected_series=["flow"],
+    )
+
+    assert drops["date_parse_failed"] == 0
+    assert not frame.empty
+    assert pd.api.types.is_datetime64_ns_dtype(frame["as_of_date"])  # noqa: PD013
+    assert list(frame["as_of_date"]) == [
+        pd.Timestamp("2024-05-31"),
+        pd.Timestamp("2024-06-30"),
+    ]

@@ -160,13 +160,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m scripts.ci.probe_idmc_reprise || true
-
-      - name: Probe HDX reachability
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m scripts.ci.probe_hdx_reachability || true
+          python -m scripts.ci.probe_idmc_reachability || true
 
       - name: Run connectors (with per-connector log tee)
         env:
@@ -178,7 +172,6 @@ jobs:
           LOG_LEVEL: ${{ inputs.log_level }}
           EMPTY_POLICY: ${{ inputs.empty_policy }}
           IDMC_HTTP_VERIFY: "true"
-          IDMC_ALLOW_HDX_FALLBACK: "1"
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"
           # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
@@ -224,8 +217,7 @@ jobs:
             CMD_ARGS+=(--extra-env "dtm_client=DTM_FORCE_FAKE=1")
           fi
           {
-            echo "IDMC_NETWORK_MODE=live"
-            echo "IDMC_ALLOW_HDX_FALLBACK=1"
+            echo "IDMC_NETWORK_MODE=helix"
             echo "IDMC_CONNECT_TIMEOUT=5"
             echo "IDMC_READ_TIMEOUT=5"
             echo "IDMC_WRITE_EMPTY=1"
@@ -253,13 +245,10 @@ jobs:
           PY
           )
           CMD_ARGS+=(--extra-args "idmc=--chunk-by-month --start ${IDMC_WINDOW_START} --end ${IDMC_WINDOW_END} \
-            --series flow --enable-export --write-outputs --debug")
+            --network-mode helix --series flow --enable-export --write-outputs --debug")
           CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
           CMD_ARGS+=(--extra-env "idmc=RELIEFWEB_APPNAME=${RELIEFWEB_APPNAME}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=live")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_ALLOW_HDX_FALLBACK=1")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HDX_DATASET=preliminary-internal-displacement-updates")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HDX_RESOURCE_ID=1ace9c2a-7daf-4563-ac15-f2aa5071cd40")
+          CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=helix")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HELIX_CLIENT_ID=${IDMC_HELIX_CLIENT_ID}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HELIX_ENV=${IDMC_HELIX_ENV}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_VERIFY=${IDMC_HTTP_VERIFY}")
@@ -298,15 +287,6 @@ jobs:
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary
-
-      - name: Probe Helix reachability
-        if: always()
-        env:
-          IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
-          IDMC_HELIX_ENV: RELEASE
-        run: |
-          set -euo pipefail
-          python -m scripts.ci.probe_helix_reachability || true
 
       - name: Prime ingestion artifact placeholders
         if: always()

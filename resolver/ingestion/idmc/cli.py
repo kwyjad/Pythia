@@ -19,7 +19,7 @@ from resolver.ingestion.utils.country_utils import (
     resolve_countries,
 )
 
-from .client import NETWORK_MODES, NetworkMode, fetch
+from .client import NETWORK_MODES, NetworkMode, IdmcClient
 from .config import load
 from .diagnostics import (
     debug_block,
@@ -42,7 +42,6 @@ from .export import (
     build_resolution_ready_facts,
     summarise_facts,
 )
-from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
 from .provenance import build_provenance, write_json
@@ -226,37 +225,11 @@ def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
         return None
 
 
-def _resolve_network_mode(
-    args: argparse.Namespace,
-    parser: argparse.ArgumentParser,
-    *,
-    env_force_cache_only: Optional[bool],
-    cfg_force_cache_only: bool,
-) -> NetworkMode:
-    """Return the effective network mode for this run."""
-
-    if getattr(args, "skip_network", False):
-        return cast(NetworkMode, "fixture")
-
-    env_override = os.getenv("IDMC_NETWORK_MODE", "").strip().lower()
-    if env_override:
-        if env_override not in NETWORK_MODES:
-            parser.error(
-                f"Invalid network mode '{env_override}'. Choose from {', '.join(NETWORK_MODES)}."
-            )
-        return cast(NetworkMode, env_override)
-
-    arg_override = getattr(args, "network_mode", None)
-    if arg_override:
-        return cast(NetworkMode, arg_override)
-
-    if env_force_cache_only:
-        return cast(NetworkMode, "cache_only")
-
-    if env_force_cache_only is None and cfg_force_cache_only:
-        return cast(NetworkMode, "cache_only")
-
-    return cast(NetworkMode, "live")
+def _resolve_network_mode(args: argparse.Namespace) -> NetworkMode:
+    env = os.getenv("IDMC_NETWORK_MODE", "").strip().lower()
+    if env in {"live", "helix", "cache_only", "fixture"}:
+        return cast(NetworkMode, env)
+    return cast(NetworkMode, getattr(args, "network_mode", None) or "live")
 
 
 def _resolve_window_from_flags_or_env(
@@ -281,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         "--network-mode",
         choices=NETWORK_MODES,
         default=None,
-        help="Network behaviour: live (default), cache_only, or fixture",
+        help="Network behaviour: live (default), helix, cache_only, or fixture",
     )
     parser.add_argument(
         "--debug",
@@ -455,17 +428,21 @@ def main(argv: list[str] | None = None) -> int:
     env_max_concurrency = _env_int(os.getenv("IDMC_MAX_CONCURRENCY"))
     env_max_bytes = _env_int(os.getenv("IDMC_MAX_BYTES"))
     env_chunk_by_month = _env_truthy(os.getenv("IDMC_CHUNK_BY_MONTH"))
+    helix_client_id = (os.getenv("IDMC_HELIX_CLIENT_ID") or "").strip() or None
     resolver_output_dir_env = os.getenv("RESOLVER_OUTPUT_DIR")
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
-    network_mode = _resolve_network_mode(
-        args,
-        parser,
-        env_force_cache_only=env_force_cache_only,
-        cfg_force_cache_only=bool(getattr(cfg.cache, "force_cache_only", False)),
-    )
+    network_mode = _resolve_network_mode(args)
+    if getattr(args, "skip_network", False):
+        network_mode = cast(NetworkMode, "fixture")
+    elif network_mode in {"live", "helix"}:
+        cfg_force_cache_only = bool(getattr(cfg.cache, "force_cache_only", False))
+        if env_force_cache_only:
+            network_mode = cast(NetworkMode, "cache_only")
+        elif env_force_cache_only is None and cfg_force_cache_only:
+            network_mode = cast(NetworkMode, "cache_only")
 
     cfg.cache.force_cache_only = network_mode == "cache_only"
 
@@ -618,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         or resolver_output_dir_env
         or export_feature_enabled
     )
-    if network_mode != "live":
+    if network_mode not in {"live", "helix"}:
         export_requested = True
     if export_requested:
         write_empty_outputs = True
@@ -765,7 +742,7 @@ def main(argv: list[str] | None = None) -> int:
     probe_result = None
     probe_start = tick()
 
-    if network_mode == "live":
+    if network_mode in {"live", "helix"}:
         try:
             probe_result = probe_reachability(
                 ProbeOptions(base_url=args.base_url or cfg.api.base_url)
@@ -774,8 +751,10 @@ def main(argv: list[str] | None = None) -> int:
             probe_result = {"error": str(exc)}
     probe_ms = to_ms(tick() - probe_start)
 
+    client = IdmcClient(helix_client_id=helix_client_id)
+
     fetch_start = tick()
-    data, diagnostics = fetch(
+    data, diagnostics = client.fetch(
         cfg,
         network_mode=network_mode,
         soft_timeouts=True,
@@ -996,16 +975,14 @@ def main(argv: list[str] | None = None) -> int:
         export_details["reason"] = "feature-flag-disabled"
 
     if write_outputs and export_feature_enabled:
-        facts_frame = to_facts(tidy)
-        csv_path = write_facts_csv(facts_frame, args.out_dir)
-        parquet_path = write_facts_parquet(facts_frame, args.out_dir)
+        csv_path = flow_staging_path.as_posix()
         export_details.update(
             {
                 "enabled": True,
-                "rows": len(facts_frame),
+                "rows": len(resolution_ready_facts),
                 "paths": {
-                    "csv": csv_path,
-                    "parquet": parquet_path or None,
+                    "csv": csv_path if flow_staging_path.exists() else None,
+                    "parquet": None,
                 },
             }
         )
@@ -1335,7 +1312,7 @@ def main(argv: list[str] | None = None) -> int:
                 five=int(http_status_counts.get("5xx", 0) or 0),
             )
         )
-    elif effective_network_mode != "live":
+    elif effective_network_mode not in {"live", "helix"}:
         attempts_lines.append("HTTP status counts: n/a in non-live mode")
 
     http_counters_lines = [
@@ -1612,6 +1589,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     countries_sample_display = ", ".join(selected_countries[:10]) or "(none)"
+    helix_block = diagnostics.get("helix") or {}
 
     summary_context = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1640,6 +1618,7 @@ def main(argv: list[str] | None = None) -> int:
         "fallback_block": fallback_block,
         "notes_block": _format_bullets(notes_lines),
         "zero_rows_reason": zero_rows_reason_value or "n/a",
+        "helix_block": helix_block,
     }
     summary_path = _write_summary(summary_context)
     if summary_path:

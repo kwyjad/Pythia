@@ -327,9 +327,9 @@ structured overrides (all mirrored by environment variables):
   variable attached to HTTP requests.
 - Normalization and diagnostics semantics are documented in
   `resolver/docs/ingestion/idmc.md`.
-- The IDMC staging directory (`resolver/staging/idmc/`) may contain both
-  `flow.csv` and `stock.csv`; the exporter reports row counts for each file even
-  when a downstream mapping is not yet configured.【F:resolver/tools/export_facts.py†L2247-L2280】
+- The IDMC staging directory (`resolver/staging/idmc/`) always includes
+  `flow.csv` when staging/export flags are active; stock staging is optional and
+  ignored by the exporter contract.【F:resolver/tools/export_facts.py†L2247-L2280】
 - When staging outputs are requested (for example via `--write-outputs`,
   `--enable-export`, `RESOLVER_EXPORT_ENABLE_FLOW`, `RESOLVER_OUTPUT_DIR`, or by
   running in fixture/cache-only modes), the connector ensures
@@ -351,12 +351,11 @@ distinguish new flows from stock snapshots.
 | metric | enum | Always `new_displacements` |
 | value | integer | Monthly sum of displacement figures |
 | series_semantics | enum | Always `new` for flow exports |
-| source | string | `idmc_idu` for HDX/IDU data, `idmc_gidd` when the Helix fallback provided rows |
-- The HDX fallback fetch downloads the configured `IDMC_HDX_RESOURCE_ID`
-  (defaulting to the `idus_view_flat` CSV) once per run, verifies the payload is
-  at least 10 KB and still exposes the `iso3`/`figure` columns, caches the frame
-  for all month chunks, and records the resource id/URL/byte count so diagnostics
-  and CI summaries show the exact asset used.【F:resolver/ingestion/idmc/client.py†L531-L673】【F:scripts/ci/probe_hdx_reachability.py†L9-L210】【F:scripts/ci/summarize_connectors.py†L1617-L1653】
+| source | string | `idmc_idu` for backend rows, `idmc_gidd` when Helix supplied the payload |
+- Helix mode fetches the `/external-api/idus/last-180-days` endpoint once per run,
+  caches the raw payload for chunk filtering, and records the redacted URL,
+  status, byte count, and row totals in diagnostics so summaries reflect the
+  exact asset used.【F:resolver/ingestion/idmc/client.py†L803-L991】【F:scripts/ci/probe_idmc_reachability.py†L1-L200】
 - Zero-row diagnostics (`diagnostics/ingestion/idmc/why_zero.json`) capture token
   presence, resolved country counts and samples, the source of the country list,
   selected series, the effective window (`window.start`/`window.end`/`window_source`),

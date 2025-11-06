@@ -14,7 +14,7 @@ def test_export_config_maps_idmc_flow(monkeypatch, tmp_path):
         [
             {
                 "iso3": "AAA",
-                "as_of_date": "2024-06-30",
+                "as_of_date": pd.Timestamp("2024-06-30"),
                 "metric": "new_displacements",
                 "value": 123,
                 "series_semantics": "new",
@@ -37,6 +37,7 @@ def test_export_config_maps_idmc_flow(monkeypatch, tmp_path):
     idmc_rows = df[df["metric"] == "new_displacements"].reset_index(drop=True)
     assert len(idmc_rows) == 1
     assert idmc_rows.iloc[0]["value"] == "123"
+    assert idmc_rows.iloc[0]["series_semantics"] == "new"
 
     matched = {Path(entry["path"]).name: entry for entry in result.report["matched_files"]}
     assert "flow.csv" in matched

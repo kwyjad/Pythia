@@ -34,7 +34,15 @@ def _stub_config(config_path: Path) -> SimpleNamespace:
     )
 
 
-def _common_stubs(monkeypatch, tmp_path: Path, expected_mode: str, http_counts, http_requests: int):
+def _common_stubs(
+    monkeypatch,
+    tmp_path: Path,
+    expected_mode: str,
+    http_counts,
+    http_requests: int,
+    *,
+    expected_helix_id: str | None = None,
+):
     config_path = tmp_path / "resolver" / "config" / "idmc.yml"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("IDMC_API_TOKEN", "token")
@@ -42,33 +50,41 @@ def _common_stubs(monkeypatch, tmp_path: Path, expected_mode: str, http_counts, 
 
     observed_modes: list[str] = []
 
-    def _fake_fetch(cfg, *, network_mode, **_kwargs):
-        assert network_mode == expected_mode
-        observed_modes.append(network_mode)
-        diagnostics = {
-            "mode": "online" if network_mode == "live" else network_mode,
-            "network_mode": network_mode,
-            "http": {
-                "requests": http_requests,
-                "retries": 0,
-                "status_last": 200 if http_requests else None,
-                "retry_after_events": 0,
-                "cache": {"hits": 0, "misses": 0},
-                "latency_ms": {"p50": 0, "p95": 0, "max": 0},
-            },
-            "cache": {"hits": 0, "misses": 0},
-            "filters": {"window_start": None, "window_end": None, "countries": []},
-            "performance": {},
-            "rate_limit": {},
-            "chunks": {"enabled": False, "count": 0, "by_month": []},
-            "http_status_counts": http_counts,
-        }
-        frame = pd.DataFrame(
-            [{"displacement_date": "2024-01-05", "figure": 10, "iso3": "AAA"}]
-        )
-        return {"monthly_flow": frame}, diagnostics
+    class _FakeClient:
+        def __init__(self, *, helix_client_id=None):
+            if expected_helix_id is not None:
+                assert helix_client_id == expected_helix_id
+            else:
+                assert helix_client_id is None
+            self.helix_client_id = helix_client_id
 
-    monkeypatch.setattr(idmc_cli, "fetch", _fake_fetch)
+        def fetch(self, cfg, *, network_mode, **_kwargs):
+            assert network_mode == expected_mode
+            observed_modes.append(network_mode)
+            diagnostics = {
+                "mode": "online" if network_mode in {"live", "helix"} else network_mode,
+                "network_mode": network_mode,
+                "http": {
+                    "requests": http_requests,
+                    "retries": 0,
+                    "status_last": 200 if http_requests else None,
+                    "retry_after_events": 0,
+                    "cache": {"hits": 0, "misses": 0},
+                    "latency_ms": {"p50": 0, "p95": 0, "max": 0},
+                },
+                "cache": {"hits": 0, "misses": 0},
+                "filters": {"window_start": None, "window_end": None, "countries": []},
+                "performance": {},
+                "rate_limit": {},
+                "chunks": {"enabled": False, "count": 0, "by_month": []},
+                "http_status_counts": http_counts,
+            }
+            frame = pd.DataFrame(
+                [{"displacement_date": "2024-01-05", "figure": 10, "iso3": "AAA"}]
+            )
+            return {"monthly_flow": frame}, diagnostics
+
+    monkeypatch.setattr(idmc_cli, "IdmcClient", _FakeClient)
     monkeypatch.setattr(
         idmc_cli,
         "normalize_all",
@@ -104,7 +120,7 @@ def _common_stubs(monkeypatch, tmp_path: Path, expected_mode: str, http_counts, 
     return observed_modes, captured_payloads
 
 
-def test_idmc_network_mode_defaults_live(monkeypatch, tmp_path):
+def test_idmc_cli_default_live(monkeypatch, tmp_path):
     observed_modes, captured = _common_stubs(
         monkeypatch,
         tmp_path,
@@ -173,3 +189,41 @@ def test_idmc_network_mode_cache_only(monkeypatch, tmp_path):
     why_zero_payload = json.loads(why_zero_path.read_text(encoding="utf-8"))
     assert why_zero_payload["network_mode"] == "cache_only"
     assert why_zero_payload["http_status_counts"] == {"2xx": 0, "4xx": 0, "5xx": 0}
+
+
+def test_idmc_cli_accepts_helix_mode(monkeypatch, tmp_path):
+    observed_modes, captured = _common_stubs(
+        monkeypatch,
+        tmp_path,
+        expected_mode="helix",
+        http_counts={"2xx": 1, "4xx": 0, "5xx": 0},
+        http_requests=1,
+    )
+
+    exit_code = idmc_cli.main(["--network-mode", "helix"])
+    assert exit_code == 0
+    assert observed_modes == ["helix"]
+    payload = captured[-1]
+    assert payload["network_mode"] == "helix"
+    assert payload["http_status_counts"] == {"2xx": 1, "4xx": 0, "5xx": 0}
+
+
+def test_idmc_cli_plumbs_helix_id(monkeypatch, tmp_path):
+    helix_id = "client-123"
+    monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", helix_id)
+    observed_modes, captured = _common_stubs(
+        monkeypatch,
+        tmp_path,
+        expected_mode="live",
+        http_counts={"2xx": 1, "4xx": 0, "5xx": 0},
+        http_requests=1,
+        expected_helix_id=helix_id,
+    )
+
+    exit_code = idmc_cli.main([])
+    assert exit_code == 0
+    assert observed_modes == ["live"]
+    payload = captured[-1]
+    assert payload["network_mode"] == "live"
+    assert payload["http_status_counts"] == {"2xx": 1, "4xx": 0, "5xx": 0}
+
