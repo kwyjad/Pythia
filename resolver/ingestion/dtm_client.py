@@ -5980,15 +5980,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     write_sample=True,
                 )
             except requests.exceptions.ConnectTimeout as exc:
-                http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
-                if soft_timeout_rescue_enabled:
-                    LOG.error("dtm: connect timeout detected; applying soft-timeout rescue", exc_info=True)
+                timeout_message = str(exc) or "connect_timeout"
+                timeout_reason = "connect_timeout"
+                if soft_timeout_rescue_enabled or fake_on_timeout:
+                    if fake_on_timeout and not soft_timeout_rescue_enabled:
+                        LOG.error(
+                            "dtm: connect timeout detected; applying fake-on-timeout header-only rescue",
+                            exc_info=True,
+                        )
+                    else:
+                        LOG.error(
+                            "dtm: connect timeout detected; applying soft-timeout rescue",
+                            exc_info=True,
+                        )
                     details = {
                         "ok": False,
-                        "error": str(exc) or "connect_timeout",
+                        "error": timeout_message,
                         "error_type": type(exc).__name__,
                         "stage": "fetch",
                     }
+                    if fake_on_timeout:
+                        details["mode"] = "fake_on_timeout"
                     timings_snapshot = dict(timings_ms)
                     base_extras["timings_ms"] = dict(timings_snapshot)
                     exit_code = _complete_soft_timeout_rescue(
@@ -6000,17 +6012,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         diagnostics_ctx=diagnostics_ctx,
                         details=details,
                         offline=OFFLINE,
+                        zero_reason=timeout_reason,
                     )
                     OFFLINE = previous_offline
                     return exit_code
+                http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
                 LOG.error("dtm: connect timeout detected during fetch", exc_info=True)
                 status = "error"
-                reason = str(exc) or "connect_timeout"
+                reason = timeout_reason
                 extras.setdefault(
                     "exception",
-                    {"type": type(exc).__name__, "message": str(exc)},
+                    {"type": type(exc).__name__, "message": timeout_message},
                 )
-                ensure_zero_row_outputs(offline=OFFLINE)
                 exit_code = 1
                 rows = []
                 rows_written = 0
@@ -6024,41 +6037,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except requests.exceptions.RequestException as exc:
         timeout_like = _is_connect_timeout_error(exc)
-        if fake_on_timeout and timeout_like:
-            LOG.error("dtm: timeout detected; writing fake rows due to fake-on-timeout", exc_info=True)
-            details = {
-                "mode": "fake_on_timeout",
-                "exception": type(exc).__name__,
-                "message": str(exc),
-            }
-            exit_code = _complete_fake_success(
-                args=args,
-                base_extras=base_extras,
-                base_http=http_stats,
-                deps=deps_payload,
-                timings_ms=timings_ms,
-                diagnostics_ctx=diagnostics_ctx,
-                window_start_iso=window_start_iso,
-                window_end_iso=window_end_iso,
-                configured_labels=configured_labels,
-                configured_iso3=configured_iso3,
-                admin_levels=configured_admin_levels,
-                mode="fake_on_timeout",
-                reason="network_timeout",
-                offline=OFFLINE,
-                diagnostics_details=details,
-                window_override_env=window_override_env,
-            )
-            OFFLINE = previous_offline
-            return exit_code
-        if soft_timeout_rescue_enabled and timeout_like:
-            LOG.error("dtm: timeout detected (%s); treating as ok-empty", exc)
+        if timeout_like and (soft_timeout_rescue_enabled or fake_on_timeout):
+            if fake_on_timeout and not soft_timeout_rescue_enabled:
+                LOG.error(
+                    "dtm: timeout detected; applying fake-on-timeout header-only rescue",
+                    exc_info=True,
+                )
+            else:
+                LOG.error(
+                    "dtm: timeout detected (%s); treating as ok-empty",
+                    exc,
+                    exc_info=True,
+                )
             details = {
                 "ok": False,
-                "error": str(exc) or type(exc).__name__,
+                "error": str(exc) or "connect_timeout",
                 "error_type": type(exc).__name__,
                 "stage": "fetch",
             }
+            if fake_on_timeout:
+                details["mode"] = "fake_on_timeout"
             timings_snapshot = dict(timings_ms)
             base_extras["timings_ms"] = dict(timings_snapshot)
             exit_code = _complete_soft_timeout_rescue(
@@ -6070,6 +6068,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 diagnostics_ctx=diagnostics_ctx,
                 details=details,
                 offline=OFFLINE,
+                zero_reason="connect_timeout",
             )
             OFFLINE = previous_offline
             return exit_code
