@@ -337,6 +337,21 @@ structured overrides (all mirrored by environment variables):
   `iso3,as_of_date,metric,value,series_semantics,source` header even if
   normalization yielded zero rows so downstream exporters still detect the
   file.【F:resolver/ingestion/idmc/cli.py†L720-L910】【F:resolver/ingestion/idmc/staging.py†L9-L26】【F:resolver/tools/export_config.yml†L90-L116】
+
+### IDMC flow staging schema
+
+`resolver/staging/idmc/flow.csv` always adheres to the following schema. The
+`series_semantics` column is present even when the file is empty so exporters can
+distinguish new flows from stock snapshots.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| iso3 | string | ISO-3166 alpha-3 country code |
+| as_of_date | date | Month-end ISO-8601 date |
+| metric | enum | Always `new_displacements` |
+| value | integer | Monthly sum of displacement figures |
+| series_semantics | enum | Always `new` for flow exports |
+| source | string | `idmc_idu` for HDX/IDU data, `idmc_gidd` when the Helix fallback provided rows |
 - The HDX fallback fetch downloads the configured `IDMC_HDX_RESOURCE_ID`
   (defaulting to the `idus_view_flat` CSV) once per run, verifies the payload is
   at least 10 KB and still exposes the `iso3`/`figure` columns, caches the frame

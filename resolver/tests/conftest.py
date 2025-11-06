@@ -26,6 +26,10 @@ def _fast_tests_offline_env() -> None:
     defaults = {
         "PYTHONFAULTHANDLER": "1",
         "RESOLVER_OFFLINE": "1",
+        "IDMC_NETWORK_MODE": "fixture",
+        "IDMC_ALLOW_HDX_FALLBACK": "0",
+        "IDMC_TEST_NO_SLEEP": "1",
+        "IDMC_HELIX_CLIENT_ID": "",
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)

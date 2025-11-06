@@ -20,6 +20,7 @@ FLOW_EXPORT_COLUMNS: List[str] = [
     "as_of_date",
     "metric",
     "value",
+    "series_semantics",
     "source",
 ]
 

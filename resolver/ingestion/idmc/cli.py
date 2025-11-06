@@ -38,6 +38,7 @@ from .export import (
     FACT_COLUMNS,
     FLOW_EXPORT_COLUMNS,
     FLOW_METRIC,
+    FLOW_SERIES_SEMANTICS,
     build_resolution_ready_facts,
     summarise_facts,
 )
@@ -823,6 +824,18 @@ def main(argv: list[str] | None = None) -> int:
             export_frame = pd.DataFrame(columns=FLOW_EXPORT_COLUMNS)
         else:
             export_frame = flow_frame.copy()
+            if "series_semantics" in export_frame.columns:
+                series = (
+                    export_frame["series_semantics"]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                )
+                export_frame["series_semantics"] = series.mask(
+                    series == "", FLOW_SERIES_SEMANTICS
+                )
+            else:
+                export_frame["series_semantics"] = FLOW_SERIES_SEMANTICS
             for column in FLOW_EXPORT_COLUMNS:
                 if column not in export_frame.columns:
                     export_frame[column] = pd.NA
