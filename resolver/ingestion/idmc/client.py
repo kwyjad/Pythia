@@ -1823,7 +1823,8 @@ def fetch_idu_json(
                     date_column=date_filter_column,
                     select_columns=select_list,
                 )
-                url = f"{base}{endpoint}"
+                base_url_no_query = f"{base}{endpoint}"
+                url = base_url_no_query
                 if request_params:
                     url = f"{url}?{urlencode(request_params, safe='.,()')}"
                 diagnostics["url"] = url
@@ -1853,21 +1854,34 @@ def fetch_idu_json(
                     "offset": offset,
                     "iso_batch": cache_params["iso_batch"],
                 }
+                if cache_entry is None and use_cache_only:
+                    legacy_params = {"chunk": cache_params.get("chunk", "full")}
+                    legacy_key = cache_key(base_url_no_query, params=legacy_params)
+                    legacy_entry = cache_get(cache_dir, legacy_key, None)
+                    if legacy_entry is not None:
+                        cache_entry = legacy_entry
+                        cached_entry = legacy_entry
+                        key = legacy_key
+                        cache_record["key"] = key
+                        cache_record.setdefault("legacy_key", legacy_key)
+                        cache_record.setdefault("legacy_params", legacy_params)
                 refresh_live_chunk = (
                     network_mode in {"live", "helix"}
                     and isinstance(chunk_label, str)
                     and chunk_label
                     and chunk_label != "full"
                 )
+                cache_hit = cache_entry is not None and not refresh_live_chunk
                 request_params_serialized = [
                     {"key": key, "value": value} for key, value in request_params
                 ]
                 diagnostics["postgrest_params"] = request_params_serialized
-                if cache_entry is not None and not refresh_live_chunk:
+                if cache_hit:
                     cache_stats["hits"] += 1
                     cache_stats["hit"] = True
                     cache_record.update(cache_entry.metadata)
                     payload_body = cache_entry.body
+                    http_diag = {"attempts": 0, "retries": 0}
                     mode = "cache"
                     diagnostics["requests"].append(
                         {
@@ -2278,7 +2292,7 @@ def fetch_idu_json(
                 diagnostics["attempts"].append(
                     {
                         "chunk": chunk_label or "full",
-                        "via": "http_get",
+                        "via": "cache" if cache_hit else "http_get",
                         "status": status,
                         "rows": len(chunk_rows),
                     }
@@ -2291,22 +2305,23 @@ def fetch_idu_json(
                     _trim_url(url),
                 )
 
-                http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
-                http_info["retries"] += int(http_diag.get("retries", 0) or 0)
-                http_info["status_last"] = status or http_info["status_last"]
-                http_info["duration_s"] += float(http_diag.get("duration_s", 0.0) or 0.0)
-                http_info["backoff_s"] += float(http_diag.get("backoff_s", 0.0) or 0.0)
-                http_info["wire_bytes"] += int(http_diag.get("wire_bytes", 0) or 0)
-                http_info["body_bytes"] += int(http_diag.get("body_bytes", 0) or 0)
-                retry_after = http_diag.get("retry_after_s", []) or []
-                http_info["retry_after_events"] += len(retry_after)
-                http_info["retry_after_s"].extend(retry_after)
-                http_info["rate_limit_wait_s"].extend(
-                    http_diag.get("rate_limit_wait_s", []) or []
-                )
-                http_info["planned_sleep_s"].extend(
-                    http_diag.get("planned_sleep_s", []) or []
-                )
+                if not cache_hit:
+                    http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
+                    http_info["retries"] += int(http_diag.get("retries", 0) or 0)
+                    http_info["status_last"] = status or http_info["status_last"]
+                    http_info["duration_s"] += float(http_diag.get("duration_s", 0.0) or 0.0)
+                    http_info["backoff_s"] += float(http_diag.get("backoff_s", 0.0) or 0.0)
+                    http_info["wire_bytes"] += int(http_diag.get("wire_bytes", 0) or 0)
+                    http_info["body_bytes"] += int(http_diag.get("body_bytes", 0) or 0)
+                    retry_after = http_diag.get("retry_after_s", []) or []
+                    http_info["retry_after_events"] += len(retry_after)
+                    http_info["retry_after_s"].extend(retry_after)
+                    http_info["rate_limit_wait_s"].extend(
+                        http_diag.get("rate_limit_wait_s", []) or []
+                    )
+                    http_info["planned_sleep_s"].extend(
+                        http_diag.get("planned_sleep_s", []) or []
+                    )
                 attempts = http_diag.get("attempt_durations_s", []) or []
                 http_info["attempt_durations_ms"].extend(
                     [int(round(value * 1000)) for value in attempts]
@@ -2431,6 +2446,10 @@ def fetch(
     soft_timeouts: bool = True,  # noqa: ARG001 - future compatibility
     window_start: Optional[date] = None,
     window_end: Optional[date] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
     window_days: Optional[int] = 30,
     only_countries: Iterable[str] | None = None,
     base_url: Optional[str] = None,
@@ -2453,6 +2472,13 @@ def fetch(
             "Running in %s – no network calls will be made; results may be empty unless cache/fixtures exist.",
             network_mode,
         )
+
+    start_alias = start_date if start_date is not None else start
+    end_alias = end_date if end_date is not None else end
+    if window_start is None:
+        window_start = start_alias
+    if window_end is None:
+        window_end = end_alias
 
     helix_client_id = helix_client_id or _helix_client_id()
 
@@ -2652,7 +2678,7 @@ def fetch(
                 diag_copy.setdefault("source_tag", fallback_source_cache_fetch)
         return frame, diag_copy
 
-    if should_return_empty(window_start, window_end, window_days):
+    if should_return_empty(window_start, window_end, window_days) and network_mode in {"live", "helix"}:
         LOGGER.warning(
             "IDMC fetch invoked without a date window; returning empty payload",
         )
