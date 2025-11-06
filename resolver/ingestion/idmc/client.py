@@ -12,7 +12,15 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urlparse,
+    urlsplit,
+    urlunparse,
+)
+import urllib.error
+import urllib.request
 
 import requests
 
@@ -62,7 +70,7 @@ HELIX_BASE = (
     os.getenv("IDMC_HELIX_BASE_URL", HELIX_DEFAULT_BASE).strip().rstrip("/")
     or HELIX_DEFAULT_BASE
 )
-HELIX_LAST180 = "/external-api/idus/last-180-days"
+HELIX_DISPLACEMENTS_PATH = "/external-api/gidd/displacements"
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_READ_TIMEOUT_S = 25.0
@@ -108,6 +116,14 @@ def _trim_url(url: str, limit: int = 160) -> str:
     if len(url) <= limit:
         return url
     return url[: max(limit - 3, 1)] + "..."
+
+
+def _request_path(url: str) -> str:
+    parts = urlsplit(url)
+    query = parts.query.strip()
+    if query:
+        return f"{parts.path}?{query}"
+    return parts.path
 
 
 def _env_timeout(name: str, default: float, *, aliases: Iterable[str] = ()) -> float:
@@ -564,6 +580,119 @@ def _hdx_package_show_url(dataset: str) -> str:
     return f"{base}/api/3/action/package_show?id={dataset}"
 
 
+def _hdx_pick_displacement_csv(
+    package_id: str,
+    *,
+    base_url: str | None = None,
+    opener: Any = urllib.request,
+    timeout: float = 30.0,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Return the most appropriate CSV resource for displacement data."""
+
+    diagnostics: Dict[str, Any] = {
+        "package_id": package_id,
+    }
+    if not package_id:
+        diagnostics["error"] = "missing_package_id"
+        return None, diagnostics
+
+    base_env = os.getenv("IDMC_HDX_BASE_URL") or os.getenv("HDX_BASE")
+    base = (base_url or base_env or "https://data.humdata.org").rstrip("/")
+    diagnostics["base_url"] = base
+    query = urlencode({"id": package_id})
+    package_url = f"{base}/api/3/action/package_show?{query}"
+    diagnostics["package_url"] = package_url
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _resolve_http_user_agent(),
+    }
+    request = urllib.request.Request(package_url, headers=headers)
+    try:
+        with opener.urlopen(request, timeout=timeout) as response:
+            diagnostics["package_status_code"] = getattr(
+                response, "status", None
+            ) or getattr(response, "code", None)
+            payload = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:  # pragma: no cover - network dependent
+        diagnostics["package_status_code"] = getattr(exc, "code", None)
+        diagnostics["error"] = f"package_http_error:{exc.code}"
+        return None, diagnostics
+    except urllib.error.URLError as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"package_error:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        return None, diagnostics
+
+    try:
+        info = json.loads(payload)
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = f"package_decode_error:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        return None, diagnostics
+
+    if not info.get("success"):
+        diagnostics["error"] = "package_show_unsuccessful"
+        return None, diagnostics
+
+    result = info.get("result") or {}
+    resources = result.get("resources") or []
+    diagnostics["resource_candidates"] = len(resources)
+
+    chosen: Optional[Mapping[str, Any]] = None
+    keyword_selection = False
+    for resource in resources:
+        if not isinstance(resource, Mapping):
+            continue
+        fmt = str(resource.get("format") or "").strip().lower()
+        if fmt != "csv":
+            continue
+        text = " ".join(
+            [str(resource.get("name") or ""), str(resource.get("description") or "")]
+        ).lower()
+        if "displacement" in text or "disaggreg" in text:
+            chosen = resource
+            keyword_selection = True
+            break
+
+    if chosen is None:
+        for resource in resources:
+            if not isinstance(resource, Mapping):
+                continue
+            fmt = str(resource.get("format") or "").strip().lower()
+            if fmt != "csv":
+                continue
+            size_raw = resource.get("size")
+            try:
+                size_value = int(size_raw)
+            except (TypeError, ValueError):
+                size_value = None
+            if size_value is not None and size_value > 50_000:
+                chosen = resource
+                break
+
+    if chosen is None:
+        diagnostics["error"] = "no_csv_resource"
+        diagnostics.setdefault("zero_rows_reason", "fallback_no_valid_resource")
+        return None, diagnostics
+
+    diagnostics["resource_selection"] = (
+        "keyword_match" if keyword_selection else "size_threshold"
+    )
+    diagnostics["resource_id"] = chosen.get("id")
+    diagnostics["resource_name"] = chosen.get("name")
+    diagnostics["resource_format"] = chosen.get("format")
+
+    url = (
+        str(chosen.get("url") or "").strip()
+        or str(chosen.get("download_url") or "").strip()
+    )
+    diagnostics["resource_url"] = url or None
+    size_candidate = chosen.get("size")
+    if size_candidate is not None:
+        diagnostics["resource_content_length"] = size_candidate
+    return (url or None), diagnostics
+
+
 def _read_csv_from_bytes(payload: bytes) -> pd.DataFrame:
     buffer = io.BytesIO(payload)
     return pd.read_csv(buffer)
@@ -792,6 +921,73 @@ def _hdx_fetch_latest_csv() -> Tuple[pd.DataFrame, Dict[str, Any]]:
     return frame, diagnostics
 
 
+def _fetch_hdx_displacements(
+    *,
+    package_id: Optional[str],
+    base_url: Optional[str],
+    start_date: Optional[date],
+    end_date: Optional[date],
+    iso3_list: Iterable[str],
+    opener: Any = urllib.request,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Download and aggregate the HDX displacement CSV."""
+
+    diagnostics: Dict[str, Any] = {
+        "source": "hdx",
+        "source_tag": "idmc_idu",
+    }
+    empty = pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS))
+    if not package_id:
+        diagnostics["error"] = "missing_hdx_package_id"
+        diagnostics["zero_rows_reason"] = "hdx_missing_package_id"
+        return empty, diagnostics
+
+    resource_url, resource_diag = _hdx_pick_displacement_csv(
+        package_id,
+        base_url=base_url,
+        opener=opener,
+    )
+    diagnostics.update(resource_diag)
+    if not resource_url:
+        diagnostics.setdefault("zero_rows_reason", "hdx_resource_not_found")
+        return empty, diagnostics
+
+    try:
+        raw = pd.read_csv(resource_url)
+    except Exception as exc:  # pragma: no cover - network dependent
+        diagnostics["error"] = f"hdx_download_error:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics.setdefault("zero_rows_reason", "hdx_download_error")
+        return empty, diagnostics
+
+    diagnostics["resource_rows"] = int(raw.shape[0])
+    diagnostics["resource_columns"] = [str(column) for column in raw.columns]
+
+    iso_scope = [
+        code.strip().upper()
+        for code in iso3_list
+        if isinstance(code, str) and code.strip()
+    ]
+    iso_batches: List[List[str]] = [iso_scope] if iso_scope else []
+
+    aggregated = _hdx_prepare_monthly_flow(
+        raw,
+        iso_batches=iso_batches,
+        chunk_start=None,
+        chunk_end=None,
+        window_start=start_date,
+        window_end=end_date,
+        source_tag="idmc_idu",
+    )
+
+    if aggregated.empty:
+        diagnostics.setdefault("zero_rows_reason", "hdx_aggregation_empty")
+        return aggregated, diagnostics
+
+    diagnostics["rows"] = int(aggregated.shape[0])
+    return aggregated, diagnostics
+
+
 def _helix_client_id() -> Optional[str]:
     raw = os.getenv("IDMC_HELIX_CLIENT_ID")
     if raw is None:
@@ -803,13 +999,16 @@ def _helix_client_id() -> Optional[str]:
 def _fetch_helix_last180(
     helix_client_id: Optional[str],
     *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    iso3_list: Iterable[str] = (),
     rate_limiter: TokenBucket | None = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """Fetch the Helix IDU last-180-days payload once."""
+    """Fetch displacement figures from the Helix GIDD endpoint."""
 
     diagnostics: Dict[str, Any] = {
         "source": "helix_idu",
-        "url": f"{HELIX_BASE}{HELIX_LAST180}",
+        "url": f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}",
         "status": None,
         "bytes": 0,
     }
@@ -820,9 +1019,23 @@ def _fetch_helix_last180(
         diagnostics["zero_rows_reason"] = "helix_missing_client_id"
         return pd.DataFrame(), diagnostics
 
-    query = urlencode({"client_id": client_id, "format": "json"})
-    url = f"{HELIX_BASE}{HELIX_LAST180}?{query}"
+    params: Dict[str, str] = {"client_id": client_id, "format": "json"}
+    if start_date:
+        params["start"] = start_date.strftime("%Y-%m-%d")
+    if end_date:
+        params["end"] = end_date.strftime("%Y-%m-%d")
+    iso_values = [
+        code.strip().upper()
+        for code in iso3_list
+        if isinstance(code, str) and code.strip()
+    ]
+    if iso_values:
+        params["iso3__in"] = ",".join(sorted(dict.fromkeys(iso_values)))
+
+    query = urlencode(params)
+    url = f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}?{query}"
     diagnostics["url"] = url.replace(client_id, "REDACTED")
+    diagnostics["path"] = _request_path(url)
 
     headers = _build_http_headers({"Accept": "application/json"})
     connect_timeout_s, read_timeout_s = _http_timeouts()
@@ -910,23 +1123,52 @@ def _fetch_helix_last180(
             "geo_iso3",
         )
         iso3_value = str(iso3_raw).strip().upper() if iso3_raw else None
+
         date_value = _coalesce(
             raw,
             "displacement_date",
             "event_date",
             "date",
             "displacement_end_date",
+            "as_of_date",
+            "month",
         )
-        figure_value = _coalesce(raw, "figure", "new_displacements")
+        if date_value is None:
+            year = _coalesce(raw, "year", "Year")
+            month = _coalesce(raw, "month_number", "Month")
+            try:
+                if year is not None and month is not None:
+                    month_int = int(str(month))
+                    year_int = int(str(year))
+                    day = 1
+                    candidate_date = datetime(year_int, month_int, day)
+                    date_value = candidate_date.strftime("%Y-%m-%d")
+            except Exception:  # pragma: no cover - defensive
+                date_value = None
+
+        figure_value = _coalesce(
+            raw,
+            "new_displacements",
+            "figure",
+            "value",
+            "total_displacements",
+        )
+
         rows.append(
             {
                 "iso3": iso3_value,
                 "displacement_date": date_value,
                 "displacement_start_date": _coalesce(
-                    raw, "displacement_start_date"
+                    raw,
+                    "displacement_start_date",
+                    "start_date",
+                    "start",
                 ),
                 "displacement_end_date": _coalesce(
-                    raw, "displacement_end_date"
+                    raw,
+                    "displacement_end_date",
+                    "end_date",
+                    "end",
                 ),
                 "figure": figure_value,
                 "raw": raw,
@@ -955,7 +1197,12 @@ def _helix_fetch_csv(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     del timeout  # compatibility with previous signature
 
-    frame, diagnostics = _fetch_helix_last180(_helix_client_id())
+    frame, diagnostics = _fetch_helix_last180(
+        _helix_client_id(),
+        start_date=start_date,
+        end_date=end_date,
+        iso3_list=iso3_list,
+    )
     diagnostics = dict(diagnostics)
     diagnostics.setdefault("source", "helix")
     diagnostics.setdefault("source_tag", "idmc_gidd")
@@ -1164,6 +1411,40 @@ def _hdx_filter(
     window_end: Optional[date],
     source_tag: str,
 ) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS))
+
+    has_canonical_columns = all(column in frame.columns for column in FLOW_EXPORT_COLUMNS)
+    if HDX_PREAGG_COLUMN in frame.columns or has_canonical_columns:
+        working = frame.copy()
+        if "iso3" in working.columns and iso_batches:
+            allowed = {
+                code.strip().upper()
+                for batch in iso_batches
+                for code in batch
+                if isinstance(code, str) and code.strip()
+            }
+            if allowed:
+                iso_series = working["iso3"].astype(str).str.strip().str.upper()
+                working = working.loc[iso_series.isin(allowed)]
+
+        start_bound = chunk_start or window_start
+        end_bound = chunk_end or window_end
+        if start_bound or end_bound:
+            if "as_of_date" in working.columns:
+                dates = pd.to_datetime(working["as_of_date"], errors="coerce")
+                if start_bound:
+                    working = working.loc[dates >= pd.Timestamp(start_bound)]
+                if end_bound:
+                    working = working.loc[dates <= pd.Timestamp(end_bound)]
+
+        ordered = list(FLOW_EXPORT_COLUMNS)
+        extras: List[str] = []
+        if HDX_PREAGG_COLUMN in working.columns:
+            extras.append(HDX_PREAGG_COLUMN)
+        result = working.loc[:, [col for col in ordered + extras if col in working.columns]]
+        return result.reset_index(drop=True)
+
     return _hdx_prepare_monthly_flow(
         frame,
         iso_batches=iso_batches,
@@ -1251,6 +1532,7 @@ def fetch_idu_json(
     diagnostics: Dict[str, Any] = {
         "mode": network_mode,
         "url": None,
+        "last_request_path": None,
         "cache": cache_stats,
         "http": http_info,
         "filters": {},
@@ -1484,6 +1766,7 @@ def fetch_idu_json(
                 if request_params:
                     url = f"{url}?{urlencode(request_params, safe='.,()')}"
                 diagnostics["url"] = url
+                diagnostics["last_request_path"] = _request_path(url)
                 cache_params = {
                     **{k: v for k, v in base_params.items() if v is not None},
                     "iso_batch": ",".join(iso_batch) if iso_batch else "*",
@@ -1562,24 +1845,7 @@ def fetch_idu_json(
                             headers=_build_http_headers(),
                             verify=verify_setting,
                         )
-                        bucket = _http_status_bucket(status)
-                        if bucket:
-                            http_info["status_counts"].setdefault(bucket, 0)
-                            http_info["status_counts"][bucket] += 1
-                        http_info["status_last"] = status
                         summary_counters = diagnostics["http_attempt_summary"]
-                        if 200 <= status < 300:
-                            http_info["requests_ok_2xx"] += 1
-                            summary_counters["ok_2xx"] += 1
-                        elif 400 <= status < 500:
-                            http_info["requests_4xx"] += 1
-                            summary_counters["status_4xx"] += 1
-                        elif 500 <= status < 600:
-                            http_info["requests_5xx"] += 1
-                            summary_counters["status_5xx"] += 1
-                        else:
-                            http_info["requests_other"] += 1
-                            summary_counters["status_other"] += 1
                         diagnostics["requests"].append(
                             {
                                 "url": url,
@@ -1600,6 +1866,21 @@ def fetch_idu_json(
                             "fetched_at": datetime.now(timezone.utc).isoformat(),
                         }
                         cache_record.update(metadata)
+                        if not isinstance(status, int) or not (200 <= status < 300):
+                            error_diag = dict(http_diag)
+                            error_diag.setdefault("status", status)
+                            raise HttpRequestError(
+                                message=f"HTTP {status}",
+                                diagnostics=error_diag,
+                                kind="http_error",
+                            )
+                        bucket = _http_status_bucket(status)
+                        if bucket:
+                            http_info["status_counts"].setdefault(bucket, 0)
+                            http_info["status_counts"][bucket] += 1
+                        http_info["status_last"] = status
+                        http_info["requests_ok_2xx"] += 1
+                        summary_counters["ok_2xx"] += 1
                         with _cache_lock(key):
                             if http_diag.get("streamed_to"):
                                 final_path = cache_path
@@ -2176,16 +2457,40 @@ def fetch(
     )
     countries = list(selected_countries)
 
-    fallback_allowed = (
-        allow_hdx_fallback
-        if allow_hdx_fallback is not None
-        else getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
-    )
+    hdx_cfg = getattr(cfg, "hdx", None)
+    hdx_package_id: Optional[str] = None
+    hdx_base_url: Optional[str] = None
+    if hdx_cfg is not None:
+        hdx_package_id = getattr(hdx_cfg, "package_id", None)
+        hdx_base_url = getattr(hdx_cfg, "base_url", None)
+
+    env_package = os.getenv("IDMC_HDX_PACKAGE_ID")
+    if env_package:
+        env_package_clean = env_package.strip()
+        if env_package_clean:
+            hdx_package_id = env_package_clean
+
+    env_base = os.getenv("IDMC_HDX_BASE_URL")
+    if env_base:
+        env_base_clean = env_base.strip()
+        if env_base_clean:
+            hdx_base_url = env_base_clean
+
+    cli_allow = bool(allow_hdx_fallback) if allow_hdx_fallback is not None else False
+    env_allow = getenv_bool("IDMC_ALLOW_HDX_FALLBACK", default=False)
+    fallback_allowed = cli_allow or env_allow
+
+    if fallback_allowed and not hdx_package_id:
+        LOGGER.error(
+            "HDX fallback requested but no package id configured (set idmc.hdx.package_id or IDMC_HDX_PACKAGE_ID)"
+        )
 
     fallback_lock = threading.Lock()
     fallback_frame_cache_fetch: Optional[pd.DataFrame] = None
     fallback_diag_cache_fetch: Optional[Dict[str, Any]] = None
     fallback_source_cache_fetch: Optional[str] = None
+    fallback_latest_frame_cache: Optional[pd.DataFrame] = None
+    fallback_latest_diag_cache: Optional[Dict[str, Any]] = None
     helix_flag_raw = os.getenv("IDMC_USE_HELIX_IF_IDU_UNREACHABLE")
     if helix_flag_raw is None:
         helix_enabled = bool(_helix_client_id())
@@ -2193,14 +2498,45 @@ def fetch(
         helix_enabled = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
 
     def _resolve_fallback_frame() -> Tuple[pd.DataFrame, Dict[str, Any], str]:
-        hdx_frame, hdx_diag = _hdx_fetch_latest_csv()
+        nonlocal fallback_latest_frame_cache, fallback_latest_diag_cache
+
+        if fallback_latest_frame_cache is None or fallback_latest_diag_cache is None:
+            latest_frame, latest_diag = _hdx_fetch_latest_csv()
+            if latest_frame is None:
+                latest_frame = pd.DataFrame()
+            fallback_latest_frame_cache = latest_frame
+            fallback_latest_diag_cache = dict(latest_diag or {})
+
+        latest_frame = fallback_latest_frame_cache
+        latest_diag = dict(fallback_latest_diag_cache or {})
+        latest_diag.setdefault("source", latest_diag.get("source") or "hdx")
+        latest_source_tag = str(
+            latest_diag.get("source_tag")
+            or latest_diag.get("source")
+            or "idmc_idu"
+        )
+        latest_diag.setdefault("source_tag", latest_source_tag)
+
+        if latest_frame is not None and not latest_frame.empty:
+            return latest_frame, latest_diag, latest_source_tag
+
+        hdx_frame, hdx_diag = _fetch_hdx_displacements(
+            package_id=hdx_package_id,
+            base_url=hdx_base_url,
+            start_date=window_start,
+            end_date=window_end,
+            iso3_list=countries,
+        )
         diag_copy = dict(hdx_diag)
         diag_copy.setdefault("source_tag", "idmc_idu")
         diag_copy.setdefault("source", "hdx")
+        if latest_diag:
+            diag_copy.setdefault("hdx_attempt", latest_diag)
 
         if hdx_frame is not None and not hdx_frame.empty:
             diag_copy.pop("zero_rows_reason", None)
-            return hdx_frame, diag_copy, "idmc_idu"
+            source_tag_value = str(diag_copy.get("source_tag") or "idmc_idu")
+            return hdx_frame, diag_copy, source_tag_value
 
         if "zero_rows_reason" not in diag_copy:
             diag_copy["zero_rows_reason"] = "hdx_empty_or_bad_header"
@@ -2220,7 +2556,10 @@ def fetch(
                 helix_diag = dict(helix_diag)
                 helix_diag.setdefault("source", "helix")
                 helix_diag.setdefault("source_tag", "idmc_gidd")
-                helix_diag.setdefault("hdx_attempt", diag_copy)
+                if latest_diag:
+                    helix_diag.setdefault("hdx_attempt", latest_diag)
+                else:
+                    helix_diag.setdefault("hdx_attempt", diag_copy)
                 if helix_frame is not None and not helix_frame.empty:
                     helix_diag.pop("zero_rows_reason", None)
                 return helix_frame, helix_diag, "idmc_gidd"
@@ -2231,6 +2570,7 @@ def fetch(
 
     def _load_fallback_cached() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         nonlocal fallback_frame_cache_fetch, fallback_diag_cache_fetch, fallback_source_cache_fetch
+        nonlocal fallback_latest_frame_cache, fallback_latest_diag_cache
         with fallback_lock:
             if fallback_frame_cache_fetch is None or fallback_diag_cache_fetch is None:
                 frame, diag, source_tag = _resolve_fallback_frame()
@@ -2312,6 +2652,7 @@ def fetch(
             if network_mode in {"live", "helix"}
             else None,
             "raw_path": None,
+            "last_request_path": None,
             "requests_planned": 0,
             "requests_executed": 0,
             "window": {"start": None, "end": None, "window_days": None},
@@ -2352,6 +2693,9 @@ def fetch(
         connect_timeout_s, read_timeout_s = _http_timeouts()
         helix_frame_full, helix_diag = _fetch_helix_last180(
             helix_client_id,
+            start_date=window_start,
+            end_date=window_end,
+            iso3_list=countries,
             rate_limiter=limiter,
         )
         helix_summary = dict(helix_diag or {})
@@ -2474,6 +2818,7 @@ def fetch(
                 "fallback_used": False,
                 "raw_path": None,
                 "via": "helix",
+                "last_request_path": HELIX_DISPLACEMENTS_PATH,
             }
             if helix_zero_reason and chunk_frame.empty:
                 chunk_diag.setdefault("zero_rows_reasons", {"full": helix_zero_reason})
@@ -2583,6 +2928,7 @@ def fetch(
     last_exception: Optional[str] = None
     last_exception_kind: Optional[str] = None
     verify_value: Optional[object] = None
+    last_request_path: Optional[str] = None
 
     for index in sorted(chunk_diags):
         diag = chunk_diags[index]
@@ -2615,6 +2961,9 @@ def fetch(
         cache_misses += int(cache_block.get("misses", 0) or 0)
         if diag.get("raw_path"):
             raw_path = diag["raw_path"]
+        path_value = diag.get("last_request_path")
+        if path_value:
+            last_request_path = path_value
         status_counts_block = http_block.get("status_counts") or {}
         for bucket in ("2xx", "4xx", "5xx", "other", "timeout"):
             try:
@@ -2846,6 +3195,7 @@ def fetch(
             "rows_after": total_rows,
         },
         "raw_path": raw_path,
+        "last_request_path": last_request_path,
         "performance": performance,
         "rate_limit": rate_limit_info,
         "chunks": chunks_info,

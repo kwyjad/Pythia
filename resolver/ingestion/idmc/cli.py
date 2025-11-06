@@ -427,7 +427,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.strict_empty:
         empty_policy = "fail"
 
-    cfg = load()
+    config_override_raw = os.getenv("IDMC_CONFIG_PATH")
+    config_override = config_override_raw.strip() if config_override_raw else None
+    if config_override:
+        cfg = load(config_override)
+    else:
+        cfg = load()
     config_details = getattr(cfg, "_config_details", None)
     config_source_label = str(getattr(cfg, "_config_source", "ingestion"))
     config_path_used = getattr(cfg, "_config_path", None)
@@ -1741,8 +1746,36 @@ def main(argv: list[str] | None = None) -> int:
             "config_path_used": str(config_path_used) if config_path_used else None,
             "loader_warnings": config_warnings,
         }
+        fallback_details = diagnostics.get("fallback") if diagnostics else None
+        fallback_used_flag = bool(diagnostics.get("fallback_used")) if diagnostics else False
+        fallback_payload: Dict[str, Any] = {
+            "used": fallback_used_flag,
+            "resource_url": None,
+        }
+        if isinstance(fallback_details, Mapping):
+            resource_url = fallback_details.get("resource_url")
+            if resource_url is None and isinstance(
+                fallback_details.get("hdx_attempt"), Mapping
+            ):
+                hdx_attempt = fallback_details.get("hdx_attempt")
+                resource_url = (
+                    hdx_attempt.get("resource_url")
+                    if isinstance(hdx_attempt, Mapping)
+                    else None
+                )
+                if resource_url is None and isinstance(hdx_attempt, Mapping):
+                    resource_url = hdx_attempt.get("package_url")
+            if resource_url is None:
+                resource_url = fallback_details.get("request_url")
+            fallback_payload["resource_url"] = resource_url
+            if fallback_used_flag and fallback_details.get("reason"):
+                fallback_payload["reason"] = fallback_details.get("reason")
+        why_zero_payload["fallback"] = fallback_payload
         if zero_rows_reason_value:
             why_zero_payload["zero_rows_reason"] = zero_rows_reason_value
+        last_request_path = diagnostics.get("last_request_path") if diagnostics else None
+        if last_request_path:
+            why_zero_payload["last_request_path"] = last_request_path
         if override_raw and countries_source != "cli(--only-countries)" and countries_source != "env(IDMC_ONLY_COUNTRIES)":
             why_zero_payload["countries_override"] = "env(IDMC_COUNTRIES)"
         write_why_zero(why_zero_payload)

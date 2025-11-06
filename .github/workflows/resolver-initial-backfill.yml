@@ -83,6 +83,8 @@ jobs:
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
       IDMC_REQ_PER_SEC: 0.3
       IDMC_MAX_CONCURRENCY: 1
+      IDMC_ALLOW_HDX_FALLBACK: "1"
+      IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
