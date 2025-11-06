@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import io
 import logging
@@ -19,7 +20,8 @@ from resolver.ingestion.utils.country_utils import (
     resolve_countries,
 )
 
-from .client import NETWORK_MODES, NetworkMode, IdmcClient
+from . import client as _client
+from .client import NETWORK_MODES, NetworkMode
 from .config import load
 from .diagnostics import (
     debug_block,
@@ -164,18 +166,51 @@ def _render_summary(context: Dict[str, Any]) -> str:
     return template.format(**context)
 
 
-def fetch(cfg, **kwargs):
-    """Module-level shim to keep a stable fetch entrypoint for tests."""
+def fetch(
+    *,
+    config,
+    start=None,
+    end=None,
+    network_mode: NetworkMode = "live",
+    series=None,
+    allow_fallback: bool = False,
+    **kwargs,
+):
+    """Delegate to the IDMC client fetch, keeping a stable shim for tests."""
 
     options = dict(kwargs)
+
+    # Preserve compatibility with historical callers that expect helix_client_id
     helix_client_id = options.pop("helix_client_id", None)
     if helix_client_id is None:
         env_value = os.environ.get("IDMC_HELIX_CLIENT_ID")
         if env_value is not None:
             helix_client_id = env_value.strip() or None
 
-    client = IdmcClient(helix_client_id=helix_client_id)
-    return client.fetch(cfg, **options)
+    # ``allow_fallback`` maps to the IDU client's HDX fallback toggle.
+    allow_hdx_fallback = options.pop("allow_hdx_fallback", None)
+    if allow_hdx_fallback is None:
+        allow_hdx_fallback = allow_fallback
+
+    # Series selection is handled during normalization, so drop the hint.
+    options.pop("series", None)
+
+    return _client.fetch(
+        copy.deepcopy(config),
+        network_mode=network_mode,
+        window_start=start,
+        window_end=end,
+        allow_hdx_fallback=allow_hdx_fallback,
+        helix_client_id=helix_client_id,
+        **options,
+    )
+
+
+def _serialize_http_counts(counts: Mapping[str, Any] | None) -> Dict[str, int]:
+    """Limit HTTP status counts to the canonical buckets for summaries."""
+
+    serialized = serialize_http_status_counts(counts)
+    return {bucket: int(serialized.get(bucket, 0) or 0) for bucket in ("2xx", "4xx", "5xx")}
 
 
 def _write_summary(context: Dict[str, Any]) -> Path | None:
@@ -784,11 +819,11 @@ def main(argv: list[str] | None = None) -> int:
 
     fetch_start = tick()
     data, diagnostics = fetch(
-        cfg,
+        config=cfg,
+        start=window_start_date,
+        end=window_end_date,
         network_mode=network_mode,
         soft_timeouts=True,
-        window_start=window_start_date,
-        window_end=window_end_date,
         window_days=window_days,
         only_countries=selected_countries,
         base_url=args.base_url,
@@ -797,7 +832,7 @@ def main(argv: list[str] | None = None) -> int:
         max_concurrency=max_concurrency,
         max_bytes=max_bytes,
         chunk_by_month=chunk_by_month,
-        allow_hdx_fallback=allow_hdx_fallback,
+        allow_fallback=allow_hdx_fallback,
     )
     fetch_ms = to_ms(tick() - fetch_start)
 
@@ -1080,7 +1115,7 @@ def main(argv: list[str] | None = None) -> int:
     cache_stats = diagnostics.get("cache") or {}
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
     http_status_counts_raw = diagnostics.get("http_status_counts")
-    http_status_counts = serialize_http_status_counts(http_status_counts_raw)
+    http_status_counts = _serialize_http_counts(http_status_counts_raw)
     http_extended = diagnostics.get("http_extended") or {}
     requests_planned_raw = diagnostics.get("requests_planned")
     try:

@@ -1,6 +1,7 @@
 """Client implementation for the IDMC connector."""
 from __future__ import annotations
 
+import calendar
 import concurrent.futures
 import io
 import json
@@ -61,7 +62,6 @@ IDU_POSTGREST_LIMIT = 10000
 ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
-HDX_MIN_BYTES = 50_000
 HDX_DEFAULT_RESOURCE_ID = "1ace9c2a-7daf-4563-ac15-f2aa5071cd40"
 HDX_DEFAULT_GID = "123456789"
 
@@ -561,6 +561,23 @@ def _hdx_dataset_slug() -> str:
     )
 
 
+def _ensure_date(value: Optional[date | datetime]) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _month_start(value: date) -> date:
+    return value.replace(day=1)
+
+
+def _month_end(value: date) -> date:
+    last_day = calendar.monthrange(value.year, value.month)[1]
+    return value.replace(day=last_day)
+
+
 def _hdx_resource_id() -> Optional[str]:
     for name in ("IDMC_HDX_RESOURCE_ID", "IDMC_HDX_RESOURCE"):
         raw = os.getenv(name)
@@ -661,14 +678,8 @@ def _hdx_pick_displacement_csv(
             fmt = str(resource.get("format") or "").strip().lower()
             if fmt != "csv":
                 continue
-            size_raw = resource.get("size")
-            try:
-                size_value = int(size_raw)
-            except (TypeError, ValueError):
-                size_value = None
-            if size_value is not None and size_value > 50_000:
-                chosen = resource
-                break
+            chosen = resource
+            break
 
     if chosen is None:
         diagnostics["error"] = "no_csv_resource"
@@ -676,7 +687,7 @@ def _hdx_pick_displacement_csv(
         return None, diagnostics
 
     diagnostics["resource_selection"] = (
-        "keyword_match" if keyword_selection else "size_threshold"
+        "keyword_match" if keyword_selection else "first_csv"
     )
     diagnostics["resource_id"] = chosen.get("id")
     diagnostics["resource_name"] = chosen.get("name")
@@ -859,7 +870,6 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
     diagnostics["resource_status_code"] = payload_diag.get("status_code")
     diagnostics["resource_bytes"] = payload_diag.get("bytes")
     diagnostics["resource_content_length"] = payload_diag.get("content_length")
-    diagnostics["min_bytes"] = HDX_MIN_BYTES
 
     try:
         frame = _read_csv_from_bytes(payload_bytes)
@@ -885,7 +895,8 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
     lowered_columns = {str(column).strip().lower() for column in frame.columns}
     has_iso3 = "iso3" in lowered_columns
     has_value = any(
-        candidate in lowered_columns for candidate in {"figure", "new displacements"}
+        candidate in lowered_columns
+        for candidate in {"figure", "new_displacements", "new displacements"}
     )
     if not has_iso3 or not has_value:
         diagnostics["zero_rows_reason"] = "hdx_empty_or_bad_header"
@@ -898,18 +909,6 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
             {"id": selected.get("id"), "error": f"missing:{','.join(missing)}"}
         )
         return None, diagnostics
-
-    try:
-        byte_int = int(diagnostics.get("resource_bytes", 0) or 0)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        byte_int = 0
-    if byte_int and byte_int < HDX_MIN_BYTES:
-        diagnostics.setdefault("resource_errors", []).append(
-            {"id": selected.get("id"), "error": "below_minimum"}
-        )
-        diagnostics.setdefault("zero_rows_reason", "hdx_resource_below_minimum")
-        diagnostics.setdefault("error", "resource_below_minimum")
-        return pd.DataFrame(), diagnostics
 
     return frame, diagnostics
 
@@ -1017,25 +1016,66 @@ def _fetch_helix_last180(
     if not client_id:
         diagnostics["error"] = "missing_client_id"
         diagnostics["zero_rows_reason"] = "helix_missing_client_id"
+        status_counts_empty = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0}
+        diagnostics["status_counts"] = dict(status_counts_empty)
+        diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts_empty)
+        diagnostics["http_status_counts_extended"] = dict(status_counts_empty)
+        diagnostics["requests_planned"] = 0
+        diagnostics["requests_executed"] = 0
         return pd.DataFrame(), diagnostics
 
-    params: Dict[str, str] = {"client_id": client_id, "format": "json"}
-    if start_date:
-        params["start"] = start_date.strftime("%Y-%m-%d")
-    if end_date:
-        params["end"] = end_date.strftime("%Y-%m-%d")
+    start_value = _ensure_date(start_date)
+    end_value = _ensure_date(end_date)
+    start_param = _month_start(start_value) if start_value else None
+    end_param = _month_end(end_value) if end_value else None
+    if start_param is None and end_param is not None:
+        start_param = _month_start(end_param)
+    if end_param is None and start_param is not None:
+        end_param = _month_end(start_param)
+
     iso_values = [
         code.strip().upper()
         for code in iso3_list
         if isinstance(code, str) and code.strip()
     ]
-    if iso_values:
-        params["iso3__in"] = ",".join(sorted(dict.fromkeys(iso_values)))
+    iso_joined = ",".join(sorted(dict.fromkeys(iso_values))) if iso_values else ""
 
-    query = urlencode(params)
-    url = f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}?{query}"
+    release_env = (
+        os.getenv("IDMC_HELIX_VERSION", "").strip()
+        or os.getenv("IDMC_HELIX_ENV", "").strip()
+        or "RELEASE"
+    )
+
+    params: Dict[str, str] = {
+        "limit": "10000",
+        "release_environment": release_env,
+    }
+    if start_param:
+        params["start"] = start_param.strftime("%Y-%m-%d")
+    if end_param:
+        params["end"] = end_param.strftime("%Y-%m-%d")
+    if iso_joined:
+        params["iso3"] = iso_joined
+    if client_id:
+        params["client_id"] = client_id
+
+    query = urlencode({key: value for key, value in params.items() if value})
+    url = f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}?{query}" if query else f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}"
     diagnostics["url"] = url.replace(client_id, "REDACTED")
     diagnostics["path"] = _request_path(url)
+    diagnostics["release_environment"] = release_env
+    diagnostics["iso_scope"] = iso_values
+    diagnostics["requests_planned"] = 1
+    diagnostics["requests_executed"] = 0
+
+    status_counts: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0}
+
+    def _record_status(bucket: Optional[str]) -> None:
+        if not bucket:
+            return
+        if bucket not in status_counts:
+            status_counts[bucket] = 0
+        status_counts[bucket] += 1
 
     headers = _build_http_headers({"Accept": "application/json"})
     connect_timeout_s, read_timeout_s = _http_timeouts()
@@ -1051,9 +1091,22 @@ def _fetch_helix_last180(
             verify=verify_setting,
         )
     except HttpRequestError as exc:
-        diagnostics["error"] = exc.diagnostics or exc.message
-        diagnostics["status"] = (exc.diagnostics or {}).get("status")
-        diagnostics["status_bucket"] = _http_status_bucket(diagnostics["status"])
+        error_diag = exc.diagnostics or {}
+        if not isinstance(error_diag, Mapping):
+            error_diag = {"details": error_diag}
+        diagnostics["error"] = error_diag or exc.message
+        status_value = error_diag.get("status")
+        if error_diag.get("timeout"):
+            status_value = "timeout"
+        diagnostics["status"] = status_value
+        bucket = _http_status_bucket(status_value)
+        diagnostics["status_bucket"] = bucket
+        _record_status(bucket)
+        diagnostics["status_counts"] = dict(status_counts)
+        diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts)
+        diagnostics["http_status_counts_extended"] = dict(status_counts)
+        diagnostics["http"] = error_diag
+        diagnostics["requests_executed"] = int(error_diag.get("attempts", 1) or 1)
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics["zero_rows_reason"] = "helix_http_error"
         return pd.DataFrame(), diagnostics
@@ -1061,10 +1114,18 @@ def _fetch_helix_last180(
         diagnostics["error"] = str(exc)
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics["zero_rows_reason"] = "helix_http_error"
+        diagnostics["status_counts"] = dict(status_counts)
+        diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts)
+        diagnostics["http_status_counts_extended"] = dict(status_counts)
         return pd.DataFrame(), diagnostics
 
     diagnostics["status"] = status
-    diagnostics["status_bucket"] = _http_status_bucket(status)
+    bucket = _http_status_bucket(status)
+    diagnostics["status_bucket"] = bucket
+    _record_status(bucket)
+    diagnostics["status_counts"] = dict(status_counts)
+    diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts)
+    diagnostics["requests_executed"] = int(http_diag.get("attempts", 1) or 1)
     diagnostics["headers"] = response_headers
     diagnostics["http"] = http_diag
     diagnostics["bytes"] = len(body or b"") if isinstance(body, (bytes, bytearray)) else 0
@@ -2094,6 +2155,10 @@ def fetch_idu_json(
                                     source_tag=fallback_source_tag_inner,
                                 )
                                 fallback_rows = filtered.to_dict("records")
+                                for record in fallback_rows:
+                                    if "figure" not in record:
+                                        record["figure"] = record.get("value")
+                                    record.setdefault("idmc_source", fallback_source_tag_inner)
                                 rows.extend(fallback_rows)
                                 fallback_diag_entry["rows"] = len(fallback_rows)
                                 fallback_diag_entry["used"] = True
@@ -2300,6 +2365,10 @@ def fetch_idu_json(
             source_tag=fallback_source_tag,
         )
         fallback_rows = filtered.to_dict("records")
+        for record in fallback_rows:
+            if "figure" not in record:
+                record["figure"] = record.get("value")
+            record.setdefault("idmc_source", fallback_source_tag)
         diagnostics["fallback"]["rows"] = len(fallback_rows)
         fallback_entry["rows"] = len(fallback_rows)
         fallback_attempt = {
