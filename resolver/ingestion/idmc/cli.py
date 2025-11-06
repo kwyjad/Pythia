@@ -226,6 +226,39 @@ def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
         return None
 
 
+def _resolve_network_mode(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    env_force_cache_only: Optional[bool],
+    cfg_force_cache_only: bool,
+) -> NetworkMode:
+    """Return the effective network mode for this run."""
+
+    if getattr(args, "skip_network", False):
+        return cast(NetworkMode, "fixture")
+
+    env_override = os.getenv("IDMC_NETWORK_MODE", "").strip().lower()
+    if env_override:
+        if env_override not in NETWORK_MODES:
+            parser.error(
+                f"Invalid network mode '{env_override}'. Choose from {', '.join(NETWORK_MODES)}."
+            )
+        return cast(NetworkMode, env_override)
+
+    arg_override = getattr(args, "network_mode", None)
+    if arg_override:
+        return cast(NetworkMode, arg_override)
+
+    if env_force_cache_only:
+        return cast(NetworkMode, "cache_only")
+
+    if env_force_cache_only is None and cfg_force_cache_only:
+        return cast(NetworkMode, "cache_only")
+
+    return cast(NetworkMode, "live")
+
+
 def _resolve_window_from_flags_or_env(
     args, env_start: Optional[str] = None, env_end: Optional[str] = None
 ) -> tuple[Optional[date], Optional[date]]:
@@ -427,23 +460,12 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
-    raw_network_mode = args.network_mode or os.getenv("IDMC_NETWORK_MODE")
-    network_mode: NetworkMode
-    if raw_network_mode:
-        candidate = str(raw_network_mode).strip().lower()
-        if candidate not in NETWORK_MODES:
-            parser.error(
-                f"Invalid network mode '{raw_network_mode}'. Choose from {', '.join(NETWORK_MODES)}."
-            )
-        network_mode = cast(NetworkMode, candidate)
-    elif args.skip_network:
-        network_mode = cast(NetworkMode, "fixture")
-    elif env_force_cache_only:
-        network_mode = cast(NetworkMode, "cache_only")
-    elif env_force_cache_only is None and cfg.cache.force_cache_only:
-        network_mode = cast(NetworkMode, "cache_only")
-    else:
-        network_mode = cast(NetworkMode, "live")
+    network_mode = _resolve_network_mode(
+        args,
+        parser,
+        env_force_cache_only=env_force_cache_only,
+        cfg_force_cache_only=bool(getattr(cfg.cache, "force_cache_only", False)),
+    )
 
     cfg.cache.force_cache_only = network_mode == "cache_only"
 
