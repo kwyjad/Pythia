@@ -94,6 +94,19 @@ Notes:
 STOCK_METRIC = "idp_displacement_stock_idmc"
 
 
+def write_facts_parquet(path: str | Path, df: pd.DataFrame) -> str:
+    """Write ``df`` to ``path`` as Parquet and return the filesystem path."""
+
+    parquet_path = Path(path)
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df.to_parquet(parquet_path, index=False)
+    except Exception as exc:  # pragma: no cover - optional dependency
+        LOGGER.debug("Failed to write Parquet snapshot %s: %s", parquet_path, exc)
+        return ""
+    return parquet_path.as_posix()
+
+
 def _parse_empty_policy(value: str | None) -> str:
     candidate = (value or "allow").strip().lower()
     if candidate in {"allow", "warn", "fail"}:
@@ -986,14 +999,17 @@ def main(argv: list[str] | None = None) -> int:
         export_details["reason"] = "feature-flag-disabled"
 
     if write_outputs and export_feature_enabled:
-        csv_path = flow_staging_path.as_posix()
+        csv_path = flow_staging_path.as_posix() if flow_staging_path.exists() else None
+        out_dir_value = args.out_dir or default_out_dir or "artifacts/idmc"
+        parquet_target = Path(out_dir_value).expanduser() / "idmc_facts_flow.parquet"
+        parquet_path = write_facts_parquet(parquet_target, resolution_ready_facts)
         export_details.update(
             {
                 "enabled": True,
                 "rows": len(resolution_ready_facts),
                 "paths": {
-                    "csv": csv_path if flow_staging_path.exists() else None,
-                    "parquet": None,
+                    "csv": csv_path,
+                    "parquet": parquet_path or None,
                 },
             }
         )
