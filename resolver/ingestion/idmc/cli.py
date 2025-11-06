@@ -151,6 +151,20 @@ def _render_summary(context: Dict[str, Any]) -> str:
     return template.format(**context)
 
 
+def fetch(cfg, **kwargs):
+    """Module-level shim to keep a stable fetch entrypoint for tests."""
+
+    options = dict(kwargs)
+    helix_client_id = options.pop("helix_client_id", None)
+    if helix_client_id is None:
+        env_value = os.environ.get("IDMC_HELIX_CLIENT_ID")
+        if env_value is not None:
+            helix_client_id = env_value.strip() or None
+
+    client = IdmcClient(helix_client_id=helix_client_id)
+    return client.fetch(cfg, **options)
+
+
 def _write_summary(context: Dict[str, Any]) -> Path | None:
     try:
         diag_path = Path(diagnostics_dir())
@@ -428,7 +442,6 @@ def main(argv: list[str] | None = None) -> int:
     env_max_concurrency = _env_int(os.getenv("IDMC_MAX_CONCURRENCY"))
     env_max_bytes = _env_int(os.getenv("IDMC_MAX_BYTES"))
     env_chunk_by_month = _env_truthy(os.getenv("IDMC_CHUNK_BY_MONTH"))
-    helix_client_id = (os.getenv("IDMC_HELIX_CLIENT_ID") or "").strip() or None
     resolver_output_dir_env = os.getenv("RESOLVER_OUTPUT_DIR")
 
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
@@ -751,10 +764,8 @@ def main(argv: list[str] | None = None) -> int:
             probe_result = {"error": str(exc)}
     probe_ms = to_ms(tick() - probe_start)
 
-    client = IdmcClient(helix_client_id=helix_client_id)
-
     fetch_start = tick()
-    data, diagnostics = client.fetch(
+    data, diagnostics = fetch(
         cfg,
         network_mode=network_mode,
         soft_timeouts=True,
