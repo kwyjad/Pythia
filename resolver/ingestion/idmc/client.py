@@ -51,7 +51,7 @@ IDU_POSTGREST_LIMIT = 10000
 ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
-HDX_MIN_BYTES = 10_000
+HDX_MIN_BYTES = 50_000
 HDX_DEFAULT_RESOURCE_ID = "1ace9c2a-7daf-4563-ac15-f2aa5071cd40"
 HDX_DEFAULT_GID = "123456789"
 
@@ -655,6 +655,7 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
 
     diagnostics["resource_id"] = selected.get("id")
     diagnostics["resource_name"] = selected.get("name")
+    diagnostics["resource_preferred"] = bool(selected.get("preferred"))
 
     resource_url = str(selected.get("url") or "").strip()
     if not resource_url:
@@ -761,6 +762,9 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
         diagnostics.setdefault("resource_errors", []).append(
             {"id": selected.get("id"), "error": "below_minimum"}
         )
+        diagnostics.setdefault("zero_rows_reason", "hdx_resource_below_minimum")
+        diagnostics.setdefault("error", "resource_below_minimum")
+        return pd.DataFrame(), diagnostics
 
     return frame, diagnostics
 
@@ -1101,6 +1105,7 @@ def fetch_idu_json(
             "resource_status_code",
             "resource_bytes",
             "resource_content_length",
+            "min_bytes",
             "resource_rows",
             "resource_columns",
             "resource_preferred",
@@ -1903,12 +1908,17 @@ def fetch(
     fallback_frame_cache_fetch: Optional[pd.DataFrame] = None
     fallback_diag_cache_fetch: Optional[Dict[str, Any]] = None
     fallback_source_cache_fetch: Optional[str] = None
-    helix_enabled = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
+    helix_flag_raw = os.getenv("IDMC_USE_HELIX_IF_IDU_UNREACHABLE")
+    if helix_flag_raw is None:
+        helix_enabled = bool(_helix_client_id())
+    else:
+        helix_enabled = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
 
     def _resolve_fallback_frame() -> Tuple[pd.DataFrame, Dict[str, Any], str]:
         hdx_frame, hdx_diag = _hdx_fetch_latest_csv()
         diag_copy = dict(hdx_diag)
         diag_copy.setdefault("source_tag", "idmc_idu")
+        diag_copy.setdefault("source", "hdx")
 
         if hdx_frame is not None and not hdx_frame.empty:
             diag_copy.pop("zero_rows_reason", None)
@@ -1930,6 +1940,7 @@ def fetch(
                     diag_copy["zero_rows_reason"] = "helix_exception"
             else:
                 helix_diag = dict(helix_diag)
+                helix_diag.setdefault("source", "helix")
                 helix_diag.setdefault("source_tag", "idmc_gidd")
                 helix_diag.setdefault("hdx_attempt", diag_copy)
                 if helix_frame is not None and not helix_frame.empty:

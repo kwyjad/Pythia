@@ -34,7 +34,13 @@ from .diagnostics import (
     write_unmapped_hazards_preview,
     zero_rows_rescue,
 )
-from .export import FACT_COLUMNS, FLOW_METRIC, build_resolution_ready_facts, summarise_facts
+from .export import (
+    FACT_COLUMNS,
+    FLOW_EXPORT_COLUMNS,
+    FLOW_METRIC,
+    build_resolution_ready_facts,
+    summarise_facts,
+)
 from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
@@ -813,15 +819,15 @@ def main(argv: list[str] | None = None) -> int:
         flow_export_requested = True
     if flow_export_requested:
         flow_frame = resolution_ready_facts
-        required_columns = ["iso3", "as_of_date", "metric", "value", "series_semantics", "source"]
         if flow_frame.empty:
-            flow_frame = pd.DataFrame(columns=required_columns)
+            export_frame = pd.DataFrame(columns=FLOW_EXPORT_COLUMNS)
         else:
-            for column in required_columns:
-                if column not in flow_frame.columns:
-                    flow_frame[column] = pd.NA
-            flow_frame = flow_frame.loc[:, required_columns]
-        flow_frame.to_csv(flow_staging_path, index=False)
+            export_frame = flow_frame.copy()
+            for column in FLOW_EXPORT_COLUMNS:
+                if column not in export_frame.columns:
+                    export_frame[column] = pd.NA
+            export_frame = export_frame.loc[:, FLOW_EXPORT_COLUMNS]
+        export_frame.to_csv(flow_staging_path, index=False)
     elif not resolution_ready_facts.empty:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
@@ -1387,6 +1393,9 @@ def main(argv: list[str] | None = None) -> int:
     resource_bytes = fallback_info.get("resource_bytes")
     if resource_bytes is not None:
         fallback_lines.append(f"Resource bytes: {resource_bytes}")
+    min_bytes = fallback_info.get("min_bytes")
+    if min_bytes is not None:
+        fallback_lines.append(f"Minimum bytes required: {min_bytes}")
     helix_bytes = fallback_info.get("bytes")
     if helix_bytes is not None:
         fallback_lines.append(f"Helix bytes: {helix_bytes}")

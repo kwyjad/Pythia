@@ -33,7 +33,7 @@ def cfg(tmp_path: Path) -> config.IdmcConfig:
     return cfg_obj
 
 
-def test_idmc_hdx_prefers_configured_resource(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_idmc_hdx_selects_large_resource(monkeypatch: pytest.MonkeyPatch) -> None:
     good_id = "good-resource"
     small_id = "small-resource"
 
@@ -65,7 +65,7 @@ def test_idmc_hdx_prefers_configured_resource(monkeypatch: pytest.MonkeyPatch) -
             body = b"iso3,value\nAFG,1\n"
             return _FakeResponse(status_code=200, content=body, headers={"Content-Length": str(len(body))})
         assert url.endswith("good.csv")
-        rows = ["iso3,figure"] + ["AFG,10"] * 2500
+        rows = ["iso3,figure"] + ["AFG,10"] * 12000
         body = ("\n".join(rows) + "\n").encode("utf-8")
         return _FakeResponse(status_code=200, content=body, headers={"Content-Length": str(len(body))})
 
@@ -76,12 +76,12 @@ def test_idmc_hdx_prefers_configured_resource(monkeypatch: pytest.MonkeyPatch) -
 
     assert not frame.empty
     assert diag.get("resource_id") == good_id
-    assert diag.get("resource_bytes") and int(diag["resource_bytes"]) > 10_000
+    assert diag.get("resource_bytes") and int(diag["resource_bytes"]) >= 50_000
     assert "iso3" in frame.columns
     assert "figure" in frame.columns
 
 
-def test_idmc_hdx_single_fetch_reused_across_chunks(monkeypatch: pytest.MonkeyPatch, cfg: config.IdmcConfig) -> None:
+def test_idmc_hdx_single_download_reused(monkeypatch: pytest.MonkeyPatch, cfg: config.IdmcConfig) -> None:
     call_count = 0
 
     fallback_frame = pd.DataFrame(
@@ -98,7 +98,7 @@ def test_idmc_hdx_single_fetch_reused_across_chunks(monkeypatch: pytest.MonkeyPa
         return fallback_frame, {
             "dataset": "preliminary-internal-displacement-updates",
             "resource_id": "cached",
-            "resource_bytes": 15_000,
+            "resource_bytes": 60_000,
             "resource_url": "https://example.invalid/good.csv",
             "source_tag": "idmc_idu",
         }
@@ -149,7 +149,8 @@ def test_idmc_hdx_selects_data_tab(monkeypatch: pytest.MonkeyPatch) -> None:
             return _FakeResponse(status_code=200, json_body=payload)
         assert "gid=" in url
         assert f"gid={gid_value}" in url
-        body = b"iso3,figure,displacement_end_date\nAFG,3,2024-01-31\n"
+        rows = ["iso3,figure,displacement_end_date"] + ["AFG,3,2024-01-31"] * 3000
+        body = ("\n".join(rows) + "\n").encode("utf-8")
         return _FakeResponse(status_code=200, content=body, headers={"Content-Length": str(len(body))})
 
     monkeypatch.setenv("IDMC_HDX_RESOURCE_ID", resource_id)
@@ -164,7 +165,7 @@ def test_idmc_hdx_selects_data_tab(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "displacement_end_date" in frame.columns
 
 
-def test_idmc_helix_fallback_used_on_hdx_empty(
+def test_idmc_helix_fallback(
     monkeypatch: pytest.MonkeyPatch, cfg: config.IdmcConfig
 ) -> None:
     def fake_http_get(*args: Any, **kwargs: Any) -> None:
@@ -193,7 +194,6 @@ def test_idmc_helix_fallback_used_on_hdx_empty(
         return frame, diag
 
     monkeypatch.setenv("IDMC_ALLOW_HDX_FALLBACK", "1")
-    monkeypatch.setenv("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", "1")
     monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "dummy")
     monkeypatch.setattr(client, "http_get", fake_http_get)
     monkeypatch.setattr(client, "_hdx_fetch_once", fake_hdx_once)
@@ -261,7 +261,6 @@ def test_summary_zero_reason_codes(monkeypatch: pytest.MonkeyPatch, cfg: config.
         }
 
     monkeypatch.setenv("IDMC_ALLOW_HDX_FALLBACK", "1")
-    monkeypatch.setenv("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", "1")
     monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "dummy")
     monkeypatch.setattr(client, "http_get", fake_http_get)
     monkeypatch.setattr(client, "_hdx_fetch_once", fake_hdx_once)

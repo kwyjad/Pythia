@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from resolver.ingestion.idmc import cli
-from resolver.ingestion.idmc.export import FACT_COLUMNS
+from resolver.ingestion.idmc.export import FACT_COLUMNS, FLOW_EXPORT_COLUMNS
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ api:
     return tmp_path
 
 
-def test_cli_writes_header_on_empty_with_export(stubbed_cli: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_writes_header_when_empty(stubbed_cli: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RESOLVER_OUTPUT_DIR", raising=False)
     exit_code = cli.main(
         [
@@ -101,7 +101,7 @@ def test_cli_writes_header_on_empty_with_export(stubbed_cli: Path, monkeypatch: 
     assert flow_path.exists()
     header = flow_path.read_text(encoding="utf-8").splitlines()
     assert header
-    assert header[0].split(",") == FACT_COLUMNS
+    assert header[0].split(",") == FLOW_EXPORT_COLUMNS
 
 
 def test_cli_accepts_debug_flag(stubbed_cli: Path, monkeypatch: pytest.MonkeyPatch) -> None:

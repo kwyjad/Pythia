@@ -128,7 +128,8 @@ sources:
       semantics:
         const: new
       source:
-        const: idmc_idu
+        from: source
+        ops: [trim]
     filters:
       - keep_if_not_null: [iso3, as_of_date, value]
       - keep_if_positive: [value]
