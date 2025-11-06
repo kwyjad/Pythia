@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from .diagnostics import (
 )
 from .chunking import split_by_month
 from .config import IdmcConfig
+from .export import FLOW_EXPORT_COLUMNS, FLOW_METRIC, FLOW_SERIES_SEMANTICS
 from .http import HttpRequestError, http_get
 from .rate_limit import TokenBucket
 
@@ -59,6 +61,8 @@ HELIX_DEFAULT_BASE = "https://helix-tools-api.idmcdb.org"
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_READ_TIMEOUT_S = 25.0
+
+HDX_PREAGG_COLUMN = "__hdx_preaggregated__"
 
 _CACHE_LOCKS: Dict[str, threading.Lock] = {}
 _CACHE_LOCKS_LOCK = threading.Lock()
@@ -726,7 +730,7 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
         diagnostics["zero_rows_reason"] = "hdx_empty_or_bad_header"
         return None, diagnostics
 
-    diagnostics["resource_rows"] = len(frame)
+    diagnostics["resource_rows"] = int(frame.shape[0])
     diagnostics["resource_columns"] = list(frame.columns)
     diagnostics["source"] = "hdx"
 
@@ -859,7 +863,168 @@ def _helix_fetch_csv(
     if frame.empty:
         diagnostics["zero_rows_reason"] = "helix_empty"
 
-    return frame, diagnostics
+def _normalise_column_key(name: object) -> str:
+    text = re.sub(r"[^0-9a-zA-Z]+", "_", str(name or "").strip().lower())
+    text = re.sub(r"_+", "_", text)
+    return text.strip("_")
+
+
+def _resolve_column(frame: pd.DataFrame, options: Iterable[str]) -> Optional[str]:
+    if frame.empty:
+        return None
+    normalised = {
+        _normalise_column_key(column): column for column in frame.columns
+    }
+    for option in options:
+        key = _normalise_column_key(option)
+        if key in normalised:
+            return normalised[key]
+    return None
+
+
+def _hdx_filter_rows(
+    frame: pd.DataFrame,
+    *,
+    iso_batches: List[List[str]],
+    chunk_start: Optional[date],
+    chunk_end: Optional[date],
+    window_start: Optional[date],
+    window_end: Optional[date],
+) -> pd.DataFrame:
+    working = frame.copy()
+    if working.empty:
+        return working
+
+    iso_column = _resolve_column(
+        working, ["iso3", "iso_3", "country_iso3", "countryiso3", "geo_iso3"]
+    )
+    if iso_batches and iso_column:
+        allowed = {
+            code.strip().upper()
+            for batch in iso_batches
+            for code in batch
+            if code and code.strip()
+        }
+        if allowed:
+            iso_values = working[iso_column].astype(str).str.strip().str.upper()
+            working = working.loc[iso_values.isin(allowed)]
+
+    start_bound = chunk_start or window_start
+    end_bound = chunk_end or window_end
+    if start_bound or end_bound:
+        date_column = _resolve_column(
+            working,
+            [
+                "displacement_end_date",
+                "displacement_start_date",
+                "displacement_date",
+                "event_date",
+                "report_date",
+                "date",
+            ],
+        )
+        if date_column:
+            dates = pd.to_datetime(working[date_column], errors="coerce")
+            if start_bound:
+                working = working.loc[dates >= pd.Timestamp(start_bound)]
+            if end_bound:
+                working = working.loc[dates <= pd.Timestamp(end_bound)]
+    return working.reset_index(drop=True)
+
+
+def _hdx_prepare_monthly_flow(
+    frame: pd.DataFrame,
+    *,
+    iso_batches: List[List[str]],
+    chunk_start: Optional[date],
+    chunk_end: Optional[date],
+    window_start: Optional[date],
+    window_end: Optional[date],
+    source_tag: str,
+) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS))
+    filtered = _hdx_filter_rows(
+        frame,
+        iso_batches=iso_batches,
+        chunk_start=chunk_start,
+        chunk_end=chunk_end,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    if filtered.empty:
+        return empty
+
+    iso_column = _resolve_column(
+        filtered, ["iso3", "iso_3", "country_iso3", "countryiso3", "geo_iso3"]
+    )
+    value_column = _resolve_column(
+        filtered,
+        [
+            "figure",
+            "new_displacements",
+            "new displacement",
+            "new_displacement",
+            "new_displacements_(idps)",
+            "new_displacements_idps",
+        ],
+    )
+    date_column = _resolve_column(
+        filtered,
+        [
+            "displacement_end_date",
+            "displacement_start_date",
+            "displacement_date",
+            "event_date",
+            "report_date",
+            "date",
+        ],
+    )
+    if not iso_column or not value_column or not date_column:
+        return empty
+
+    iso_series = filtered[iso_column].astype(str).str.strip().str.upper()
+    value_series = pd.to_numeric(filtered[value_column], errors="coerce")
+    date_series = pd.to_datetime(filtered[date_column], errors="coerce")
+
+    mask = iso_series.notna() & date_series.notna() & value_series.notna()
+    mask &= value_series >= 0
+    if not mask.any():
+        return empty
+
+    iso_series = iso_series.loc[mask]
+    value_series = value_series.loc[mask]
+    date_series = date_series.loc[mask]
+
+    month_end = (
+        date_series.dt.to_period("M")
+        .dt.to_timestamp(how="end")
+        .dt.tz_localize(None)
+        .dt.floor("D")
+    )
+
+    aggregated = (
+        pd.DataFrame(
+            {
+                "iso3": iso_series.values,
+                "as_of_date": month_end.values,
+                "metric": FLOW_METRIC,
+                "value": value_series.values,
+                "series_semantics": FLOW_SERIES_SEMANTICS,
+                "source": source_tag,
+            }
+        )
+        .groupby(["iso3", "as_of_date", "metric", "series_semantics", "source"], as_index=False)[
+            "value"
+        ]
+        .sum()
+    )
+
+    if aggregated.empty:
+        return empty
+
+    aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())
+    aggregated[HDX_PREAGG_COLUMN] = True
+    return aggregated.loc[:, list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]]
 
 
 def _hdx_filter(
@@ -870,38 +1035,17 @@ def _hdx_filter(
     chunk_end: Optional[date],
     window_start: Optional[date],
     window_end: Optional[date],
+    source_tag: str,
 ) -> pd.DataFrame:
-    working = frame.copy()
-    if iso_batches:
-        allowed = {code for batch in iso_batches for code in batch}
-        iso_columns = [
-            column
-            for column in ("iso3", "ISO3", "Country ISO3", "CountryISO3")
-            if column in working.columns
-        ]
-        if iso_columns:
-            iso_column = iso_columns[0]
-            working = working[
-                working[iso_column].astype(str).str.upper().isin(allowed)
-            ]
-
-    start_bound = chunk_start or window_start
-    end_bound = chunk_end or window_end
-    if start_bound or end_bound:
-        for column in [
-            "displacement_end_date",
-            "displacement_start_date",
-            "displacement_date",
-        ]:
-            if column not in working.columns:
-                continue
-            dates = pd.to_datetime(working[column], errors="coerce")
-            if start_bound:
-                working = working[dates >= pd.Timestamp(start_bound)]
-            if end_bound:
-                working = working[dates <= pd.Timestamp(end_bound)]
-            break
-    return working.reset_index(drop=True)
+    return _hdx_prepare_monthly_flow(
+        frame,
+        iso_batches=iso_batches,
+        chunk_start=chunk_start,
+        chunk_end=chunk_end,
+        window_start=window_start,
+        window_end=window_end,
+        source_tag=source_tag,
+    )
 
 
 def fetch_idu_json(
@@ -1020,7 +1164,13 @@ def fetch_idu_json(
     fallback_frame_cached: Optional[pd.DataFrame] = None
     fallback_diag_cached: Optional[Dict[str, Any]] = None
     fallback_source_cached: Optional[str] = None
-    helix_enabled_local = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
+    helix_client_value = _helix_client_id()
+    helix_enabled_local = bool(allow_fallback and helix_client_value)
+    if os.getenv("IDMC_ALLOW_HELIX_FALLBACK") is not None:
+        helix_enabled_local = bool(
+            helix_enabled_local
+            and getenv_bool("IDMC_ALLOW_HELIX_FALLBACK", default=False)
+        )
 
     def _fetch_hdx_fallback() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         nonlocal fallback_frame_cached, fallback_diag_cached, fallback_source_cached
@@ -1064,7 +1214,7 @@ def fetch_idu_json(
         frame_candidate = hdx_frame if hdx_frame is not None else pd.DataFrame()
 
         helix_iso_scope: Iterable[str] = only_countries or cfg.api.countries or []
-        if helix_enabled_local and _helix_client_id():
+        if helix_enabled_local and helix_client_value:
             try:
                 helix_frame, helix_diag = _helix_fetch_csv(
                     start_date=window_start,
@@ -1533,9 +1683,8 @@ def fetch_idu_json(
                                     chunk_end=chunk_end,
                                     window_start=window_start,
                                     window_end=window_end,
+                                    source_tag=fallback_source_tag_inner,
                                 )
-                                filtered = filtered.copy()
-                                filtered["idmc_source"] = fallback_source_tag_inner
                                 fallback_rows = filtered.to_dict("records")
                                 rows.extend(fallback_rows)
                                 fallback_diag_entry["rows"] = len(fallback_rows)
@@ -1740,9 +1889,8 @@ def fetch_idu_json(
             chunk_end=chunk_end,
             window_start=window_start,
             window_end=window_end,
+            source_tag=fallback_source_tag,
         )
-        filtered = filtered.copy()
-        filtered["idmc_source"] = fallback_source_tag
         fallback_rows = filtered.to_dict("records")
         diagnostics["fallback"]["rows"] = len(fallback_rows)
         fallback_entry["rows"] = len(fallback_rows)

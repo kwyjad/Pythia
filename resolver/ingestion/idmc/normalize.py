@@ -12,6 +12,7 @@ from resolver.ingestion.utils.iso_normalize import to_iso3
 
 SOURCE_NAME = "idmc_idu"
 FLOW_METRIC_NAME = "new_displacements"
+HDX_PREAGG_COLUMN = "__hdx_preaggregated__"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -115,6 +116,63 @@ def _normalize_monthly_flow(
         "negative_value": 0,
         "dup_event": 0,
     }
+
+    direct_columns = {
+        "iso3",
+        "as_of_date",
+        "metric",
+        "value",
+        "series_semantics",
+        "source",
+    }
+    if direct_columns.issubset(raw.columns) and HDX_PREAGG_COLUMN in raw.columns:
+        working = raw.loc[
+            :, [col for col in raw.columns if col in direct_columns]
+        ]
+        working = working.copy()
+        working["iso3"] = working["iso3"].astype(str).str.strip().str.upper()
+        working = working.dropna(subset=["iso3"])
+
+        working["as_of_date"] = pd.to_datetime(
+            working["as_of_date"], errors="coerce"
+        ).dt.tz_localize(None)
+        working = working.dropna(subset=["as_of_date"])
+
+        start_raw = (date_window or {}).get("start")
+        end_raw = (date_window or {}).get("end")
+        start_dt = pd.to_datetime(start_raw, errors="coerce")
+        end_dt = pd.to_datetime(end_raw, errors="coerce")
+        if not pd.isna(start_dt):
+            working = working[working["as_of_date"] >= start_dt]
+        if not pd.isna(end_dt):
+            working = working[working["as_of_date"] <= end_dt]
+
+        working["value"] = pd.to_numeric(working["value"], errors="coerce")
+        working = working.dropna(subset=["value"])
+        working = working[working["value"] >= 0]
+        if working.empty:
+            return (
+                pd.DataFrame(columns=list(direct_columns)),
+                drops,
+            )
+
+        working["value"] = working["value"].astype(pd.Int64Dtype())
+        working["series_semantics"] = (
+            working["series_semantics"].fillna("new").astype(str).str.strip()
+        )
+        working.loc[working["series_semantics"] == "", "series_semantics"] = "new"
+        working["source"] = working["source"].fillna(SOURCE_NAME).astype(str).str.strip()
+        working.loc[working["source"] == "", "source"] = SOURCE_NAME
+        working["metric"] = FLOW_METRIC_NAME
+
+        aggregated = (
+            working.groupby(
+                ["iso3", "as_of_date", "metric", "series_semantics", "source"],
+                as_index=False,
+            )["value"].sum()
+        )
+        aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())
+        return aggregated.reset_index(drop=True), drops
 
     iso_candidates = _dedupe_preserve_order(field_aliases.get("iso3", ["iso3", "ISO3"]))
     date_candidates = _dedupe_preserve_order(

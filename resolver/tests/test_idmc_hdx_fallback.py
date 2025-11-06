@@ -78,7 +78,20 @@ def test_idmc_single_shot_fallback_filters_per_chunk(tmp_path: Path, monkeypatch
 
     flow = data["monthly_flow"]
     assert len(flow) == 2
-    assert sorted(flow["displacement_date"].tolist()) == ["2024-01-15", "2024-02-10"]
+    assert set(flow.columns) == {
+        "iso3",
+        "as_of_date",
+        "metric",
+        "value",
+        "series_semantics",
+        "source",
+        "__hdx_preaggregated__",
+    }
+    as_of_dates = sorted(flow["as_of_date"].astype(str).tolist())
+    assert as_of_dates == ["2024-01-31", "2024-02-29"]
+    values = sorted(flow["value"].tolist())
+    assert values == [10, 20]
+    assert flow["metric"].unique().tolist() == ["new_displacements"]
 
     attempts = diagnostics.get("attempts") or []
     chunk_rows = [entry.get("rows") for entry in attempts if entry.get("via") == "hdx_fallback"]
