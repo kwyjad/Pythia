@@ -38,9 +38,6 @@ api:
         }
     )
 
-    def fake_fetch(*args, **kwargs):
-        return {"monthly_flow": pd.DataFrame()}, {"filters": {"rows_before": 0, "rows_after": 0}}
-
     def fake_normalize(*args, **kwargs):
         drops = {
             "date_parse_failed": 0,
@@ -58,25 +55,19 @@ api:
     def fake_build_resolution_ready(frame):
         return pd.DataFrame(columns=FACT_COLUMNS)
 
-    def fake_to_facts(frame):
-        return pd.DataFrame(columns=FACT_COLUMNS)
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
 
-    def fake_write_csv(frame, out_dir):
-        dest = Path(out_dir) / "facts.csv"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text("", encoding="utf-8")
-        return dest.as_posix()
+        def fetch(self, *args, **kwargs):
+            return {"monthly_flow": pd.DataFrame()}, {
+                "filters": {"rows_before": 0, "rows_after": 0}
+            }
 
-    def fake_write_parquet(frame, out_dir):
-        return None
-
-    monkeypatch.setattr(cli, "fetch", fake_fetch)
+    monkeypatch.setattr(cli, "IdmcClient", DummyClient)
     monkeypatch.setattr(cli, "normalize_all", fake_normalize)
     monkeypatch.setattr(cli, "maybe_map_hazards", fake_map_hazards)
     monkeypatch.setattr(cli, "build_resolution_ready_facts", fake_build_resolution_ready)
-    monkeypatch.setattr(cli, "to_facts", fake_to_facts)
-    monkeypatch.setattr(cli, "write_facts_csv", fake_write_csv)
-    monkeypatch.setattr(cli, "write_facts_parquet", fake_write_parquet)
     monkeypatch.setattr(cli, "probe_reachability", lambda *args, **kwargs: {})
 
     return tmp_path

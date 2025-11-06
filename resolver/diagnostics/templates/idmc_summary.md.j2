@@ -18,8 +18,17 @@ Date window: {date_window}
 ## Endpoints
 {endpoints_block}
 
+{% if helix_block %}
+## Helix (IDU) Reachability
+- URL: {helix_block[url]}
+- Status: {helix_block[status]}
+- Bytes: {helix_block[bytes]}
+- Raw rows: {helix_block[raw_rows]}
+{reachability_block}
+{% else %}
 ## IDMC Reachability
 {reachability_block}
+{% endif %}
 
 ## HTTP attempts
 {http_attempts_block}

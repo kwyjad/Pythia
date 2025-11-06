@@ -12,6 +12,7 @@ from resolver.ingestion.utils.iso_normalize import to_iso3
 
 SOURCE_NAME = "idmc_idu"
 FLOW_METRIC_NAME = "new_displacements"
+FLOW_SERIES_SEMANTICS = "new"
 HDX_PREAGG_COLUMN = "__hdx_preaggregated__"
 LOGGER = logging.getLogger(__name__)
 
@@ -135,7 +136,11 @@ def _normalize_monthly_flow(
 
         working["as_of_date"] = pd.to_datetime(
             working["as_of_date"], errors="coerce"
-        ).dt.tz_localize(None)
+        )
+        try:
+            working["as_of_date"] = working["as_of_date"].dt.tz_localize(None)
+        except TypeError:
+            pass
         working = working.dropna(subset=["as_of_date"])
 
         start_raw = (date_window or {}).get("start")
@@ -158,9 +163,14 @@ def _normalize_monthly_flow(
 
         working["value"] = working["value"].astype(pd.Int64Dtype())
         working["series_semantics"] = (
-            working["series_semantics"].fillna("new").astype(str).str.strip()
+            working["series_semantics"].fillna(FLOW_SERIES_SEMANTICS)
+            .astype(str)
+            .str.strip()
         )
-        working.loc[working["series_semantics"] == "", "series_semantics"] = "new"
+        working.loc[
+            working["series_semantics"] == "", "series_semantics"
+        ] = FLOW_SERIES_SEMANTICS
+        working["series_semantics"] = FLOW_SERIES_SEMANTICS
         working["source"] = working["source"].fillna(SOURCE_NAME).astype(str).str.strip()
         working.loc[working["source"] == "", "source"] = SOURCE_NAME
         working["metric"] = FLOW_METRIC_NAME
@@ -172,6 +182,24 @@ def _normalize_monthly_flow(
             )["value"].sum()
         )
         aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())
+        aggregated["as_of_date"] = pd.to_datetime(
+            aggregated["as_of_date"], errors="coerce"
+        )
+        try:
+            aggregated["as_of_date"] = aggregated["as_of_date"].dt.tz_localize(None)
+        except TypeError:
+            pass
+        aggregated["as_of_date"] = (
+            aggregated["as_of_date"].dt.to_period("M").dt.to_timestamp(how="end").dt.normalize()
+        )
+        aggregated = aggregated.loc[:, [
+            "iso3",
+            "as_of_date",
+            "metric",
+            "value",
+            "series_semantics",
+            "source",
+        ]]  # ensure canonical order
         return aggregated.reset_index(drop=True), drops
 
     iso_candidates = _dedupe_preserve_order(field_aliases.get("iso3", ["iso3", "ISO3"]))
@@ -307,7 +335,7 @@ def _normalize_monthly_flow(
         .reset_index(drop=True)
     )
 
-    aggregated["series_semantics"] = "new"
+    aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
     if "source_override" in aggregated.columns:
         source_values = (
             aggregated.pop("source_override")
@@ -321,14 +349,29 @@ def _normalize_monthly_flow(
 
     if not aggregated.empty:
         aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())
-
-    if not aggregated.empty and not pd.api.types.is_datetime64_any_dtype(aggregated["as_of_date"]):
-        aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce")
+    if "as_of_date" in aggregated.columns:
+        aggregated["as_of_date"] = pd.to_datetime(
+            aggregated["as_of_date"], errors="coerce"
+        )
+        try:
+            aggregated["as_of_date"] = aggregated["as_of_date"].dt.tz_localize(None)
+        except TypeError:
+            pass
+        aggregated["as_of_date"] = (
+            aggregated["as_of_date"].dt.to_period("M").dt.to_timestamp(how="end").dt.normalize()
+        )
+        LOGGER.debug("normalize_flow: as_of_date dtype=%s", aggregated["as_of_date"].dtype)
 
     column_order = ["iso3", "as_of_date", "metric", "value", "series_semantics", "source"]
-    existing_columns = [column for column in column_order if column in aggregated.columns]
-    if existing_columns:
-        aggregated = aggregated.loc[:, existing_columns]
+    for column in column_order:
+        if column not in aggregated.columns:
+            if column == "value":
+                aggregated[column] = pd.Series(dtype=pd.Int64Dtype())
+            elif column == "as_of_date":
+                aggregated[column] = pd.Series(dtype="datetime64[ns]")
+            else:
+                aggregated[column] = pd.Series(dtype="string")
+    aggregated = aggregated.loc[:, column_order]
 
     if aggregated.empty:
         aggregated = aggregated.astype(
@@ -341,8 +384,6 @@ def _normalize_monthly_flow(
                 "source": "string",
             }
         )
-    elif "as_of_date" in aggregated.columns:
-        LOGGER.debug("normalize_flow: as_of_date dtype=%s", aggregated["as_of_date"].dtype)
 
     return aggregated, drops
 

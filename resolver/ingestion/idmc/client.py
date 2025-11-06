@@ -58,6 +58,11 @@ HDX_DEFAULT_RESOURCE_ID = "1ace9c2a-7daf-4563-ac15-f2aa5071cd40"
 HDX_DEFAULT_GID = "123456789"
 
 HELIX_DEFAULT_BASE = "https://helix-tools-api.idmcdb.org"
+HELIX_BASE = (
+    os.getenv("IDMC_HELIX_BASE_URL", HELIX_DEFAULT_BASE).strip().rstrip("/")
+    or HELIX_DEFAULT_BASE
+)
+HELIX_LAST180 = "/external-api/idus/last-180-days"
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_READ_TIMEOUT_S = 25.0
@@ -69,8 +74,8 @@ _CACHE_LOCKS_LOCK = threading.Lock()
 
 LOGGER = logging.getLogger(__name__)
 
-NetworkMode = Literal["live", "cache_only", "fixture"]
-NETWORK_MODES: Tuple[NetworkMode, ...] = ("live", "cache_only", "fixture")
+NetworkMode = Literal["live", "helix", "cache_only", "fixture"]
+NETWORK_MODES: Tuple[NetworkMode, ...] = ("live", "helix", "cache_only", "fixture")
 
 NETWORK_ERROR_KINDS = {
     "connect_timeout",
@@ -369,7 +374,14 @@ def _probe_idu_schema(
         "skipped": False,
     }
 
-    if network_mode != "live":
+    if network_mode == "helix":
+        diagnostics["skipped"] = True
+        diagnostics["reason"] = "helix-mode"
+        diagnostics["date_column"] = default_date_column
+        diagnostics["columns"] = default_columns
+        return default_date_column, default_columns, diagnostics
+
+    if network_mode not in {"live", "helix"}:
         diagnostics["skipped"] = True
         diagnostics["date_column"] = default_date_column
         diagnostics["columns"] = default_columns
@@ -788,6 +800,147 @@ def _helix_client_id() -> Optional[str]:
     return cleaned or None
 
 
+def _fetch_helix_last180(
+    helix_client_id: Optional[str],
+    *,
+    rate_limiter: TokenBucket | None = None,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Fetch the Helix IDU last-180-days payload once."""
+
+    diagnostics: Dict[str, Any] = {
+        "source": "helix_idu",
+        "url": f"{HELIX_BASE}{HELIX_LAST180}",
+        "status": None,
+        "bytes": 0,
+    }
+
+    client_id = (helix_client_id or "").strip()
+    if not client_id:
+        diagnostics["error"] = "missing_client_id"
+        diagnostics["zero_rows_reason"] = "helix_missing_client_id"
+        return pd.DataFrame(), diagnostics
+
+    query = urlencode({"client_id": client_id, "format": "json"})
+    url = f"{HELIX_BASE}{HELIX_LAST180}?{query}"
+    diagnostics["url"] = url.replace(client_id, "REDACTED")
+
+    headers = _build_http_headers({"Accept": "application/json"})
+    connect_timeout_s, read_timeout_s = _http_timeouts()
+    verify_setting = _http_verify()
+
+    try:
+        status, response_headers, body, http_diag = http_get(
+            url,
+            headers=headers,
+            timeout=(connect_timeout_s, read_timeout_s),
+            retries=1,
+            rate_limiter=rate_limiter,
+            verify=verify_setting,
+        )
+    except HttpRequestError as exc:
+        diagnostics["error"] = exc.diagnostics or exc.message
+        diagnostics["status"] = (exc.diagnostics or {}).get("status")
+        diagnostics["status_bucket"] = _http_status_bucket(diagnostics["status"])
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["zero_rows_reason"] = "helix_http_error"
+        return pd.DataFrame(), diagnostics
+    except Exception as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = str(exc)
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["zero_rows_reason"] = "helix_http_error"
+        return pd.DataFrame(), diagnostics
+
+    diagnostics["status"] = status
+    diagnostics["status_bucket"] = _http_status_bucket(status)
+    diagnostics["headers"] = response_headers
+    diagnostics["http"] = http_diag
+    diagnostics["bytes"] = len(body or b"") if isinstance(body, (bytes, bytearray)) else 0
+    diagnostics["wire_bytes"] = int(http_diag.get("wire_bytes", 0) or 0)
+    diagnostics["body_bytes"] = int(http_diag.get("body_bytes", 0) or diagnostics["bytes"])
+    diagnostics["duration_s"] = float(http_diag.get("duration_s", 0.0) or 0.0)
+
+    if not isinstance(status, int) or not (200 <= status < 300):
+        diagnostics.setdefault("zero_rows_reason", "helix_http_error")
+        return pd.DataFrame(), diagnostics
+
+    payload = body
+    if isinstance(body, bytes):
+        try:
+            payload = body.decode("utf-8")
+        except Exception:  # pragma: no cover - defensive
+            payload = body.decode("utf-8", errors="replace")
+
+    try:
+        parsed = json.loads(payload) if isinstance(payload, str) else payload
+    except Exception as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = f"json:{exc.__class__.__name__}"
+        diagnostics["exception"] = exc.__class__.__name__
+        diagnostics["zero_rows_reason"] = "helix_parse_error"
+        return pd.DataFrame(), diagnostics
+
+    items: Iterable[Mapping[str, Any]]
+    if isinstance(parsed, dict):
+        candidate = parsed.get("results")
+        if isinstance(candidate, list):
+            items = candidate
+        else:
+            items = []
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        items = []
+
+    rows: List[Dict[str, Any]] = []
+
+    def _coalesce(record: Mapping[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in record and record[key] not in (None, ""):
+                return record[key]
+        return None
+
+    for raw in items:
+        if not isinstance(raw, Mapping):
+            continue
+        iso3_raw = _coalesce(
+            raw,
+            "iso3",
+            "ISO3",
+            "country_iso3",
+            "CountryISO3",
+            "geo_iso3",
+        )
+        iso3_value = str(iso3_raw).strip().upper() if iso3_raw else None
+        date_value = _coalesce(
+            raw,
+            "displacement_date",
+            "event_date",
+            "date",
+            "displacement_end_date",
+        )
+        figure_value = _coalesce(raw, "figure", "new_displacements")
+        rows.append(
+            {
+                "iso3": iso3_value,
+                "displacement_date": date_value,
+                "displacement_start_date": _coalesce(
+                    raw, "displacement_start_date"
+                ),
+                "displacement_end_date": _coalesce(
+                    raw, "displacement_end_date"
+                ),
+                "figure": figure_value,
+                "raw": raw,
+            }
+        )
+
+    frame = pd.DataFrame(rows)
+    diagnostics["raw_rows"] = int(frame.shape[0])
+    if frame.empty:
+        diagnostics.setdefault("zero_rows_reason", "helix_empty")
+
+    return frame, diagnostics
+
+
 def _helix_base_url() -> str:
     base = os.getenv("IDMC_HELIX_BASE", HELIX_DEFAULT_BASE)
     return str(base).strip().rstrip("/") or HELIX_DEFAULT_BASE
@@ -800,68 +953,42 @@ def _helix_fetch_csv(
     iso3_list: Iterable[str],
     timeout: float = 60.0,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    client_id = _helix_client_id()
-    if not client_id:
-        raise RuntimeError("IDMC_HELIX_CLIENT_ID not configured")
+    del timeout  # compatibility with previous signature
 
-    today = date.today()
-    start = start_date or end_date or today
-    end = end_date or start_date or today
-    if start > end:
-        start, end = end, start
+    frame, diagnostics = _fetch_helix_last180(_helix_client_id())
+    diagnostics = dict(diagnostics)
+    diagnostics.setdefault("source", "helix")
+    diagnostics.setdefault("source_tag", "idmc_gidd")
 
-    params: List[Tuple[str, str]] = [
-        ("client_id", client_id),
-        ("start_year", str(start.year)),
-        ("end_year", str(end.year)),
-        (
-            "release_environment",
-            str(os.getenv("IDMC_HELIX_ENV", "RELEASE") or "RELEASE").upper(),
-        ),
-    ]
-
-    iso_set = sorted({code.strip().upper() for code in iso3_list if code and code.strip()})
-    if iso_set:
-        params.append(("iso3__in", ",".join(iso_set)))
-
-    base_url = _helix_base_url()
-    endpoint = f"{base_url}/external-api/gidd/displacements/displacement-export/"
-
-    sanitized_params = [(key, value) for key, value in params if key != "client_id"]
-    diagnostics: Dict[str, Any] = {
-        "url": endpoint,
-        "request_url": f"{endpoint}?{urlencode(sanitized_params, doseq=True)}"
-        if sanitized_params
-        else endpoint,
-        "source": "helix",
-        "source_tag": "idmc_gidd",
-    }
-
-    headers = {"Accept": "text/csv", "User-Agent": _resolve_http_user_agent()}
-    try:
-        response = requests.get(endpoint, params=dict(params), headers=headers, timeout=timeout)
-        diagnostics["status_code"] = response.status_code
-        response.raise_for_status()
-        payload = response.content or b""
-        diagnostics["bytes"] = len(payload)
-        diagnostics["content_length"] = response.headers.get("Content-Length")
-        frame = _read_csv_from_bytes(payload)
-    except requests.RequestException as exc:  # pragma: no cover - network dependent
-        diagnostics["error"] = f"helix_http_error:{exc.__class__.__name__}"
-        diagnostics["exception"] = exc.__class__.__name__
-        diagnostics["status_code"] = getattr(exc.response, "status_code", None)
-        diagnostics["zero_rows_reason"] = "helix_http_error"
-        return pd.DataFrame(), diagnostics
-    except Exception as exc:  # pragma: no cover - defensive
-        diagnostics["error"] = f"helix_parse_error:{exc.__class__.__name__}"
-        diagnostics["exception"] = exc.__class__.__name__
-        diagnostics["zero_rows_reason"] = "helix_parse_error"
-        return pd.DataFrame(), diagnostics
-
-    diagnostics["rows"] = int(frame.shape[0])
-    diagnostics["columns"] = list(frame.columns)
     if frame.empty:
+        return frame, diagnostics
+
+    filtered = frame.copy()
+
+    iso_set = {
+        code.strip().upper() for code in iso3_list if code and str(code).strip()
+    }
+    if iso_set:
+        filtered = filtered.loc[filtered["iso3"].isin(sorted(iso_set))]
+
+    start_bound = start_date
+    end_bound = end_date
+    if start_bound and end_bound and start_bound > end_bound:
+        start_bound, end_bound = end_bound, start_bound
+
+    if start_bound or end_bound:
+        dates = pd.to_datetime(filtered["displacement_date"], errors="coerce")
+        if start_bound:
+            filtered = filtered.loc[dates >= pd.Timestamp(start_bound)]
+        if end_bound:
+            filtered = filtered.loc[dates <= pd.Timestamp(end_bound)]
+
+    diagnostics["rows"] = int(filtered.shape[0])
+    diagnostics["columns"] = list(filtered.columns)
+    if filtered.empty and diagnostics.get("zero_rows_reason") is None:
         diagnostics["zero_rows_reason"] = "helix_empty"
+
+    return filtered.reset_index(drop=True), diagnostics
 
 def _normalise_column_key(name: object) -> str:
     text = re.sub(r"[^0-9a-zA-Z]+", "_", str(name or "").strip().lower())
@@ -1383,7 +1510,7 @@ def fetch_idu_json(
                     "iso_batch": cache_params["iso_batch"],
                 }
                 refresh_live_chunk = (
-                    network_mode == "live"
+                    network_mode in {"live", "helix"}
                     and isinstance(chunk_label, str)
                     and chunk_label
                     and chunk_label != "full"
@@ -1963,6 +2090,7 @@ def fetch(
     max_bytes: Optional[int] = None,
     chunk_by_month: bool = False,
     allow_hdx_fallback: Optional[bool] = None,
+    helix_client_id: Optional[str] = None,  # noqa: ARG001 - reserved for helix mode
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
     """Return payloads for downstream normalization and diagnostics."""
 
@@ -1970,11 +2098,13 @@ def fetch(
         raise ValueError(f"Unsupported IDMC network mode: {network_mode}")
 
     LOGGER.info("IDMC network mode: %s", network_mode)
-    if network_mode != "live":
+    if network_mode not in {"live", "helix"}:
         LOGGER.warning(
             "Running in %s – no network calls will be made; results may be empty unless cache/fixtures exist.",
             network_mode,
         )
+
+    helix_client_id = helix_client_id or _helix_client_id()
 
     if rate_per_sec is not None:
         rate = rate_per_sec
@@ -1985,7 +2115,7 @@ def fetch(
         except ValueError:  # pragma: no cover - defensive
             rate = 0.5
     limiter = None
-    if network_mode == "live" and rate and rate > 0:
+    if network_mode in {"live", "helix"} and rate and rate > 0:
         limiter = TokenBucket(rate, sleep_fn=_rate_sleep)
 
     resolved_start = window_start
@@ -2176,10 +2306,10 @@ def fetch(
             "chunks": build_chunks_block(False, [], count=0),
             "network_mode": network_mode,
             "http_status_counts": serialize_http_status_counts(None)
-            if network_mode == "live"
+            if network_mode in {"live", "helix"}
             else None,
             "http_status_counts_extended": {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0}
-            if network_mode == "live"
+            if network_mode in {"live", "helix"}
             else None,
             "raw_path": None,
             "requests_planned": 0,
@@ -2215,51 +2345,192 @@ def fetch(
 
     frames: Dict[int, pd.DataFrame] = {}
     chunk_diags: Dict[int, Dict[str, Any]] = {}
+    helix_summary: Optional[Dict[str, Any]] = None
+    helix_zero_reason_global: Optional[str] = None
 
-    def _run_chunk(index: int, start: Optional[date], end: Optional[date]) -> Tuple[int, pd.DataFrame, Dict[str, Any]]:
-        label = _chunk_label(start, end)
-        frame, diag = fetch_idu_json(
-            cfg,
-            base_url=base_url,
-            cache_ttl=cache_ttl,
-            window_start=window_start,
-            window_end=window_end,
-            only_countries=countries,
-            network_mode=network_mode,
+    if network_mode == "helix":
+        connect_timeout_s, read_timeout_s = _http_timeouts()
+        helix_frame_full, helix_diag = _fetch_helix_last180(
+            helix_client_id,
             rate_limiter=limiter,
-            max_bytes=max_bytes,
-            chunk_start=start,
-            chunk_end=end,
-            chunk_label=label,
-            date_column=schema_date_column,
-            select_columns=select_columns,
-            allow_fallback=fallback_allowed,
-            fallback_loader=_load_fallback_cached if fallback_allowed else None,
         )
-        LOGGER.debug(
-            "Fetched chunk %s: rows=%d mode=%s status=%s",
-            label,
-            len(frame),
-            diag.get("mode"),
-            (diag.get("http") or {}).get("status_last"),
-        )
-        return index, frame, diag
+        helix_summary = dict(helix_diag or {})
+        helix_zero_reason: Optional[str] = None
+        status_value = helix_summary.get("status")
+        if not isinstance(status_value, int) or not (200 <= status_value < 300):
+            helix_zero_reason = "helix_http_error"
+        elif int(helix_summary.get("raw_rows", 0) or 0) == 0:
+            helix_zero_reason = "helix_http_error"
 
-    if max_concurrency and max_concurrency > 1 and len(jobs) > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-            future_to_index = {
-                executor.submit(_run_chunk, index, start, end): index
-                for index, start, end in jobs
+        allowed_iso = {
+            code.strip().upper()
+            for code in countries
+            if isinstance(code, str) and code.strip()
+        }
+        if allowed_iso:
+            helix_frame_full = helix_frame_full.loc[
+                helix_frame_full["iso3"].isin(sorted(allowed_iso))
+            ]
+
+        if "displacement_date" not in helix_frame_full.columns:
+            helix_frame_full["displacement_date"] = None
+
+        helix_timestamps = pd.to_datetime(
+            helix_frame_full["displacement_date"], errors="coerce"
+        )
+        helix_frame_full = helix_frame_full.assign(_helix_ts=helix_timestamps)
+        total_rows_pre_filter = int(helix_frame_full.shape[0])
+
+        for index, (start, end) in enumerate(chunk_ranges):
+            label = _chunk_label(start, end)
+            mask = pd.Series(True, index=helix_frame_full.index)
+            if start:
+                mask &= helix_frame_full["_helix_ts"] >= pd.Timestamp(start)
+            if end:
+                mask &= helix_frame_full["_helix_ts"] <= pd.Timestamp(end)
+            chunk_frame = (
+                helix_frame_full.loc[mask]
+                .drop(columns=["_helix_ts"], errors="ignore")
+                .reset_index(drop=True)
+            )
+
+            bucket = _http_status_bucket(status_value)
+            http_counts = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0}
+            if bucket and index == 0:
+                http_counts[bucket] = 1
+            request_count = 1 if index == 0 and bucket else 0
+            attempt_ms: List[int] = []
+            duration_s = float(helix_summary.get("duration_s", 0.0) or 0.0)
+            if index == 0 and duration_s > 0:
+                attempt_ms.append(int(round(duration_s * 1000)))
+            http_block = {
+                "requests": request_count,
+                "retries": 0,
+                "status_last": status_value,
+                "duration_s": duration_s if index == 0 else 0.0,
+                "backoff_s": 0.0,
+                "wire_bytes": int(helix_summary.get("wire_bytes", 0) or 0)
+                if index == 0
+                else 0,
+                "body_bytes": int(helix_summary.get("body_bytes", 0) or 0)
+                if index == 0
+                else 0,
+                "retry_after_events": 0,
+                "retry_after_s": [],
+                "rate_limit_wait_s": [],
+                "planned_sleep_s": [],
+                "attempt_durations_ms": attempt_ms,
+                "latency_ms": _latency_block(attempt_ms),
+                "status_counts": http_counts,
+                "requests_ok_2xx": request_count if bucket == "2xx" else 0,
+                "requests_4xx": request_count if bucket == "4xx" else 0,
+                "requests_5xx": request_count if bucket == "5xx" else 0,
+                "requests_other": request_count if bucket == "other" else 0,
+                "timeouts": request_count if bucket == "timeout" else 0,
+                "other_exceptions": 0,
             }
-            for future in concurrent.futures.as_completed(future_to_index):
-                idx, frame, diag = future.result()
+            filters_block = {
+                "window_start": (start or window_start).isoformat()
+                if (start or window_start)
+                else None,
+                "window_end": (end or window_end).isoformat()
+                if (end or window_end)
+                else None,
+                "countries": sorted(allowed_iso),
+                "rows_before": total_rows_pre_filter,
+                "rows_after": int(chunk_frame.shape[0]),
+                "chunk_label": label or "full",
+            }
+            if chunk_frame.empty and helix_zero_reason:
+                filters_block["zero_rows_reason"] = helix_zero_reason
+
+            chunk_diag = {
+                "mode": "online",
+                "network_mode": "helix",
+                "chunk": {
+                    "start": start.isoformat() if start else None,
+                    "end": end.isoformat() if end else None,
+                },
+                "http": http_block,
+                "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+                "filters": filters_block,
+                "requests": [],
+                "attempts": [],
+                "http_attempt_summary": {
+                    "planned": request_count,
+                    "ok_2xx": request_count if bucket == "2xx" else 0,
+                    "status_4xx": request_count if bucket == "4xx" else 0,
+                    "status_5xx": request_count if bucket == "5xx" else 0,
+                    "status_other": request_count if bucket == "other" else 0,
+                    "timeouts": request_count if bucket == "timeout" else 0,
+                    "other_exceptions": 0,
+                },
+                "helix": dict(helix_summary),
+                "http_timeouts": {
+                    "connect_s": connect_timeout_s,
+                    "read_s": read_timeout_s,
+                },
+                "fallback": None,
+                "fallback_used": False,
+                "raw_path": None,
+                "via": "helix",
+            }
+            if helix_zero_reason and chunk_frame.empty:
+                chunk_diag.setdefault("zero_rows_reasons", {"full": helix_zero_reason})
+
+            frames[index] = chunk_frame
+            chunk_diags[index] = chunk_diag
+
+        helix_zero_reason_global = helix_zero_reason
+    else:
+        def _run_chunk(
+            index: int, start: Optional[date], end: Optional[date]
+        ) -> Tuple[int, pd.DataFrame, Dict[str, Any]]:
+            label = _chunk_label(start, end)
+            frame, diag = fetch_idu_json(
+                cfg,
+                base_url=base_url,
+                cache_ttl=cache_ttl,
+                window_start=window_start,
+                window_end=window_end,
+                only_countries=countries,
+                network_mode=network_mode,
+                rate_limiter=limiter,
+                max_bytes=max_bytes,
+                chunk_start=start,
+                chunk_end=end,
+                chunk_label=label,
+                date_column=schema_date_column,
+                select_columns=select_columns,
+                allow_fallback=fallback_allowed,
+                fallback_loader=_load_fallback_cached if fallback_allowed else None,
+            )
+            LOGGER.debug(
+                "Fetched chunk %s: rows=%d mode=%s status=%s",
+                label,
+                len(frame),
+                diag.get("mode"),
+                (diag.get("http") or {}).get("status_last"),
+            )
+            return index, frame, diag
+
+        if max_concurrency and max_concurrency > 1 and len(jobs) > 1:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_concurrency
+            ) as executor:
+                future_to_index = {
+                    executor.submit(_run_chunk, index, start, end): index
+                    for index, start, end in jobs
+                }
+                for future in concurrent.futures.as_completed(future_to_index):
+                    idx, frame, diag = future.result()
+                    frames[idx] = frame
+                    chunk_diags[idx] = diag
+        else:
+            for index, start, end in jobs:
+                idx, frame, diag = _run_chunk(index, start, end)
                 frames[idx] = frame
                 chunk_diags[idx] = diag
-    else:
-        for index, start, end in jobs:
-            idx, frame, diag = _run_chunk(index, start, end)
-            frames[idx] = frame
-            chunk_diags[idx] = diag
 
     ordered_frames = [frames[index] for index in sorted(frames)]
     combined = _combine_frames(ordered_frames)
@@ -2579,7 +2850,9 @@ def fetch(
         "rate_limit": rate_limit_info,
         "chunks": chunks_info,
         "network_mode": network_mode,
-        "http_status_counts": status_counts_serialized if network_mode == "live" else None,
+        "http_status_counts": status_counts_serialized
+        if network_mode in {"live", "helix"}
+        else None,
         "date_column": schema_date_column,
         "select_columns": list(select_columns),
         "schema_probe": schema_probe_diag,
@@ -2600,7 +2873,14 @@ def fetch(
         "fallback_used": bool(fallback_used_total),
         "http_timeouts": http_timeouts_cfg,
     }
-    if network_mode == "live":
+    if network_mode == "helix":
+        helix_block = dict(helix_summary or {})
+        helix_block.setdefault("raw_rows", int((helix_summary or {}).get("raw_rows", 0) or 0))
+        helix_block.setdefault("status_counts", status_counts_serialized)
+        diagnostics["helix"] = helix_block
+        if helix_zero_reason_global and total_rows == 0:
+            diagnostics.setdefault("zero_rows_reason", helix_zero_reason_global)
+    if network_mode in {"live", "helix"}:
         diagnostics["http_extended"] = {
             "status_counts": dict(status_counts),
             "timeouts": total_timeouts,
@@ -2626,3 +2906,48 @@ def fetch(
                 diagnostics["filters"] = filters_block
 
     return data, diagnostics
+
+
+class IdmcClient:
+    """Lightweight wrapper to prepare configuration for IDMC fetches."""
+
+    def __init__(self, *, helix_client_id: Optional[str] = None) -> None:
+        env_value = os.getenv("IDMC_HELIX_CLIENT_ID")
+        env_cleaned = env_value.strip() if env_value is not None else None
+        self.helix_client_id = helix_client_id or (env_cleaned or None)
+
+    def fetch(
+        self,
+        cfg: IdmcConfig,
+        *,
+        network_mode: NetworkMode = "live",
+        soft_timeouts: bool = True,
+        window_start: Optional[date] = None,
+        window_end: Optional[date] = None,
+        window_days: Optional[int] = 30,
+        only_countries: Iterable[str] | None = None,
+        base_url: Optional[str] = None,
+        cache_ttl: Optional[int] = None,
+        rate_per_sec: Optional[float] = None,
+        max_concurrency: int = 1,
+        max_bytes: Optional[int] = None,
+        chunk_by_month: bool = False,
+        allow_hdx_fallback: Optional[bool] = None,
+    ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+        return fetch(
+            cfg,
+            network_mode=network_mode,
+            soft_timeouts=soft_timeouts,
+            window_start=window_start,
+            window_end=window_end,
+            window_days=window_days,
+            only_countries=only_countries,
+            base_url=base_url,
+            cache_ttl=cache_ttl,
+            rate_per_sec=rate_per_sec,
+            max_concurrency=max_concurrency,
+            max_bytes=max_bytes,
+            chunk_by_month=chunk_by_month,
+            allow_hdx_fallback=allow_hdx_fallback,
+            helix_client_id=self.helix_client_id,
+        )

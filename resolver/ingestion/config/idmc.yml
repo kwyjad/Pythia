@@ -15,7 +15,15 @@ api:
 field_aliases:
   value_flow: ["new_displacements", "New displacements", "figure"]
   value_stock: ["idps", "IDPs", "Total IDPs"]
-  date: ["date", "Date", "month", "Month", "ReportingDate"]
+  date:
+    [
+      "displacement_end_date",
+      "displacement_date",
+      "event_date",
+      "date",
+      "Month",
+      "ReportingDate",
+    ]
   iso3: ["iso3", "ISO3", "Country ISO3", "CountryISO3"]
 cache:
   dir: ".cache/idmc"  # override with IDMC_CACHE_DIR

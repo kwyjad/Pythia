@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Tuple
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlparse, urlunparse
 
 import certifi
 
@@ -35,6 +36,41 @@ TARGET_URL = os.getenv(
     "IDMC_PROBE_URL",
     f"{TARGET_SCHEME}://{TARGET_HOST}:{TARGET_PORT}/{TARGET_PATH}",
 )
+HELIX_BASE_URL = (
+    os.getenv("IDMC_HELIX_BASE_URL", "https://helix-tools-api.idmcdb.org").strip()
+    or "https://helix-tools-api.idmcdb.org"
+)
+HELIX_LAST180 = "/external-api/idus/last-180-days"
+HELIX_CLIENT_ID = os.getenv("IDMC_HELIX_CLIENT_ID", "").strip()
+HELIX_ENABLED = bool(HELIX_CLIENT_ID)
+SUMMARY_TITLE = "IDMC Reachability"
+DISPLAY_URL = TARGET_URL
+
+if HELIX_ENABLED:
+    helix_base = HELIX_BASE_URL.rstrip("/")
+    helix_url = f"{helix_base}{HELIX_LAST180}?client_id={HELIX_CLIENT_ID}&format=json"
+    parsed = urlparse(helix_url)
+    if parsed.scheme:
+        TARGET_SCHEME = parsed.scheme
+    if parsed.hostname:
+        TARGET_HOST = parsed.hostname
+    TARGET_PORT = parsed.port or (443 if TARGET_SCHEME == "https" else 80)
+    helix_path = parsed.path.lstrip("/")
+    if parsed.query:
+        helix_path = f"{helix_path}?{parsed.query}"
+    TARGET_PATH = helix_path
+    TARGET_URL = urlunparse(
+        (
+            parsed.scheme or TARGET_SCHEME,
+            parsed.netloc or f"{TARGET_HOST}:{TARGET_PORT}",
+            parsed.path,
+            "",
+            parsed.query,
+            "",
+        )
+    )
+    DISPLAY_URL = TARGET_URL.replace(HELIX_CLIENT_ID, "REDACTED")
+    SUMMARY_TITLE = "Helix (IDU) Reachability"
 CONNECT_TIMEOUT = float(os.getenv("IDMC_PROBE_CONNECT_TIMEOUT", "5"))
 READ_TIMEOUT = float(os.getenv("IDMC_PROBE_READ_TIMEOUT", "10"))
 EGRESS_TIMEOUT = float(os.getenv("IDMC_PROBE_EGRESS_TIMEOUT", "5"))
@@ -145,11 +181,15 @@ def probe_tls(host: str, port: int, timeout: float) -> Dict[str, Any]:
 
 
 def probe_http(
-    url: str, *, timeout: Tuple[float, float], verify: bool | str
+    url: str,
+    *,
+    timeout: Tuple[float, float],
+    verify: bool | str,
+    display_url: str | None = None,
 ) -> Dict[str, Any]:
     started = time.monotonic()
     payload: Dict[str, Any] = {
-        "url": url,
+        "url": display_url or url,
         "verify": verify,
         "headers": {"User-Agent": USER_AGENT, "Accept": "application/json"},
     }
@@ -168,6 +208,10 @@ def probe_http(
         payload["reason"] = response.reason
         payload["elapsed_ms"] = _elapsed_ms(started)
         payload["content_type"] = response.headers.get("Content-Type")
+        try:
+            payload["bytes"] = len(response.content)
+        except Exception:
+            payload["bytes"] = None
         preview = response.text[:256]
         if preview:
             payload["preview"] = _truncate(preview)
@@ -219,11 +263,14 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
     tls = payload.get("tls", {})
     http = payload.get("http", {})
     egress = payload.get("egress", {})
-    lines: List[str] = ["## IDMC Reachability", ""]
+    lines: List[str] = [f"## {SUMMARY_TITLE}", ""]
     target = payload.get("target", {})
     host = target.get("host", TARGET_HOST)
     port = target.get("port", TARGET_PORT)
+    url_display = target.get("url")
     lines.append(f"- **Target:** `{host}:{port}`")
+    if url_display:
+        lines.append(f"- **URL:** {url_display}")
     lines.append(f"- **Captured:** {payload.get('generated_at', 'unknown')}")
     dns_records = [
         f"{record.get('address')} ({record.get('family')})"
@@ -270,6 +317,8 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
             line = f"- **HTTP GET:** status={http.get('status_code')}"
             if http.get("elapsed_ms") is not None:
                 line += f" ({http.get('elapsed_ms')}ms)"
+            if http.get("bytes"):
+                line += f" bytes={http.get('bytes')}"
         else:
             error = http.get("exception") or http.get("error") or "unknown"
             line = f"- **HTTP GET:** error={error}"
@@ -299,10 +348,15 @@ def main() -> int:
     dns_info = probe_dns(TARGET_HOST)
     tcp_info = probe_tcp(TARGET_HOST, TARGET_PORT, CONNECT_TIMEOUT)
     tls_info = probe_tls(TARGET_HOST, TARGET_PORT, CONNECT_TIMEOUT)
-    http_info = probe_http(TARGET_URL, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), verify=VERIFY_SETTING)
+    http_info = probe_http(
+        TARGET_URL,
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        verify=VERIFY_SETTING,
+        display_url=DISPLAY_URL,
+    )
     egress_info = probe_egress(EGRESS_TIMEOUT)
     payload: Dict[str, Any] = {
-        "target": {"host": TARGET_HOST, "port": TARGET_PORT, "url": TARGET_URL},
+        "target": {"host": TARGET_HOST, "port": TARGET_PORT, "url": DISPLAY_URL},
         "generated_at": started_iso,
         "completed_at": _now_iso(),
         "dns": dns_info,
@@ -314,12 +368,20 @@ def main() -> int:
         "python_version": sys.version,
         "requests_available": requests is not None,
         "requests_version": REQUESTS_VERSION,
+        "mode": "helix" if HELIX_ENABLED else "backend",
+        "summary_title": SUMMARY_TITLE,
         "env": {
             "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
             "HTTP_PROXY": os.getenv("HTTP_PROXY"),
             "IDMC_HTTP_VERIFY": os.getenv("IDMC_HTTP_VERIFY"),
         },
     }
+    if HELIX_ENABLED:
+        payload["helix"] = {
+            "url": DISPLAY_URL,
+            "status": http_info.get("status_code"),
+            "bytes": http_info.get("bytes"),
+        }
     try:
         DIAG_DIR.mkdir(parents=True, exist_ok=True)
         JSON_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
