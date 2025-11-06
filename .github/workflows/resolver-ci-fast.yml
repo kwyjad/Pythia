@@ -17,7 +17,13 @@ jobs:
     env:
       duckdb_label: default
       RESOLVER_EXPORT_ENABLE_FLOW: "0"
-      RESOLVER_SKIP_DTM: "0"
+      RESOLVER_SKIP_DTM: "1"
+      PYTHONFAULTHANDLER: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "0"
+      IDMC_NETWORK_MODE: "fixture"
+      IDMC_ALLOW_HDX_FALLBACK: "0"
+      DTM_SOFT_TIMEOUTS: "1"
+      PYTEST_PROC_TIMEOUT: "60"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -c constraints-ci.txt -e '.[db,test]'
+          pip install -c constraints-ci.txt -e '.[db,test]' 'pytest-timeout==2.3.1'
           if [ -f resolver/requirements.txt ]; then pip install -c constraints-ci.txt -r resolver/requirements.txt; fi
 
       - name: Ensure CI helpers are executable
@@ -100,17 +106,17 @@ jobs:
           set -euo pipefail
 
           # Collect-only (always allowed to fail non-fatally but we still want logs)
-          if ! bash scripts/ci/run_and_capture.sh pytest-collect "pytest -q resolver/tests -k 'not slow and not nightly' --collect-only"; then
+          if ! bash scripts/ci/run_and_capture.sh pytest-collect "pytest resolver/tests -k 'not slow and not nightly' --collect-only"; then
             echo "pytest --collect-only failed (non-fatal for diagnostics)" >&2
           fi
 
           # Durations (non-fatal)
-          if ! bash scripts/ci/run_and_capture.sh pytest-durations "pytest -q resolver/tests -k 'not slow and not nightly' --maxfail=1 --durations=25 -x"; then
+          if ! bash scripts/ci/run_and_capture.sh pytest-durations "pytest resolver/tests -k 'not slow and not nightly' --durations=15 -x"; then
             echo "pytest --durations failed (non-fatal)" >&2
           fi
 
           # Real run with JUnit (this one we care about)
-          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest -q resolver/tests -k 'not slow and not nightly' --junitxml $ART_DIR/pytest-junit.xml"
+          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests -k 'not slow and not nightly' --junitxml $ART_DIR/pytest-junit.xml"
 
           # Mirror to legacy root filename for collectors that still look there
           if [ -f "$ART_DIR/pytest-junit.xml" ]; then

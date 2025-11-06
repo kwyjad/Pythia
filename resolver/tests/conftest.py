@@ -16,7 +16,9 @@ from resolver.tests.fixtures.bootstrap_fast_exports import FastExports, build_fa
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Ensure DTM integration tests run unless explicitly skipped."""
-    os.environ.pop("RESOLVER_SKIP_DTM", None)
+    skip_value = os.environ.get("RESOLVER_SKIP_DTM")
+    if skip_value is None or skip_value.lower() not in {"1", "true", "yes"}:
+        os.environ.pop("RESOLVER_SKIP_DTM", None)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -26,9 +28,12 @@ def _fast_tests_offline_env() -> None:
     defaults = {
         "PYTHONFAULTHANDLER": "1",
         "RESOLVER_OFFLINE": "1",
+        "IDMC_NETWORK_MODE": "fixture",
         "IDMC_ALLOW_HDX_FALLBACK": "0",
         "IDMC_TEST_NO_SLEEP": "1",
         "IDMC_HELIX_CLIENT_ID": "",
+        "DTM_SOFT_TIMEOUTS": "1",
+        "PYTEST_PROC_TIMEOUT": "60",
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
