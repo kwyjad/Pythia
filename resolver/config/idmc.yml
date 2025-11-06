@@ -29,3 +29,5 @@ cache:
   dir: ".cache/idmc"  # override with IDMC_CACHE_DIR
   ttl_seconds: 86400  # override with IDMC_CACHE_TTL_S
   force_cache_only: false  # override with IDMC_FORCE_CACHE_ONLY
+hdx:
+  package_id: "preliminary-internal-displacement-updates"

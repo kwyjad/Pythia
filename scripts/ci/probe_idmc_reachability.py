@@ -7,12 +7,12 @@ import socket
 import ssl
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import certifi
 
@@ -29,7 +29,7 @@ MARKDOWN_PATH = DIAG_DIR / "probe.md"
 TARGET_HOST = os.getenv("IDMC_PROBE_HOST", "backend.idmcdb.org").strip() or "backend.idmcdb.org"
 TARGET_PORT = int(os.getenv("IDMC_PROBE_PORT", "443"))
 TARGET_PATH = os.getenv(
-    "IDMC_PROBE_PATH", "data/idus_view_flat?select=id&limit=1"
+    "IDMC_PROBE_PATH", "external-api/gidd/displacements"
 ).lstrip("/")
 TARGET_SCHEME = os.getenv("IDMC_PROBE_SCHEME", "https").strip() or "https"
 TARGET_URL = os.getenv(
@@ -40,15 +40,40 @@ HELIX_BASE_URL = (
     os.getenv("IDMC_HELIX_BASE_URL", "https://helix-tools-api.idmcdb.org").strip()
     or "https://helix-tools-api.idmcdb.org"
 )
-HELIX_LAST180 = "/external-api/idus/last-180-days"
+HELIX_DISPLACEMENTS_PATH = "/external-api/gidd/displacements"
 HELIX_CLIENT_ID = os.getenv("IDMC_HELIX_CLIENT_ID", "").strip()
 HELIX_ENABLED = bool(HELIX_CLIENT_ID)
 SUMMARY_TITLE = "IDMC Reachability"
 DISPLAY_URL = TARGET_URL
 
+
+def _env_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    lowered = value.strip().lower()
+    return lowered in {"1", "true", "yes", "on"}
+
+
+ALLOW_HDX_FALLBACK = _env_truthy(os.getenv("IDMC_ALLOW_HDX_FALLBACK"))
+HDX_PACKAGE_ID = (os.getenv("IDMC_HDX_PACKAGE_ID") or "").strip()
+HDX_BASE_URL = (
+    os.getenv("IDMC_HDX_BASE_URL")
+    or os.getenv("HDX_BASE")
+    or "https://data.humdata.org"
+).strip() or "https://data.humdata.org"
+
 if HELIX_ENABLED:
     helix_base = HELIX_BASE_URL.rstrip("/")
-    helix_url = f"{helix_base}{HELIX_LAST180}?client_id={HELIX_CLIENT_ID}&format=json"
+    probe_end = datetime.now(timezone.utc).date()
+    probe_start = probe_end - timedelta(days=31)
+    helix_params = {
+        "client_id": HELIX_CLIENT_ID,
+        "format": "json",
+        "start": probe_start.isoformat(),
+        "end": probe_end.isoformat(),
+        "iso3__in": os.getenv("IDMC_PROBE_ISO3", "AFG"),
+    }
+    helix_url = f"{helix_base}{HELIX_DISPLACEMENTS_PATH}?{urlencode(helix_params)}"
     parsed = urlparse(helix_url)
     if parsed.scheme:
         TARGET_SCHEME = parsed.scheme
@@ -257,6 +282,151 @@ def probe_egress(timeout: float) -> Dict[str, Any]:
     return results
 
 
+def probe_hdx(
+    package_id: str,
+    *,
+    base_url: str,
+    timeout: Tuple[float, float],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "package_id": package_id,
+        "base_url": base_url,
+    }
+    if not requests:
+        payload["error"] = "requests-not-installed"
+        return payload
+    if not package_id:
+        payload["error"] = "missing_package_id"
+        return payload
+
+    base = base_url.rstrip("/")
+    query = urlencode({"id": package_id})
+    package_url = f"{base}/api/3/action/package_show?{query}"
+    payload["package_url"] = package_url
+
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    started = time.monotonic()
+    try:
+        response = requests.get(package_url, headers=headers, timeout=timeout)
+        payload["package_status_code"] = response.status_code
+        payload["package_elapsed_ms"] = _elapsed_ms(started)
+        response.raise_for_status()
+        body = response.json()
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        payload["package_elapsed_ms"] = _elapsed_ms(started)
+        payload["error"] = f"package_request_error:{exc.__class__.__name__}"
+        payload["exception"] = exc.__class__.__name__
+        payload["package_status_code"] = getattr(exc.response, "status_code", None)
+        return payload
+    except ValueError as exc:  # pragma: no cover - defensive
+        payload["package_elapsed_ms"] = _elapsed_ms(started)
+        payload["error"] = f"package_decode_error:{exc.__class__.__name__}"
+        payload["exception"] = exc.__class__.__name__
+        return payload
+
+    if not isinstance(body, Mapping) or not body.get("success"):
+        payload["error"] = "package_show_unsuccessful"
+        return payload
+
+    resources = body.get("result", {}).get("resources", [])
+    payload["resource_candidates"] = len(resources)
+    chosen: Optional[Mapping[str, Any]] = None
+
+    for resource in resources:
+        if not isinstance(resource, Mapping):
+            continue
+        fmt = str(resource.get("format") or "").strip().lower()
+        if fmt != "csv":
+            continue
+        text = " ".join(
+            [str(resource.get("name") or ""), str(resource.get("description") or "")]
+        ).lower()
+        if "displacement" in text or "disaggreg" in text:
+            chosen = resource
+            payload["resource_selection"] = "keyword"
+            break
+
+    if chosen is None:
+        for resource in resources:
+            if not isinstance(resource, Mapping):
+                continue
+            fmt = str(resource.get("format") or "").strip().lower()
+            if fmt != "csv":
+                continue
+            size_raw = resource.get("size")
+            try:
+                size_value = int(size_raw)
+            except (TypeError, ValueError):
+                size_value = None
+            if size_value is not None and size_value > 50_000:
+                chosen = resource
+                payload["resource_selection"] = "size_threshold"
+                break
+
+    if chosen is None:
+        for resource in resources:
+            if not isinstance(resource, Mapping):
+                continue
+            fmt = str(resource.get("format") or "").strip().lower()
+            if fmt == "csv":
+                chosen = resource
+                payload["resource_selection"] = "first_csv"
+                break
+
+    if chosen is None:
+        payload["error"] = "no_csv_resource"
+        return payload
+
+    payload["resource_id"] = chosen.get("id")
+    payload["resource_name"] = chosen.get("name")
+    url = (
+        str(chosen.get("url") or "").strip()
+        or str(chosen.get("download_url") or "").strip()
+    )
+    payload["resource_url"] = url or None
+    if not url:
+        payload["error"] = "resource_missing_url"
+        return payload
+
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/csv"}
+    started = time.monotonic()
+    try:
+        response = requests.head(
+            url, headers=headers, timeout=timeout, allow_redirects=True
+        )
+        payload["resource_status_code"] = response.status_code
+        payload["resource_elapsed_ms"] = _elapsed_ms(started)
+        response.close()
+        if response.status_code in {405, 403}:
+            raise requests.RequestException()
+    except requests.RequestException:  # pragma: no cover - network dependent
+        started = time.monotonic()
+        response = None
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                stream=True,
+                allow_redirects=True,
+            )
+            payload["resource_status_code"] = response.status_code
+            payload["resource_elapsed_ms"] = _elapsed_ms(started)
+        except requests.RequestException as exc:  # pragma: no cover - network dependent
+            payload["resource_elapsed_ms"] = _elapsed_ms(started)
+            payload["error"] = f"resource_request_error:{exc.__class__.__name__}"
+            payload["resource_exception"] = exc.__class__.__name__
+            payload["resource_status_code"] = getattr(exc.response, "status_code", None)
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    pass
+
+    return payload
+
+
 def build_markdown(payload: Mapping[str, Any]) -> str:
     dns = payload.get("dns", {})
     tcp = payload.get("tcp", {})
@@ -339,6 +509,26 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
     verify_flag = http.get("verify") if isinstance(http, Mapping) else None
     if verify_flag is not None:
         lines.append(f"- **Verify TLS:** {verify_flag}")
+    hdx = payload.get("hdx", {})
+    if hdx:
+        lines.append("")
+        lines.append("### HDX")
+        package_status = hdx.get("package_status_code")
+        package_url = hdx.get("package_url") or hdx.get("package_id")
+        if package_status is not None:
+            lines.append(
+                f"- **Package:** status={package_status} — {package_url or 'n/a'}"
+            )
+        else:
+            lines.append(f"- **Package:** {hdx.get('error', 'unavailable')}")
+        resource_url = hdx.get("resource_url")
+        resource_status = hdx.get("resource_status_code")
+        if resource_url:
+            detail = f"status={resource_status}" if resource_status is not None else "unavailable"
+            lines.append(f"- **Resource:** {detail} — {resource_url}")
+        elif hdx.get("error"):
+            lines.append(f"- **Resource:** {hdx.get('error')}")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -355,6 +545,13 @@ def main() -> int:
         display_url=DISPLAY_URL,
     )
     egress_info = probe_egress(EGRESS_TIMEOUT)
+    hdx_info: Optional[Dict[str, Any]] = None
+    if ALLOW_HDX_FALLBACK:
+        hdx_info = probe_hdx(
+            HDX_PACKAGE_ID,
+            base_url=HDX_BASE_URL,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
     payload: Dict[str, Any] = {
         "target": {"host": TARGET_HOST, "port": TARGET_PORT, "url": DISPLAY_URL},
         "generated_at": started_iso,
@@ -376,11 +573,18 @@ def main() -> int:
             "IDMC_HTTP_VERIFY": os.getenv("IDMC_HTTP_VERIFY"),
         },
     }
+    if hdx_info is not None:
+        payload["hdx"] = hdx_info
     if HELIX_ENABLED:
+        parsed_display = urlparse(DISPLAY_URL)
+        helix_path = parsed_display.path or ""
+        if parsed_display.query:
+            helix_path = f"{helix_path}?{parsed_display.query}"
         payload["helix"] = {
             "url": DISPLAY_URL,
             "status": http_info.get("status_code"),
             "bytes": http_info.get("bytes"),
+            "path": helix_path,
         }
     try:
         DIAG_DIR.mkdir(parents=True, exist_ok=True)

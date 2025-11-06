@@ -316,7 +316,7 @@ Example JSONL entry:
 
 ## IDMC connector configuration keys
 
-The IDMC connector reads `resolver/ingestion/config/idmc.yml` and accepts the following
+The IDMC connector reads `resolver/config/idmc.yml` and accepts the following
 structured overrides (all mirrored by environment variables):
 
 - `api.base_url` and `api.endpoints` (including `idus_json` and `idus_geo`) control the IDU

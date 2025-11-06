@@ -13,7 +13,7 @@ from resolver.ingestion._shared.config_loader import (
     load_connector_config,
 )
 
-DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "idmc.yml"
+DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "idmc.yml"
 
 
 @dataclass
@@ -107,6 +107,14 @@ class FieldAliases:
 
 
 @dataclass
+class HdxCfg:
+    """Configuration for the HDX fallback."""
+
+    package_id: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+@dataclass
 class IdmcConfig:
     """Top-level configuration object."""
 
@@ -114,6 +122,7 @@ class IdmcConfig:
     api: ApiCfg = field(default_factory=ApiCfg)
     cache: CacheCfg = field(default_factory=CacheCfg)
     field_aliases: FieldAliases = field(default_factory=FieldAliases)
+    hdx: HdxCfg = field(default_factory=HdxCfg)
 
 
 def _coerce_bool(value: object, default: bool) -> bool:
@@ -171,6 +180,7 @@ def load(
     api_block = data.get("api", {})
     alias_block = data.get("field_aliases", {})
     cache_block = data.get("cache", {})
+    hdx_block = data.get("hdx", {}) if isinstance(data.get("hdx"), dict) else {}
     ttl_raw = cache_block.get("ttl_seconds", _default_cache_ttl())
     try:
         ttl_seconds = int(ttl_raw)
@@ -202,6 +212,9 @@ def load(
     )
     if env_force_cache_only is not None:
         cache_force_cache_only = _coerce_bool(env_force_cache_only, cache_force_cache_only)
+
+    hdx_package_id = str(hdx_block.get("package_id", "")).strip() or None
+    hdx_base_url = str(hdx_block.get("base_url", "")).strip() or None
 
     config = IdmcConfig(
         enabled=bool(data.get("enabled", True)),
@@ -238,6 +251,7 @@ def load(
                 "iso3", ["iso3", "ISO3", "Country ISO3", "CountryISO3"]
             ),
         ),
+        hdx=HdxCfg(package_id=hdx_package_id, base_url=hdx_base_url),
     )
 
     config._config_source = source_label  # type: ignore[attr-defined]
