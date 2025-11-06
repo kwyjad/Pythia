@@ -267,6 +267,11 @@ def _normalize_monthly_flow(
     if not aggregated.empty and not pd.api.types.is_datetime64_any_dtype(aggregated["as_of_date"]):
         aggregated["as_of_date"] = pd.to_datetime(aggregated["as_of_date"], errors="coerce")
 
+    column_order = ["iso3", "as_of_date", "metric", "value", "series_semantics", "source"]
+    existing_columns = [column for column in column_order if column in aggregated.columns]
+    if existing_columns:
+        aggregated = aggregated.loc[:, existing_columns]
+
     if aggregated.empty:
         aggregated = aggregated.astype(
             {

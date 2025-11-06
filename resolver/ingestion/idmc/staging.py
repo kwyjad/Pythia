@@ -6,7 +6,7 @@ import pathlib
 
 import pandas as pd
 
-from .export import FACT_COLUMNS
+from .export import FLOW_EXPORT_COLUMNS
 
 DEFAULT_DIR = "resolver/staging/idmc"
 DEFAULT_FLOW = f"{DEFAULT_DIR}/flow.csv"
@@ -23,5 +23,5 @@ def write_header_if_empty(path: str = DEFAULT_FLOW) -> str:
     """Write an empty CSV with the expected header if ``path`` is missing."""
 
     if not os.path.exists(path):
-        pd.DataFrame(columns=list(FACT_COLUMNS)).to_csv(path, index=False)
+        pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS)).to_csv(path, index=False)
     return path

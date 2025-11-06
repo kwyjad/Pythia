@@ -14,6 +14,16 @@ FACT_COLUMNS: List[str] = [
     "source",
 ]
 
+# Columns expected by downstream exporters when staging ``flow.csv``.
+FLOW_EXPORT_COLUMNS: List[str] = [
+    "iso3",
+    "as_of_date",
+    "metric",
+    "value",
+    "series_semantics",
+    "source",
+]
+
 FLOW_METRIC = "new_displacements"
 FLOW_SERIES_SEMANTICS = "new"
 

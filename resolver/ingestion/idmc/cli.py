@@ -34,7 +34,14 @@ from .diagnostics import (
     write_unmapped_hazards_preview,
     zero_rows_rescue,
 )
-from .export import FACT_COLUMNS, FLOW_METRIC, build_resolution_ready_facts, summarise_facts
+from .export import (
+    FACT_COLUMNS,
+    FLOW_EXPORT_COLUMNS,
+    FLOW_METRIC,
+    FLOW_SERIES_SEMANTICS,
+    build_resolution_ready_facts,
+    summarise_facts,
+)
 from .exporter import to_facts, write_facts_csv, write_facts_parquet
 from .normalize import maybe_map_hazards, normalize_all
 from .probe import ProbeOptions, probe_reachability
@@ -217,6 +224,39 @@ def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
     except ValueError:
         LOGGER.warning("Invalid %s date '%s'; ignoring", label, value)
         return None
+
+
+def _resolve_network_mode(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    env_force_cache_only: Optional[bool],
+    cfg_force_cache_only: bool,
+) -> NetworkMode:
+    """Return the effective network mode for this run."""
+
+    if getattr(args, "skip_network", False):
+        return cast(NetworkMode, "fixture")
+
+    env_override = os.getenv("IDMC_NETWORK_MODE", "").strip().lower()
+    if env_override:
+        if env_override not in NETWORK_MODES:
+            parser.error(
+                f"Invalid network mode '{env_override}'. Choose from {', '.join(NETWORK_MODES)}."
+            )
+        return cast(NetworkMode, env_override)
+
+    arg_override = getattr(args, "network_mode", None)
+    if arg_override:
+        return cast(NetworkMode, arg_override)
+
+    if env_force_cache_only:
+        return cast(NetworkMode, "cache_only")
+
+    if env_force_cache_only is None and cfg_force_cache_only:
+        return cast(NetworkMode, "cache_only")
+
+    return cast(NetworkMode, "live")
 
 
 def _resolve_window_from_flags_or_env(
@@ -420,23 +460,12 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
-    raw_network_mode = args.network_mode or os.getenv("IDMC_NETWORK_MODE")
-    network_mode: NetworkMode
-    if raw_network_mode:
-        candidate = str(raw_network_mode).strip().lower()
-        if candidate not in NETWORK_MODES:
-            parser.error(
-                f"Invalid network mode '{raw_network_mode}'. Choose from {', '.join(NETWORK_MODES)}."
-            )
-        network_mode = cast(NetworkMode, candidate)
-    elif args.skip_network:
-        network_mode = cast(NetworkMode, "fixture")
-    elif env_force_cache_only:
-        network_mode = cast(NetworkMode, "cache_only")
-    elif env_force_cache_only is None and cfg.cache.force_cache_only:
-        network_mode = cast(NetworkMode, "cache_only")
-    else:
-        network_mode = cast(NetworkMode, "live")
+    network_mode = _resolve_network_mode(
+        args,
+        parser,
+        env_force_cache_only=env_force_cache_only,
+        cfg_force_cache_only=bool(getattr(cfg.cache, "force_cache_only", False)),
+    )
 
     cfg.cache.force_cache_only = network_mode == "cache_only"
 
@@ -813,15 +842,27 @@ def main(argv: list[str] | None = None) -> int:
         flow_export_requested = True
     if flow_export_requested:
         flow_frame = resolution_ready_facts
-        required_columns = ["iso3", "as_of_date", "metric", "value", "series_semantics", "source"]
         if flow_frame.empty:
-            flow_frame = pd.DataFrame(columns=required_columns)
+            export_frame = pd.DataFrame(columns=FLOW_EXPORT_COLUMNS)
         else:
-            for column in required_columns:
-                if column not in flow_frame.columns:
-                    flow_frame[column] = pd.NA
-            flow_frame = flow_frame.loc[:, required_columns]
-        flow_frame.to_csv(flow_staging_path, index=False)
+            export_frame = flow_frame.copy()
+            if "series_semantics" in export_frame.columns:
+                series = (
+                    export_frame["series_semantics"]
+                    .astype("string")
+                    .fillna("")
+                    .str.strip()
+                )
+                export_frame["series_semantics"] = series.mask(
+                    series == "", FLOW_SERIES_SEMANTICS
+                )
+            else:
+                export_frame["series_semantics"] = FLOW_SERIES_SEMANTICS
+            for column in FLOW_EXPORT_COLUMNS:
+                if column not in export_frame.columns:
+                    export_frame[column] = pd.NA
+            export_frame = export_frame.loc[:, FLOW_EXPORT_COLUMNS]
+        export_frame.to_csv(flow_staging_path, index=False)
     elif not resolution_ready_facts.empty:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
 
@@ -1387,6 +1428,9 @@ def main(argv: list[str] | None = None) -> int:
     resource_bytes = fallback_info.get("resource_bytes")
     if resource_bytes is not None:
         fallback_lines.append(f"Resource bytes: {resource_bytes}")
+    min_bytes = fallback_info.get("min_bytes")
+    if min_bytes is not None:
+        fallback_lines.append(f"Minimum bytes required: {min_bytes}")
     helix_bytes = fallback_info.get("bytes")
     if helix_bytes is not None:
         fallback_lines.append(f"Helix bytes: {helix_bytes}")
