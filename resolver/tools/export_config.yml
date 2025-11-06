@@ -9,6 +9,7 @@ mapping:
   value:           ["value", "count", "people"]
   unit:            ["unit"]
   as_of_date:      ["as_of_date", "as_of"]
+  series_semantics: ["series_semantics"]
   publication_date: ["publication_date", "published"]
   publisher:       ["publisher", "org"]
   source_type:     ["source_type", "source"]

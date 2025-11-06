@@ -865,6 +865,7 @@ def main(argv: list[str] | None = None) -> int:
         export_frame.to_csv(flow_staging_path, index=False)
     elif not resolution_ready_facts.empty:
         resolution_ready_facts.to_csv(flow_staging_path, index=False)
+    write_header_if_empty(flow_staging_path.as_posix())
 
     selected_series_normalized = {
         str(series).strip().lower() for series in selected_series if str(series).strip()
@@ -1072,10 +1073,6 @@ def main(argv: list[str] | None = None) -> int:
     http_status_counts_raw = diagnostics.get("http_status_counts")
     http_status_counts = serialize_http_status_counts(http_status_counts_raw)
     http_extended = diagnostics.get("http_extended") or {}
-    try:
-        http_status_other = int((http_extended.get("status_counts") or {}).get("other", 0) or 0)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        http_status_other = 0
     requests_planned_raw = diagnostics.get("requests_planned")
     try:
         requests_planned = int(requests_planned_raw) if requests_planned_raw is not None else None
@@ -1183,6 +1180,62 @@ def main(argv: list[str] | None = None) -> int:
         f"{name}: {int(len(frame))} rows"
         for name, frame in data.items()
     ]
+    fallback_info = diagnostics.get("fallback") or {}
+    hdx_meta: Mapping[str, Any] | None = None
+    if isinstance(fallback_info, Mapping):
+        hdx_meta = fallback_info
+        if fallback_info.get("type") == "helix" and isinstance(
+            fallback_info.get("hdx_attempt"), Mapping
+        ):
+            hdx_meta = fallback_info.get("hdx_attempt")
+    if isinstance(hdx_meta, Mapping):
+        resource_parts: List[str] = []
+        resource_id = hdx_meta.get("resource_id")
+        if resource_id:
+            resource_parts.append(f"id={resource_id}")
+        resource_bytes = hdx_meta.get("resource_bytes")
+        if resource_bytes is not None:
+            try:
+                resource_parts.append(f"bytes={int(resource_bytes)}")
+            except (TypeError, ValueError):
+                resource_parts.append(f"bytes={resource_bytes}")
+        resource_rows = hdx_meta.get("resource_rows")
+        if resource_rows is not None:
+            try:
+                resource_parts.append(f"rows={int(resource_rows)}")
+            except (TypeError, ValueError):
+                resource_parts.append(f"rows={resource_rows}")
+        if resource_parts:
+            dataset_lines.append("HDX resource: " + ", ".join(resource_parts))
+        resource_url = hdx_meta.get("resource_url") or hdx_meta.get("package_url")
+        if resource_url:
+            dataset_lines.append(f"HDX URL: {_trim_text(resource_url)}")
+    if isinstance(fallback_info, Mapping) and (
+        str(fallback_info.get("type") or "").lower() == "helix"
+        or str(fallback_info.get("source_tag") or "").lower() == "idmc_gidd"
+    ):
+        helix_url = fallback_info.get("request_url")
+        helix_rows = fallback_info.get("rows")
+        helix_bytes = fallback_info.get("bytes")
+        helix_parts: List[str] = []
+        if helix_rows is not None:
+            try:
+                helix_parts.append(f"rows={int(helix_rows)}")
+            except (TypeError, ValueError):
+                helix_parts.append(f"rows={helix_rows}")
+        if helix_bytes is not None:
+            try:
+                helix_parts.append(f"bytes={int(helix_bytes)}")
+            except (TypeError, ValueError):
+                helix_parts.append(f"bytes={helix_bytes}")
+        if helix_url or helix_parts:
+            label = "Helix CSV: "
+            if helix_url:
+                label += _trim_text(helix_url)
+            if helix_parts:
+                suffix = ", ".join(helix_parts)
+                label = f"{label} ({suffix})" if helix_url else f"Helix CSV: {suffix}"
+            dataset_lines.append(label)
 
     staging_dir = staging_dir_path
     staged_counts: Dict[str, Optional[int]] = {}
@@ -1282,8 +1335,6 @@ def main(argv: list[str] | None = None) -> int:
                 five=int(http_status_counts.get("5xx", 0) or 0),
             )
         )
-        if http_status_other:
-            attempts_lines.append(f"HTTP status (other): other={http_status_other}")
     elif effective_network_mode != "live":
         attempts_lines.append("HTTP status counts: n/a in non-live mode")
 
@@ -1292,7 +1343,6 @@ def main(argv: list[str] | None = None) -> int:
         f"2xx responses: {int(http_attempt_summary.get('ok_2xx', 0) or 0)}",
         f"4xx responses: {int(http_attempt_summary.get('status_4xx', 0) or 0)}",
         f"5xx responses: {int(http_attempt_summary.get('status_5xx', 0) or 0)}",
-        f"Other responses: {int(http_attempt_summary.get('status_other', 0) or 0)}",
         f"Timeouts: {int(http_attempt_summary.get('timeouts', 0) or 0)}",
         f"Other exceptions: {int(http_attempt_summary.get('other_exceptions', 0) or 0)}",
     ]
@@ -1524,13 +1574,12 @@ def main(argv: list[str] | None = None) -> int:
         notes_lines.append(f"Zero rows reason: {zero_rows_reason_value}")
     date_column_used = diagnostics.get("date_column") or "n/a"
     notes_lines.append(f"Date column: {date_column_used}")
-    non_two_buckets = [
-        f"4xx={int(http_status_counts.get('4xx', 0) or 0)}",
-        f"5xx={int(http_status_counts.get('5xx', 0) or 0)}",
+    http_counts_safe = http_status_counts or {}
+    http_summary_parts = [
+        f"{bucket}={int(http_counts_safe.get(bucket, 0) or 0)}"
+        for bucket in ("2xx", "4xx", "5xx")
     ]
-    if http_status_other:
-        non_two_buckets.append(f"other={http_status_other}")
-    notes_lines.append("HTTP non-2xx: " + " ".join(non_two_buckets))
+    notes_lines.append("HTTP responses: " + " ".join(http_summary_parts))
     notes_lines.append(
         f"Chunk errors: {int(diagnostics.get('chunk_errors', 0) or 0)}"
     )

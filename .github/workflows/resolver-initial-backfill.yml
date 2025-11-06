@@ -240,10 +240,10 @@ jobs:
           if not end_raw:
               raise SystemExit("RESOLVER_END_ISO not set")
           end = date.fromisoformat(end_raw)
-          months_back = 5
+          months_back = 6
           year = end.year
           month = end.month
-          for _ in range(months_back):
+          for _ in range(max(months_back - 1, 0)):
               month -= 1
               if month == 0:
                   month = 12
@@ -252,9 +252,8 @@ jobs:
           print(start.isoformat())
           PY
           )
-          CMD_ARGS+=(--extra-args "idmc=--start ${IDMC_WINDOW_START} --end ${IDMC_WINDOW_END} \
-            --chunk-by-month --enable-export --write-outputs --series flow \
-            --network-mode live --allow-hdx-fallback --debug")
+          CMD_ARGS+=(--extra-args "idmc=--chunk-by-month --start ${IDMC_WINDOW_START} --end ${IDMC_WINDOW_END} \
+            --series flow --enable-export --write-outputs --debug")
           CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
           CMD_ARGS+=(--extra-env "idmc=RELIEFWEB_APPNAME=${RELIEFWEB_APPNAME}")
           CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=live")
