@@ -1906,14 +1906,17 @@ def fetch(
     helix_enabled = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
 
     def _resolve_fallback_frame() -> Tuple[pd.DataFrame, Dict[str, Any], str]:
-        hdx_frame, hdx_diag = _hdx_fetch_once()
-        if hdx_frame is not None and not hdx_frame.empty:
-            diag_copy = dict(hdx_diag)
-            diag_copy.setdefault("source_tag", "idmc_idu")
-            return hdx_frame, diag_copy, "idmc_idu"
-
+        hdx_frame, hdx_diag = _hdx_fetch_latest_csv()
         diag_copy = dict(hdx_diag)
         diag_copy.setdefault("source_tag", "idmc_idu")
+
+        if hdx_frame is not None and not hdx_frame.empty:
+            diag_copy.pop("zero_rows_reason", None)
+            return hdx_frame, diag_copy, "idmc_idu"
+
+        if "zero_rows_reason" not in diag_copy:
+            diag_copy["zero_rows_reason"] = "hdx_empty_or_bad_header"
+
         if helix_enabled and _helix_client_id():
             try:
                 helix_frame, helix_diag = _helix_fetch_csv(
