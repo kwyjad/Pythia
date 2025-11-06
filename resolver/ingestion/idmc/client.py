@@ -2489,6 +2489,8 @@ def fetch(
     fallback_frame_cache_fetch: Optional[pd.DataFrame] = None
     fallback_diag_cache_fetch: Optional[Dict[str, Any]] = None
     fallback_source_cache_fetch: Optional[str] = None
+    fallback_latest_frame_cache: Optional[pd.DataFrame] = None
+    fallback_latest_diag_cache: Optional[Dict[str, Any]] = None
     helix_flag_raw = os.getenv("IDMC_USE_HELIX_IF_IDU_UNREACHABLE")
     if helix_flag_raw is None:
         helix_enabled = bool(_helix_client_id())
@@ -2496,6 +2498,28 @@ def fetch(
         helix_enabled = getenv_bool("IDMC_USE_HELIX_IF_IDU_UNREACHABLE", default=False)
 
     def _resolve_fallback_frame() -> Tuple[pd.DataFrame, Dict[str, Any], str]:
+        nonlocal fallback_latest_frame_cache, fallback_latest_diag_cache
+
+        if fallback_latest_frame_cache is None or fallback_latest_diag_cache is None:
+            latest_frame, latest_diag = _hdx_fetch_latest_csv()
+            if latest_frame is None:
+                latest_frame = pd.DataFrame()
+            fallback_latest_frame_cache = latest_frame
+            fallback_latest_diag_cache = dict(latest_diag or {})
+
+        latest_frame = fallback_latest_frame_cache
+        latest_diag = dict(fallback_latest_diag_cache or {})
+        latest_diag.setdefault("source", latest_diag.get("source") or "hdx")
+        latest_source_tag = str(
+            latest_diag.get("source_tag")
+            or latest_diag.get("source")
+            or "idmc_idu"
+        )
+        latest_diag.setdefault("source_tag", latest_source_tag)
+
+        if latest_frame is not None and not latest_frame.empty:
+            return latest_frame, latest_diag, latest_source_tag
+
         hdx_frame, hdx_diag = _fetch_hdx_displacements(
             package_id=hdx_package_id,
             base_url=hdx_base_url,
@@ -2506,6 +2530,8 @@ def fetch(
         diag_copy = dict(hdx_diag)
         diag_copy.setdefault("source_tag", "idmc_idu")
         diag_copy.setdefault("source", "hdx")
+        if latest_diag:
+            diag_copy.setdefault("hdx_attempt", latest_diag)
 
         if hdx_frame is not None and not hdx_frame.empty:
             diag_copy.pop("zero_rows_reason", None)
@@ -2530,7 +2556,10 @@ def fetch(
                 helix_diag = dict(helix_diag)
                 helix_diag.setdefault("source", "helix")
                 helix_diag.setdefault("source_tag", "idmc_gidd")
-                helix_diag.setdefault("hdx_attempt", diag_copy)
+                if latest_diag:
+                    helix_diag.setdefault("hdx_attempt", latest_diag)
+                else:
+                    helix_diag.setdefault("hdx_attempt", diag_copy)
                 if helix_frame is not None and not helix_frame.empty:
                     helix_diag.pop("zero_rows_reason", None)
                 return helix_frame, helix_diag, "idmc_gidd"
@@ -2541,6 +2570,7 @@ def fetch(
 
     def _load_fallback_cached() -> Tuple[pd.DataFrame, Dict[str, Any]]:
         nonlocal fallback_frame_cache_fetch, fallback_diag_cache_fetch, fallback_source_cache_fetch
+        nonlocal fallback_latest_frame_cache, fallback_latest_diag_cache
         with fallback_lock:
             if fallback_frame_cache_fetch is None or fallback_diag_cache_fetch is None:
                 frame, diag, source_tag = _resolve_fallback_frame()
