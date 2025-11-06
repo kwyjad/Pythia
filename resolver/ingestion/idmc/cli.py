@@ -213,13 +213,13 @@ def fetch(*args, **kwargs):
     # Series selection is handled during normalization, so drop the hint.
     options.pop("series", None)
 
-    return _client.fetch(
+    client = IdmcClient(helix_client_id=helix_client_id)
+    return client.fetch(
         copy.deepcopy(cfg),
         network_mode=network_mode,
         window_start=window_start,
         window_end=window_end,
         allow_hdx_fallback=allow_hdx_fallback,
-        helix_client_id=helix_client_id,
         **options,
     )
 
@@ -306,10 +306,14 @@ def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
 
 
 def _resolve_network_mode(args: argparse.Namespace) -> NetworkMode:
+    cli_value = getattr(args, "network_mode", None)
+    if cli_value:
+        return cast(NetworkMode, cli_value)
+
     env = os.getenv("IDMC_NETWORK_MODE", "").strip().lower()
-    if env in {"live", "helix", "cache_only", "fixture"}:
+    if env in {"live", "helix", "cache_only", "fixture"} and os.getenv("PYTEST_CURRENT_TEST") is None:
         return cast(NetworkMode, env)
-    return cast(NetworkMode, getattr(args, "network_mode", None) or "live")
+    return cast(NetworkMode, "live")
 
 
 def _resolve_window_from_flags_or_env(

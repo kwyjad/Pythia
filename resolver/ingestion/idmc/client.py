@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -109,6 +110,33 @@ if os.getenv("IDMC_PROXY"):
 
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _resolve_cache_dir(
+    cfg: IdmcConfig,
+    *,
+    env_key: str = "IDMC_CACHE_DIR",
+    default: str = os.path.join(".cache", "idmc"),
+) -> Path:
+    """Return a usable cache directory path for IDMC fetches."""
+
+    cache_config = getattr(cfg, "cache", None)
+    cache_dir: object = None
+    if cache_config is not None:
+        candidate = getattr(cache_config, "dir", None)
+        if candidate is not None:
+            cache_dir = candidate
+        elif isinstance(cache_config, (str, os.PathLike, Path)):
+            cache_dir = cache_config
+    if cache_dir is None:
+        env_value = os.getenv(env_key)
+        if env_value:
+            cache_dir = env_value
+    if cache_dir is None:
+        cache_dir = default
+    path = Path(cache_dir)
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -1462,6 +1490,114 @@ def _hdx_prepare_monthly_flow(
     return aggregated.loc[:, list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]]
 
 
+def _normalise_fallback_monthly_flow(
+    frame: pd.DataFrame,
+    *,
+    source_tag: str,
+    chunk_start: Optional[date],
+    chunk_end: Optional[date],
+    window_start: Optional[date],
+    window_end: Optional[date],
+    countries: Iterable[str] | None,
+) -> pd.DataFrame:
+    canonical_columns = list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=canonical_columns)
+
+    working = frame.copy()
+    start_bound = chunk_start or window_start
+    end_bound = chunk_end or window_end
+    allowed_countries = {
+        code.strip().upper()
+        for code in (countries or [])
+        if isinstance(code, str) and code.strip()
+    }
+
+    if all(column in working.columns for column in FLOW_EXPORT_COLUMNS):
+        result = working.loc[:, FLOW_EXPORT_COLUMNS].copy()
+        result["iso3"] = result["iso3"].astype(str).str.strip().str.upper()
+        result["as_of_date"] = pd.to_datetime(result["as_of_date"], errors="coerce")
+        result["value"] = pd.to_numeric(result["value"], errors="coerce")
+        if start_bound is not None:
+            result = result.loc[result["as_of_date"] >= pd.Timestamp(start_bound)]
+        if end_bound is not None:
+            result = result.loc[result["as_of_date"] <= pd.Timestamp(end_bound)]
+        if allowed_countries:
+            result = result.loc[result["iso3"].isin(allowed_countries)]
+        result = result.dropna(subset=["iso3", "as_of_date", "value"])
+        result = result.loc[result["value"] >= 0]
+        if result.empty:
+            return pd.DataFrame(columns=canonical_columns)
+        result["metric"] = FLOW_METRIC
+        result["series_semantics"] = FLOW_SERIES_SEMANTICS
+        result["source"] = source_tag
+        result["value"] = result["value"].round().astype(pd.Int64Dtype())
+        if HDX_PREAGG_COLUMN not in result.columns:
+            result[HDX_PREAGG_COLUMN] = True
+        else:
+            result[HDX_PREAGG_COLUMN] = result[HDX_PREAGG_COLUMN].astype(bool)
+        return result.loc[:, canonical_columns]
+
+    columns_lower = {str(column).strip().lower(): column for column in working.columns}
+    iso_candidates = (
+        "iso3",
+        "iso_3",
+        "countryiso3",
+        "country iso3",
+        "country_iso3",
+        "geo_iso3",
+    )
+    date_candidates = (
+        "displacement_date",
+        "event_date",
+        "displacement_end_date",
+        "displacement_start_date",
+        "start_date",
+        "end_date",
+        "date",
+    )
+    value_candidates = (
+        "new_displacements",
+        "new displacements",
+        "figure",
+        "value",
+    )
+
+    iso_col = next((columns_lower.get(name) for name in iso_candidates if name in columns_lower), None)
+    date_col = next((columns_lower.get(name) for name in date_candidates if name in columns_lower), None)
+    value_col = next((columns_lower.get(name) for name in value_candidates if name in columns_lower), None)
+
+    if iso_col is None or date_col is None or value_col is None:
+        return pd.DataFrame(columns=canonical_columns)
+
+    renamed = working.rename(columns={iso_col: "iso3", date_col: "event_date", value_col: "value"})
+    subset = renamed.loc[:, ["iso3", "event_date", "value"]].copy()
+    subset["iso3"] = subset["iso3"].astype(str).str.strip().str.upper()
+    subset["event_date"] = pd.to_datetime(subset["event_date"], errors="coerce")
+    subset["value"] = pd.to_numeric(subset["value"], errors="coerce")
+    subset = subset.dropna(subset=["iso3", "event_date", "value"])
+    subset = subset.loc[subset["value"] >= 0]
+    if start_bound is not None:
+        subset = subset.loc[subset["event_date"] >= pd.Timestamp(start_bound)]
+    if end_bound is not None:
+        subset = subset.loc[subset["event_date"] <= pd.Timestamp(end_bound)]
+    if allowed_countries:
+        subset = subset.loc[subset["iso3"].isin(allowed_countries)]
+    if subset.empty:
+        return pd.DataFrame(columns=canonical_columns)
+
+    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp("M")
+    aggregated = (
+        subset.groupby(["iso3", "as_of_date"], as_index=False)["value"].sum()
+    )
+    aggregated["metric"] = FLOW_METRIC
+    aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
+    aggregated["source"] = source_tag
+    aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
+    aggregated[HDX_PREAGG_COLUMN] = True
+    return aggregated.loc[:, canonical_columns]
+
+
 def _hdx_filter(
     frame: pd.DataFrame,
     *,
@@ -1547,8 +1683,14 @@ def fetch_idu_json(
         "window_start": window_start_iso,
         "window_end": window_end_iso,
     }
-    cache_dir = cfg.cache.dir
-    ttl_seconds = cache_ttl if cache_ttl is not None else cfg.cache.ttl_seconds
+    cache_dir_path = _resolve_cache_dir(cfg)
+    cache_dir = cache_dir_path.as_posix()
+    cache_cfg = getattr(cfg, "cache", None)
+    ttl_seconds = (
+        cache_ttl
+        if cache_ttl is not None
+        else getattr(cache_cfg, "ttl_seconds", 0)
+    )
     cache_stats: Dict[str, Any] = {
         "dir": cache_dir,
         "ttl_seconds": ttl_seconds,
@@ -2159,20 +2301,19 @@ def fetch_idu_json(
                                 fallback_diag_entry["type"] = (
                                     "helix" if fallback_source_tag_inner == "idmc_gidd" else "hdx"
                                 )
-                                filtered = _hdx_filter(
+                                fallback_scope = (
+                                    only_countries if only_countries is not None else countries
+                                )
+                                normalized_fallback = _normalise_fallback_monthly_flow(
                                     fallback_frame,
-                                    iso_batches=iso_batches or [],
+                                    source_tag=fallback_source_tag_inner,
                                     chunk_start=chunk_start,
                                     chunk_end=chunk_end,
                                     window_start=window_start,
                                     window_end=window_end,
-                                    source_tag=fallback_source_tag_inner,
+                                    countries=fallback_scope,
                                 )
-                                fallback_rows = filtered.to_dict("records")
-                                for record in fallback_rows:
-                                    if "figure" not in record:
-                                        record["figure"] = record.get("value")
-                                    record.setdefault("idmc_source", fallback_source_tag_inner)
+                                fallback_rows = normalized_fallback.to_dict("records")
                                 rows.extend(fallback_rows)
                                 fallback_diag_entry["rows"] = len(fallback_rows)
                                 fallback_diag_entry["used"] = True
@@ -2370,20 +2511,17 @@ def fetch_idu_json(
         diagnostics["fallback"] = fallback_entry
         diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
-        filtered = _hdx_filter(
+        fallback_scope = only_countries if only_countries is not None else countries
+        normalized_fallback = _normalise_fallback_monthly_flow(
             fallback_frame,
-            iso_batches=iso_batches,
+            source_tag=fallback_source_tag,
             chunk_start=chunk_start,
             chunk_end=chunk_end,
             window_start=window_start,
             window_end=window_end,
-            source_tag=fallback_source_tag,
+            countries=fallback_scope,
         )
-        fallback_rows = filtered.to_dict("records")
-        for record in fallback_rows:
-            if "figure" not in record:
-                record["figure"] = record.get("value")
-            record.setdefault("idmc_source", fallback_source_tag)
+        fallback_rows = normalized_fallback.to_dict("records")
         diagnostics["fallback"]["rows"] = len(fallback_rows)
         fallback_entry["rows"] = len(fallback_rows)
         fallback_attempt = {
@@ -2472,6 +2610,8 @@ def fetch(
             "Running in %s – no network calls will be made; results may be empty unless cache/fixtures exist.",
             network_mode,
         )
+
+    cache_dir_text = _resolve_cache_dir(cfg).as_posix()
 
     start_alias = start_date if start_date is not None else start
     end_alias = end_date if end_date is not None else end
@@ -2703,6 +2843,7 @@ def fetch(
             ]
         )
         countries_scope = sorted({c.strip().upper() for c in countries if c.strip()})
+        cache_dir_text = _resolve_cache_dir(cfg).as_posix()
         diagnostics = {
             "mode": "offline",
             "http": {
@@ -2714,7 +2855,7 @@ def fetch(
                 "body_bytes": 0,
                 "retry_after_events": 0,
             },
-            "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+            "cache": {"dir": cache_dir_text, "hits": 0, "misses": 0},
             "filters": {
                 "window_start": None,
                 "window_end": None,
@@ -2891,7 +3032,7 @@ def fetch(
                     "end": end.isoformat() if end else None,
                 },
                 "http": http_block,
-                "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+                "cache": {"dir": cache_dir_text, "hits": 0, "misses": 0},
                 "filters": filters_block,
                 "requests": [],
                 "attempts": [],
@@ -3278,7 +3419,7 @@ def fetch(
         ),
         "http": http_summary,
         "cache": {
-            "dir": cfg.cache.dir,
+            "dir": cache_dir_text,
             "hits": cache_hits,
             "misses": cache_misses,
         },

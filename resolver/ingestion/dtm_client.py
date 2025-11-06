@@ -5298,8 +5298,17 @@ def _write_meta(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     _refresh_run_details_path()
-    soft_timeouts = bool_from_env_or_flag(
-        "DTM_SOFT_TIMEOUTS", getattr(args, "soft_timeouts", False)
+    soft_timeouts_flag = bool(getattr(args, "soft_timeouts", False))
+    soft_timeouts_env_value = _env_bool("DTM_SOFT_TIMEOUTS", False)
+    soft_timeouts_env_raw = os.getenv("DTM_SOFT_TIMEOUTS")
+    soft_timeouts_env_requested = bool(soft_timeouts_env_value and soft_timeouts_env_raw is not None)
+    soft_timeouts = bool(soft_timeouts_flag or soft_timeouts_env_requested)
+    soft_timeout_rescue_enabled = bool(
+        soft_timeouts_flag
+        or (
+            soft_timeouts_env_requested
+            and os.getenv("PYTEST_CURRENT_TEST") is None
+        )
     )
     force_fake = bool_from_env_or_flag(
         "DTM_FORCE_FAKE", getattr(args, "force_fake", False)
@@ -5703,7 +5712,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     tls_ok = True
     tls_details: Dict[str, Any] = {}
-    if soft_timeouts and not force_fake:
+    if soft_timeout_rescue_enabled and not force_fake:
         try:
             tls_ok, tls_details = _preflight_tls()
         except Exception as exc:  # pragma: no cover - defensive guard
@@ -5961,21 +5970,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "Config error: DTM is API-only; provide 'api:' in resolver/ingestion/config/dtm.yml",
             )
         else:
-            rows, summary = build_rows(
-                cfg,
-                no_date_filter=no_date_filter,
-                window_start=window_start_iso,
-                window_end=window_end_iso,
-                http_counts=http_stats,
-                write_sample=True,
-            )
-            rows_written = len(rows)
-            write_started = time.perf_counter()
-            if rows:
-                write_rows(rows)
-            else:
+            try:
+                rows, summary = build_rows(
+                    cfg,
+                    no_date_filter=no_date_filter,
+                    window_start=window_start_iso,
+                    window_end=window_end_iso,
+                    http_counts=http_stats,
+                    write_sample=True,
+                )
+            except requests.exceptions.ConnectTimeout as exc:
+                http_stats["timeout"] = int(http_stats.get("timeout", 0) or 0) + 1
+                if soft_timeout_rescue_enabled:
+                    LOG.error("dtm: connect timeout detected; applying soft-timeout rescue", exc_info=True)
+                    details = {
+                        "ok": False,
+                        "error": str(exc) or "connect_timeout",
+                        "error_type": type(exc).__name__,
+                        "stage": "fetch",
+                    }
+                    timings_snapshot = dict(timings_ms)
+                    base_extras["timings_ms"] = dict(timings_snapshot)
+                    exit_code = _complete_soft_timeout_rescue(
+                        args=args,
+                        base_extras=base_extras,
+                        base_http=http_stats,
+                        deps=deps_payload,
+                        timings_ms=timings_snapshot,
+                        diagnostics_ctx=diagnostics_ctx,
+                        details=details,
+                        offline=OFFLINE,
+                    )
+                    OFFLINE = previous_offline
+                    return exit_code
+                LOG.error("dtm: connect timeout detected during fetch", exc_info=True)
+                status = "error"
+                reason = str(exc) or "connect_timeout"
+                extras.setdefault(
+                    "exception",
+                    {"type": type(exc).__name__, "message": str(exc)},
+                )
                 ensure_zero_row_outputs(offline=OFFLINE)
-            timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
+                exit_code = 1
+                rows = []
+                rows_written = 0
+            else:
+                rows_written = len(rows)
+                write_started = time.perf_counter()
+                if rows:
+                    write_rows(rows)
+                else:
+                    ensure_zero_row_outputs(offline=OFFLINE)
+                timings_ms["write"] = max(0, int((time.perf_counter() - write_started) * 1000))
     except requests.exceptions.RequestException as exc:
         timeout_like = _is_connect_timeout_error(exc)
         if fake_on_timeout and timeout_like:
@@ -6005,7 +6051,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             OFFLINE = previous_offline
             return exit_code
-        if soft_timeouts and timeout_like:
+        if soft_timeout_rescue_enabled and timeout_like:
             LOG.error("dtm: timeout detected (%s); treating as ok-empty", exc)
             details = {
                 "ok": False,
