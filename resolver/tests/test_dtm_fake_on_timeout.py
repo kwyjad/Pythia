@@ -103,18 +103,19 @@ def test_fake_on_timeout_writes_staging(
 
     assert csv_path.exists()
     csv_lines = [line for line in csv_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(csv_lines) > 1  # header + fake rows
+    assert csv_lines == ["CountryISO3,ReportingDate,idp_count"]
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert meta.get("fake_data") is True
-    assert meta.get("fake_reason") == "network_timeout"
-    assert meta.get("written_rows", 0) >= 1
-    iso3_filter = meta.get("iso3_filter", [])
-    assert set(iso3_filter) == {"SDN", "COD"}
+    assert meta.get("row_count") == 0
+    assert meta.get("status") == "ok"
+    assert meta.get("zero_rows_reason") == "connect_timeout"
+    assert meta.get("http", {}).get("timeout") == 1
+    assert meta.get("fake_data") is None
 
     run_payload = json.loads(run_details_path.read_text(encoding="utf-8"))
     assert run_payload["status"] == "ok"
+    assert run_payload.get("reason") == "connect_timeout"
     extras = run_payload.get("extras", {})
-    assert extras.get("fake_data_used") is True
-    assert extras.get("fake_reason") == "network_timeout"
-    assert extras.get("rows_written", 0) >= 1
+    assert extras.get("soft_timeout_applied") is True
+    assert extras.get("zero_rows_reason") == "connect_timeout"
+    assert extras.get("http", {}).get("timeouts") == 1

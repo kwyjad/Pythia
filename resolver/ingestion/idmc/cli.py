@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import io
 import logging
@@ -19,6 +20,7 @@ from resolver.ingestion.utils.country_utils import (
     resolve_countries,
 )
 
+from . import client as _client
 from .client import NETWORK_MODES, NetworkMode, IdmcClient
 from .config import load
 from .diagnostics import (
@@ -164,18 +166,69 @@ def _render_summary(context: Dict[str, Any]) -> str:
     return template.format(**context)
 
 
-def fetch(cfg, **kwargs):
-    """Module-level shim to keep a stable fetch entrypoint for tests."""
+def fetch(*args, **kwargs):
+    """Delegate to the IDMC client fetch, keeping a stable shim for tests."""
+
+    if args:
+        cfg = args[0]
+        if len(args) > 1:
+            raise TypeError("fetch() accepts at most one positional argument (config)")
+    else:
+        try:
+            cfg = kwargs.pop("config")
+        except KeyError as exc:  # pragma: no cover - defensive guard
+            raise TypeError("fetch() missing required argument: 'config'") from exc
 
     options = dict(kwargs)
+
+    window_start = options.pop("window_start", None)
+    window_end = options.pop("window_end", None)
+
+    if window_start is None and "start" in options:
+        window_start = options.pop("start")
+    if window_start is None and "start_date" in options:
+        window_start = options.pop("start_date")
+
+    if window_end is None and "end" in options:
+        window_end = options.pop("end")
+    if window_end is None and "end_date" in options:
+        window_end = options.pop("end_date")
+
+    network_mode = options.pop("network_mode", "live")
+
+    # Preserve compatibility with historical callers that expect helix_client_id
     helix_client_id = options.pop("helix_client_id", None)
     if helix_client_id is None:
         env_value = os.environ.get("IDMC_HELIX_CLIENT_ID")
         if env_value is not None:
             helix_client_id = env_value.strip() or None
 
+    allow_fallback = options.pop("allow_fallback", False)
+
+    # ``allow_fallback`` maps to the IDU client's HDX fallback toggle.
+    allow_hdx_fallback = options.pop("allow_hdx_fallback", None)
+    if allow_hdx_fallback is None:
+        allow_hdx_fallback = allow_fallback
+
+    # Series selection is handled during normalization, so drop the hint.
+    options.pop("series", None)
+
     client = IdmcClient(helix_client_id=helix_client_id)
-    return client.fetch(cfg, **options)
+    return client.fetch(
+        copy.deepcopy(cfg),
+        network_mode=network_mode,
+        window_start=window_start,
+        window_end=window_end,
+        allow_hdx_fallback=allow_hdx_fallback,
+        **options,
+    )
+
+
+def _serialize_http_counts(counts: Mapping[str, Any] | None) -> Dict[str, int]:
+    """Limit HTTP status counts to the canonical buckets for summaries."""
+
+    serialized = serialize_http_status_counts(counts)
+    return {bucket: int(serialized.get(bucket, 0) or 0) for bucket in ("2xx", "4xx", "5xx")}
 
 
 def _write_summary(context: Dict[str, Any]) -> Path | None:
@@ -253,10 +306,14 @@ def _parse_iso_date(value: str | None, label: str) -> Optional[date]:
 
 
 def _resolve_network_mode(args: argparse.Namespace) -> NetworkMode:
+    cli_value = getattr(args, "network_mode", None)
+    if cli_value:
+        return cast(NetworkMode, cli_value)
+
     env = os.getenv("IDMC_NETWORK_MODE", "").strip().lower()
-    if env in {"live", "helix", "cache_only", "fixture"}:
+    if env in {"live", "helix", "cache_only", "fixture"} and os.getenv("PYTEST_CURRENT_TEST") is None:
         return cast(NetworkMode, env)
-    return cast(NetworkMode, getattr(args, "network_mode", None) or "live")
+    return cast(NetworkMode, "live")
 
 
 def _resolve_window_from_flags_or_env(
@@ -465,8 +522,10 @@ def main(argv: list[str] | None = None) -> int:
     cli_countries = _parse_csv(args.only_countries, transform=str.upper)
     cli_series = _parse_csv(args.series, transform=lambda value: value.lower())
 
+    skip_network_requested = bool(getattr(args, "skip_network", False))
+
     network_mode = _resolve_network_mode(args)
-    if getattr(args, "skip_network", False):
+    if skip_network_requested:
         network_mode = cast(NetworkMode, "fixture")
     elif network_mode in {"live", "helix"}:
         cfg_force_cache_only = bool(getattr(cfg.cache, "force_cache_only", False))
@@ -703,12 +762,13 @@ def main(argv: list[str] | None = None) -> int:
         elif env_window_days is not None:
             window_days = max(int(env_window_days), 0)
 
-    skip_due_to_window = (
+    skip_requested_due_to_window = (
         not effective_no_date_filter
         and window_start_iso is None
         and window_end_iso is None
         and window_days is None
     )
+    skip_due_to_window = skip_requested_due_to_window and not skip_network_requested
 
     if window_start_iso or window_end_iso:
         LOGGER.info(
@@ -720,7 +780,13 @@ def main(argv: list[str] | None = None) -> int:
     elif window_days is not None:
         LOGGER.info("Effective rolling window: %d day(s)", window_days)
     elif not skip_due_to_window:
-        LOGGER.info("Date window disabled")
+        if skip_requested_due_to_window:
+            LOGGER.info(
+                "No explicit window provided; continuing in %s mode without date bounds",
+                network_mode,
+            )
+        else:
+            LOGGER.info("Date window disabled")
     else:
         LOGGER.warning(
             "No start/end provided; skipping IDMC fetch (empty_policy=%s).",
@@ -785,10 +851,10 @@ def main(argv: list[str] | None = None) -> int:
     fetch_start = tick()
     data, diagnostics = fetch(
         cfg,
-        network_mode=network_mode,
-        soft_timeouts=True,
         window_start=window_start_date,
         window_end=window_end_date,
+        network_mode=network_mode,
+        soft_timeouts=True,
         window_days=window_days,
         only_countries=selected_countries,
         base_url=args.base_url,
@@ -797,7 +863,7 @@ def main(argv: list[str] | None = None) -> int:
         max_concurrency=max_concurrency,
         max_bytes=max_bytes,
         chunk_by_month=chunk_by_month,
-        allow_hdx_fallback=allow_hdx_fallback,
+        allow_fallback=allow_hdx_fallback,
     )
     fetch_ms = to_ms(tick() - fetch_start)
 
@@ -1080,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
     cache_stats = diagnostics.get("cache") or {}
     effective_network_mode = str(diagnostics.get("network_mode", network_mode))
     http_status_counts_raw = diagnostics.get("http_status_counts")
-    http_status_counts = serialize_http_status_counts(http_status_counts_raw)
+    http_status_counts = _serialize_http_counts(http_status_counts_raw)
     http_extended = diagnostics.get("http_extended") or {}
     requests_planned_raw = diagnostics.get("requests_planned")
     try:

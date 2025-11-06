@@ -1,13 +1,14 @@
 """Connectivity probe for the IDMC PostgREST endpoint."""
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import socket
 import ssl
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.error import URLError
@@ -26,6 +27,7 @@ REQUESTS_VERSION = getattr(requests, "__version__", None) if requests else None
 DIAG_DIR = Path("diagnostics/ingestion/idmc")
 JSON_PATH = DIAG_DIR / "probe.json"
 MARKDOWN_PATH = DIAG_DIR / "probe.md"
+SUMMARY_PATH = MARKDOWN_PATH
 TARGET_HOST = os.getenv("IDMC_PROBE_HOST", "backend.idmcdb.org").strip() or "backend.idmcdb.org"
 TARGET_PORT = int(os.getenv("IDMC_PROBE_PORT", "443"))
 TARGET_PATH = os.getenv(
@@ -64,16 +66,26 @@ HDX_BASE_URL = (
 
 if HELIX_ENABLED:
     helix_base = HELIX_BASE_URL.rstrip("/")
-    probe_end = datetime.now(timezone.utc).date()
-    probe_start = probe_end - timedelta(days=31)
+    today = datetime.now(timezone.utc).date()
+    month_start = today.replace(day=1)
+    month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    iso_candidate = os.getenv("IDMC_PROBE_ISO3", "FRA").strip() or "FRA"
+    release_env = (
+        os.getenv("IDMC_HELIX_VERSION", "").strip()
+        or os.getenv("IDMC_HELIX_ENV", "").strip()
+        or "RELEASE"
+    )
     helix_params = {
-        "client_id": HELIX_CLIENT_ID,
-        "format": "json",
-        "start": probe_start.isoformat(),
-        "end": probe_end.isoformat(),
-        "iso3__in": os.getenv("IDMC_PROBE_ISO3", "AFG"),
+        "start": month_start.isoformat(),
+        "end": month_end.isoformat(),
+        "iso3": iso_candidate,
+        "limit": "1",
+        "release_environment": release_env,
     }
-    helix_url = f"{helix_base}{HELIX_DISPLACEMENTS_PATH}?{urlencode(helix_params)}"
+    if HELIX_CLIENT_ID:
+        helix_params["client_id"] = HELIX_CLIENT_ID
+    helix_query = urlencode({key: value for key, value in helix_params.items() if value})
+    helix_url = f"{helix_base}{HELIX_DISPLACEMENTS_PATH}?{helix_query}"
     parsed = urlparse(helix_url)
     if parsed.scheme:
         TARGET_SCHEME = parsed.scheme
@@ -94,8 +106,17 @@ if HELIX_ENABLED:
             "",
         )
     )
-    DISPLAY_URL = TARGET_URL.replace(HELIX_CLIENT_ID, "REDACTED")
-    SUMMARY_TITLE = "Helix (IDU) Reachability"
+    DISPLAY_URL = TARGET_URL
+    if HELIX_CLIENT_ID:
+        DISPLAY_URL = DISPLAY_URL.replace(HELIX_CLIENT_ID, "REDACTED")
+    SUMMARY_TITLE = "Helix (GIDD) Reachability"
+
+_path_split = TARGET_PATH.split("?", 1)
+_path_only = _path_split[0]
+_path_query = _path_split[1] if len(_path_split) > 1 else ""
+BASE = f"{TARGET_SCHEME}://{TARGET_HOST}:{TARGET_PORT}"
+ENDPOINT = "/" + _path_only.lstrip("/")
+QUERY = _path_query
 CONNECT_TIMEOUT = float(os.getenv("IDMC_PROBE_CONNECT_TIMEOUT", "5"))
 READ_TIMEOUT = float(os.getenv("IDMC_PROBE_READ_TIMEOUT", "10"))
 EGRESS_TIMEOUT = float(os.getenv("IDMC_PROBE_EGRESS_TIMEOUT", "5"))
@@ -131,6 +152,14 @@ def _truncate(value: str, limit: int = 512) -> str:
     return value[: limit - 3] + "..."
 
 
+def ca_bundle_info() -> Dict[str, Any]:
+    cafile = ssl.get_default_verify_paths().cafile or certifi.where()
+    payload: Dict[str, Any] = {"paths": []}
+    if cafile:
+        payload["paths"].append(cafile)
+    return payload
+
+
 def probe_dns(host: str) -> Dict[str, Any]:
     started = time.monotonic()
     payload: Dict[str, Any] = {"records": []}
@@ -159,11 +188,12 @@ def probe_dns(host: str) -> Dict[str, Any]:
     return payload
 
 
-def probe_tcp(host: str, port: int, timeout: float) -> Dict[str, Any]:
+def probe_tcp(host: str, port: int, timeout: float | None = None) -> Dict[str, Any]:
     started = time.monotonic()
     payload: Dict[str, Any] = {"ok": False}
+    timeout_value = CONNECT_TIMEOUT if timeout is None else timeout
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        with socket.create_connection((host, port), timeout=timeout_value) as sock:
             payload["ok"] = True
             try:
                 payload["peer"] = list(sock.getpeername())
@@ -175,7 +205,7 @@ def probe_tcp(host: str, port: int, timeout: float) -> Dict[str, Any]:
     return payload
 
 
-def probe_tls(host: str, port: int, timeout: float) -> Dict[str, Any]:
+def probe_tls(host: str, port: int, timeout: float | None = None) -> Dict[str, Any]:
     started = time.monotonic()
     payload: Dict[str, Any] = {"ok": False, "server_name": host}
     context = ssl.create_default_context()
@@ -187,7 +217,8 @@ def probe_tls(host: str, port: int, timeout: float) -> Dict[str, Any]:
     except Exception:  # pragma: no cover - defensive
         pass
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        timeout_value = CONNECT_TIMEOUT if timeout is None else timeout
+        with socket.create_connection((host, port), timeout=timeout_value) as sock:
             with context.wrap_socket(sock, server_hostname=host) as wrapped:
                 payload["ok"] = True
                 payload["version"] = wrapped.version()
@@ -208,14 +239,16 @@ def probe_tls(host: str, port: int, timeout: float) -> Dict[str, Any]:
 def probe_http(
     url: str,
     *,
-    timeout: Tuple[float, float],
-    verify: bool | str,
+    timeout: Tuple[float, float] | None = None,
+    verify: bool | str | None = None,
     display_url: str | None = None,
 ) -> Dict[str, Any]:
     started = time.monotonic()
+    timeout_value = timeout or (CONNECT_TIMEOUT, READ_TIMEOUT)
+    verify_value = VERIFY_SETTING if verify is None else verify
     payload: Dict[str, Any] = {
         "url": display_url or url,
-        "verify": verify,
+        "verify": verify_value,
         "headers": {"User-Agent": USER_AGENT, "Accept": "application/json"},
     }
     if requests is None:
@@ -226,8 +259,8 @@ def probe_http(
         response = requests.get(
             url,
             headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            timeout=timeout,
-            verify=verify,
+            timeout=timeout_value,
+            verify=verify_value,
         )
         payload["status_code"] = response.status_code
         payload["reason"] = response.reason
@@ -483,26 +516,34 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
                 tls_line += f" after {tls.get('elapsed_ms')}ms"
         lines.append(tls_line)
     if http:
-        if http.get("status_code") is not None:
-            line = f"- **HTTP GET:** status={http.get('status_code')}"
+        status_value = http.get("status_code")
+        if status_value is None:
+            status_value = http.get("status")
+        if status_value is not None:
+            line = f"- HTTP GET: status {status_value}"
             if http.get("elapsed_ms") is not None:
                 line += f" ({http.get('elapsed_ms')}ms)"
             if http.get("bytes"):
                 line += f" bytes={http.get('bytes')}"
         else:
             error = http.get("exception") or http.get("error") or "unknown"
-            line = f"- **HTTP GET:** error={error}"
+            line = f"- HTTP GET: error {error}"
             if http.get("elapsed_ms") is not None:
                 line += f" after {http.get('elapsed_ms')}ms"
         lines.append(line)
     egress_ip = None
-    for label in ("ifconfig.me", "ipify"):
-        entry = egress.get(label)
-        if isinstance(entry, Mapping) and entry.get("text"):
-            egress_ip = entry.get("text")
-            break
+    if isinstance(tcp, Mapping):
+        egress_entry = tcp.get("egress")
+        if isinstance(egress_entry, (list, tuple)) and egress_entry:
+            egress_ip = egress_entry[0]
+    if egress_ip is None:
+        for label in ("ifconfig.me", "ipify"):
+            entry = egress.get(label)
+            if isinstance(entry, Mapping) and entry.get("text"):
+                egress_ip = entry.get("text")
+                break
     if egress_ip:
-        lines.append(f"- **Egress IP:** {egress_ip}")
+        lines.append(f"- Egress IP: {egress_ip}")
     ca_bundle = payload.get("ca_bundle") or payload.get("tls", {}).get("ca_bundle")
     if ca_bundle:
         lines.append(f"- **CA bundle:** `{ca_bundle}`")
@@ -534,16 +575,28 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
 
 
 def main() -> int:
+    base_url = BASE or f"{TARGET_SCHEME}://{TARGET_HOST}:{TARGET_PORT}"
+    endpoint = ENDPOINT or "/" + TARGET_PATH.lstrip("/")
+    query = QUERY or ""
+    runtime_url = base_url + endpoint
+    if query:
+        runtime_url = f"{runtime_url}?{query}"
+    parsed_runtime = urlparse(runtime_url)
+    target_host = parsed_runtime.hostname or TARGET_HOST
+    if parsed_runtime.port:
+        target_port = parsed_runtime.port
+    else:
+        target_port = TARGET_PORT or (443 if parsed_runtime.scheme == "https" else 80)
+    display_url = runtime_url
+    if HELIX_CLIENT_ID:
+        display_url = display_url.replace(HELIX_CLIENT_ID, "REDACTED")
+
     started_iso = _now_iso()
-    dns_info = probe_dns(TARGET_HOST)
-    tcp_info = probe_tcp(TARGET_HOST, TARGET_PORT, CONNECT_TIMEOUT)
-    tls_info = probe_tls(TARGET_HOST, TARGET_PORT, CONNECT_TIMEOUT)
-    http_info = probe_http(
-        TARGET_URL,
-        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-        verify=VERIFY_SETTING,
-        display_url=DISPLAY_URL,
-    )
+    dns_info = probe_dns(target_host)
+    tcp_info = probe_tcp(target_host, target_port)
+    tls_info = probe_tls(target_host, target_port)
+    http_info = probe_http(runtime_url)
+    http_info["url"] = display_url
     egress_info = probe_egress(EGRESS_TIMEOUT)
     hdx_info: Optional[Dict[str, Any]] = None
     if ALLOW_HDX_FALLBACK:
@@ -553,7 +606,7 @@ def main() -> int:
             timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
         )
     payload: Dict[str, Any] = {
-        "target": {"host": TARGET_HOST, "port": TARGET_PORT, "url": DISPLAY_URL},
+        "target": {"host": target_host, "port": target_port, "url": display_url},
         "generated_at": started_iso,
         "completed_at": _now_iso(),
         "dns": dns_info,
@@ -576,21 +629,26 @@ def main() -> int:
     if hdx_info is not None:
         payload["hdx"] = hdx_info
     if HELIX_ENABLED:
-        parsed_display = urlparse(DISPLAY_URL)
+        parsed_display = urlparse(display_url)
         helix_path = parsed_display.path or ""
         if parsed_display.query:
             helix_path = f"{helix_path}?{parsed_display.query}"
         payload["helix"] = {
-            "url": DISPLAY_URL,
+            "url": display_url,
             "status": http_info.get("status_code"),
             "bytes": http_info.get("bytes"),
             "path": helix_path,
         }
     try:
         DIAG_DIR.mkdir(parents=True, exist_ok=True)
-        JSON_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        json_path = DIAG_DIR / "reachability.json"
+        json_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
         markdown = build_markdown(payload)
-        MARKDOWN_PATH.write_text(markdown, encoding="utf-8")
+        SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SUMMARY_PATH.write_text(markdown, encoding="utf-8")
         print(markdown)
     except Exception:  # pragma: no cover - diagnostics must not break CI
         return 0

@@ -1,12 +1,14 @@
 """Client implementation for the IDMC connector."""
 from __future__ import annotations
 
+import calendar
 import concurrent.futures
 import io
 import json
 import logging
 import math
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -61,7 +63,6 @@ IDU_POSTGREST_LIMIT = 10000
 ISO3_BATCH_SIZE = 25
 SCHEMA_PROBE_QUERY = (("select", "*"), ("limit", "1"))
 
-HDX_MIN_BYTES = 50_000
 HDX_DEFAULT_RESOURCE_ID = "1ace9c2a-7daf-4563-ac15-f2aa5071cd40"
 HDX_DEFAULT_GID = "123456789"
 
@@ -109,6 +110,33 @@ if os.getenv("IDMC_PROXY"):
 
 def _ensure_dir(path: str) -> str:
     os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _resolve_cache_dir(
+    cfg: IdmcConfig,
+    *,
+    env_key: str = "IDMC_CACHE_DIR",
+    default: str = os.path.join(".cache", "idmc"),
+) -> Path:
+    """Return a usable cache directory path for IDMC fetches."""
+
+    cache_config = getattr(cfg, "cache", None)
+    cache_dir: object = None
+    if cache_config is not None:
+        candidate = getattr(cache_config, "dir", None)
+        if candidate is not None:
+            cache_dir = candidate
+        elif isinstance(cache_config, (str, os.PathLike, Path)):
+            cache_dir = cache_config
+    if cache_dir is None:
+        env_value = os.getenv(env_key)
+        if env_value:
+            cache_dir = env_value
+    if cache_dir is None:
+        cache_dir = default
+    path = Path(cache_dir)
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -561,6 +589,23 @@ def _hdx_dataset_slug() -> str:
     )
 
 
+def _ensure_date(value: Optional[date | datetime]) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _month_start(value: date) -> date:
+    return value.replace(day=1)
+
+
+def _month_end(value: date) -> date:
+    last_day = calendar.monthrange(value.year, value.month)[1]
+    return value.replace(day=last_day)
+
+
 def _hdx_resource_id() -> Optional[str]:
     for name in ("IDMC_HDX_RESOURCE_ID", "IDMC_HDX_RESOURCE"):
         raw = os.getenv(name)
@@ -661,14 +706,8 @@ def _hdx_pick_displacement_csv(
             fmt = str(resource.get("format") or "").strip().lower()
             if fmt != "csv":
                 continue
-            size_raw = resource.get("size")
-            try:
-                size_value = int(size_raw)
-            except (TypeError, ValueError):
-                size_value = None
-            if size_value is not None and size_value > 50_000:
-                chosen = resource
-                break
+            chosen = resource
+            break
 
     if chosen is None:
         diagnostics["error"] = "no_csv_resource"
@@ -676,7 +715,7 @@ def _hdx_pick_displacement_csv(
         return None, diagnostics
 
     diagnostics["resource_selection"] = (
-        "keyword_match" if keyword_selection else "size_threshold"
+        "keyword_match" if keyword_selection else "first_csv"
     )
     diagnostics["resource_id"] = chosen.get("id")
     diagnostics["resource_name"] = chosen.get("name")
@@ -859,7 +898,6 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
     diagnostics["resource_status_code"] = payload_diag.get("status_code")
     diagnostics["resource_bytes"] = payload_diag.get("bytes")
     diagnostics["resource_content_length"] = payload_diag.get("content_length")
-    diagnostics["min_bytes"] = HDX_MIN_BYTES
 
     try:
         frame = _read_csv_from_bytes(payload_bytes)
@@ -885,7 +923,8 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
     lowered_columns = {str(column).strip().lower() for column in frame.columns}
     has_iso3 = "iso3" in lowered_columns
     has_value = any(
-        candidate in lowered_columns for candidate in {"figure", "new displacements"}
+        candidate in lowered_columns
+        for candidate in {"figure", "new_displacements", "new displacements"}
     )
     if not has_iso3 or not has_value:
         diagnostics["zero_rows_reason"] = "hdx_empty_or_bad_header"
@@ -898,18 +937,6 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
             {"id": selected.get("id"), "error": f"missing:{','.join(missing)}"}
         )
         return None, diagnostics
-
-    try:
-        byte_int = int(diagnostics.get("resource_bytes", 0) or 0)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        byte_int = 0
-    if byte_int and byte_int < HDX_MIN_BYTES:
-        diagnostics.setdefault("resource_errors", []).append(
-            {"id": selected.get("id"), "error": "below_minimum"}
-        )
-        diagnostics.setdefault("zero_rows_reason", "hdx_resource_below_minimum")
-        diagnostics.setdefault("error", "resource_below_minimum")
-        return pd.DataFrame(), diagnostics
 
     return frame, diagnostics
 
@@ -1017,25 +1044,66 @@ def _fetch_helix_last180(
     if not client_id:
         diagnostics["error"] = "missing_client_id"
         diagnostics["zero_rows_reason"] = "helix_missing_client_id"
+        status_counts_empty = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0}
+        diagnostics["status_counts"] = dict(status_counts_empty)
+        diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts_empty)
+        diagnostics["http_status_counts_extended"] = dict(status_counts_empty)
+        diagnostics["requests_planned"] = 0
+        diagnostics["requests_executed"] = 0
         return pd.DataFrame(), diagnostics
 
-    params: Dict[str, str] = {"client_id": client_id, "format": "json"}
-    if start_date:
-        params["start"] = start_date.strftime("%Y-%m-%d")
-    if end_date:
-        params["end"] = end_date.strftime("%Y-%m-%d")
+    start_value = _ensure_date(start_date)
+    end_value = _ensure_date(end_date)
+    start_param = _month_start(start_value) if start_value else None
+    end_param = _month_end(end_value) if end_value else None
+    if start_param is None and end_param is not None:
+        start_param = _month_start(end_param)
+    if end_param is None and start_param is not None:
+        end_param = _month_end(start_param)
+
     iso_values = [
         code.strip().upper()
         for code in iso3_list
         if isinstance(code, str) and code.strip()
     ]
-    if iso_values:
-        params["iso3__in"] = ",".join(sorted(dict.fromkeys(iso_values)))
+    iso_joined = ",".join(sorted(dict.fromkeys(iso_values))) if iso_values else ""
 
-    query = urlencode(params)
-    url = f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}?{query}"
+    release_env = (
+        os.getenv("IDMC_HELIX_VERSION", "").strip()
+        or os.getenv("IDMC_HELIX_ENV", "").strip()
+        or "RELEASE"
+    )
+
+    params: Dict[str, str] = {
+        "limit": "10000",
+        "release_environment": release_env,
+    }
+    if start_param:
+        params["start"] = start_param.strftime("%Y-%m-%d")
+    if end_param:
+        params["end"] = end_param.strftime("%Y-%m-%d")
+    if iso_joined:
+        params["iso3"] = iso_joined
+    if client_id:
+        params["client_id"] = client_id
+
+    query = urlencode({key: value for key, value in params.items() if value})
+    url = f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}?{query}" if query else f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}"
     diagnostics["url"] = url.replace(client_id, "REDACTED")
     diagnostics["path"] = _request_path(url)
+    diagnostics["release_environment"] = release_env
+    diagnostics["iso_scope"] = iso_values
+    diagnostics["requests_planned"] = 1
+    diagnostics["requests_executed"] = 0
+
+    status_counts: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0, "other": 0, "timeout": 0}
+
+    def _record_status(bucket: Optional[str]) -> None:
+        if not bucket:
+            return
+        if bucket not in status_counts:
+            status_counts[bucket] = 0
+        status_counts[bucket] += 1
 
     headers = _build_http_headers({"Accept": "application/json"})
     connect_timeout_s, read_timeout_s = _http_timeouts()
@@ -1051,9 +1119,22 @@ def _fetch_helix_last180(
             verify=verify_setting,
         )
     except HttpRequestError as exc:
-        diagnostics["error"] = exc.diagnostics or exc.message
-        diagnostics["status"] = (exc.diagnostics or {}).get("status")
-        diagnostics["status_bucket"] = _http_status_bucket(diagnostics["status"])
+        error_diag = exc.diagnostics or {}
+        if not isinstance(error_diag, Mapping):
+            error_diag = {"details": error_diag}
+        diagnostics["error"] = error_diag or exc.message
+        status_value = error_diag.get("status")
+        if error_diag.get("timeout"):
+            status_value = "timeout"
+        diagnostics["status"] = status_value
+        bucket = _http_status_bucket(status_value)
+        diagnostics["status_bucket"] = bucket
+        _record_status(bucket)
+        diagnostics["status_counts"] = dict(status_counts)
+        diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts)
+        diagnostics["http_status_counts_extended"] = dict(status_counts)
+        diagnostics["http"] = error_diag
+        diagnostics["requests_executed"] = int(error_diag.get("attempts", 1) or 1)
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics["zero_rows_reason"] = "helix_http_error"
         return pd.DataFrame(), diagnostics
@@ -1061,10 +1142,18 @@ def _fetch_helix_last180(
         diagnostics["error"] = str(exc)
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics["zero_rows_reason"] = "helix_http_error"
+        diagnostics["status_counts"] = dict(status_counts)
+        diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts)
+        diagnostics["http_status_counts_extended"] = dict(status_counts)
         return pd.DataFrame(), diagnostics
 
     diagnostics["status"] = status
-    diagnostics["status_bucket"] = _http_status_bucket(status)
+    bucket = _http_status_bucket(status)
+    diagnostics["status_bucket"] = bucket
+    _record_status(bucket)
+    diagnostics["status_counts"] = dict(status_counts)
+    diagnostics["http_status_counts"] = serialize_http_status_counts(status_counts)
+    diagnostics["requests_executed"] = int(http_diag.get("attempts", 1) or 1)
     diagnostics["headers"] = response_headers
     diagnostics["http"] = http_diag
     diagnostics["bytes"] = len(body or b"") if isinstance(body, (bytes, bytearray)) else 0
@@ -1401,6 +1490,114 @@ def _hdx_prepare_monthly_flow(
     return aggregated.loc[:, list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]]
 
 
+def _normalise_fallback_monthly_flow(
+    frame: pd.DataFrame,
+    *,
+    source_tag: str,
+    chunk_start: Optional[date],
+    chunk_end: Optional[date],
+    window_start: Optional[date],
+    window_end: Optional[date],
+    countries: Iterable[str] | None,
+) -> pd.DataFrame:
+    canonical_columns = list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=canonical_columns)
+
+    working = frame.copy()
+    start_bound = chunk_start or window_start
+    end_bound = chunk_end or window_end
+    allowed_countries = {
+        code.strip().upper()
+        for code in (countries or [])
+        if isinstance(code, str) and code.strip()
+    }
+
+    if all(column in working.columns for column in FLOW_EXPORT_COLUMNS):
+        result = working.loc[:, FLOW_EXPORT_COLUMNS].copy()
+        result["iso3"] = result["iso3"].astype(str).str.strip().str.upper()
+        result["as_of_date"] = pd.to_datetime(result["as_of_date"], errors="coerce")
+        result["value"] = pd.to_numeric(result["value"], errors="coerce")
+        if start_bound is not None:
+            result = result.loc[result["as_of_date"] >= pd.Timestamp(start_bound)]
+        if end_bound is not None:
+            result = result.loc[result["as_of_date"] <= pd.Timestamp(end_bound)]
+        if allowed_countries:
+            result = result.loc[result["iso3"].isin(allowed_countries)]
+        result = result.dropna(subset=["iso3", "as_of_date", "value"])
+        result = result.loc[result["value"] >= 0]
+        if result.empty:
+            return pd.DataFrame(columns=canonical_columns)
+        result["metric"] = FLOW_METRIC
+        result["series_semantics"] = FLOW_SERIES_SEMANTICS
+        result["source"] = source_tag
+        result["value"] = result["value"].round().astype(pd.Int64Dtype())
+        if HDX_PREAGG_COLUMN not in result.columns:
+            result[HDX_PREAGG_COLUMN] = True
+        else:
+            result[HDX_PREAGG_COLUMN] = result[HDX_PREAGG_COLUMN].astype(bool)
+        return result.loc[:, canonical_columns]
+
+    columns_lower = {str(column).strip().lower(): column for column in working.columns}
+    iso_candidates = (
+        "iso3",
+        "iso_3",
+        "countryiso3",
+        "country iso3",
+        "country_iso3",
+        "geo_iso3",
+    )
+    date_candidates = (
+        "displacement_date",
+        "event_date",
+        "displacement_end_date",
+        "displacement_start_date",
+        "start_date",
+        "end_date",
+        "date",
+    )
+    value_candidates = (
+        "new_displacements",
+        "new displacements",
+        "figure",
+        "value",
+    )
+
+    iso_col = next((columns_lower.get(name) for name in iso_candidates if name in columns_lower), None)
+    date_col = next((columns_lower.get(name) for name in date_candidates if name in columns_lower), None)
+    value_col = next((columns_lower.get(name) for name in value_candidates if name in columns_lower), None)
+
+    if iso_col is None or date_col is None or value_col is None:
+        return pd.DataFrame(columns=canonical_columns)
+
+    renamed = working.rename(columns={iso_col: "iso3", date_col: "event_date", value_col: "value"})
+    subset = renamed.loc[:, ["iso3", "event_date", "value"]].copy()
+    subset["iso3"] = subset["iso3"].astype(str).str.strip().str.upper()
+    subset["event_date"] = pd.to_datetime(subset["event_date"], errors="coerce")
+    subset["value"] = pd.to_numeric(subset["value"], errors="coerce")
+    subset = subset.dropna(subset=["iso3", "event_date", "value"])
+    subset = subset.loc[subset["value"] >= 0]
+    if start_bound is not None:
+        subset = subset.loc[subset["event_date"] >= pd.Timestamp(start_bound)]
+    if end_bound is not None:
+        subset = subset.loc[subset["event_date"] <= pd.Timestamp(end_bound)]
+    if allowed_countries:
+        subset = subset.loc[subset["iso3"].isin(allowed_countries)]
+    if subset.empty:
+        return pd.DataFrame(columns=canonical_columns)
+
+    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp("M")
+    aggregated = (
+        subset.groupby(["iso3", "as_of_date"], as_index=False)["value"].sum()
+    )
+    aggregated["metric"] = FLOW_METRIC
+    aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
+    aggregated["source"] = source_tag
+    aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
+    aggregated[HDX_PREAGG_COLUMN] = True
+    return aggregated.loc[:, canonical_columns]
+
+
 def _hdx_filter(
     frame: pd.DataFrame,
     *,
@@ -1486,8 +1683,14 @@ def fetch_idu_json(
         "window_start": window_start_iso,
         "window_end": window_end_iso,
     }
-    cache_dir = cfg.cache.dir
-    ttl_seconds = cache_ttl if cache_ttl is not None else cfg.cache.ttl_seconds
+    cache_dir_path = _resolve_cache_dir(cfg)
+    cache_dir = cache_dir_path.as_posix()
+    cache_cfg = getattr(cfg, "cache", None)
+    ttl_seconds = (
+        cache_ttl
+        if cache_ttl is not None
+        else getattr(cache_cfg, "ttl_seconds", 0)
+    )
     cache_stats: Dict[str, Any] = {
         "dir": cache_dir,
         "ttl_seconds": ttl_seconds,
@@ -1762,7 +1965,8 @@ def fetch_idu_json(
                     date_column=date_filter_column,
                     select_columns=select_list,
                 )
-                url = f"{base}{endpoint}"
+                base_url_no_query = f"{base}{endpoint}"
+                url = base_url_no_query
                 if request_params:
                     url = f"{url}?{urlencode(request_params, safe='.,()')}"
                 diagnostics["url"] = url
@@ -1792,21 +1996,34 @@ def fetch_idu_json(
                     "offset": offset,
                     "iso_batch": cache_params["iso_batch"],
                 }
+                if cache_entry is None and use_cache_only:
+                    legacy_params = {"chunk": cache_params.get("chunk", "full")}
+                    legacy_key = cache_key(base_url_no_query, params=legacy_params)
+                    legacy_entry = cache_get(cache_dir, legacy_key, None)
+                    if legacy_entry is not None:
+                        cache_entry = legacy_entry
+                        cached_entry = legacy_entry
+                        key = legacy_key
+                        cache_record["key"] = key
+                        cache_record.setdefault("legacy_key", legacy_key)
+                        cache_record.setdefault("legacy_params", legacy_params)
                 refresh_live_chunk = (
                     network_mode in {"live", "helix"}
                     and isinstance(chunk_label, str)
                     and chunk_label
                     and chunk_label != "full"
                 )
+                cache_hit = cache_entry is not None and not refresh_live_chunk
                 request_params_serialized = [
                     {"key": key, "value": value} for key, value in request_params
                 ]
                 diagnostics["postgrest_params"] = request_params_serialized
-                if cache_entry is not None and not refresh_live_chunk:
+                if cache_hit:
                     cache_stats["hits"] += 1
                     cache_stats["hit"] = True
                     cache_record.update(cache_entry.metadata)
                     payload_body = cache_entry.body
+                    http_diag = {"attempts": 0, "retries": 0}
                     mode = "cache"
                     diagnostics["requests"].append(
                         {
@@ -2084,16 +2301,19 @@ def fetch_idu_json(
                                 fallback_diag_entry["type"] = (
                                     "helix" if fallback_source_tag_inner == "idmc_gidd" else "hdx"
                                 )
-                                filtered = _hdx_filter(
+                                fallback_scope = (
+                                    only_countries if only_countries is not None else countries
+                                )
+                                normalized_fallback = _normalise_fallback_monthly_flow(
                                     fallback_frame,
-                                    iso_batches=iso_batches or [],
+                                    source_tag=fallback_source_tag_inner,
                                     chunk_start=chunk_start,
                                     chunk_end=chunk_end,
                                     window_start=window_start,
                                     window_end=window_end,
-                                    source_tag=fallback_source_tag_inner,
+                                    countries=fallback_scope,
                                 )
-                                fallback_rows = filtered.to_dict("records")
+                                fallback_rows = normalized_fallback.to_dict("records")
                                 rows.extend(fallback_rows)
                                 fallback_diag_entry["rows"] = len(fallback_rows)
                                 fallback_diag_entry["used"] = True
@@ -2213,7 +2433,7 @@ def fetch_idu_json(
                 diagnostics["attempts"].append(
                     {
                         "chunk": chunk_label or "full",
-                        "via": "http_get",
+                        "via": "cache" if cache_hit else "http_get",
                         "status": status,
                         "rows": len(chunk_rows),
                     }
@@ -2226,22 +2446,23 @@ def fetch_idu_json(
                     _trim_url(url),
                 )
 
-                http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
-                http_info["retries"] += int(http_diag.get("retries", 0) or 0)
-                http_info["status_last"] = status or http_info["status_last"]
-                http_info["duration_s"] += float(http_diag.get("duration_s", 0.0) or 0.0)
-                http_info["backoff_s"] += float(http_diag.get("backoff_s", 0.0) or 0.0)
-                http_info["wire_bytes"] += int(http_diag.get("wire_bytes", 0) or 0)
-                http_info["body_bytes"] += int(http_diag.get("body_bytes", 0) or 0)
-                retry_after = http_diag.get("retry_after_s", []) or []
-                http_info["retry_after_events"] += len(retry_after)
-                http_info["retry_after_s"].extend(retry_after)
-                http_info["rate_limit_wait_s"].extend(
-                    http_diag.get("rate_limit_wait_s", []) or []
-                )
-                http_info["planned_sleep_s"].extend(
-                    http_diag.get("planned_sleep_s", []) or []
-                )
+                if not cache_hit:
+                    http_info["requests"] += int(http_diag.get("attempts", 1) or 1)
+                    http_info["retries"] += int(http_diag.get("retries", 0) or 0)
+                    http_info["status_last"] = status or http_info["status_last"]
+                    http_info["duration_s"] += float(http_diag.get("duration_s", 0.0) or 0.0)
+                    http_info["backoff_s"] += float(http_diag.get("backoff_s", 0.0) or 0.0)
+                    http_info["wire_bytes"] += int(http_diag.get("wire_bytes", 0) or 0)
+                    http_info["body_bytes"] += int(http_diag.get("body_bytes", 0) or 0)
+                    retry_after = http_diag.get("retry_after_s", []) or []
+                    http_info["retry_after_events"] += len(retry_after)
+                    http_info["retry_after_s"].extend(retry_after)
+                    http_info["rate_limit_wait_s"].extend(
+                        http_diag.get("rate_limit_wait_s", []) or []
+                    )
+                    http_info["planned_sleep_s"].extend(
+                        http_diag.get("planned_sleep_s", []) or []
+                    )
                 attempts = http_diag.get("attempt_durations_s", []) or []
                 http_info["attempt_durations_ms"].extend(
                     [int(round(value * 1000)) for value in attempts]
@@ -2290,16 +2511,17 @@ def fetch_idu_json(
         diagnostics["fallback"] = fallback_entry
         diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
-        filtered = _hdx_filter(
+        fallback_scope = only_countries if only_countries is not None else countries
+        normalized_fallback = _normalise_fallback_monthly_flow(
             fallback_frame,
-            iso_batches=iso_batches,
+            source_tag=fallback_source_tag,
             chunk_start=chunk_start,
             chunk_end=chunk_end,
             window_start=window_start,
             window_end=window_end,
-            source_tag=fallback_source_tag,
+            countries=fallback_scope,
         )
-        fallback_rows = filtered.to_dict("records")
+        fallback_rows = normalized_fallback.to_dict("records")
         diagnostics["fallback"]["rows"] = len(fallback_rows)
         fallback_entry["rows"] = len(fallback_rows)
         fallback_attempt = {
@@ -2362,6 +2584,10 @@ def fetch(
     soft_timeouts: bool = True,  # noqa: ARG001 - future compatibility
     window_start: Optional[date] = None,
     window_end: Optional[date] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
     window_days: Optional[int] = 30,
     only_countries: Iterable[str] | None = None,
     base_url: Optional[str] = None,
@@ -2384,6 +2610,15 @@ def fetch(
             "Running in %s – no network calls will be made; results may be empty unless cache/fixtures exist.",
             network_mode,
         )
+
+    cache_dir_text = _resolve_cache_dir(cfg).as_posix()
+
+    start_alias = start_date if start_date is not None else start
+    end_alias = end_date if end_date is not None else end
+    if window_start is None:
+        window_start = start_alias
+    if window_end is None:
+        window_end = end_alias
 
     helix_client_id = helix_client_id or _helix_client_id()
 
@@ -2583,7 +2818,7 @@ def fetch(
                 diag_copy.setdefault("source_tag", fallback_source_cache_fetch)
         return frame, diag_copy
 
-    if should_return_empty(window_start, window_end, window_days):
+    if should_return_empty(window_start, window_end, window_days) and network_mode in {"live", "helix"}:
         LOGGER.warning(
             "IDMC fetch invoked without a date window; returning empty payload",
         )
@@ -2608,6 +2843,7 @@ def fetch(
             ]
         )
         countries_scope = sorted({c.strip().upper() for c in countries if c.strip()})
+        cache_dir_text = _resolve_cache_dir(cfg).as_posix()
         diagnostics = {
             "mode": "offline",
             "http": {
@@ -2619,7 +2855,7 @@ def fetch(
                 "body_bytes": 0,
                 "retry_after_events": 0,
             },
-            "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+            "cache": {"dir": cache_dir_text, "hits": 0, "misses": 0},
             "filters": {
                 "window_start": None,
                 "window_end": None,
@@ -2796,7 +3032,7 @@ def fetch(
                     "end": end.isoformat() if end else None,
                 },
                 "http": http_block,
-                "cache": {"dir": cfg.cache.dir, "hits": 0, "misses": 0},
+                "cache": {"dir": cache_dir_text, "hits": 0, "misses": 0},
                 "filters": filters_block,
                 "requests": [],
                 "attempts": [],
@@ -3183,7 +3419,7 @@ def fetch(
         ),
         "http": http_summary,
         "cache": {
-            "dir": cfg.cache.dir,
+            "dir": cache_dir_text,
             "hits": cache_hits,
             "misses": cache_misses,
         },
