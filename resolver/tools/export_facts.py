@@ -1783,6 +1783,7 @@ def export_facts(
     out_dir: Path = EXPORTS,
     write_db: str | bool | None = None,
     db_url: Optional[str] = None,
+    only_strategy: Optional[str] = None,
     report_json_path: Optional[Path] = None,
     report_md_path: Optional[Path] = None,
     append_summary_path: Optional[Path] = None,
@@ -1817,6 +1818,10 @@ def export_facts(
             )
             canonical_db_url = selected_db_url_raw or None
 
+    selected_strategy = (only_strategy or "").strip()
+    if selected_strategy:
+        LOGGER.info("export.strategy.only | strategy=%s", selected_strategy)
+
     LOGGER.info(
         "export.start | input=%s | out=%s | write_db=%s | db_url=%s | auto=%s",
         inp,
@@ -1844,6 +1849,61 @@ def export_facts(
     warnings: List[str] = []
     source_details: List[SourceApplication] = []
     debug_records: List[Dict[str, Any]] = []
+
+    claimed_paths: dict[str, str] = {}
+    double_match_dropped = 0
+
+    def _accept_detail(detail: SourceApplication, *, stage: str) -> bool:
+        nonlocal double_match_dropped
+        if detail is None:
+            return False
+        if not selected_strategy:
+            return True
+
+        strategy = str(detail.strategy or "")
+        path_obj = getattr(detail, "path", None)
+        path_key = str(path_obj) if path_obj else str(detail.name or "")
+        if strategy != selected_strategy:
+            existing = claimed_paths.get(path_key)
+            if existing is not None:
+                double_match_dropped += 1
+                LOGGER.info(
+                    "export.strategy.double_match | path=%s kept=%s dropped=%s stage=%s",
+                    path_key,
+                    existing or "",
+                    strategy or "",
+                    stage,
+                )
+            else:
+                LOGGER.info(
+                    "export.strategy.skip | path=%s strategy=%s required=%s stage=%s",
+                    path_key,
+                    strategy or "",
+                    selected_strategy,
+                    stage,
+                )
+            return False
+
+        existing = claimed_paths.get(path_key)
+        if existing is not None:
+            double_match_dropped += 1
+            LOGGER.info(
+                "export.strategy.double_match | path=%s kept=%s dropped=%s stage=%s",
+                path_key,
+                existing or "",
+                strategy or "",
+                stage,
+            )
+            return False
+
+        claimed_paths[path_key] = strategy
+        LOGGER.info(
+            "export.strategy.claimed | path=%s strategy=%s stage=%s",
+            path_key,
+            strategy or "",
+            stage,
+        )
+        return True
 
     for meta_path in skipped_meta:
         message = f"Skipped metadata file {meta_path.name}"
@@ -1967,6 +2027,20 @@ def export_facts(
                     )
                     detail.strategy = "config"
                     source_details.append(detail)
+                    if not _accept_detail(detail, stage="allow_empty"):
+                        source_details.pop()
+                        debug_entry.update(
+                            {
+                                "matched": False,
+                                "used_mapping": str(
+                                    matched_cfg.get("name") or file_path.name
+                                ),
+                                "strategy": detail.strategy,
+                                "skipped": "only_strategy",
+                            }
+                        )
+                        debug_records.append(debug_entry)
+                        continue
                     if not mapped.empty:
                         mapped_frames.append(mapped)
                     debug_entry.update(
@@ -2080,6 +2154,18 @@ def export_facts(
                     warnings.append(warning_msg)
 
                 source_details.append(detail)
+                if not _accept_detail(detail, stage="dtm_admin0_alias"):
+                    source_details.pop()
+                    debug_entry.update(
+                        {
+                            "matched": True,
+                            "used_mapping": "dtm_displacement_admin0_alias",
+                            "strategy": detail.strategy,
+                            "skipped": "only_strategy",
+                        }
+                    )
+                    debug_records.append(debug_entry)
+                    continue
                 if not mapped.empty:
                     mapped_frames.append(mapped)
 
@@ -2134,6 +2220,18 @@ def export_facts(
                         strategy="canonical-passthrough",
                     )
                     source_details.append(detail)
+                    if not _accept_detail(detail, stage="canonical_passthrough"):
+                        source_details.pop()
+                        debug_entry.update(
+                            {
+                                "matched": True,
+                                "used_mapping": "canonical-passthrough",
+                                "strategy": detail.strategy,
+                                "skipped": "only_strategy",
+                            }
+                        )
+                        debug_records.append(debug_entry)
+                        continue
                     debug_entry.update(
                         {
                             "matched": True,
@@ -2172,16 +2270,30 @@ def export_facts(
                     continue
 
             mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
+            mapping_name = str(matched_cfg.get("name") or file_path.name)
+            if mapping_name in {"idmc_flow", "idmc_stock"}:
+                strategy = "idmc-staging"
             detail.strategy = strategy
             if detail.warnings:
                 warnings.extend(detail.warnings)
             source_details.append(detail)
+            if not _accept_detail(detail, stage="source_mapping"):
+                source_details.pop()
+                debug_entry.update(
+                    {
+                        "matched": True,
+                        "used_mapping": mapping_name,
+                        "strategy": detail.strategy,
+                        "skipped": "only_strategy",
+                    }
+                )
+                debug_records.append(debug_entry)
+                continue
             if file_path.name == "dtm_displacement.csv":
                 dtm_yaml_rows = len(mapped)
                 dtm_detail = detail
             if not mapped.empty:
                 mapped_frames.append(mapped)
-            mapping_name = str(matched_cfg.get("name") or file_path.name)
             debug_entry.update(
                 {
                     "matched": True,
@@ -2199,49 +2311,73 @@ def export_facts(
                 dtm_debug_entry = debug_entry
 
         if dtm_yaml_rows == 0 and dtm_frame is not None:
-            fallback, fallback_meta = _map_dtm_admin0_fallback(dtm_frame)
-            if fallback is not None and not fallback.empty:
-                if "series_semantics" not in fallback.columns:
-                    fallback["series_semantics"] = "stock"
-                mapped_frames.append(fallback)
-                warning_msg = (
-                    "dtm_displacement.csv: YAML mapping yielded 0 rows; applied admin0 fallback"
+            if selected_strategy and (
+                dtm_detail is None or str(dtm_detail.strategy or "") != selected_strategy
+            ):
+                LOGGER.info(
+                    "export.strategy.skip | stage=dtm_fallback required=%s",
+                    selected_strategy,
                 )
-                warnings.append(warning_msg)
-                LOGGER.warning(
-                    "Export mapping warning: YAML mapping yielded 0 rows; applied dtm_admin0 fallback: %s rows",
-                    len(fallback),
-                )
-                if dtm_detail is not None:
-                    dtm_detail.rows_mapped = fallback_meta.get("rows_after_filters", len(fallback))
-                    dtm_detail.rows_after_filters = fallback_meta.get("rows_after_filters", len(fallback))
-                    dtm_detail.rows_after_aggregate = fallback_meta.get("rows_after_aggregate", len(fallback))
-                    dtm_detail.rows_after_dedupe = fallback_meta.get("rows_after_dedupe", len(fallback))
-                    dtm_detail.dedupe_keys = ["iso3", "as_of_date", "metric"]
-                    dtm_detail.dedupe_keep = "last"
-                    dtm_detail.aggregate_keys = fallback_meta.get("aggregate_keys", [])
-                    dtm_detail.aggregate_funcs = fallback_meta.get("aggregate_funcs", {})
-                    dtm_detail.drop_histogram = fallback_meta.get("drop_histogram", {})
-                    dtm_detail.filters_applied = fallback_meta.get("filters_applied", [])
-                    metric_details = dtm_detail.mapping_details.get("metric")
-                    if isinstance(metric_details, dict):
-                        metric_details["const"] = "idps_stock"
-                    detail_warning = (
-                        "YAML mapping yielded 0 rows; applied dtm_admin0 fallback"
+            else:
+                fallback, fallback_meta = _map_dtm_admin0_fallback(dtm_frame)
+                if fallback is not None and not fallback.empty:
+                    if "series_semantics" not in fallback.columns:
+                        fallback["series_semantics"] = "stock"
+                    mapped_frames.append(fallback)
+                    warning_msg = (
+                        "dtm_displacement.csv: YAML mapping yielded 0 rows; applied admin0 fallback"
                     )
-                    if detail_warning not in dtm_detail.warnings:
-                        dtm_detail.warnings.append(detail_warning)
-                if dtm_debug_entry is not None:
-                    dtm_debug_entry["fallback"] = {
-                        "applied": True,
-                        "rows": int(len(fallback)),
-                        "rows_after_filters": int(
-                            fallback_meta.get("rows_after_filters", len(fallback))
-                        ),
-                        "rows_after_aggregate": int(
-                            fallback_meta.get("rows_after_aggregate", len(fallback))
-                        ),
-                    }
+                    warnings.append(warning_msg)
+                    LOGGER.warning(
+                        "Export mapping warning: YAML mapping yielded 0 rows; applied dtm_admin0 fallback: %s rows",
+                        len(fallback),
+                    )
+                    if dtm_detail is not None:
+                        dtm_detail.rows_mapped = fallback_meta.get(
+                            "rows_after_filters", len(fallback)
+                        )
+                        dtm_detail.rows_after_filters = fallback_meta.get(
+                            "rows_after_filters", len(fallback)
+                        )
+                        dtm_detail.rows_after_aggregate = fallback_meta.get(
+                            "rows_after_aggregate", len(fallback)
+                        )
+                        dtm_detail.rows_after_dedupe = fallback_meta.get(
+                            "rows_after_dedupe", len(fallback)
+                        )
+                        dtm_detail.dedupe_keys = ["iso3", "as_of_date", "metric"]
+                        dtm_detail.dedupe_keep = "last"
+                        dtm_detail.aggregate_keys = fallback_meta.get(
+                            "aggregate_keys", []
+                        )
+                        dtm_detail.aggregate_funcs = fallback_meta.get(
+                            "aggregate_funcs", {}
+                        )
+                        dtm_detail.drop_histogram = fallback_meta.get(
+                            "drop_histogram", {}
+                        )
+                        dtm_detail.filters_applied = fallback_meta.get(
+                            "filters_applied", []
+                        )
+                        metric_details = dtm_detail.mapping_details.get("metric")
+                        if isinstance(metric_details, dict):
+                            metric_details["const"] = "idps_stock"
+                        detail_warning = (
+                            "YAML mapping yielded 0 rows; applied dtm_admin0 fallback"
+                        )
+                        if detail_warning not in dtm_detail.warnings:
+                            dtm_detail.warnings.append(detail_warning)
+                    if dtm_debug_entry is not None:
+                        dtm_debug_entry["fallback"] = {
+                            "applied": True,
+                            "rows": int(len(fallback)),
+                            "rows_after_filters": int(
+                                fallback_meta.get("rows_after_filters", len(fallback))
+                            ),
+                            "rows_after_aggregate": int(
+                                fallback_meta.get("rows_after_aggregate", len(fallback))
+                            ),
+                        }
 
         if not mapped_frames and raw_frames:
             staging_frames = [frame for _, frame in raw_frames]
@@ -2270,13 +2406,16 @@ def export_facts(
                 strategy="legacy-fallback",
             )
             source_details.append(detail)
-            fallback_warning = (
-                "Legacy fallback applied: "
-                f"{len(staging)} staging rows → {len(fallback)} exported rows"
-            )
-            warnings.append(fallback_warning)
-            if not fallback.empty:
-                mapped_frames.append(fallback)
+            if _accept_detail(detail, stage="legacy_fallback"):
+                fallback_warning = (
+                    "Legacy fallback applied: "
+                    f"{len(staging)} staging rows → {len(fallback)} exported rows"
+                )
+                warnings.append(fallback_warning)
+                if not fallback.empty:
+                    mapped_frames.append(fallback)
+            else:
+                source_details.pop()
 
         if mapped_frames:
             facts = pd.concat(mapped_frames, ignore_index=True)
@@ -2322,17 +2461,18 @@ def export_facts(
 
         staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         facts = _apply_mapping(staging, cfg)
-        source_details.append(
-            SourceApplication(
-                name="legacy-config",
-                path=successful_paths[0],
-                rows_in=len(staging),
-                strategy="legacy",
-                rows_mapped=len(facts),
-                rows_after_filters=len(facts),
-                rows_after_dedupe=len(facts),
-            )
+        detail = SourceApplication(
+            name="legacy-config",
+            path=successful_paths[0],
+            rows_in=len(staging),
+            strategy="legacy",
+            rows_mapped=len(facts),
+            rows_after_filters=len(facts),
+            rows_after_dedupe=len(facts),
         )
+        source_details.append(detail)
+        if not _accept_detail(detail, stage="legacy"):
+            source_details.pop()
 
     facts = _apply_series_semantics(facts)
     for col in ["as_of_date", "publication_date"]:
@@ -2352,6 +2492,13 @@ def export_facts(
         LOGGER.debug("Sample rows: %s", facts.head(5).to_dict(orient="records"))
     for warning in warnings:
         LOGGER.warning("Export mapping warning: %s", warning)
+
+    if selected_strategy and double_match_dropped:
+        LOGGER.info(
+            "export.strategy.double_match.total | strategy=%s dropped=%s",
+            selected_strategy,
+            double_match_dropped,
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
@@ -2582,6 +2729,11 @@ def main():
         default=None,
         help="Append the Export Facts markdown block to this file",
     )
+    ap.add_argument(
+        "--only-strategy",
+        default=None,
+        help="Restrict processing to a single strategy name (e.g. idmc-staging)",
+    )
     args = ap.parse_args()
 
     try:
@@ -2591,6 +2743,7 @@ def main():
             out_dir=Path(args.out),
             write_db=args.write_db,
             db_url=args.db_url,
+            only_strategy=args.only_strategy,
             report_json_path=Path(args.report_json) if args.report_json else None,
             report_md_path=Path(args.report_md) if args.report_md else None,
             append_summary_path=Path(args.append_summary) if args.append_summary else None,

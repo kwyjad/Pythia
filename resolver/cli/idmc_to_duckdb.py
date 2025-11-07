@@ -185,8 +185,9 @@ def run(argv: Sequence[str] | None = None) -> int:
             export_result = export_facts.export_facts(
                 inp=input_dir,
                 out_dir=out_dir,
-                write_db=True,
+                write_db=False,
                 db_url=canonical_url,
+                only_strategy="idmc-staging",
             )
         except export_facts.DuckDBWriteError as exc:
             LOGGER.error("Exporter DuckDB write failed", exc_info=True)
@@ -196,6 +197,56 @@ def run(argv: Sequence[str] | None = None) -> int:
             LOGGER.error("Exporter failed", exc_info=True)
             print(f"❌ Export failed: {exc}", file=sys.stderr)
             return 3
+
+    dataframe = export_result.dataframe
+    if dataframe is None or dataframe.empty:
+        LOGGER.error("Exporter produced no rows; aborting")
+        print("❌ Export produced no rows", file=sys.stderr)
+        return 3
+
+    filtered_df = dataframe
+    removed_rows = 0
+    if "source" in dataframe.columns:
+        normalized_sources = dataframe["source"].astype(str).str.strip().str.lower()
+        idmc_mask = normalized_sources == "idmc_flow"
+        removed_rows = int((~idmc_mask).sum())
+        if removed_rows:
+            filtered_df = dataframe.loc[idmc_mask].reset_index(drop=True)
+            LOGGER.info(
+                "idmc_filter.source | removed=%s kept=%s", removed_rows, len(filtered_df)
+            )
+            if filtered_df.empty:
+                LOGGER.error("Filtering removed all rows; aborting")
+                print("❌ No idmc_flow rows remain after filtering", file=sys.stderr)
+                return 3
+            try:
+                filtered_df.to_csv(export_result.csv_path, index=False)
+                if export_result.parquet_path:
+                    filtered_df.to_parquet(export_result.parquet_path, index=False)
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                LOGGER.warning("Failed to rewrite filtered artifacts: %s", exc, exc_info=True)
+            inferred_warnings.append(
+                f"Filtered {removed_rows} non-idmc_flow rows before persistence"
+            )
+
+    export_result.dataframe = filtered_df
+    export_result.rows = len(filtered_df)
+    if isinstance(export_result.report, dict):
+        export_result.report["rows_exported"] = len(filtered_df)
+
+    try:
+        db_stats = export_facts._maybe_write_to_db(
+            facts_resolved=filtered_df,
+            db_url=canonical_url,
+            write_db=True,
+            fail_on_error=True,
+        )
+    except export_facts.DuckDBWriteError as exc:
+        LOGGER.error("Filtered DuckDB write failed", exc_info=True)
+        print(f"❌ DuckDB write failed: {exc}", file=sys.stderr)
+        return 3
+
+    export_result.db_stats = db_stats
 
     print(f"📄 Exported {export_result.rows} rows to {export_result.csv_path}")
 

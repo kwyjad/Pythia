@@ -649,11 +649,15 @@ absolute; they are canonicalised to a `duckdb:///…` URL before writing so the
 export, verification query, and subsequent tooling all point at the same
 database file. To keep row counts aligned the helper copies only `flow.csv`
 (plus an optional `stock.csv`) into a temporary working directory before the
-exporter runs; additional artefacts such as `idmc_facts_flow.parquet` are
-skipped and reported in the warnings list. Each run ends with a one-line
-summary and a dedicated `Warnings:` block that capture the exported rows,
-DuckDB delta/total counts, warning total, and the resulting exit code
-(`0`=success, `2`=warnings under `--strict`, `3`=error).
+exporter runs, forces `--only-strategy idmc-staging` so no other mapping claims
+the same file, and filters the exported dataframe to `source=idmc_flow` before
+writing to DuckDB. Additional artefacts such as `idmc_facts_flow.parquet` are
+skipped and reported in the warnings list; if any non-IDMC rows sneak through
+the helper rewrites the CSV/Parquet previews after dropping them and surfaces a
+`Filtered …` warning. Each run ends with a one-line summary and a dedicated
+`Warnings:` block that capture the exported rows, DuckDB delta/total counts,
+warning total, and the resulting exit code (`0`=success, `2`=warnings under
+`--strict`, `3`=error).
 
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
 > inside pytest temporary directories, so no binary fixtures need to be stored

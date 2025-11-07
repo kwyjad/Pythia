@@ -61,6 +61,26 @@ you can confirm the behaviour in the `Warnings:` block. Missing `stock.csv`
 also appears as a warning; rerun with `--strict` to promote those conditions to
 exit code `2`.
 
+## Preventing double matches
+
+The exporter now accepts an `--only-strategy` switch that restricts processing
+to a single mapping strategy. The IDMC helper always passes
+`--only-strategy idmc-staging`, so only the dedicated staging strategy claims
+`flow.csv`/`stock.csv` and any competing matches are logged and dropped. You can
+use the same flag when running the exporter directly:
+
+```bash
+python resolver/tools/export_facts.py \
+  --in resolver/staging/idmc \
+  --out diagnostics/ingestion/export_preview \
+  --only-strategy idmc-staging
+```
+
+As a final safeguard the CLI filters the exported dataframe to
+`source=idmc_flow` before writing to DuckDB. If any non-IDMC rows sneak in they
+are removed, the CSV/Parquet previews are rewritten, and a warning line such as
+`Filtered 2 non-idmc_flow rows before persistence` appears in the summary.
+
 ## Inspect the database
 
 Use the helper target to review key table counts:
