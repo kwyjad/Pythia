@@ -41,9 +41,11 @@ The command prints a short summary similar to:
 
 ```
 📄 Exported 5 rows to diagnostics/ingestion/export_preview/facts.csv
-✅ Wrote 5 rows to DuckDB (facts_resolved) — total 5
+✅ Wrote 0 rows to DuckDB (facts_resolved) — total 0
+✅ Wrote 5 rows to DuckDB (facts_deltas) — total 5
+✅ Verified DuckDB row counts: resolved=0 deltas=5 total=5
 Warnings: none
-Summary: Exported 5 rows; wrote 5 rows (total 5) to DuckDB @ /abs/path/resolver.duckdb; warnings: 0; exit=0
+Summary: Exported 5 rows; wrote 5 rows (resolved Δ=0, deltas Δ=5) → totals resolved=0, deltas=5, total=5 to DuckDB @ /abs/path/resolver.duckdb; warnings: 0; exit=0
 Sources:
  - idmc_flow
 ```
@@ -61,6 +63,15 @@ you can confirm the behaviour in the `Warnings:` block. Missing `stock.csv`
 also appears as a warning; rerun with `--strict` to promote those conditions to
 exit code `2`.
 
+## Semantics-aware routing
+
+The exporter now splits the unified facts dataframe by `semantics` before
+writing to DuckDB. Rows tagged `stock` land in `facts_resolved` while rows
+tagged `new` land in `facts_deltas`. Any other semantics are skipped from the DB
+write (the CSV preview still contains them) and the CLI verifies the combined
+row count across both tables before declaring success. The summary line reports
+per-table deltas so idempotent reruns continue to show `✅ Wrote 0 rows`.
+
 ## Preventing double matches
 
 The exporter now accepts an `--only-strategy` switch that restricts processing
@@ -76,10 +87,9 @@ python resolver/tools/export_facts.py \
   --only-strategy idmc-staging
 ```
 
-As a final safeguard the CLI filters the exported dataframe to
-`source=idmc_flow` before writing to DuckDB. If any non-IDMC rows sneak in they
-are removed, the CSV/Parquet previews are rewritten, and a warning line such as
-`Filtered 2 non-idmc_flow rows before persistence` appears in the summary.
+The dedicated IDMC strategy guard remains in place so only the intended staging
+files are processed; the semantics-aware split removes the need for any
+downstream source filtering.
 
 ## Inspect the database
 

@@ -185,7 +185,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             export_result = export_facts.export_facts(
                 inp=input_dir,
                 out_dir=out_dir,
-                write_db=False,
+                write_db=True,
                 db_url=canonical_url,
                 only_strategy="idmc-staging",
             )
@@ -204,80 +204,56 @@ def run(argv: Sequence[str] | None = None) -> int:
         print("❌ Export produced no rows", file=sys.stderr)
         return 3
 
-    filtered_df = dataframe
-    removed_rows = 0
-    if "source" in dataframe.columns:
-        normalized_sources = dataframe["source"].astype(str).str.strip().str.lower()
-        idmc_mask = normalized_sources == "idmc_flow"
-        removed_rows = int((~idmc_mask).sum())
-        if removed_rows:
-            filtered_df = dataframe.loc[idmc_mask].reset_index(drop=True)
-            LOGGER.info(
-                "idmc_filter.source | removed=%s kept=%s", removed_rows, len(filtered_df)
-            )
-            if filtered_df.empty:
-                LOGGER.error("Filtering removed all rows; aborting")
-                print("❌ No idmc_flow rows remain after filtering", file=sys.stderr)
-                return 3
-            try:
-                filtered_df.to_csv(export_result.csv_path, index=False)
-                if export_result.parquet_path:
-                    filtered_df.to_parquet(export_result.parquet_path, index=False)
-            except Exception as exc:  # pragma: no cover - diagnostics only
-                LOGGER.warning("Failed to rewrite filtered artifacts: %s", exc, exc_info=True)
-            inferred_warnings.append(
-                f"Filtered {removed_rows} non-idmc_flow rows before persistence"
-            )
-
-    export_result.dataframe = filtered_df
-    export_result.rows = len(filtered_df)
-    if isinstance(export_result.report, dict):
-        export_result.report["rows_exported"] = len(filtered_df)
-
-    try:
-        db_stats = export_facts._maybe_write_to_db(
-            facts_resolved=filtered_df,
-            db_url=canonical_url,
-            write_db=True,
-            fail_on_error=True,
-        )
-    except export_facts.DuckDBWriteError as exc:
-        LOGGER.error("Filtered DuckDB write failed", exc_info=True)
-        print(f"❌ DuckDB write failed: {exc}", file=sys.stderr)
-        return 3
-
-    export_result.db_stats = db_stats
-
+    exported_rows = int(export_result.rows)
     print(f"📄 Exported {export_result.rows} rows to {export_result.csv_path}")
 
-    db_stats = export_result.db_stats.get("facts_resolved") if export_result.db_stats else None
-    if db_stats:
-        delta = int(db_stats.get("rows_delta", 0))
-        total_after = int(db_stats.get("rows_after", 0))
-        print(f"✅ Wrote {delta} rows to DuckDB (facts_resolved) — total {total_after}")
-    else:
-        print("⚠️ DuckDB write stats unavailable; verifying manually…")
+    db_stats = export_result.db_stats or {}
+
+    def _extract_delta_and_total(stats: dict[str, object] | None) -> tuple[int, int]:
+        if not stats:
+            return 0, 0
+        delta = int(stats.get("rows_delta", 0) or 0)
+        total_after = int(stats.get("rows_after", stats.get("rows_before", 0) or 0))
+        return delta, total_after
+
+    resolved_stats = db_stats.get("facts_resolved") or {}
+    deltas_stats = db_stats.get("facts_deltas") or {}
+    resolved_delta, resolved_total_reported = _extract_delta_and_total(resolved_stats)
+    deltas_delta, deltas_total_reported = _extract_delta_and_total(deltas_stats)
+
+    print(
+        f"✅ Wrote {resolved_delta} rows to DuckDB (facts_resolved) — total {resolved_total_reported}"
+    )
+    print(
+        f"✅ Wrote {deltas_delta} rows to DuckDB (facts_deltas) — total {deltas_total_reported}"
+    )
 
     conn = None
     try:
         conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
-        ym_values = _ym_candidates(export_result.dataframe)
-        if ym_values:
-            placeholders = ",".join(["?"] * len(ym_values))
-            query = f"SELECT COUNT(*) FROM facts_resolved WHERE ym IN ({placeholders})"
-            total_rows = conn.execute(query, ym_values).fetchone()[0]
-        else:
-            total_rows = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
+
+        def _table_count(name: str) -> int:
+            try:
+                return int(
+                    conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+                )
+            except Exception as exc:
+                message = str(exc).lower()
+                if "no such table" in message or "does not exist" in message:
+                    LOGGER.warning(
+                        "Verification table missing; treating row count as zero | table=%s",
+                        name,
+                    )
+                    return 0
+                raise
+
+        resolved_count = _table_count("facts_resolved")
+        deltas_count = _table_count("facts_deltas")
     except Exception as exc:
-        message = str(exc).lower()
-        if "no such table" in message or "does not exist" in message:
-            LOGGER.warning("Verification table missing; treating row count as zero")
-            total_rows = 0
-        else:
-            LOGGER.error("Verification query failed", exc_info=True)
-            print(f"❌ Verification failed: {exc}", file=sys.stderr)
-            return 3
+        LOGGER.error("Verification query failed", exc_info=True)
+        print(f"❌ Verification failed: {exc}", file=sys.stderr)
+        return 3
     finally:
         if conn is not None:
             try:
@@ -285,15 +261,26 @@ def run(argv: Sequence[str] | None = None) -> int:
             except Exception:  # pragma: no cover - cached connection may persist
                 pass
 
-    total_rows = int(total_rows)
-    exported_rows = int(export_result.rows)
+    resolved_count = int(resolved_count)
+    deltas_count = int(deltas_count)
+    total_rows = resolved_count + deltas_count
     if total_rows <= 0:
         LOGGER.error("Verification failed: DuckDB contains no rows after export")
         return 3
 
-    LOGGER.info("verification.ok | total_rows=%s", total_rows)
-    if not db_stats:
-        print(f"✅ Verified DuckDB row count: total {total_rows}")
+    LOGGER.info(
+        "verification.ok | resolved=%s deltas=%s total=%s",
+        resolved_count,
+        deltas_count,
+        total_rows,
+    )
+    print(
+        "✅ Verified DuckDB row counts: resolved={resolved} deltas={deltas} total={total}".format(
+            resolved=resolved_count,
+            deltas=deltas_count,
+            total=total_rows,
+        )
+    )
 
     warnings: list[str] = []
     seen: set[str] = set()
@@ -320,11 +307,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     else:
         print("Warnings: none")
 
-    rows_delta = 0
-    rows_total = total_rows
-    if db_stats:
-        rows_delta = int(db_stats.get("rows_delta", rows_delta))
-        rows_total = int(db_stats.get("rows_after", rows_total))
+    total_delta = resolved_delta + deltas_delta
+    resolved_total = resolved_count
+    deltas_total = deltas_count
 
     exit_code = 0
     if warnings and args.strict:
@@ -332,11 +317,19 @@ def run(argv: Sequence[str] | None = None) -> int:
         exit_code = 2
 
     print(
-        "Summary: Exported {exported} rows; wrote {delta} rows (total {total}) to DuckDB @ {path}; "
-        "warnings: {warns}; exit={code}".format(
+        (
+            "Summary: Exported {exported} rows; wrote {delta} rows "
+            "(resolved Δ={resolved_delta}, deltas Δ={deltas_delta}) "
+            "→ totals resolved={resolved_total}, deltas={deltas_total}, total={total} "
+            "to DuckDB @ {path}; warnings: {warns}; exit={code}"
+        ).format(
             exported=exported_rows,
-            delta=rows_delta,
-            total=rows_total,
+            delta=total_delta,
+            resolved_delta=resolved_delta,
+            deltas_delta=deltas_delta,
+            resolved_total=resolved_total,
+            deltas_total=deltas_total,
+            total=total_rows,
             path=db_path,
             warns=len(warnings),
             code=exit_code,

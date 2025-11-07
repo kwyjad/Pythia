@@ -1547,6 +1547,10 @@ def _maybe_write_to_db(
         conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
+            LOGGER.info(
+                "DuckDB write start | table=facts_resolved rows=%s",
+                len(resolved_prepared),
+            )
             written_resolved = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_resolved",
@@ -1556,6 +1560,10 @@ def _maybe_write_to_db(
             LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved.rows_delta)
             stats["facts_resolved"] = written_resolved.to_dict()
         if deltas_prepared is not None and not deltas_prepared.empty:
+            LOGGER.info(
+                "DuckDB write start | table=facts_deltas rows=%s",
+                len(deltas_prepared),
+            )
             written_deltas = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_deltas",
@@ -2523,8 +2531,63 @@ def export_facts(
     except Exception as exc:
         print(f"Warning: could not write Parquet ({exc}). CSV written.", file=sys.stderr)
 
+    resolved_for_db: Optional[pd.DataFrame] = None
+    deltas_for_db: Optional[pd.DataFrame] = None
+    semantics_source: Optional[str] = None
+    semantics_series: Optional[pd.Series] = None
+    if isinstance(facts, pd.DataFrame) and not facts.empty:
+        if "semantics" in facts.columns:
+            semantics_source = "semantics"
+            semantics_series = facts["semantics"]
+        elif "series_semantics" in facts.columns:
+            semantics_source = "series_semantics"
+            semantics_series = facts["series_semantics"]
+
+        if semantics_series is not None:
+            semantics_normalized = (
+                semantics_series.fillna("")
+                .astype(str)
+                .str.lower()
+                .str.strip()
+            )
+            deltas_mask = semantics_normalized.eq("new")
+            resolved_mask = semantics_normalized.eq("stock")
+
+            if deltas_mask.any():
+                deltas_for_db = facts.loc[deltas_mask].copy()
+            if resolved_mask.any():
+                resolved_for_db = facts.loc[resolved_mask].copy()
+
+            other_mask = ~(deltas_mask | resolved_mask)
+            other_count = int(other_mask.sum())
+            if other_count:
+                distribution = (
+                    semantics_normalized[other_mask]
+                    .value_counts(dropna=False)
+                    .to_dict()
+                )
+                normalized_distribution = {
+                    (key if key else "(empty)"): int(value)
+                    for key, value in distribution.items()
+                }
+                LOGGER.info(
+                    "duckdb.semantics.skipped | total=%s details=%s",
+                    other_count,
+                    normalized_distribution,
+                )
+        else:
+            resolved_for_db = facts
+
+        LOGGER.info(
+            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s",
+            semantics_source or "∅",
+            0 if resolved_for_db is None else len(resolved_for_db),
+            0 if deltas_for_db is None else len(deltas_for_db),
+        )
+
     db_write_stats = _maybe_write_to_db(
-        facts_resolved=facts,
+        facts_resolved=resolved_for_db,
+        facts_deltas=deltas_for_db,
         db_url=canonical_db_url or selected_db_url_raw,
         write_db=bool(effective_write_flag),
         fail_on_error=bool(effective_write_flag),

@@ -1055,6 +1055,11 @@ def init_schema(
         return
 
     core_statements: list[tuple[str, str]] = []
+    missing_core = sorted(core_tables - existing_tables)
+    if missing_core:
+        LOGGER.info(
+            "duckdb.schema.create | ensuring core tables=%s", ", ".join(missing_core)
+        )
     if "facts_resolved" not in existing_tables:
         core_statements.append(
             (
