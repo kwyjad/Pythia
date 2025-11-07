@@ -24,7 +24,10 @@ cp resolver/.env.sample .env
 
 When `RESOLVER_DB_URL` is set the exporter dual-writes to DuckDB even if you
 omit `--write-db`. Provide `--write-db 0` (or export `RESOLVER_WRITE_DB=0`) to
-skip the database write while keeping the CSV diagnostics.
+skip the database write while keeping the CSV diagnostics. The helper accepts a
+filesystem path or a `duckdb:///` URL; paths are canonicalised to absolute URLs
+before the exporter runs so the write and verification always point at the same
+database file.
 
 ## Write the IDMC flow data
 
@@ -39,6 +42,7 @@ The command prints a short summary similar to:
 ```
 📄 Exported 5 rows to diagnostics/ingestion/export_preview/facts.csv
 ✅ Wrote 5 rows to DuckDB (facts_resolved) — total 5
+Summary: Exported 5 rows; wrote 5 rows (total 5) to DuckDB @ /abs/path/resolver.duckdb; warnings: 0; exit=0
 Sources:
  - idmc_flow
 ```
@@ -73,7 +77,8 @@ make db.path
 * **Staging directory absent:** confirm the path in `resolver/staging/idmc/` contains the expected `flow.csv` (and optional `stock.csv`) before running `make idmc.db`.
 * **DuckDB not installed:** install the `duckdb` Python package (via `pip install duckdb`) or run the repo's `dev-setup` script.
 
-For lower-level control, you can invoke the CLI directly:
+For lower-level control, you can invoke the CLI directly (paths and URLs are
+interchangeable):
 
 ```bash
 python -m resolver.cli.idmc_to_duckdb \

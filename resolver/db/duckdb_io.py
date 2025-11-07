@@ -920,6 +920,7 @@ def _normalize_duckdb_target(path_or_url: str | None) -> tuple[str, str]:
             _WARNED_EXPLICIT_OVERRIDE.add(key)
     raw = explicit or env_candidate or DEFAULT_DB_URL
     path, url = _shared_canonicalize_duckdb_target(raw)
+    LOGGER.info("duckdb.target | raw=%s | url=%s | path=%s", raw, url, path)
     if path == ":memory:":
         return "duckdb:///:memory:", path
     return url, path

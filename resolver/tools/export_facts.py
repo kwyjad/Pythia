@@ -2556,6 +2556,8 @@ def main():
     ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
     ap.add_argument(
         "--write-db",
+        "--write_db",
+        dest="write_db",
         default=None,
         choices=["0", "1"],
         help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",

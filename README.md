@@ -644,7 +644,12 @@ Whenever `RESOLVER_DB_URL` is present in the environment the exporter now
 dual-writes into DuckDB automatically. Override the behaviour with
 `--write-db 0` (or `RESOLVER_WRITE_DB=0`) if you only want the CSV preview,
 otherwise expect both the diagnostics files and the `facts_resolved`
-upsert to complete together.
+upsert to complete together. Paths handed to the helper can be relative or
+absolute; they are canonicalised to a `duckdb:///…` URL before writing so the
+export, verification query, and subsequent tooling all point at the same
+database file. Each run ends with a one-line summary that captures the exported
+rows, DuckDB delta/total counts, warning total, and the resulting exit code
+(`0`=success, `2`=warnings under `--strict`, `3`=error).
 
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
 > inside pytest temporary directories, so no binary fixtures need to be stored

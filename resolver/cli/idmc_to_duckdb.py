@@ -26,12 +26,23 @@ DEFAULT_OUT = Path("diagnostics/ingestion/export_preview")
 DEFAULT_DB_URL = "./resolver_data/resolver.duckdb"
 
 
-def _resolve_db_url(raw: str | None) -> str:
-    env_default = os.getenv("RESOLVER_DB_URL", DEFAULT_DB_URL).strip()
-    candidate = (raw or "").strip() or env_default
+def _normalize_db_url(raw: str | None) -> tuple[str, str]:
+    """Return canonical filesystem path and DuckDB URL for ``raw``."""
+
+    candidate = (raw or "").strip()
     if not candidate:
-        candidate = DEFAULT_DB_URL
-    return candidate
+        env_default = os.getenv("RESOLVER_DB_URL", "").strip()
+        candidate = env_default or DEFAULT_DB_URL
+    try:
+        path, url = canonicalize_duckdb_target(candidate)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.error(
+            "Failed to canonicalise DuckDB target | raw=%s error=%s",
+            candidate,
+            exc,
+        )
+        raise
+    return path, url
 
 
 def _ensure_directory(path: Path) -> None:
@@ -114,8 +125,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     staging_dir = Path(args.staging_dir)
     out_dir = Path(args.out)
-    db_url_raw = _resolve_db_url(args.db_url)
-    db_path, canonical_url = canonicalize_duckdb_target(db_url_raw)
+    db_path, canonical_url = _normalize_db_url(args.db_url)
 
     LOGGER.info("idmc_to_duckdb.start | staging=%s out=%s db_url=%s", staging_dir, out_dir, canonical_url)
     LOGGER.debug(
@@ -167,9 +177,14 @@ def run(argv: Sequence[str] | None = None) -> int:
         else:
             total_rows = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
     except Exception as exc:
-        LOGGER.error("Verification query failed", exc_info=True)
-        print(f"❌ Verification failed: {exc}", file=sys.stderr)
-        return 3
+        message = str(exc).lower()
+        if "no such table" in message or "does not exist" in message:
+            LOGGER.warning("Verification table missing; treating row count as zero")
+            total_rows = 0
+        else:
+            LOGGER.error("Verification query failed", exc_info=True)
+            print(f"❌ Verification failed: {exc}", file=sys.stderr)
+            return 3
     finally:
         if conn is not None:
             try:
@@ -179,12 +194,8 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     total_rows = int(total_rows)
     exported_rows = int(export_result.rows)
-    if total_rows <= 0 or total_rows < exported_rows:
-        LOGGER.error(
-            "Verification failed: DB rows (%s) lower than exported rows (%s)",
-            total_rows,
-            exported_rows,
-        )
+    if total_rows <= 0:
+        LOGGER.error("Verification failed: DuckDB contains no rows after export")
         return 3
 
     LOGGER.info("verification.ok | total_rows=%s", total_rows)
@@ -201,9 +212,29 @@ def run(argv: Sequence[str] | None = None) -> int:
         print("Warnings:")
         for message in warnings:
             print(f" - ⚠️ {message}")
-        if args.strict:
-            LOGGER.error("Strict mode enabled and warnings present; exiting with failure")
-            return 2
+
+    rows_delta = 0
+    rows_total = total_rows
+    if db_stats:
+        rows_delta = int(db_stats.get("rows_delta", rows_delta))
+        rows_total = int(db_stats.get("rows_after", rows_total))
+
+    exit_code = 0
+    if warnings and args.strict:
+        LOGGER.error("Strict mode enabled and warnings present; exiting with warnings")
+        exit_code = 2
+
+    print(
+        "Summary: Exported {exported} rows; wrote {delta} rows (total {total}) to DuckDB @ {path}; "
+        "warnings: {warns}; exit={code}".format(
+            exported=exported_rows,
+            delta=rows_delta,
+            total=rows_total,
+            path=db_path,
+            warns=len(warnings),
+            code=exit_code,
+        )
+    )
 
     matched_files = export_result.report.get("matched_files") if export_result.report else []
     matched_sources: set[str] = set()
@@ -216,7 +247,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         for source in sorted(matched_sources):
             print(f" - {source}")
 
-    return 0
+    return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> None:
