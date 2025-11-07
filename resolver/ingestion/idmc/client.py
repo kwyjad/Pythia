@@ -749,6 +749,14 @@ def _hdx_download_resource(url: str, *, timeout: float = 30.0) -> Tuple[bytes, D
     diagnostics: Dict[str, Any] = {
         "status_code": response.status_code,
     }
+    counts = diagnostics.setdefault("http_status_counts", {"2xx": 0, "4xx": 0, "5xx": 0})
+    status_code = response.status_code
+    if 200 <= status_code < 300:
+        counts["2xx"] += 1
+    elif 400 <= status_code < 500:
+        counts["4xx"] += 1
+    elif status_code >= 500:
+        counts["5xx"] += 1
     response.raise_for_status()
     payload = response.content
     diagnostics["bytes"] = len(payload)
@@ -771,16 +779,32 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
         "dataset": dataset,
         "package_url": package_url,
     }
+    counts = diagnostics.setdefault("http_status_counts", {"2xx": 0, "4xx": 0, "5xx": 0})
     headers = {"Accept": "application/json", "User-Agent": "Pythia-IDMC/1.0"}
     try:
         response = requests.get(package_url, headers=headers, timeout=30.0)
         diagnostics["package_status_code"] = response.status_code
+        status_code = response.status_code
+        if 200 <= status_code < 300:
+            counts["2xx"] += 1
+        elif 400 <= status_code < 500:
+            counts["4xx"] += 1
+        elif status_code >= 500:
+            counts["5xx"] += 1
         response.raise_for_status()
         payload = response.json()
     except requests.RequestException as exc:  # pragma: no cover - network dependent
         diagnostics["error"] = f"package_show_failed:{exc.__class__.__name__}"
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics["package_status_code"] = getattr(exc.response, "status_code", None)
+        status_value = diagnostics.get("package_status_code")
+        if isinstance(status_value, int):
+            if 200 <= status_value < 300:
+                counts["2xx"] += 1
+            elif 400 <= status_value < 500:
+                counts["4xx"] += 1
+            elif status_value >= 500:
+                counts["5xx"] += 1
         return pd.DataFrame(), diagnostics
 
     if not payload.get("success"):
@@ -980,6 +1004,7 @@ def _fetch_hdx_displacements(
         "source": "hdx",
         "source_tag": "idmc_hdx",
     }
+    status_counts = diagnostics.setdefault("http_status_counts", {"2xx": 0, "4xx": 0, "5xx": 0})
     canonical_columns = list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]
     empty = pd.DataFrame(columns=canonical_columns)
     if not package_id:
@@ -1003,11 +1028,26 @@ def _fetch_hdx_displacements(
         diagnostics["error"] = f"hdx_download_error:{exc.__class__.__name__}"
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics.setdefault("zero_rows_reason", "hdx_download_error")
+        status_value = getattr(exc.response, "status_code", None)
+        if isinstance(status_value, int):
+            if 200 <= status_value < 300:
+                status_counts["2xx"] += 1
+            elif 400 <= status_value < 500:
+                status_counts["4xx"] += 1
+            elif status_value >= 500:
+                status_counts["5xx"] += 1
         return empty, diagnostics
 
     diagnostics["resource_status_code"] = payload_diag.get("status_code")
     diagnostics["resource_bytes"] = payload_diag.get("bytes")
     diagnostics["resource_content_length"] = payload_diag.get("content_length")
+    payload_counts = payload_diag.get("http_status_counts")
+    if isinstance(payload_counts, Mapping):
+        for bucket in ("2xx", "4xx", "5xx"):
+            try:
+                status_counts[bucket] += int(payload_counts.get(bucket, 0) or 0)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                continue
 
     try:
         raw = _read_csv_from_bytes(payload_bytes)
@@ -3694,6 +3734,20 @@ def fetch(
             if meta_value is not None and meta_key not in fallback_summary:
                 fallback_summary[meta_key] = meta_value
 
+    raw_rows_total = 0
+    for frame in ordered_frames:
+        if isinstance(frame, pd.DataFrame):
+            raw_rows_total += int(frame.shape[0])
+    if helix_last180_frame is not None:
+        raw_rows_total += int(helix_last180_frame.shape[0])
+    if fallback_rows_total:
+        try:
+            raw_rows_total += int(fallback_rows_total)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            raw_rows_total += 0
+    rows_normalized = int(total_rows)
+    rows_written = rows_normalized
+
     performance = build_performance_block(
         requests=total_requests,
         wire_bytes=total_wire_bytes,
@@ -3766,6 +3820,9 @@ def fetch(
         "fallback_used": bool(fallback_used_total),
         "http_timeouts": http_timeouts_cfg,
     }
+    diagnostics["rows_fetched"] = max(raw_rows_total, 0)
+    diagnostics["rows_normalized"] = rows_normalized
+    diagnostics["rows_written"] = rows_written
     if helix_last180_diag is not None and helix_last180_fallback_summary:
         helix_last180_diag = dict(helix_last180_diag)
         helix_last180_diag.setdefault("fallback", helix_last180_fallback_summary)

@@ -1770,6 +1770,39 @@ def export_facts(
 
     cfg = _load_config(config_path)
 
+    ignore_cfg = cfg.get("ignore") if isinstance(cfg, Mapping) else None
+    ignore_names: set[str] = set()
+    ignore_patterns: list[re.Pattern[str]] = []
+    if isinstance(ignore_cfg, Mapping):
+        filenames = ignore_cfg.get("filenames")
+        if isinstance(filenames, Iterable) and not isinstance(filenames, (str, bytes)):
+            for name in filenames:
+                if not isinstance(name, str):
+                    continue
+                cleaned = name.strip().lower()
+                if cleaned:
+                    ignore_names.add(cleaned)
+        patterns = ignore_cfg.get("patterns")
+        if patterns is not None:
+            for raw_pattern in _ensure_iterable(patterns):
+                if not isinstance(raw_pattern, str):
+                    continue
+                try:
+                    ignore_patterns.append(re.compile(raw_pattern))
+                except re.error:  # pragma: no cover - defensive against bad config
+                    continue
+    if ignore_names or ignore_patterns:
+        filtered: List[Path] = []
+        for path in files:
+            name_lower = path.name.lower()
+            path_text = path.as_posix()
+            if name_lower in ignore_names:
+                continue
+            if any(pattern.search(path_text) for pattern in ignore_patterns):
+                continue
+            filtered.append(path)
+        files = filtered
+
     use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
 
     dtm_flow_enabled: bool = False

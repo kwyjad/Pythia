@@ -34,6 +34,11 @@ constants:
   confidence: "med"
   revision: 1
 
+ignore:
+  filenames:
+    - "flow.csv.manifest.json"
+    - "stock.csv"
+
 transforms:
   metric:
     in_need:    ["pin", "people_in_need", "in need", "in-need"]
@@ -143,7 +148,7 @@ metrics:
     series_semantics: new
     source: IOM DTM (admin0)
   idps_present:
-    enabled: true
+    enabled: false
     series_semantics: stock
     source: IOM DTM (admin0)
   new_displacements:

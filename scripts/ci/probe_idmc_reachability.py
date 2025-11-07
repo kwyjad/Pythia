@@ -279,6 +279,48 @@ def probe_http(
     return payload
 
 
+def probe_helix_last180() -> Dict[str, Any]:
+    base = os.getenv("IDMC_HELIX_BASE_URL", "https://helix-tools-api.idmcdb.org").strip()
+    base = base.rstrip("/") or "https://helix-tools-api.idmcdb.org"
+    client_id = os.getenv("IDMC_HELIX_CLIENT_ID", "").strip()
+    query_params = {"format": "json"}
+    if client_id:
+        query_params["client_id"] = client_id
+    query_string = urlencode(query_params)
+    url = f"{base}{HELIX_LAST180_PATH}?{query_string}" if query_string else f"{base}{HELIX_LAST180_PATH}"
+    path = HELIX_LAST180_PATH
+    if query_string:
+        path = f"{path}?{query_string}"
+    sanitized_url = url
+    sanitized_path = path
+    if client_id:
+        sanitized_url = sanitized_url.replace(client_id, "REDACTED")
+        sanitized_path = sanitized_path.replace(client_id, "REDACTED")
+    payload: Dict[str, Any] = {
+        "url": sanitized_url,
+        "path": sanitized_path,
+        "status": None,
+        "bytes": 0,
+        "captured_at": _now_iso(),
+    }
+    if requests is None:
+        payload["error"] = "requests-not-installed"
+        return payload
+    user_agent = os.getenv("IDMC_USER_AGENT", USER_AGENT)
+    headers = {"Accept": "application/json", "User-Agent": user_agent}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        payload["status"] = int(response.status_code)
+        try:
+            payload["bytes"] = len(response.content or b"")
+        except Exception:  # pragma: no cover - defensive
+            payload["bytes"] = 0
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        payload["status"] = getattr(exc.response, "status_code", None)
+        payload["error"] = str(exc)
+    return payload
+
+
 def probe_egress(timeout: float) -> Dict[str, Any]:
     targets = {
         "ifconfig.me": "https://ifconfig.me/ip",
@@ -453,7 +495,8 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
     dns = payload.get("dns", {})
     tcp = payload.get("tcp", {})
     tls = payload.get("tls", {})
-    http = payload.get("http", {})
+    http_info = payload.get("http", {})
+    probe_info = payload.get("probe", {})
     egress = payload.get("egress", {})
     lines: List[str] = [f"## {SUMMARY_TITLE}", ""]
     target = payload.get("target", {})
@@ -504,24 +547,36 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
             if tls.get("elapsed_ms") is not None:
                 tls_line += f" after {tls.get('elapsed_ms')}ms"
         lines.append(tls_line)
-    if http:
-        status_value = http.get("status_code")
+    if http_info or probe_info:
+        status_value = probe_info.get("status") if isinstance(probe_info, Mapping) else None
         if status_value is None:
-            status_value = http.get("status")
-        path_display = target.get("path") if isinstance(target, Mapping) else None
+            status_value = http_info.get("status_code") if isinstance(http_info, Mapping) else None
+        if status_value is None:
+            status_value = http_info.get("status") if isinstance(http_info, Mapping) else None
+        path_display = probe_info.get("path") if isinstance(probe_info, Mapping) else None
+        if not path_display:
+            path_display = target.get("path") if isinstance(target, Mapping) else None
         if not path_display:
             path_display = (payload.get("helix", {}) or {}).get("path")
+        bytes_value = probe_info.get("bytes") if isinstance(probe_info, Mapping) else None
+        if not bytes_value:
+            bytes_value = http_info.get("bytes") if isinstance(http_info, Mapping) else None
+        elapsed_ms = http_info.get("elapsed_ms") if isinstance(http_info, Mapping) else None
         if status_value is not None:
             line = f"- HTTP GET: path={path_display or 'unknown'} status={status_value}"
-            if http.get("bytes") is not None:
-                line += f" bytes={http.get('bytes')}"
-            if http.get("elapsed_ms") is not None:
-                line += f" ({http.get('elapsed_ms')}ms)"
+            if bytes_value is not None:
+                line += f" bytes={bytes_value}"
+            if elapsed_ms is not None:
+                line += f" ({elapsed_ms}ms)"
         else:
-            error = http.get("exception") or http.get("error") or "unknown"
+            error = probe_info.get("error") if isinstance(probe_info, Mapping) else None
+            if not error:
+                error = http_info.get("exception") if isinstance(http_info, Mapping) else None
+            if not error:
+                error = http_info.get("error") if isinstance(http_info, Mapping) else "unknown"
             line = f"- HTTP GET: path={path_display or 'unknown'} error {error}"
-            if http.get("elapsed_ms") is not None:
-                line += f" after {http.get('elapsed_ms')}ms"
+            if elapsed_ms is not None:
+                line += f" after {elapsed_ms}ms"
         lines.append(line)
     egress_ip = None
     if isinstance(tcp, Mapping):
@@ -539,7 +594,7 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
     ca_bundle = payload.get("ca_bundle") or payload.get("tls", {}).get("ca_bundle")
     if ca_bundle:
         lines.append(f"- **CA bundle:** `{ca_bundle}`")
-    verify_flag = http.get("verify") if isinstance(http, Mapping) else None
+    verify_flag = http_info.get("verify") if isinstance(http_info, Mapping) else None
     if verify_flag is not None:
         lines.append(f"- **Verify TLS:** {verify_flag}")
     hdx = payload.get("hdx", {})
@@ -598,6 +653,11 @@ def main() -> int:
     tls_info = probe_tls(target_host, target_port)
     http_info = probe_http(runtime_url)
     http_info["url"] = display_url
+    helix_probe = probe_helix_last180()
+    if http_info.get("status_code") is None and helix_probe.get("status") is not None:
+        http_info["status_code"] = helix_probe.get("status")
+    if http_info.get("bytes") in (None, 0) and helix_probe.get("bytes"):
+        http_info["bytes"] = helix_probe.get("bytes")
     egress_info = probe_egress(EGRESS_TIMEOUT)
     hdx_info: Optional[Dict[str, Any]] = None
     if ALLOW_HDX_FALLBACK:
@@ -632,6 +692,7 @@ def main() -> int:
             "IDMC_HTTP_VERIFY": os.getenv("IDMC_HTTP_VERIFY"),
         },
     }
+    payload["probe"] = helix_probe
     if hdx_info is not None:
         payload["hdx"] = hdx_info
     if HELIX_ENABLED:
@@ -650,6 +711,10 @@ def main() -> int:
         json_path = DIAG_DIR / "reachability.json"
         json_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        JSON_PATH.write_text(
+            json.dumps(helix_probe, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         markdown = build_markdown(payload)
