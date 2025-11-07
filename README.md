@@ -656,6 +656,12 @@ as `idmc_facts_flow.parquet` are skipped and reported in the warnings list.
 Each run ends with a one-line summary and a dedicated `Warnings:` block that
 captures the exported rows, per-table DuckDB deltas/totals, warning total, and
 the resulting exit code (`0`=success, `2`=warnings under `--strict`, `3`=error).
+DuckDB persistence now honours a richer composite key so parity holds row-for-row:
+if `event_id` is present it participates in the merge key, otherwise the writer
+falls back to `(iso3, hazard_code, metric, as_of_date/as_of, publication_date, source_id, ym,
+series_semantics)`. Schema initialisation drops the legacy `(ym, iso3, metric, …)`
+unique indexes so the MERGE statements can store distinct events that share the
+same month without collapsing them into one record.
 
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
 > inside pytest temporary directories, so no binary fixtures need to be stored

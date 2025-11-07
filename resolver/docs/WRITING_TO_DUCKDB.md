@@ -72,6 +72,17 @@ write (the CSV preview still contains them) and the CLI verifies the combined
 row count across both tables before declaring success. The summary line reports
 per-table deltas so idempotent reruns continue to show `✅ Wrote 0 rows`.
 
+## Composite keys and parity
+
+DuckDB initialisation drops the legacy `(ym, iso3, hazard_code, metric, series_semantics)`
+unique indexes and replaces them with composite keys that match the exporter’s
+semantics-aware routing. When an `event_id` column is present it participates in
+the merge key; otherwise the helper falls back to the full context columns—`iso3`,
+`hazard_code`, `metric`, the exact `as_of_date`/`as_of`, `publication_date`, `source_id`,
+`ym`, and `series_semantics`. The richer key prevents distinct events in the same month
+from being collapsed into a single row and keeps DuckDB row counts aligned with
+the CSV preview and parity tests.
+
 ## Preventing double matches
 
 The exporter now accepts an `--only-strategy` switch that restricts processing

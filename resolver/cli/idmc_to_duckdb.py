@@ -321,6 +321,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             "Summary: Exported {exported} rows; wrote {delta} rows "
             "(resolved Δ={resolved_delta}, deltas Δ={deltas_delta}) "
             "→ totals resolved={resolved_total}, deltas={deltas_total}, total={total} "
+            "| semantics stock→facts_resolved, new→facts_deltas "
             "to DuckDB @ {path}; warnings: {warns}; exit={code}"
         ).format(
             exported=exported_rows,

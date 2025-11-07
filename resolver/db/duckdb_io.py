@@ -85,17 +85,23 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
 
 FACTS_RESOLVED_KEY_COLUMNS = [
-    "ym",
+    "event_id",
     "iso3",
     "hazard_code",
     "metric",
+    "as_of_date",
+    "publication_date",
+    "source_id",
     "series_semantics",
+    "ym",
 ]
 FACTS_DELTAS_KEY_COLUMNS = [
-    "ym",
     "iso3",
     "hazard_code",
     "metric",
+    "as_of",
+    "ym",
+    "series_semantics",
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
@@ -229,6 +235,72 @@ def _savepoints_supported() -> bool:
 
 def _savepoints_certainly_unsupported() -> bool:
     return _SAVEPOINT_PROBED and not _SAVEPOINT_WORKS
+
+
+def _series_has_non_empty(frame: pd.DataFrame, column: str) -> bool:
+    try:
+        series = frame[column]
+    except KeyError:
+        return False
+    if series.empty:
+        return False
+    if series.dtype == object:
+        return series.astype(str).str.strip().ne("").any()
+    return series.notna().any()
+
+
+def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
+    """Return the natural key columns to use for ``table`` writes."""
+
+    spec = TABLE_KEY_SPECS.get(table, {})
+    if frame is None or frame.empty:
+        return list(spec.get("columns", [])) if spec else []
+
+    columns = set(frame.columns)
+    keys: list[str] = []
+
+    def _extend(candidates: Iterable[str]) -> None:
+        for column in candidates:
+            if column in columns and column not in keys:
+                keys.append(column)
+
+    if table == "facts_resolved":
+        if "event_id" in columns and _series_has_non_empty(frame, "event_id"):
+            _extend(["event_id"])
+        fallback: list[str] = ["iso3", "hazard_code", "metric"]
+        for candidate in ("as_of_date", "as_of"):
+            if candidate in columns:
+                fallback.append(candidate)
+                break
+        if "publication_date" in columns:
+            fallback.append("publication_date")
+        for candidate in ("source_id", "source"):
+            if candidate in columns:
+                fallback.append(candidate)
+                break
+        fallback.extend(
+            [column for column in ("series_semantics", "ym") if column in columns]
+        )
+        _extend(fallback)
+    elif table == "facts_deltas":
+        if "event_id" in columns and _series_has_non_empty(frame, "event_id"):
+            _extend(["event_id"])
+        fallback = ["iso3", "hazard_code", "metric"]
+        for candidate in ("as_of", "as_of_date"):
+            if candidate in columns:
+                fallback.append(candidate)
+                break
+        if "publication_date" in columns:
+            fallback.append("publication_date")
+        fallback.extend(
+            [column for column in ("series_semantics", "ym") if column in columns]
+        )
+        _extend(fallback)
+
+    if not keys and spec.get("columns"):
+        _extend(spec.get("columns", []))
+
+    return keys
 
 
 @contextmanager
@@ -1139,6 +1211,38 @@ def init_schema(
         )
         LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
 
+    try:
+        _run_ddl_batch(
+            conn,
+            [
+                "ALTER TABLE facts_resolved DROP CONSTRAINT IF EXISTS facts_resolved_unique",
+                "ALTER TABLE facts_deltas DROP CONSTRAINT IF EXISTS facts_deltas_unique",
+            ],
+            label="schema:drop_legacy_unique_constraints",
+        )
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - migration guard only
+        LOGGER.debug(
+            "duckdb.schema.drop_legacy_unique.failed | error=%s",
+            exc,
+            exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+        )
+
+    try:
+        _run_ddl_batch(
+            conn,
+            [
+                "DROP INDEX IF EXISTS ux_facts_resolved_series",
+                "DROP INDEX IF EXISTS ux_facts_deltas_series",
+            ],
+            label="schema:drop_legacy_unique_indexes",
+        )
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - migration guard only
+        LOGGER.debug(
+            "duckdb.schema.drop_legacy_unique_index.failed | error=%s",
+            exc,
+            exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+        )
+
     for table_name, spec in TABLE_KEY_SPECS.items():
         columns = spec["columns"]
         primary = spec["primary"]
@@ -1152,11 +1256,28 @@ def init_schema(
             [
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_resolved_series
-                ON facts_resolved (ym, iso3, hazard_code, metric, series_semantics)
+                ON facts_resolved (
+                    event_id,
+                    iso3,
+                    hazard_code,
+                    metric,
+                    as_of_date,
+                    publication_date,
+                    source_id,
+                    series_semantics,
+                    ym
+                )
                 """,
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_deltas_series
-                ON facts_deltas (ym, iso3, hazard_code, metric)
+                ON facts_deltas (
+                    iso3,
+                    hazard_code,
+                    metric,
+                    as_of,
+                    ym,
+                    series_semantics
+                )
                 """,
             ],
             label="schema:unique_indexes",
@@ -1430,23 +1551,46 @@ def upsert_dataframe(
                 ", ".join(normalised_dates),
             )
 
+    effective_keys: Sequence[str] | None = None
+    merge_keys: list[str] = []
     if keys:
         missing_keys = [k for k in keys if k not in frame.columns]
+        effective_keys = [k for k in keys if k in frame.columns]
         if missing_keys:
-            raise KeyError(
-                f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+            LOGGER.debug(
+                "duckdb.upsert.keys.missing | table=%s missing=%s available=%s",
+                table,
+                missing_keys,
+                effective_keys,
             )
-        for key in keys:
+            if not effective_keys:
+                raise KeyError(
+                    f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+                )
+        else:
+            effective_keys = list(keys)
+        for key in effective_keys:
             frame[key] = frame[key].where(frame[key].notna(), "").astype(str).str.strip()
         before = len(frame)
-        frame = frame.drop_duplicates(subset=list(keys), keep="last").reset_index(drop=True)
+        frame = frame.drop_duplicates(subset=list(effective_keys), keep="last").reset_index(
+            drop=True
+        )
         if LOGGER.isEnabledFor(logging.DEBUG) and before != len(frame):
             LOGGER.debug(
                 "Dropped %s duplicate rows for %s based on keys %s",
                 before - len(frame),
                 table,
-                keys,
+                effective_keys,
             )
+        merge_keys = list(effective_keys)
+        if set(effective_keys) != set(keys):
+            LOGGER.debug(
+                "duckdb.upsert.keys.degraded | table=%s requested=%s used=%s",
+                table,
+                list(keys),
+                merge_keys,
+            )
+            has_declared_key = False
 
     object_columns = frame.select_dtypes(include=["object"]).columns
     for column in object_columns:
@@ -1454,7 +1598,9 @@ def upsert_dataframe(
 
     if frame.empty:
         LOGGER.debug(
-            "duckdb.upsert.no_rows_after_prepare | table=%s | keys=%s", table, keys
+            "duckdb.upsert.no_rows_after_prepare | table=%s | keys=%s",
+            table,
+            merge_keys or list(keys or []),
         )
         return UpsertResult(
             table=table,
@@ -1472,9 +1618,9 @@ def upsert_dataframe(
     try:
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
-        if keys and LOGGER.isEnabledFor(logging.DEBUG):
+        if merge_keys and LOGGER.isEnabledFor(logging.DEBUG):
             diag_join_pred = " AND ".join(
-                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in merge_keys
             )
             diag_join_count_sql = (
                 "\n".join(
@@ -1497,11 +1643,12 @@ def upsert_dataframe(
                     "DIAG matched %s existing rows in %s using keys %s",
                     match_rows,
                     table,
-                    "[" + ", ".join(keys) + "]",
+                    "[" + ", ".join(merge_keys) + "]",
                 )
 
+        log_keys = merge_keys or list(keys or [])
         use_legacy_path = True
-        if keys and has_declared_key:
+        if merge_keys and has_declared_key:
             if not _merge_enabled():
                 LOGGER.debug(
                     "MERGE disabled via RESOLVER_DUCKDB_DISABLE_MERGE for table %s",
@@ -1509,9 +1656,9 @@ def upsert_dataframe(
                 )
             else:
                 all_columns = insert_columns
-                non_key_columns = [c for c in all_columns if c not in keys]
+                non_key_columns = [c for c in all_columns if c not in merge_keys]
                 on_predicate = " AND ".join(
-                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in merge_keys
                 )
                 update_assignments = (
                     ", ".join(
@@ -1575,17 +1722,17 @@ def upsert_dataframe(
                             LOGGER.debug(
                                 "duckdb.upsert.fallback.start | table=%s keys=%s rows=%s",
                                 table,
-                                list(keys or []),
+                                log_keys,
                                 len(frame),
                             )
-                if keys and has_declared_key and merge_sql:
+                if merge_keys and has_declared_key and merge_sql:
                     LOGGER.debug(
                         "Falling back to legacy delete+insert after MERGE failure for table %s",
                         table,
                     )
-                if keys:
+                if merge_keys:
                     delete_predicate = " AND ".join(
-                        f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                        f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in merge_keys
                     )
                     delete_sql = (
                         "\n".join(
@@ -1628,7 +1775,7 @@ def upsert_dataframe(
                         "duckdb.upsert.legacy_delete | Deleted %s existing rows from %s using keys %s",
                         int(deleted_count or 0),
                         table,
-                        "[" + ", ".join(keys or []) + "]",
+                        "[" + ", ".join(log_keys) + "]",
                     )
 
                 cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
@@ -1648,7 +1795,7 @@ def upsert_dataframe(
                     LOGGER.debug(
                         "duckdb.upsert.fallback.complete | table=%s keys=%s rows=%s",
                         table,
-                        list(keys or []),
+                        log_keys,
                         len(frame),
                     )
             except Exception as exc:
@@ -1663,7 +1810,7 @@ def upsert_dataframe(
                         )
                 if fallback_missing_key:
                     raise ValueError(
-                        f"Fallback upsert failed for table '{table}' with keys {list(keys or [])}"
+                        f"Fallback upsert failed for table '{table}' with keys {log_keys}"
                     ) from exc
                 raise
             else:

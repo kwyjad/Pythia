@@ -1547,6 +1547,13 @@ def _maybe_write_to_db(
         conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
+            resolved_keys = duckdb_io.resolve_upsert_keys(
+                "facts_resolved", resolved_prepared
+            )
+            LOGGER.info(
+                "duckdb.write.keys | table=facts_resolved columns=%s",
+                resolved_keys,
+            )
             LOGGER.info(
                 "DuckDB write start | table=facts_resolved rows=%s",
                 len(resolved_prepared),
@@ -1555,11 +1562,16 @@ def _maybe_write_to_db(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
-                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
+                keys=resolved_keys or duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
             LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved.rows_delta)
             stats["facts_resolved"] = written_resolved.to_dict()
         if deltas_prepared is not None and not deltas_prepared.empty:
+            deltas_keys = duckdb_io.resolve_upsert_keys("facts_deltas", deltas_prepared)
+            LOGGER.info(
+                "duckdb.write.keys | table=facts_deltas columns=%s",
+                deltas_keys,
+            )
             LOGGER.info(
                 "DuckDB write start | table=facts_deltas rows=%s",
                 len(deltas_prepared),
@@ -1568,7 +1580,7 @@ def _maybe_write_to_db(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
-                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
+                keys=deltas_keys or duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
             LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas.rows_delta)
             stats["facts_deltas"] = written_deltas.to_dict()
