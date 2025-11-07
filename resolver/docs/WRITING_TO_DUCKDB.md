@@ -22,6 +22,10 @@ These defaults live in `resolver/.env.sample`. Copy them into your working envir
 cp resolver/.env.sample .env
 ```
 
+When `RESOLVER_DB_URL` is set the exporter dual-writes to DuckDB even if you
+omit `--write-db`. Provide `--write-db 0` (or export `RESOLVER_WRITE_DB=0`) to
+skip the database write while keeping the CSV diagnostics.
+
 ## Write the IDMC flow data
 
 Run the Makefile target to export IDMC flow rows and upsert them into DuckDB:
@@ -39,7 +43,7 @@ Sources:
  - idmc_flow
 ```
 
-A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-running the target is idempotent—the row counts remain stable while updated values replace older entries.
+A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-running the target is idempotent—the row counts remain stable while updated values replace older entries. Exit codes mirror that summary: `0` for success, `2` when `--strict` escalates warnings, and `3` when verification or the exporter fails.
 
 ## Inspect the database
 

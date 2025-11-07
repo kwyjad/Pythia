@@ -993,6 +993,10 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
         cache_event=cache_event,
         forced=force_reopen if force_reopen else None,
     )
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "duckdb.connect | url=%s path=%s cache_event=%s", url, resolved_path, cache_event
+        )
     if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",  # pragma: no cover - logging only
@@ -1014,6 +1018,11 @@ def init_schema(
     if not schema_path.exists():
         raise FileNotFoundError(f"Schema SQL not found at {schema_path}")
 
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS main")
+    except Exception:  # pragma: no cover - DuckDB pre-0.9 fallback
+        LOGGER.debug("duckdb.schema.ensure_main_failed", exc_info=True)
+
     expected_tables = {
         "facts_resolved",
         "facts_deltas",
@@ -1025,6 +1034,11 @@ def init_schema(
         row[0]
         for row in conn.execute("PRAGMA show_tables").fetchall()
     }
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "duckdb.schema.inspect | existing_tables=%s",
+            ", ".join(sorted(existing_tables)) or "<none>",
+        )
 
     core_tables = {"facts_resolved", "facts_deltas"}
     if core_tables.issubset(existing_tables):

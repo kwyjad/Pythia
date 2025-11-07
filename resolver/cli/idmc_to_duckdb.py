@@ -129,12 +129,21 @@ def run(argv: Sequence[str] | None = None) -> int:
         _ensure_directory(Path(db_path).expanduser().resolve().parent)
     _log_staging_inventory(staging_dir)
 
-    export_result = export_facts.export_facts(
-        inp=staging_dir,
-        out_dir=out_dir,
-        write_db=True,
-        db_url=canonical_url,
-    )
+    try:
+        export_result = export_facts.export_facts(
+            inp=staging_dir,
+            out_dir=out_dir,
+            write_db=True,
+            db_url=canonical_url,
+        )
+    except export_facts.DuckDBWriteError as exc:
+        LOGGER.error("Exporter DuckDB write failed", exc_info=True)
+        print(f"❌ DuckDB write failed: {exc}", file=sys.stderr)
+        return 3
+    except export_facts.ExportError as exc:
+        LOGGER.error("Exporter failed", exc_info=True)
+        print(f"❌ Export failed: {exc}", file=sys.stderr)
+        return 3
 
     print(f"📄 Exported {export_result.rows} rows to {export_result.csv_path}")
 
@@ -146,8 +155,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     else:
         print("⚠️ DuckDB write stats unavailable; verifying manually…")
 
-    conn = duckdb_io.get_db(canonical_url)
+    conn = None
     try:
+        conn = duckdb_io.get_db(canonical_url)
+        duckdb_io.init_schema(conn)
         ym_values = _ym_candidates(export_result.dataframe)
         if ym_values:
             placeholders = ",".join(["?"] * len(ym_values))
@@ -155,21 +166,30 @@ def run(argv: Sequence[str] | None = None) -> int:
             total_rows = conn.execute(query, ym_values).fetchone()[0]
         else:
             total_rows = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
+    except Exception as exc:
+        LOGGER.error("Verification query failed", exc_info=True)
+        print(f"❌ Verification failed: {exc}", file=sys.stderr)
+        return 3
     finally:
-        try:
-            conn.close()
-        except Exception:  # pragma: no cover - cached connection may persist
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover - cached connection may persist
+                pass
 
-    if int(total_rows) < int(export_result.rows):
+    total_rows = int(total_rows)
+    exported_rows = int(export_result.rows)
+    if total_rows <= 0 or total_rows < exported_rows:
         LOGGER.error(
-            "Verification failed: DB rows (%s) less than exported rows (%s)",
+            "Verification failed: DB rows (%s) lower than exported rows (%s)",
             total_rows,
-            export_result.rows,
+            exported_rows,
         )
         return 3
 
     LOGGER.info("verification.ok | total_rows=%s", total_rows)
+    if not db_stats:
+        print(f"✅ Verified DuckDB row count: total {total_rows}")
 
     warnings = list(export_result.warnings)
     report_warnings = export_result.report.get("warnings") if export_result.report else []

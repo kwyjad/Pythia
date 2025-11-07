@@ -640,6 +640,12 @@ Need to populate a DuckDB file from the IDMC staging exports? The
 guide walks through the new `make idmc.db` helper and related inspection
 commands.
 
+Whenever `RESOLVER_DB_URL` is present in the environment the exporter now
+dual-writes into DuckDB automatically. Override the behaviour with
+`--write-db 0` (or `RESOLVER_WRITE_DB=0`) if you only want the CSV preview,
+otherwise expect both the diagnostics files and the `facts_resolved`
+upsert to complete together.
+
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
 > inside pytest temporary directories, so no binary fixtures need to be stored
 > in the repository.

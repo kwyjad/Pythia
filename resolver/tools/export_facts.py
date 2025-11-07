@@ -376,8 +376,10 @@ def _map_dtm_displacement_admin0(
 
 try:  # Optional dependency for DB dual-write
     from resolver.db import duckdb_io
+    from resolver.db.conn_shared import canonicalize_duckdb_target
 except Exception:  # pragma: no cover - allow exporter without duckdb installed
     duckdb_io = None
+    canonicalize_duckdb_target = None  # type: ignore[assignment]
 
 from resolver.common import (
     compute_series_semantics,
@@ -1480,15 +1482,36 @@ def _maybe_write_to_db(
     if duckdb_io is None:
         return {}
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
-    if db_url is not None:
-        db_url = db_url.strip()
-    else:
-        db_url = env_url
+    candidate = (db_url or "").strip() or env_url
     if write_db is None:
-        write_db = bool(db_url)
-    if not write_db or not db_url:
-        LOGGER.debug("DuckDB write skipped: disabled or missing RESOLVER_DB_URL")
+        write_db = bool(candidate)
+    write_db = bool(write_db)
+
+    if not candidate:
+        LOGGER.debug("DuckDB write skipped: no DuckDB URL configured")
         return {}
+    if not write_db:
+        LOGGER.info("DuckDB write disabled | db_url=%s", candidate)
+        return {}
+
+    canonical_url = candidate
+    canonical_path: Optional[str] = None
+    if canonicalize_duckdb_target is not None:
+        try:
+            canonical_path, canonical_url = canonicalize_duckdb_target(candidate)
+        except Exception as exc:  # pragma: no cover - defensive path
+            LOGGER.error(
+                "DuckDB target canonicalization failed | candidate=%s error=%s",
+                candidate,
+                exc,
+                exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+            )
+            if fail_on_error:
+                raise DuckDBWriteError(
+                    f"DuckDB target canonicalization failed for '{candidate}': {exc}",
+                    db_url=candidate,
+                ) from exc
+            return {}
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
@@ -1499,7 +1522,9 @@ def _maybe_write_to_db(
     conn = None
     stats: Dict[str, Dict[str, Any]] = {}
     try:
-        LOGGER.info("Writing exports to DuckDB at %s", db_url)
+        LOGGER.info(
+            "Writing exports to DuckDB | url=%s path=%s", canonical_url, canonical_path or ""
+        )
         if LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug(
                 "Resolved frame schema: %s",
@@ -1519,7 +1544,7 @@ def _maybe_write_to_db(
             )
         _warn_on_non_canonical_semantics("facts_resolved", resolved_prepared)
         _warn_on_non_canonical_semantics("facts_deltas", deltas_prepared)
-        conn = duckdb_io.get_db(db_url)
+        conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
             written_resolved = duckdb_io.upsert_dataframe(
@@ -1544,7 +1569,9 @@ def _maybe_write_to_db(
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
         if fail_on_error:
-            raise ExportError(f"DuckDB write failed: {exc}") from exc
+            raise DuckDBWriteError(
+                f"DuckDB write failed: {exc}", db_url=canonical_url
+            ) from exc
     finally:
         # Shared DuckDB connections are cached per URL; leave them open so
         # subsequent writers/readers reuse the same wrapper instance.
@@ -1567,6 +1594,14 @@ class ExportResult:
 
 class ExportError(RuntimeError):
     pass
+
+
+class DuckDBWriteError(ExportError):
+    """Raised when DuckDB persistence fails during an export."""
+
+    def __init__(self, message: str, *, db_url: str | None = None) -> None:
+        super().__init__(message)
+        self.db_url = db_url
 
 
 def _render_markdown_report(report: Mapping[str, Any]) -> str:
@@ -1755,30 +1790,47 @@ def export_facts(
     if not config_path.exists():
         raise ExportError(f"Config not found: {config_path}")
 
-    env_db_url = os.environ.get("RESOLVER_DB_URL", "").strip() or None
-    provided_db_url = db_url.strip() if isinstance(db_url, str) else None
-    effective_db_url = provided_db_url or env_db_url
+    env_db_url_raw = os.environ.get("RESOLVER_DB_URL", "").strip()
+    provided_db_url_raw = db_url.strip() if isinstance(db_url, str) else ""
+    selected_db_url_raw = provided_db_url_raw or env_db_url_raw
+
     env_write_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
     requested_write_flag = _parse_write_db_flag(write_db)
+    auto_enabled = False
     if requested_write_flag is None:
         if env_write_flag is None:
-            effective_write_flag = False
+            effective_write_flag = bool(selected_db_url_raw)
+            auto_enabled = bool(selected_db_url_raw)
         else:
             effective_write_flag = env_write_flag
     else:
         effective_write_flag = requested_write_flag
 
+    canonical_db_url = selected_db_url_raw or None
+    canonical_db_path: Optional[str] = None
+    if canonical_db_url and canonicalize_duckdb_target is not None:
+        try:
+            canonical_db_path, canonical_db_url = canonicalize_duckdb_target(canonical_db_url)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.debug(
+                "DuckDB canonicalisation failed | raw=%s error=%s", canonical_db_url, exc
+            )
+            canonical_db_url = selected_db_url_raw or None
+
     LOGGER.info(
-        "export.start | input=%s | out=%s | write_db=%s | db_url=%s",
+        "export.start | input=%s | out=%s | write_db=%s | db_url=%s | auto=%s",
         inp,
         out_dir,
         bool(effective_write_flag),
-        effective_db_url or "",
+        canonical_db_url or "",
+        auto_enabled,
     )
     if LOGGER.isEnabledFor(logging.DEBUG):
+        if canonical_db_path:
+            LOGGER.debug("export.db_path | %s", canonical_db_path)
         LOGGER.debug(
             "export.env | RESOLVER_DB_URL=%s RESOLVER_WRITE_DB=%s",
-            env_db_url or "",
+            env_db_url_raw or "",
             os.environ.get("RESOLVER_WRITE_DB", ""),
         )
 
@@ -2326,7 +2378,7 @@ def export_facts(
 
     db_write_stats = _maybe_write_to_db(
         facts_resolved=facts,
-        db_url=effective_db_url,
+        db_url=canonical_db_url or selected_db_url_raw,
         write_db=bool(effective_write_flag),
         fail_on_error=bool(effective_write_flag),
     )
@@ -2541,6 +2593,9 @@ def main():
             report_md_path=Path(args.report_md) if args.report_md else None,
             append_summary_path=Path(args.append_summary) if args.append_summary else None,
         )
+    except DuckDBWriteError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(3)
     except ExportError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
