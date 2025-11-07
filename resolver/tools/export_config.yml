@@ -34,6 +34,10 @@ constants:
   confidence: "med"
   revision: 1
 
+ignore:
+  filenames:
+    - "flow.csv.manifest.json"
+
 transforms:
   metric:
     in_need:    ["pin", "people_in_need", "in need", "in-need"]
@@ -137,13 +141,42 @@ sources:
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
+  - name: idmc_stock
+    allow_empty: true
+    match:
+      filename_regex: "(?i)resolver/staging/idmc/stock\\.csv$|(?i)^stock\\.csv$"
+    map:
+      iso3:
+        from: iso3
+        ops: [trim, uppercase]
+      as_of_date:
+        from_any: [as_of_date, date, displacement_date]
+        ops: [to_date]
+      metric:
+        const: idp_displacement_stock_idmc
+      value:
+        from: value
+        ops: [to_number]
+      series_semantics:
+        const: stock
+      semantics:
+        const: stock
+      source:
+        from_any: [source, source_label]
+        ops: [trim]
+    filters:
+      - keep_if_not_null: [iso3, as_of_date, value]
+      - keep_if_positive: [value]
+    dedupe:
+      keys: [iso3, as_of_date, metric]
+      keep: last
 metrics:
   idp_displacement_new_dtm:
     enabled: true
     series_semantics: new
     source: IOM DTM (admin0)
   idps_present:
-    enabled: true
+    enabled: false
     series_semantics: stock
     source: IOM DTM (admin0)
   new_displacements:

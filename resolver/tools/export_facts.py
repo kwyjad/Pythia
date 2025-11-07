@@ -1770,6 +1770,39 @@ def export_facts(
 
     cfg = _load_config(config_path)
 
+    ignore_cfg = cfg.get("ignore") if isinstance(cfg, Mapping) else None
+    ignore_names: set[str] = set()
+    ignore_patterns: list[re.Pattern[str]] = []
+    if isinstance(ignore_cfg, Mapping):
+        filenames = ignore_cfg.get("filenames")
+        if isinstance(filenames, Iterable) and not isinstance(filenames, (str, bytes)):
+            for name in filenames:
+                if not isinstance(name, str):
+                    continue
+                cleaned = name.strip().lower()
+                if cleaned:
+                    ignore_names.add(cleaned)
+        patterns = ignore_cfg.get("patterns")
+        if patterns is not None:
+            for raw_pattern in _ensure_iterable(patterns):
+                if not isinstance(raw_pattern, str):
+                    continue
+                try:
+                    ignore_patterns.append(re.compile(raw_pattern))
+                except re.error:  # pragma: no cover - defensive against bad config
+                    continue
+    if ignore_names or ignore_patterns:
+        filtered: List[Path] = []
+        for path in files:
+            name_lower = path.name.lower()
+            path_text = path.as_posix()
+            if name_lower in ignore_names:
+                continue
+            if any(pattern.search(path_text) for pattern in ignore_patterns):
+                continue
+            filtered.append(path)
+        files = filtered
+
     use_sources = isinstance(cfg, Mapping) and isinstance(cfg.get("sources"), Iterable)
 
     dtm_flow_enabled: bool = False
@@ -1815,18 +1848,62 @@ def export_facts(
                 unmatched_paths.append(file_path)
                 continue
 
+            relative_path = _relativize_path(file_path)
+            columns = [str(col) for col in frame.columns]
+            debug_entry: Dict[str, Any] = {
+                "file": relative_path,
+                "columns": columns,
+            }
+
             if frame.empty:
+                matched_cfg: Optional[Mapping[str, Any]] = None
+                attempts: List[Dict[str, Any]] = []
+                attempt_summary: Dict[str, Any] = {}
+                allow_empty = False
+                if use_sources:
+                    matched_cfg, attempts = _find_source_for_file(
+                        file_path, frame, sources_cfg
+                    )
+                    attempt_summary = _summarize_match_attempts(attempts)
+                    allow_empty = bool(
+                        matched_cfg is not None and matched_cfg.get("allow_empty")
+                    )
+                if allow_empty and matched_cfg is not None:
+                    mapped, detail = _apply_source(
+                        path=file_path, frame=frame, source_cfg=matched_cfg
+                    )
+                    detail.strategy = "config"
+                    source_details.append(detail)
+                    if not mapped.empty:
+                        mapped_frames.append(mapped)
+                    debug_entry.update(
+                        {
+                            "matched": True,
+                            "used_mapping": str(
+                                matched_cfg.get("name") or file_path.name
+                            ),
+                            "strategy": "config",
+                        }
+                    )
+                    if detail.dedupe_keys:
+                        debug_entry["dedupe"] = {
+                            "keys": detail.dedupe_keys,
+                            "keep": detail.dedupe_keep,
+                        }
+                    debug_records.append(debug_entry)
+                    continue
+
                 warning = f"{file_path.name}: no rows parsed (empty or invalid file)"
                 warnings.append(warning)
-                debug_records.append(
+                reasons = attempt_summary if attempt_summary else {"empty_input": True}
+                debug_entry.update(
                     {
-                        "file": _relativize_path(file_path),
                         "matched": False,
                         "used_mapping": None,
-                        "columns": [],
-                        "reasons": {"empty_input": True},
+                        "reasons": reasons,
                     }
                 )
+                debug_records.append(debug_entry)
                 source_details.append(
                     SourceApplication(
                         name=file_path.name,
@@ -1840,12 +1917,6 @@ def export_facts(
                 continue
 
             raw_frames.append((file_path, frame))
-            relative_path = _relativize_path(file_path)
-            columns = [str(col) for col in frame.columns]
-            debug_entry: Dict[str, Any] = {
-                "file": relative_path,
-                "columns": columns,
-            }
 
             if file_path.name.lower() == "dtm_displacement.csv":
                 mapped, meta = _map_dtm_displacement_admin0(frame, config=cfg)
