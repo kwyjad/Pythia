@@ -647,8 +647,12 @@ otherwise expect both the diagnostics files and the `facts_resolved`
 upsert to complete together. Paths handed to the helper can be relative or
 absolute; they are canonicalised to a `duckdb:///…` URL before writing so the
 export, verification query, and subsequent tooling all point at the same
-database file. Each run ends with a one-line summary that captures the exported
-rows, DuckDB delta/total counts, warning total, and the resulting exit code
+database file. To keep row counts aligned the helper copies only `flow.csv`
+(plus an optional `stock.csv`) into a temporary working directory before the
+exporter runs; additional artefacts such as `idmc_facts_flow.parquet` are
+skipped and reported in the warnings list. Each run ends with a one-line
+summary and a dedicated `Warnings:` block that capture the exported rows,
+DuckDB delta/total counts, warning total, and the resulting exit code
 (`0`=success, `2`=warnings under `--strict`, `3`=error).
 
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime

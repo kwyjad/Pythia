@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Sequence
 
@@ -139,21 +142,60 @@ def run(argv: Sequence[str] | None = None) -> int:
         _ensure_directory(Path(db_path).expanduser().resolve().parent)
     _log_staging_inventory(staging_dir)
 
-    try:
-        export_result = export_facts.export_facts(
-            inp=staging_dir,
-            out_dir=out_dir,
-            write_db=True,
-            db_url=canonical_url,
-        )
-    except export_facts.DuckDBWriteError as exc:
-        LOGGER.error("Exporter DuckDB write failed", exc_info=True)
-        print(f"❌ DuckDB write failed: {exc}", file=sys.stderr)
-        return 3
-    except export_facts.ExportError as exc:
-        LOGGER.error("Exporter failed", exc_info=True)
-        print(f"❌ Export failed: {exc}", file=sys.stderr)
-        return 3
+    flow_path = staging_dir / "flow.csv"
+    parquet_path = staging_dir / "idmc_facts_flow.parquet"
+    stock_path = staging_dir / "stock.csv"
+    has_flow = flow_path.is_file()
+    has_parquet = parquet_path.is_file()
+    has_stock = stock_path.is_file()
+
+    inferred_warnings: list[str] = []
+    if not has_stock:
+        inferred_warnings.append("stock.csv: not present")
+
+    with ExitStack() as stack:
+        input_dir = staging_dir
+        if has_flow:
+            temp_dir = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="idmc_single_source_")
+            )
+            work_dir = Path(temp_dir)
+            shutil.copy2(flow_path, work_dir / flow_path.name)
+            LOGGER.info(
+                "single_source.flow_only | work_dir=%s copy_stock=%s skip_parquet=%s",
+                work_dir,
+                has_stock,
+                has_parquet,
+            )
+            if has_stock:
+                shutil.copy2(stock_path, work_dir / stock_path.name)
+            if has_parquet:
+                inferred_warnings.append(
+                    "idmc_facts_flow.parquet: skipped to avoid double-counting"
+                )
+            input_dir = work_dir
+        else:
+            LOGGER.info(
+                "single_source.flow_missing | staging=%s parquet_present=%s",
+                staging_dir,
+                has_parquet,
+            )
+
+        try:
+            export_result = export_facts.export_facts(
+                inp=input_dir,
+                out_dir=out_dir,
+                write_db=True,
+                db_url=canonical_url,
+            )
+        except export_facts.DuckDBWriteError as exc:
+            LOGGER.error("Exporter DuckDB write failed", exc_info=True)
+            print(f"❌ DuckDB write failed: {exc}", file=sys.stderr)
+            return 3
+        except export_facts.ExportError as exc:
+            LOGGER.error("Exporter failed", exc_info=True)
+            print(f"❌ Export failed: {exc}", file=sys.stderr)
+            return 3
 
     print(f"📄 Exported {export_result.rows} rows to {export_result.csv_path}")
 
@@ -202,16 +244,30 @@ def run(argv: Sequence[str] | None = None) -> int:
     if not db_stats:
         print(f"✅ Verified DuckDB row count: total {total_rows}")
 
-    warnings = list(export_result.warnings)
+    warnings: list[str] = []
+    seen: set[str] = set()
+
+    for warning in inferred_warnings:
+        if warning and warning not in seen:
+            warnings.append(warning)
+            seen.add(warning)
+
+    export_warnings = list(export_result.warnings or [])
     report_warnings = export_result.report.get("warnings") if export_result.report else []
-    for warning in report_warnings or []:
-        if warning not in warnings:
-            warnings.append(str(warning))
+    for warning in (export_warnings or []) + (report_warnings or []):
+        if not warning:
+            continue
+        message = str(warning)
+        if message not in seen:
+            warnings.append(message)
+            seen.add(message)
 
     if warnings:
         print("Warnings:")
         for message in warnings:
             print(f" - ⚠️ {message}")
+    else:
+        print("Warnings: none")
 
     rows_delta = 0
     rows_total = total_rows

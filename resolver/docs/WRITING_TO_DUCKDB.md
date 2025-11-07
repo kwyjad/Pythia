@@ -42,12 +42,24 @@ The command prints a short summary similar to:
 ```
 📄 Exported 5 rows to diagnostics/ingestion/export_preview/facts.csv
 ✅ Wrote 5 rows to DuckDB (facts_resolved) — total 5
+Warnings: none
 Summary: Exported 5 rows; wrote 5 rows (total 5) to DuckDB @ /abs/path/resolver.duckdb; warnings: 0; exit=0
 Sources:
  - idmc_flow
 ```
 
-A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-running the target is idempotent—the row counts remain stable while updated values replace older entries. Exit codes mirror that summary: `0` for success, `2` when `--strict` escalates warnings, and `3` when verification or the exporter fails.
+A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-running the target is idempotent—the row counts remain stable while updated values replace older entries. Exit codes mirror that summary: `0` for success, `2` when `--strict` escalates warnings, and `3` when verification or the exporter fails. The helper always prints a `Warnings:` block; `Warnings: none` means the run was clean while any listed entries are compatible with strict-mode exit code `2`.
+
+## Single-source selection
+
+The helper focuses on the canonical `flow.csv` export. When both `flow.csv` and
+`idmc_facts_flow.parquet` are staged the CLI copies only the CSV (and an
+optional `stock.csv`) into a temporary working directory before calling the
+exporter. This avoids double-counting the same rows while leaving the original
+staging assets untouched. The skipped Parquet file is recorded as a warning so
+you can confirm the behaviour in the `Warnings:` block. Missing `stock.csv`
+also appears as a warning; rerun with `--strict` to promote those conditions to
+exit code `2`.
 
 ## Inspect the database
 
@@ -74,6 +86,9 @@ make db.path
 ## Common pitfalls
 
 * **Missing or empty `stock.csv`:** the exporter logs a warning but still writes the flow rows. Use `--strict` (or set `RESOLVER_WRITE_STRICT=1`) if you want the process to fail when warnings occur.
+* **Parquet staged alongside `flow.csv`:** the helper intentionally skips
+  `idmc_facts_flow.parquet` to avoid writing duplicate rows. The skip appears in
+  the warnings list.
 * **Staging directory absent:** confirm the path in `resolver/staging/idmc/` contains the expected `flow.csv` (and optional `stock.csv`) before running `make idmc.db`.
 * **DuckDB not installed:** install the `duckdb` Python package (via `pip install duckdb`) or run the repo's `dev-setup` script.
 
