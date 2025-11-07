@@ -1814,11 +1814,15 @@ def main(argv: list[str] | None = None) -> int:
         }
         fallback_details = diagnostics.get("fallback") if diagnostics else None
         fallback_used_flag = bool(diagnostics.get("fallback_used")) if diagnostics else False
+        fallback_rows = None
         fallback_payload: Dict[str, Any] = {
             "used": fallback_used_flag,
             "resource_url": None,
         }
         if isinstance(fallback_details, Mapping):
+            fallback_payload["used"] = bool(fallback_details.get("used", fallback_used_flag))
+            if fallback_details.get("rows") is not None:
+                fallback_rows = fallback_details.get("rows")
             resource_url = fallback_details.get("resource_url")
             if resource_url is None and isinstance(
                 fallback_details.get("hdx_attempt"), Mapping
@@ -1836,6 +1840,10 @@ def main(argv: list[str] | None = None) -> int:
             fallback_payload["resource_url"] = resource_url
             if fallback_used_flag and fallback_details.get("reason"):
                 fallback_payload["reason"] = fallback_details.get("reason")
+            if fallback_rows is None and fallback_details.get("rows") is not None:
+                fallback_rows = fallback_details.get("rows")
+        if fallback_rows is not None:
+            fallback_payload["rows"] = fallback_rows
         why_zero_payload["fallback"] = fallback_payload
         if zero_rows_reason_value:
             why_zero_payload["zero_rows_reason"] = zero_rows_reason_value

@@ -72,6 +72,7 @@ HELIX_BASE = (
     or HELIX_DEFAULT_BASE
 )
 HELIX_DISPLACEMENTS_PATH = "/external-api/gidd/displacements"
+HELIX_LAST180_PATH = "/external-api/idus/last-180-days/"
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 DEFAULT_READ_TIMEOUT_S = 25.0
@@ -800,15 +801,24 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
         identifier = str(resource.get("id", "")).strip()
         url = str(resource.get("url", "")).strip()
         name = str(resource.get("name", "")).strip()
+        description = str(resource.get("description", "")).strip()
         stamp = str(resource.get("last_modified") or resource.get("created") or "")
+        lowered_name = name.lower()
+        lowered_description = description.lower()
+        keyword_match = any(
+            keyword in lowered_name or keyword in lowered_description
+            for keyword in ("displacement", "disaggreg")
+        )
         csv_candidates.append(
             {
                 "id": identifier,
                 "url": url,
                 "name": name,
+                "description": description,
                 "timestamp": stamp,
                 "preferred": "idus_view_flat" in name.lower()
                 or "idus_view_flat" in url.lower(),
+                "keyword": keyword_match,
             }
         )
     diagnostics["resource_candidates"] = len(csv_candidates)
@@ -828,17 +838,24 @@ def _hdx_fetch_once() -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
         diagnostics["resource_configured_id"] = resource_target
 
     if selected is None:
+        keyword_matches = [c for c in csv_candidates if c.get("keyword")]
+        if keyword_matches:
+            selected = dict(keyword_matches[0])
+            diagnostics["resource_selection"] = "keyword"
+
+    if selected is None:
         preferred = [c for c in csv_candidates if c.get("preferred")]
         if preferred:
             selected = dict(preferred[-1])
             diagnostics["resource_selection"] = "preferred"
 
     if selected is None:
-        selected = dict(csv_candidates[-1])
+        selected = dict(csv_candidates[0])
         diagnostics["resource_selection"] = "fallback"
 
     diagnostics["resource_id"] = selected.get("id")
     diagnostics["resource_name"] = selected.get("name")
+    diagnostics["resource_description"] = selected.get("description") or None
     diagnostics["resource_preferred"] = bool(selected.get("preferred"))
 
     resource_url = str(selected.get("url") or "").strip()
@@ -961,9 +978,10 @@ def _fetch_hdx_displacements(
 
     diagnostics: Dict[str, Any] = {
         "source": "hdx",
-        "source_tag": "idmc_idu",
+        "source_tag": "idmc_hdx",
     }
-    empty = pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS))
+    canonical_columns = list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]
+    empty = pd.DataFrame(columns=canonical_columns)
     if not package_id:
         diagnostics["error"] = "missing_hdx_package_id"
         diagnostics["zero_rows_reason"] = "hdx_missing_package_id"
@@ -980,11 +998,22 @@ def _fetch_hdx_displacements(
         return empty, diagnostics
 
     try:
-        raw = pd.read_csv(resource_url)
-    except Exception as exc:  # pragma: no cover - network dependent
+        payload_bytes, payload_diag = _hdx_download_resource(resource_url)
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
         diagnostics["error"] = f"hdx_download_error:{exc.__class__.__name__}"
         diagnostics["exception"] = exc.__class__.__name__
         diagnostics.setdefault("zero_rows_reason", "hdx_download_error")
+        return empty, diagnostics
+
+    diagnostics["resource_status_code"] = payload_diag.get("status_code")
+    diagnostics["resource_bytes"] = payload_diag.get("bytes")
+    diagnostics["resource_content_length"] = payload_diag.get("content_length")
+
+    try:
+        raw = _read_csv_from_bytes(payload_bytes)
+    except Exception as exc:  # pragma: no cover - defensive
+        diagnostics["error"] = f"csv_parse_error:{exc.__class__.__name__}"
+        diagnostics.setdefault("zero_rows_reason", "hdx_empty_or_bad_header")
         return empty, diagnostics
 
     diagnostics["resource_rows"] = int(raw.shape[0])
@@ -996,22 +1025,76 @@ def _fetch_hdx_displacements(
         if isinstance(code, str) and code.strip()
     ]
     iso_batches: List[List[str]] = [iso_scope] if iso_scope else []
-
-    aggregated = _hdx_prepare_monthly_flow(
-        raw,
-        iso_batches=iso_batches,
-        chunk_start=None,
-        chunk_end=None,
-        window_start=start_date,
-        window_end=end_date,
-        source_tag="idmc_idu",
+    columns_lower = {str(column).strip().lower(): column for column in raw.columns}
+    iso_candidates = ("iso3", "countryiso3", "country iso3")
+    date_candidates = (
+        "displacement_date",
+        "event_date",
+        "start_date",
+        "date",
+        "month",
     )
+    value_candidates = ("new_displacements", "new displacements", "figure")
 
+    iso_column = next((columns_lower.get(name) for name in iso_candidates if name in columns_lower), None)
+    date_column = next((columns_lower.get(name) for name in date_candidates if name in columns_lower), None)
+    value_column = None
+    for name in value_candidates:
+        if name in columns_lower:
+            value_column = columns_lower[name]
+            break
+    if value_column is None and "figure" in columns_lower:
+        value_column = columns_lower["figure"]
+
+    if iso_column is None or date_column is None or value_column is None:
+        diagnostics.setdefault("fallback_reason", "missing_required_columns")
+        diagnostics.setdefault("zero_rows_reason", "hdx_missing_required_columns")
+        return empty, diagnostics
+
+    working = raw.rename(
+        columns={
+            iso_column: "iso3",
+            date_column: "event_date",
+            value_column: "value",
+        }
+    )
+    subset = working.loc[:, ["iso3", "event_date", "value"]].copy()
+    subset["iso3"] = subset["iso3"].astype(str).str.strip().str.upper()
+    subset["event_date"] = pd.to_datetime(subset["event_date"], errors="coerce")
+    subset["value"] = pd.to_numeric(subset["value"], errors="coerce")
+    subset = subset.dropna(subset=["iso3", "event_date", "value"])
+    subset = subset.loc[subset["value"] >= 0]
+
+    if start_date is not None:
+        subset = subset.loc[subset["event_date"] >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        subset = subset.loc[subset["event_date"] <= pd.Timestamp(end_date)]
+    if iso_batches:
+        allowed = {code for batch in iso_batches for code in batch}
+        subset = subset.loc[subset["iso3"].isin(allowed)]
+
+    if subset.empty:
+        diagnostics.setdefault("zero_rows_reason", "hdx_filtered_empty")
+        return empty, diagnostics
+
+    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp("M")
+    aggregated = (
+        subset.groupby(["iso3", "as_of_date"], as_index=False)["value"].sum()
+    )
     if aggregated.empty:
         diagnostics.setdefault("zero_rows_reason", "hdx_aggregation_empty")
-        return aggregated, diagnostics
+        return empty, diagnostics
+
+    aggregated["metric"] = FLOW_METRIC
+    aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
+    aggregated["source"] = "idmc_hdx"
+    aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
+    aggregated[HDX_PREAGG_COLUMN] = True
+    aggregated = aggregated.loc[:, canonical_columns]
 
     diagnostics["rows"] = int(aggregated.shape[0])
+    diagnostics["resource_url"] = resource_url
+    diagnostics["used"] = True
     return aggregated, diagnostics
 
 
@@ -1021,6 +1104,102 @@ def _helix_client_id() -> Optional[str]:
         return None
     cleaned = str(raw).strip()
     return cleaned or None
+
+
+def _fetch_helix_idus_last180(
+    client_id: Optional[str],
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    diagnostics: Dict[str, Any] = {
+        "status": None,
+        "bytes": 0,
+        "last_request_path": None,
+        "http_status_counts": serialize_http_status_counts(None),
+    }
+
+    resolved_client = (client_id or "").strip()
+    if not resolved_client:
+        diagnostics["error"] = "missing_client_id"
+        diagnostics["zero_rows_reason"] = "helix_last180_missing_client_id"
+        return pd.DataFrame(columns=["iso3", "event_date", "value"]), diagnostics
+
+    url = (
+        f"{HELIX_BASE}{HELIX_LAST180_PATH}?client_id={resolved_client}&format=json"
+    )
+    path = _request_path(url)
+    if resolved_client:
+        path = path.replace(resolved_client, "REDACTED")
+    diagnostics["last_request_path"] = path
+
+    headers = _build_http_headers({"Accept": "application/json"})
+    connect_timeout_s, read_timeout_s = _http_timeouts()
+    verify_setting = _http_verify()
+
+    try:
+        status, _response_headers, body, http_diag = http_get(
+            url,
+            headers=headers,
+            timeout=(connect_timeout_s, read_timeout_s),
+            retries=0,
+            verify=verify_setting,
+        )
+    except HttpRequestError as exc:
+        error_diag = exc.diagnostics or {}
+        if not isinstance(error_diag, Mapping):
+            error_diag = {"details": error_diag}
+        diagnostics.update({
+            "status": error_diag.get("status"),
+            "error": error_diag or exc.message,
+        })
+        diagnostics.setdefault("zero_rows_reason", "helix_last180_http_error")
+        bucket = _http_status_bucket(diagnostics.get("status"))
+        diagnostics["http_status_counts"] = serialize_http_status_counts(
+            {bucket: 1} if bucket else None
+        )
+        return pd.DataFrame(columns=["iso3", "event_date", "value"]), diagnostics
+
+    diagnostics["status"] = status
+    diagnostics["bytes"] = len(body or b"")
+    diagnostics["url"] = url.replace(resolved_client, "REDACTED")
+    if http_diag:
+        diagnostics["http"] = dict(http_diag)
+    bucket = _http_status_bucket(status)
+    diagnostics["http_status_counts"] = serialize_http_status_counts(
+        {bucket: 1} if bucket else None
+    )
+
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else []
+    except (TypeError, ValueError):
+        diagnostics["error"] = "invalid_json"
+        diagnostics.setdefault("zero_rows_reason", "helix_last180_invalid_json")
+        return pd.DataFrame(columns=["iso3", "event_date", "value"]), diagnostics
+
+    if not isinstance(payload, list):
+        diagnostics.setdefault("zero_rows_reason", "helix_last180_not_list")
+        return pd.DataFrame(columns=["iso3", "event_date", "value"]), diagnostics
+
+    records: List[Dict[str, Any]] = []
+    for entry in payload:
+        if not isinstance(entry, Mapping):
+            continue
+        iso_value = entry.get("iso3") or entry.get("ISO3")
+        date_value = (
+            entry.get("displacement_date")
+            or entry.get("event_date")
+            or entry.get("start_date")
+            or entry.get("date")
+        )
+        value = entry.get("new_displacements")
+        if value is None:
+            value = entry.get("figure")
+        records.append({
+            "iso3": iso_value,
+            "event_date": date_value,
+            "value": value,
+        })
+
+    frame = pd.DataFrame(records, columns=["iso3", "event_date", "value"])
+    return frame, diagnostics
 
 
 def _fetch_helix_last180(
@@ -1090,7 +1269,11 @@ def _fetch_helix_last180(
     query = urlencode({key: value for key, value in params.items() if value})
     url = f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}?{query}" if query else f"{HELIX_BASE}{HELIX_DISPLACEMENTS_PATH}"
     diagnostics["url"] = url.replace(client_id, "REDACTED")
-    diagnostics["path"] = _request_path(url)
+    path_value = _request_path(url)
+    if client_id:
+        path_value = path_value.replace(client_id, "REDACTED")
+    diagnostics["path"] = path_value
+    diagnostics["last_request_path"] = path_value
     diagnostics["release_environment"] = release_env
     diagnostics["iso_scope"] = iso_values
     diagnostics["requests_planned"] = 1
@@ -1595,6 +1778,52 @@ def _normalise_fallback_monthly_flow(
     aggregated["source"] = source_tag
     aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
     aggregated[HDX_PREAGG_COLUMN] = True
+    return aggregated.loc[:, canonical_columns]
+
+
+def _normalise_helix_last180_monthly(
+    frame: pd.DataFrame,
+    *,
+    window_start: Optional[date],
+    window_end: Optional[date],
+    countries: Iterable[str] | None,
+) -> pd.DataFrame:
+    canonical_columns = list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=canonical_columns)
+
+    working = frame.copy()
+    working["iso3"] = working["iso3"].astype(str).str.strip().str.upper()
+    working["event_date"] = pd.to_datetime(working["event_date"], errors="coerce")
+    working["value"] = pd.to_numeric(working["value"], errors="coerce")
+
+    allowed_countries = {
+        code.strip().upper()
+        for code in (countries or [])
+        if isinstance(code, str) and code.strip()
+    }
+
+    subset = working.dropna(subset=["iso3", "event_date", "value"])
+    subset = subset.loc[subset["value"] >= 0]
+    if window_start is not None:
+        subset = subset.loc[subset["event_date"] >= pd.Timestamp(window_start)]
+    if window_end is not None:
+        subset = subset.loc[subset["event_date"] <= pd.Timestamp(window_end)]
+    if allowed_countries:
+        subset = subset.loc[subset["iso3"].isin(allowed_countries)]
+    if subset.empty:
+        return pd.DataFrame(columns=canonical_columns)
+
+    subset["as_of_date"] = (
+        subset["event_date"].dt.to_period("M").dt.to_timestamp(how="end").dt.floor("D")
+    )
+
+    aggregated = subset.groupby(["iso3", "as_of_date"], as_index=False)["value"].sum()
+    aggregated["metric"] = FLOW_METRIC
+    aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
+    aggregated["source"] = "idmc_idu"
+    aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
+    aggregated[HDX_PREAGG_COLUMN] = False
     return aggregated.loc[:, canonical_columns]
 
 
@@ -2621,6 +2850,7 @@ def fetch(
         window_end = end_alias
 
     helix_client_id = helix_client_id or _helix_client_id()
+    helix_last180_diag: Optional[Dict[str, Any]] = None
 
     if rate_per_sec is not None:
         rate = rate_per_sec
@@ -3116,6 +3346,64 @@ def fetch(
     ordered_frames = [frames[index] for index in sorted(frames)]
     combined = _combine_frames(ordered_frames)
 
+    monthly_frames: List[pd.DataFrame] = []
+    if not combined.empty:
+        monthly_frames.append(combined)
+
+    helix_last180_frame: Optional[pd.DataFrame] = None
+    helix_last180_fallback_summary: Optional[Dict[str, Any]] = None
+    if network_mode == "live" and helix_client_id:
+        helix_last180_frame, helix_last180_diag = _fetch_helix_idus_last180(helix_client_id)
+        status_value = helix_last180_diag.get("status") if helix_last180_diag else None
+        helix_success = isinstance(status_value, int) and 200 <= status_value < 300
+        if helix_success and helix_last180_frame is not None and not helix_last180_frame.empty:
+            helix_normalized = _normalise_helix_last180_monthly(
+                helix_last180_frame,
+                window_start=window_start,
+                window_end=window_end,
+                countries=countries,
+            )
+            if not helix_normalized.empty:
+                monthly_frames.append(helix_normalized)
+        elif fallback_allowed:
+            hdx_frame, hdx_diag = _fetch_hdx_displacements(
+                package_id=hdx_package_id,
+                base_url=hdx_base_url,
+                start_date=window_start,
+                end_date=window_end,
+                iso3_list=countries,
+            )
+            hdx_rows = int(hdx_frame.shape[0]) if isinstance(hdx_frame, pd.DataFrame) else 0
+            if hdx_frame is not None and not hdx_frame.empty:
+                monthly_frames.append(hdx_frame)
+            summary = {
+                "used": bool(hdx_rows),
+                "rows": hdx_rows,
+                "type": "hdx",
+            }
+            for key in (
+                "resource_url",
+                "dataset",
+                "package_url",
+                "package_status_code",
+                "resource_status_code",
+                "resource_bytes",
+                "resource_content_length",
+                "resource_id",
+                "resource_selection",
+                "fallback_reason",
+                "zero_rows_reason",
+            ):
+                value = hdx_diag.get(key)
+                if value is not None:
+                    summary[key] = value
+            helix_last180_fallback_summary = summary
+
+    if monthly_frames:
+        combined = _combine_frames(monthly_frames)
+    else:
+        combined = pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN])
+
     total_rows = int(len(combined))
     total_requests = 0
     total_retries = 0
@@ -3365,6 +3653,25 @@ def fetch(
         fallback_summary["details"] = fallback_details
     elif fallback_used_total:
         fallback_summary = {"used": True, "rows": int(fallback_rows_total)}
+
+    if helix_last180_fallback_summary:
+        helix_entry = dict(helix_last180_fallback_summary)
+        if helix_entry.get("used"):
+            fallback_used_total = True
+        if fallback_summary:
+            details_list = list(fallback_summary.get("details", []))
+            details_list.append(helix_entry)
+            fallback_summary["details"] = details_list
+            try:
+                fallback_summary["rows"] = int(fallback_summary.get("rows", 0) or 0) + int(
+                    helix_entry.get("rows", 0) or 0
+                )
+            except (TypeError, ValueError):
+                fallback_summary["rows"] = helix_entry.get("rows")
+            if "resource_url" not in fallback_summary and helix_entry.get("resource_url"):
+                fallback_summary["resource_url"] = helix_entry.get("resource_url")
+        else:
+            fallback_summary = helix_entry
     if fallback_summary and fallback_diag_cache_fetch:
         for meta_key in (
             "dataset",
@@ -3459,6 +3766,11 @@ def fetch(
         "fallback_used": bool(fallback_used_total),
         "http_timeouts": http_timeouts_cfg,
     }
+    if helix_last180_diag is not None and helix_last180_fallback_summary:
+        helix_last180_diag = dict(helix_last180_diag)
+        helix_last180_diag.setdefault("fallback", helix_last180_fallback_summary)
+    if helix_last180_diag is not None:
+        diagnostics["helix_last180"] = dict(helix_last180_diag)
     if network_mode == "helix":
         helix_block = dict(helix_summary or {})
         helix_block.setdefault("raw_rows", int((helix_summary or {}).get("raw_rows", 0) or 0))
