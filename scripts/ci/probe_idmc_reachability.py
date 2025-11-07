@@ -1,7 +1,6 @@
 """Connectivity probe for the IDMC PostgREST endpoint."""
 from __future__ import annotations
 
-import calendar
 import json
 import os
 import socket
@@ -31,7 +30,7 @@ SUMMARY_PATH = MARKDOWN_PATH
 TARGET_HOST = os.getenv("IDMC_PROBE_HOST", "backend.idmcdb.org").strip() or "backend.idmcdb.org"
 TARGET_PORT = int(os.getenv("IDMC_PROBE_PORT", "443"))
 TARGET_PATH = os.getenv(
-    "IDMC_PROBE_PATH", "external-api/gidd/displacements"
+    "IDMC_PROBE_PATH", "external-api/idus/last-180-days/"
 ).lstrip("/")
 TARGET_SCHEME = os.getenv("IDMC_PROBE_SCHEME", "https").strip() or "https"
 TARGET_URL = os.getenv(
@@ -42,11 +41,12 @@ HELIX_BASE_URL = (
     os.getenv("IDMC_HELIX_BASE_URL", "https://helix-tools-api.idmcdb.org").strip()
     or "https://helix-tools-api.idmcdb.org"
 )
-HELIX_DISPLACEMENTS_PATH = "/external-api/gidd/displacements"
+HELIX_LAST180_PATH = "/external-api/idus/last-180-days/"
 HELIX_CLIENT_ID = os.getenv("IDMC_HELIX_CLIENT_ID", "").strip()
 HELIX_ENABLED = bool(HELIX_CLIENT_ID)
 SUMMARY_TITLE = "IDMC Reachability"
 DISPLAY_URL = TARGET_URL
+DISPLAY_PATH: Optional[str] = None
 
 
 def _env_truthy(value: str | None) -> bool:
@@ -66,26 +66,8 @@ HDX_BASE_URL = (
 
 if HELIX_ENABLED:
     helix_base = HELIX_BASE_URL.rstrip("/")
-    today = datetime.now(timezone.utc).date()
-    month_start = today.replace(day=1)
-    month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
-    iso_candidate = os.getenv("IDMC_PROBE_ISO3", "FRA").strip() or "FRA"
-    release_env = (
-        os.getenv("IDMC_HELIX_VERSION", "").strip()
-        or os.getenv("IDMC_HELIX_ENV", "").strip()
-        or "RELEASE"
-    )
-    helix_params = {
-        "start": month_start.isoformat(),
-        "end": month_end.isoformat(),
-        "iso3": iso_candidate,
-        "limit": "1",
-        "release_environment": release_env,
-    }
-    if HELIX_CLIENT_ID:
-        helix_params["client_id"] = HELIX_CLIENT_ID
-    helix_query = urlencode({key: value for key, value in helix_params.items() if value})
-    helix_url = f"{helix_base}{HELIX_DISPLACEMENTS_PATH}?{helix_query}"
+    helix_query = urlencode({"client_id": HELIX_CLIENT_ID, "format": "json"})
+    helix_url = f"{helix_base}{HELIX_LAST180_PATH}?{helix_query}"
     parsed = urlparse(helix_url)
     if parsed.scheme:
         TARGET_SCHEME = parsed.scheme
@@ -107,9 +89,16 @@ if HELIX_ENABLED:
         )
     )
     DISPLAY_URL = TARGET_URL
+    SUMMARY_TITLE = "Helix (IDU last-180-days) Reachability"
     if HELIX_CLIENT_ID:
         DISPLAY_URL = DISPLAY_URL.replace(HELIX_CLIENT_ID, "REDACTED")
-    SUMMARY_TITLE = "Helix (GIDD) Reachability"
+        display_query = parsed.query.replace(HELIX_CLIENT_ID, "REDACTED")
+    else:
+        display_query = parsed.query
+    display_path = parsed.path
+    if display_query:
+        display_path = f"{display_path}?{display_query}"
+    DISPLAY_PATH = display_path
 
 _path_split = TARGET_PATH.split("?", 1)
 _path_only = _path_split[0]
@@ -519,15 +508,18 @@ def build_markdown(payload: Mapping[str, Any]) -> str:
         status_value = http.get("status_code")
         if status_value is None:
             status_value = http.get("status")
+        path_display = target.get("path") if isinstance(target, Mapping) else None
+        if not path_display:
+            path_display = (payload.get("helix", {}) or {}).get("path")
         if status_value is not None:
-            line = f"- HTTP GET: status {status_value}"
+            line = f"- HTTP GET: path={path_display or 'unknown'} status={status_value}"
+            if http.get("bytes") is not None:
+                line += f" bytes={http.get('bytes')}"
             if http.get("elapsed_ms") is not None:
                 line += f" ({http.get('elapsed_ms')}ms)"
-            if http.get("bytes"):
-                line += f" bytes={http.get('bytes')}"
         else:
             error = http.get("exception") or http.get("error") or "unknown"
-            line = f"- HTTP GET: error {error}"
+            line = f"- HTTP GET: path={path_display or 'unknown'} error {error}"
             if http.get("elapsed_ms") is not None:
                 line += f" after {http.get('elapsed_ms')}ms"
         lines.append(line)
@@ -590,6 +582,15 @@ def main() -> int:
     display_url = runtime_url
     if HELIX_CLIENT_ID:
         display_url = display_url.replace(HELIX_CLIENT_ID, "REDACTED")
+    if DISPLAY_PATH is not None:
+        display_path = DISPLAY_PATH
+    else:
+        display_query = parsed_runtime.query
+        if HELIX_CLIENT_ID and display_query:
+            display_query = display_query.replace(HELIX_CLIENT_ID, "REDACTED")
+        display_path = parsed_runtime.path
+        if display_query:
+            display_path = f"{display_path}?{display_query}"
 
     started_iso = _now_iso()
     dns_info = probe_dns(target_host)
@@ -606,7 +607,12 @@ def main() -> int:
             timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
         )
     payload: Dict[str, Any] = {
-        "target": {"host": target_host, "port": target_port, "url": display_url},
+        "target": {
+            "host": target_host,
+            "port": target_port,
+            "url": display_url,
+            "path": display_path,
+        },
         "generated_at": started_iso,
         "completed_at": _now_iso(),
         "dns": dns_info,
@@ -630,8 +636,8 @@ def main() -> int:
         payload["hdx"] = hdx_info
     if HELIX_ENABLED:
         parsed_display = urlparse(display_url)
-        helix_path = parsed_display.path or ""
-        if parsed_display.query:
+        helix_path = DISPLAY_PATH or parsed_display.path or ""
+        if not DISPLAY_PATH and parsed_display.query:
             helix_path = f"{helix_path}?{parsed_display.query}"
         payload["helix"] = {
             "url": display_url,

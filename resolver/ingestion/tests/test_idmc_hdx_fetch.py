@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from resolver.ingestion.idmc import client, config
+from resolver.ingestion.idmc.export import FLOW_EXPORT_COLUMNS
 from resolver.ingestion.idmc.http import HttpRequestError
 
 
@@ -123,7 +124,9 @@ def test_idmc_hdx_single_download_reused(monkeypatch: pytest.MonkeyPatch, cfg: c
     monthly = frames.get("monthly_flow")
     assert monthly is not None
     assert isinstance(monthly, pd.DataFrame)
-    assert int(monthly["figure"].sum()) == 300
+    assert set(FLOW_EXPORT_COLUMNS).issubset(monthly.columns)
+    assert int(monthly["value"].sum()) == 300
+    assert set(monthly["source"].unique()).issubset({"idmc_idu", "idmc_hdx"})
     assert diagnostics.get("fallback_used") is True
 
 
@@ -215,14 +218,91 @@ def test_idmc_helix_fallback(
 
     monthly = frames.get("monthly_flow")
     assert monthly is not None
-    assert "idmc_source" in monthly.columns
-    assert set(monthly["idmc_source"].unique()) == {"idmc_gidd"}
+    assert set(FLOW_EXPORT_COLUMNS).issubset(monthly.columns)
+    assert set(monthly["source"].unique()) == {"idmc_gidd"}
 
 
 def test_idmc_value_alias_includes_figure() -> None:
     cfg_obj = config.load()
     aliases = cfg_obj.field_aliases.value_flow
     assert "figure" in aliases
+
+
+def test_hdx_displacements_parses_small_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    csv_rows = [
+        "CountryISO3,displacement_date,figure",
+        "AFG,2024-01-05,5",
+        "AFG,2024-01-20,7",
+        "AFG,2024-02-10,9",
+    ]
+    payload = ("\n".join(csv_rows) + "\n").encode("utf-8")
+
+    def fake_pick(*_args: Any, **_kwargs: Any) -> tuple[str, Dict[str, Any]]:
+        return "https://example.invalid/tiny.csv", {}
+
+    def fake_download(*_args: Any, **_kwargs: Any) -> tuple[bytes, Dict[str, Any]]:
+        return payload, {"status_code": 200, "bytes": len(payload), "content_length": len(payload)}
+
+    monkeypatch.setattr(client, "_hdx_pick_displacement_csv", fake_pick)
+    monkeypatch.setattr(client, "_hdx_download_resource", fake_download)
+
+    frame, diagnostics = client._fetch_hdx_displacements(
+        package_id="pkg",
+        base_url="https://example.invalid",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 2, 29),
+        iso3_list=["AFG"],
+    )
+
+    assert diagnostics.get("rows") == 2
+    assert diagnostics.get("used") is True
+    assert diagnostics.get("resource_bytes") == len(payload)
+    expected_columns = set(FLOW_EXPORT_COLUMNS) | {"__hdx_preaggregated__"}
+    assert set(frame.columns) == expected_columns
+    assert "figure" not in frame.columns
+    values = dict(zip(frame["as_of_date"].astype(str), frame["value"].astype(int)))
+    assert values == {"2024-01-31": 12, "2024-02-29": 9}
+    assert set(frame["source"].unique()) == {"idmc_hdx"}
+
+
+def test_helix_last180_fallback_respects_env_disable(
+    monkeypatch: pytest.MonkeyPatch, cfg: config.IdmcConfig
+) -> None:
+    monkeypatch.setenv("IDMC_ALLOW_HDX_FALLBACK", "0")
+    monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "dummy-client")
+
+    monkeypatch.setattr(
+        client,
+        "_fetch_helix_idus_last180",
+        lambda *_args, **_kwargs: (pd.DataFrame(), {"status": 502}),
+    )
+
+    called = False
+
+    def forbidden_fetch(*_args: Any, **_kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
+        nonlocal called
+        called = True
+        return pd.DataFrame(), {}
+
+    monkeypatch.setattr(client, "_fetch_hdx_displacements", forbidden_fetch)
+    monkeypatch.setattr(
+        client,
+        "fetch_idu_json",
+        lambda *args, **kwargs: (pd.DataFrame(), {"mode": "cache", "http": {}}),
+    )
+
+    frames, diagnostics = client.fetch(
+        cfg,
+        network_mode="live",
+        window_start=date(2024, 1, 1),
+        window_end=date(2024, 1, 31),
+        allow_hdx_fallback=False,
+    )
+
+    assert called is False
+    assert frames.get("monthly_flow") is not None
+    fallback_summary = diagnostics.get("fallback") or {}
+    assert not fallback_summary
 
 
 def test_summary_zero_reason_codes(monkeypatch: pytest.MonkeyPatch, cfg: config.IdmcConfig) -> None:
