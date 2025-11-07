@@ -46,7 +46,8 @@ def test_upsert_accepts_table_df_order(duck_conn) -> None:
         frame,
         keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
     )
-    assert inserted == len(frame)
+    assert inserted.rows_written == len(frame)
+    assert inserted.rows_delta == len(frame)
     assert _count_rows(duck_conn) == len(frame)
 
 
@@ -58,5 +59,6 @@ def test_upsert_accepts_df_table_order(duck_conn) -> None:
         "facts_resolved",
         keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
     )
-    assert inserted == len(frame)
+    assert inserted.rows_written == len(frame)
+    assert inserted.rows_delta == len(frame)
     assert _count_rows(duck_conn) == len(frame)

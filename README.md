@@ -635,6 +635,15 @@ run the DuckDB-specific test suite locally. The same commands ensure
 `python -c "import duckdb; print(duckdb.__version__)"` works before running
 `pytest -q resolver/tests -k duckdb`.
 
+Need to populate a DuckDB file from the IDMC staging exports? The
+[resolver/docs/WRITING_TO_DUCKDB.md](resolver/docs/WRITING_TO_DUCKDB.md)
+guide walks through the new `make idmc.db` helper and related inspection
+commands.
+
+> Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
+> inside pytest temporary directories, so no binary fixtures need to be stored
+> in the repository.
+
 > Running the fast test target inside Codex or on a fresh clone without the
 > large fixture checkout? See
 > [docs/testing-without-fixtures.md](docs/testing-without-fixtures.md) for the

@@ -206,6 +206,11 @@ Resolved precedence outputs stored in DuckDB for querying.
 | confidence | string | no |  |  |
 | created_at | datetime | no |  |  |
 
+Primary key: `(ym, iso3, hazard_code, metric, series_semantics)`.
+Upserts update existing rows matching that composite key and insert any
+new combinations, guaranteeing idempotent dual-writes from the exporter
+and CLI helpers.
+
 ## db.facts_deltas
 
 Monthly "new" deltas derived from resolved totals.
@@ -227,6 +232,8 @@ Monthly "new" deltas derived from resolved totals.
 | source_url | string | no |  |  |
 | definition_text | string | no |  |  |
 | created_at | datetime | no |  |  |
+
+Primary key: `(ym, iso3, hazard_code, metric)`.
 
 ### Metric reference
 
@@ -330,6 +337,10 @@ structured overrides (all mirrored by environment variables):
 - The IDMC staging directory (`resolver/staging/idmc/`) always includes
   `flow.csv` when staging/export flags are active; stock staging is optional and
   ignored by the exporter contract.【F:resolver/tools/export_facts.py†L2247-L2280】
+- DuckDB unit tests mirror this layout by generating tiny `flow.csv` and
+  `idmc_facts_flow.parquet` files at runtime inside pytest temporary directories,
+  keeping binary fixtures out of the repository while still exercising the
+  exporter contract.
 - When staging outputs are requested (for example via `--write-outputs`,
   `--enable-export`, `RESOLVER_EXPORT_ENABLE_FLOW`, `RESOLVER_OUTPUT_DIR`, or by
   running in fixture/cache-only modes), the connector ensures

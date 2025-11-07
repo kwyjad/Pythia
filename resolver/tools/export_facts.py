@@ -1473,11 +1473,12 @@ def _maybe_write_to_db(
     facts_deltas: "Optional[pd.DataFrame]" = None,
     db_url: Optional[str] = None,
     write_db: Optional[bool] = None,
-) -> None:
+    fail_on_error: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     """Write exported facts into DuckDB when enabled via environment or flag."""
 
     if duckdb_io is None:
-        return
+        return {}
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
     if db_url is not None:
         db_url = db_url.strip()
@@ -1487,15 +1488,16 @@ def _maybe_write_to_db(
         write_db = bool(db_url)
     if not write_db or not db_url:
         LOGGER.debug("DuckDB write skipped: disabled or missing RESOLVER_DB_URL")
-        return
+        return {}
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
     if resolved_prepared is None and deltas_prepared is None:
         LOGGER.debug("DuckDB write skipped: no prepared frames to persist")
-        return
+        return {}
 
     conn = None
+    stats: Dict[str, Dict[str, Any]] = {}
     try:
         LOGGER.info("Writing exports to DuckDB at %s", db_url)
         if LOGGER.isEnabledFor(logging.DEBUG):
@@ -1526,7 +1528,8 @@ def _maybe_write_to_db(
                 resolved_prepared,
                 keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
-            LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved)
+            LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved.rows_delta)
+            stats["facts_resolved"] = written_resolved.to_dict()
         if deltas_prepared is not None and not deltas_prepared.empty:
             written_deltas = duckdb_io.upsert_dataframe(
                 conn,
@@ -1534,15 +1537,20 @@ def _maybe_write_to_db(
                 deltas_prepared,
                 keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
-            LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas)
+            LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas.rows_delta)
+            stats["facts_deltas"] = written_deltas.to_dict()
         LOGGER.info("DuckDB write complete")
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
+        if fail_on_error:
+            raise ExportError(f"DuckDB write failed: {exc}") from exc
     finally:
         # Shared DuckDB connections are cached per URL; leave them open so
         # subsequent writers/readers reuse the same wrapper instance.
         pass
+
+    return stats
 
 
 @dataclass
@@ -1554,6 +1562,7 @@ class ExportResult:
     warnings: List[str] = field(default_factory=list)
     sources: List[SourceApplication] = field(default_factory=list)
     report: Dict[str, Any] = field(default_factory=dict)
+    db_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 class ExportError(RuntimeError):
@@ -1746,7 +1755,39 @@ def export_facts(
     if not config_path.exists():
         raise ExportError(f"Config not found: {config_path}")
 
+    env_db_url = os.environ.get("RESOLVER_DB_URL", "").strip() or None
+    provided_db_url = db_url.strip() if isinstance(db_url, str) else None
+    effective_db_url = provided_db_url or env_db_url
+    env_write_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
+    requested_write_flag = _parse_write_db_flag(write_db)
+    if requested_write_flag is None:
+        if env_write_flag is None:
+            effective_write_flag = False
+        else:
+            effective_write_flag = env_write_flag
+    else:
+        effective_write_flag = requested_write_flag
+
+    LOGGER.info(
+        "export.start | input=%s | out=%s | write_db=%s | db_url=%s",
+        inp,
+        out_dir,
+        bool(effective_write_flag),
+        effective_db_url or "",
+    )
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "export.env | RESOLVER_DB_URL=%s RESOLVER_WRITE_DB=%s",
+            env_db_url or "",
+            os.environ.get("RESOLVER_WRITE_DB", ""),
+        )
+
     files, skipped_meta = _collect_inputs(inp)
+
+    LOGGER.info("export.inputs | scanned=%s matched=%s", len(files) + len(skipped_meta), len(files))
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        for path in files:
+            LOGGER.debug("export.input_file | %s", path)
 
     warnings: List[str] = []
     source_details: List[SourceApplication] = []
@@ -2283,10 +2324,11 @@ def export_facts(
     except Exception as exc:
         print(f"Warning: could not write Parquet ({exc}). CSV written.", file=sys.stderr)
 
-    _maybe_write_to_db(
+    db_write_stats = _maybe_write_to_db(
         facts_resolved=facts,
-        db_url=db_url,
-        write_db=_parse_write_db_flag(write_db),
+        db_url=effective_db_url,
+        write_db=bool(effective_write_flag),
+        fail_on_error=bool(effective_write_flag),
     )
 
     result_rows = len(facts)
@@ -2451,6 +2493,7 @@ def export_facts(
         warnings=warnings,
         sources=source_details,
         report=report,
+        db_stats=db_write_stats,
     )
 
 

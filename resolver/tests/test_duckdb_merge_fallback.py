@@ -53,7 +53,8 @@ def test_merge_fallback_no_error(
             frame,
             keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
         )
-        assert rows_inserted == len(frame)
+        assert rows_inserted.rows_written == len(frame)
+        assert rows_inserted.rows_delta == len(frame)
 
         frame_update = frame.copy()
         frame_update.loc[frame_update["hazard_code"].eq("TC"), "value"] = 120
@@ -63,7 +64,7 @@ def test_merge_fallback_no_error(
             frame_update,
             keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
         )
-        assert rows_updated == len(frame_update)
+        assert rows_updated.rows_written == len(frame_update)
 
         final_count = conn.execute(
             "SELECT COUNT(*) FROM facts_resolved WHERE ym='2024-01'"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import numbers
 import os
 import platform
 import re
@@ -10,6 +11,7 @@ import sys
 import uuid
 import datetime as dt
 import logging
+from dataclasses import dataclass
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
@@ -122,6 +124,49 @@ DEFAULT_DB_URL = os.environ.get(
 )
 
 _DB_CACHE: dict[str, "duckdb.DuckDBPyConnection"] = {}
+
+
+@dataclass
+class UpsertResult:
+    """Structured counts returned after an upsert operation."""
+
+    table: str
+    rows_in: int
+    rows_written: int
+    rows_before: int
+    rows_after: int
+    rows_delta: int
+    matched_existing: int | None = None
+
+    def to_dict(self) -> dict[str, int | None | str]:
+        return {
+            "table": self.table,
+            "rows_in": int(self.rows_in),
+            "rows_written": int(self.rows_written),
+            "rows_before": int(self.rows_before),
+            "rows_after": int(self.rows_after),
+            "rows_delta": int(self.rows_delta),
+            "matched_existing": None if self.matched_existing is None else int(self.matched_existing),
+        }
+
+    def __int__(self) -> int:  # pragma: no cover - compatibility shim
+        return int(self.rows_written)
+
+    def __repr__(self) -> str:  # pragma: no cover - logging helper
+        return (
+            "UpsertResult(table={table!r}, rows_in={rows_in}, rows_written={rows_written}, "
+            "rows_before={rows_before}, rows_after={rows_after}, rows_delta={rows_delta}, "
+            "matched_existing={matched_existing})"
+        ).format(
+            table=self.table,
+            rows_in=self.rows_in,
+            rows_written=self.rows_written,
+            rows_before=self.rows_before,
+            rows_after=self.rows_after,
+            rows_delta=self.rows_delta,
+            matched_existing=self.matched_existing,
+        )
+
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tests
@@ -1143,12 +1188,26 @@ def init_schema(
             LOGGER.debug("Table %s columns: %s", current_table, ", ".join(columns))
 
 
+def _table_row_count(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> int:
+    try:
+        return int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table)}"
+            ).fetchone()[0]
+        )
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("duckdb.upsert.count_failed | table=%s", table, exc_info=True)
+        return 0
+
+
 def upsert_dataframe(
     conn: "duckdb.DuckDBPyConnection",
     table: str,
     df: pd.DataFrame,
     keys: Sequence[str] | None = None,
-) -> int:
+) -> UpsertResult:
     """Upsert rows into ``table`` using ``keys`` as the natural key.
 
     Preferred call signature::
@@ -1201,7 +1260,18 @@ def upsert_dataframe(
         LOGGER.debug("UPSERT debug prelude failed: %s", _e)
 
     if df is None or df.empty:
-        return 0
+        rows_before = _table_row_count(conn, table)
+        LOGGER.debug(
+            "duckdb.upsert.no_rows | table=%s | rows_before=%s", table, rows_before
+        )
+        return UpsertResult(
+            table=table,
+            rows_in=0,
+            rows_written=0,
+            rows_before=rows_before,
+            rows_after=rows_before,
+            rows_delta=0,
+        )
 
     duckdb = get_duckdb()
 
@@ -1209,7 +1279,14 @@ def upsert_dataframe(
     coerced = _coerce_numeric(frame, table)
     if coerced is not None:
         frame = coerced
-    LOGGER.info("Upserting %s rows into %s", len(frame), table)
+    rows_incoming = len(frame)
+    rows_before = _table_row_count(conn, table)
+    LOGGER.info(
+        "Upserting %s rows into %s (rows_before=%s)",
+        rows_incoming,
+        table,
+        rows_before,
+    )
     LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
 
     if "series_semantics_out" in frame.columns:
@@ -1357,13 +1434,21 @@ def upsert_dataframe(
 
     if frame.empty:
         LOGGER.debug(
-            "duckdb.upsert.no_rows | table=%s | keys=%s", table, keys
+            "duckdb.upsert.no_rows_after_prepare | table=%s | keys=%s", table, keys
         )
-        return 0
+        return UpsertResult(
+            table=table,
+            rows_in=len(df) if df is not None else 0,
+            rows_written=0,
+            rows_before=rows_before,
+            rows_after=rows_before,
+            rows_delta=0,
+        )
 
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
     upsert_completed = False
+    match_rows: int | None = None
     try:
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
@@ -1591,8 +1676,27 @@ def upsert_dataframe(
     finally:
         conn.unregister(temp_name)
 
-    LOGGER.info("Processed %s rows for %s", len(frame), table)
-    return len(frame)
+    rows_after = _table_row_count(conn, table)
+    rows_delta = rows_after - rows_before
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "duckdb.upsert.counts | table=%s rows_before=%s rows_after=%s delta=%s",
+            table,
+            rows_before,
+            rows_after,
+            rows_delta,
+        )
+    return UpsertResult(
+        table=table,
+        rows_in=len(df) if df is not None else 0,
+        rows_written=len(frame),
+        rows_before=rows_before,
+        rows_after=rows_after,
+        rows_delta=rows_delta,
+        matched_existing=int(match_rows)
+        if isinstance(match_rows, numbers.Integral)
+        else None,
+    )
 
 
 def _default_created_at(value: str | None = None) -> str:

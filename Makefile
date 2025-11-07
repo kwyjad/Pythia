@@ -6,7 +6,9 @@ ctx-changed:
 
 PY ?= $(if $(PY_BIN),$(PY_BIN),python)
 
-.PHONY: dev-setup dev-setup-online dev-setup-offline test-db which-python
+RESOLVER_DB_URL ?= ./resolver_data/resolver.duckdb
+
+.PHONY: dev-setup dev-setup-online dev-setup-offline test-db which-python idmc.db db.inspect db.path
 
 which-python:
 	@echo "PY=$(PY)"
@@ -29,4 +31,26 @@ dev-setup-online:
         fi
 
 test-db:
-	RESOLVER_API_BACKEND=db RESOLVER_DB_URL=duckdb:///resolver.dev.duckdb $(PY) -m pytest -q resolver/tests/test_db_query_contract.py
+        RESOLVER_API_BACKEND=db RESOLVER_DB_URL=duckdb:///resolver.dev.duckdb $(PY) -m pytest -q resolver/tests/test_db_query_contract.py
+
+idmc.db:
+	@$(PY) -m resolver.cli.idmc_to_duckdb --staging-dir resolver/staging/idmc --db-url $(RESOLVER_DB_URL)
+
+db.inspect:
+	@$(PY) - <<'PY'
+import duckdb
+import os
+
+db = os.environ.get("RESOLVER_DB_URL", "./resolver_data/resolver.duckdb")
+con = duckdb.connect(db)
+for table in ["facts_resolved", "facts_deltas", "manifests"]:
+    try:
+        count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(f"{table}: {count}")
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        print(f"{table}: (missing) {exc}")
+con.close()
+PY
+
+db.path:
+	@echo $(RESOLVER_DB_URL)
