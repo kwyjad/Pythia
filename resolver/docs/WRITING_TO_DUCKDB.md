@@ -67,24 +67,25 @@ exit code `2`.
 
 The exporter now splits the unified facts dataframe by `semantics` before
 writing to DuckDB. Rows tagged `stock` land in `facts_resolved` while rows
-tagged `new` land in `facts_deltas`. Any other semantics are skipped from the DB
-write (the CSV preview still contains them) and the CLI verifies the combined
-row count across both tables before declaring success. The summary line reports
-per-table deltas so idempotent reruns continue to show `✅ Wrote 0 rows`.
+tagged `new` land in `facts_deltas`. Any other semantics default to
+`facts_resolved` so the persisted rows still match the CSV preview, and the CLI
+verifies the combined row count across both tables before declaring success. The
+summary line reports per-table deltas so idempotent reruns continue to show
+`✅ Wrote 0 rows`.
 
 ## Composite keys and parity
 
 DuckDB initialisation drops the legacy `(ym, iso3, hazard_code, metric, series_semantics)`
-unique indexes and replaces them with composite keys that match the exporter’s
-semantics-aware routing. When an `event_id` column is present it participates in
-the merge key; otherwise the helper falls back to the full context columns—`iso3`,
-`hazard_code`, `metric`, the exact `as_of_date`/`as_of`, `publication_date`, `source_id`,
-`ym`, and `series_semantics`. The richer key prevents distinct events in the same month
-from being collapsed into a single row and keeps DuckDB row counts aligned with
-the CSV preview and parity tests. If you point the helper at a minimal table that
-predates some of those columns, the schema healer intersects the requested key
-with whatever columns exist and falls back to a unique index on that subset so the
-write still succeeds.
+indexes and recreates them with the canonical column lists expected by the fast tests:
+
+- `facts_resolved`: `(event_id, iso3, hazard_code, metric, as_of_date, publication_date, source_id, series_semantics, ym)`
+- `facts_deltas`: `(event_id, iso3, hazard_code, metric, as_of_date, publication_date, source_id, ym)`
+
+The writer adds any missing key columns as nullable `VARCHAR` fields before issuing
+the MERGE so minimal or historic tables are healed automatically. That guarantees
+row-for-row parity with the CSV preview—distinct events in the same month no longer
+collapse—and keeps the verification step honest because the CLI sums row counts
+from both tables after each run.
 
 ## Preventing double matches
 

@@ -656,15 +656,16 @@ as `idmc_facts_flow.parquet` are skipped and reported in the warnings list.
 Each run ends with a one-line summary and a dedicated `Warnings:` block that
 captures the exported rows, per-table DuckDB deltas/totals, warning total, and
 the resulting exit code (`0`=success, `2`=warnings under `--strict`, `3`=error).
-DuckDB persistence now honours a richer composite key so parity holds row-for-row:
-if `event_id` is present it participates in the merge key, otherwise the writer
-falls back to `(iso3, hazard_code, metric, as_of_date/as_of, publication_date, source_id, ym,
-series_semantics)`. Schema initialisation drops the legacy `(ym, iso3, metric, …)`
-unique indexes so the MERGE statements can store distinct events that share the
-same month without collapsing them into one record. When older tables are missing
-newer columns the key healer intersects the requested set with what actually
-exists and creates a unique index on that subset, which keeps minimal test
-fixtures writable without raising catalogue errors.
+DuckDB persistence now honours canonical composite keys for both facts tables:
+`facts_resolved` writes use `(event_id, iso3, hazard_code, metric, as_of_date,
+publication_date, source_id, series_semantics, ym)` and `facts_deltas` writes use
+`(event_id, iso3, hazard_code, metric, as_of_date, publication_date, source_id, ym)`.
+Schema initialisation adds any missing key columns as nullable `VARCHAR` fields,
+recreates the `ux_facts_resolved_series`/`ux_facts_deltas_series` indexes with that
+exact column order, and heals minimal test tables before the upsert runs so MERGE
+operations never collapse distinct rows. Verification in the IDMC wrapper sums the
+row counts from both tables so flows (`new`) and stock rows are confirmed in their
+respective destinations.
 
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
 > inside pytest temporary directories, so no binary fixtures need to be stored

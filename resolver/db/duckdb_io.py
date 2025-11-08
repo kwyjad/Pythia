@@ -96,12 +96,14 @@ FACTS_RESOLVED_KEY_COLUMNS = [
     "ym",
 ]
 FACTS_DELTAS_KEY_COLUMNS = [
+    "event_id",
     "iso3",
     "hazard_code",
     "metric",
-    "as_of",
+    "as_of_date",
+    "publication_date",
+    "source_id",
     "ym",
-    "series_semantics",
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
@@ -123,7 +125,7 @@ _COERCE_NUMERIC_COLUMNS: dict[str, list[str]] = {
 }
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
     "facts_resolved": ("as_of_date", "publication_date"),
-    "facts_deltas": ("as_of",),
+    "facts_deltas": ("as_of", "as_of_date", "publication_date"),
 }
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
@@ -253,8 +255,12 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
     """Return the natural key columns to use for ``table`` writes."""
 
     spec = TABLE_KEY_SPECS.get(table, {})
+    canonical = list(spec.get("columns", [])) if spec else []
+    if canonical:
+        return canonical
+
     if frame is None or frame.empty:
-        return list(spec.get("columns", [])) if spec else []
+        return []
 
     columns = set(frame.columns)
     keys: list[str] = []
@@ -748,23 +754,6 @@ def _has_declared_key(
     if not canonical:
         return False
 
-    existing_columns, _ = _table_columns(conn, table)
-    existing_canonical = {col.lower() for col in existing_columns}
-    available = [key for key in canonical if key in existing_canonical]
-    if not available:
-        LOGGER.debug(
-            "duckdb.schema.declared_key.unavailable | table=%s requested=%s", table, keys
-        )
-        return False
-
-    candidate_sets: list[list[str]] = [canonical]
-    if available != canonical:
-        candidate_sets.append(available)
-
-    def _matches(columns: Sequence[str]) -> bool:
-        normalized = _canonicalize_columns(columns)
-        return any(normalized == candidate for candidate in candidate_sets)
-
     constraint_sets: list[list[str]] = []
     unique_indexes: dict[str, list[str]] = {}
 
@@ -778,16 +767,7 @@ def _has_declared_key(
                 constraints=[list(cols) for cols in constraint_sets],
             )
         for constraint_columns in constraint_sets:
-            if _matches(constraint_columns):
-                if diag_enabled():
-                    log_json(
-                        DIAG_LOGGER,
-                        "declared_key_detected",
-                        table=table,
-                        keys=list(keys),
-                        via="constraint",
-                        columns=constraint_columns,
-                    )
+            if _canonicalize_columns(constraint_columns) == canonical:
                 return True
     except Exception:  # pragma: no cover - diagnostic aid only
         LOGGER.debug(
@@ -804,17 +784,7 @@ def _has_declared_key(
                 indexes=unique_indexes,
             )
         for index_name, columns in unique_indexes.items():
-            if _matches(columns):
-                if diag_enabled():
-                    log_json(
-                        DIAG_LOGGER,
-                        "declared_key_detected",
-                        table=table,
-                        keys=list(keys),
-                        via="unique_index",
-                        index=index_name,
-                        columns=columns,
-                    )
+            if _canonicalize_columns(columns) == canonical:
                 return True
     except Exception:  # pragma: no cover - diagnostic aid only
         LOGGER.debug(
@@ -867,6 +837,61 @@ def _split_available_columns(
     return available, missing
 
 
+def _ensure_table_has_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str]
+) -> list[str]:
+    """Ensure ``table`` has ``columns`` (adding nullable VARCHAR columns if missing)."""
+
+    if not columns:
+        return []
+
+    existing, _ = _table_columns(conn, table)
+    existing_lower = {name.lower() for name in existing}
+    added: list[str] = []
+    table_ident = _quote_identifier(table)
+    ddl: list[str] = []
+    for column in columns:
+        if column.lower() in existing_lower:
+            continue
+        column_ident = _quote_identifier(column)
+        ddl.append(f"ALTER TABLE {table_ident} ADD COLUMN {column_ident} VARCHAR")
+        added.append(column)
+
+    if ddl:
+        _run_ddl_batch(conn, ddl, label=f"schema:add_columns:{table}")
+        LOGGER.info(
+            "duckdb.schema.columns_added | table=%s columns=%s", table, added
+        )
+
+    return added
+
+
+def _ensure_frame_has_columns(
+    frame: pd.DataFrame, table: str, columns: Sequence[str]
+) -> pd.DataFrame:
+    if not columns:
+        return frame
+
+    working = frame
+    if not working.columns.is_unique:
+        working = working.copy()
+
+    for column in columns:
+        if column in working.columns:
+            continue
+        if column == "as_of_date" and "as_of" in working.columns:
+            working[column] = working["as_of"]
+        elif column == "publication_date" and "as_of_date" in working.columns:
+            working[column] = working["as_of_date"]
+        elif column == "source_id" and "source" in working.columns:
+            working[column] = working["source"]
+        elif column == "series_semantics" and "semantics" in working.columns:
+            working[column] = working["semantics"]
+        else:
+            working[column] = pd.NA
+    return working
+
+
 def _ensure_unique_index(
     conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], index_name: str
 ) -> None:
@@ -878,23 +903,35 @@ def _ensure_unique_index(
         )
         return
 
+    _ensure_table_has_columns(conn, table, columns)
     available, missing = _split_available_columns(conn, table, columns)
-    if not available:
-        LOGGER.debug(
-            "duckdb.schema.unique_index_skipped_missing | table=%s index=%s requested=%s",
-            table,
-            index_name,
-            list(columns),
-        )
-        return
     if missing:
-        LOGGER.warning(
-            "duckdb.schema.unique_index_degraded | table=%s index=%s missing=%s using=%s",
+        LOGGER.debug(
+            "duckdb.schema.unique_index_missing_columns | table=%s index=%s missing=%s",
             table,
             index_name,
             missing,
-            available,
         )
+        return
+
+    existing_indexes = _unique_index_columns(conn, table)
+    normalized_target = _canonicalize_columns(columns)
+    current = existing_indexes.get(index_name)
+    if current and _canonicalize_columns(current) != normalized_target:
+        index_ident = _quote_identifier(index_name)
+        LOGGER.info(
+            "duckdb.schema.unique_index_recreate | table=%s index=%s from=%s to=%s",
+            table,
+            index_name,
+            current,
+            columns,
+        )
+        _run_ddl_batch(
+            conn,
+            [f"DROP INDEX IF EXISTS {index_ident}"],
+            label=f"unique_index:drop:{table}:{index_name}",
+        )
+
     column_list = ", ".join(_quote_identifier(col) for col in available)
     table_ident = _quote_identifier(table)
     index_ident = _quote_identifier(index_name)
@@ -929,6 +966,7 @@ def _ensure_primary_key_or_unique(
         )
         return
 
+    _ensure_table_has_columns(conn, table, columns)
     available, missing = _split_available_columns(conn, table, columns)
     if not available:
         LOGGER.warning(
@@ -1225,6 +1263,7 @@ def init_schema(
             columns = spec["columns"]
             primary = spec["primary"]
             unique = spec["unique"]
+            _ensure_table_has_columns(conn, table_name, columns)
             _ensure_primary_key_or_unique(
                 conn, table_name, columns, str(primary), str(unique)
             )
@@ -1287,6 +1326,9 @@ def init_schema(
                     value_stock DOUBLE,
                     series_semantics TEXT NOT NULL DEFAULT 'new',
                     as_of VARCHAR,
+                    as_of_date VARCHAR,
+                    publication_date VARCHAR,
+                    event_id TEXT,
                     source_id TEXT,
                     series TEXT,
                     rebase_flag INTEGER,
@@ -1315,6 +1357,9 @@ def init_schema(
             label=f"schema:{schema_path.name}",
         )
         LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
+
+    for table_name, spec in TABLE_KEY_SPECS.items():
+        _ensure_table_has_columns(conn, table_name, spec["columns"])
 
     try:
         _run_ddl_batch(
@@ -1376,12 +1421,14 @@ def init_schema(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_deltas_series
                 ON facts_deltas (
+                    event_id,
                     iso3,
                     hazard_code,
                     metric,
-                    as_of,
-                    ym,
-                    series_semantics
+                    as_of_date,
+                    publication_date,
+                    source_id,
+                    ym
                 )
                 """,
             ],
@@ -1554,6 +1601,12 @@ def upsert_dataframe(
     frame["series_semantics"] = _canonicalise_series_semantics(
         frame["series_semantics"]
     )
+
+    spec = TABLE_KEY_SPECS.get(table)
+    canonical_columns: Sequence[str] = spec["columns"] if spec else []
+    if canonical_columns:
+        frame = _ensure_frame_has_columns(frame, table, canonical_columns)
+        _ensure_table_has_columns(conn, table, canonical_columns)
 
     table_info = conn.execute(f"PRAGMA table_info({_quote_literal(table)})").fetchall()
     if not table_info:

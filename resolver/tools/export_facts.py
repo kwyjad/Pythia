@@ -1837,6 +1837,10 @@ def export_facts(
                 "DuckDB canonicalisation failed | raw=%s error=%s", canonical_db_url, exc
             )
             canonical_db_url = selected_db_url_raw or None
+    if canonical_db_url and not str(canonical_db_url).startswith("duckdb://"):
+        resolved = Path(canonical_db_url).expanduser().resolve()
+        canonical_db_path = str(resolved)
+        canonical_db_url = f"duckdb:///{resolved.as_posix()}"
 
     selected_strategy = (only_strategy or "").strip()
     if selected_strategy:
