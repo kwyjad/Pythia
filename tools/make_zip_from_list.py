@@ -130,7 +130,22 @@ def add_file(zipf: ZipFile, base: Path, relpath: str, manifest: list[dict], warn
         warnings.append(f"Unusable archive name for path: {candidate}")
         return False
 
-    zi = ZipInfo(filename=arcname)
+    base_name = Path(arcname).name
+    parent_name = Path(arcname).parent.name
+    archive_name = base_name
+    existing_names = {z.filename for z in zipf.filelist}
+    if archive_name in existing_names:
+        prefix = parent_name or ""
+        if prefix:
+            archive_name = f"{prefix}_{archive_name}"
+        # Ensure uniqueness even if prefixed name still collides.
+        counter = 1
+        while archive_name in existing_names:
+            suffix = f"{prefix + '_' if prefix else ''}{counter}_"
+            archive_name = f"{suffix}{base_name}"
+            counter += 1
+
+    zi = ZipInfo(filename=archive_name)
     # MS-DOS date format (Y, M, D, h, m, s)
     now = datetime.now(timezone.utc)
     zi.date_time = now.utctimetuple()[:6]
@@ -141,11 +156,12 @@ def add_file(zipf: ZipFile, base: Path, relpath: str, manifest: list[dict], warn
     zipf.writestr(zi, data)
 
     manifest.append({
-        "path": arcname,
+        "original_path": arcname,
+        "archive_name": archive_name,
         "size": size,
         "sha256": digest,
     })
-    print(f"Added: {arcname} ({size} bytes)")
+    print(f"Added: {arcname} → {archive_name} ({size} bytes)")
     return True
 
 
