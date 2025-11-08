@@ -64,7 +64,7 @@ def test_cli_writes_rows_once(tmp_path: Path, capfd: pytest.CaptureFixture[str])
         assert resolved_count == _expected_stock_rows(fixture.stock_csv)
         value = conn.execute(
             """
-            SELECT value
+            SELECT value_new
             FROM facts_deltas
             WHERE iso3='COL' AND ym='2024-02' AND metric='new_displacements'
             """
@@ -205,6 +205,7 @@ def test_db_contains_expected_columns(tmp_path: Path) -> None:
         deltas_names = [row[1] for row in deltas_columns]
         for required in ["ym", "iso3", "metric", "series_semantics", "value"]:
             assert required in resolved_names
+        for required in ["ym", "iso3", "metric", "series_semantics", "value_new"]:
             assert required in deltas_names
     finally:
         conn.close()
@@ -259,7 +260,7 @@ def test_merge_updates_on_conflict(tmp_path: Path, capfd: pytest.CaptureFixture[
     try:
         value = conn.execute(
             """
-            SELECT value
+            SELECT value_new
             FROM facts_deltas
             WHERE iso3='COL' AND ym='2024-02' AND metric='new_displacements'
             """

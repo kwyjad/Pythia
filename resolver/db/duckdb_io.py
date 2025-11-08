@@ -2218,6 +2218,12 @@ def write_snapshot(
                     "facts_deltas",
                     default_target="new",
                 )
+                if "value" in facts_deltas.columns:
+                    missing_new = facts_deltas["value_new"].isna()
+                    if missing_new.any():
+                        facts_deltas.loc[missing_new, "value_new"] = facts_deltas.loc[
+                            missing_new, "value"
+                        ]
                 _assert_semantics_required(facts_deltas, "facts_deltas")
                 facts_deltas = _coerce_numeric(
                     facts_deltas, "facts_deltas"
