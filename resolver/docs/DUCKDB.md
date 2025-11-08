@@ -36,3 +36,12 @@ pytest -q resolver/tests -k duckdb
 
 These tests will now run in both local development and continuous integration
 pipelines.
+
+## IDMC flow semantics
+
+The `resolver.cli.idmc_to_duckdb` wrapper normalizes staging paths and delegates
+writes to the exporter with the `idmc-staging` strategy. Rows with
+`metric=new_displacements` are forced to `series_semantics=new`, so they land in
+`facts_deltas`, while accompanying stock rows continue to populate
+`facts_resolved`. The wrapper verifies both tables after each run, so a flow-only
+staging directory still reports success when the deltas table receives rows.

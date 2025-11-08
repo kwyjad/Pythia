@@ -2029,6 +2029,31 @@ def export_facts(
     if use_sources:
         mapped_frames: List[pd.DataFrame] = []
         sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
+        source_by_name: Dict[str, Mapping[str, Any]] = {}
+        for source in sources_cfg:
+            name = str(source.get("name") or "").strip()
+            if name:
+                source_by_name[name] = source
+
+        def _force_idmc_mapping(path: Path, frame: "pd.DataFrame") -> Optional[str]:
+            filename = path.name.lower()
+            if filename not in {"flow.csv", "stock.csv"}:
+                return None
+            text = path.as_posix().lower()
+            if "staging/idmc" not in text:
+                return None
+            candidate = "idmc_flow" if filename == "flow.csv" else "idmc_stock"
+            mapping = source_by_name.get(candidate)
+            if mapping is None:
+                return None
+            required = mapping.get("match", {}).get("required_columns")
+            if required:
+                available = {str(col).strip().lower() for col in frame.columns}
+                for column in required:
+                    if str(column).strip().lower() not in available:
+                        return None
+            return candidate
+
         raw_frames: List[tuple[Path, "pd.DataFrame"]] = []
         dtm_frame: Optional["pd.DataFrame"] = None
         dtm_detail: Optional[SourceApplication] = None
@@ -2265,6 +2290,22 @@ def export_facts(
             matched_cfg, attempts = _find_source_for_file(file_path, frame, sources_cfg)
             strategy = "config"
             attempt_summary = _summarize_match_attempts(attempts)
+            forced_mapping_name: Optional[str] = None
+            if matched_cfg is None:
+                forced_mapping_name = _force_idmc_mapping(file_path, frame)
+                if forced_mapping_name:
+                    forced = source_by_name.get(forced_mapping_name)
+                    if forced is not None:
+                        matched_cfg = forced
+                        strategy = "idmc-staging"
+                        attempts.append(
+                            {
+                                "name": forced_mapping_name,
+                                "matched": True,
+                                "reasons": {"forced": True},
+                            }
+                        )
+                        attempt_summary = _summarize_match_attempts(attempts)
             if matched_cfg is None:
                 auto_cfg = _auto_detect_dtm_source(frame)
                 if auto_cfg is not None:
@@ -2333,6 +2374,8 @@ def export_facts(
 
             mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
             mapping_name = str(matched_cfg.get("name") or file_path.name)
+            if forced_mapping_name:
+                mapping_name = forced_mapping_name
             if mapping_name in {"idmc_flow", "idmc_stock"}:
                 strategy = "idmc-staging"
             detail.strategy = strategy
@@ -2363,6 +2406,8 @@ def export_facts(
                     "strategy": strategy,
                 }
             )
+            if forced_mapping_name:
+                debug_entry["forced_mapping"] = forced_mapping_name
             if detail.dedupe_keys:
                 debug_entry["dedupe"] = {
                     "keys": detail.dedupe_keys,
@@ -2600,28 +2645,15 @@ def export_facts(
             .str.lower()
             .str.strip()
         )
-        source_series = (
-            facts["source"]
-            if "source" in facts.columns
-            else pd.Series([""] * len(facts), index=facts.index)
-        )
-        source_normalized = (
-            source_series.fillna("")
-            .astype(str)
-            .str.lower()
-        )
-
-        idmc_flow_mask = metric_normalized.eq("new_displacements") & source_normalized.str.contains(
-            "idmc", na=False
-        )
-        if idmc_flow_mask.any():
+        new_displacements_mask = metric_normalized.eq("new_displacements")
+        if new_displacements_mask.any():
             if "series_semantics" not in facts.columns:
                 facts["series_semantics"] = pd.NA
-            facts.loc[idmc_flow_mask, "series_semantics"] = "stock"
+            facts.loc[new_displacements_mask, "series_semantics"] = "new"
             if "semantics" in facts.columns:
-                facts.loc[idmc_flow_mask, "semantics"] = "stock"
-            rerouted = int(idmc_flow_mask.sum())
-            LOGGER.info("duckdb.idmc.flow_reroute | rows=%s", rerouted)
+                facts.loc[new_displacements_mask, "semantics"] = "new"
+            locked = int(new_displacements_mask.sum())
+            LOGGER.info("duckdb.idmc.flow_semantics | rows=%s", locked)
 
         if "series_semantics" in facts.columns:
             semantics_series = facts["series_semantics"]
