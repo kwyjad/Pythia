@@ -2583,10 +2583,19 @@ def export_facts(
                     for key, value in distribution.items()
                 }
                 LOGGER.info(
-                    "duckdb.semantics.skipped | total=%s details=%s",
+                    "duckdb.semantics.routed_other | total=%s details=%s",
                     other_count,
                     normalized_distribution,
                 )
+                other_rows = facts.loc[other_mask].copy()
+                if resolved_for_db is None:
+                    resolved_for_db = other_rows
+                else:
+                    resolved_for_db = pd.concat(
+                        [resolved_for_db, other_rows],
+                        ignore_index=True,
+                        sort=False,
+                    )
         else:
             resolved_for_db = facts
 

@@ -815,10 +815,67 @@ def _has_declared_key(
     return False
 
 
+def _table_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> tuple[list[str], dict[str, str]]:
+    try:
+        rows = conn.execute(
+            f"PRAGMA table_info({_quote_literal(table)})"
+        ).fetchall()
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("duckdb.schema.table_info_failed | table=%s", table, exc_info=True)
+        return [], {}
+    existing = [row[1] for row in rows]
+    mapping = {name.lower(): name for name in existing}
+    return existing, mapping
+
+
+def _split_available_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    if not columns:
+        return [], []
+    _, mapping = _table_columns(conn, table)
+    available: list[str] = []
+    missing: list[str] = []
+    for column in columns:
+        lookup = mapping.get(column.lower())
+        if lookup is None:
+            missing.append(column)
+        else:
+            available.append(lookup)
+    return available, missing
+
+
 def _ensure_unique_index(
     conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], index_name: str
 ) -> None:
-    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    if not columns:
+        LOGGER.debug(
+            "duckdb.schema.unique_index_skipped_empty | table=%s index=%s",
+            table,
+            index_name,
+        )
+        return
+
+    available, missing = _split_available_columns(conn, table, columns)
+    if not available:
+        LOGGER.debug(
+            "duckdb.schema.unique_index_skipped_missing | table=%s index=%s requested=%s",
+            table,
+            index_name,
+            list(columns),
+        )
+        return
+    if missing:
+        LOGGER.warning(
+            "duckdb.schema.unique_index_degraded | table=%s index=%s missing=%s using=%s",
+            table,
+            index_name,
+            missing,
+            available,
+        )
+    column_list = ", ".join(_quote_identifier(col) for col in available)
     table_ident = _quote_identifier(table)
     index_ident = _quote_identifier(index_name)
     statement = (
@@ -833,7 +890,7 @@ def _ensure_unique_index(
         "duckdb.schema.unique_index_ensured | table=%s index=%s columns=%s",
         table,
         index_name,
-        columns,
+        available,
     )
 
 
@@ -844,7 +901,35 @@ def _ensure_primary_key_or_unique(
     constraint_name: str,
     index_name: str,
 ) -> None:
-    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    if not columns:
+        LOGGER.debug(
+            "duckdb.schema.primary_key_skipped_empty | table=%s constraint=%s",
+            table,
+            constraint_name,
+        )
+        return
+
+    available, missing = _split_available_columns(conn, table, columns)
+    if not available:
+        LOGGER.warning(
+            "duckdb.schema.primary_key_skipped_missing | table=%s constraint=%s requested=%s",
+            table,
+            constraint_name,
+            list(columns),
+        )
+        return
+    if missing:
+        LOGGER.warning(
+            "duckdb.schema.primary_key_degraded | table=%s constraint=%s missing=%s using=%s",
+            table,
+            constraint_name,
+            missing,
+            available,
+        )
+        _ensure_unique_index(conn, table, available, index_name)
+        return
+
+    column_list = ", ".join(_quote_identifier(col) for col in available)
     table_ident = _quote_identifier(table)
     constraint_ident = _quote_identifier(constraint_name)
 
@@ -854,7 +939,7 @@ def _ensure_primary_key_or_unique(
             table,
             constraint_name,
         )
-        _ensure_unique_index(conn, table, columns, index_name)
+        _ensure_unique_index(conn, table, available, index_name)
         return
 
     if _has_declared_key(conn, table, columns):
@@ -877,7 +962,7 @@ def _ensure_primary_key_or_unique(
             "duckdb.schema.primary_key_added | table=%s constraint=%s columns=%s",
             table,
             constraint_name,
-            columns,
+            available,
         )
     except _NOTIMPL_EXC as exc:  # pragma: no cover - version-specific fallback
         LOGGER.debug(
@@ -886,7 +971,7 @@ def _ensure_primary_key_or_unique(
             constraint_name,
             exc,
         )
-        _ensure_unique_index(conn, table, columns, index_name)
+        _ensure_unique_index(conn, table, available, index_name)
     except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - idempotent path
         message = str(exc)
         if "already has a primary key" in message or "Constraint with name" in message:
@@ -909,7 +994,7 @@ def _ensure_primary_key_or_unique(
                 constraint_name,
                 message,
             )
-        _ensure_unique_index(conn, table, columns, index_name)
+        _ensure_unique_index(conn, table, available, index_name)
 
 
 def _attempt_heal_missing_key(
