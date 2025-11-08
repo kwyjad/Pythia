@@ -29,13 +29,15 @@ DEFAULT_OUT = Path("diagnostics/ingestion/export_preview")
 DEFAULT_DB_URL = "./resolver_data/resolver.duckdb"
 
 
-def _normalize_db_url(raw: str | None) -> tuple[str, str]:
-    """Return canonical filesystem path and DuckDB URL for ``raw``."""
+def _normalize_db_url(raw: str | None) -> tuple[str, str, str]:
+    """Return printable path, filesystem path, and DuckDB URL for ``raw``."""
 
     candidate = (raw or "").strip()
+    env_default = os.getenv("RESOLVER_DB_URL", "").strip()
     if not candidate:
-        env_default = os.getenv("RESOLVER_DB_URL", "").strip()
         candidate = env_default or DEFAULT_DB_URL
+    printable = (raw or "").strip() or (env_default or DEFAULT_DB_URL)
+
     path: str | None = None
     url = candidate
     try:
@@ -61,7 +63,9 @@ def _normalize_db_url(raw: str | None) -> tuple[str, str]:
             url = f"duckdb:///{resolved.as_posix()}"
     if path is None:
         path = url.replace("duckdb:///", "") if url.startswith("duckdb:///") else candidate
-    return path, url
+    if not printable:
+        printable = candidate if isinstance(candidate, str) and candidate else path or url
+    return printable, path, url
 
 
 def _ensure_directory(path: Path) -> None:
@@ -144,9 +148,16 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     staging_dir = Path(args.staging_dir)
     out_dir = Path(args.out)
-    db_path, canonical_url = _normalize_db_url(args.db_url)
+    db_display, db_path, canonical_url = _normalize_db_url(args.db_url)
 
-    LOGGER.info("idmc_to_duckdb.start | staging=%s out=%s db_url=%s", staging_dir, out_dir, canonical_url)
+    LOGGER.info(
+        "idmc_to_duckdb.start | staging=%s out=%s db_url=%s (display=%s path=%s)",
+        staging_dir,
+        out_dir,
+        canonical_url,
+        db_display,
+        db_path,
+    )
     LOGGER.debug(
         "environment | RESOLVER_DB_URL=%s RESOLVER_WRITE_DB=%s",
         os.getenv("RESOLVER_DB_URL", ""),
@@ -154,8 +165,13 @@ def run(argv: Sequence[str] | None = None) -> int:
     )
 
     _ensure_directory(out_dir)
-    if db_path != ":memory":
-        _ensure_directory(Path(db_path).expanduser().resolve().parent)
+    if db_path and db_path != ":memory:" and not str(db_path).startswith("duckdb://"):
+        try:
+            parent = Path(db_path).expanduser().resolve().parent
+        except Exception:
+            parent = None
+        if parent is not None:
+            _ensure_directory(parent)
     _log_staging_inventory(staging_dir)
 
     flow_path = staging_dir / "flow.csv"
@@ -198,6 +214,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
 
         try:
+            LOGGER.info(
+                "exporter.invoke | input=%s out=%s db_url=%s write_db=1 strategy=idmc-staging",
+                input_dir,
+                out_dir,
+                canonical_url,
+            )
             export_result = export_facts.export_facts(
                 inp=input_dir,
                 out_dir=out_dir,
@@ -321,7 +343,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     if warnings:
         print("Warnings:")
         for message in warnings:
-            print(f" - ⚠️ {message}")
+            print(f"- {message}")
     else:
         print("Warnings: none")
 
@@ -349,7 +371,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             resolved_total=resolved_total,
             deltas_total=deltas_total,
             total=total_rows,
-            path=db_path,
+            path=db_display,
             warns=len(warnings),
             code=exit_code,
         )

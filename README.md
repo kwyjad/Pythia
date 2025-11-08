@@ -645,7 +645,10 @@ exporter automatically dual-writes into DuckDB unless `--write-db 0`
 (or `RESOLVER_WRITE_DB=0`) explicitly disables the write. Relative paths are
 normalised to absolute `duckdb:///…` URLs before the exporter runs so the
 export, verification query, and downstream tooling all reference the same
-database file. To keep row counts aligned the helper copies only `flow.csv`
+database file. The `resolver.cli.idmc_to_duckdb` wrapper always passes the
+staging directory as `--in`, forces `--write-db 1` when `--db-url` is provided,
+and logs the normalised DuckDB URL so verification connects to the exact file
+the exporter used. To keep row counts aligned the helper copies only `flow.csv`
 (plus an optional `stock.csv`) into a temporary working directory before the
 exporter runs and forces `--only-strategy idmc-staging` so no other mapping
 claims the same file. The exporter splits the dataframe by semantics—`stock`
