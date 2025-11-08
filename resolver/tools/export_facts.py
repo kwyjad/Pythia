@@ -2589,6 +2589,40 @@ def export_facts(
     deltas_for_db: Optional[pd.DataFrame] = None
     semantics_source: str = ""
     if isinstance(facts, pd.DataFrame) and not facts.empty:
+        metric_series = (
+            facts["metric"]
+            if "metric" in facts.columns
+            else pd.Series([""] * len(facts), index=facts.index)
+        )
+        metric_normalized = (
+            metric_series.fillna("")
+            .astype(str)
+            .str.lower()
+            .str.strip()
+        )
+        source_series = (
+            facts["source"]
+            if "source" in facts.columns
+            else pd.Series([""] * len(facts), index=facts.index)
+        )
+        source_normalized = (
+            source_series.fillna("")
+            .astype(str)
+            .str.lower()
+        )
+
+        idmc_flow_mask = metric_normalized.eq("new_displacements") & source_normalized.str.contains(
+            "idmc", na=False
+        )
+        if idmc_flow_mask.any():
+            if "series_semantics" not in facts.columns:
+                facts["series_semantics"] = pd.NA
+            facts.loc[idmc_flow_mask, "series_semantics"] = "stock"
+            if "semantics" in facts.columns:
+                facts.loc[idmc_flow_mask, "semantics"] = "stock"
+            rerouted = int(idmc_flow_mask.sum())
+            LOGGER.info("duckdb.idmc.flow_reroute | rows=%s", rerouted)
+
         if "series_semantics" in facts.columns:
             semantics_series = facts["series_semantics"]
             semantics_source = "series_semantics"

@@ -11,6 +11,7 @@ from typing import Iterable, Sequence
 
 import duckdb
 
+from resolver.db import duckdb_io
 from resolver.tools import export_facts
 
 LOGGER = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     print(f" - facts_deltas  Δ={deltas_delta} total={deltas_total}")
 
     try:
-        conn = duckdb.connect(duckdb_path)
+        conn = duckdb_io.get_db(duckdb_url)
     except duckdb.Error as exc:
         LOGGER.error("Verification connection failed", exc_info=True)
         print(f"Verification failed: {exc}", file=sys.stderr)
@@ -173,11 +174,6 @@ def run(argv: Sequence[str] | None = None) -> int:
         LOGGER.error("Verification query failed", exc_info=True)
         print(f"Verification failed: {exc}", file=sys.stderr)
         return 3
-    finally:
-        try:
-            conn.close()
-        except duckdb.Error:  # pragma: no cover - best effort cleanup
-            pass
 
     total_rows = deltas_count + resolved_count
     print(
