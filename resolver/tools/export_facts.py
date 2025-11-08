@@ -1845,8 +1845,8 @@ def export_facts(
     if requested_write_flag is not None:
         effective_write_flag = bool(requested_write_flag)
     elif selected_db_url_raw:
-        effective_write_flag = env_write_flag is not False
-        auto_enabled = env_write_flag is not False
+        effective_write_flag = True
+        auto_enabled = True
     elif env_write_flag is not None:
         effective_write_flag = bool(env_write_flag)
     else:

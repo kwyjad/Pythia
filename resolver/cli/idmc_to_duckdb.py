@@ -12,8 +12,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Sequence
 
-from resolver.db import duckdb_io
-from resolver.db.conn_shared import canonicalize_duckdb_target
+import duckdb
+
 from resolver.tools import export_facts
 
 LOGGER = logging.getLogger(__name__)
@@ -29,43 +29,37 @@ DEFAULT_OUT = Path("diagnostics/ingestion/export_preview")
 DEFAULT_DB_URL = "./resolver_data/resolver.duckdb"
 
 
-def _normalize_db_url(raw: str | None) -> tuple[str, str, str]:
-    """Return printable path, filesystem path, and DuckDB URL for ``raw``."""
+def normalize_db_url(raw: str) -> tuple[str, str]:
+    """Return (DuckDB URL, filesystem path) for ``raw`` input."""
 
     candidate = (raw or "").strip()
-    env_default = os.getenv("RESOLVER_DB_URL", "").strip()
     if not candidate:
-        candidate = env_default or DEFAULT_DB_URL
-    printable = (raw or "").strip() or (env_default or DEFAULT_DB_URL)
+        raise ValueError("A DuckDB path or URL must be provided")
 
-    path: str | None = None
-    url = candidate
+    if "://" in candidate and not candidate.lower().startswith("duckdb://"):
+        return candidate, candidate
+
+    if candidate.lower().startswith("duckdb://"):
+        if candidate.lower().startswith("duckdb:///"):
+            fs_part = candidate[len("duckdb:///") :]
+            fs_path = Path(fs_part).expanduser().resolve()
+            return f"duckdb:///{fs_path.as_posix()}", str(fs_path)
+        return candidate, candidate
+
+    fs_path = Path(candidate).expanduser().resolve()
+    return f"duckdb:///{fs_path.as_posix()}", str(fs_path)
+
+
+def _select_db_target(raw: str | None) -> tuple[str, str, str]:
+    env_default = os.getenv("RESOLVER_DB_URL", "").strip()
+    candidate = (raw or "").strip() or env_default or DEFAULT_DB_URL
+    display = (raw or "").strip() or env_default or DEFAULT_DB_URL
     try:
-        path, url = canonicalize_duckdb_target(candidate)
+        canonical_url, fs_path = normalize_db_url(candidate)
     except Exception as exc:  # pragma: no cover - defensive
-        LOGGER.error(
-            "Failed to canonicalise DuckDB target | raw=%s error=%s",
-            candidate,
-            exc,
-        )
-        path = None
-        url = candidate
-    if not str(url).startswith("duckdb://"):
-        try:
-            if str(candidate).lower().endswith(".duckdb"):
-                resolved = Path(candidate).expanduser().resolve()
-            else:
-                resolved = Path(url).expanduser().resolve()
-        except Exception:
-            resolved = None
-        if resolved is not None:
-            path = resolved.as_posix()
-            url = f"duckdb:///{resolved.as_posix()}"
-    if path is None:
-        path = url.replace("duckdb:///", "") if url.startswith("duckdb:///") else candidate
-    if not printable:
-        printable = candidate if isinstance(candidate, str) and candidate else path or url
-    return printable, path, url
+        LOGGER.error("Failed to normalise DuckDB target | raw=%s error=%s", candidate, exc)
+        return display, candidate, candidate
+    return display, fs_path, canonical_url
 
 
 def _ensure_directory(path: Path) -> None:
@@ -148,7 +142,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     staging_dir = Path(args.staging_dir)
     out_dir = Path(args.out)
-    db_display, db_path, canonical_url = _normalize_db_url(args.db_url)
+    db_display, db_fs_path, canonical_url = _select_db_target(args.db_url)
 
     LOGGER.info(
         "idmc_to_duckdb.start | staging=%s out=%s db_url=%s (display=%s path=%s)",
@@ -156,7 +150,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         out_dir,
         canonical_url,
         db_display,
-        db_path,
+        db_fs_path,
     )
     LOGGER.debug(
         "environment | RESOLVER_DB_URL=%s RESOLVER_WRITE_DB=%s",
@@ -165,13 +159,17 @@ def run(argv: Sequence[str] | None = None) -> int:
     )
 
     _ensure_directory(out_dir)
-    if db_path and db_path != ":memory:" and not str(db_path).startswith("duckdb://"):
+    verify_path: str | None = None
+    if db_fs_path and db_fs_path != canonical_url:
+        verify_path = db_fs_path
         try:
-            parent = Path(db_path).expanduser().resolve().parent
+            parent = Path(db_fs_path).expanduser().resolve().parent
         except Exception:
             parent = None
         if parent is not None:
             _ensure_directory(parent)
+    elif canonical_url.lower().startswith("duckdb:///"):
+        verify_path = canonical_url[len("duckdb:///") :]
     _log_staging_inventory(staging_dir)
 
     flow_path = staging_dir / "flow.csv"
@@ -229,21 +227,21 @@ def run(argv: Sequence[str] | None = None) -> int:
             )
         except export_facts.DuckDBWriteError as exc:
             LOGGER.error("Exporter DuckDB write failed", exc_info=True)
-            print(f"❌ DuckDB write failed: {exc}", file=sys.stderr)
+            print(f"DuckDB write failed: {exc}", file=sys.stderr)
             return 3
         except export_facts.ExportError as exc:
             LOGGER.error("Exporter failed", exc_info=True)
-            print(f"❌ Export failed: {exc}", file=sys.stderr)
+            print(f"Export failed: {exc}", file=sys.stderr)
             return 3
 
     dataframe = export_result.dataframe
     if dataframe is None or dataframe.empty:
         LOGGER.error("Exporter produced no rows; aborting")
-        print("❌ Export produced no rows", file=sys.stderr)
+        print("Export produced no rows", file=sys.stderr)
         return 3
 
     exported_rows = int(export_result.rows)
-    print(f"📄 Exported {export_result.rows} rows to {export_result.csv_path}")
+    print(f"Exported {export_result.rows} rows to {export_result.csv_path}")
 
     db_stats = export_result.db_stats or {}
 
@@ -260,16 +258,22 @@ def run(argv: Sequence[str] | None = None) -> int:
     deltas_delta, deltas_total_reported = _extract_delta_and_total(deltas_stats)
 
     print(
-        f"✅ Wrote {resolved_delta} rows to DuckDB (facts_resolved) — total {resolved_total_reported}"
+        f"Wrote {resolved_delta} rows to DuckDB (facts_resolved) — total {resolved_total_reported}"
     )
     print(
-        f"✅ Wrote {deltas_delta} rows to DuckDB (facts_deltas) — total {deltas_total_reported}"
+        f"Wrote {deltas_delta} rows to DuckDB (facts_deltas) — total {deltas_total_reported}"
     )
+
+    if not verify_path:
+        LOGGER.error(
+            "Verification requires a filesystem DuckDB path | canonical=%s", canonical_url
+        )
+        print("Verification failed: DuckDB URL is not a filesystem path", file=sys.stderr)
+        return 3
 
     conn = None
     try:
-        conn = duckdb_io.get_db(canonical_url)
-        duckdb_io.init_schema(conn)
+        conn = duckdb.connect(verify_path)
 
         def _table_count(name: str) -> int:
             try:
@@ -278,7 +282,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                         f"SELECT COALESCE(COUNT(*), 0) FROM {name}"
                     ).fetchone()[0]
                 )
-            except Exception as exc:
+            except duckdb.Error as exc:  # pragma: no cover - passthrough for tests
                 message = str(exc).lower()
                 if "no such table" in message or "does not exist" in message:
                     LOGGER.warning(
@@ -290,15 +294,15 @@ def run(argv: Sequence[str] | None = None) -> int:
 
         resolved_count = _table_count("facts_resolved")
         deltas_count = _table_count("facts_deltas")
-    except Exception as exc:
+    except duckdb.Error as exc:
         LOGGER.error("Verification query failed", exc_info=True)
-        print(f"❌ Verification failed: {exc}", file=sys.stderr)
+        print(f"Verification failed: {exc}", file=sys.stderr)
         return 3
     finally:
         if conn is not None:
             try:
                 conn.close()
-            except Exception:  # pragma: no cover - cached connection may persist
+            except duckdb.Error:  # pragma: no cover - defensive close
                 pass
 
     resolved_count = int(resolved_count)
@@ -315,7 +319,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         total_rows,
     )
     print(
-        "✅ Verified DuckDB row counts: resolved={resolved} deltas={deltas} total={total}".format(
+        "Verification: facts_resolved={resolved} facts_deltas={deltas} total={total}".format(
             resolved=resolved_count,
             deltas=deltas_count,
             total=total_rows,
