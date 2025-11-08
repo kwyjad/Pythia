@@ -2219,11 +2219,23 @@ def write_snapshot(
                     default_target="new",
                 )
                 if "value" in facts_deltas.columns:
-                    missing_new = facts_deltas["value_new"].isna()
-                    if missing_new.any():
-                        facts_deltas.loc[missing_new, "value_new"] = facts_deltas.loc[
-                            missing_new, "value"
-                        ]
+                    if "value_new" not in facts_deltas.columns:
+                        facts_deltas["value_new"] = pd.NA
+                    value_new_series = facts_deltas["value_new"]
+                    missing_mask = value_new_series.isna()
+                    if value_new_series.dtype == object:
+                        missing_mask = missing_mask | value_new_series.astype(str).str.strip().eq("")
+                    semantics = (
+                        facts_deltas["series_semantics"]
+                        .astype(str)
+                        .str.strip()
+                        .str.lower()
+                    )
+                    to_fill = missing_mask & semantics.eq("new")
+                    if to_fill.any():
+                        facts_deltas.loc[to_fill, "value_new"] = pd.to_numeric(
+                            facts_deltas.loc[to_fill, "value"], errors="coerce"
+                        )
                 _assert_semantics_required(facts_deltas, "facts_deltas")
                 facts_deltas = _coerce_numeric(
                     facts_deltas, "facts_deltas"
