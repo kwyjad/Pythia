@@ -376,8 +376,10 @@ def _map_dtm_displacement_admin0(
 
 try:  # Optional dependency for DB dual-write
     from resolver.db import duckdb_io
+    from resolver.db.conn_shared import canonicalize_duckdb_target
 except Exception:  # pragma: no cover - allow exporter without duckdb installed
     duckdb_io = None
+    canonicalize_duckdb_target = None  # type: ignore[assignment]
 
 from resolver.common import (
     compute_series_semantics,
@@ -1473,31 +1475,56 @@ def _maybe_write_to_db(
     facts_deltas: "Optional[pd.DataFrame]" = None,
     db_url: Optional[str] = None,
     write_db: Optional[bool] = None,
-) -> None:
+    fail_on_error: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     """Write exported facts into DuckDB when enabled via environment or flag."""
 
     if duckdb_io is None:
-        return
+        return {}
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
-    if db_url is not None:
-        db_url = db_url.strip()
-    else:
-        db_url = env_url
+    candidate = (db_url or "").strip() or env_url
     if write_db is None:
-        write_db = bool(db_url)
-    if not write_db or not db_url:
-        LOGGER.debug("DuckDB write skipped: disabled or missing RESOLVER_DB_URL")
-        return
+        write_db = bool(candidate)
+    write_db = bool(write_db)
+
+    if not candidate:
+        LOGGER.debug("DuckDB write skipped: no DuckDB URL configured")
+        return {}
+    if not write_db:
+        LOGGER.info("DuckDB write disabled | db_url=%s", candidate)
+        return {}
+
+    canonical_url = candidate
+    canonical_path: Optional[str] = None
+    if canonicalize_duckdb_target is not None:
+        try:
+            canonical_path, canonical_url = canonicalize_duckdb_target(candidate)
+        except Exception as exc:  # pragma: no cover - defensive path
+            LOGGER.error(
+                "DuckDB target canonicalization failed | candidate=%s error=%s",
+                candidate,
+                exc,
+                exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+            )
+            if fail_on_error:
+                raise DuckDBWriteError(
+                    f"DuckDB target canonicalization failed for '{candidate}': {exc}",
+                    db_url=candidate,
+                ) from exc
+            return {}
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
     if resolved_prepared is None and deltas_prepared is None:
         LOGGER.debug("DuckDB write skipped: no prepared frames to persist")
-        return
+        return {}
 
     conn = None
+    stats: Dict[str, Dict[str, Any]] = {}
     try:
-        LOGGER.info("Writing exports to DuckDB at %s", db_url)
+        LOGGER.info(
+            "Writing exports to DuckDB | url=%s path=%s", canonical_url, canonical_path or ""
+        )
         if LOGGER.isEnabledFor(logging.DEBUG):
             LOGGER.debug(
                 "Resolved frame schema: %s",
@@ -1517,32 +1544,60 @@ def _maybe_write_to_db(
             )
         _warn_on_non_canonical_semantics("facts_resolved", resolved_prepared)
         _warn_on_non_canonical_semantics("facts_deltas", deltas_prepared)
-        conn = duckdb_io.get_db(db_url)
+        conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
+            resolved_keys = duckdb_io.resolve_upsert_keys(
+                "facts_resolved", resolved_prepared
+            )
+            LOGGER.info(
+                "duckdb.write.keys | table=facts_resolved columns=%s",
+                resolved_keys,
+            )
+            LOGGER.info(
+                "DuckDB write start | table=facts_resolved rows=%s",
+                len(resolved_prepared),
+            )
             written_resolved = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
-                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
+                keys=resolved_keys or duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
-            LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved)
+            LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved.rows_delta)
+            stats["facts_resolved"] = written_resolved.to_dict()
         if deltas_prepared is not None and not deltas_prepared.empty:
+            deltas_keys = duckdb_io.resolve_upsert_keys("facts_deltas", deltas_prepared)
+            LOGGER.info(
+                "duckdb.write.keys | table=facts_deltas columns=%s",
+                deltas_keys,
+            )
+            LOGGER.info(
+                "DuckDB write start | table=facts_deltas rows=%s",
+                len(deltas_prepared),
+            )
             written_deltas = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
-                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
+                keys=deltas_keys or duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
-            LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas)
+            LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas.rows_delta)
+            stats["facts_deltas"] = written_deltas.to_dict()
         LOGGER.info("DuckDB write complete")
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
+        if fail_on_error:
+            raise DuckDBWriteError(
+                f"DuckDB write failed: {exc}", db_url=canonical_url
+            ) from exc
     finally:
         # Shared DuckDB connections are cached per URL; leave them open so
         # subsequent writers/readers reuse the same wrapper instance.
         pass
+
+    return stats
 
 
 @dataclass
@@ -1554,10 +1609,19 @@ class ExportResult:
     warnings: List[str] = field(default_factory=list)
     sources: List[SourceApplication] = field(default_factory=list)
     report: Dict[str, Any] = field(default_factory=dict)
+    db_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 class ExportError(RuntimeError):
     pass
+
+
+class DuckDBWriteError(ExportError):
+    """Raised when DuckDB persistence fails during an export."""
+
+    def __init__(self, message: str, *, db_url: str | None = None) -> None:
+        super().__init__(message)
+        self.db_url = db_url
 
 
 def _render_markdown_report(report: Mapping[str, Any]) -> str:
@@ -1739,6 +1803,7 @@ def export_facts(
     out_dir: Path = EXPORTS,
     write_db: str | bool | None = None,
     db_url: Optional[str] = None,
+    only_strategy: Optional[str] = None,
     report_json_path: Optional[Path] = None,
     report_md_path: Optional[Path] = None,
     append_summary_path: Optional[Path] = None,
@@ -1746,11 +1811,123 @@ def export_facts(
     if not config_path.exists():
         raise ExportError(f"Config not found: {config_path}")
 
+    env_db_url_raw = os.environ.get("RESOLVER_DB_URL", "").strip()
+    provided_db_url_raw = db_url.strip() if isinstance(db_url, str) else ""
+    selected_db_url_raw = provided_db_url_raw or env_db_url_raw
+
+    env_write_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
+    requested_write_flag = _parse_write_db_flag(write_db)
+    auto_enabled = False
+    if requested_write_flag is None:
+        if env_write_flag is None:
+            effective_write_flag = bool(selected_db_url_raw)
+            auto_enabled = bool(selected_db_url_raw)
+        else:
+            effective_write_flag = env_write_flag
+    else:
+        effective_write_flag = requested_write_flag
+
+    canonical_db_url = selected_db_url_raw or None
+    canonical_db_path: Optional[str] = None
+    if canonical_db_url and canonicalize_duckdb_target is not None:
+        try:
+            canonical_db_path, canonical_db_url = canonicalize_duckdb_target(canonical_db_url)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.debug(
+                "DuckDB canonicalisation failed | raw=%s error=%s", canonical_db_url, exc
+            )
+            canonical_db_url = selected_db_url_raw or None
+    if canonical_db_url and not str(canonical_db_url).startswith("duckdb://"):
+        resolved = Path(canonical_db_url).expanduser().resolve()
+        canonical_db_path = str(resolved)
+        canonical_db_url = f"duckdb:///{resolved.as_posix()}"
+
+    selected_strategy = (only_strategy or "").strip()
+    if selected_strategy:
+        LOGGER.info("export.strategy.only | strategy=%s", selected_strategy)
+
+    LOGGER.info(
+        "export.start | input=%s | out=%s | write_db=%s | db_url=%s | auto=%s",
+        inp,
+        out_dir,
+        bool(effective_write_flag),
+        canonical_db_url or "",
+        auto_enabled,
+    )
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        if canonical_db_path:
+            LOGGER.debug("export.db_path | %s", canonical_db_path)
+        LOGGER.debug(
+            "export.env | RESOLVER_DB_URL=%s RESOLVER_WRITE_DB=%s",
+            env_db_url_raw or "",
+            os.environ.get("RESOLVER_WRITE_DB", ""),
+        )
+
     files, skipped_meta = _collect_inputs(inp)
+
+    LOGGER.info("export.inputs | scanned=%s matched=%s", len(files) + len(skipped_meta), len(files))
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        for path in files:
+            LOGGER.debug("export.input_file | %s", path)
 
     warnings: List[str] = []
     source_details: List[SourceApplication] = []
     debug_records: List[Dict[str, Any]] = []
+
+    claimed_paths: dict[str, str] = {}
+    double_match_dropped = 0
+
+    def _accept_detail(detail: SourceApplication, *, stage: str) -> bool:
+        nonlocal double_match_dropped
+        if detail is None:
+            return False
+        if not selected_strategy:
+            return True
+
+        strategy = str(detail.strategy or "")
+        path_obj = getattr(detail, "path", None)
+        path_key = str(path_obj) if path_obj else str(detail.name or "")
+        if strategy != selected_strategy:
+            existing = claimed_paths.get(path_key)
+            if existing is not None:
+                double_match_dropped += 1
+                LOGGER.info(
+                    "export.strategy.double_match | path=%s kept=%s dropped=%s stage=%s",
+                    path_key,
+                    existing or "",
+                    strategy or "",
+                    stage,
+                )
+            else:
+                LOGGER.info(
+                    "export.strategy.skip | path=%s strategy=%s required=%s stage=%s",
+                    path_key,
+                    strategy or "",
+                    selected_strategy,
+                    stage,
+                )
+            return False
+
+        existing = claimed_paths.get(path_key)
+        if existing is not None:
+            double_match_dropped += 1
+            LOGGER.info(
+                "export.strategy.double_match | path=%s kept=%s dropped=%s stage=%s",
+                path_key,
+                existing or "",
+                strategy or "",
+                stage,
+            )
+            return False
+
+        claimed_paths[path_key] = strategy
+        LOGGER.info(
+            "export.strategy.claimed | path=%s strategy=%s stage=%s",
+            path_key,
+            strategy or "",
+            stage,
+        )
+        return True
 
     for meta_path in skipped_meta:
         message = f"Skipped metadata file {meta_path.name}"
@@ -1874,6 +2051,20 @@ def export_facts(
                     )
                     detail.strategy = "config"
                     source_details.append(detail)
+                    if not _accept_detail(detail, stage="allow_empty"):
+                        source_details.pop()
+                        debug_entry.update(
+                            {
+                                "matched": False,
+                                "used_mapping": str(
+                                    matched_cfg.get("name") or file_path.name
+                                ),
+                                "strategy": detail.strategy,
+                                "skipped": "only_strategy",
+                            }
+                        )
+                        debug_records.append(debug_entry)
+                        continue
                     if not mapped.empty:
                         mapped_frames.append(mapped)
                     debug_entry.update(
@@ -1987,6 +2178,18 @@ def export_facts(
                     warnings.append(warning_msg)
 
                 source_details.append(detail)
+                if not _accept_detail(detail, stage="dtm_admin0_alias"):
+                    source_details.pop()
+                    debug_entry.update(
+                        {
+                            "matched": True,
+                            "used_mapping": "dtm_displacement_admin0_alias",
+                            "strategy": detail.strategy,
+                            "skipped": "only_strategy",
+                        }
+                    )
+                    debug_records.append(debug_entry)
+                    continue
                 if not mapped.empty:
                     mapped_frames.append(mapped)
 
@@ -2041,6 +2244,18 @@ def export_facts(
                         strategy="canonical-passthrough",
                     )
                     source_details.append(detail)
+                    if not _accept_detail(detail, stage="canonical_passthrough"):
+                        source_details.pop()
+                        debug_entry.update(
+                            {
+                                "matched": True,
+                                "used_mapping": "canonical-passthrough",
+                                "strategy": detail.strategy,
+                                "skipped": "only_strategy",
+                            }
+                        )
+                        debug_records.append(debug_entry)
+                        continue
                     debug_entry.update(
                         {
                             "matched": True,
@@ -2079,16 +2294,30 @@ def export_facts(
                     continue
 
             mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
+            mapping_name = str(matched_cfg.get("name") or file_path.name)
+            if mapping_name in {"idmc_flow", "idmc_stock"}:
+                strategy = "idmc-staging"
             detail.strategy = strategy
             if detail.warnings:
                 warnings.extend(detail.warnings)
             source_details.append(detail)
+            if not _accept_detail(detail, stage="source_mapping"):
+                source_details.pop()
+                debug_entry.update(
+                    {
+                        "matched": True,
+                        "used_mapping": mapping_name,
+                        "strategy": detail.strategy,
+                        "skipped": "only_strategy",
+                    }
+                )
+                debug_records.append(debug_entry)
+                continue
             if file_path.name == "dtm_displacement.csv":
                 dtm_yaml_rows = len(mapped)
                 dtm_detail = detail
             if not mapped.empty:
                 mapped_frames.append(mapped)
-            mapping_name = str(matched_cfg.get("name") or file_path.name)
             debug_entry.update(
                 {
                     "matched": True,
@@ -2106,49 +2335,73 @@ def export_facts(
                 dtm_debug_entry = debug_entry
 
         if dtm_yaml_rows == 0 and dtm_frame is not None:
-            fallback, fallback_meta = _map_dtm_admin0_fallback(dtm_frame)
-            if fallback is not None and not fallback.empty:
-                if "series_semantics" not in fallback.columns:
-                    fallback["series_semantics"] = "stock"
-                mapped_frames.append(fallback)
-                warning_msg = (
-                    "dtm_displacement.csv: YAML mapping yielded 0 rows; applied admin0 fallback"
+            if selected_strategy and (
+                dtm_detail is None or str(dtm_detail.strategy or "") != selected_strategy
+            ):
+                LOGGER.info(
+                    "export.strategy.skip | stage=dtm_fallback required=%s",
+                    selected_strategy,
                 )
-                warnings.append(warning_msg)
-                LOGGER.warning(
-                    "Export mapping warning: YAML mapping yielded 0 rows; applied dtm_admin0 fallback: %s rows",
-                    len(fallback),
-                )
-                if dtm_detail is not None:
-                    dtm_detail.rows_mapped = fallback_meta.get("rows_after_filters", len(fallback))
-                    dtm_detail.rows_after_filters = fallback_meta.get("rows_after_filters", len(fallback))
-                    dtm_detail.rows_after_aggregate = fallback_meta.get("rows_after_aggregate", len(fallback))
-                    dtm_detail.rows_after_dedupe = fallback_meta.get("rows_after_dedupe", len(fallback))
-                    dtm_detail.dedupe_keys = ["iso3", "as_of_date", "metric"]
-                    dtm_detail.dedupe_keep = "last"
-                    dtm_detail.aggregate_keys = fallback_meta.get("aggregate_keys", [])
-                    dtm_detail.aggregate_funcs = fallback_meta.get("aggregate_funcs", {})
-                    dtm_detail.drop_histogram = fallback_meta.get("drop_histogram", {})
-                    dtm_detail.filters_applied = fallback_meta.get("filters_applied", [])
-                    metric_details = dtm_detail.mapping_details.get("metric")
-                    if isinstance(metric_details, dict):
-                        metric_details["const"] = "idps_stock"
-                    detail_warning = (
-                        "YAML mapping yielded 0 rows; applied dtm_admin0 fallback"
+            else:
+                fallback, fallback_meta = _map_dtm_admin0_fallback(dtm_frame)
+                if fallback is not None and not fallback.empty:
+                    if "series_semantics" not in fallback.columns:
+                        fallback["series_semantics"] = "stock"
+                    mapped_frames.append(fallback)
+                    warning_msg = (
+                        "dtm_displacement.csv: YAML mapping yielded 0 rows; applied admin0 fallback"
                     )
-                    if detail_warning not in dtm_detail.warnings:
-                        dtm_detail.warnings.append(detail_warning)
-                if dtm_debug_entry is not None:
-                    dtm_debug_entry["fallback"] = {
-                        "applied": True,
-                        "rows": int(len(fallback)),
-                        "rows_after_filters": int(
-                            fallback_meta.get("rows_after_filters", len(fallback))
-                        ),
-                        "rows_after_aggregate": int(
-                            fallback_meta.get("rows_after_aggregate", len(fallback))
-                        ),
-                    }
+                    warnings.append(warning_msg)
+                    LOGGER.warning(
+                        "Export mapping warning: YAML mapping yielded 0 rows; applied dtm_admin0 fallback: %s rows",
+                        len(fallback),
+                    )
+                    if dtm_detail is not None:
+                        dtm_detail.rows_mapped = fallback_meta.get(
+                            "rows_after_filters", len(fallback)
+                        )
+                        dtm_detail.rows_after_filters = fallback_meta.get(
+                            "rows_after_filters", len(fallback)
+                        )
+                        dtm_detail.rows_after_aggregate = fallback_meta.get(
+                            "rows_after_aggregate", len(fallback)
+                        )
+                        dtm_detail.rows_after_dedupe = fallback_meta.get(
+                            "rows_after_dedupe", len(fallback)
+                        )
+                        dtm_detail.dedupe_keys = ["iso3", "as_of_date", "metric"]
+                        dtm_detail.dedupe_keep = "last"
+                        dtm_detail.aggregate_keys = fallback_meta.get(
+                            "aggregate_keys", []
+                        )
+                        dtm_detail.aggregate_funcs = fallback_meta.get(
+                            "aggregate_funcs", {}
+                        )
+                        dtm_detail.drop_histogram = fallback_meta.get(
+                            "drop_histogram", {}
+                        )
+                        dtm_detail.filters_applied = fallback_meta.get(
+                            "filters_applied", []
+                        )
+                        metric_details = dtm_detail.mapping_details.get("metric")
+                        if isinstance(metric_details, dict):
+                            metric_details["const"] = "idps_stock"
+                        detail_warning = (
+                            "YAML mapping yielded 0 rows; applied dtm_admin0 fallback"
+                        )
+                        if detail_warning not in dtm_detail.warnings:
+                            dtm_detail.warnings.append(detail_warning)
+                    if dtm_debug_entry is not None:
+                        dtm_debug_entry["fallback"] = {
+                            "applied": True,
+                            "rows": int(len(fallback)),
+                            "rows_after_filters": int(
+                                fallback_meta.get("rows_after_filters", len(fallback))
+                            ),
+                            "rows_after_aggregate": int(
+                                fallback_meta.get("rows_after_aggregate", len(fallback))
+                            ),
+                        }
 
         if not mapped_frames and raw_frames:
             staging_frames = [frame for _, frame in raw_frames]
@@ -2177,13 +2430,16 @@ def export_facts(
                 strategy="legacy-fallback",
             )
             source_details.append(detail)
-            fallback_warning = (
-                "Legacy fallback applied: "
-                f"{len(staging)} staging rows → {len(fallback)} exported rows"
-            )
-            warnings.append(fallback_warning)
-            if not fallback.empty:
-                mapped_frames.append(fallback)
+            if _accept_detail(detail, stage="legacy_fallback"):
+                fallback_warning = (
+                    "Legacy fallback applied: "
+                    f"{len(staging)} staging rows → {len(fallback)} exported rows"
+                )
+                warnings.append(fallback_warning)
+                if not fallback.empty:
+                    mapped_frames.append(fallback)
+            else:
+                source_details.pop()
 
         if mapped_frames:
             facts = pd.concat(mapped_frames, ignore_index=True)
@@ -2229,17 +2485,18 @@ def export_facts(
 
         staging = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         facts = _apply_mapping(staging, cfg)
-        source_details.append(
-            SourceApplication(
-                name="legacy-config",
-                path=successful_paths[0],
-                rows_in=len(staging),
-                strategy="legacy",
-                rows_mapped=len(facts),
-                rows_after_filters=len(facts),
-                rows_after_dedupe=len(facts),
-            )
+        detail = SourceApplication(
+            name="legacy-config",
+            path=successful_paths[0],
+            rows_in=len(staging),
+            strategy="legacy",
+            rows_mapped=len(facts),
+            rows_after_filters=len(facts),
+            rows_after_dedupe=len(facts),
         )
+        source_details.append(detail)
+        if not _accept_detail(detail, stage="legacy"):
+            source_details.pop()
 
     facts = _apply_series_semantics(facts)
     for col in ["as_of_date", "publication_date"]:
@@ -2259,6 +2516,13 @@ def export_facts(
         LOGGER.debug("Sample rows: %s", facts.head(5).to_dict(orient="records"))
     for warning in warnings:
         LOGGER.warning("Export mapping warning: %s", warning)
+
+    if selected_strategy and double_match_dropped:
+        LOGGER.info(
+            "export.strategy.double_match.total | strategy=%s dropped=%s",
+            selected_strategy,
+            double_match_dropped,
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "facts.csv"
@@ -2283,10 +2547,75 @@ def export_facts(
     except Exception as exc:
         print(f"Warning: could not write Parquet ({exc}). CSV written.", file=sys.stderr)
 
-    _maybe_write_to_db(
-        facts_resolved=facts,
-        db_url=db_url,
-        write_db=_parse_write_db_flag(write_db),
+    resolved_for_db: Optional[pd.DataFrame] = None
+    deltas_for_db: Optional[pd.DataFrame] = None
+    semantics_source: Optional[str] = None
+    semantics_series: Optional[pd.Series] = None
+    if isinstance(facts, pd.DataFrame) and not facts.empty:
+        if "semantics" in facts.columns:
+            semantics_source = "semantics"
+            semantics_series = facts["semantics"]
+        elif "series_semantics" in facts.columns:
+            semantics_source = "series_semantics"
+            semantics_series = facts["series_semantics"]
+
+        if semantics_series is not None:
+            semantics_normalized = (
+                semantics_series.fillna("")
+                .astype(str)
+                .str.lower()
+                .str.strip()
+            )
+            deltas_mask = semantics_normalized.eq("new")
+            resolved_mask = semantics_normalized.eq("stock")
+
+            if deltas_mask.any():
+                deltas_for_db = facts.loc[deltas_mask].copy()
+            if resolved_mask.any():
+                resolved_for_db = facts.loc[resolved_mask].copy()
+
+            other_mask = ~(deltas_mask | resolved_mask)
+            other_count = int(other_mask.sum())
+            if other_count:
+                distribution = (
+                    semantics_normalized[other_mask]
+                    .value_counts(dropna=False)
+                    .to_dict()
+                )
+                normalized_distribution = {
+                    (key if key else "(empty)"): int(value)
+                    for key, value in distribution.items()
+                }
+                LOGGER.info(
+                    "duckdb.semantics.routed_other | total=%s details=%s",
+                    other_count,
+                    normalized_distribution,
+                )
+                other_rows = facts.loc[other_mask].copy()
+                if resolved_for_db is None:
+                    resolved_for_db = other_rows
+                else:
+                    resolved_for_db = pd.concat(
+                        [resolved_for_db, other_rows],
+                        ignore_index=True,
+                        sort=False,
+                    )
+        else:
+            resolved_for_db = facts
+
+        LOGGER.info(
+            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s",
+            semantics_source or "∅",
+            0 if resolved_for_db is None else len(resolved_for_db),
+            0 if deltas_for_db is None else len(deltas_for_db),
+        )
+
+    db_write_stats = _maybe_write_to_db(
+        facts_resolved=resolved_for_db,
+        facts_deltas=deltas_for_db,
+        db_url=canonical_db_url or selected_db_url_raw,
+        write_db=bool(effective_write_flag),
+        fail_on_error=bool(effective_write_flag),
     )
 
     result_rows = len(facts)
@@ -2451,6 +2780,7 @@ def export_facts(
         warnings=warnings,
         sources=source_details,
         report=report,
+        db_stats=db_write_stats,
     )
 
 
@@ -2461,6 +2791,8 @@ def main():
     ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
     ap.add_argument(
         "--write-db",
+        "--write_db",
+        dest="write_db",
         default=None,
         choices=["0", "1"],
         help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",
@@ -2485,6 +2817,11 @@ def main():
         default=None,
         help="Append the Export Facts markdown block to this file",
     )
+    ap.add_argument(
+        "--only-strategy",
+        default=None,
+        help="Restrict processing to a single strategy name (e.g. idmc-staging)",
+    )
     args = ap.parse_args()
 
     try:
@@ -2494,10 +2831,14 @@ def main():
             out_dir=Path(args.out),
             write_db=args.write_db,
             db_url=args.db_url,
+            only_strategy=args.only_strategy,
             report_json_path=Path(args.report_json) if args.report_json else None,
             report_md_path=Path(args.report_md) if args.report_md else None,
             append_summary_path=Path(args.append_summary) if args.append_summary else None,
         )
+    except DuckDBWriteError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(3)
     except ExportError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

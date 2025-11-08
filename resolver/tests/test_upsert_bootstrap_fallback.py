@@ -41,7 +41,8 @@ def test_fallback_writes_when_no_constraints(monkeypatch, tmp_path, table, keys,
     monkeypatch.setattr(duckdb_io, "_attempt_heal_missing_key", lambda *args, **kwargs: False)
 
     written = duckdb_io.upsert_dataframe(conn, table, frame, keys=keys)
-    assert written == len(frame)
+    assert written.rows_written == len(frame)
+    assert written.rows_delta == len(frame)
 
     rows = conn.execute(
         f"SELECT value FROM {table} WHERE ym='2024-01' AND iso3='COL'"
@@ -52,7 +53,7 @@ def test_fallback_writes_when_no_constraints(monkeypatch, tmp_path, table, keys,
     frame_updated = frame.copy()
     frame_updated.loc[0, "value"] = "2.0"
     written_second = duckdb_io.upsert_dataframe(conn, table, frame_updated, keys=keys)
-    assert written_second == len(frame_updated)
+    assert written_second.rows_written == len(frame_updated)
     rows = conn.execute(
         f"SELECT value FROM {table} WHERE ym='2024-01' AND iso3='COL'"
     ).fetchall()
@@ -84,7 +85,7 @@ def test_numeric_coercion_to_nulls(tmp_path):
         frame,
         keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
     )
-    assert written == len(frame)
+    assert written.rows_written == len(frame)
 
     value_new, value_stock = conn.execute(
         "SELECT value_new, value_stock FROM facts_deltas WHERE ym='2024-02'"

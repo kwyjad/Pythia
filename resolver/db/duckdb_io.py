@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import numbers
 import os
 import platform
 import re
@@ -10,6 +11,7 @@ import sys
 import uuid
 import datetime as dt
 import logging
+from dataclasses import dataclass
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
@@ -83,17 +85,25 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
 
 FACTS_RESOLVED_KEY_COLUMNS = [
-    "ym",
+    "event_id",
     "iso3",
     "hazard_code",
     "metric",
+    "as_of_date",
+    "publication_date",
+    "source_id",
     "series_semantics",
+    "ym",
 ]
 FACTS_DELTAS_KEY_COLUMNS = [
-    "ym",
+    "event_id",
     "iso3",
     "hazard_code",
     "metric",
+    "as_of_date",
+    "publication_date",
+    "source_id",
+    "ym",
 ]
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
@@ -115,13 +125,56 @@ _COERCE_NUMERIC_COLUMNS: dict[str, list[str]] = {
 }
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
     "facts_resolved": ("as_of_date", "publication_date"),
-    "facts_deltas": ("as_of",),
+    "facts_deltas": ("as_of", "as_of_date", "publication_date"),
 }
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
 
 _DB_CACHE: dict[str, "duckdb.DuckDBPyConnection"] = {}
+
+
+@dataclass
+class UpsertResult:
+    """Structured counts returned after an upsert operation."""
+
+    table: str
+    rows_in: int
+    rows_written: int
+    rows_before: int
+    rows_after: int
+    rows_delta: int
+    matched_existing: int | None = None
+
+    def to_dict(self) -> dict[str, int | None | str]:
+        return {
+            "table": self.table,
+            "rows_in": int(self.rows_in),
+            "rows_written": int(self.rows_written),
+            "rows_before": int(self.rows_before),
+            "rows_after": int(self.rows_after),
+            "rows_delta": int(self.rows_delta),
+            "matched_existing": None if self.matched_existing is None else int(self.matched_existing),
+        }
+
+    def __int__(self) -> int:  # pragma: no cover - compatibility shim
+        return int(self.rows_written)
+
+    def __repr__(self) -> str:  # pragma: no cover - logging helper
+        return (
+            "UpsertResult(table={table!r}, rows_in={rows_in}, rows_written={rows_written}, "
+            "rows_before={rows_before}, rows_after={rows_after}, rows_delta={rows_delta}, "
+            "matched_existing={matched_existing})"
+        ).format(
+            table=self.table,
+            rows_in=self.rows_in,
+            rows_written=self.rows_written,
+            rows_before=self.rows_before,
+            rows_after=self.rows_after,
+            rows_delta=self.rows_delta,
+            matched_existing=self.matched_existing,
+        )
+
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - avoid "No handler" warnings in tests
@@ -184,6 +237,76 @@ def _savepoints_supported() -> bool:
 
 def _savepoints_certainly_unsupported() -> bool:
     return _SAVEPOINT_PROBED and not _SAVEPOINT_WORKS
+
+
+def _series_has_non_empty(frame: pd.DataFrame, column: str) -> bool:
+    try:
+        series = frame[column]
+    except KeyError:
+        return False
+    if series.empty:
+        return False
+    if series.dtype == object:
+        return series.astype(str).str.strip().ne("").any()
+    return series.notna().any()
+
+
+def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
+    """Return the natural key columns to use for ``table`` writes."""
+
+    spec = TABLE_KEY_SPECS.get(table, {})
+    canonical = list(spec.get("columns", [])) if spec else []
+    if canonical:
+        return canonical
+
+    if frame is None or frame.empty:
+        return []
+
+    columns = set(frame.columns)
+    keys: list[str] = []
+
+    def _extend(candidates: Iterable[str]) -> None:
+        for column in candidates:
+            if column in columns and column not in keys:
+                keys.append(column)
+
+    if table == "facts_resolved":
+        if "event_id" in columns and _series_has_non_empty(frame, "event_id"):
+            _extend(["event_id"])
+        fallback: list[str] = ["iso3", "hazard_code", "metric"]
+        for candidate in ("as_of_date", "as_of"):
+            if candidate in columns:
+                fallback.append(candidate)
+                break
+        if "publication_date" in columns:
+            fallback.append("publication_date")
+        for candidate in ("source_id", "source"):
+            if candidate in columns:
+                fallback.append(candidate)
+                break
+        fallback.extend(
+            [column for column in ("series_semantics", "ym") if column in columns]
+        )
+        _extend(fallback)
+    elif table == "facts_deltas":
+        if "event_id" in columns and _series_has_non_empty(frame, "event_id"):
+            _extend(["event_id"])
+        fallback = ["iso3", "hazard_code", "metric"]
+        for candidate in ("as_of", "as_of_date"):
+            if candidate in columns:
+                fallback.append(candidate)
+                break
+        if "publication_date" in columns:
+            fallback.append("publication_date")
+        fallback.extend(
+            [column for column in ("series_semantics", "ym") if column in columns]
+        )
+        _extend(fallback)
+
+    if not keys and spec.get("columns"):
+        _extend(spec.get("columns", []))
+
+    return keys
 
 
 @contextmanager
@@ -628,6 +751,9 @@ def _has_declared_key(
         return False
 
     canonical = _canonicalize_columns(keys)
+    if not canonical:
+        return False
+
     constraint_sets: list[list[str]] = []
     unique_indexes: dict[str, list[str]] = {}
 
@@ -642,15 +768,6 @@ def _has_declared_key(
             )
         for constraint_columns in constraint_sets:
             if _canonicalize_columns(constraint_columns) == canonical:
-                if diag_enabled():
-                    log_json(
-                        DIAG_LOGGER,
-                        "declared_key_detected",
-                        table=table,
-                        keys=list(keys),
-                        via="constraint",
-                        columns=constraint_columns,
-                    )
                 return True
     except Exception:  # pragma: no cover - diagnostic aid only
         LOGGER.debug(
@@ -668,16 +785,6 @@ def _has_declared_key(
             )
         for index_name, columns in unique_indexes.items():
             if _canonicalize_columns(columns) == canonical:
-                if diag_enabled():
-                    log_json(
-                        DIAG_LOGGER,
-                        "declared_key_detected",
-                        table=table,
-                        keys=list(keys),
-                        via="unique_index",
-                        index=index_name,
-                        columns=columns,
-                    )
                 return True
     except Exception:  # pragma: no cover - diagnostic aid only
         LOGGER.debug(
@@ -698,10 +805,134 @@ def _has_declared_key(
     return False
 
 
+def _table_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> tuple[list[str], dict[str, str]]:
+    try:
+        rows = conn.execute(
+            f"PRAGMA table_info({_quote_literal(table)})"
+        ).fetchall()
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("duckdb.schema.table_info_failed | table=%s", table, exc_info=True)
+        return [], {}
+    existing = [row[1] for row in rows]
+    mapping = {name.lower(): name for name in existing}
+    return existing, mapping
+
+
+def _split_available_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    if not columns:
+        return [], []
+    _, mapping = _table_columns(conn, table)
+    available: list[str] = []
+    missing: list[str] = []
+    for column in columns:
+        lookup = mapping.get(column.lower())
+        if lookup is None:
+            missing.append(column)
+        else:
+            available.append(lookup)
+    return available, missing
+
+
+def _ensure_table_has_columns(
+    conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str]
+) -> list[str]:
+    """Ensure ``table`` has ``columns`` (adding nullable VARCHAR columns if missing)."""
+
+    if not columns:
+        return []
+
+    existing, _ = _table_columns(conn, table)
+    existing_lower = {name.lower() for name in existing}
+    added: list[str] = []
+    table_ident = _quote_identifier(table)
+    ddl: list[str] = []
+    for column in columns:
+        if column.lower() in existing_lower:
+            continue
+        column_ident = _quote_identifier(column)
+        ddl.append(f"ALTER TABLE {table_ident} ADD COLUMN {column_ident} VARCHAR")
+        added.append(column)
+
+    if ddl:
+        _run_ddl_batch(conn, ddl, label=f"schema:add_columns:{table}")
+        LOGGER.info(
+            "duckdb.schema.columns_added | table=%s columns=%s", table, added
+        )
+
+    return added
+
+
+def _ensure_frame_has_columns(
+    frame: pd.DataFrame, table: str, columns: Sequence[str]
+) -> pd.DataFrame:
+    if not columns:
+        return frame
+
+    working = frame
+    if not working.columns.is_unique:
+        working = working.copy()
+
+    for column in columns:
+        if column in working.columns:
+            continue
+        if column == "as_of_date" and "as_of" in working.columns:
+            working[column] = working["as_of"]
+        elif column == "publication_date" and "as_of_date" in working.columns:
+            working[column] = working["as_of_date"]
+        elif column == "source_id" and "source" in working.columns:
+            working[column] = working["source"]
+        elif column == "series_semantics" and "semantics" in working.columns:
+            working[column] = working["semantics"]
+        else:
+            working[column] = pd.NA
+    return working
+
+
 def _ensure_unique_index(
     conn: "duckdb.DuckDBPyConnection", table: str, columns: Sequence[str], index_name: str
 ) -> None:
-    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    if not columns:
+        LOGGER.debug(
+            "duckdb.schema.unique_index_skipped_empty | table=%s index=%s",
+            table,
+            index_name,
+        )
+        return
+
+    _ensure_table_has_columns(conn, table, columns)
+    available, missing = _split_available_columns(conn, table, columns)
+    if missing:
+        LOGGER.debug(
+            "duckdb.schema.unique_index_missing_columns | table=%s index=%s missing=%s",
+            table,
+            index_name,
+            missing,
+        )
+        return
+
+    existing_indexes = _unique_index_columns(conn, table)
+    normalized_target = _canonicalize_columns(columns)
+    current = existing_indexes.get(index_name)
+    if current and _canonicalize_columns(current) != normalized_target:
+        index_ident = _quote_identifier(index_name)
+        LOGGER.info(
+            "duckdb.schema.unique_index_recreate | table=%s index=%s from=%s to=%s",
+            table,
+            index_name,
+            current,
+            columns,
+        )
+        _run_ddl_batch(
+            conn,
+            [f"DROP INDEX IF EXISTS {index_ident}"],
+            label=f"unique_index:drop:{table}:{index_name}",
+        )
+
+    column_list = ", ".join(_quote_identifier(col) for col in available)
     table_ident = _quote_identifier(table)
     index_ident = _quote_identifier(index_name)
     statement = (
@@ -716,7 +947,7 @@ def _ensure_unique_index(
         "duckdb.schema.unique_index_ensured | table=%s index=%s columns=%s",
         table,
         index_name,
-        columns,
+        available,
     )
 
 
@@ -727,7 +958,36 @@ def _ensure_primary_key_or_unique(
     constraint_name: str,
     index_name: str,
 ) -> None:
-    column_list = ", ".join(_quote_identifier(col) for col in columns)
+    if not columns:
+        LOGGER.debug(
+            "duckdb.schema.primary_key_skipped_empty | table=%s constraint=%s",
+            table,
+            constraint_name,
+        )
+        return
+
+    _ensure_table_has_columns(conn, table, columns)
+    available, missing = _split_available_columns(conn, table, columns)
+    if not available:
+        LOGGER.warning(
+            "duckdb.schema.primary_key_skipped_missing | table=%s constraint=%s requested=%s",
+            table,
+            constraint_name,
+            list(columns),
+        )
+        return
+    if missing:
+        LOGGER.warning(
+            "duckdb.schema.primary_key_degraded | table=%s constraint=%s missing=%s using=%s",
+            table,
+            constraint_name,
+            missing,
+            available,
+        )
+        _ensure_unique_index(conn, table, available, index_name)
+        return
+
+    column_list = ", ".join(_quote_identifier(col) for col in available)
     table_ident = _quote_identifier(table)
     constraint_ident = _quote_identifier(constraint_name)
 
@@ -737,7 +997,7 @@ def _ensure_primary_key_or_unique(
             table,
             constraint_name,
         )
-        _ensure_unique_index(conn, table, columns, index_name)
+        _ensure_unique_index(conn, table, available, index_name)
         return
 
     if _has_declared_key(conn, table, columns):
@@ -760,7 +1020,7 @@ def _ensure_primary_key_or_unique(
             "duckdb.schema.primary_key_added | table=%s constraint=%s columns=%s",
             table,
             constraint_name,
-            columns,
+            available,
         )
     except _NOTIMPL_EXC as exc:  # pragma: no cover - version-specific fallback
         LOGGER.debug(
@@ -769,7 +1029,7 @@ def _ensure_primary_key_or_unique(
             constraint_name,
             exc,
         )
-        _ensure_unique_index(conn, table, columns, index_name)
+        _ensure_unique_index(conn, table, available, index_name)
     except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - idempotent path
         message = str(exc)
         if "already has a primary key" in message or "Constraint with name" in message:
@@ -792,7 +1052,7 @@ def _ensure_primary_key_or_unique(
                 constraint_name,
                 message,
             )
-        _ensure_unique_index(conn, table, columns, index_name)
+        _ensure_unique_index(conn, table, available, index_name)
 
 
 def _attempt_heal_missing_key(
@@ -875,6 +1135,7 @@ def _normalize_duckdb_target(path_or_url: str | None) -> tuple[str, str]:
             _WARNED_EXPLICIT_OVERRIDE.add(key)
     raw = explicit or env_candidate or DEFAULT_DB_URL
     path, url = _shared_canonicalize_duckdb_target(raw)
+    LOGGER.info("duckdb.target | raw=%s | url=%s | path=%s", raw, url, path)
     if path == ":memory:":
         return "duckdb:///:memory:", path
     return url, path
@@ -948,6 +1209,10 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
         cache_event=cache_event,
         forced=force_reopen if force_reopen else None,
     )
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "duckdb.connect | url=%s path=%s cache_event=%s", url, resolved_path, cache_event
+        )
     if os.getenv("RESOLVER_DEBUG") == "1" and LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug(
             "DuckDB connection resolved: path=%s from=%s cache_disabled=%s",  # pragma: no cover - logging only
@@ -969,6 +1234,11 @@ def init_schema(
     if not schema_path.exists():
         raise FileNotFoundError(f"Schema SQL not found at {schema_path}")
 
+    try:
+        conn.execute("CREATE SCHEMA IF NOT EXISTS main")
+    except Exception:  # pragma: no cover - DuckDB pre-0.9 fallback
+        LOGGER.debug("duckdb.schema.ensure_main_failed", exc_info=True)
+
     expected_tables = {
         "facts_resolved",
         "facts_deltas",
@@ -980,6 +1250,11 @@ def init_schema(
         row[0]
         for row in conn.execute("PRAGMA show_tables").fetchall()
     }
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "duckdb.schema.inspect | existing_tables=%s",
+            ", ".join(sorted(existing_tables)) or "<none>",
+        )
 
     core_tables = {"facts_resolved", "facts_deltas"}
     if core_tables.issubset(existing_tables):
@@ -988,6 +1263,7 @@ def init_schema(
             columns = spec["columns"]
             primary = spec["primary"]
             unique = spec["unique"]
+            _ensure_table_has_columns(conn, table_name, columns)
             _ensure_primary_key_or_unique(
                 conn, table_name, columns, str(primary), str(unique)
             )
@@ -995,6 +1271,11 @@ def init_schema(
         return
 
     core_statements: list[tuple[str, str]] = []
+    missing_core = sorted(core_tables - existing_tables)
+    if missing_core:
+        LOGGER.info(
+            "duckdb.schema.create | ensuring core tables=%s", ", ".join(missing_core)
+        )
     if "facts_resolved" not in existing_tables:
         core_statements.append(
             (
@@ -1045,6 +1326,9 @@ def init_schema(
                     value_stock DOUBLE,
                     series_semantics TEXT NOT NULL DEFAULT 'new',
                     as_of VARCHAR,
+                    as_of_date VARCHAR,
+                    publication_date VARCHAR,
+                    event_id TEXT,
                     source_id TEXT,
                     series TEXT,
                     rebase_flag INTEGER,
@@ -1075,6 +1359,41 @@ def init_schema(
         LOGGER.debug("Ensured DuckDB schema from %s", schema_path)
 
     for table_name, spec in TABLE_KEY_SPECS.items():
+        _ensure_table_has_columns(conn, table_name, spec["columns"])
+
+    try:
+        _run_ddl_batch(
+            conn,
+            [
+                "ALTER TABLE facts_resolved DROP CONSTRAINT IF EXISTS facts_resolved_unique",
+                "ALTER TABLE facts_deltas DROP CONSTRAINT IF EXISTS facts_deltas_unique",
+            ],
+            label="schema:drop_legacy_unique_constraints",
+        )
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - migration guard only
+        LOGGER.debug(
+            "duckdb.schema.drop_legacy_unique.failed | error=%s",
+            exc,
+            exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+        )
+
+    try:
+        _run_ddl_batch(
+            conn,
+            [
+                "DROP INDEX IF EXISTS ux_facts_resolved_series",
+                "DROP INDEX IF EXISTS ux_facts_deltas_series",
+            ],
+            label="schema:drop_legacy_unique_indexes",
+        )
+    except _SCHEMA_EXC_TUPLE as exc:  # pragma: no cover - migration guard only
+        LOGGER.debug(
+            "duckdb.schema.drop_legacy_unique_index.failed | error=%s",
+            exc,
+            exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+        )
+
+    for table_name, spec in TABLE_KEY_SPECS.items():
         columns = spec["columns"]
         primary = spec["primary"]
         unique = spec["unique"]
@@ -1087,11 +1406,30 @@ def init_schema(
             [
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_resolved_series
-                ON facts_resolved (ym, iso3, hazard_code, metric, series_semantics)
+                ON facts_resolved (
+                    event_id,
+                    iso3,
+                    hazard_code,
+                    metric,
+                    as_of_date,
+                    publication_date,
+                    source_id,
+                    series_semantics,
+                    ym
+                )
                 """,
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_facts_deltas_series
-                ON facts_deltas (ym, iso3, hazard_code, metric)
+                ON facts_deltas (
+                    event_id,
+                    iso3,
+                    hazard_code,
+                    metric,
+                    as_of_date,
+                    publication_date,
+                    source_id,
+                    ym
+                )
                 """,
             ],
             label="schema:unique_indexes",
@@ -1143,12 +1481,26 @@ def init_schema(
             LOGGER.debug("Table %s columns: %s", current_table, ", ".join(columns))
 
 
+def _table_row_count(
+    conn: "duckdb.DuckDBPyConnection", table: str
+) -> int:
+    try:
+        return int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table)}"
+            ).fetchone()[0]
+        )
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("duckdb.upsert.count_failed | table=%s", table, exc_info=True)
+        return 0
+
+
 def upsert_dataframe(
     conn: "duckdb.DuckDBPyConnection",
     table: str,
     df: pd.DataFrame,
     keys: Sequence[str] | None = None,
-) -> int:
+) -> UpsertResult:
     """Upsert rows into ``table`` using ``keys`` as the natural key.
 
     Preferred call signature::
@@ -1201,7 +1553,18 @@ def upsert_dataframe(
         LOGGER.debug("UPSERT debug prelude failed: %s", _e)
 
     if df is None or df.empty:
-        return 0
+        rows_before = _table_row_count(conn, table)
+        LOGGER.debug(
+            "duckdb.upsert.no_rows | table=%s | rows_before=%s", table, rows_before
+        )
+        return UpsertResult(
+            table=table,
+            rows_in=0,
+            rows_written=0,
+            rows_before=rows_before,
+            rows_after=rows_before,
+            rows_delta=0,
+        )
 
     duckdb = get_duckdb()
 
@@ -1209,7 +1572,14 @@ def upsert_dataframe(
     coerced = _coerce_numeric(frame, table)
     if coerced is not None:
         frame = coerced
-    LOGGER.info("Upserting %s rows into %s", len(frame), table)
+    rows_incoming = len(frame)
+    rows_before = _table_row_count(conn, table)
+    LOGGER.info(
+        "Upserting %s rows into %s (rows_before=%s)",
+        rows_incoming,
+        table,
+        rows_before,
+    )
     LOGGER.debug("Incoming frame schema: %s", df_schema(frame))
 
     if "series_semantics_out" in frame.columns:
@@ -1231,6 +1601,12 @@ def upsert_dataframe(
     frame["series_semantics"] = _canonicalise_series_semantics(
         frame["series_semantics"]
     )
+
+    spec = TABLE_KEY_SPECS.get(table)
+    canonical_columns: Sequence[str] = spec["columns"] if spec else []
+    if canonical_columns:
+        frame = _ensure_frame_has_columns(frame, table, canonical_columns)
+        _ensure_table_has_columns(conn, table, canonical_columns)
 
     table_info = conn.execute(f"PRAGMA table_info({_quote_literal(table)})").fetchall()
     if not table_info:
@@ -1333,23 +1709,46 @@ def upsert_dataframe(
                 ", ".join(normalised_dates),
             )
 
+    effective_keys: Sequence[str] | None = None
+    merge_keys: list[str] = []
     if keys:
         missing_keys = [k for k in keys if k not in frame.columns]
+        effective_keys = [k for k in keys if k in frame.columns]
         if missing_keys:
-            raise KeyError(
-                f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+            LOGGER.debug(
+                "duckdb.upsert.keys.missing | table=%s missing=%s available=%s",
+                table,
+                missing_keys,
+                effective_keys,
             )
-        for key in keys:
+            if not effective_keys:
+                raise KeyError(
+                    f"Upsert keys {missing_keys} are missing from dataframe for table '{table}'"
+                )
+        else:
+            effective_keys = list(keys)
+        for key in effective_keys:
             frame[key] = frame[key].where(frame[key].notna(), "").astype(str).str.strip()
         before = len(frame)
-        frame = frame.drop_duplicates(subset=list(keys), keep="last").reset_index(drop=True)
+        frame = frame.drop_duplicates(subset=list(effective_keys), keep="last").reset_index(
+            drop=True
+        )
         if LOGGER.isEnabledFor(logging.DEBUG) and before != len(frame):
             LOGGER.debug(
                 "Dropped %s duplicate rows for %s based on keys %s",
                 before - len(frame),
                 table,
-                keys,
+                effective_keys,
             )
+        merge_keys = list(effective_keys)
+        if set(effective_keys) != set(keys):
+            LOGGER.debug(
+                "duckdb.upsert.keys.degraded | table=%s requested=%s used=%s",
+                table,
+                list(keys),
+                merge_keys,
+            )
+            has_declared_key = False
 
     object_columns = frame.select_dtypes(include=["object"]).columns
     for column in object_columns:
@@ -1357,19 +1756,29 @@ def upsert_dataframe(
 
     if frame.empty:
         LOGGER.debug(
-            "duckdb.upsert.no_rows | table=%s | keys=%s", table, keys
+            "duckdb.upsert.no_rows_after_prepare | table=%s | keys=%s",
+            table,
+            merge_keys or list(keys or []),
         )
-        return 0
+        return UpsertResult(
+            table=table,
+            rows_in=len(df) if df is not None else 0,
+            rows_written=0,
+            rows_before=rows_before,
+            rows_after=rows_before,
+            rows_delta=0,
+        )
 
     temp_name = f"tmp_{uuid.uuid4().hex}"
     conn.register(temp_name, frame)
     upsert_completed = False
+    match_rows: int | None = None
     try:
         table_ident = _quote_identifier(table)
         temp_ident = _quote_identifier(temp_name)
-        if keys and LOGGER.isEnabledFor(logging.DEBUG):
+        if merge_keys and LOGGER.isEnabledFor(logging.DEBUG):
             diag_join_pred = " AND ".join(
-                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in merge_keys
             )
             diag_join_count_sql = (
                 "\n".join(
@@ -1392,11 +1801,12 @@ def upsert_dataframe(
                     "DIAG matched %s existing rows in %s using keys %s",
                     match_rows,
                     table,
-                    "[" + ", ".join(keys) + "]",
+                    "[" + ", ".join(merge_keys) + "]",
                 )
 
+        log_keys = merge_keys or list(keys or [])
         use_legacy_path = True
-        if keys and has_declared_key:
+        if merge_keys and has_declared_key:
             if not _merge_enabled():
                 LOGGER.debug(
                     "MERGE disabled via RESOLVER_DUCKDB_DISABLE_MERGE for table %s",
@@ -1404,9 +1814,9 @@ def upsert_dataframe(
                 )
             else:
                 all_columns = insert_columns
-                non_key_columns = [c for c in all_columns if c not in keys]
+                non_key_columns = [c for c in all_columns if c not in merge_keys]
                 on_predicate = " AND ".join(
-                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                    f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in merge_keys
                 )
                 update_assignments = (
                     ", ".join(
@@ -1470,17 +1880,17 @@ def upsert_dataframe(
                             LOGGER.debug(
                                 "duckdb.upsert.fallback.start | table=%s keys=%s rows=%s",
                                 table,
-                                list(keys or []),
+                                log_keys,
                                 len(frame),
                             )
-                if keys and has_declared_key and merge_sql:
+                if merge_keys and has_declared_key and merge_sql:
                     LOGGER.debug(
                         "Falling back to legacy delete+insert after MERGE failure for table %s",
                         table,
                     )
-                if keys:
+                if merge_keys:
                     delete_predicate = " AND ".join(
-                        f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in keys
+                        f"t.{_quote_identifier(k)} = s.{_quote_identifier(k)}" for k in merge_keys
                     )
                     delete_sql = (
                         "\n".join(
@@ -1523,7 +1933,7 @@ def upsert_dataframe(
                         "duckdb.upsert.legacy_delete | Deleted %s existing rows from %s using keys %s",
                         int(deleted_count or 0),
                         table,
-                        "[" + ", ".join(keys or []) + "]",
+                        "[" + ", ".join(log_keys) + "]",
                     )
 
                 cols_csv = ", ".join(_quote_identifier(col) for col in insert_columns)
@@ -1543,7 +1953,7 @@ def upsert_dataframe(
                     LOGGER.debug(
                         "duckdb.upsert.fallback.complete | table=%s keys=%s rows=%s",
                         table,
-                        list(keys or []),
+                        log_keys,
                         len(frame),
                     )
             except Exception as exc:
@@ -1558,7 +1968,7 @@ def upsert_dataframe(
                         )
                 if fallback_missing_key:
                     raise ValueError(
-                        f"Fallback upsert failed for table '{table}' with keys {list(keys or [])}"
+                        f"Fallback upsert failed for table '{table}' with keys {log_keys}"
                     ) from exc
                 raise
             else:
@@ -1591,8 +2001,27 @@ def upsert_dataframe(
     finally:
         conn.unregister(temp_name)
 
-    LOGGER.info("Processed %s rows for %s", len(frame), table)
-    return len(frame)
+    rows_after = _table_row_count(conn, table)
+    rows_delta = rows_after - rows_before
+    if LOGGER.isEnabledFor(logging.INFO):
+        LOGGER.info(
+            "duckdb.upsert.counts | table=%s rows_before=%s rows_after=%s delta=%s",
+            table,
+            rows_before,
+            rows_after,
+            rows_delta,
+        )
+    return UpsertResult(
+        table=table,
+        rows_in=len(df) if df is not None else 0,
+        rows_written=len(frame),
+        rows_before=rows_before,
+        rows_after=rows_after,
+        rows_delta=rows_delta,
+        matched_existing=int(match_rows)
+        if isinstance(match_rows, numbers.Integral)
+        else None,
+    )
 
 
 def _default_created_at(value: str | None = None) -> str:

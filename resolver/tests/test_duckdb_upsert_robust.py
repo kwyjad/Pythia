@@ -37,7 +37,8 @@ def test_upsert_handles_unknown_columns_and_alias(tmp_path):
             df,
             keys=["ym", "iso3", "hazard_code", "metric"],
         )
-        assert inserted == 1
+        assert inserted.rows_written == 1
+        assert inserted.rows_delta == 1
         rows = conn.execute(
             "SELECT ym, iso3, hazard_code, metric, series_semantics, value_new FROM facts_deltas"
         ).fetchall()

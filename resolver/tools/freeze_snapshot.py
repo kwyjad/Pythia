@@ -424,17 +424,23 @@ def _maybe_write_db(
         prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
         prepared_deltas = _prepare_deltas_frame_for_db(deltas_df)
 
-        facts_rows = 0
-        deltas_rows = 0
+        facts_result = None
+        deltas_result = None
 
         if prepared_resolved is not None and not prepared_resolved.empty:
-            facts_rows = duckdb_io.upsert_dataframe(
+            LOGGER.debug(
+                "DuckDB snapshot write | table=facts_resolved rows=%s", len(prepared_resolved)
+            )
+            facts_result = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_resolved",
                 prepared_resolved,
                 keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
-            LOGGER.info("DuckDB snapshot facts_resolved rows written: %s", facts_rows)
+            LOGGER.info(
+                "DuckDB snapshot facts_resolved rows written: %s",
+                facts_result.rows_delta,
+            )
         else:
             LOGGER.debug("DuckDB snapshot facts_resolved skipped: no rows prepared")
 
@@ -447,13 +453,19 @@ def _maybe_write_db(
                         prepared_deltas[column] = ""
                     else:
                         prepared_deltas[column] = pd.Series([pd.NA] * len(prepared_deltas))
-            deltas_rows = duckdb_io.upsert_dataframe(
+            LOGGER.debug(
+                "DuckDB snapshot write | table=facts_deltas rows=%s", len(prepared_deltas)
+            )
+            deltas_result = duckdb_io.upsert_dataframe(
                 conn,
                 "facts_deltas",
                 prepared_deltas,
                 keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
-            LOGGER.info("DuckDB snapshot facts_deltas rows written: %s", deltas_rows)
+            LOGGER.info(
+                "DuckDB snapshot facts_deltas rows written: %s",
+                deltas_result.rows_delta,
+            )
         elif deltas_df is not None:
             LOGGER.debug("DuckDB snapshot facts_deltas skipped: no rows prepared")
 
@@ -469,8 +481,8 @@ def _maybe_write_db(
                     created_at,
                     git_sha,
                     export_version,
-                    int(facts_rows),
-                    int(deltas_rows),
+                    int(facts_result.rows_written if facts_result else 0),
+                    int(deltas_result.rows_written if deltas_result else 0),
                 ],
             )
             LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)

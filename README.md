@@ -635,6 +635,42 @@ run the DuckDB-specific test suite locally. The same commands ensure
 `python -c "import duckdb; print(duckdb.__version__)"` works before running
 `pytest -q resolver/tests -k duckdb`.
 
+Need to populate a DuckDB file from the IDMC staging exports? The
+[resolver/docs/WRITING_TO_DUCKDB.md](resolver/docs/WRITING_TO_DUCKDB.md)
+guide walks through the new `make idmc.db` helper and related inspection
+commands.
+
+Whenever `RESOLVER_DB_URL` is present in the environment the exporter now
+dual-writes into DuckDB automatically. Override the behaviour with
+`--write-db 0` (or `RESOLVER_WRITE_DB=0`) if you only want the CSV preview,
+otherwise expect both the diagnostics files and the DuckDB upserts to complete
+together. Paths handed to the helper can be relative or absolute; they are
+canonicalised to a `duckdb:///…` URL before writing so the export, verification
+query, and subsequent tooling all point at the same database file. To keep row
+counts aligned the helper copies only `flow.csv` (plus an optional `stock.csv`)
+into a temporary working directory before the exporter runs and forces
+`--only-strategy idmc-staging` so no other mapping claims the same file. The
+exporter then splits the dataframe by `semantics`: `stock` rows land in
+`facts_resolved` and `new` rows land in `facts_deltas`. Additional artefacts such
+as `idmc_facts_flow.parquet` are skipped and reported in the warnings list.
+Each run ends with a one-line summary and a dedicated `Warnings:` block that
+captures the exported rows, per-table DuckDB deltas/totals, warning total, and
+the resulting exit code (`0`=success, `2`=warnings under `--strict`, `3`=error).
+DuckDB persistence now honours canonical composite keys for both facts tables:
+`facts_resolved` writes use `(event_id, iso3, hazard_code, metric, as_of_date,
+publication_date, source_id, series_semantics, ym)` and `facts_deltas` writes use
+`(event_id, iso3, hazard_code, metric, as_of_date, publication_date, source_id, ym)`.
+Schema initialisation adds any missing key columns as nullable `VARCHAR` fields,
+recreates the `ux_facts_resolved_series`/`ux_facts_deltas_series` indexes with that
+exact column order, and heals minimal test tables before the upsert runs so MERGE
+operations never collapse distinct rows. Verification in the IDMC wrapper sums the
+row counts from both tables so flows (`new`) and stock rows are confirmed in their
+respective destinations.
+
+> Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
+> inside pytest temporary directories, so no binary fixtures need to be stored
+> in the repository.
+
 > Running the fast test target inside Codex or on a fresh clone without the
 > large fixture checkout? See
 > [docs/testing-without-fixtures.md](docs/testing-without-fixtures.md) for the
