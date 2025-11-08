@@ -22,12 +22,13 @@ These defaults live in `resolver/.env.sample`. Copy them into your working envir
 cp resolver/.env.sample .env
 ```
 
-When `RESOLVER_DB_URL` is set the exporter dual-writes to DuckDB even if you
-omit `--write-db`. Provide `--write-db 0` (or export `RESOLVER_WRITE_DB=0`) to
-skip the database write while keeping the CSV diagnostics. The helper accepts a
-filesystem path or a `duckdb:///` URL; paths are canonicalised to absolute URLs
-before the exporter runs so the write and verification always point at the same
-database file.
+When `RESOLVER_DB_URL` is set—or you provide `--db-url` on the command
+line—the exporter dual-writes to DuckDB automatically unless you explicitly
+disable it with `--write-db 0` (or `RESOLVER_WRITE_DB=0`). The helper accepts a
+filesystem path or a `duckdb:///` URL; paths are canonicalised to absolute
+URLs before the exporter runs so the write, verification, and any follow-up
+queries all point at the same database file. The CLI forwards `--write-db 1`
+to the exporter so the DuckDB write is always attempted during wrapper runs.
 
 ## Write the IDMC flow data
 
@@ -65,27 +66,28 @@ exit code `2`.
 
 ## Semantics-aware routing
 
-The exporter now splits the unified facts dataframe by `semantics` before
-writing to DuckDB. Rows tagged `stock` land in `facts_resolved` while rows
-tagged `new` land in `facts_deltas`. Any other semantics default to
-`facts_resolved` so the persisted rows still match the CSV preview, and the CLI
-verifies the combined row count across both tables before declaring success. The
-summary line reports per-table deltas so idempotent reruns continue to show
-`✅ Wrote 0 rows`.
+The exporter splits the unified facts dataframe by semantics before writing to
+DuckDB. Rows tagged `stock` land in `facts_resolved` while rows tagged `new`
+land in `facts_deltas`. Any other semantics default to `facts_resolved` so the
+persisted rows still match the CSV preview. The CLI verifies the combined row
+count across both tables before declaring success and the summary line reports
+per-table deltas so idempotent reruns continue to show `✅ Wrote 0 rows`.
 
 ## Composite keys and parity
 
-DuckDB initialisation drops the legacy `(ym, iso3, hazard_code, metric, series_semantics)`
-indexes and recreates them with the canonical column lists expected by the fast tests:
+DuckDB initialisation enforces the canonical column lists defined in
+`resolver/db/schema_keys.py`:
 
 - `facts_resolved`: `(event_id, iso3, hazard_code, metric, as_of_date, publication_date, source_id, series_semantics, ym)`
 - `facts_deltas`: `(event_id, iso3, hazard_code, metric, as_of_date, publication_date, source_id, ym)`
 
-The writer adds any missing key columns as nullable `VARCHAR` fields before issuing
-the MERGE so minimal or historic tables are healed automatically. That guarantees
-row-for-row parity with the CSV preview—distinct events in the same month no longer
-collapse—and keeps the verification step honest because the CLI sums row counts
-from both tables after each run.
+The writer adds any missing key columns as nullable `VARCHAR` fields before
+issuing the MERGE so minimal or historic tables are healed automatically, then
+recreates the `ux_facts_resolved_series` and `ux_facts_deltas_series` unique
+indexes with that exact column order. That guarantees row-for-row parity with
+the CSV preview—distinct events in the same month no longer collapse—and keeps
+the verification step honest because the CLI sums row counts from both tables
+after each run.
 
 ## Preventing double matches
 

@@ -1482,20 +1482,37 @@ def _maybe_write_to_db(
     if duckdb_io is None:
         return {}
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
-    candidate = (db_url or "").strip() or env_url
-    if write_db is None:
-        write_db = bool(candidate)
-    write_db = bool(write_db)
+    provided_url = (db_url or "").strip()
+    candidate = provided_url or env_url
+
+    requested_flag = _parse_write_db_flag(write_db)
+    env_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
+    auto_enabled = False
+
+    if requested_flag is not None:
+        effective_write = bool(requested_flag)
+    elif candidate:
+        effective_write = env_flag is not False
+        auto_enabled = env_flag is not False
+    elif env_flag is not None:
+        effective_write = bool(env_flag)
+    else:
+        effective_write = False
 
     if not candidate:
         LOGGER.debug("DuckDB write skipped: no DuckDB URL configured")
         return {}
-    if not write_db:
-        LOGGER.info("DuckDB write disabled | db_url=%s", candidate)
+    if not effective_write:
+        LOGGER.info(
+            "DuckDB write disabled | db_url=%s requested=%s env=%s",
+            candidate,
+            requested_flag,
+            env_flag,
+        )
         return {}
 
-    canonical_url = candidate
     canonical_path: Optional[str] = None
+    canonical_url = candidate
     if canonicalize_duckdb_target is not None:
         try:
             canonical_path, canonical_url = canonicalize_duckdb_target(candidate)
@@ -1511,7 +1528,26 @@ def _maybe_write_to_db(
                     f"DuckDB target canonicalization failed for '{candidate}': {exc}",
                     db_url=candidate,
                 ) from exc
-            return {}
+            canonical_url = candidate
+            canonical_path = None
+    if canonical_url and not str(canonical_url).startswith("duckdb://"):
+        try:
+            if str(candidate).lower().endswith(".duckdb"):
+                resolved = Path(candidate).expanduser().resolve()
+            else:
+                resolved = Path(canonical_url).expanduser().resolve()
+        except Exception:
+            resolved = None
+        if resolved is not None:
+            canonical_path = str(resolved)
+            canonical_url = f"duckdb:///{resolved.as_posix()}"
+
+    LOGGER.info(
+        "DuckDB write configuration | enabled=%s auto=%s url=%s",
+        effective_write,
+        auto_enabled,
+        canonical_url or candidate,
+    )
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
@@ -1547,13 +1583,6 @@ def _maybe_write_to_db(
         conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
-            resolved_keys = duckdb_io.resolve_upsert_keys(
-                "facts_resolved", resolved_prepared
-            )
-            LOGGER.info(
-                "duckdb.write.keys | table=facts_resolved columns=%s",
-                resolved_keys,
-            )
             LOGGER.info(
                 "DuckDB write start | table=facts_resolved rows=%s",
                 len(resolved_prepared),
@@ -1562,16 +1591,11 @@ def _maybe_write_to_db(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
-                keys=resolved_keys or duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
+                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
             LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved.rows_delta)
             stats["facts_resolved"] = written_resolved.to_dict()
         if deltas_prepared is not None and not deltas_prepared.empty:
-            deltas_keys = duckdb_io.resolve_upsert_keys("facts_deltas", deltas_prepared)
-            LOGGER.info(
-                "duckdb.write.keys | table=facts_deltas columns=%s",
-                deltas_keys,
-            )
             LOGGER.info(
                 "DuckDB write start | table=facts_deltas rows=%s",
                 len(deltas_prepared),
@@ -1580,7 +1604,7 @@ def _maybe_write_to_db(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
-                keys=deltas_keys or duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
+                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
             LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas.rows_delta)
             stats["facts_deltas"] = written_deltas.to_dict()
@@ -1818,29 +1842,43 @@ def export_facts(
     env_write_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
     requested_write_flag = _parse_write_db_flag(write_db)
     auto_enabled = False
-    if requested_write_flag is None:
-        if env_write_flag is None:
-            effective_write_flag = bool(selected_db_url_raw)
-            auto_enabled = bool(selected_db_url_raw)
-        else:
-            effective_write_flag = env_write_flag
+    if requested_write_flag is not None:
+        effective_write_flag = bool(requested_write_flag)
+    elif selected_db_url_raw:
+        effective_write_flag = env_write_flag is not False
+        auto_enabled = env_write_flag is not False
+    elif env_write_flag is not None:
+        effective_write_flag = bool(env_write_flag)
     else:
-        effective_write_flag = requested_write_flag
+        effective_write_flag = False
 
-    canonical_db_url = selected_db_url_raw or None
+    canonical_db_url: Optional[str] = None
     canonical_db_path: Optional[str] = None
-    if canonical_db_url and canonicalize_duckdb_target is not None:
-        try:
-            canonical_db_path, canonical_db_url = canonicalize_duckdb_target(canonical_db_url)
-        except Exception as exc:  # pragma: no cover - defensive
-            LOGGER.debug(
-                "DuckDB canonicalisation failed | raw=%s error=%s", canonical_db_url, exc
-            )
-            canonical_db_url = selected_db_url_raw or None
-    if canonical_db_url and not str(canonical_db_url).startswith("duckdb://"):
-        resolved = Path(canonical_db_url).expanduser().resolve()
-        canonical_db_path = str(resolved)
-        canonical_db_url = f"duckdb:///{resolved.as_posix()}"
+    if selected_db_url_raw:
+        canonical_db_url = selected_db_url_raw
+        if canonicalize_duckdb_target is not None:
+            try:
+                canonical_db_path, canonical_db_url = canonicalize_duckdb_target(canonical_db_url)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.debug(
+                    "DuckDB canonicalisation failed | raw=%s error=%s",
+                    canonical_db_url,
+                    exc,
+                )
+                canonical_db_url = selected_db_url_raw
+                canonical_db_path = None
+        if canonical_db_url and not str(canonical_db_url).startswith("duckdb://"):
+            candidate = provided_db_url_raw or canonical_db_url
+            try:
+                if str(candidate).lower().endswith(".duckdb"):
+                    resolved = Path(candidate).expanduser().resolve()
+                else:
+                    resolved = Path(canonical_db_url).expanduser().resolve()
+            except Exception:
+                resolved = None
+            if resolved is not None:
+                canonical_db_path = str(resolved)
+                canonical_db_url = f"duckdb:///{resolved.as_posix()}"
 
     selected_strategy = (only_strategy or "").strip()
     if selected_strategy:
@@ -2549,65 +2587,64 @@ def export_facts(
 
     resolved_for_db: Optional[pd.DataFrame] = None
     deltas_for_db: Optional[pd.DataFrame] = None
-    semantics_source: Optional[str] = None
-    semantics_series: Optional[pd.Series] = None
+    semantics_source: str = ""
     if isinstance(facts, pd.DataFrame) and not facts.empty:
-        if "semantics" in facts.columns:
-            semantics_source = "semantics"
-            semantics_series = facts["semantics"]
-        elif "series_semantics" in facts.columns:
-            semantics_source = "series_semantics"
+        if "series_semantics" in facts.columns:
             semantics_series = facts["series_semantics"]
-
-        if semantics_series is not None:
-            semantics_normalized = (
-                semantics_series.fillna("")
-                .astype(str)
-                .str.lower()
-                .str.strip()
-            )
-            deltas_mask = semantics_normalized.eq("new")
-            resolved_mask = semantics_normalized.eq("stock")
-
-            if deltas_mask.any():
-                deltas_for_db = facts.loc[deltas_mask].copy()
-            if resolved_mask.any():
-                resolved_for_db = facts.loc[resolved_mask].copy()
-
-            other_mask = ~(deltas_mask | resolved_mask)
-            other_count = int(other_mask.sum())
-            if other_count:
-                distribution = (
-                    semantics_normalized[other_mask]
-                    .value_counts(dropna=False)
-                    .to_dict()
-                )
-                normalized_distribution = {
-                    (key if key else "(empty)"): int(value)
-                    for key, value in distribution.items()
-                }
-                LOGGER.info(
-                    "duckdb.semantics.routed_other | total=%s details=%s",
-                    other_count,
-                    normalized_distribution,
-                )
-                other_rows = facts.loc[other_mask].copy()
-                if resolved_for_db is None:
-                    resolved_for_db = other_rows
-                else:
-                    resolved_for_db = pd.concat(
-                        [resolved_for_db, other_rows],
-                        ignore_index=True,
-                        sort=False,
-                    )
+            semantics_source = "series_semantics"
+        elif "semantics" in facts.columns:
+            semantics_series = facts["semantics"]
+            semantics_source = "semantics"
         else:
-            resolved_for_db = facts
+            semantics_series = pd.Series([""] * len(facts), index=facts.index)
+
+        semantics_normalized = (
+            semantics_series.fillna("")
+            .astype(str)
+            .str.lower()
+            .str.strip()
+        )
+        deltas_mask = semantics_normalized.eq("new")
+        resolved_mask = semantics_normalized.eq("stock")
+
+        if deltas_mask.any():
+            deltas_for_db = facts.loc[deltas_mask].copy()
+        if resolved_mask.any():
+            resolved_for_db = facts.loc[resolved_mask].copy()
+
+        other_mask = ~(deltas_mask | resolved_mask)
+        other_count = int(other_mask.sum())
+        if other_count:
+            distribution = (
+                semantics_normalized[other_mask]
+                .value_counts(dropna=False)
+                .to_dict()
+            )
+            normalized_distribution = {
+                (key if key else "(empty)"): int(value)
+                for key, value in distribution.items()
+            }
+            LOGGER.info(
+                "duckdb.semantics.routed_other | total=%s details=%s",
+                other_count,
+                normalized_distribution,
+            )
+            other_rows = facts.loc[other_mask].copy()
+            if resolved_for_db is None:
+                resolved_for_db = other_rows
+            else:
+                resolved_for_db = pd.concat(
+                    [resolved_for_db, other_rows],
+                    ignore_index=True,
+                    sort=False,
+                )
 
         LOGGER.info(
-            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s",
+            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s other_rows=%s",
             semantics_source or "∅",
             0 if resolved_for_db is None else len(resolved_for_db),
             0 if deltas_for_db is None else len(deltas_for_db),
+            other_count,
         )
 
     db_write_stats = _maybe_write_to_db(

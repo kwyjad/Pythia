@@ -2,6 +2,10 @@
 
 from .duckdb_io import (
     DEFAULT_DB_URL,
+    FACTS_DELTAS_KEY_COLUMNS,
+    FACTS_RESOLVED_KEY_COLUMNS,
+    UX_DELTAS,
+    UX_RESOLVED,
     get_db,
     init_schema,
     upsert_dataframe,
@@ -10,6 +14,10 @@ from .duckdb_io import (
 
 __all__ = [
     "DEFAULT_DB_URL",
+    "FACTS_DELTAS_KEY_COLUMNS",
+    "FACTS_RESOLVED_KEY_COLUMNS",
+    "UX_DELTAS",
+    "UX_RESOLVED",
     "get_db",
     "init_schema",
     "upsert_dataframe",

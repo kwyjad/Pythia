@@ -36,6 +36,8 @@ def _normalize_db_url(raw: str | None) -> tuple[str, str]:
     if not candidate:
         env_default = os.getenv("RESOLVER_DB_URL", "").strip()
         candidate = env_default or DEFAULT_DB_URL
+    path: str | None = None
+    url = candidate
     try:
         path, url = canonicalize_duckdb_target(candidate)
     except Exception as exc:  # pragma: no cover - defensive
@@ -44,7 +46,21 @@ def _normalize_db_url(raw: str | None) -> tuple[str, str]:
             candidate,
             exc,
         )
-        raise
+        path = None
+        url = candidate
+    if not str(url).startswith("duckdb://"):
+        try:
+            if str(candidate).lower().endswith(".duckdb"):
+                resolved = Path(candidate).expanduser().resolve()
+            else:
+                resolved = Path(url).expanduser().resolve()
+        except Exception:
+            resolved = None
+        if resolved is not None:
+            path = resolved.as_posix()
+            url = f"duckdb:///{resolved.as_posix()}"
+    if path is None:
+        path = url.replace("duckdb:///", "") if url.startswith("duckdb:///") else candidate
     return path, url
 
 
@@ -185,7 +201,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             export_result = export_facts.export_facts(
                 inp=input_dir,
                 out_dir=out_dir,
-                write_db=True,
+                write_db="1",
                 db_url=canonical_url,
                 only_strategy="idmc-staging",
             )
@@ -236,7 +252,9 @@ def run(argv: Sequence[str] | None = None) -> int:
         def _table_count(name: str) -> int:
             try:
                 return int(
-                    conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+                    conn.execute(
+                        f"SELECT COALESCE(COUNT(*), 0) FROM {name}"
+                    ).fetchone()[0]
                 )
             except Exception as exc:
                 message = str(exc).lower()
