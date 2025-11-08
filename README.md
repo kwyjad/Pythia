@@ -646,20 +646,16 @@ exporter automatically dual-writes into DuckDB unless `--write-db 0`
 normalised to absolute `duckdb:///…` URLs before the exporter runs so the
 export, verification query, and downstream tooling all reference the same
 database file. The `resolver.cli.idmc_to_duckdb` wrapper turns the CLI
-`--db-url` into that normalised form, forwards the staging directory as
-`--input`, forces `--write-db 1`, and then reconnects to the same filesystem
+`--db-url` into that normalised form, forwards the staging directory to the
+exporter, forces `--write-db 1`, and then reconnects to the same filesystem
 path with `duckdb.connect` to sum row counts from both `facts_deltas` and
 `facts_resolved`. Runs always emit a canonical `Warnings:` block (`none` when
 empty) and return `0` for success, `2` for strict-mode warnings, or `3` if no
-rows land in either table. To keep row counts aligned the helper copies only
-`flow.csv` (plus an optional `stock.csv`) into a temporary working directory
-before the exporter runs and forces `--only-strategy idmc-staging` so no other
-mapping claims the same file. The exporter splits the dataframe by
+rows land in either table. The exporter splits the dataframe by
 semantics—`stock` rows land in `facts_resolved`, `new` rows land in
 `facts_deltas`, and any other values default to `facts_resolved` so the DuckDB
-tables mirror the CSV preview. Additional artefacts such as
-`idmc_facts_flow.parquet` are skipped and reported in the warnings list. DuckDB
-persistence honours the canonical composite keys defined in
+tables mirror the CSV preview. DuckDB persistence honours the canonical
+composite keys defined in
 `resolver/db/schema_keys.py`: `facts_resolved` writes use `(event_id, iso3,
 hazard_code, metric, as_of_date, publication_date, source_id, series_semantics,
 ym)` and `facts_deltas` writes use `(event_id, iso3, hazard_code, metric,

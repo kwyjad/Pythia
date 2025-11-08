@@ -2823,7 +2823,13 @@ def export_facts(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
+    ap.add_argument(
+        "--input",
+        "--in",
+        dest="inp",
+        required=True,
+        help="Path to staging file or directory",
+    )
     ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to export_config.yml")
     ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
     ap.add_argument(
