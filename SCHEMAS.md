@@ -363,6 +363,10 @@ distinguish new flows from stock snapshots.
 | value | integer | Monthly sum of displacement figures |
 | series_semantics | enum | Always `new` for flow exports |
 | source | string | `idmc_idu` for backend rows, `idmc_gidd` when Helix supplied the payload |
+- DuckDB exports treat these monthly flow rows as resolved snapshots: when the
+  exporter writes to DuckDB it normalizes the series semantics to `stock` and
+  stores them in `facts_resolved` so the connector surfaces a month-end
+  inventory even though the metric name retains the "new" qualifier.
 - Helix mode fetches the `/external-api/idus/last-180-days` endpoint once per run,
   caches the raw payload for chunk filtering, and records the redacted URL,
   status, byte count, and row totals in diagnostics so summaries reflect the

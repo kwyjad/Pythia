@@ -1482,20 +1482,37 @@ def _maybe_write_to_db(
     if duckdb_io is None:
         return {}
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
-    candidate = (db_url or "").strip() or env_url
-    if write_db is None:
-        write_db = bool(candidate)
-    write_db = bool(write_db)
+    provided_url = (db_url or "").strip()
+    candidate = provided_url or env_url
+
+    requested_flag = _parse_write_db_flag(write_db)
+    env_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
+    auto_enabled = False
+
+    if requested_flag is not None:
+        effective_write = bool(requested_flag)
+    elif candidate:
+        effective_write = env_flag is not False
+        auto_enabled = env_flag is not False
+    elif env_flag is not None:
+        effective_write = bool(env_flag)
+    else:
+        effective_write = False
 
     if not candidate:
         LOGGER.debug("DuckDB write skipped: no DuckDB URL configured")
         return {}
-    if not write_db:
-        LOGGER.info("DuckDB write disabled | db_url=%s", candidate)
+    if not effective_write:
+        LOGGER.info(
+            "DuckDB write disabled | db_url=%s requested=%s env=%s",
+            candidate,
+            requested_flag,
+            env_flag,
+        )
         return {}
 
-    canonical_url = candidate
     canonical_path: Optional[str] = None
+    canonical_url = candidate
     if canonicalize_duckdb_target is not None:
         try:
             canonical_path, canonical_url = canonicalize_duckdb_target(candidate)
@@ -1511,7 +1528,26 @@ def _maybe_write_to_db(
                     f"DuckDB target canonicalization failed for '{candidate}': {exc}",
                     db_url=candidate,
                 ) from exc
-            return {}
+            canonical_url = candidate
+            canonical_path = None
+    if canonical_url and not str(canonical_url).startswith("duckdb://"):
+        try:
+            if str(candidate).lower().endswith(".duckdb"):
+                resolved = Path(candidate).expanduser().resolve()
+            else:
+                resolved = Path(canonical_url).expanduser().resolve()
+        except Exception:
+            resolved = None
+        if resolved is not None:
+            canonical_path = str(resolved)
+            canonical_url = f"duckdb:///{resolved.as_posix()}"
+
+    LOGGER.info(
+        "DuckDB write configuration | enabled=%s auto=%s url=%s",
+        effective_write,
+        auto_enabled,
+        canonical_url or candidate,
+    )
 
     resolved_prepared = _prepare_resolved_for_db(facts_resolved)
     deltas_prepared = _prepare_deltas_for_db(facts_deltas)
@@ -1547,13 +1583,6 @@ def _maybe_write_to_db(
         conn = duckdb_io.get_db(canonical_url)
         duckdb_io.init_schema(conn)
         if resolved_prepared is not None and not resolved_prepared.empty:
-            resolved_keys = duckdb_io.resolve_upsert_keys(
-                "facts_resolved", resolved_prepared
-            )
-            LOGGER.info(
-                "duckdb.write.keys | table=facts_resolved columns=%s",
-                resolved_keys,
-            )
             LOGGER.info(
                 "DuckDB write start | table=facts_resolved rows=%s",
                 len(resolved_prepared),
@@ -1562,16 +1591,11 @@ def _maybe_write_to_db(
                 conn,
                 "facts_resolved",
                 resolved_prepared,
-                keys=resolved_keys or duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
+                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
             )
             LOGGER.info("DuckDB facts_resolved rows written: %s", written_resolved.rows_delta)
             stats["facts_resolved"] = written_resolved.to_dict()
         if deltas_prepared is not None and not deltas_prepared.empty:
-            deltas_keys = duckdb_io.resolve_upsert_keys("facts_deltas", deltas_prepared)
-            LOGGER.info(
-                "duckdb.write.keys | table=facts_deltas columns=%s",
-                deltas_keys,
-            )
             LOGGER.info(
                 "DuckDB write start | table=facts_deltas rows=%s",
                 len(deltas_prepared),
@@ -1580,7 +1604,7 @@ def _maybe_write_to_db(
                 conn,
                 "facts_deltas",
                 deltas_prepared,
-                keys=deltas_keys or duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
+                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
             )
             LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas.rows_delta)
             stats["facts_deltas"] = written_deltas.to_dict()
@@ -1818,29 +1842,43 @@ def export_facts(
     env_write_flag = _parse_write_db_flag(os.environ.get("RESOLVER_WRITE_DB"))
     requested_write_flag = _parse_write_db_flag(write_db)
     auto_enabled = False
-    if requested_write_flag is None:
-        if env_write_flag is None:
-            effective_write_flag = bool(selected_db_url_raw)
-            auto_enabled = bool(selected_db_url_raw)
-        else:
-            effective_write_flag = env_write_flag
+    if requested_write_flag is not None:
+        effective_write_flag = bool(requested_write_flag)
+    elif selected_db_url_raw:
+        effective_write_flag = True
+        auto_enabled = True
+    elif env_write_flag is not None:
+        effective_write_flag = bool(env_write_flag)
     else:
-        effective_write_flag = requested_write_flag
+        effective_write_flag = False
 
-    canonical_db_url = selected_db_url_raw or None
+    canonical_db_url: Optional[str] = None
     canonical_db_path: Optional[str] = None
-    if canonical_db_url and canonicalize_duckdb_target is not None:
-        try:
-            canonical_db_path, canonical_db_url = canonicalize_duckdb_target(canonical_db_url)
-        except Exception as exc:  # pragma: no cover - defensive
-            LOGGER.debug(
-                "DuckDB canonicalisation failed | raw=%s error=%s", canonical_db_url, exc
-            )
-            canonical_db_url = selected_db_url_raw or None
-    if canonical_db_url and not str(canonical_db_url).startswith("duckdb://"):
-        resolved = Path(canonical_db_url).expanduser().resolve()
-        canonical_db_path = str(resolved)
-        canonical_db_url = f"duckdb:///{resolved.as_posix()}"
+    if selected_db_url_raw:
+        canonical_db_url = selected_db_url_raw
+        if canonicalize_duckdb_target is not None:
+            try:
+                canonical_db_path, canonical_db_url = canonicalize_duckdb_target(canonical_db_url)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.debug(
+                    "DuckDB canonicalisation failed | raw=%s error=%s",
+                    canonical_db_url,
+                    exc,
+                )
+                canonical_db_url = selected_db_url_raw
+                canonical_db_path = None
+        if canonical_db_url and not str(canonical_db_url).startswith("duckdb://"):
+            candidate = provided_db_url_raw or canonical_db_url
+            try:
+                if str(candidate).lower().endswith(".duckdb"):
+                    resolved = Path(candidate).expanduser().resolve()
+                else:
+                    resolved = Path(canonical_db_url).expanduser().resolve()
+            except Exception:
+                resolved = None
+            if resolved is not None:
+                canonical_db_path = str(resolved)
+                canonical_db_url = f"duckdb:///{resolved.as_posix()}"
 
     selected_strategy = (only_strategy or "").strip()
     if selected_strategy:
@@ -1991,6 +2029,31 @@ def export_facts(
     if use_sources:
         mapped_frames: List[pd.DataFrame] = []
         sources_cfg = [source for source in cfg.get("sources", []) if isinstance(source, Mapping)]
+        source_by_name: Dict[str, Mapping[str, Any]] = {}
+        for source in sources_cfg:
+            name = str(source.get("name") or "").strip()
+            if name:
+                source_by_name[name] = source
+
+        def _force_idmc_mapping(path: Path, frame: "pd.DataFrame") -> Optional[str]:
+            filename = path.name.lower()
+            if filename not in {"flow.csv", "stock.csv"}:
+                return None
+            text = path.as_posix().lower()
+            if "staging/idmc" not in text:
+                return None
+            candidate = "idmc_flow" if filename == "flow.csv" else "idmc_stock"
+            mapping = source_by_name.get(candidate)
+            if mapping is None:
+                return None
+            required = mapping.get("match", {}).get("required_columns")
+            if required:
+                available = {str(col).strip().lower() for col in frame.columns}
+                for column in required:
+                    if str(column).strip().lower() not in available:
+                        return None
+            return candidate
+
         raw_frames: List[tuple[Path, "pd.DataFrame"]] = []
         dtm_frame: Optional["pd.DataFrame"] = None
         dtm_detail: Optional[SourceApplication] = None
@@ -2227,6 +2290,22 @@ def export_facts(
             matched_cfg, attempts = _find_source_for_file(file_path, frame, sources_cfg)
             strategy = "config"
             attempt_summary = _summarize_match_attempts(attempts)
+            forced_mapping_name: Optional[str] = None
+            if matched_cfg is None:
+                forced_mapping_name = _force_idmc_mapping(file_path, frame)
+                if forced_mapping_name:
+                    forced = source_by_name.get(forced_mapping_name)
+                    if forced is not None:
+                        matched_cfg = forced
+                        strategy = "idmc-staging"
+                        attempts.append(
+                            {
+                                "name": forced_mapping_name,
+                                "matched": True,
+                                "reasons": {"forced": True},
+                            }
+                        )
+                        attempt_summary = _summarize_match_attempts(attempts)
             if matched_cfg is None:
                 auto_cfg = _auto_detect_dtm_source(frame)
                 if auto_cfg is not None:
@@ -2295,6 +2374,8 @@ def export_facts(
 
             mapped, detail = _apply_source(path=file_path, frame=frame, source_cfg=matched_cfg)
             mapping_name = str(matched_cfg.get("name") or file_path.name)
+            if forced_mapping_name:
+                mapping_name = forced_mapping_name
             if mapping_name in {"idmc_flow", "idmc_stock"}:
                 strategy = "idmc-staging"
             detail.strategy = strategy
@@ -2325,6 +2406,8 @@ def export_facts(
                     "strategy": strategy,
                 }
             )
+            if forced_mapping_name:
+                debug_entry["forced_mapping"] = forced_mapping_name
             if detail.dedupe_keys:
                 debug_entry["dedupe"] = {
                     "keys": detail.dedupe_keys,
@@ -2549,65 +2632,85 @@ def export_facts(
 
     resolved_for_db: Optional[pd.DataFrame] = None
     deltas_for_db: Optional[pd.DataFrame] = None
-    semantics_source: Optional[str] = None
-    semantics_series: Optional[pd.Series] = None
+    semantics_source: str = ""
     if isinstance(facts, pd.DataFrame) and not facts.empty:
-        if "semantics" in facts.columns:
-            semantics_source = "semantics"
-            semantics_series = facts["semantics"]
-        elif "series_semantics" in facts.columns:
-            semantics_source = "series_semantics"
+        metric_series = (
+            facts["metric"]
+            if "metric" in facts.columns
+            else pd.Series([""] * len(facts), index=facts.index)
+        )
+        metric_normalized = (
+            metric_series.fillna("")
+            .astype(str)
+            .str.lower()
+            .str.strip()
+        )
+        new_displacements_mask = metric_normalized.eq("new_displacements")
+        if new_displacements_mask.any():
+            if "series_semantics" not in facts.columns:
+                facts["series_semantics"] = pd.NA
+            facts.loc[new_displacements_mask, "series_semantics"] = "new"
+            if "semantics" in facts.columns:
+                facts.loc[new_displacements_mask, "semantics"] = "new"
+            locked = int(new_displacements_mask.sum())
+            LOGGER.info("duckdb.idmc.flow_semantics | rows=%s", locked)
+
+        if "series_semantics" in facts.columns:
             semantics_series = facts["series_semantics"]
-
-        if semantics_series is not None:
-            semantics_normalized = (
-                semantics_series.fillna("")
-                .astype(str)
-                .str.lower()
-                .str.strip()
-            )
-            deltas_mask = semantics_normalized.eq("new")
-            resolved_mask = semantics_normalized.eq("stock")
-
-            if deltas_mask.any():
-                deltas_for_db = facts.loc[deltas_mask].copy()
-            if resolved_mask.any():
-                resolved_for_db = facts.loc[resolved_mask].copy()
-
-            other_mask = ~(deltas_mask | resolved_mask)
-            other_count = int(other_mask.sum())
-            if other_count:
-                distribution = (
-                    semantics_normalized[other_mask]
-                    .value_counts(dropna=False)
-                    .to_dict()
-                )
-                normalized_distribution = {
-                    (key if key else "(empty)"): int(value)
-                    for key, value in distribution.items()
-                }
-                LOGGER.info(
-                    "duckdb.semantics.routed_other | total=%s details=%s",
-                    other_count,
-                    normalized_distribution,
-                )
-                other_rows = facts.loc[other_mask].copy()
-                if resolved_for_db is None:
-                    resolved_for_db = other_rows
-                else:
-                    resolved_for_db = pd.concat(
-                        [resolved_for_db, other_rows],
-                        ignore_index=True,
-                        sort=False,
-                    )
+            semantics_source = "series_semantics"
+        elif "semantics" in facts.columns:
+            semantics_series = facts["semantics"]
+            semantics_source = "semantics"
         else:
-            resolved_for_db = facts
+            semantics_series = pd.Series([""] * len(facts), index=facts.index)
+
+        semantics_normalized = (
+            semantics_series.fillna("")
+            .astype(str)
+            .str.lower()
+            .str.strip()
+        )
+        deltas_mask = semantics_normalized.eq("new")
+        resolved_mask = semantics_normalized.eq("stock")
+
+        if deltas_mask.any():
+            deltas_for_db = facts.loc[deltas_mask].copy()
+        if resolved_mask.any():
+            resolved_for_db = facts.loc[resolved_mask].copy()
+
+        other_mask = ~(deltas_mask | resolved_mask)
+        other_count = int(other_mask.sum())
+        if other_count:
+            distribution = (
+                semantics_normalized[other_mask]
+                .value_counts(dropna=False)
+                .to_dict()
+            )
+            normalized_distribution = {
+                (key if key else "(empty)"): int(value)
+                for key, value in distribution.items()
+            }
+            LOGGER.info(
+                "duckdb.semantics.routed_other | total=%s details=%s",
+                other_count,
+                normalized_distribution,
+            )
+            other_rows = facts.loc[other_mask].copy()
+            if resolved_for_db is None:
+                resolved_for_db = other_rows
+            else:
+                resolved_for_db = pd.concat(
+                    [resolved_for_db, other_rows],
+                    ignore_index=True,
+                    sort=False,
+                )
 
         LOGGER.info(
-            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s",
+            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s other_rows=%s",
             semantics_source or "∅",
             0 if resolved_for_db is None else len(resolved_for_db),
             0 if deltas_for_db is None else len(deltas_for_db),
+            other_count,
         )
 
     db_write_stats = _maybe_write_to_db(
@@ -2786,7 +2889,13 @@ def export_facts(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", required=True, help="Path to staging file or directory")
+    ap.add_argument(
+        "--input",
+        "--in",
+        dest="inp",
+        required=True,
+        help="Path to staging file or directory",
+    )
     ap.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to export_config.yml")
     ap.add_argument("--out", default=str(EXPORTS), help="Output directory (will create if needed)")
     ap.add_argument(

@@ -18,7 +18,15 @@ def _fetch(conn, sql: str):
     return conn.execute(sql).fetchall()
 
 
-def _expected_resolved_rows(csv_path: Path) -> int:
+def _expected_delta_rows(csv_path: Path) -> int:
+    frame = pd.read_csv(csv_path)
+    deduped = frame.drop_duplicates(subset=["iso3", "as_of_date", "metric", "series_semantics"])
+    return len(deduped)
+
+
+def _expected_stock_rows(csv_path: Path | None) -> int:
+    if csv_path is None:
+        return 0
     frame = pd.read_csv(csv_path)
     deduped = frame.drop_duplicates(subset=["iso3", "as_of_date", "metric", "series_semantics"])
     return len(deduped)
@@ -50,12 +58,14 @@ def test_cli_writes_rows_once(tmp_path: Path, capfd: pytest.CaptureFixture[str])
 
     conn = duckdb_io.get_db(_db_url(db_path))
     try:
-        count = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
-        assert count == _expected_resolved_rows(fixture.flow_csv)
+        deltas_count = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+        assert deltas_count == _expected_delta_rows(fixture.flow_csv)
+        resolved_count = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
+        assert resolved_count == _expected_stock_rows(fixture.stock_csv)
         value = conn.execute(
             """
             SELECT value
-            FROM facts_resolved
+            FROM facts_deltas
             WHERE iso3='COL' AND ym='2024-02' AND metric='new_displacements'
             """
         ).fetchone()[0]
@@ -103,8 +113,10 @@ def test_cli_is_idempotent(tmp_path: Path, capfd: pytest.CaptureFixture[str]) ->
 
     conn = duckdb_io.get_db(_db_url(db_path))
     try:
-        count = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
-        assert count == _expected_resolved_rows(fixture.flow_csv)
+        deltas_count = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]
+        assert deltas_count == _expected_delta_rows(fixture.flow_csv)
+        resolved_count = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
+        assert resolved_count == _expected_stock_rows(fixture.stock_csv)
     finally:
         conn.close()
 
@@ -187,10 +199,13 @@ def test_db_contains_expected_columns(tmp_path: Path) -> None:
 
     conn = duckdb_io.get_db(_db_url(db_path))
     try:
-        columns = _fetch(conn, "PRAGMA table_info('facts_resolved')")
-        names = [row[1] for row in columns]
+        resolved_columns = _fetch(conn, "PRAGMA table_info('facts_resolved')")
+        deltas_columns = _fetch(conn, "PRAGMA table_info('facts_deltas')")
+        resolved_names = [row[1] for row in resolved_columns]
+        deltas_names = [row[1] for row in deltas_columns]
         for required in ["ym", "iso3", "metric", "series_semantics", "value"]:
-            assert required in names
+            assert required in resolved_names
+            assert required in deltas_names
     finally:
         conn.close()
 
@@ -243,7 +258,11 @@ def test_merge_updates_on_conflict(tmp_path: Path, capfd: pytest.CaptureFixture[
     conn = duckdb_io.get_db(_db_url(db_path))
     try:
         value = conn.execute(
-            "SELECT value FROM facts_resolved WHERE iso3='COL' AND ym='2024-02'"
+            """
+            SELECT value
+            FROM facts_deltas
+            WHERE iso3='COL' AND ym='2024-02' AND metric='new_displacements'
+            """
         ).fetchone()[0]
         assert pytest.approx(value) == 175.0
     finally:

@@ -115,7 +115,7 @@ sources:
   - name: idmc_flow
     match:
       filename_regex: "(?i)resolver/staging/idmc/flow\\.csv$|(?i)^flow\\.csv$"
-      required_columns: [iso3, as_of_date, metric, value, series_semantics, source]
+      required_columns: [iso3, as_of_date, value]
     map:
       iso3:
         from: iso3

@@ -70,3 +70,14 @@ causes include:
 * Missing operation filter — admin2 pulls require explicit `operations` when the API exposes multiple programmes.
 
 Use `--strict-empty` or set `DTM_STRICT_EMPTY=1` in CI to fail builds when the connector writes zero rows. Real runs now exit with code `2` when the API returns no rows; the diagnostics and connectors report include a `zero_rows_reason` (`empty_country_list`, `invalid_indicator`, `api_empty_response`, or `filter_excluded_all`). Pass `--offline-smoke` (or set `DTM_OFFLINE_SMOKE=1`) to produce header-only diagnostics with exit code `0` without requiring credentials.
+
+## IDMC staging exports
+
+The IDMC staging strategy reads `flow.csv` and `stock.csv` from
+`resolver/staging/idmc/`. Flow files map through the `idmc_flow` source, which
+forces `metric=new_displacements` rows to carry `series_semantics=new` so that
+they are persisted as deltas in DuckDB (`facts_deltas`). Stock files keep
+`series_semantics=stock` and populate `facts_resolved`. When running the
+exporter with `--only-strategy idmc-staging`, the IDMC mappings are applied even
+if the filename regex would otherwise miss, ensuring the staging assets always
+route to the intended tables.
