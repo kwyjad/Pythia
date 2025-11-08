@@ -1026,3 +1026,16 @@ DuckDB connection inconsistencies or transaction errors.
 - When both a `RESOLVER_DB_URL` environment variable and an explicit argument are provided, the explicit path wins. This prevents surprising cross-environment writes; a warning is logged the first time we override the environment value.
 - Schema initialisation is wrapped in a Python-managed transaction. Do not embed `BEGIN`/`COMMIT` in schema snippets you pass to `duckdb_io.init_schema`; the helper strips those statements and handles rollbacks on errors for you.
 
+
+### Packaging files into a context zip
+Use `tools/make_zip_from_list.py` to bundle an explicit list of files into a portable archive that includes an integrity manifest.
+
+```bash
+# Use the inline DEFAULT_FILE_LIST defined in the script
+python tools/make_zip_from_list.py
+
+# Or point at a file that lists one repo-relative path per line
+python tools/make_zip_from_list.py --file-list paths.txt --out my_context.zip
+```
+
+The script reads each file as bytes, writes them into the zip, and adds a `MANIFEST.json` containing the size and SHA-256 hash for every entry. It prints warnings for missing files, Git-LFS pointers, and suspicious truncation markers, and exits non-zero if no files were added so CI jobs can fail fast.
