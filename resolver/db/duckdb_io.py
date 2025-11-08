@@ -745,6 +745,26 @@ def _has_declared_key(
         return False
 
     canonical = _canonicalize_columns(keys)
+    if not canonical:
+        return False
+
+    existing_columns, _ = _table_columns(conn, table)
+    existing_canonical = {col.lower() for col in existing_columns}
+    available = [key for key in canonical if key in existing_canonical]
+    if not available:
+        LOGGER.debug(
+            "duckdb.schema.declared_key.unavailable | table=%s requested=%s", table, keys
+        )
+        return False
+
+    candidate_sets: list[list[str]] = [canonical]
+    if available != canonical:
+        candidate_sets.append(available)
+
+    def _matches(columns: Sequence[str]) -> bool:
+        normalized = _canonicalize_columns(columns)
+        return any(normalized == candidate for candidate in candidate_sets)
+
     constraint_sets: list[list[str]] = []
     unique_indexes: dict[str, list[str]] = {}
 
@@ -758,7 +778,7 @@ def _has_declared_key(
                 constraints=[list(cols) for cols in constraint_sets],
             )
         for constraint_columns in constraint_sets:
-            if _canonicalize_columns(constraint_columns) == canonical:
+            if _matches(constraint_columns):
                 if diag_enabled():
                     log_json(
                         DIAG_LOGGER,
@@ -784,7 +804,7 @@ def _has_declared_key(
                 indexes=unique_indexes,
             )
         for index_name, columns in unique_indexes.items():
-            if _canonicalize_columns(columns) == canonical:
+            if _matches(columns):
                 if diag_enabled():
                     log_json(
                         DIAG_LOGGER,

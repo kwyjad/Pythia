@@ -81,7 +81,10 @@ the merge key; otherwise the helper falls back to the full context columns—`is
 `hazard_code`, `metric`, the exact `as_of_date`/`as_of`, `publication_date`, `source_id`,
 `ym`, and `series_semantics`. The richer key prevents distinct events in the same month
 from being collapsed into a single row and keeps DuckDB row counts aligned with
-the CSV preview and parity tests.
+the CSV preview and parity tests. If you point the helper at a minimal table that
+predates some of those columns, the schema healer intersects the requested key
+with whatever columns exist and falls back to a unique index on that subset so the
+write still succeeds.
 
 ## Preventing double matches
 

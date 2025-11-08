@@ -661,7 +661,10 @@ if `event_id` is present it participates in the merge key, otherwise the writer
 falls back to `(iso3, hazard_code, metric, as_of_date/as_of, publication_date, source_id, ym,
 series_semantics)`. Schema initialisation drops the legacy `(ym, iso3, metric, …)`
 unique indexes so the MERGE statements can store distinct events that share the
-same month without collapsing them into one record.
+same month without collapsing them into one record. When older tables are missing
+newer columns the key healer intersects the requested set with what actually
+exists and creates a unique index on that subset, which keeps minimal test
+fixtures writable without raising catalogue errors.
 
 > Resolver DuckDB tests now build their IDMC CSV/Parquet fixtures at runtime
 > inside pytest temporary directories, so no binary fixtures need to be stored
