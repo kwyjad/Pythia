@@ -52,3 +52,10 @@ real row counts for fetched, normalized, and written data. The generated
 `diagnostics/ingestion/idmc/summary.md` and the per-connector table therefore
 show the fallback totals (instead of `0/0/0`) whenever the rescue path produced
 rows.
+
+Fallback data sources occasionally surface ISO3 identifiers under alternate
+column names (for example `CountryISO3`). The connector normalizes these
+variants to a canonical `iso3` column before applying any country filters and
+skips filtering entirely when a fallback frame is empty. Diagnostics now note
+when the ISO filter was applied or skipped so empty fallback payloads no longer
+raise `KeyError: 'iso3'` during fast tests.

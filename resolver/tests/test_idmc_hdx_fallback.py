@@ -102,3 +102,70 @@ def test_idmc_single_shot_fallback_filters_per_chunk(tmp_path: Path, monkeypatch
     assert fallback_info.get("resource_url") == fallback_diag["resource_url"]
 
     assert fallback_fetch.call_count == 1
+
+
+def test_idmc_fallback_empty_frame_records_filter_skip(tmp_path: Path, monkeypatch) -> None:
+    cfg = IdmcConfig()
+    cfg.api.countries = ["AFG"]
+    cfg.api.series = ["flow"]
+    cfg.cache.dir = (tmp_path / "cache").as_posix()
+    Path(cfg.cache.dir).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client._probe_idu_schema",
+        lambda *args, **kwargs: (
+            "displacement_date",
+            ["iso3", "figure", "displacement_date"],
+            {"status": 200},
+        ),
+    )
+
+    def _failing_http_get(*_args, **_kwargs):
+        diagnostics = {
+            "attempts": 1,
+            "retries": 0,
+            "duration_s": 0.01,
+            "backoff_s": 0.0,
+            "wire_bytes": 0,
+            "body_bytes": 0,
+            "status": None,
+        }
+        raise HttpRequestError("boom", diagnostics, kind="dns_error")
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client.http_get",
+        _failing_http_get,
+    )
+
+    fallback_frame = pd.DataFrame(
+        columns=["CountryISO3", "displacement_date", "figure"],
+    )
+    fallback_diag = {
+        "dataset": "preliminary-internal-displacement-updates",
+        "resource_url": "https://data.humdata.org/idus_view_flat.csv",
+        "resource_status_code": 200,
+    }
+    fallback_fetch = MagicMock(return_value=(fallback_frame, fallback_diag))
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client._hdx_fetch_latest_csv",
+        fallback_fetch,
+    )
+
+    data, diagnostics = fetch(
+        cfg,
+        network_mode="live",
+        window_start=date(2024, 1, 1),
+        window_end=date(2024, 1, 31),
+        chunk_by_month=True,
+        allow_hdx_fallback=True,
+    )
+
+    flow = data["monthly_flow"]
+    assert flow.empty
+
+    fallback_info = diagnostics.get("fallback") or {}
+    filter_info = fallback_info.get("fallback_filter") or {}
+    assert filter_info.get("fallback_filter_applied") is False
+    assert filter_info.get("reason") in {"empty_frame", "no_iso3_or_empty"}
+
+    assert fallback_fetch.call_count == 1
