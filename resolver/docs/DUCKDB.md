@@ -39,22 +39,23 @@ pipelines.
 
 ## IDMC flow semantics
 
-The `resolver.cli.idmc_to_duckdb` wrapper normalizes staging paths and delegates
-writes to the exporter with the `idmc-staging` strategy. Rows with
-`metric=new_displacements` are forced to `series_semantics=new`, so they land in
-`facts_deltas`, while accompanying stock rows continue to populate
-`facts_resolved`. The wrapper verifies both tables after each run, so a flow-only
-staging directory still reports success when the deltas table receives rows.
+The `resolver.cli.idmc_to_duckdb` wrapper now runs in dry-run mode by default
+and only performs inserts when `--write-db` is supplied. It prefers the
+canonical `facts.csv` emitted by the exporter (pass `--facts-csv`), falling back
+to staging re-exports when the CSV is absent. Rows with
+`metric=new_displacements` are still forced to `series_semantics=new`, so they
+land in `facts_deltas`, while accompanying stock rows continue to populate
+`facts_resolved`. Successful writes log `✅ Wrote N rows to DuckDB`, and the
+command exits with a non-zero status when `--write-db` is set but the source
+contains zero rows (useful guardrail for automation).
 
 ## Initial backfill automation
 
 The `resolver-initial-backfill.yml` workflow invokes
 `python -m resolver.cli.idmc_to_duckdb` immediately after exporting the preview
-CSV so the generated facts land in the `BACKFILL_DB_PATH` DuckDB file during CI. The
-step forces DuckDB writes by setting `RESOLVER_WRITE_DB=1` (and compatible
-aliases) alongside `RESOLVER_EXPORT_ENABLE_IDMC=1`, then records the inserted and
-updated row counts in the GitHub Actions job summary. A follow-up "Verify DuckDB
-contents" step runs `python -m scripts.ci.verify_duckdb_counts` so the
-`diagnostics/ingestion/duckdb_counts.md` artifact and the GitHub Step Summary
-include a canonical "DuckDB write verification" section detailing totals and a
-source/metric breakdown for `facts_resolved`.
+CSV so the generated facts land in the `BACKFILL_DB_PATH` DuckDB file during CI.
+The step passes `--facts-csv` and `--write-db`, enabling inserts only when the
+canonical CSV exists. The subsequent "Verify DuckDB contents" step queries
+DuckDB directly, writes `diagnostics/ingestion/duckdb_counts.md`, and appends the
+table/row breakdown to both the GitHub Step Summary and the ingestion summary for
+auditing.

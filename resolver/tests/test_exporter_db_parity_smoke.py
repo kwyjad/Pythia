@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -169,6 +170,87 @@ def test_exporter_cli_write_db_flag(monkeypatch, tmp_path):
 
     assert calls, "_maybe_write_to_db should be invoked when --write-db is set"
     assert calls[0]["db_url"] == db_url
+
+    conn = duckdb_io.get_db(db_url)
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rows == len(data)
+
+
+def test_exporter_cli_duckdb_integration_subprocess(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+
+    staging = tmp_path / "staging.csv"
+    data = pd.DataFrame(
+        [
+            {
+                "event_id": "E200",
+                "country_name": "Philippines",
+                "iso3": "PHL",
+                "hazard_code": "EQ",
+                "hazard_label": "Earthquake",
+                "hazard_class": "Geophysical",
+                "metric": "affected",
+                "value": "1200",
+                "unit": "persons",
+                "as_of_date": "2024-01-20",
+                "publication_date": "2024-01-21",
+                "publisher": "OCHA",
+                "source_type": "situation_report",
+                "source_url": "https://example.org/eq",
+                "doc_title": "EQ update",
+                "definition_text": "People affected",
+                "method": "reported",
+                "confidence": "medium",
+                "revision": "1",
+                "ingested_at": "2024-01-21T00:00:00Z",
+            }
+        ]
+    )
+    data.to_csv(staging, index=False)
+
+    mapping = {column: [column] for column in data.columns}
+    config = {"mapping": mapping, "constants": {}}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+
+    out_dir = tmp_path / "exports"
+    out_dir.mkdir()
+
+    db_path = tmp_path / "subprocess.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(repo_root)
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "resolver.tools.export_facts",
+            "--in",
+            str(staging),
+            "--out",
+            str(out_dir),
+            "--config",
+            str(config_path),
+            "--write-db",
+            "1",
+            "--db-url",
+            db_url,
+        ],
+        check=True,
+        cwd=repo_root,
+        env=env,
+    )
 
     conn = duckdb_io.get_db(db_url)
     try:

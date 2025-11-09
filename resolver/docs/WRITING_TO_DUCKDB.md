@@ -75,6 +75,22 @@ records the absolute DuckDB path, the total `facts_resolved` rows observed, and 
 small source/metric/semantics breakdown to serve as auditable proof that rows
 landed in the database.
 
+The exporter invocation used by the workflow looks like this:
+
+```bash
+python -m resolver.tools.export_facts \
+  --in resolver/staging \
+  --out resolver/exports/backfill \
+  --config resolver/tools/export_config.yml \
+  --write-db 1 \
+  --db-url "$RESOLVER_DB_URL" \
+  --append-summary diagnostics/ingestion/summary.md
+```
+
+These explicit flags guarantee the derived snapshot writes rows into
+`data/resolver_backfill.duckdb` during the backfill run rather than acting as a
+preview-only export.
+
 ## Single-source selection
 
 The helper focuses on the canonical `flow.csv` export. When both `flow.csv` and
