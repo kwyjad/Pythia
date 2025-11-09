@@ -123,3 +123,50 @@ def test_coverage_formats_missing_values(tmp_path: Path) -> None:
         "| fews_stub | stub | skipped | missing secret | — | 0/0/0 (0) | 0/0/0 | — | — | — | — | — | — | — |"
         in markdown
     )
+
+
+def test_duckdb_section_rendered() -> None:
+    entries = [
+        {
+            "connector_id": "idmc_client",
+            "mode": "real",
+            "status": "ok",
+            "counts": {"fetched": 0, "normalized": 0, "written": 0},
+            "coverage": {},
+            "extras": {},
+        }
+    ]
+    export_summary = {
+        "duckdb": {
+            "db_path": "/tmp/resolver.duckdb",
+            "window": {"start": "2024-01-01", "end": "2024-01-31"},
+            "log_path": "logs/ingestion/latest/idmc.log",
+            "tables": ["facts_resolved"],
+            "table_stats": {
+                "facts_resolved": {"rows_written": 6, "rows_delta": 4, "rows_after": 10}
+            },
+            "breakdown": {
+                "facts_resolved": {
+                    "rows": [
+                        {
+                            "source_id": "idmc",
+                            "metric": "new_displacements",
+                            "semantics": "stock",
+                            "rows": 4,
+                        },
+                        {
+                            "source_id": "idmc",
+                            "metric": "total_displacements",
+                            "semantics": "stock",
+                            "rows": 2,
+                        },
+                    ]
+                }
+            },
+        }
+    }
+    markdown = summarize_connectors.build_markdown(entries, export_summary=export_summary)
+    assert "## DuckDB" in markdown
+    assert "Rows written:** 6" in markdown
+    assert "logs/ingestion/latest/idmc.log" in markdown
+    assert "| idmc | new_displacements | stock | 4 |" in markdown

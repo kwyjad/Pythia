@@ -4,7 +4,7 @@ from __future__ import annotations
 import calendar
 import logging
 from datetime import datetime
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
 
@@ -55,6 +55,38 @@ def _dedupe_preserve_order(values: Iterable[str]) -> List[str]:
         seen.add(value)
         ordered.append(value)
     return ordered
+
+
+def ensure_iso3_column(
+    frame: pd.DataFrame,
+    *,
+    variants: Sequence[str] = (
+        "iso3",
+        "ISO3",
+        "CountryISO3",
+        "country_iso3",
+        "countryiso3",
+        "country iso3",
+    ),
+) -> pd.DataFrame:
+    """Return a frame with any known ISO3 alias renamed to ``iso3``."""
+
+    if frame is None:
+        return frame
+
+    if "iso3" in frame.columns:
+        return frame
+
+    for candidate in variants:
+        if candidate in frame.columns and candidate != "iso3":
+            return frame.rename(columns={candidate: "iso3"})
+
+    if frame.empty:
+        working = frame.copy()
+        working["iso3"] = pd.Series(dtype="string")
+        return working
+
+    return frame
 
 
 def _first_non_null(df: pd.DataFrame, columns: Iterable[str]) -> pd.Series:

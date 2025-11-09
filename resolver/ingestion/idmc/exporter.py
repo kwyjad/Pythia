@@ -15,6 +15,12 @@ FACTS_COLS: Final[list[str]] = [
     "source",
 ]
 
+# ``stock.csv`` shares the same column contract as the normalised facts export.
+STOCK_EXPORT_COLUMNS: Final[list[str]] = FACTS_COLS
+
+# Absolute staging path used by downstream tooling when probing for ``stock.csv``.
+STOCK_STAGING_PATH: Final[str] = os.path.join("resolver", "staging", "idmc", "stock.csv")
+
 
 def ensure_dir(path: str) -> None:
     """Ensure ``path`` exists, creating directories as required."""

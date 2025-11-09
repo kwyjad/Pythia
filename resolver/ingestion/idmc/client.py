@@ -43,8 +43,10 @@ from .diagnostics import (
 )
 from .chunking import split_by_month
 from .config import IdmcConfig
+from .probe import ProbeOptions, probe_reachability, summarize_probe_outcome
 from .export import FLOW_EXPORT_COLUMNS, FLOW_METRIC, FLOW_SERIES_SEMANTICS
 from .http import HttpRequestError, http_get
+from .normalize import ensure_iso3_column
 from .rate_limit import TokenBucket
 
 HERE = os.path.dirname(__file__)
@@ -196,6 +198,61 @@ def _http_timeouts() -> Tuple[float, float]:
     if read <= 0:
         read = DEFAULT_READ_TIMEOUT_S
     return connect, read
+
+
+def _has_col(df: Any, name: str) -> bool:
+    if not hasattr(df, "columns"):
+        return False
+    columns = getattr(df, "columns", [])
+    if name not in columns:
+        return False
+    return not getattr(df, "empty", True)
+
+
+def _apply_iso3_filter(
+    frame: Optional[pd.DataFrame],
+    countries: Iterable[str],
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    allowed = {
+        code.strip().upper()
+        for code in countries
+        if isinstance(code, str) and code.strip()
+    }
+    scope = sorted(allowed)
+    note: Dict[str, Any] = {"fallback_filter_applied": False}
+    if scope:
+        note["scope"] = scope
+
+    if frame is None:
+        note["reason"] = "empty_frame"
+        return pd.DataFrame(), note
+
+    working = ensure_iso3_column(frame)
+    if getattr(working, "empty", True):
+        note["reason"] = "empty_frame"
+        return working.copy() if hasattr(working, "copy") else working, note
+
+    working = working.copy()
+    if not scope:
+        note["reason"] = "no_scope"
+        return working, note
+
+    if not _has_col(working, "iso3"):
+        note["reason"] = "no_iso3_or_empty"
+        return working, note
+
+    iso_series = working["iso3"].astype(str).str.strip().str.upper()
+    working["iso3"] = iso_series
+    mask = iso_series.isin(scope)
+    rows_before = int(mask.size)
+    filtered = working.loc[mask]
+    note.update(
+        fallback_filter_applied=True,
+        reason="applied",
+        rows_before=rows_before,
+        rows_after=int(filtered.shape[0]),
+    )
+    return filtered, note
 
 
 def _resolve_http_user_agent() -> str:
@@ -1519,16 +1576,10 @@ def _helix_fetch_csv(
     diagnostics.setdefault("source", "helix")
     diagnostics.setdefault("source_tag", "idmc_gidd")
 
-    if frame.empty:
-        return frame, diagnostics
-
-    filtered = frame.copy()
-
-    iso_set = {
-        code.strip().upper() for code in iso3_list if code and str(code).strip()
-    }
-    if iso_set:
-        filtered = filtered.loc[filtered["iso3"].isin(sorted(iso_set))]
+    filtered, filter_note = _apply_iso3_filter(frame, iso3_list)
+    diagnostics["fallback_filter"] = filter_note
+    if filtered.empty and filter_note.get("reason") == "empty_frame":
+        return filtered, diagnostics
 
     start_bound = start_date
     end_bound = end_date
@@ -1727,7 +1778,7 @@ def _normalise_fallback_monthly_flow(
     if frame is None or frame.empty:
         return pd.DataFrame(columns=canonical_columns)
 
-    working = frame.copy()
+    working = ensure_iso3_column(frame).copy()
     start_bound = chunk_start or window_start
     end_bound = chunk_end or window_end
     allowed_countries = {
@@ -1745,7 +1796,7 @@ def _normalise_fallback_monthly_flow(
             result = result.loc[result["as_of_date"] >= pd.Timestamp(start_bound)]
         if end_bound is not None:
             result = result.loc[result["as_of_date"] <= pd.Timestamp(end_bound)]
-        if allowed_countries:
+        if allowed_countries and _has_col(result, "iso3"):
             result = result.loc[result["iso3"].isin(allowed_countries)]
         result = result.dropna(subset=["iso3", "as_of_date", "value"])
         result = result.loc[result["value"] >= 0]
@@ -1804,7 +1855,7 @@ def _normalise_fallback_monthly_flow(
         subset = subset.loc[subset["event_date"] >= pd.Timestamp(start_bound)]
     if end_bound is not None:
         subset = subset.loc[subset["event_date"] <= pd.Timestamp(end_bound)]
-    if allowed_countries:
+    if allowed_countries and _has_col(subset, "iso3"):
         subset = subset.loc[subset["iso3"].isin(allowed_countries)]
     if subset.empty:
         return pd.DataFrame(columns=canonical_columns)
@@ -1832,7 +1883,10 @@ def _normalise_helix_last180_monthly(
     if frame is None or frame.empty:
         return pd.DataFrame(columns=canonical_columns)
 
-    working = frame.copy()
+    working = ensure_iso3_column(frame).copy()
+    if "iso3" not in working.columns:
+        return pd.DataFrame(columns=canonical_columns)
+
     working["iso3"] = working["iso3"].astype(str).str.strip().str.upper()
     working["event_date"] = pd.to_datetime(working["event_date"], errors="coerce")
     working["value"] = pd.to_numeric(working["value"], errors="coerce")
@@ -1849,7 +1903,7 @@ def _normalise_helix_last180_monthly(
         subset = subset.loc[subset["event_date"] >= pd.Timestamp(window_start)]
     if window_end is not None:
         subset = subset.loc[subset["event_date"] <= pd.Timestamp(window_end)]
-    if allowed_countries:
+    if allowed_countries and _has_col(subset, "iso3"):
         subset = subset.loc[subset["iso3"].isin(allowed_countries)]
     if subset.empty:
         return pd.DataFrame(columns=canonical_columns)
@@ -2150,6 +2204,7 @@ def fetch_idu_json(
             "source_tag",
             "hdx_attempt",
             "helix_error",
+            "fallback_filter",
         )
         for key in metadata_keys:
             value = diag.get(key) if isinstance(diag, Mapping) else None
@@ -2573,6 +2628,13 @@ def fetch_idu_json(
                                 fallback_scope = (
                                     only_countries if only_countries is not None else countries
                                 )
+                                _, filter_note = _apply_iso3_filter(
+                                    fallback_frame,
+                                    fallback_scope or [],
+                                )
+                                fallback_diag_entry.setdefault(
+                                    "fallback_filter", filter_note
+                                )
                                 normalized_fallback = _normalise_fallback_monthly_flow(
                                     fallback_frame,
                                     source_tag=fallback_source_tag_inner,
@@ -2781,6 +2843,11 @@ def fetch_idu_json(
         diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
         fallback_scope = only_countries if only_countries is not None else countries
+        _, filter_note = _apply_iso3_filter(
+            fallback_frame,
+            fallback_scope or [],
+        )
+        fallback_entry.setdefault("fallback_filter", filter_note)
         normalized_fallback = _normalise_fallback_monthly_flow(
             fallback_frame,
             source_tag=fallback_source_tag,
@@ -2873,6 +2940,9 @@ def fetch(
     if network_mode not in NETWORK_MODES:
         raise ValueError(f"Unsupported IDMC network mode: {network_mode}")
 
+    requested_network_mode = network_mode
+    endpoint_outcomes: Dict[str, Dict[str, Any]] = {}
+
     LOGGER.info("IDMC network mode: %s", network_mode)
     if network_mode not in {"live", "helix"}:
         LOGGER.warning(
@@ -2923,6 +2993,114 @@ def fetch(
         window_end,
         window_days,
     )
+    base_candidate = (base_url or cfg.api.base_url).rstrip("/")
+    alt_config_value = getattr(cfg.api, "alternate_base_url", None)
+    alt_candidate: Optional[str] = None
+    if isinstance(alt_config_value, str):
+        cleaned_alt = alt_config_value.strip()
+        if cleaned_alt:
+            alt_candidate = cleaned_alt.rstrip("/")
+    if alt_candidate and alt_candidate == base_candidate:
+        alt_candidate = None
+
+    helix_failover_active = False
+    endpoint_outcomes.setdefault(
+        "helix",
+        {
+            "base_url": f"{HELIX_BASE}{HELIX_LAST180_PATH}",
+            "status": "unused",
+        },
+    )
+
+    if network_mode == "live":
+        try:
+            primary_probe = probe_reachability(ProbeOptions(base_url=base_candidate))
+        except Exception as exc:  # pragma: no cover - defensive network
+            primary_probe = {
+                "base_url": base_candidate,
+                "dns": {"ok": False, "error": str(exc), "elapsed_ms": 0},
+            }
+        primary_summary = summarize_probe_outcome(primary_probe)
+        primary_summary.setdefault("base_url", base_candidate)
+        endpoint_outcomes["primary"] = primary_summary
+
+        should_try_alt = (
+            primary_summary.get("status") == "fail"
+            and str(primary_summary.get("stage")) in {"dns", "tls"}
+        )
+        if should_try_alt:
+            if alt_candidate:
+                try:
+                    alternate_probe = probe_reachability(
+                        ProbeOptions(base_url=alt_candidate)
+                    )
+                except Exception as exc:  # pragma: no cover - defensive network
+                    alternate_probe = {
+                        "base_url": alt_candidate,
+                        "dns": {"ok": False, "error": str(exc), "elapsed_ms": 0},
+                    }
+                alternate_summary = summarize_probe_outcome(alternate_probe)
+                alternate_summary.setdefault("base_url", alt_candidate)
+                endpoint_outcomes["alternate"] = alternate_summary
+                if alternate_summary.get("status") in {"ok", "warn"}:
+                    LOGGER.warning(
+                        "IDMC primary base unreachable (stage=%s); using alternate base %s",
+                        primary_summary.get("stage"),
+                        alt_candidate,
+                    )
+                    base_candidate = alt_candidate
+                elif (
+                    alternate_summary.get("status") == "fail"
+                    and str(alternate_summary.get("stage")) in {"dns", "tls"}
+                ):
+                    helix_failover_active = True
+                else:
+                    helix_failover_active = False
+            else:
+                endpoint_outcomes["alternate"] = {
+                    "status": "skipped",
+                    "reason": "not_configured",
+                    "base_url": None,
+                }
+                helix_failover_active = True
+        else:
+            if alt_candidate:
+                endpoint_outcomes.setdefault(
+                    "alternate",
+                    {
+                        "status": "skipped",
+                        "reason": "not_attempted",
+                        "base_url": alt_candidate,
+                    },
+                )
+    else:
+        endpoint_outcomes.setdefault(
+            "primary",
+            {
+                "status": "skipped",
+                "reason": f"network_mode_{network_mode}",
+                "base_url": base_candidate,
+            },
+        )
+        if alt_candidate:
+            endpoint_outcomes.setdefault(
+                "alternate",
+                {
+                    "status": "skipped",
+                    "reason": f"network_mode_{network_mode}",
+                    "base_url": alt_candidate,
+                },
+            )
+
+    if helix_failover_active and network_mode != "helix" and helix_client_id:
+        LOGGER.warning(
+            "IDMC primary and alternate bases unreachable; falling back to HELIX last-180-days",
+        )
+        network_mode = "helix"
+        endpoint_outcomes["helix"].update({"status": "pending", "reason": "failover"})
+
+    base_url = base_candidate
+
     if max_bytes is None:
         raw_max_bytes = os.getenv("IDMC_MAX_BYTES")
         if raw_max_bytes is not None:
@@ -3205,6 +3383,26 @@ def fetch(
             rate_limiter=limiter,
         )
         helix_summary = dict(helix_diag or {})
+        helix_entry = endpoint_outcomes.setdefault(
+            "helix",
+            {"base_url": f"{HELIX_BASE}{HELIX_LAST180_PATH}"},
+        )
+        status_value = helix_summary.get("status")
+        if isinstance(status_value, int) and 200 <= status_value < 300:
+            helix_entry.update({"status": "used", "status_code": status_value})
+        else:
+            helix_entry.update({"status": "fail", "status_code": status_value})
+        rows_value = helix_summary.get("raw_rows")
+        if rows_value is None:
+            rows_value = helix_frame_full.shape[0]
+        try:
+            helix_entry["rows"] = int(rows_value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            helix_entry["rows"] = int(helix_frame_full.shape[0])
+        if helix_failover_active:
+            helix_entry.setdefault("reason", "failover")
+        else:
+            helix_entry.setdefault("reason", f"network_mode_{requested_network_mode}")
         helix_zero_reason: Optional[str] = None
         status_value = helix_summary.get("status")
         if not isinstance(status_value, int) or not (200 <= status_value < 300):
@@ -3212,15 +3410,13 @@ def fetch(
         elif int(helix_summary.get("raw_rows", 0) or 0) == 0:
             helix_zero_reason = "helix_http_error"
 
-        allowed_iso = {
+        allowed_iso = [
             code.strip().upper()
             for code in countries
             if isinstance(code, str) and code.strip()
-        }
-        if allowed_iso:
-            helix_frame_full = helix_frame_full.loc[
-                helix_frame_full["iso3"].isin(sorted(allowed_iso))
-            ]
+        ]
+        helix_frame_full, filter_note = _apply_iso3_filter(helix_frame_full, allowed_iso)
+        helix_summary["fallback_filter"] = filter_note
 
         if "displacement_date" not in helix_frame_full.columns:
             helix_frame_full["displacement_date"] = None
@@ -3286,7 +3482,7 @@ def fetch(
                 "window_end": (end or window_end).isoformat()
                 if (end or window_end)
                 else None,
-                "countries": sorted(allowed_iso),
+                "countries": sorted(set(allowed_iso)),
                 "rows_before": total_rows_pre_filter,
                 "rows_after": int(chunk_frame.shape[0]),
                 "chunk_label": label or "full",
@@ -3800,6 +3996,8 @@ def fetch(
         "rate_limit": rate_limit_info,
         "chunks": chunks_info,
         "network_mode": network_mode,
+        "requested_network_mode": requested_network_mode,
+        "helix_failover": helix_failover_active,
         "http_status_counts": status_counts_serialized
         if network_mode in {"live", "helix"}
         else None,
@@ -3822,6 +4020,7 @@ def fetch(
         "fallback": fallback_summary,
         "fallback_used": bool(fallback_used_total),
         "http_timeouts": http_timeouts_cfg,
+        "endpoint_outcomes": dict(endpoint_outcomes),
     }
     diagnostics["rows_fetched"] = max(raw_rows_total, 0)
     diagnostics["rows_normalized"] = rows_normalized

@@ -157,6 +157,17 @@ def test_idmc_url_has_no_window_params(monkeypatch, tmp_path):
         ),
     )
 
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client.probe_reachability",
+        lambda options: {
+            "base_url": options.base_url,
+            "dns": {"ok": True, "elapsed_ms": 1, "records": []},
+            "tcp": {"ok": True, "elapsed_ms": 1},
+            "tls": {"ok": True, "elapsed_ms": 1},
+            "http_head": {"ok": True, "status": 200, "elapsed_ms": 1},
+        },
+    )
+
     captured_urls: list[str] = []
 
     def fake_http_get(url: str, **_kwargs: Any) -> Tuple[int, Dict[str, str], bytes, Dict[str, Any]]:
@@ -200,6 +211,157 @@ def test_idmc_url_has_no_window_params(monkeypatch, tmp_path):
         assert "window_end" not in url
 
 
+def test_idmc_fallback_uses_alternate_base(monkeypatch, tmp_path):
+    cfg = IdmcConfig()
+    cfg.api.base_url = "https://primary.example"
+    cfg.api.alternate_base_url = "https://alternate.example"
+    cfg.api.countries = ["AFG"]
+    cfg.api.series = ["flow"]
+    cfg.cache.dir = (tmp_path / "cache").as_posix()
+
+    monkeypatch.setenv("IDMC_CACHE_DIR", cfg.cache.dir)
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client._probe_idu_schema",
+        lambda *args, **kwargs: (
+            "displacement_date",
+            ["iso3", "figure", "displacement_date"],
+            {"status": 200},
+        ),
+    )
+
+    def fake_probe(options):
+        base = options.base_url
+        if "primary" in base:
+            return {
+                "base_url": base,
+                "dns": {"ok": False, "error": "nxdomain", "elapsed_ms": 5},
+                "tcp": {"ok": False, "skipped": True, "elapsed_ms": 0},
+                "tls": {"ok": False, "skipped": True, "elapsed_ms": 0},
+                "http_head": {"ok": False, "skipped": True, "elapsed_ms": 0},
+            }
+        return {
+            "base_url": base,
+            "dns": {"ok": True, "elapsed_ms": 1, "records": []},
+            "tcp": {"ok": True, "elapsed_ms": 1},
+            "tls": {"ok": True, "elapsed_ms": 1},
+            "http_head": {"ok": True, "status": 200, "elapsed_ms": 1},
+        }
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client.probe_reachability", fake_probe
+    )
+
+    captured_urls: list[str] = []
+
+    def fake_http_get(url: str, **_kwargs: Any):
+        captured_urls.append(url)
+        payload = json.dumps(
+            [{
+                "iso3": "AFG",
+                "figure": 1,
+                "displacement_date": "2024-01-01",
+            }]
+        ).encode("utf-8")
+        diagnostics = {
+            "attempts": 1,
+            "retries": 0,
+            "duration_s": 0.01,
+            "backoff_s": 0.0,
+            "wire_bytes": len(payload),
+            "body_bytes": len(payload),
+            "attempt_durations_s": [0.01],
+        }
+        return 200, {}, payload, diagnostics
+
+    monkeypatch.setattr("resolver.ingestion.idmc.client.http_get", fake_http_get)
+
+    data, diagnostics = fetch(
+        cfg,
+        network_mode="live",
+        window_start=date(2024, 1, 1),
+        window_end=date(2024, 1, 31),
+    )
+
+    assert captured_urls
+    assert all("alternate.example" in url for url in captured_urls)
+    assert not data["monthly_flow"].empty
+
+    outcomes = diagnostics.get("endpoint_outcomes") or {}
+    assert outcomes.get("primary", {}).get("status") == "fail"
+    assert outcomes.get("primary", {}).get("stage") == "dns"
+    assert outcomes.get("alternate", {}).get("status") in {"ok", "warn"}
+    assert diagnostics.get("network_mode") == "live"
+    assert outcomes.get("helix", {}).get("status") == "unused"
+
+
+def test_idmc_dns_failure_routes_to_helix(monkeypatch, tmp_path):
+    cfg = IdmcConfig()
+    cfg.api.base_url = "https://primary.example"
+    cfg.api.alternate_base_url = "https://alternate.example"
+    cfg.api.countries = ["AFG"]
+    cfg.api.series = ["flow"]
+    cfg.cache.dir = (tmp_path / "cache").as_posix()
+
+    monkeypatch.setenv("IDMC_CACHE_DIR", cfg.cache.dir)
+    monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "client-123")
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client._probe_idu_schema",
+        lambda *args, **kwargs: (
+            "displacement_date",
+            ["iso3", "figure", "displacement_date"],
+            {"status": 200},
+        ),
+    )
+
+    def failing_probe(options):
+        base = options.base_url
+        return {
+            "base_url": base,
+            "dns": {"ok": False, "error": "nxdomain", "elapsed_ms": 5},
+            "tcp": {"ok": False, "skipped": True, "elapsed_ms": 0},
+            "tls": {"ok": False, "skipped": True, "elapsed_ms": 0},
+            "http_head": {"ok": False, "skipped": True, "elapsed_ms": 0},
+        }
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client.probe_reachability", failing_probe
+    )
+
+    def fake_helix_last180(*_args, **_kwargs):
+        frame = pd.DataFrame(
+            [{
+                "iso3": "AFG",
+                "displacement_date": "2024-01-01",
+                "figure": 5,
+            }]
+        )
+        return frame, {"status": 200, "raw_rows": frame.shape[0]}
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client._fetch_helix_last180",
+        fake_helix_last180,
+    )
+
+    data, diagnostics = fetch(
+        cfg,
+        network_mode="live",
+        window_start=date(2024, 1, 1),
+        window_end=date(2024, 1, 31),
+    )
+
+    outcomes = diagnostics.get("endpoint_outcomes") or {}
+    assert diagnostics.get("network_mode") == "helix"
+    assert diagnostics.get("requested_network_mode") == "live"
+    assert diagnostics.get("helix_failover") is True
+    assert outcomes.get("primary", {}).get("status") == "fail"
+    assert outcomes.get("helix", {}).get("status") == "used"
+    assert outcomes.get("helix", {}).get("status_code") == 200
+    assert outcomes.get("helix", {}).get("rows") == 1
+    assert not data["monthly_flow"].empty
+
+
 def test_idmc_fallback_gated(monkeypatch, tmp_path):
     cfg = IdmcConfig()
     cfg.api.countries = ["AFG"]
@@ -213,6 +375,17 @@ def test_idmc_fallback_gated(monkeypatch, tmp_path):
             ["iso3", "figure", "displacement_date"],
             {"status": 200, "columns": ["iso3", "figure", "displacement_date"]},
         ),
+    )
+
+    monkeypatch.setattr(
+        "resolver.ingestion.idmc.client.probe_reachability",
+        lambda options: {
+            "base_url": options.base_url,
+            "dns": {"ok": True, "elapsed_ms": 1, "records": []},
+            "tcp": {"ok": True, "elapsed_ms": 1},
+            "tls": {"ok": True, "elapsed_ms": 1},
+            "http_head": {"ok": True, "status": 200, "elapsed_ms": 1},
+        },
     )
 
     def failing_http_get(_url: str, **_kwargs: Any):

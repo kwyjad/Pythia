@@ -23,6 +23,12 @@ This guide captures common issues encountered when running Resolver locally or i
 - **Household conversion surprises:** Inspect the `pph_used` column and confirm the value exists in `avg_household_size.csv` or overrides. Supply a custom file via `RELIEFWEB_PPH_OVERRIDE_PATH` when testing scenario-specific multipliers.
 - **Empty PDFs or images only:** Native extraction may return little text. Enable OCR for such cases, or mark the attachment as `pdf_skip=1` in the manifest to avoid repeated attempts.
 
+## IDMC connectivity
+
+- **Primary host unreachable:** Set `IDMC_BASE_URL_ALT` to a secondary base (e.g., an alternate CDN). The connector now probes DNS → TCP → TLS → HTTP for the primary host, then repeats the sequence for the alternate when the primary fails at the DNS/TLS layers.
+- **Automatic HELIX failover:** When both hosts fail DNS/TLS resolution, the run falls back to the HELIX `idus/last-180-days` endpoint (client ID required). Successful fallback is reported in the summary’s endpoint matrix as `HELIX: 200 used` with the returned row count.
+- **Endpoint matrix diagnostics:** The summary’s reachability block lists the outcome for each endpoint (`Primary`, `Alternate`, `HELIX`) so you can confirm whether the run used the alternate host or HELIX failover instead of returning empty exports.
+
 ## General debugging tips
 
 - Inspect `resolver/logs/ingestion/*.log` for structured details (JSON) including selector scores and parsing diagnostics.
