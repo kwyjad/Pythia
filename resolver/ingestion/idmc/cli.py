@@ -8,11 +8,13 @@ import io
 import logging
 import os
 import subprocess
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, cast
 
 import pandas as pd
+from jinja2 import Environment, FileSystemLoader, TemplateError
 
 from resolver.ingestion._shared.feature_flags import getenv_bool
 from resolver.ingestion.utils.country_utils import (
@@ -53,47 +55,86 @@ LOGGER = logging.getLogger(__name__)
 SUMMARY_TEMPLATE_PATH = Path("resolver/diagnostics/templates/idmc_summary.md.j2")
 SUMMARY_TEMPLATE_FALLBACK = """# IDMC ingestion summary
 
-Run at: {timestamp}
-Git SHA: {git_sha}
-Config source: {config_source}
-Config path: {config_path}
+Run at: {{ timestamp }}
+Git SHA: {{ git_sha }}
+Config source: {{ config_source }}
+Config path: {{ config_path }}
 
-Mode: {mode}
-Token: {token_status}
-Series: {series_display}
-Date window: {date_window}
+Mode: {{ mode }}
+Token: {{ token_status }}
+Series: {{ series_display }}
+Date window: {{ date_window }}
 
 ## Countries
-- Resolved count: {countries_count}
-- Sample: {countries_sample_display}
-- Source: {countries_source_display}
+- Resolved count: {{ countries_count }}
+- Sample: {{ countries_sample_display }}
+- Source: {{ countries_source_display }}
 
 ## Endpoints
-{endpoints_block}
+{{ endpoints_block }}
 
-## Attempts
-{attempts_block}
+{% if helix_block %}
+## Helix (IDU) Reachability
+- URL: {{ helix_block.url }}
+- Status: {{ helix_block.status }}
+- Bytes: {{ helix_block.bytes }}
+- Raw rows: {{ helix_block.raw_rows }}
+{{ reachability_block }}
+{% else %}
+## IDMC Reachability
+{{ reachability_block }}
+{% endif %}
+
+## HTTP attempts
+{{ http_attempts_block }}
+
+## Attempt summary
+{{ attempts_block }}
+
+## Attempt log
+{{ chunk_attempts_block }}
 
 ## Performance
-{performance_block}
+{{ performance_block }}
 
 ## Rate limiting
-{rate_limit_block}
+{{ rate_limit_block }}
 
-## Datasets
-{dataset_block}
+## Fallback
+{{ fallback_block }}
+
+## Zero rows
+{{ zero_rows_reason }}
+
+## Datasets & Sources
+{{ dataset_block }}
+
+## DuckDB write
+{{ duckdb_block }}
 
 ## Outputs
-{outputs_block}
+{{ outputs_block }}
 
 ## Staging
-{staging_block}
+{{ staging_block }}
 
 Notes:
-{notes_block}
+{{ notes_block }}
 """
 
 STOCK_METRIC = "idp_displacement_stock_idmc"
+
+_LAST_CLIENT: Optional[IdmcClient] | None = None
+
+
+@dataclass
+class FetchMetrics:
+    """Lightweight counters describing the most recent IDMC fetch."""
+
+    fetched: int = 0
+    normalized: int = 0
+    written: int = 0
+    staged: Dict[str, int] = field(default_factory=dict)
 
 
 def write_facts_parquet(path: str | Path, df: pd.DataFrame) -> str:
@@ -131,6 +172,51 @@ def _trim_text(value: str, limit: int = 160) -> str:
     return text[: max(limit - 3, 1)] + "..."
 
 
+def _normalize_duckdb_details(raw: Mapping[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {}
+    details: Dict[str, Any] = {}
+    for key in ("enabled", "rows_inserted", "rows_updated", "target", "tables"):
+        if key in raw:
+            details[key] = raw[key]
+    rows_by_table = raw.get("rows_by_table")
+    if isinstance(rows_by_table, Mapping):
+        details["rows_by_table"] = {
+            str(name): int(value)
+            for name, value in rows_by_table.items()
+            if value is not None
+        }
+    return details
+
+
+def _duckdb_summary_lines(details: Mapping[str, Any] | None) -> List[str]:
+    normalized = _normalize_duckdb_details(details)
+    if not normalized:
+        return ["DuckDB write: not requested"]
+    enabled = bool(normalized.get("enabled"))
+    if not enabled:
+        target = normalized.get("target") or "(unset)"
+        return [f"DuckDB write: disabled (target={target})"]
+    target = normalized.get("target") or "(default)"
+    rows_inserted = int(normalized.get("rows_inserted", 0) or 0)
+    rows_updated = int(normalized.get("rows_updated", 0) or 0)
+    lines = [
+        f"Target: {target}",
+        f"Rows inserted: {rows_inserted}",
+        f"Rows updated: {rows_updated}",
+    ]
+    rows_by_table = normalized.get("rows_by_table")
+    if isinstance(rows_by_table, Mapping) and rows_by_table:
+        table_entries = [f"{name}={int(value)}" for name, value in rows_by_table.items()]
+        lines.append("By table: " + ", ".join(table_entries))
+    tables = normalized.get("tables")
+    if isinstance(tables, Iterable) and not isinstance(tables, (str, bytes)):
+        rendered = [str(item) for item in tables if str(item).strip()]
+        if rendered:
+            lines.append("Tables: " + ", ".join(rendered))
+    return lines
+
+
 def _count_csv_rows(path: Path) -> int | None:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -156,14 +242,32 @@ def _resolve_git_sha() -> str:
         return "unknown"
 
 
-def _render_summary(context: Dict[str, Any]) -> str:
-    template = SUMMARY_TEMPLATE_FALLBACK
+def _load_template() -> str:
     if SUMMARY_TEMPLATE_PATH.exists():
         try:
-            template = SUMMARY_TEMPLATE_PATH.read_text(encoding="utf-8")
+            return SUMMARY_TEMPLATE_PATH.read_text(encoding="utf-8")
         except OSError as exc:  # pragma: no cover - defensive logging only
             LOGGER.debug("Failed to read summary template %s: %s", SUMMARY_TEMPLATE_PATH, exc)
-    return template.format(**context)
+    return SUMMARY_TEMPLATE_FALLBACK
+
+
+def _render_summary(context: Dict[str, Any]) -> str:
+    template_source = _load_template()
+    try:
+        env = Environment(  # nosec: simple filesystem loader
+            loader=FileSystemLoader(str(SUMMARY_TEMPLATE_PATH.parent)),
+            autoescape=False,
+            trim_blocks=False,
+            lstrip_blocks=False,
+        )
+        template = env.from_string(template_source)
+        return template.render(**context)
+    except TemplateError as exc:
+        LOGGER.warning("Summary template render failed: %s", exc)
+    except Exception as exc:  # pragma: no cover - defensive safeguard
+        LOGGER.warning("Unexpected summary render failure: %s", exc)
+    fallback = Environment(autoescape=False).from_string(SUMMARY_TEMPLATE_FALLBACK)
+    return fallback.render(**context)
 
 
 def fetch(*args, **kwargs):
@@ -214,6 +318,8 @@ def fetch(*args, **kwargs):
     options.pop("series", None)
 
     client = IdmcClient(helix_client_id=helix_client_id)
+    global _LAST_CLIENT
+    _LAST_CLIENT = client
     return client.fetch(
         copy.deepcopy(cfg),
         network_mode=network_mode,
@@ -1354,6 +1460,40 @@ def main(argv: list[str] | None = None) -> int:
     )
     diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
 
+    duckdb_env_flag = _env_truthy(os.getenv("WRITE_TO_DUCKDB"))
+    duckdb_target = (
+        os.getenv("RESOLVER_DB_URL")
+        or os.getenv("DUCKDB_PATH")
+        or os.getenv("RESOLVER_DUCKDB_PATH")
+        or "resolver.duckdb"
+    )
+    duckdb_rows_by_table = {
+        "facts_resolved": int(rows_resolution_ready),
+    }
+    duckdb_details = {
+        "enabled": bool(duckdb_env_flag),
+        "target": duckdb_target,
+        "rows_inserted": int(rows_resolution_ready) if duckdb_env_flag else 0,
+        "rows_updated": 0,
+        "tables": ["facts_resolved"],
+        "rows_by_table": duckdb_rows_by_table,
+    }
+    diagnostics_payload["duckdb"] = duckdb_details
+    client_for_metrics = _LAST_CLIENT
+    if isinstance(client_for_metrics, IdmcClient):
+        try:
+            staged_counts_int = {
+                name: int(value or 0)
+                for name, value in staged_counts_serializable.items()
+                if value is not None
+            }
+            client_for_metrics.metrics.fetched = int(rows_fetched)
+            client_for_metrics.metrics.normalized = int(rows)
+            client_for_metrics.metrics.written = int(total_staged_rows)
+            client_for_metrics.metrics.staged = staged_counts_int
+        except Exception:  # pragma: no cover - defensive update
+            LOGGER.debug("Failed to update IDMC client metrics", exc_info=True)
+
     outputs_lines: List[str] = [
         "Write outputs: {flag}".format(
             flag="yes" if write_outputs else "no",
@@ -1685,9 +1825,14 @@ def main(argv: list[str] | None = None) -> int:
         notes_lines.append(
             f"Chunks enabled: {bool(chunks_info.get('enabled'))} (count={chunks_info.get('count', 0)})"
         )
+    stock_staged_rows = staged_counts_serializable.get("stock.csv")
+    if stock_staged_rows == 0 and (stock_staging_path.exists() or "stock" in selected_series):
+        window_bounds = f"{window_start_iso or '∅'}→{window_end_iso or '∅'}"
+        notes_lines.append(f"idmc stock: created but empty in window {window_bounds}")
 
     countries_sample_display = ", ".join(selected_countries[:10]) or "(none)"
     helix_block = diagnostics.get("helix") or {}
+    duckdb_lines = _duckdb_summary_lines(duckdb_details)
 
     summary_context = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1711,6 +1856,7 @@ def main(argv: list[str] | None = None) -> int:
         "performance_block": _format_bullets(performance_lines),
         "rate_limit_block": _format_bullets(rate_limit_lines),
         "dataset_block": _format_bullets(dataset_lines),
+        "duckdb_block": _format_bullets(duckdb_lines),
         "outputs_block": _format_bullets(outputs_lines),
         "staging_block": _format_bullets(staging_entries),
         "fallback_block": fallback_block,

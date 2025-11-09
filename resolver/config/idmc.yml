@@ -12,6 +12,8 @@ api:
     start:
     end:
   token_env: "IDMC_API_TOKEN"  # optional bearer token (not required for IDU)
+  allow_fallbacks: true
+  prefer_helix_last_180: true
 field_aliases:
   value_flow: ["new_displacements", "New displacements", "figure"]
   value_stock: ["idps", "IDPs", "Total IDPs"]

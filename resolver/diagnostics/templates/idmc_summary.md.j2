@@ -1,64 +1,67 @@
 # IDMC ingestion summary
 
-Run at: {timestamp}
-Git SHA: {git_sha}
-Config source: {config_source}
-Config path: {config_path}
+Run at: {{ timestamp }}
+Git SHA: {{ git_sha }}
+Config source: {{ config_source }}
+Config path: {{ config_path }}
 
-Mode: {mode}
-Token: {token_status}
-Series: {series_display}
-Date window: {date_window}
+Mode: {{ mode }}
+Token: {{ token_status }}
+Series: {{ series_display }}
+Date window: {{ date_window }}
 
 ## Countries
-- Resolved count: {countries_count}
-- Sample: {countries_sample_display}
-- Source: {countries_source_display}
+- Resolved count: {{ countries_count }}
+- Sample: {{ countries_sample_display }}
+- Source: {{ countries_source_display }}
 
 ## Endpoints
-{endpoints_block}
+{{ endpoints_block }}
 
 {% if helix_block %}
 ## Helix (IDU) Reachability
-- URL: {helix_block[url]}
-- Status: {helix_block[status]}
-- Bytes: {helix_block[bytes]}
-- Raw rows: {helix_block[raw_rows]}
-{reachability_block}
+- URL: {{ helix_block.url }}
+- Status: {{ helix_block.status }}
+- Bytes: {{ helix_block.bytes }}
+- Raw rows: {{ helix_block.raw_rows }}
+{{ reachability_block }}
 {% else %}
 ## IDMC Reachability
-{reachability_block}
+{{ reachability_block }}
 {% endif %}
 
 ## HTTP attempts
-{http_attempts_block}
+{{ http_attempts_block }}
 
 ## Attempt summary
-{attempts_block}
+{{ attempts_block }}
 
 ## Attempt log
-{chunk_attempts_block}
+{{ chunk_attempts_block }}
 
 ## Performance
-{performance_block}
+{{ performance_block }}
 
 ## Rate limiting
-{rate_limit_block}
+{{ rate_limit_block }}
 
 ## Fallback
-{fallback_block}
+{{ fallback_block }}
 
 ## Zero rows
-{zero_rows_reason}
+{{ zero_rows_reason }}
 
 ## Datasets & Sources
-{dataset_block}
+{{ dataset_block }}
+
+## DuckDB write
+{{ duckdb_block }}
 
 ## Outputs
-{outputs_block}
+{{ outputs_block }}
 
 ## Staging
-{staging_block}
+{{ staging_block }}
 
 Notes:
-{notes_block}
+{{ notes_block }}
