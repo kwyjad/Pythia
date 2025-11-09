@@ -58,6 +58,14 @@ def _default_base_url() -> str:
     return os.getenv("IDMC_BASE_URL", "https://backend.idmcdb.org")
 
 
+def _default_alt_base_url() -> Optional[str]:
+    value = os.getenv("IDMC_BASE_URL_ALT")
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 def _default_endpoints() -> Dict[str, str]:
     return {
         "idus_json": "/data/idus_view_flat",
@@ -81,6 +89,7 @@ class ApiCfg:
     """Parameters for the IDMC API."""
 
     base_url: str = field(default_factory=_default_base_url)
+    alternate_base_url: Optional[str] = field(default_factory=_default_alt_base_url)
     endpoints: Dict[str, str] = field(default_factory=_default_endpoints)
     countries: List[str] = field(default_factory=list)
     series: List[str] = field(default_factory=lambda: ["stock", "flow"])
@@ -216,10 +225,17 @@ def load(
     hdx_package_id = str(hdx_block.get("package_id", "")).strip() or None
     hdx_base_url = str(hdx_block.get("base_url", "")).strip() or None
 
+    alt_base_config = api_block.get("alternate_base_url") or api_block.get("base_url_alt")
+    if isinstance(alt_base_config, str):
+        alt_base_config = alt_base_config.strip() or None
+    env_alt_base = _default_alt_base_url()
+    alternate_base_url = env_alt_base if env_alt_base is not None else alt_base_config
+
     config = IdmcConfig(
         enabled=bool(data.get("enabled", True)),
         api=ApiCfg(
             base_url=api_block.get("base_url", _default_base_url()),
+            alternate_base_url=alternate_base_url,
             endpoints={
                 **_default_endpoints(),
                 **api_block.get("endpoints", {}),

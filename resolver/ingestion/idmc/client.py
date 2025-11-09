@@ -43,6 +43,7 @@ from .diagnostics import (
 )
 from .chunking import split_by_month
 from .config import IdmcConfig
+from .probe import ProbeOptions, probe_reachability, summarize_probe_outcome
 from .export import FLOW_EXPORT_COLUMNS, FLOW_METRIC, FLOW_SERIES_SEMANTICS
 from .http import HttpRequestError, http_get
 from .rate_limit import TokenBucket
@@ -2873,6 +2874,9 @@ def fetch(
     if network_mode not in NETWORK_MODES:
         raise ValueError(f"Unsupported IDMC network mode: {network_mode}")
 
+    requested_network_mode = network_mode
+    endpoint_outcomes: Dict[str, Dict[str, Any]] = {}
+
     LOGGER.info("IDMC network mode: %s", network_mode)
     if network_mode not in {"live", "helix"}:
         LOGGER.warning(
@@ -2923,6 +2927,114 @@ def fetch(
         window_end,
         window_days,
     )
+    base_candidate = (base_url or cfg.api.base_url).rstrip("/")
+    alt_config_value = getattr(cfg.api, "alternate_base_url", None)
+    alt_candidate: Optional[str] = None
+    if isinstance(alt_config_value, str):
+        cleaned_alt = alt_config_value.strip()
+        if cleaned_alt:
+            alt_candidate = cleaned_alt.rstrip("/")
+    if alt_candidate and alt_candidate == base_candidate:
+        alt_candidate = None
+
+    helix_failover_active = False
+    endpoint_outcomes.setdefault(
+        "helix",
+        {
+            "base_url": f"{HELIX_BASE}{HELIX_LAST180_PATH}",
+            "status": "unused",
+        },
+    )
+
+    if network_mode == "live":
+        try:
+            primary_probe = probe_reachability(ProbeOptions(base_url=base_candidate))
+        except Exception as exc:  # pragma: no cover - defensive network
+            primary_probe = {
+                "base_url": base_candidate,
+                "dns": {"ok": False, "error": str(exc), "elapsed_ms": 0},
+            }
+        primary_summary = summarize_probe_outcome(primary_probe)
+        primary_summary.setdefault("base_url", base_candidate)
+        endpoint_outcomes["primary"] = primary_summary
+
+        should_try_alt = (
+            primary_summary.get("status") == "fail"
+            and str(primary_summary.get("stage")) in {"dns", "tls"}
+        )
+        if should_try_alt:
+            if alt_candidate:
+                try:
+                    alternate_probe = probe_reachability(
+                        ProbeOptions(base_url=alt_candidate)
+                    )
+                except Exception as exc:  # pragma: no cover - defensive network
+                    alternate_probe = {
+                        "base_url": alt_candidate,
+                        "dns": {"ok": False, "error": str(exc), "elapsed_ms": 0},
+                    }
+                alternate_summary = summarize_probe_outcome(alternate_probe)
+                alternate_summary.setdefault("base_url", alt_candidate)
+                endpoint_outcomes["alternate"] = alternate_summary
+                if alternate_summary.get("status") in {"ok", "warn"}:
+                    LOGGER.warning(
+                        "IDMC primary base unreachable (stage=%s); using alternate base %s",
+                        primary_summary.get("stage"),
+                        alt_candidate,
+                    )
+                    base_candidate = alt_candidate
+                elif (
+                    alternate_summary.get("status") == "fail"
+                    and str(alternate_summary.get("stage")) in {"dns", "tls"}
+                ):
+                    helix_failover_active = True
+                else:
+                    helix_failover_active = False
+            else:
+                endpoint_outcomes["alternate"] = {
+                    "status": "skipped",
+                    "reason": "not_configured",
+                    "base_url": None,
+                }
+                helix_failover_active = True
+        else:
+            if alt_candidate:
+                endpoint_outcomes.setdefault(
+                    "alternate",
+                    {
+                        "status": "skipped",
+                        "reason": "not_attempted",
+                        "base_url": alt_candidate,
+                    },
+                )
+    else:
+        endpoint_outcomes.setdefault(
+            "primary",
+            {
+                "status": "skipped",
+                "reason": f"network_mode_{network_mode}",
+                "base_url": base_candidate,
+            },
+        )
+        if alt_candidate:
+            endpoint_outcomes.setdefault(
+                "alternate",
+                {
+                    "status": "skipped",
+                    "reason": f"network_mode_{network_mode}",
+                    "base_url": alt_candidate,
+                },
+            )
+
+    if helix_failover_active and network_mode != "helix":
+        LOGGER.warning(
+            "IDMC primary and alternate bases unreachable; falling back to HELIX last-180-days",
+        )
+        network_mode = "helix"
+        endpoint_outcomes["helix"].update({"status": "pending", "reason": "failover"})
+
+    base_url = base_candidate
+
     if max_bytes is None:
         raw_max_bytes = os.getenv("IDMC_MAX_BYTES")
         if raw_max_bytes is not None:
@@ -3205,6 +3317,26 @@ def fetch(
             rate_limiter=limiter,
         )
         helix_summary = dict(helix_diag or {})
+        helix_entry = endpoint_outcomes.setdefault(
+            "helix",
+            {"base_url": f"{HELIX_BASE}{HELIX_LAST180_PATH}"},
+        )
+        status_value = helix_summary.get("status")
+        if isinstance(status_value, int) and 200 <= status_value < 300:
+            helix_entry.update({"status": "used", "status_code": status_value})
+        else:
+            helix_entry.update({"status": "fail", "status_code": status_value})
+        rows_value = helix_summary.get("raw_rows")
+        if rows_value is None:
+            rows_value = helix_frame_full.shape[0]
+        try:
+            helix_entry["rows"] = int(rows_value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            helix_entry["rows"] = int(helix_frame_full.shape[0])
+        if helix_failover_active:
+            helix_entry.setdefault("reason", "failover")
+        else:
+            helix_entry.setdefault("reason", f"network_mode_{requested_network_mode}")
         helix_zero_reason: Optional[str] = None
         status_value = helix_summary.get("status")
         if not isinstance(status_value, int) or not (200 <= status_value < 300):
@@ -3800,6 +3932,8 @@ def fetch(
         "rate_limit": rate_limit_info,
         "chunks": chunks_info,
         "network_mode": network_mode,
+        "requested_network_mode": requested_network_mode,
+        "helix_failover": helix_failover_active,
         "http_status_counts": status_counts_serialized
         if network_mode in {"live", "helix"}
         else None,
@@ -3822,6 +3956,7 @@ def fetch(
         "fallback": fallback_summary,
         "fallback_used": bool(fallback_used_total),
         "http_timeouts": http_timeouts_cfg,
+        "endpoint_outcomes": dict(endpoint_outcomes),
     }
     diagnostics["rows_fetched"] = max(raw_rows_total, 0)
     diagnostics["rows_normalized"] = rows_normalized

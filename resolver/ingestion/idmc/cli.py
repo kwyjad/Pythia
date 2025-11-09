@@ -172,6 +172,48 @@ def _trim_text(value: str, limit: int = 160) -> str:
     return text[: max(limit - 3, 1)] + "..."
 
 
+def _format_endpoint_summary(label: str, entry: Mapping[str, Any]) -> str:
+    """Return a compact status string for endpoint failover diagnostics."""
+
+    display = label.upper() if label.lower() == "helix" else label.title()
+    status = str(entry.get("status") or "unknown")
+    stage = str(entry.get("stage") or "").strip()
+    status_code = entry.get("status_code")
+    reason = entry.get("reason")
+    rows = entry.get("rows")
+
+    if status == "fail" and stage:
+        main = f"{stage.upper()} fail"
+    elif status == "used" and status_code is not None:
+        main = f"{status_code} used"
+    elif status in {"ok", "warn"} and status_code is not None:
+        main = f"{status_code} {status}"
+    elif status == "skipped":
+        main = "n/a"
+    else:
+        main = status
+
+    extras: List[str] = []
+    if status in {"fail", "warn"} and reason:
+        extras.append(f"reason={reason}")
+    elif status == "skipped" and reason:
+        extras.append(str(reason))
+    elif status == "used" and reason:
+        extras.append(str(reason))
+    if rows is not None and status in {"used"}:
+        try:
+            extras.append(f"rows={int(rows)}")
+        except (TypeError, ValueError):
+            extras.append(f"rows={rows}")
+    if status not in {"used", "ok", "warn"} and status_code is not None:
+        extras.append(f"code={status_code}")
+
+    if extras:
+        main = f"{main} ({', '.join(extras)})"
+
+    return f"{display}: {main}"
+
+
 def _normalize_duckdb_details(raw: Mapping[str, Any] | None) -> Dict[str, Any]:
     if not isinstance(raw, Mapping):
         return {}
@@ -1385,6 +1427,9 @@ def main(argv: list[str] | None = None) -> int:
         "fallback_used": bool(diagnostics.get("fallback_used")),
         "http_timeouts": diagnostics.get("http_timeouts"),
         "attempts_detail": diagnostics.get("attempts"),
+        "endpoint_outcomes": diagnostics.get("endpoint_outcomes"),
+        "requested_network_mode": diagnostics.get("requested_network_mode"),
+        "helix_failover": diagnostics.get("helix_failover"),
     }
 
     config_payload = {
@@ -1682,6 +1727,12 @@ def main(argv: list[str] | None = None) -> int:
         chunk_attempt_lines.append("; ".join(parts))
 
     reachability_lines: List[str] = []
+    endpoint_outcomes = diagnostics.get("endpoint_outcomes") or {}
+    if isinstance(endpoint_outcomes, Mapping):
+        for key, display in (("primary", "Primary"), ("alternate", "Alternate"), ("helix", "HELIX")):
+            entry = endpoint_outcomes.get(key)
+            if isinstance(entry, Mapping) and entry:
+                reachability_lines.append(_format_endpoint_summary(display, entry))
     if isinstance(probe_result, dict) and probe_result:
         base = probe_result.get("base_url")
         if base:
@@ -1850,6 +1901,11 @@ def main(argv: list[str] | None = None) -> int:
         f"Rows (resolution-ready): {rows_resolution_ready}",
         f"Staged rows: {staged_notes}",
     ]
+    requested_mode = diagnostics.get("requested_network_mode")
+    if requested_mode and requested_mode != effective_network_mode:
+        notes_lines.append(f"Requested mode: {requested_mode}")
+    if diagnostics.get("helix_failover"):
+        notes_lines.append("HELIX failover: engaged")
     notes_lines.append(
         "Write outputs: {flag} (out_dir={path})".format(
             flag="yes" if write_outputs else "no",

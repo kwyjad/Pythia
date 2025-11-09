@@ -58,4 +58,9 @@ The step passes `--facts-csv` and `--write-db`, enabling inserts only when the
 canonical CSV exists. The subsequent "Verify DuckDB contents" step queries
 DuckDB directly, writes `diagnostics/ingestion/duckdb_counts.md`, and appends the
 table/row breakdown to both the GitHub Step Summary and the ingestion summary for
-auditing.
+auditing. The connector summarizer also adds a dedicated **DuckDB** block to
+`diagnostics/ingestion/summary.md` whenever the exporter reports DuckDB writes.
+That section includes the canonical database path, the requested date window,
+per-table deltas reported by the writer, a grouped source/metric/semantics
+breakdown for the window, and the latest ingestion log path so reviewers can
+jump straight to the upsert diagnostics without hunting through artifacts.

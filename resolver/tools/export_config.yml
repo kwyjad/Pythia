@@ -114,7 +114,7 @@ sources:
       keep: last
   - name: idmc_flow
     match:
-      filename_regex: "(?i)resolver/staging/idmc/flow\\.csv$|(?i)^flow\\.csv$"
+      filename_regex: "(?i)(?:^|.*/resolver/staging/idmc/)flow\\.csv$"
       required_columns: [iso3, as_of_date, value]
     map:
       iso3:
@@ -144,7 +144,8 @@ sources:
   - name: idmc_stock
     allow_empty: true
     match:
-      filename_regex: "(?i)resolver/staging/idmc/stock\\.csv$|(?i)^stock\\.csv$"
+      filename_regex: "(?i)(?:^|.*/resolver/staging/idmc/)stock\\.csv$"
+      required_columns: [iso3, as_of_date, value]
     map:
       iso3:
         from: iso3

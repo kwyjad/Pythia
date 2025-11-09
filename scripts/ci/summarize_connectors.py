@@ -30,6 +30,149 @@ EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semant
 IDMC_WHY_ZERO_PATH = Path("diagnostics/ingestion/idmc/why_zero.json")
 
 
+def _normalise_duckdb_path(raw: str) -> str | None:
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    if candidate.startswith("duckdb:///"):
+        candidate = candidate.replace("duckdb:///", "", 1)
+    try:
+        return str(Path(candidate).expanduser().resolve())
+    except Exception:
+        try:
+            return os.path.abspath(os.path.expanduser(candidate))
+        except Exception:
+            return candidate
+
+
+def _resolve_duckdb_target() -> Tuple[str | None, str | None]:
+    env_url = (os.environ.get("RESOLVER_DB_URL") or "").strip()
+    env_path = (os.environ.get("RESOLVER_DB_PATH") or "").strip()
+    canonical_url: str | None = None
+    canonical_path: str | None = None
+
+    if env_url:
+        canonical_url = env_url
+        try:
+            from resolver.db.conn_shared import canonicalize_duckdb_target
+
+            resolved_path, resolved_url = canonicalize_duckdb_target(env_url)
+            canonical_url = resolved_url or env_url
+            canonical_path = resolved_path or None
+        except Exception:
+            pass
+        if canonical_path is None and canonical_url and canonical_url.startswith("duckdb:///"):
+            canonical_path = _normalise_duckdb_path(canonical_url)
+    elif env_path:
+        canonical_path = _normalise_duckdb_path(env_path)
+        if canonical_path:
+            canonical_url = f"duckdb:///{Path(canonical_path).as_posix()}"
+
+    return canonical_url, canonical_path
+
+
+def _detect_window_bounds() -> Dict[str, str | None]:
+    start = (os.environ.get("RESOLVER_START_ISO") or os.environ.get("BACKFILL_START_ISO") or "").strip() or None
+    end = (os.environ.get("RESOLVER_END_ISO") or os.environ.get("BACKFILL_END_ISO") or "").strip() or None
+    return {"start": start, "end": end}
+
+
+def _find_recent_writer_log() -> str | None:
+    base = Path("logs/ingestion")
+    if not base.exists():
+        return None
+    candidates: List[Path] = []
+    try:
+        for candidate in base.rglob("*.log"):
+            if candidate.is_file():
+                candidates.append(candidate)
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
+    return latest.as_posix()
+
+
+def _collect_duckdb_breakdown(
+    db_path: str,
+    tables: Sequence[str],
+    window: Mapping[str, str | None],
+) -> Tuple[Dict[str, Any], str | None]:
+    try:
+        import duckdb  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - optional dependency
+        return {}, f"duckdb import failed: {exc}"
+
+    try:
+        conn = duckdb.connect(db_path, read_only=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        return {}, f"duckdb connect failed: {exc}"
+
+    breakdown: Dict[str, Any] = {}
+    error: str | None = None
+    start = window.get("start") if isinstance(window, Mapping) else None
+    end = window.get("end") if isinstance(window, Mapping) else None
+    try:
+        for table in tables:
+            try:
+                exists = conn.execute(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
+                    [table],
+                ).fetchone()
+            except Exception as exc:  # pragma: no cover - defensive
+                error = f"table probe failed for {table}: {exc}"
+                continue
+            if not exists:
+                continue
+            params: List[str] = []
+            predicates: List[str] = []
+            if start:
+                predicates.append("COALESCE(as_of_date, as_of) >= ?")
+                params.append(start)
+            if end:
+                predicates.append("COALESCE(as_of_date, as_of) <= ?")
+                params.append(end)
+            where_clause = ""
+            if predicates:
+                where_clause = " WHERE " + " AND ".join(predicates)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT
+                      COALESCE(source_id, '') AS source_id,
+                      COALESCE(metric, '') AS metric,
+                      COALESCE(series_semantics, COALESCE(semantics, '')) AS semantics,
+                      COUNT(*) AS rows
+                    FROM {table}
+                    {where}
+                    GROUP BY 1, 2, 3
+                    ORDER BY rows DESC, source_id, metric, semantics
+                    """.format(table=table, where=where_clause),
+                    params,
+                ).fetchall()
+            except Exception as exc:  # pragma: no cover - defensive
+                error = f"query failed for {table}: {exc}"
+                continue
+            breakdown[table] = {
+                "rows": [
+                    {
+                        "source_id": str(row[0] or ""),
+                        "metric": str(row[1] or ""),
+                        "semantics": str(row[2] or ""),
+                        "rows": int(row[3]),
+                    }
+                    for row in rows
+                ],
+            }
+    finally:
+        try:
+            conn.close()
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return breakdown, error
+
+
 def _relativize_path(raw: Any) -> str | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -317,7 +460,106 @@ def _collect_export_summary(
         sources.append(entry)
     summary["sources"] = sources
     summary["csv_path"] = result.csv_path.as_posix()
+    db_stats = dict(getattr(result, "db_stats", {}) or {})
+    summary["db_stats"] = db_stats
+    duckdb_url, duckdb_path = _resolve_duckdb_target()
+    window_bounds = _detect_window_bounds()
+    duckdb_info: Dict[str, Any] = {
+        "db_url": duckdb_url,
+        "db_path": duckdb_path,
+        "window": window_bounds,
+        "log_path": _find_recent_writer_log(),
+        "tables": sorted(db_stats.keys()),
+        "table_stats": db_stats,
+        "breakdown": {},
+        "error": None,
+    }
+    if duckdb_path and duckdb_info["tables"]:
+        breakdown, duckdb_error = _collect_duckdb_breakdown(duckdb_path, duckdb_info["tables"], window_bounds)
+        duckdb_info["breakdown"] = breakdown
+        duckdb_info["error"] = duckdb_error
+    summary["duckdb"] = duckdb_info
     return summary
+
+
+def _render_duckdb_section(duckdb_info: Mapping[str, Any] | None) -> List[str]:
+    info = dict(duckdb_info or {})
+    table_stats = info.get("table_stats") or {}
+    error = info.get("error")
+    if not table_stats and not error:
+        return []
+
+    lines = ["## DuckDB", ""]
+    if error:
+        lines.append(f"- **Status:** {error}")
+    else:
+        db_target = info.get("db_path") or info.get("db_url")
+        if db_target:
+            lines.append(f"- **Database:** `{db_target}`")
+        window = info.get("window") or {}
+        window_start = (window.get("start") if isinstance(window, Mapping) else None) or "∅"
+        window_end = (window.get("end") if isinstance(window, Mapping) else None) or "∅"
+        if window_start != "∅" or window_end != "∅":
+            lines.append(f"- **Window:** {window_start} → {window_end}")
+        tables_line: List[str] = []
+        rows_written_total = 0
+
+        for table in sorted(table_stats):
+            stats = table_stats.get(table) or {}
+            try:
+                rows_written = int(stats.get("rows_written", 0) or 0)
+            except Exception:
+                rows_written = 0
+            try:
+                rows_delta = int(stats.get("rows_delta", 0) or 0)
+            except Exception:
+                rows_delta = 0
+            total_after = stats.get("rows_after")
+            if total_after in (None, ""):
+                total_after = stats.get("rows_before")
+            try:
+                total_after_int = int(total_after or 0)
+            except Exception:
+                total_after_int = 0
+            tables_line.append(
+                f"{table} (written={rows_written}, Δ={rows_delta}, total={total_after_int})"
+            )
+            rows_written_total += rows_written
+
+        if tables_line:
+            lines.append(f"- **Tables updated:** {', '.join(tables_line)}")
+            lines.append(f"- **Rows written:** {rows_written_total}")
+
+        log_path = info.get("log_path")
+        if isinstance(log_path, str) and log_path.strip():
+            lines.append(f"- **Writer logs:** `{log_path}`")
+
+    breakdown = info.get("breakdown") or {}
+    if breakdown:
+        for table in sorted(breakdown):
+            table_rows = breakdown.get(table) or {}
+            entries = table_rows.get("rows") if isinstance(table_rows, Mapping) else None
+            if not entries:
+                continue
+            lines.append("")
+            lines.append(f"### {table} rows by source/metric")
+            lines.append("")
+            lines.append("| source_id | metric | semantics | rows |")
+            lines.append("| --- | --- | --- | ---: |")
+            for row in entries:
+                if not isinstance(row, Mapping):
+                    continue
+                source = str(row.get("source_id", ""))
+                metric = str(row.get("metric", ""))
+                semantics = str(row.get("semantics", ""))
+                try:
+                    count = int(row.get("rows", 0) or 0)
+                except Exception:
+                    count = 0
+                lines.append(f"| {source} | {metric} | {semantics} | {count} |")
+
+    lines.append("")
+    return lines
 
 
 def _format_meta_cell(
@@ -1901,6 +2143,11 @@ def build_markdown(
                     lines.append(summary_line)
         else:
             lines.append("- **Status:** export summary unavailable")
+
+    duckdb_lines = _render_duckdb_section(_ensure_dict(export_summary).get("duckdb"))
+    if duckdb_lines:
+        lines.append("")
+        lines.extend(duckdb_lines)
 
     if mapping_debug_records:
         lines.append("")
