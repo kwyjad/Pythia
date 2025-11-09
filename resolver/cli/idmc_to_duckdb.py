@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import pandas as pd
+
 import duckdb
 
 from resolver.db import duckdb_io
@@ -91,6 +93,16 @@ def run(argv: Sequence[str] | None = None) -> int:
         help="Directory for exporter diagnostics (default: %(default)s)",
     )
     parser.add_argument(
+        "--facts-csv",
+        default=None,
+        help="Optional canonical facts.csv to load instead of staging",
+    )
+    parser.add_argument(
+        "--write-db",
+        action="store_true",
+        help="Enable DuckDB writes (requires --db-url)",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"),
         help="Set logging level (default: %(default)s)",
@@ -110,6 +122,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     duckdb_url, duckdb_path = _normalize_db_url_arg(args.db_url)
+    writing_requested = bool(args.write_db)
     LOGGER.info(
         "idmc_to_duckdb.start | staging=%s out=%s duckdb_url=%s duckdb_path=%s",
         staging_dir,
@@ -118,32 +131,84 @@ def run(argv: Sequence[str] | None = None) -> int:
         duckdb_path,
     )
 
-    exporter_args = dict(
-        inp=staging_dir,
-        out_dir=out_dir,
-        write_db="1",
-        db_url=duckdb_url,
-        only_strategy="idmc-staging",
-    )
-    LOGGER.info(
-        "exporter.invoke | input=%s out=%s db_url=%s write_db=1",
-        staging_dir,
-        out_dir,
-        duckdb_url,
-    )
+    facts_dataframe: pd.DataFrame | None = None
+    exporter_result: export_facts.ExportResult | None = None
+    db_stats: dict[str, dict[str, object]] = {}
 
-    try:
-        result = export_facts.export_facts(**exporter_args)
-    except export_facts.DuckDBWriteError as exc:
-        LOGGER.error("Exporter DuckDB write failed", exc_info=True)
-        print(f"DuckDB write failed: {exc}", file=sys.stderr)
-        return 3
-    except export_facts.ExportError as exc:
-        LOGGER.error("Exporter failed", exc_info=True)
-        print(f"Export failed: {exc}", file=sys.stderr)
-        return 3
+    if args.facts_csv:
+        facts_path = Path(args.facts_csv)
+        if not facts_path.is_file():
+            LOGGER.error("facts.csv not found at %s", facts_path)
+            print(f"facts.csv not found: {facts_path}", file=sys.stderr)
+            return 2
+        LOGGER.info(
+            "facts_csv.selected | path=%s write_db=%s",
+            facts_path,
+            writing_requested,
+        )
+        try:
+            facts_dataframe = pd.read_csv(facts_path)
+        except Exception as exc:  # pragma: no cover - pandas-level parsing issues
+            LOGGER.error("Failed to read facts.csv", exc_info=True)
+            print(f"Failed to read facts.csv: {exc}", file=sys.stderr)
+            return 2
+        if writing_requested:
+            try:
+                prepared_resolved = export_facts._prepare_resolved_for_db(  # type: ignore[attr-defined]
+                    facts_dataframe
+                )
+                prepared_deltas = export_facts._prepare_deltas_for_db(  # type: ignore[attr-defined]
+                    facts_dataframe
+                )
+                db_stats = export_facts._maybe_write_to_db(  # type: ignore[attr-defined]
+                    facts_resolved=prepared_resolved,
+                    facts_deltas=prepared_deltas,
+                    db_url=duckdb_url,
+                    write_db=True,
+                    fail_on_error=True,
+                )
+            except export_facts.DuckDBWriteError as exc:  # pragma: no cover - passthrough
+                LOGGER.error("facts.csv DuckDB write failed", exc_info=True)
+                print(f"DuckDB write failed: {exc}", file=sys.stderr)
+                return 3
+        else:
+            db_stats = {}
+    else:
+        exporter_args = dict(
+            inp=staging_dir,
+            out_dir=out_dir,
+            write_db="1" if writing_requested else "0",
+            db_url=duckdb_url,
+            only_strategy="idmc-staging",
+        )
+        LOGGER.info(
+            "exporter.invoke | input=%s out=%s db_url=%s write_db=%s",
+            staging_dir,
+            out_dir,
+            duckdb_url,
+            "1" if writing_requested else "0",
+        )
 
-    db_stats = result.db_stats or {}
+        try:
+            exporter_result = export_facts.export_facts(**exporter_args)
+        except export_facts.DuckDBWriteError as exc:
+            LOGGER.error("Exporter DuckDB write failed", exc_info=True)
+            print(f"DuckDB write failed: {exc}", file=sys.stderr)
+            return 3
+        except export_facts.ExportError as exc:
+            LOGGER.error("Exporter failed", exc_info=True)
+            print(f"Export failed: {exc}", file=sys.stderr)
+            return 3
+
+        facts_dataframe = exporter_result.dataframe
+        if facts_dataframe is None and exporter_result.csv_path:
+            csv_path = Path(exporter_result.csv_path)
+            if csv_path.is_file():
+                try:
+                    facts_dataframe = pd.read_csv(csv_path)
+                except Exception:  # pragma: no cover - diagnostics only
+                    LOGGER.debug("Failed to backfill dataframe from %s", csv_path, exc_info=True)
+        db_stats = exporter_result.db_stats or {}
 
     def _stats(values: dict[str, object] | None) -> tuple[int, int]:
         if not values:
@@ -156,46 +221,59 @@ def run(argv: Sequence[str] | None = None) -> int:
     deltas_delta, deltas_total = _stats(db_stats.get("facts_deltas"))
     total_delta = resolved_delta + deltas_delta
 
-    print(f"✅ Wrote {total_delta} rows to DuckDB")
+    rows_message = f"✅ Wrote {total_delta} rows to DuckDB"
+    if not writing_requested:
+        rows_message += " (dry-run)"
+    print(rows_message)
     print(f" - facts_resolved Δ={resolved_delta} total={resolved_total}")
     print(f" - facts_deltas  Δ={deltas_delta} total={deltas_total}")
 
-    try:
-        conn = duckdb_io.get_db(duckdb_url)
-    except duckdb.Error as exc:
-        LOGGER.error("Verification connection failed", exc_info=True)
-        print(f"Verification failed: {exc}", file=sys.stderr)
-        return 3
+    total_rows = 0
+    resolved_count = 0
+    deltas_count = 0
+    if writing_requested:
+        if facts_dataframe is None or facts_dataframe.empty:
+            LOGGER.error("write_db requested but no canonical facts rows found")
+            print("No canonical facts rows available for DuckDB write", file=sys.stderr)
+            return 4
+        try:
+            conn = duckdb_io.get_db(duckdb_url)
+        except duckdb.Error as exc:
+            LOGGER.error("Verification connection failed", exc_info=True)
+            print(f"Verification failed: {exc}", file=sys.stderr)
+            return 3
 
-    try:
-        deltas_count = _safe_count(conn, "facts_deltas")
-        resolved_count = _safe_count(conn, "facts_resolved")
-    except duckdb.Error as exc:
-        LOGGER.error("Verification query failed", exc_info=True)
-        print(f"Verification failed: {exc}", file=sys.stderr)
-        return 3
+        try:
+            deltas_count = _safe_count(conn, "facts_deltas")
+            resolved_count = _safe_count(conn, "facts_resolved")
+        except duckdb.Error as exc:
+            LOGGER.error("Verification query failed", exc_info=True)
+            print(f"Verification failed: {exc}", file=sys.stderr)
+            return 3
+        finally:
+            conn.close()
 
-    total_rows = deltas_count + resolved_count
-    print(
-        "Verification: facts_deltas={deltas} facts_resolved={resolved} total={total}".format(
-            deltas=deltas_count,
-            resolved=resolved_count,
-            total=total_rows,
+        total_rows = deltas_count + resolved_count
+        print(
+            "Verification: facts_deltas={deltas} facts_resolved={resolved} total={total}".format(
+                deltas=deltas_count,
+                resolved=resolved_count,
+                total=total_rows,
+            )
         )
-    )
 
-    if total_rows <= 0:
-        LOGGER.error("Verification failed: DuckDB contains no rows after export")
-        return 3
+        if total_rows <= 0:
+            LOGGER.error("Verification failed: DuckDB contains no rows after export")
+            return 3
 
     staging_warnings = []
-    if not (staging_dir / "stock.csv").is_file():
+    if not args.facts_csv and not (staging_dir / "stock.csv").is_file():
         staging_warnings.append("stock.csv: not present")
 
     collected_warnings = _gather_warnings(
         staging_warnings,
-        result.warnings or [],
-        (result.report or {}).get("warnings") or [],
+        (exporter_result.warnings if exporter_result else []) or [],
+        ((exporter_result.report or {}) if exporter_result else {}).get("warnings") or [],
     )
 
     if collected_warnings:
