@@ -3392,6 +3392,7 @@ def fetch(
 
     helix_last180_frame: Optional[pd.DataFrame] = None
     helix_last180_fallback_summary: Optional[Dict[str, Any]] = None
+    helix_last180_rows = 0
     if network_mode == "live" and helix_client_id:
         helix_last180_frame, helix_last180_diag = _fetch_helix_idus_last180(helix_client_id)
         status_value = helix_last180_diag.get("status") if helix_last180_diag else None
@@ -3405,6 +3406,7 @@ def fetch(
             )
             if not helix_normalized.empty:
                 monthly_frames.append(helix_normalized)
+            helix_last180_rows = int(helix_last180_frame.shape[0])
         elif fallback_allowed:
             hdx_frame, hdx_diag = _fetch_hdx_displacements(
                 package_id=hdx_package_id,
@@ -3421,6 +3423,7 @@ def fetch(
                 "rows": hdx_rows,
                 "type": "hdx",
             }
+            helix_last180_rows = int(hdx_rows)
             for key in (
                 "resource_url",
                 "dataset",
@@ -3738,8 +3741,8 @@ def fetch(
     for frame in ordered_frames:
         if isinstance(frame, pd.DataFrame):
             raw_rows_total += int(frame.shape[0])
-    if helix_last180_frame is not None:
-        raw_rows_total += int(helix_last180_frame.shape[0])
+    if helix_last180_rows:
+        raw_rows_total += int(helix_last180_rows)
     if fallback_rows_total:
         try:
             raw_rows_total += int(fallback_rows_total)
