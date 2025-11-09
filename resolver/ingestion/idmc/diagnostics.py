@@ -61,6 +61,24 @@ def debug_block(**fields: Any) -> Dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+def sync_rows_metrics(
+    payload: Dict[str, Any], *, fetched: int, normalized: int, written: int
+) -> Dict[str, Any]:
+    """Update ``payload`` so row counters reflect the latest metrics values."""
+
+    payload["rows_fetched"] = int(fetched)
+    payload["rows_normalized"] = int(normalized)
+    payload["rows_written"] = int(written)
+
+    rows_block = dict(payload.get("rows") or {})
+    rows_block["raw"] = int(fetched)
+    rows_block["normalized"] = int(normalized)
+    rows_block["written"] = int(written)
+    payload["rows"] = rows_block
+
+    return payload
+
+
 def serialize_http_status_counts(counts: Mapping[str, Any] | None) -> Dict[str, int]:
     """Render HTTP status counters with the canonical three PostgREST buckets."""
 
