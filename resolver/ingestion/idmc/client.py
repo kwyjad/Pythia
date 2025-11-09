@@ -3870,6 +3870,9 @@ class IdmcClient:
         env_value = os.getenv("IDMC_HELIX_CLIENT_ID")
         env_cleaned = env_value.strip() if env_value is not None else None
         self.helix_client_id = helix_client_id or (env_cleaned or None)
+        from .cli import FetchMetrics  # local import to avoid cycle in type-checking
+
+        self.metrics: FetchMetrics = FetchMetrics()
 
     def fetch(
         self,
@@ -3889,7 +3892,7 @@ class IdmcClient:
         chunk_by_month: bool = False,
         allow_hdx_fallback: Optional[bool] = None,
     ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
-        return fetch(
+        data, diagnostics = fetch(
             cfg,
             network_mode=network_mode,
             soft_timeouts=soft_timeouts,
@@ -3906,3 +3909,28 @@ class IdmcClient:
             allow_hdx_fallback=allow_hdx_fallback,
             helix_client_id=self.helix_client_id,
         )
+        try:
+            from .cli import FetchMetrics  # local import avoids circular typing
+
+            rows_fetched = int(diagnostics.get("rows_fetched", 0) or 0)
+            if rows_fetched == 0:
+                rows_fetched = sum(
+                    int(frame.shape[0])
+                    for frame in data.values()
+                    if isinstance(frame, pd.DataFrame)
+                )
+            rows_normalized = int(diagnostics.get("rows_normalized", rows_fetched) or 0)
+            rows_written = int(diagnostics.get("rows_written", rows_normalized) or 0)
+            staged = diagnostics.get("rows_staged") or {}
+            staged_counts = {
+                str(name): int(value or 0) for name, value in staged.items() if value is not None
+            }
+            self.metrics = FetchMetrics(
+                fetched=rows_fetched,
+                normalized=rows_normalized,
+                written=rows_written,
+                staged=staged_counts,
+            )
+        except Exception:  # pragma: no cover - defensive metrics update
+            pass
+        return data, diagnostics

@@ -335,8 +335,11 @@ structured overrides (all mirrored by environment variables):
 - Normalization and diagnostics semantics are documented in
   `resolver/docs/ingestion/idmc.md`.
 - The IDMC staging directory (`resolver/staging/idmc/`) always includes
-  `flow.csv` when staging/export flags are active; stock staging is optional and
-  ignored by the exporter contract.【F:resolver/tools/export_facts.py†L2247-L2280】
+  `flow.csv` when staging/export flags are active; `stock.csv` is emitted only
+  when stock series are requested. If the monthly window produces no stock
+  rows, the connector writes only the CSV header and records the zero-row state
+  in the diagnostics summary so the exporter reports “matched: yes, rows=0”
+  without conflicting regex warnings.【F:resolver/ingestion/idmc/cli.py†L1230-L1500】
 - DuckDB unit tests mirror this layout by generating tiny `flow.csv` and
   `idmc_facts_flow.parquet` files at runtime inside pytest temporary directories,
   keeping binary fixtures out of the repository while still exercising the
@@ -366,7 +369,10 @@ distinguish new flows from stock snapshots.
 - DuckDB exports treat these monthly flow rows as resolved snapshots: when the
   exporter writes to DuckDB it normalizes the series semantics to `stock` and
   stores them in `facts_resolved` so the connector surfaces a month-end
-  inventory even though the metric name retains the "new" qualifier.
+  inventory even though the metric name retains the "new" qualifier. The
+  ingestion summary now includes a “DuckDB write” block that reports the target
+  path, total inserted rows, and per-table row deltas so operators can confirm
+  database effects without opening exporter logs.【F:resolver/ingestion/idmc/cli.py†L1230-L1700】
 - Helix mode fetches the `/external-api/idus/last-180-days` endpoint once per run,
   caches the raw payload for chunk filtering, and records the redacted URL,
   status, byte count, and row totals in diagnostics so summaries reflect the
