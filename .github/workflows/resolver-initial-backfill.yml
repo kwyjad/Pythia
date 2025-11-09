@@ -400,9 +400,12 @@ jobs:
             --db-url "${{ env.RESOLVER_DB_URL }}" \
             --append-summary diagnostics/ingestion/summary.md
 
-      - name: Load IDMC facts into DuckDB (from exported facts)
+      - name: Load IDMC facts into DuckDB (auxiliary)
         env:
           RESOLVER_WRITE_DB: "1"
+          RESOLVER_WRITE_TO_DUCKDB: "1"
+          RESOLVER_EXPORT_ENABLE_IDMC: "1"
+          WRITE_TO_DUCKDB: "1"
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
@@ -410,10 +413,17 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          python -m resolver.cli.idmc_to_duckdb \
-            --facts-csv resolver/exports/backfill/facts.csv \
-            --db-url "${RESOLVER_DB_URL}" \
-            --write-db
+          if [ -d "resolver/staging/idmc" ]; then
+            mkdir -p diagnostics/ingestion/export_preview
+            if ! python -m resolver.cli.idmc_to_duckdb \
+                --staging-dir resolver/staging/idmc \
+                --out diagnostics/ingestion/export_preview \
+                --db "${RESOLVER_DB_URL}"; then
+              echo "⚠️ idmc_to_duckdb failed; continuing (freeze_snapshot will write canonical facts to DB)."
+            fi
+          else
+            echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
+          fi
 
       - name: Verify DuckDB contents
         run: |
@@ -588,6 +598,16 @@ jobs:
 
               print("::endgroup::")
           PY
+
+      - name: Summarize DuckDB contents (post-freeze)
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics/ingestion
+          summary_file="${GITHUB_STEP_SUMMARY:-}"
+          python scripts/ci/duckdb_summary.py --db "${{ env.BACKFILL_DB_PATH }}" | tee diagnostics/ingestion/duckdb_summary.md
+          if [ -n "$summary_file" ]; then
+            cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
+          fi
 
       - name: Upload snapshots and database
         uses: actions/upload-artifact@v4

@@ -24,16 +24,16 @@ These defaults live in `resolver/.env.sample`. Copy them into your working envir
 cp resolver/.env.sample .env
 ```
 
-When `RESOLVER_DB_URL` is set—or you provide `--db-url` on the command line—the
-exporter dual-writes to DuckDB automatically unless you explicitly disable it
-with `--write-db 0` (or `RESOLVER_WRITE_DB=0`). The `WRITE_TO_DUCKDB` and
-`RESOLVER_WRITE_TO_DUCKDB` aliases act as defensive toggles for workflows that
-expect DuckDB writes (the CI backfill job sets all of them), but the helper
-still forwards `--write-db 1` to the exporter so the DuckDB write is always
-attempted during wrapper runs. The CLI accepts a filesystem path or a
-`duckdb:///` URL; paths are canonicalised to absolute URLs before the exporter
-runs so the write, verification, and any follow-up queries all point at the same
-database file.
+When `RESOLVER_DB_URL` is set—or you provide `--db` (or the legacy
+`--db-url`) on the command line—the exporter dual-writes to DuckDB automatically
+unless you explicitly disable it with `--write-db 0` (or `RESOLVER_WRITE_DB=0`).
+The `WRITE_TO_DUCKDB` and `RESOLVER_WRITE_TO_DUCKDB` aliases act as defensive
+toggles for workflows that expect DuckDB writes (the CI backfill job sets all of
+them), but the helper still forwards `--write-db 1` to the exporter so the
+DuckDB write is always attempted during wrapper runs. The CLI accepts a
+filesystem path or a `duckdb:///` URL; paths are canonicalised to absolute URLs
+before the exporter runs so the write, verification, and any follow-up queries
+all point at the same database file.
 
 ## Write the IDMC flow data
 
@@ -60,20 +60,24 @@ A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-runnin
 
 ### Continuous integration usage
 
-The `resolver-initial-backfill` GitHub Actions workflow reuses the helper to load
-the export preview into the automated DuckDB bundle. The step sets the
-environment toggles above, runs `python -m resolver.cli.idmc_to_duckdb` against
-the staging snapshot that was just exported, and appends the "✅ Wrote …" and
-`Summary:` lines to the job summary so the inserted/updated counts are visible in
-CI logs. The preceding "Export canonical facts" step now passes `--write-db` and
-the job's `RESOLVER_DB_URL` directly to `resolver.tools.export_facts`, so the
-DuckDB file is populated before the helper performs its snapshot parity checks.
-Immediately afterward the workflow executes `python -m scripts.ci.verify_duckdb_counts`
-to append a "DuckDB write verification" section to both
-`diagnostics/ingestion/summary.md` and the GitHub Step Summary. That section
-records the absolute DuckDB path, the total `facts_resolved` rows observed, and a
-small source/metric/semantics breakdown to serve as auditable proof that rows
-landed in the database.
+The `resolver-initial-backfill` GitHub Actions workflow reuses the helper to
+opportunistically load the export preview into the automated DuckDB bundle. The
+step sets the environment toggles above, confirms that `resolver/staging/idmc/`
+exists, and then runs `python -m resolver.cli.idmc_to_duckdb` with the staging
+directory. The invocation now uses the normalised `--db` flag and is wrapped in
+guards so empty staging or minor schema drift logs a warning instead of failing
+the workflow; the auxiliary write is best-effort and the freeze stage remains in
+charge of the canonical database state.
+
+The preceding "Export canonical facts" step still passes `--write-db 1` and the
+job's `RESOLVER_DB_URL` directly to `resolver.tools.export_facts`, seeding the
+DuckDB file before snapshot derivation begins. Each
+`resolver.tools.freeze_snapshot --write-db 1` invocation inside the snapshot loop
+continues to be the authoritative write path for backfill jobs. After the
+snapshots are frozen the workflow runs
+`python scripts/ci/duckdb_summary.py --db "$BACKFILL_DB_PATH"` and appends the
+resulting counts to the GitHub Step Summary so operators can verify the final
+row totals directly from the job output.
 
 The exporter invocation used by the workflow looks like this:
 
@@ -83,7 +87,7 @@ python -m resolver.tools.export_facts \
   --out resolver/exports/backfill \
   --config resolver/tools/export_config.yml \
   --write-db 1 \
-  --db-url "$RESOLVER_DB_URL" \
+  --db "$RESOLVER_DB_URL" \
   --append-summary diagnostics/ingestion/summary.md
 ```
 
@@ -183,7 +187,7 @@ interchangeable):
 ```bash
 python -m resolver.cli.idmc_to_duckdb \
   --staging-dir resolver/staging/idmc \
-  --db-url ./resolver_data/resolver.duckdb \
+  --db ./resolver_data/resolver.duckdb \
   --out diagnostics/ingestion/export_preview
 ```
 
