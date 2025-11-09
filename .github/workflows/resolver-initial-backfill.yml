@@ -165,7 +165,7 @@ jobs:
           python -m scripts.ci.probe_idmc_reachability || true
 
       - name: Run IDMC (HELIX single-shot)
-        if: ${{ inputs.only_connector == '' || toLower(inputs.only_connector) == 'idmc' }}
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' }}
         env:
           IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
           IDMC_HELIX_ENV: RELEASE
