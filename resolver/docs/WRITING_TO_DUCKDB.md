@@ -65,7 +65,15 @@ the export preview into the automated DuckDB bundle. The step sets the
 environment toggles above, runs `python -m resolver.cli.idmc_to_duckdb` against
 the staging snapshot that was just exported, and appends the "✅ Wrote …" and
 `Summary:` lines to the job summary so the inserted/updated counts are visible in
-CI logs.
+CI logs. The preceding "Export canonical facts" step now passes `--write-db` and
+the job's `RESOLVER_DB_URL` directly to `resolver.tools.export_facts`, so the
+DuckDB file is populated before the helper performs its snapshot parity checks.
+Immediately afterward the workflow executes `python -m scripts.ci.verify_duckdb_counts`
+to append a "DuckDB write verification" section to both
+`diagnostics/ingestion/summary.md` and the GitHub Step Summary. That section
+records the absolute DuckDB path, the total `facts_resolved` rows observed, and a
+small source/metric/semantics breakdown to serve as auditable proof that rows
+landed in the database.
 
 ## Single-source selection
 

@@ -53,5 +53,8 @@ The `resolver-initial-backfill.yml` workflow invokes
 CSV so the generated facts land in the `BACKFILL_DB_PATH` DuckDB file during CI. The
 step forces DuckDB writes by setting `RESOLVER_WRITE_DB=1` (and compatible
 aliases) alongside `RESOLVER_EXPORT_ENABLE_IDMC=1`, then records the inserted and
-updated row counts in the GitHub Actions job summary. Successful runs now show a
-"DuckDB write" section confirming that the previewed rows were persisted.
+updated row counts in the GitHub Actions job summary. A follow-up "Verify DuckDB
+contents" step runs `python -m scripts.ci.verify_duckdb_counts` so the
+`diagnostics/ingestion/duckdb_counts.md` artifact and the GitHub Step Summary
+include a canonical "DuckDB write verification" section detailing totals and a
+source/metric breakdown for `facts_resolved`.

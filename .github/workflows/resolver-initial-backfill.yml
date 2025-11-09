@@ -396,6 +396,8 @@ jobs:
             --in resolver/staging \
             --out resolver/exports/backfill \
             --config resolver/tools/export_config.yml \
+            --write-db 1 \
+            --db-url "${{ env.RESOLVER_DB_URL }}" \
             --append-summary diagnostics/ingestion/summary.md
 
       - name: Load IDMC facts into DuckDB
@@ -433,6 +435,16 @@ jobs:
               fi
             } >> "${GITHUB_STEP_SUMMARY}"
           fi
+
+      - name: Verify DuckDB contents
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          python -m scripts.ci.verify_duckdb_counts
 
       - name: Derive and freeze monthly snapshots
         env:
