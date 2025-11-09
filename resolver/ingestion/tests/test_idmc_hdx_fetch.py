@@ -6,7 +6,11 @@ import pandas as pd
 import pytest
 
 from resolver.ingestion.idmc import client, config
-from resolver.ingestion.idmc.export import FLOW_EXPORT_COLUMNS
+from resolver.ingestion.idmc.export import (
+    FLOW_EXPORT_COLUMNS,
+    FLOW_METRIC,
+    FLOW_SERIES_SEMANTICS,
+)
 from resolver.ingestion.idmc.http import HttpRequestError
 
 
@@ -177,22 +181,23 @@ def test_idmc_helix_fallback(
     def fake_hdx_once() -> tuple[None, Dict[str, Any]]:
         return None, {"zero_rows_reason": "hdx_empty_or_bad_header"}
 
-    def fake_helix_fetch(**kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    def fake_helix_chain(*args: Any, **kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
         frame = pd.DataFrame(
             {
-                "ISO3": ["AFG"],
-                "New displacements": [7],
-                "displacement_end_date": ["2024-01-31"],
+                "iso3": ["AFG"],
+                "as_of_date": [pd.Timestamp("2024-01-31")],
+                "metric": FLOW_METRIC,
+                "value": [7],
+                "series_semantics": FLOW_SERIES_SEMANTICS,
+                "source": "idmc_gidd",
+                client.HDX_PREAGG_COLUMN: False,
             }
         )
         diag = {
+            "status": 200,
             "rows": 1,
-            "columns": list(frame.columns),
-            "status_code": 200,
-            "bytes": 128,
-            "source": "helix",
-            "source_tag": "idmc_gidd",
-            "request_url": "https://helix.example/export?start_year=2023",
+            "raw_rows": 1,
+            "helix_endpoint": "idus_last180",
         }
         return frame, diag
 
@@ -200,7 +205,7 @@ def test_idmc_helix_fallback(
     monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "dummy")
     monkeypatch.setattr(client, "http_get", fake_http_get)
     monkeypatch.setattr(client, "_hdx_fetch_once", fake_hdx_once)
-    monkeypatch.setattr(client, "_helix_fetch_csv", fake_helix_fetch)
+    monkeypatch.setattr(client, "_fetch_helix_chain", fake_helix_chain)
 
     frames, diagnostics = client.fetch(
         cfg,
@@ -210,11 +215,10 @@ def test_idmc_helix_fallback(
         allow_hdx_fallback=True,
     )
 
-    fallback = diagnostics.get("fallback") or {}
-    assert fallback.get("type") == "helix"
-    assert fallback.get("rows") == 1
-    assert fallback.get("source_tag") == "idmc_gidd"
-    assert "request_url" in fallback
+    assert diagnostics.get("helix_endpoint") == "idus_last180"
+    helix_block = diagnostics.get("helix") or {}
+    assert helix_block.get("helix_endpoint") == "idus_last180"
+    assert helix_block.get("raw_rows") == 1
 
     monthly = frames.get("monthly_flow")
     assert monthly is not None
@@ -312,39 +316,39 @@ def test_summary_zero_reason_codes(monkeypatch: pytest.MonkeyPatch, cfg: config.
     def fake_hdx_once() -> tuple[None, Dict[str, Any]]:
         return None, {"zero_rows_reason": "hdx_empty_or_bad_header"}
 
-    def helix_success(**kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    def helix_success(*args: Any, **kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
         frame = pd.DataFrame(
             {
-                "ISO3": ["PAK"],
-                "New displacements": [11],
-                "displacement_end_date": ["2024-02-29"],
+                "iso3": ["PAK"],
+                "as_of_date": [pd.Timestamp("2024-02-29")],
+                "metric": FLOW_METRIC,
+                "value": [11],
+                "series_semantics": FLOW_SERIES_SEMANTICS,
+                "source": "idmc_gidd",
+                client.HDX_PREAGG_COLUMN: False,
             }
         )
         return frame, {
+            "status": 200,
             "rows": 1,
-            "columns": list(frame.columns),
-            "status_code": 200,
-            "bytes": 256,
-            "source": "helix",
-            "source_tag": "idmc_gidd",
-            "request_url": "https://helix.example/export?start_year=2023",
+            "raw_rows": 1,
+            "helix_endpoint": "idus_last180",
         }
 
-    def helix_fail(**kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    def helix_fail(*args: Any, **kwargs: Any) -> tuple[pd.DataFrame, Dict[str, Any]]:
         return pd.DataFrame(), {
+            "status": 502,
             "rows": 0,
-            "columns": [],
+            "raw_rows": 0,
+            "helix_endpoint": "idus_last180",
             "zero_rows_reason": "helix_http_error",
-            "source": "helix",
-            "source_tag": "idmc_gidd",
-            "request_url": "https://helix.example/export?start_year=2023",
         }
 
     monkeypatch.setenv("IDMC_ALLOW_HDX_FALLBACK", "1")
     monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "dummy")
     monkeypatch.setattr(client, "http_get", fake_http_get)
     monkeypatch.setattr(client, "_hdx_fetch_once", fake_hdx_once)
-    monkeypatch.setattr(client, "_helix_fetch_csv", helix_success)
+    monkeypatch.setattr(client, "_fetch_helix_chain", helix_success)
 
     frames, diagnostics = client.fetch(
         cfg,
@@ -356,11 +360,11 @@ def test_summary_zero_reason_codes(monkeypatch: pytest.MonkeyPatch, cfg: config.
 
     filters_block = diagnostics.get("filters") or {}
     assert filters_block.get("zero_rows_reason") in (None, "")
-    fallback = diagnostics.get("fallback") or {}
-    assert fallback.get("type") == "helix"
-    assert fallback.get("rows") == 1
+    helix_block = diagnostics.get("helix") or {}
+    assert helix_block.get("helix_endpoint") == "idus_last180"
+    assert helix_block.get("raw_rows") == 1
 
-    monkeypatch.setattr(client, "_helix_fetch_csv", helix_fail)
+    monkeypatch.setattr(client, "_fetch_helix_chain", helix_fail)
 
     frames_empty, diagnostics_empty = client.fetch(
         cfg,
@@ -373,5 +377,5 @@ def test_summary_zero_reason_codes(monkeypatch: pytest.MonkeyPatch, cfg: config.
     assert frames_empty.get("monthly_flow") is not None
     zero_reason = (diagnostics_empty.get("filters") or {}).get("zero_rows_reason")
     assert zero_reason == "helix_http_error"
-    fallback_empty = diagnostics_empty.get("fallback") or {}
-    assert fallback_empty.get("zero_rows_reason") == "helix_http_error"
+    helix_block_empty = diagnostics_empty.get("helix") or {}
+    assert helix_block_empty.get("zero_rows_reason") == "helix_http_error"

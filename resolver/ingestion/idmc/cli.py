@@ -1363,6 +1363,25 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     rows_fetched = sum(len(frame) for frame in data.values())
+    diag_rows_fetched = diagnostics.get("rows_fetched")
+    if diag_rows_fetched is not None:
+        try:
+            rows_fetched = int(diag_rows_fetched)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            LOGGER.debug("rows_fetched diagnostics not an int: %r", diag_rows_fetched)
+    diag_rows_normalized = diagnostics.get("rows_normalized")
+    if diag_rows_normalized is not None:
+        try:
+            rows = int(diag_rows_normalized)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            LOGGER.debug("rows_normalized diagnostics not an int: %r", diag_rows_normalized)
+    rows_written_reported = rows
+    diag_rows_written = diagnostics.get("rows_written")
+    if diag_rows_written is not None:
+        try:
+            rows_written_reported = int(diag_rows_written)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            LOGGER.debug("rows_written diagnostics not an int: %r", diag_rows_written)
     http_rollup = diagnostics.get("http") or {}
     http_attempt_summary = diagnostics.get("http_attempt_summary") or {}
     cache_stats = diagnostics.get("cache") or {}
@@ -1399,7 +1418,8 @@ def main(argv: list[str] | None = None) -> int:
         "rows_fetched": rows_fetched,
         "rows_normalized": rows,
         "rows_resolution_ready": rows_resolution_ready,
-        "rows_written": rows,
+        "rows_written": rows_written_reported,
+        "helix_endpoint": diagnostics.get("helix_endpoint"),
         "window": {
             "start": window_start_iso,
             "end": window_end_iso,
@@ -1578,6 +1598,9 @@ def main(argv: list[str] | None = None) -> int:
         value or 0 for value in staged_counts_serializable.values() if value is not None
     )
     diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
+    rows_written_reported = int(total_staged_rows)
+    diagnostics_payload["rows_written"] = rows_written_reported
+    diagnostics_payload["rows"]["written"] = rows_written_reported
 
     duckdb_env_flag = _env_truthy(os.getenv("WRITE_TO_DUCKDB"))
     duckdb_target = (
@@ -1993,6 +2016,7 @@ def main(argv: list[str] | None = None) -> int:
         "notes_block": _format_bullets(notes_lines),
         "zero_rows_reason": zero_rows_reason_value or "n/a",
         "helix_block": helix_block,
+        "helix_endpoint": diagnostics.get("helix_endpoint"),
         "helix_last180": diagnostics.get("helix_last180") or None,
         "fallback_details": fallback_info if isinstance(fallback_info, Mapping) else None,
         "rows_fetched_total": int(rows_fetched),

@@ -17,6 +17,24 @@ The command:
 - falls back to the file cache or bundled fixtures when the network is
   unavailable; and
 - normalizes the IDU feed into Resolver’s monthly **new displacement** series.
+- when HELIX support is enabled, prefers the GIDD API but automatically
+  downloads the `idus/last-180-days` dump if the primary endpoint fails or
+  returns no rows. The HELIX dump is rolled up to month-end totals in memory so
+  per-month chunking is disabled for that mode. Diagnostics now record the
+  selected HELIX endpoint (`helix_endpoint`) along with per-attempt metadata,
+  and the summary counters (`rows_fetched`, `rows_normalized`, `rows_written`)
+  reflect the rows written after any HELIX fallback.
+
+The `resolver-initial-backfill` GitHub Actions workflow now calls the CLI
+directly with `--network-mode helix` before launching the generic connector
+runner. That HELIX single-shot sets `RESOLVER_SKIP_IDMC=1` so
+`scripts.ci.run_connectors` does not trigger a second IDMC execution, ensuring
+the workflow summary reflects the outcome of the direct CLI invocation. Once the
+staging exports exist the workflow writes them to DuckDB via
+`python -m resolver.cli.idmc_to_duckdb --db "$RESOLVER_DB_URL"` and appends the
+post-freeze `scripts/ci/duckdb_summary.py` report to the GitHub Step Summary so
+operators can confirm inserted and updated row counts alongside the usual IDMC
+diagnostics.
 
 The first ten normalized rows are saved to
 `diagnostics/ingestion/idmc/normalized_preview.csv` and the drop reason

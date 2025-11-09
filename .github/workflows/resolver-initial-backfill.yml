@@ -164,6 +164,37 @@ jobs:
           set -euo pipefail
           python -m scripts.ci.probe_idmc_reachability || true
 
+      - name: Run IDMC (HELIX single-shot)
+        if: ${{ inputs.only_connector == '' || toLower(inputs.only_connector) == 'idmc' }}
+        env:
+          IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
+          IDMC_HELIX_ENV: RELEASE
+          IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
+          RESOLVER_OUTPUT_DIR: resolver/staging
+          RESOLVER_EXPORT_ENABLE_FLOW: "1"
+          LOG_LEVEL: ${{ inputs.log_level }}
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          if [ "${RESOLVER_SKIP_IDMC:-0}" = "1" ]; then
+            echo "Skipping direct IDMC run (RESOLVER_SKIP_IDMC=1)"
+            echo "RESOLVER_SKIP_IDMC=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          python -m resolver.ingestion.idmc.cli \
+            --network-mode helix \
+            --series flow \
+            --enable-export \
+            --write-outputs \
+            --start "${{ steps.window.outputs.start_iso }}" \
+            --end   "${{ steps.window.outputs.end_iso }}" \
+            --debug
+          echo "RESOLVER_SKIP_IDMC=1" >> "$GITHUB_ENV"
+
       - name: Run connectors (with per-connector log tee)
         env:
           RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
@@ -218,45 +249,6 @@ jobs:
           if [ "${{ inputs.force_fake }}" = "true" ]; then
             CMD_ARGS+=(--extra-env "dtm_client=DTM_FORCE_FAKE=1")
           fi
-          {
-            echo "IDMC_NETWORK_MODE=helix"
-            echo "IDMC_CONNECT_TIMEOUT=5"
-            echo "IDMC_READ_TIMEOUT=5"
-            echo "IDMC_WRITE_EMPTY=1"
-            echo "RESOLVER_EXPORT_ENABLE_FLOW=1"
-          } >> "${GITHUB_ENV}"
-          IDMC_WINDOW_END="${RESOLVER_END_ISO}"
-          IDMC_WINDOW_START=$(python - <<'PY'
-          import os
-          from datetime import date
-
-          end_raw = os.environ.get("RESOLVER_END_ISO")
-          if not end_raw:
-              raise SystemExit("RESOLVER_END_ISO not set")
-          end = date.fromisoformat(end_raw)
-          months_back = 6
-          year = end.year
-          month = end.month
-          for _ in range(max(months_back - 1, 0)):
-              month -= 1
-              if month == 0:
-                  month = 12
-                  year -= 1
-          start = date(year, month, 1)
-          print(start.isoformat())
-          PY
-          )
-          CMD_ARGS+=(--extra-args "idmc=--chunk-by-month --start ${IDMC_WINDOW_START} --end ${IDMC_WINDOW_END} \
-            --network-mode helix --series flow --enable-export --write-outputs --debug")
-          CMD_ARGS+=(--extra-env "idmc=RESOLVER_EXPORT_ENABLE_FLOW=${RESOLVER_EXPORT_ENABLE_FLOW:-1}")
-          CMD_ARGS+=(--extra-env "idmc=RELIEFWEB_APPNAME=${RELIEFWEB_APPNAME}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_NETWORK_MODE=helix")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HELIX_CLIENT_ID=${IDMC_HELIX_CLIENT_ID}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HELIX_ENV=${IDMC_HELIX_ENV}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_VERIFY=${IDMC_HTTP_VERIFY}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_TIMEOUT_CONNECT=${IDMC_HTTP_TIMEOUT_CONNECT}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_HTTP_TIMEOUT_READ=${IDMC_HTTP_TIMEOUT_READ}")
-          CMD_ARGS+=(--extra-env "idmc=IDMC_USER_AGENT=Pythia-IDMC/1.0 (+contact)")
           # While diagnosing IDMC runs, you can append --debug via:
           # CMD_ARGS+=(--extra-args "idmc=--debug")
           CONNECTOR_EXIT=0
@@ -415,12 +407,10 @@ jobs:
           fi
           if [ -d "resolver/staging/idmc" ]; then
             mkdir -p diagnostics/ingestion/export_preview
-            if ! python -m resolver.cli.idmc_to_duckdb \
+            python -m resolver.cli.idmc_to_duckdb \
                 --staging-dir resolver/staging/idmc \
                 --out diagnostics/ingestion/export_preview \
-                --db "${RESOLVER_DB_URL}"; then
-              echo "⚠️ idmc_to_duckdb failed; continuing (freeze_snapshot will write canonical facts to DB)."
-            fi
+                --db "${RESOLVER_DB_URL}"
           else
             echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
           fi

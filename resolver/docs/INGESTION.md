@@ -53,9 +53,23 @@ real row counts for fetched, normalized, and written data. The generated
 show the fallback totals (instead of `0/0/0`) whenever the rescue path produced
 rows.
 
+HELIX runs now execute a strict fallback order: the connector first attempts the
+GIDD endpoint and, on any HTTP failure or empty payload, immediately downloads
+the HELIX dump. Because the dump is a single JSON export the client disables
+per-month chunking in HELIX mode and rolls the data up to month-end aggregates
+after download. Diagnostics expose the selected endpoint via
+`helix_endpoint=gidd|idus_last180` and set `zero_rows_reason` to
+`helix_http_error` or `helix_empty` so it is obvious why HELIX produced zero
+rows in a given window.
+
 Fallback data sources occasionally surface ISO3 identifiers under alternate
 column names (for example `CountryISO3`). The connector normalizes these
 variants to a canonical `iso3` column before applying any country filters and
 skips filtering entirely when a fallback frame is empty. Diagnostics now note
 when the ISO filter was applied or skipped so empty fallback payloads no longer
 raise `KeyError: 'iso3'` during fast tests.
+
+The companion `idmc_to_duckdb` helper accepts both `--db-url` and the shorter
+`--db` flag. Empty stock exports no longer trigger a hard failure—the command
+emits a warning, keeps the success banner (`✅ Wrote …`), and returns `0` so it
+can run as part of automated pipelines focused on flow updates.

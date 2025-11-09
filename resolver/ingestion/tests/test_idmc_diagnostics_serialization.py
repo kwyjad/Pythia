@@ -34,6 +34,7 @@ def _summary_context(**overrides):
         "staging_block": "- resolver/staging/idmc/flow.csv: present",
         "notes_block": "- Network mode: live",
         "helix_block": None,
+        "helix_endpoint": None,
         "helix_last180": None,
         "fallback_details": None,
         "rows_fetched_total": 10,

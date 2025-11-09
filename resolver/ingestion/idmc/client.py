@@ -238,7 +238,19 @@ def _apply_iso3_filter(
         return working, note
 
     if not _has_col(working, "iso3"):
+        rename_map: Dict[str, str] = {}
+        for candidate in ("CountryISO3", "country_iso3", "ISO3", "geo_iso3"):
+            if _has_col(working, candidate):
+                rename_map[candidate] = "iso3"
+                break
+        if rename_map:
+            working = working.rename(columns=rename_map)
+    if not _has_col(working, "iso3"):
         note["reason"] = "no_iso3_or_empty"
+        return working, note
+
+    if getattr(working, "empty", True):
+        note["reason"] = "empty_frame"
         return working, note
 
     iso_series = working["iso3"].astype(str).str.strip().str.upper()
@@ -1552,6 +1564,122 @@ def _fetch_helix_last180(
     return frame, diagnostics
 
 
+def _fetch_helix_chain(
+    helix_client_id: Optional[str],
+    *,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    iso3_list: Iterable[str] = (),
+    rate_limiter: TokenBucket | None = None,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Fetch Helix data, falling back from GIDD to the IDUS dump when needed."""
+
+    frame_gidd, diag_gidd = _fetch_helix_last180(
+        helix_client_id,
+        start_date=start_date,
+        end_date=end_date,
+        iso3_list=iso3_list,
+        rate_limiter=rate_limiter,
+    )
+
+    diagnostics: Dict[str, Any] = dict(diag_gidd)
+    diagnostics.setdefault("source", "helix")
+    diagnostics.setdefault("source_tag", "idmc_gidd")
+    diagnostics["helix_endpoint"] = "gidd"
+    diagnostics["helix_attempts"] = {"gidd": dict(diag_gidd)}
+    diagnostics["raw_rows"] = int(frame_gidd.shape[0]) if isinstance(frame_gidd, pd.DataFrame) else 0
+
+    allowed_countries = [
+        code.strip().upper()
+        for code in iso3_list
+        if isinstance(code, str) and code.strip()
+    ]
+
+    filtered_gidd, filter_note = _apply_iso3_filter(frame_gidd, allowed_countries)
+    diagnostics["fallback_filter"] = filter_note
+
+    start_bound = start_date
+    end_bound = end_date
+    if start_bound and end_bound and start_bound > end_bound:
+        start_bound, end_bound = end_bound, start_bound
+
+    if start_bound or end_bound:
+        date_column: Optional[str] = None
+        for candidate in (
+            "displacement_date",
+            "event_date",
+            "date",
+            "as_of_date",
+        ):
+            if _has_col(filtered_gidd, candidate):
+                date_column = candidate
+                break
+        if date_column and not filtered_gidd.empty:
+            dates = pd.to_datetime(filtered_gidd[date_column], errors="coerce")
+            if start_bound:
+                filtered_gidd = filtered_gidd.loc[dates >= pd.Timestamp(start_bound)]
+            if end_bound:
+                filtered_gidd = filtered_gidd.loc[dates <= pd.Timestamp(end_bound)]
+
+    filtered_gidd = filtered_gidd.reset_index(drop=True)
+    diagnostics["rows"] = int(filtered_gidd.shape[0])
+    diagnostics["columns"] = list(filtered_gidd.columns)
+
+    status_value = diagnostics.get("status")
+    success_status = isinstance(status_value, int) and 200 <= status_value < 300
+    has_rows = diagnostics.get("rows", 0) and int(diagnostics.get("rows", 0) or 0) > 0
+
+    if success_status and has_rows:
+        diagnostics.pop("zero_rows_reason", None)
+        return filtered_gidd, diagnostics
+
+    can_use_idus = bool((helix_client_id or "").strip())
+    if not can_use_idus:
+        if not success_status:
+            diagnostics.setdefault("zero_rows_reason", "helix_http_error")
+        elif not has_rows:
+            diagnostics.setdefault("zero_rows_reason", "helix_empty")
+        return filtered_gidd, diagnostics
+
+    idus_frame, idus_diag = _fetch_helix_idus_last180(helix_client_id)
+    diagnostics["helix_endpoint"] = "idus_last180"
+    diagnostics["helix_attempts"]["idus_last180"] = dict(idus_diag)
+    idus_status = idus_diag.get("status")
+    diagnostics["status"] = idus_status if idus_status is not None else diagnostics.get("status")
+    diagnostics["raw_rows"] = (
+        int(idus_frame.shape[0]) if isinstance(idus_frame, pd.DataFrame) else 0
+    )
+    diagnostics["source_tag"] = "idmc_idu"
+
+    normalized = _normalise_helix_last180_monthly(
+        idus_frame,
+        window_start=start_date,
+        window_end=end_date,
+        countries=allowed_countries,
+    )
+    normalized_filtered, normalized_note = _apply_iso3_filter(normalized, allowed_countries)
+    diagnostics["fallback_filter"] = normalized_note
+    diagnostics["rows"] = int(normalized_filtered.shape[0])
+    diagnostics["columns"] = list(normalized_filtered.columns)
+    diagnostics["normalized_rows"] = int(normalized_filtered.shape[0])
+
+    status_ok = isinstance(idus_status, int) and 200 <= idus_status < 300
+    if status_ok:
+        if normalized_filtered.empty:
+            diagnostics["zero_rows_reason"] = "helix_empty"
+        else:
+            diagnostics.pop("zero_rows_reason", None)
+        return normalized_filtered.reset_index(drop=True), diagnostics
+
+    diagnostics["zero_rows_reason"] = "helix_http_error"
+    empty_columns = (
+        list(normalized_filtered.columns)
+        if not normalized_filtered.empty
+        else list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]
+    )
+    return pd.DataFrame(columns=empty_columns), diagnostics
+
+
 def _helix_base_url() -> str:
     base = os.getenv("IDMC_HELIX_BASE", HELIX_DEFAULT_BASE)
     return str(base).strip().rstrip("/") or HELIX_DEFAULT_BASE
@@ -1566,7 +1694,7 @@ def _helix_fetch_csv(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     del timeout  # compatibility with previous signature
 
-    frame, diagnostics = _fetch_helix_last180(
+    frame, diagnostics = _fetch_helix_chain(
         _helix_client_id(),
         start_date=start_date,
         end_date=end_date,
@@ -1574,31 +1702,15 @@ def _helix_fetch_csv(
     )
     diagnostics = dict(diagnostics)
     diagnostics.setdefault("source", "helix")
-    diagnostics.setdefault("source_tag", "idmc_gidd")
+    helix_endpoint = str(diagnostics.get("helix_endpoint") or "gidd")
+    diagnostics.setdefault(
+        "source_tag", "idmc_idu" if helix_endpoint == "idus_last180" else "idmc_gidd"
+    )
 
-    filtered, filter_note = _apply_iso3_filter(frame, iso3_list)
-    diagnostics["fallback_filter"] = filter_note
-    if filtered.empty and filter_note.get("reason") == "empty_frame":
-        return filtered, diagnostics
-
-    start_bound = start_date
-    end_bound = end_date
-    if start_bound and end_bound and start_bound > end_bound:
-        start_bound, end_bound = end_bound, start_bound
-
-    if start_bound or end_bound:
-        dates = pd.to_datetime(filtered["displacement_date"], errors="coerce")
-        if start_bound:
-            filtered = filtered.loc[dates >= pd.Timestamp(start_bound)]
-        if end_bound:
-            filtered = filtered.loc[dates <= pd.Timestamp(end_bound)]
-
-    diagnostics["rows"] = int(filtered.shape[0])
-    diagnostics["columns"] = list(filtered.columns)
-    if filtered.empty and diagnostics.get("zero_rows_reason") is None:
+    if frame.empty and diagnostics.get("zero_rows_reason") is None:
         diagnostics["zero_rows_reason"] = "helix_empty"
 
-    return filtered.reset_index(drop=True), diagnostics
+    return frame.reset_index(drop=True), diagnostics
 
 def _normalise_column_key(name: object) -> str:
     text = re.sub(r"[^0-9a-zA-Z]+", "_", str(name or "").strip().lower())
@@ -3101,6 +3213,10 @@ def fetch(
 
     base_url = base_candidate
 
+    if network_mode == "helix" and chunk_by_month:
+        LOGGER.debug("Disabling chunk_by_month for HELIX network mode")
+        chunk_by_month = False
+
     if max_bytes is None:
         raw_max_bytes = os.getenv("IDMC_MAX_BYTES")
         if raw_max_bytes is not None:
@@ -3375,7 +3491,7 @@ def fetch(
 
     if network_mode == "helix":
         connect_timeout_s, read_timeout_s = _http_timeouts()
-        helix_frame_full, helix_diag = _fetch_helix_last180(
+        helix_frame_full, helix_diag = _fetch_helix_chain(
             helix_client_id,
             start_date=window_start,
             end_date=window_end,
@@ -3388,6 +3504,8 @@ def fetch(
             {"base_url": f"{HELIX_BASE}{HELIX_LAST180_PATH}"},
         )
         status_value = helix_summary.get("status")
+        helix_endpoint_used = str(helix_summary.get("helix_endpoint") or "gidd")
+        helix_entry["helix_endpoint"] = helix_endpoint_used
         if isinstance(status_value, int) and 200 <= status_value < 300:
             helix_entry.update({"status": "used", "status_code": status_value})
         else:
@@ -3404,10 +3522,9 @@ def fetch(
         else:
             helix_entry.setdefault("reason", f"network_mode_{requested_network_mode}")
         helix_zero_reason: Optional[str] = None
-        status_value = helix_summary.get("status")
-        if not isinstance(status_value, int) or not (200 <= status_value < 300):
-            helix_zero_reason = "helix_http_error"
-        elif int(helix_summary.get("raw_rows", 0) or 0) == 0:
+        if isinstance(status_value, int) and 200 <= status_value < 300:
+            helix_zero_reason = str(helix_summary.get("zero_rows_reason") or "") or None
+        else:
             helix_zero_reason = "helix_http_error"
 
         allowed_iso = [
@@ -3419,7 +3536,15 @@ def fetch(
         helix_summary["fallback_filter"] = filter_note
 
         if "displacement_date" not in helix_frame_full.columns:
-            helix_frame_full["displacement_date"] = None
+            if "as_of_date" in helix_frame_full.columns:
+                helix_frame_full = helix_frame_full.copy()
+                helix_frame_full["displacement_date"] = helix_frame_full["as_of_date"]
+            elif "event_date" in helix_frame_full.columns:
+                helix_frame_full = helix_frame_full.copy()
+                helix_frame_full["displacement_date"] = helix_frame_full["event_date"]
+            else:
+                helix_frame_full = helix_frame_full.copy()
+                helix_frame_full["displacement_date"] = None
 
         helix_timestamps = pd.to_datetime(
             helix_frame_full["displacement_date"], errors="coerce"
@@ -3944,6 +4069,13 @@ def fetch(
             raw_rows_total += int(fallback_rows_total)
         except (TypeError, ValueError):  # pragma: no cover - defensive
             raw_rows_total += 0
+    if network_mode == "helix" and helix_summary:
+        try:
+            raw_rows_total = max(
+                raw_rows_total, int(helix_summary.get("raw_rows", 0) or 0)
+            )
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            pass
     rows_normalized = int(total_rows)
     rows_written = rows_normalized
 
@@ -4034,6 +4166,12 @@ def fetch(
         helix_block = dict(helix_summary or {})
         helix_block.setdefault("raw_rows", int((helix_summary or {}).get("raw_rows", 0) or 0))
         helix_block.setdefault("status_counts", status_counts_serialized)
+        helix_endpoint_value = helix_block.get("helix_endpoint") or (
+            helix_summary.get("helix_endpoint") if helix_summary else None
+        )
+        if helix_endpoint_value:
+            helix_block.setdefault("helix_endpoint", helix_endpoint_value)
+            diagnostics["helix_endpoint"] = helix_endpoint_value
         diagnostics["helix"] = helix_block
         if helix_zero_reason_global and total_rows == 0:
             diagnostics.setdefault("zero_rows_reason", helix_zero_reason_global)
