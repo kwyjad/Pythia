@@ -46,3 +46,9 @@ python -m resolver.ingestion.idmc.cli --skip-network
 ```
 
 The command appends a diagnostics row to `diagnostics/ingestion/connectors.jsonl` and writes a normalized preview CSV to `diagnostics/ingestion/idmc/normalized_preview.csv`.
+
+When the CLI falls back to the HELIX `idus/last-180-days` feed it now records the
+real row counts for fetched, normalized, and written data. The generated
+`diagnostics/ingestion/idmc/summary.md` and the per-connector table therefore
+show the fallback totals (instead of `0/0/0`) whenever the rescue path produced
+rows.

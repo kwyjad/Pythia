@@ -251,6 +251,67 @@ def _load_template() -> str:
     return SUMMARY_TEMPLATE_FALLBACK
 
 
+def _render_minimal_summary(context: Dict[str, Any]) -> str:
+    def _coerce_int(value: Any) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            return str(int(value))
+        except Exception:
+            return str(value)
+
+    lines = [
+        "# IDMC ingestion summary (fallback)",
+        "",
+        f"Run at: {context.get('timestamp', 'n/a')}",
+        f"Git SHA: {context.get('git_sha', 'unknown')}",
+        f"Config source: {context.get('config_source', 'n/a')}",
+        f"Config path: {context.get('config_path', 'n/a')}",
+        "",
+        f"Mode: {context.get('mode', 'n/a')}",
+        f"Token: {context.get('token_status', 'n/a')}",
+        f"Series: {context.get('series_display', 'n/a')}",
+        f"Date window: {context.get('date_window', 'n/a')}",
+        "",
+        "## Row counts",
+        f"- Fetched: {_coerce_int(context.get('rows_fetched_total'))}",
+        f"- Normalized: {_coerce_int(context.get('rows_normalized_total'))}",
+        f"- Written: {_coerce_int(context.get('rows_written_total'))}",
+        "",
+        "## Countries",
+        f"- Resolved count: {context.get('countries_count', 'n/a')}",
+        f"- Sample: {context.get('countries_sample_display', '(none)')}",
+        f"- Source: {context.get('countries_source_display', 'n/a')}",
+    ]
+
+    sections = [
+        ("Endpoints", context.get("endpoints_block")),
+        (
+            "Helix (IDU) Reachability" if context.get("helix_block") else "IDMC Reachability",
+            context.get("reachability_block"),
+        ),
+        ("HTTP attempts", context.get("http_attempts_block")),
+        ("Attempt summary", context.get("attempts_block")),
+        ("Attempt log", context.get("chunk_attempts_block")),
+        ("Performance", context.get("performance_block")),
+        ("Rate limiting", context.get("rate_limit_block")),
+        ("Fallback", context.get("fallback_block")),
+        ("Zero rows", context.get("zero_rows_reason")),
+        ("Datasets & Sources", context.get("dataset_block")),
+        ("DuckDB write", context.get("duckdb_block")),
+        ("Outputs", context.get("outputs_block")),
+        ("Staging", context.get("staging_block")),
+        ("Notes", context.get("notes_block")),
+    ]
+
+    for title, value in sections:
+        if not value:
+            continue
+        lines.extend(["", f"## {title}", str(value)])
+
+    return "\n".join(lines)
+
+
 def _render_summary(context: Dict[str, Any]) -> str:
     template_source = _load_template()
     try:
@@ -266,8 +327,13 @@ def _render_summary(context: Dict[str, Any]) -> str:
         LOGGER.warning("Summary template render failed: %s", exc)
     except Exception as exc:  # pragma: no cover - defensive safeguard
         LOGGER.warning("Unexpected summary render failure: %s", exc)
-    fallback = Environment(autoescape=False).from_string(SUMMARY_TEMPLATE_FALLBACK)
-    return fallback.render(**context)
+    fallback_env = Environment(autoescape=False)
+    try:
+        fallback = fallback_env.from_string(SUMMARY_TEMPLATE_FALLBACK)
+        return fallback.render(**context)
+    except TemplateError as exc:
+        LOGGER.error("Fallback summary template render failed: %s", exc)
+        raise
 
 
 def fetch(*args, **kwargs):
@@ -341,7 +407,15 @@ def _write_summary(context: Dict[str, Any]) -> Path | None:
     try:
         diag_path = Path(diagnostics_dir())
         summary_path = diag_path / "summary.md"
-        summary_text = _render_summary(context)
+        diag_path.mkdir(parents=True, exist_ok=True)
+        try:
+            summary_text = _render_summary(context)
+        except Exception as exc:
+            LOGGER.error(
+                "Failed to render IDMC summary template; writing minimal summary instead: %s",
+                exc,
+            )
+            summary_text = _render_minimal_summary(context)
         summary_path.write_text(summary_text, encoding="utf-8")
         LOGGER.debug("Wrote IDMC summary to %s", summary_path)
         return summary_path
@@ -1746,7 +1820,7 @@ def main(argv: list[str] | None = None) -> int:
         f"Records/sec: {performance.get('records_per_sec', 0)}",
         f"Rows fetched: {rows_fetched}",
         f"Rows normalized: {rows}",
-        f"Rows written: {rows}",
+        f"Rows written: {total_staged_rows}",
     ]
 
     rate_limit_info = diagnostics.get("rate_limit") or {}
@@ -1863,6 +1937,13 @@ def main(argv: list[str] | None = None) -> int:
         "notes_block": _format_bullets(notes_lines),
         "zero_rows_reason": zero_rows_reason_value or "n/a",
         "helix_block": helix_block,
+        "helix_last180": diagnostics.get("helix_last180") or None,
+        "fallback_details": fallback_info if isinstance(fallback_info, Mapping) else None,
+        "rows_fetched_total": int(rows_fetched),
+        "rows_normalized_total": int(rows),
+        "rows_written_total": int(total_staged_rows),
+        "staged_counts": staged_counts_serializable,
+        "export_details": export_details,
     }
     summary_path = _write_summary(summary_context)
     if summary_path:

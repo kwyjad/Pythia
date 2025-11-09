@@ -9,11 +9,13 @@ This guide explains how to load the IDMC staging exports into a local DuckDB dat
 
 ## Environment defaults
 
-The helper CLI respects two environment variables:
+The helper CLI respects a small set of environment variables:
 
 ```
 RESOLVER_DB_URL=./resolver_data/resolver.duckdb
 RESOLVER_WRITE_DB=1
+WRITE_TO_DUCKDB=1
+RESOLVER_WRITE_TO_DUCKDB=1
 ```
 
 These defaults live in `resolver/.env.sample`. Copy them into your working environment if you want the exporter to persist to DuckDB automatically:
@@ -22,13 +24,16 @@ These defaults live in `resolver/.env.sample`. Copy them into your working envir
 cp resolver/.env.sample .env
 ```
 
-When `RESOLVER_DB_URL` is set—or you provide `--db-url` on the command
-line—the exporter dual-writes to DuckDB automatically unless you explicitly
-disable it with `--write-db 0` (or `RESOLVER_WRITE_DB=0`). The helper accepts a
-filesystem path or a `duckdb:///` URL; paths are canonicalised to absolute
-URLs before the exporter runs so the write, verification, and any follow-up
-queries all point at the same database file. The CLI forwards `--write-db 1`
-to the exporter so the DuckDB write is always attempted during wrapper runs.
+When `RESOLVER_DB_URL` is set—or you provide `--db-url` on the command line—the
+exporter dual-writes to DuckDB automatically unless you explicitly disable it
+with `--write-db 0` (or `RESOLVER_WRITE_DB=0`). The `WRITE_TO_DUCKDB` and
+`RESOLVER_WRITE_TO_DUCKDB` aliases act as defensive toggles for workflows that
+expect DuckDB writes (the CI backfill job sets all of them), but the helper
+still forwards `--write-db 1` to the exporter so the DuckDB write is always
+attempted during wrapper runs. The CLI accepts a filesystem path or a
+`duckdb:///` URL; paths are canonicalised to absolute URLs before the exporter
+runs so the write, verification, and any follow-up queries all point at the same
+database file.
 
 ## Write the IDMC flow data
 
@@ -52,6 +57,15 @@ Sources:
 ```
 
 A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-running the target is idempotent—the row counts remain stable while updated values replace older entries. Exit codes mirror that summary: `0` for success, `2` when `--strict` escalates warnings, and `3` when verification or the exporter fails. The helper always prints a `Warnings:` block; `Warnings: none` means the run was clean while any listed entries are compatible with strict-mode exit code `2`.
+
+### Continuous integration usage
+
+The `resolver-initial-backfill` GitHub Actions workflow reuses the helper to load
+the export preview into the automated DuckDB bundle. The step sets the
+environment toggles above, runs `python -m resolver.cli.idmc_to_duckdb` against
+the staging snapshot that was just exported, and appends the "✅ Wrote …" and
+`Summary:` lines to the job summary so the inserted/updated counts are visible in
+CI logs.
 
 ## Single-source selection
 

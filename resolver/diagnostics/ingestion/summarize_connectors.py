@@ -16,7 +16,7 @@ def build_summary(staging_dir: str) -> Dict[str, object]:
         "rows_total": 0,
     }
 
-    if not staging_path.exists():
+    if not staging_path.exists() or not staging_path.is_dir():
         return report
 
     files: List[Dict[str, object]] = []

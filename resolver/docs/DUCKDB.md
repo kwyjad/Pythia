@@ -45,3 +45,13 @@ writes to the exporter with the `idmc-staging` strategy. Rows with
 `facts_deltas`, while accompanying stock rows continue to populate
 `facts_resolved`. The wrapper verifies both tables after each run, so a flow-only
 staging directory still reports success when the deltas table receives rows.
+
+## Initial backfill automation
+
+The `resolver-initial-backfill.yml` workflow invokes
+`python -m resolver.cli.idmc_to_duckdb` immediately after exporting the preview
+CSV so the generated facts land in the `BACKFILL_DB_PATH` DuckDB file during CI. The
+step forces DuckDB writes by setting `RESOLVER_WRITE_DB=1` (and compatible
+aliases) alongside `RESOLVER_EXPORT_ENABLE_IDMC=1`, then records the inserted and
+updated row counts in the GitHub Actions job summary. Successful runs now show a
+"DuckDB write" section confirming that the previewed rows were persisted.
