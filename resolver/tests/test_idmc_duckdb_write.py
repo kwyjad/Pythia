@@ -52,13 +52,14 @@ def _write_canonical_facts(tmp_path: Path) -> Path:
         },
     ]
     frame = pd.DataFrame(data)
-    path = tmp_path / "facts.csv"
-    frame.to_csv(path, index=False)
-    return path
+    dest = tmp_path / "facts.csv" if tmp_path.suffix == "" else tmp_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(dest, index=False)
+    return dest
 
 
 def _write_empty_canonical_facts(tmp_path: Path) -> Path:
-    path = tmp_path / "facts_empty.csv"
+    dest = tmp_path / "facts_empty.csv" if tmp_path.suffix == "" else tmp_path
     frame = pd.DataFrame(
         columns=[
             "iso3",
@@ -69,8 +70,9 @@ def _write_empty_canonical_facts(tmp_path: Path) -> Path:
             "source",
         ]
     )
-    frame.to_csv(path, index=False)
-    return path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(dest, index=False)
+    return dest
 
 
 @pytest.mark.duckdb
