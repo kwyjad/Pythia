@@ -60,24 +60,29 @@ A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-runnin
 
 ### Continuous integration usage
 
-The `resolver-initial-backfill` GitHub Actions workflow reuses the helper to
-opportunistically load the export preview into the automated DuckDB bundle. The
-step sets the environment toggles above, confirms that `resolver/staging/idmc/`
-exists, and then runs `python -m resolver.cli.idmc_to_duckdb` with the staging
-directory. The invocation now uses the normalised `--db` flag and is wrapped in
-guards so empty staging or minor schema drift logs a warning instead of failing
-the workflow; the auxiliary write is best-effort and the freeze stage remains in
-charge of the canonical database state.
+The `resolver-initial-backfill` GitHub Actions workflow now calls the IDMC CLI
+directly in HELIX mode before the generic connector runner starts. That
+single-shot step inherits the backfill window, writes staged exports, and then
+sets `RESOLVER_SKIP_IDMC=1` so `scripts.ci.run_connectors` bypasses IDMC on the
+second pass. As a result the workflow summary reflects a single IDMC execution
+whose diagnostics explain whether HELIX served data from `gidd` or
+`idus/last-180-days`.
+
+Once the CLI has staged rows, the workflow invokes
+`python -m resolver.cli.idmc_to_duckdb --db "$RESOLVER_DB_URL"` to load the
+facts preview into DuckDB. The step now relies on the canonical `--db` flag and
+runs without a soft-fail wrapper, so any write error bubbles up and fails the
+job. The snapshot phase remains authoritative for the final dataset, but the
+auxiliary write must succeed to keep the backfill pipeline honest.
 
 The preceding "Export canonical facts" step still passes `--write-db 1` and the
 job's `RESOLVER_DB_URL` directly to `resolver.tools.export_facts`, seeding the
 DuckDB file before snapshot derivation begins. Each
 `resolver.tools.freeze_snapshot --write-db 1` invocation inside the snapshot loop
 continues to be the authoritative write path for backfill jobs. After the
-snapshots are frozen the workflow runs
-`python scripts/ci/duckdb_summary.py --db "$BACKFILL_DB_PATH"` and appends the
-resulting counts to the GitHub Step Summary so operators can verify the final
-row totals directly from the job output.
+snapshots are frozen the workflow appends `python scripts/ci/duckdb_summary.py
+--db "$BACKFILL_DB_PATH"` to the GitHub Step Summary so operators can verify the
+final row totals directly from the job output.
 
 The exporter invocation used by the workflow looks like this:
 

@@ -88,6 +88,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         help="DuckDB URL or path override (default: %(default)s)",
     )
     parser.add_argument(
+        "--db",
+        default=None,
+        help="Alias for --db-url; DuckDB URL or path",
+    )
+    parser.add_argument(
         "--out",
         default=str(DEFAULT_OUT),
         help="Directory for exporter diagnostics (default: %(default)s)",
@@ -121,7 +126,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    duckdb_url, duckdb_path = _normalize_db_url_arg(args.db_url)
+    db_arg = args.db if getattr(args, "db", None) else args.db_url
+    duckdb_url, duckdb_path = _normalize_db_url_arg(db_arg)
     writing_requested = bool(args.write_db)
     LOGGER.info(
         "idmc_to_duckdb.start | staging=%s out=%s duckdb_url=%s duckdb_path=%s",
@@ -263,8 +269,9 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
 
         if total_rows <= 0:
-            LOGGER.error("Verification failed: DuckDB contains no rows after export")
-            return 3
+            LOGGER.warning(
+                "Verification: DuckDB tables empty after export (flows may be empty)"
+            )
 
     staging_warnings = []
     if not args.facts_csv and not (staging_dir / "stock.csv").is_file():

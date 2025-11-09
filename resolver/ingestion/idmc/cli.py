@@ -32,6 +32,7 @@ from .diagnostics import (
     timings_block,
     to_ms,
     serialize_http_status_counts,
+    sync_rows_metrics,
     write_connectors_line,
     write_drop_reasons,
     write_sample_preview,
@@ -1363,6 +1364,7 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     rows_fetched = sum(len(frame) for frame in data.values())
+    rows_written_reported = rows
     http_rollup = diagnostics.get("http") or {}
     http_attempt_summary = diagnostics.get("http_attempt_summary") or {}
     cache_stats = diagnostics.get("cache") or {}
@@ -1399,7 +1401,8 @@ def main(argv: list[str] | None = None) -> int:
         "rows_fetched": rows_fetched,
         "rows_normalized": rows,
         "rows_resolution_ready": rows_resolution_ready,
-        "rows_written": rows,
+        "rows_written": rows_written_reported,
+        "helix_endpoint": diagnostics.get("helix_endpoint"),
         "window": {
             "start": window_start_iso,
             "end": window_end_iso,
@@ -1578,6 +1581,26 @@ def main(argv: list[str] | None = None) -> int:
         value or 0 for value in staged_counts_serializable.values() if value is not None
     )
     diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
+    rows_written_reported = int(total_staged_rows)
+    diagnostics_payload["rows_written"] = rows_written_reported
+    diagnostics_payload["rows"]["written"] = rows_written_reported
+
+    rows_fetched = int(rows_fetched)
+    rows = int(rows)
+    rows_written_reported = int(rows_written_reported)
+    diagnostics_payload = sync_rows_metrics(
+        diagnostics_payload,
+        fetched=rows_fetched,
+        normalized=rows,
+        written=rows_written_reported,
+    )
+    if isinstance(diagnostics, dict):
+        sync_rows_metrics(
+            diagnostics,
+            fetched=rows_fetched,
+            normalized=rows,
+            written=rows_written_reported,
+        )
 
     duckdb_env_flag = _env_truthy(os.getenv("WRITE_TO_DUCKDB"))
     duckdb_target = (
@@ -1606,10 +1629,14 @@ def main(argv: list[str] | None = None) -> int:
                 for name, value in staged_counts_serializable.items()
                 if value is not None
             }
-            client_for_metrics.metrics.fetched = int(rows_fetched)
-            client_for_metrics.metrics.normalized = int(rows)
-            client_for_metrics.metrics.written = int(total_staged_rows)
-            client_for_metrics.metrics.staged = staged_counts_int
+            metrics = getattr(client_for_metrics, "metrics", None)
+            if not isinstance(metrics, FetchMetrics):
+                metrics = FetchMetrics()
+                client_for_metrics.metrics = metrics
+            metrics.fetched = int(rows_fetched)
+            metrics.normalized = int(rows)
+            metrics.written = int(rows_written_reported)
+            metrics.staged = staged_counts_int
         except Exception:  # pragma: no cover - defensive update
             LOGGER.debug("Failed to update IDMC client metrics", exc_info=True)
 
@@ -1993,6 +2020,7 @@ def main(argv: list[str] | None = None) -> int:
         "notes_block": _format_bullets(notes_lines),
         "zero_rows_reason": zero_rows_reason_value or "n/a",
         "helix_block": helix_block,
+        "helix_endpoint": diagnostics.get("helix_endpoint"),
         "helix_last180": diagnostics.get("helix_last180") or None,
         "fallback_details": fallback_info if isinstance(fallback_info, Mapping) else None,
         "rows_fetched_total": int(rows_fetched),
