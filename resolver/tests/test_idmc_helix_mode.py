@@ -72,6 +72,10 @@ def test_idmc_helix_fetch_and_chunking(helix_fetch):
     assert diagnostics["helix"]["status"] == 200
     assert diagnostics["http_status_counts"] == {"2xx": 1, "4xx": 0, "5xx": 0}
     assert "client123" not in diagnostics["helix"].get("url", "")
+    assert diagnostics.get("helix_endpoint") == "gidd"
+    assert int(diagnostics.get("rows_fetched", 0)) >= frame.shape[0]
+    assert int(diagnostics.get("rows_normalized", 0)) >= frame.shape[0]
+    assert int(diagnostics.get("rows_written", 0)) >= frame.shape[0]
 
 
 def test_idmc_no_hdx_residuals(helix_fetch):

@@ -65,6 +65,7 @@ def test_gidd_404_then_idus_last180_200_writes_rows(
     assert diagnostics.get("helix_endpoint") == "idus_last180"
     assert diagnostics.get("raw_rows") == int(idus_frame.shape[0])
     assert diagnostics.get("rows") == int(frame.shape[0])
+    assert diagnostics.get("normalized_rows") == int(frame.shape[0])
     assert not diagnostics.get("zero_rows_reason")
     attempts = diagnostics.get("helix_attempts") or {}
     assert attempts.get("gidd", {}).get("status") == 404
@@ -141,5 +142,6 @@ def test_helix_both_empty_sets_zero_rows_reason(
     assert frame.empty
     assert diagnostics.get("helix_endpoint") == "idus_last180"
     assert diagnostics.get("zero_rows_reason") == "helix_empty"
+    assert diagnostics.get("normalized_rows") == 0
     attempts = diagnostics.get("helix_attempts") or {}
     assert "gidd" in attempts and "idus_last180" in attempts

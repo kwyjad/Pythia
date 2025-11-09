@@ -1090,6 +1090,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     fetch_ms = to_ms(tick() - fetch_start)
 
+    raw_frames = {
+        name: frame
+        for name, frame in data.items()
+        if isinstance(frame, pd.DataFrame)
+    }
+
     date_window = {"start": window_start_iso, "end": window_end_iso}
 
     normalize_start = tick()
@@ -1184,6 +1190,7 @@ def main(argv: list[str] | None = None) -> int:
         write_header_if_empty(stock_staging_path.as_posix())
 
     rows = len(tidy)
+    rows_normalized = rows
     buffer = io.StringIO()
     tidy.head(10).to_csv(buffer, index=False)
     preview_path = write_sample_preview("normalized", buffer.getvalue())
@@ -1363,8 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
             "config": str(config_path),
         }
 
-    rows_fetched = sum(len(frame) for frame in data.values())
-    rows_written_reported = rows
+    rows_fetched = sum(len(frame) for frame in raw_frames.values())
     http_rollup = diagnostics.get("http") or {}
     http_attempt_summary = diagnostics.get("http_attempt_summary") or {}
     cache_stats = diagnostics.get("cache") or {}
@@ -1399,9 +1405,9 @@ def main(argv: list[str] | None = None) -> int:
         "probe": probe_result,
         "timings": timings,
         "rows_fetched": rows_fetched,
-        "rows_normalized": rows,
+        "rows_normalized": rows_normalized,
         "rows_resolution_ready": rows_resolution_ready,
-        "rows_written": rows_written_reported,
+        "rows_written": None,
         "helix_endpoint": diagnostics.get("helix_endpoint"),
         "window": {
             "start": window_start_iso,
@@ -1562,7 +1568,7 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics_payload["rows_staged"] = staged_counts_serializable
     diagnostics_payload["rows"] = {
         "raw": rows_fetched,
-        "normalized": rows,
+        "normalized": rows_normalized,
         "resolution_ready": rows_resolution_ready,
         "staged": staged_counts_serializable,
     }
@@ -1581,25 +1587,24 @@ def main(argv: list[str] | None = None) -> int:
         value or 0 for value in staged_counts_serializable.values() if value is not None
     )
     diagnostics_payload["rows_staged_total"] = int(total_staged_rows)
-    rows_written_reported = int(total_staged_rows)
-    diagnostics_payload["rows_written"] = rows_written_reported
-    diagnostics_payload["rows"]["written"] = rows_written_reported
+    rows_written = int(total_staged_rows)
+    diagnostics_payload["rows_written"] = rows_written
+    diagnostics_payload["rows"]["written"] = rows_written
 
     rows_fetched = int(rows_fetched)
-    rows = int(rows)
-    rows_written_reported = int(rows_written_reported)
+    rows_normalized = int(rows_normalized)
     diagnostics_payload = sync_rows_metrics(
         diagnostics_payload,
         fetched=rows_fetched,
-        normalized=rows,
-        written=rows_written_reported,
+        normalized=rows_normalized,
+        written=rows_written,
     )
     if isinstance(diagnostics, dict):
         sync_rows_metrics(
             diagnostics,
             fetched=rows_fetched,
-            normalized=rows,
-            written=rows_written_reported,
+            normalized=rows_normalized,
+            written=rows_written,
         )
 
     duckdb_env_flag = _env_truthy(os.getenv("WRITE_TO_DUCKDB"))
@@ -1634,8 +1639,8 @@ def main(argv: list[str] | None = None) -> int:
                 metrics = FetchMetrics()
                 client_for_metrics.metrics = metrics
             metrics.fetched = int(rows_fetched)
-            metrics.normalized = int(rows)
-            metrics.written = int(rows_written_reported)
+            metrics.normalized = int(rows_normalized)
+            metrics.written = int(rows_written)
             metrics.staged = staged_counts_int
         except Exception:  # pragma: no cover - defensive update
             LOGGER.debug("Failed to update IDMC client metrics", exc_info=True)

@@ -62,6 +62,18 @@ after download. Diagnostics expose the selected endpoint via
 `helix_http_error` or `helix_empty` so it is obvious why HELIX produced zero
 rows in a given window.
 
+The ingestion summary now captures the real fetch/normalize/write counts even
+when HELIX takes the fallback path, populating `rows_fetched`,
+`rows_normalized`, and `rows_written` for the diagnostics table. The
+`resolver-initial-backfill` workflow cleans both `resolver/staging/` and
+`diagnostics/ingestion/` before each run, executes the HELIX single-shot
+unconditionally (skipping the legacy `RESOLVER_SKIP_IDMC` gate), and forces the
+`gidd` → `idus_last180` fallback order when the primary endpoint is empty. After
+exporting the staged files the `idmc_to_duckdb` helper appends a dedicated
+DuckDB verification block to the job summary via `--append-summary`, so the Step
+Summary always lists the inserted and updated row counts alongside the
+connector diagnostics.
+
 Fallback data sources occasionally surface ISO3 identifiers under alternate
 column names (for example `CountryISO3`). The connector normalizes these
 variants to a canonical `iso3` column before applying any country filters and

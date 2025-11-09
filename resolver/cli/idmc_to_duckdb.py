@@ -117,6 +117,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Fail if the exporter reports warnings",
     )
+    parser.add_argument(
+        "--append-summary",
+        default=None,
+        help="Optional file to append a markdown summary of DuckDB verification",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     level = getattr(logging, str(args.log_level).upper(), logging.INFO)
@@ -227,12 +232,15 @@ def run(argv: Sequence[str] | None = None) -> int:
     deltas_delta, deltas_total = _stats(db_stats.get("facts_deltas"))
     total_delta = resolved_delta + deltas_delta
 
+    def emit(message: str) -> None:
+        print(message)
+
     rows_message = f"✅ Wrote {total_delta} rows to DuckDB"
     if not writing_requested:
         rows_message += " (dry-run)"
-    print(rows_message)
-    print(f" - facts_resolved Δ={resolved_delta} total={resolved_total}")
-    print(f" - facts_deltas  Δ={deltas_delta} total={deltas_total}")
+    emit(rows_message)
+    emit(f" - facts_resolved Δ={resolved_delta} total={resolved_total}")
+    emit(f" - facts_deltas  Δ={deltas_delta} total={deltas_total}")
 
     total_rows = 0
     resolved_count = 0
@@ -260,7 +268,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             conn.close()
 
         total_rows = deltas_count + resolved_count
-        print(
+        emit(
             "Verification: facts_deltas={deltas} facts_resolved={resolved} total={total}".format(
                 deltas=deltas_count,
                 resolved=resolved_count,
@@ -284,17 +292,17 @@ def run(argv: Sequence[str] | None = None) -> int:
     )
 
     if collected_warnings:
-        print("Warnings:")
+        emit("Warnings:")
         for message in collected_warnings:
-            print(f" - {message}")
+            emit(f" - {message}")
     else:
-        print("Warnings: none")
+        emit("Warnings: none")
 
     exit_code = 0
     if collected_warnings and args.strict:
         exit_code = 2
 
-    print(
+    emit(
         (
             "Summary: resolved_total={resolved} deltas_total={deltas} total_rows={total} "
             "| delta_resolved={resolved_delta} delta_deltas={deltas_delta} exit={code}"
@@ -307,6 +315,35 @@ def run(argv: Sequence[str] | None = None) -> int:
             code=exit_code,
         )
     )
+
+    summary_path = args.append_summary
+    if summary_path:
+        summary_lines = [
+            "## IDMC — DuckDB verification",
+            "",
+        ]
+        status_line = "executed" if writing_requested else "dry-run"
+        summary_lines.append(f"- **Write mode:** {status_line}")
+        summary_lines.append(
+            f"- **Rows delta:** {total_delta} (facts_resolved Δ={resolved_delta}, facts_deltas Δ={deltas_delta})"
+        )
+        if writing_requested:
+            summary_lines.append(
+                f"- **Verification totals:** facts_resolved={resolved_count} facts_deltas={deltas_count} total={total_rows}"
+            )
+        if collected_warnings:
+            joined = "; ".join(collected_warnings)
+            summary_lines.append(f"- **Warnings:** {joined}")
+        else:
+            summary_lines.append("- **Warnings:** none")
+        summary_lines.append("")
+        try:
+            summary_target = Path(summary_path)
+            summary_target.parent.mkdir(parents=True, exist_ok=True)
+            with summary_target.open("a", encoding="utf-8") as handle:
+                handle.write("\n".join(summary_lines))
+        except OSError as exc:
+            LOGGER.warning("Failed to append DuckDB summary to %s: %s", summary_path, exc)
 
     return exit_code
 

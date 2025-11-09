@@ -125,33 +125,6 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
-      - name: Configure connector skips
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          python - <<'PY'
-          import os
-
-          def has_idmc_creds() -> bool:
-              return bool(os.getenv("IDMC_API_TOKEN", "").strip())
-
-          decisions = {
-              "RESOLVER_SKIP_IDMC": not has_idmc_creds(),
-          }
-
-          env_path = os.environ["GITHUB_ENV"]
-          with open(env_path, "a", encoding="utf-8") as env:
-              for key, should_skip in decisions.items():
-                  value = "1" if should_skip else "0"
-                  env.write(f"{key}={value}\n")
-                  state = "skipping" if should_skip else "enabled"
-                  print(f"{key}={value} ({state})")
-          PY
-
       - name: Probe DTM reachability
         shell: bash
         run: |
@@ -164,12 +137,17 @@ jobs:
           set -euo pipefail
           python -m scripts.ci.probe_idmc_reachability || true
 
+      - name: Clean staging & diagnostics
+        run: |
+          set -euo pipefail
+          rm -rf resolver/staging || true
+          rm -rf diagnostics/ingestion || true
+
       - name: Run IDMC (HELIX single-shot)
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' }}
         env:
           IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
           IDMC_HELIX_ENV: RELEASE
-          IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
           RESOLVER_OUTPUT_DIR: resolver/staging
           RESOLVER_EXPORT_ENABLE_FLOW: "1"
           LOG_LEVEL: ${{ inputs.log_level }}
@@ -179,11 +157,6 @@ jobs:
             set -x
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
-          fi
-          if [ "${RESOLVER_SKIP_IDMC:-0}" = "1" ]; then
-            echo "Skipping direct IDMC run (RESOLVER_SKIP_IDMC=1)"
-            echo "RESOLVER_SKIP_IDMC=1" >> "$GITHUB_ENV"
-            exit 0
           fi
           python -m resolver.ingestion.idmc.cli \
             --network-mode helix \
@@ -410,7 +383,9 @@ jobs:
             python -m resolver.cli.idmc_to_duckdb \
                 --staging-dir resolver/staging/idmc \
                 --out diagnostics/ingestion/export_preview \
-                --db "${RESOLVER_DB_URL}"
+                --db "${RESOLVER_DB_URL}" \
+                --write-db \
+                --append-summary diagnostics/ingestion/summary.md
           else
             echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
           fi
