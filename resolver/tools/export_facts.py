@@ -1443,6 +1443,29 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     )
     frame = normalize_series_semantics(frame)
 
+    # facts_deltas schema expects value_new/value_stock; exporters may only provide
+    # a generic "value" column for new-series rows, so populate the required
+    # columns before numeric coercion.
+    if "value_new" not in frame.columns:
+        frame["value_new"] = pd.NA
+    if "value_stock" not in frame.columns:
+        frame["value_stock"] = pd.NA
+
+    if "value" in frame.columns:
+        value_new_series = frame["value_new"]
+        missing_mask = value_new_series.isna() | (
+            value_new_series.astype(str).str.strip() == ""
+        )
+        if missing_mask.any():
+            new_mask = (
+                frame["series_semantics"].astype(str).str.lower().eq("new")
+            )
+            to_fill = missing_mask & new_mask
+            if to_fill.any():
+                frame.loc[to_fill, "value_new"] = pd.to_numeric(
+                    frame.loc[to_fill, "value"], errors="coerce"
+                )
+
     for column in DELTAS_DB_NUMERIC:
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
