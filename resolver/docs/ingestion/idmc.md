@@ -23,7 +23,9 @@ The command:
   per-month chunking is disabled for that mode. Diagnostics now record the
   selected HELIX endpoint (`helix_endpoint`) along with per-attempt metadata,
   and the summary counters (`rows_fetched`, `rows_normalized`, `rows_written`)
-  reflect the rows written after any HELIX fallback.
+  reflect the rows written after any HELIX fallback. When both HELIX calls fail
+  the connector records `zero_rows_reason=helix_http_error`; a successful fetch
+  that yields an empty window reports `zero_rows_reason=helix_empty`.
 
 The `resolver-initial-backfill` GitHub Actions workflow now calls the CLI
 directly with `--network-mode helix` before launching the generic connector
@@ -34,7 +36,11 @@ staging exports exist the workflow writes them to DuckDB via
 `python -m resolver.cli.idmc_to_duckdb --db "$RESOLVER_DB_URL"` and appends the
 post-freeze `scripts/ci/duckdb_summary.py` report to the GitHub Step Summary so
 operators can confirm inserted and updated row counts alongside the usual IDMC
-diagnostics.
+diagnostics. Each ingest run begins by clearing `resolver/staging/` and
+`diagnostics/ingestion/` to avoid stale artifacts, forces the HELIX fallback
+order (`gidd` → `idus_last180`) regardless of `IDMC_API_TOKEN`, and appends a
+DuckDB verification block (via `--append-summary`) describing the inserted
+rows.
 
 The first ten normalized rows are saved to
 `diagnostics/ingestion/idmc/normalized_preview.csv` and the drop reason

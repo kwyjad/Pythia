@@ -141,6 +141,35 @@ sources:
     dedupe:
       keys: [iso3, as_of_date, metric]
       keep: last
+  - name: idmc_facts_flow
+    match:
+      filename_regex: "(?i)(?:^|.*/resolver/staging/idmc/)idmc_facts_flow\\.parquet$"
+      required_columns: [iso3, as_of_date, value]
+    map:
+      iso3:
+        from: iso3
+        ops: [trim, uppercase]
+      as_of_date:
+        from: as_of_date
+        ops: [to_date]
+      metric:
+        const: new_displacements
+      value:
+        from: value
+        ops: [to_number]
+      series_semantics:
+        const: new
+      semantics:
+        const: new
+      source:
+        from: source
+        ops: [trim]
+    filters:
+      - keep_if_not_null: [iso3, as_of_date, value]
+      - keep_if_positive: [value]
+    dedupe:
+      keys: [iso3, as_of_date, metric]
+      keep: last
   - name: idmc_stock
     allow_empty: true
     match:

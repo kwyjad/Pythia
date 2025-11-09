@@ -1624,6 +1624,14 @@ def _fetch_helix_chain(
     filtered_gidd = filtered_gidd.reset_index(drop=True)
     diagnostics["rows"] = int(filtered_gidd.shape[0])
     diagnostics["columns"] = list(filtered_gidd.columns)
+    diagnostics["normalized_rows"] = int(filtered_gidd.shape[0])
+
+    LOGGER.info(
+        "helix.fetch.gidd | status=%s raw_rows=%s rows_after_filter=%s",
+        diagnostics.get("status"),
+        diagnostics.get("raw_rows"),
+        diagnostics.get("rows"),
+    )
 
     status_value = diagnostics.get("status")
     success_status = isinstance(status_value, int) and 200 <= status_value < 300
@@ -1663,6 +1671,13 @@ def _fetch_helix_chain(
     diagnostics["columns"] = list(normalized_filtered.columns)
     diagnostics["normalized_rows"] = int(normalized_filtered.shape[0])
 
+    LOGGER.info(
+        "helix.fetch.idus_last180 | status=%s raw_rows=%s normalized_rows=%s",
+        idus_status,
+        diagnostics.get("raw_rows"),
+        diagnostics.get("normalized_rows"),
+    )
+
     status_ok = isinstance(idus_status, int) and 200 <= idus_status < 300
     if status_ok:
         if normalized_filtered.empty:
@@ -1672,6 +1687,11 @@ def _fetch_helix_chain(
         return normalized_filtered.reset_index(drop=True), diagnostics
 
     diagnostics["zero_rows_reason"] = "helix_http_error"
+    LOGGER.warning(
+        "helix.fetch.idus_last180_failed | status=%s reason=%s",
+        idus_status,
+        diagnostics.get("zero_rows_reason"),
+    )
     empty_columns = (
         list(normalized_filtered.columns)
         if not normalized_filtered.empty

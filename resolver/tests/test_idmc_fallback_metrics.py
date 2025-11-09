@@ -79,6 +79,7 @@ def test_idmc_fallback_metrics(monkeypatch, tmp_path):
         "rows_fetched": 0,
         "rows_normalized": 0,
         "rows_written": 0,
+        "helix_endpoint": "idus_last180",
     }
 
     monkeypatch.setattr(idmc_cli._client, "fetch", lambda *_args, **_kwargs: ({"monthly_flow": fallback_frame}, diagnostics))
@@ -89,7 +90,14 @@ def test_idmc_fallback_metrics(monkeypatch, tmp_path):
 
     monkeypatch.setattr(idmc_cli, "normalize_all", _fake_normalize)
     monkeypatch.setattr(idmc_cli, "maybe_map_hazards", lambda frame, *_args, **_kwargs: (frame, []))
-    monkeypatch.setattr(idmc_cli, "write_connectors_line", lambda payload: payload)
+    captured_connectors: dict[str, object] = {}
+
+    def _capture_connector(payload):
+        captured_connectors.clear()
+        captured_connectors.update(payload)
+        return payload
+
+    monkeypatch.setattr(idmc_cli, "write_connectors_line", _capture_connector)
     monkeypatch.setattr(idmc_cli, "build_provenance", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(idmc_cli, "write_json", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(idmc_cli, "write_why_zero", lambda *_args, **_kwargs: None)
@@ -114,6 +122,15 @@ def test_idmc_fallback_metrics(monkeypatch, tmp_path):
     assert metrics.normalized > 0
     assert metrics.written > 0
     assert metrics.staged.get("flow.csv", 0) > 0
+
+    assert int(captured_connectors.get("rows_fetched", 0)) > 0
+    assert int(captured_connectors.get("rows_normalized", 0)) > 0
+    assert int(captured_connectors.get("rows_written", 0)) > 0
+    assert captured_connectors.get("helix_endpoint") == "idus_last180"
+    rows_block = captured_connectors.get("rows") or {}
+    assert int(rows_block.get("raw", 0)) > 0
+    assert int(rows_block.get("normalized", 0)) > 0
+    assert int(rows_block.get("written", 0)) > 0
 
     flow_path = Path("resolver/staging/idmc/flow.csv")
     parquet_path = Path("artifacts/idmc/idmc_facts_flow.parquet")

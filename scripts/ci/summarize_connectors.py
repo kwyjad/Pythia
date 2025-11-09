@@ -464,6 +464,12 @@ def _collect_export_summary(
     summary["db_stats"] = db_stats
     duckdb_url, duckdb_path = _resolve_duckdb_target()
     window_bounds = _detect_window_bounds()
+    duckdb_exists = False
+    if duckdb_path:
+        try:
+            duckdb_exists = Path(duckdb_path).exists()
+        except OSError:
+            duckdb_exists = False
     duckdb_info: Dict[str, Any] = {
         "db_url": duckdb_url,
         "db_path": duckdb_path,
@@ -473,11 +479,14 @@ def _collect_export_summary(
         "table_stats": db_stats,
         "breakdown": {},
         "error": None,
+        "exists": duckdb_exists,
     }
-    if duckdb_path and duckdb_info["tables"]:
+    if duckdb_exists and duckdb_info["tables"]:
         breakdown, duckdb_error = _collect_duckdb_breakdown(duckdb_path, duckdb_info["tables"], window_bounds)
         duckdb_info["breakdown"] = breakdown
         duckdb_info["error"] = duckdb_error
+    elif not duckdb_exists:
+        duckdb_info["note"] = "not created yet; will be generated in the 'Derive & freeze' job."
     summary["duckdb"] = duckdb_info
     return summary
 
@@ -486,10 +495,14 @@ def _render_duckdb_section(duckdb_info: Mapping[str, Any] | None) -> List[str]:
     info = dict(duckdb_info or {})
     table_stats = info.get("table_stats") or {}
     error = info.get("error")
-    if not table_stats and not error:
+    note = info.get("note")
+    if not table_stats and not error and not note:
         return []
 
     lines = ["## DuckDB", ""]
+    if note:
+        lines.append(f"- **Status:** {note}")
+        return lines
     if error:
         lines.append(f"- **Status:** {error}")
     else:
