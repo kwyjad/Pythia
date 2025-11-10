@@ -330,13 +330,12 @@ def run(argv: Sequence[str] | None = None) -> int:
     total_rows = 0
     resolved_count = 0
     deltas_count = 0
-    zero_prepared = (
-        (prepared_resolved is None or prepared_resolved.empty)
-        and (prepared_deltas is None or prepared_deltas.empty)
-    )
+    writing_deltas = prepared_deltas is not None and not prepared_deltas.empty
+    writing_resolved = prepared_resolved is not None and not prepared_resolved.empty
+    zero_prepared = not writing_resolved and not writing_deltas
     write_results: dict[str, duckdb_io.UpsertResult] = {}
-    written_resolved = 0
-    written_deltas = 0
+    inserted_resolved = 0
+    inserted_deltas = 0
     if writing_requested:
         if zero_prepared:
             LOGGER.error("write_db requested but no canonical facts rows found")
@@ -350,7 +349,10 @@ def run(argv: Sequence[str] | None = None) -> int:
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
                 return 3
             try:
-                if prepared_deltas is not None and not prepared_deltas.empty:
+                pre_deltas = _safe_count(conn, "facts_deltas") if writing_deltas else 0
+                pre_resolved = _safe_count(conn, "facts_resolved") if writing_resolved else 0
+
+                if writing_deltas:
                     delta_keys = duckdb_io.resolve_upsert_keys("facts_deltas", prepared_deltas)
                     result = duckdb_io.upsert_dataframe(
                         conn,
@@ -359,8 +361,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                         keys=delta_keys,
                     )
                     write_results["facts_deltas"] = result
-                    written_deltas = int(result.rows_written)
-                if prepared_resolved is not None and not prepared_resolved.empty:
+
+                if writing_resolved:
                     resolved_keys = duckdb_io.resolve_upsert_keys(
                         "facts_resolved", prepared_resolved
                     )
@@ -371,9 +373,13 @@ def run(argv: Sequence[str] | None = None) -> int:
                         keys=resolved_keys,
                     )
                     write_results["facts_resolved"] = result
-                    written_resolved = int(result.rows_written)
+
                 deltas_count = _safe_count(conn, "facts_deltas")
                 resolved_count = _safe_count(conn, "facts_resolved")
+                if writing_deltas:
+                    inserted_deltas = max(deltas_count - pre_deltas, 0)
+                if writing_resolved:
+                    inserted_resolved = max(resolved_count - pre_resolved, 0)
                 total_rows = deltas_count + resolved_count
                 if total_rows <= 0:
                     LOGGER.warning(
@@ -408,8 +414,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     def emit(message: str) -> None:
         print(message)
 
-    total_written = int(written_deltas or 0) + int(written_resolved or 0)
-    rows_message = f"✅ Wrote {total_written} rows to DuckDB"
+    inserted_total = int(inserted_deltas or 0) + int(inserted_resolved or 0)
+    rows_message = f"✅ Wrote {inserted_total} rows to DuckDB"
     if not writing_requested:
         rows_message += " (dry-run)"
     emit(rows_message)
@@ -445,7 +451,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         emit("Warnings: none")
 
     exit_code = 0
-    if writing_requested and total_written == 0:
+    if writing_requested and inserted_total == 0:
         exit_code = 4
     if collected_warnings and args.strict and exit_code == 0:
         exit_code = 2
