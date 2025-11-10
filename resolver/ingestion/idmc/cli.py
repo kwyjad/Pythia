@@ -1062,6 +1062,12 @@ def main(argv: list[str] | None = None) -> int:
             "window": {"start": None, "end": None, "source": window_source},
             "network_mode": network_mode,
             "empty_policy": empty_policy,
+            "counts": {
+                "fetched": 0,
+                "normalized": 0,
+                "written": 0,
+                "staged": 0,
+            },
         }
         write_connectors_line(connectors_payload)
         if empty_policy == "fail":
@@ -1617,6 +1623,57 @@ def main(argv: list[str] | None = None) -> int:
             written=rows_written,
         )
 
+    counts_payload = {
+        "fetched": rows_fetched,
+        "normalized": rows_normalized,
+        "written": rows_written,
+        "staged": int(total_staged_rows),
+    }
+    diagnostics_payload["counts"] = counts_payload
+
+    extras_payload: Dict[str, Any] = dict(diagnostics_payload.get("extras") or {})
+    extras_payload.update(
+        {
+            "rows_fetched": rows_fetched,
+            "rows_normalized": rows_normalized,
+            "rows_written": rows_written,
+            "rows_resolution_ready": int(rows_resolution_ready),
+            "staging_counts": staged_counts_serializable,
+            "staging_total": int(total_staged_rows),
+        }
+    )
+    export_paths = export_details.get("paths", {}) if isinstance(export_details, Mapping) else {}
+    if isinstance(export_paths, Mapping):
+        extras_payload["export_paths"] = {
+            key: (str(value) if value is not None else None)
+            for key, value in export_paths.items()
+        }
+    extras_payload["export_rows"] = int(export_details.get("rows", 0) or 0)
+    extras_payload["export_enabled"] = bool(export_details.get("enabled"))
+    export_report_path = Path("diagnostics/ingestion/export_preview/export_report.json")
+    extras_payload["export_report_path"] = export_report_path.as_posix()
+
+    summary_json_path = Path(diagnostics_dir()) / "summary.json"
+    summary_json_payload = {
+        "counts": counts_payload,
+        "rows": diagnostics_payload.get("rows", {}),
+        "rows_staged_total": int(total_staged_rows),
+        "rows_resolution_ready": int(rows_resolution_ready),
+        "staging_counts": staged_counts_serializable,
+        "export": {
+            "rows": extras_payload["export_rows"],
+            "enabled": extras_payload["export_enabled"],
+            "paths": extras_payload.get("export_paths", {}),
+        },
+    }
+    try:
+        write_json(summary_json_path.as_posix(), summary_json_payload)
+        extras_payload["summary_json"] = summary_json_path.as_posix()
+    except Exception:  # pragma: no cover - diagnostics best-effort
+        LOGGER.debug("Failed to write IDMC summary JSON", exc_info=True)
+
+    diagnostics_payload["extras"] = extras_payload
+
     duckdb_env_flag = _env_truthy(os.getenv("WRITE_TO_DUCKDB"))
     duckdb_target = (
         os.getenv("RESOLVER_DB_URL")
@@ -2044,6 +2101,8 @@ def main(argv: list[str] | None = None) -> int:
         "staged_counts": staged_counts_serializable,
         "export_details": export_details,
     }
+    summary_context["counts"] = counts_payload
+    summary_context["extras"] = extras_payload
     summary_path = _write_summary(summary_context)
     if summary_path:
         samples["summary"] = summary_path.as_posix()
