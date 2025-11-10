@@ -581,7 +581,10 @@ def _collect_export_summary(
         "error": None,
         "exists": duckdb_exists,
     }
-    if duckdb_exists and duckdb_info["tables"]:
+    ingest_job = (os.environ.get("GITHUB_JOB") or "").strip().lower() == "ingest"
+    if ingest_job:
+        duckdb_info["note"] = "DB verification deferred: will run post-write in derive-freeze."
+    elif duckdb_exists and duckdb_info["tables"]:
         breakdown, duckdb_error = _collect_duckdb_breakdown(duckdb_path, duckdb_info["tables"], window_bounds)
         duckdb_info["breakdown"] = breakdown
         duckdb_info["error"] = duckdb_error

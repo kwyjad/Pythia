@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -22,26 +23,6 @@ def _import_duckdb():  # pragma: no cover - import guarded in tests
     return duckdb
 
 
-def _normalise_db_target(raw: str | None) -> tuple[str | None, str | None]:
-    candidate = (raw or "").strip()
-    if not candidate:
-        return None, None
-    if candidate.lower().startswith("duckdb://"):
-        if candidate.lower().startswith("duckdb:///"):
-            fs_part = candidate[len("duckdb:///") :]
-            try:
-                resolved = Path(fs_part).expanduser().resolve()
-            except OSError:
-                resolved = Path(fs_part).expanduser()
-            return resolved.as_posix(), f"duckdb:///{resolved.as_posix()}"
-        return candidate, candidate
-    try:
-        resolved_path = Path(candidate).expanduser().resolve()
-    except OSError:
-        resolved_path = Path(candidate).expanduser()
-    return resolved_path.as_posix(), f"duckdb:///{resolved_path.as_posix()}"
-
-
 def _iter_tables(raw: Sequence[str] | str | None) -> Iterable[str]:
     default = ("facts_raw", "facts_resolved", "facts_deltas")
     if raw is None:
@@ -51,6 +32,71 @@ def _iter_tables(raw: Sequence[str] | str | None) -> Iterable[str]:
     else:
         items = [str(part).strip() for part in raw if str(part).strip()]
     return items or default
+
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _is_safe_identifier(name: str) -> bool:
+    return bool(_IDENTIFIER_RE.match(name))
+
+
+def _table_columns(conn, table: str) -> list[str]:
+    try:
+        cursor = conn.execute(f"SELECT * FROM {table} LIMIT 0")
+    except Exception:
+        return []
+    description = getattr(cursor, "description", None)
+    if not description:
+        return []
+    return [str(col[0]) for col in description if col and col[0]]
+
+
+def _build_expr(columns: list[str], candidates: Sequence[str], fallback: str = "''") -> str:
+    available = [name for name in candidates if name in columns]
+    if not available:
+        return fallback
+    inner = ", ".join(available + [fallback])
+    return f"COALESCE({inner})"
+
+
+def _collect_breakdown(conn, tables: Iterable[str], limit: int = 20) -> list[tuple[str, str, str, str, int]]:
+    rows: list[tuple[str, str, str, str, int]] = []
+    for table in tables:
+        if not table or not _is_safe_identifier(table):
+            continue
+        columns = _table_columns(conn, table)
+        if not columns:
+            continue
+        source_expr = _build_expr(columns, ("source_id", "source"))
+        metric_expr = _build_expr(columns, ("metric",))
+        semantics_expr = _build_expr(columns, ("series_semantics", "semantics"))
+        query = (
+            "SELECT {table} AS table_name, {source} AS source, {metric} AS metric, "
+            "{semantics} AS semantics, COUNT(*) AS rows FROM {table} GROUP BY 1,2,3,4 "
+            "ORDER BY rows DESC, source, metric, semantics LIMIT ?"
+        ).format(
+            table=table,
+            source=source_expr,
+            metric=metric_expr,
+            semantics=semantics_expr,
+        )
+        try:
+            entries = conn.execute(query, [limit]).fetchall()
+        except Exception:
+            continue
+        for row in entries:
+            try:
+                table_name = str(row[0] or table)
+                source = str(row[1] or "")
+                metric = str(row[2] or "")
+                semantics = str(row[3] or "")
+                count = int(row[4])
+            except Exception:
+                continue
+            rows.append((table_name, source, metric, semantics, count))
+    rows.sort(key=lambda item: (-item[4], item[0], item[1], item[2], item[3]))
+    return rows[:limit]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -65,7 +111,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     db_arg = args.db or args.db_url or os.environ.get("RESOLVER_DB_URL") or os.environ.get("RESOLVER_DB_PATH")
-    db_path, canonical_url = _normalise_db_target(db_arg)
+    canonical_url: str | None = None
+    db_path: str | None = None
+    if db_arg:
+        try:
+            canonical_url, db_path = duckdb_io.normalize_duckdb_target(db_arg)
+        except Exception:
+            canonical_url = None
+            db_path = None
 
     if _import_duckdb() is None:
         return 0
@@ -84,7 +137,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        conn = duckdb_io.get_db(canonical_url or db_path)
+        target = canonical_url or db_path
+        conn = duckdb_io.get_db(target)
     except Exception as exc:  # pragma: no cover - connection failure
         shown = canonical_url or db_path
         print(f"- **Status:** failed to open `{shown}`: {exc}")
@@ -111,11 +165,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("| --- | ---: |")
         for table, count in rows:
             print(f"| {table} | {count} |")
+
+        breakdown = _collect_breakdown(conn, (table for table, _ in rows))
+        if breakdown:
+            print("")
+            print("### Rows by source / metric / semantics")
+            print("")
+            print("| table | source | metric | semantics | rows |")
+            print("| --- | --- | --- | --- | ---: |")
+            for table_name, source, metric, semantics, count in breakdown:
+                safe_source = source or "∅"
+                safe_metric = metric or "∅"
+                safe_semantics = semantics or "∅"
+                print(
+                    f"| {table_name} | {safe_source} | {safe_metric} | {safe_semantics} | {count} |"
+                )
     finally:
-        try:
-            conn.close()
-        except Exception:  # pragma: no cover - best effort
-            pass
+        duckdb_io.close_db(conn)
     return 0
 
 

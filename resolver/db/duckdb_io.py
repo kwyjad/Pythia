@@ -1173,6 +1173,12 @@ def _normalize_duckdb_target(path_or_url: str | None) -> tuple[str, str]:
     return url, path
 
 
+def normalize_duckdb_target(path_or_url: str | None) -> tuple[str, str]:
+    """Public wrapper returning the canonical DuckDB URL and path."""
+
+    return _normalize_duckdb_target(path_or_url)
+
+
 def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     """Return a DuckDB connection for the given path or URL."""
 
@@ -1255,6 +1261,54 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     conn.execute("PRAGMA threads=4")
     conn.execute("PRAGMA enable_progress_bar=false")
     return conn
+
+
+def close_db(conn: "duckdb.DuckDBPyConnection" | None) -> None:
+    """Close ``conn`` and evict it from the local cache when possible."""
+
+    if conn is None:
+        return
+    try:
+        conn.close()
+    finally:
+        for key, cached in list(_DB_CACHE.items()):
+            if cached is conn:
+                _DB_CACHE.pop(key, None)
+
+
+def write_facts_tables(
+    conn: "duckdb.DuckDBPyConnection",
+    *,
+    facts_resolved: "pd.DataFrame | None" = None,
+    facts_deltas: "pd.DataFrame | None" = None,
+) -> dict[str, UpsertResult]:
+    """Persist ``facts_resolved``/``facts_deltas`` frames into DuckDB."""
+
+    results: dict[str, UpsertResult] = {}
+    if conn is None:
+        return results
+
+    init_schema(conn)
+
+    if facts_resolved is not None and not facts_resolved.empty:
+        written_resolved = upsert_dataframe(
+            conn,
+            "facts_resolved",
+            facts_resolved,
+            keys=FACTS_RESOLVED_KEY_COLUMNS,
+        )
+        results["facts_resolved"] = written_resolved
+
+    if facts_deltas is not None and not facts_deltas.empty:
+        written_deltas = upsert_dataframe(
+            conn,
+            "facts_deltas",
+            facts_deltas,
+            keys=FACTS_DELTAS_KEY_COLUMNS,
+        )
+        results["facts_deltas"] = written_deltas
+
+    return results
 
 
 def init_schema(
