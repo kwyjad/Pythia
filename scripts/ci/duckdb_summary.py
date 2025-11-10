@@ -74,7 +74,7 @@ def _collect_breakdown(conn, tables: Iterable[str], limit: int = 20) -> list[tup
         query = (
             "SELECT {table} AS table_name, {source} AS source, {metric} AS metric, "
             "{semantics} AS semantics, COUNT(*) AS count FROM {table} GROUP BY 1,2,3,4 "
-            "ORDER BY count DESC, source, metric, semantics LIMIT ?"
+            "ORDER BY 1,2,3,4"
         ).format(
             table=table,
             source=source_expr,
@@ -82,7 +82,7 @@ def _collect_breakdown(conn, tables: Iterable[str], limit: int = 20) -> list[tup
             semantics=semantics_expr,
         )
         try:
-            entries = conn.execute(query, [limit]).fetchall()
+            entries = conn.execute(query).fetchall()
         except Exception:
             continue
         for row in entries:
@@ -95,8 +95,10 @@ def _collect_breakdown(conn, tables: Iterable[str], limit: int = 20) -> list[tup
             except Exception:
                 continue
             rows.append((table_name, source, metric, semantics, count))
-    rows.sort(key=lambda item: (-item[4], item[0], item[1], item[2], item[3]))
-    return rows[:limit]
+    rows.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    if limit > 0:
+        return rows[:limit]
+    return rows
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -162,7 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print("")
         print("| table | rows |")
-        print("| --- | ---: |")
+        print("| --- | --- |")
         for table, count in rows:
             print(f"| {table} | {count} |")
 
@@ -172,7 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("### Rows by source / metric / semantics")
             print("")
             print("| table | source | metric | semantics | count |")
-            print("| --- | --- | --- | --- | ---: |")
+            print("| --- | --- | --- | --- | --- |")
             for table_name, source, metric, semantics, count in breakdown:
                 print(f"| {table_name} | {source} | {metric} | {semantics} | {count} |")
     finally:

@@ -206,8 +206,12 @@ def run(argv: Sequence[str] | None = None) -> int:
                 except Exception:  # pragma: no cover - diagnostics only
                     LOGGER.debug("Failed to backfill dataframe from %s", csv_path, exc_info=True)
         db_stats = exporter_result.db_stats or {}
-        prepared_resolved = exporter_result.resolved_df or prepared_resolved
-        prepared_deltas = exporter_result.deltas_df or prepared_deltas
+        if exporter_result.resolved_df is not None:
+            if prepared_resolved is None or not exporter_result.resolved_df.empty:
+                prepared_resolved = exporter_result.resolved_df
+        if exporter_result.deltas_df is not None:
+            if prepared_deltas is None or not exporter_result.deltas_df.empty:
+                prepared_deltas = exporter_result.deltas_df
 
     total_rows = 0
     resolved_count = 0
