@@ -166,19 +166,15 @@ def run(argv: Sequence[str] | None = None) -> int:
             LOGGER.error("Failed to read facts.csv", exc_info=True)
             print(f"Failed to read facts.csv: {exc}", file=sys.stderr)
             return 2
-        if writing_requested:
-            prepared_resolved = export_facts._prepare_resolved_for_db(  # type: ignore[attr-defined]
-                facts_dataframe
-            )
-            prepared_deltas = export_facts._prepare_deltas_for_db(  # type: ignore[attr-defined]
-                facts_dataframe
-            )
+        prepared_resolved, prepared_deltas = export_facts.prepare_duckdb_tables(
+            facts_dataframe
+        )
         db_stats = {}
     else:
         exporter_args = dict(
             inp=staging_dir,
             out_dir=out_dir,
-            write_db="1" if writing_requested else "0",
+            write_db="0",
             db_url=duckdb_url,
             only_strategy="idmc-staging",
         )
@@ -210,65 +206,64 @@ def run(argv: Sequence[str] | None = None) -> int:
                 except Exception:  # pragma: no cover - diagnostics only
                     LOGGER.debug("Failed to backfill dataframe from %s", csv_path, exc_info=True)
         db_stats = exporter_result.db_stats or {}
-        if writing_requested and facts_dataframe is not None:
-            prepared_resolved = export_facts._prepare_resolved_for_db(  # type: ignore[attr-defined]
-                facts_dataframe
-            )
-            prepared_deltas = export_facts._prepare_deltas_for_db(  # type: ignore[attr-defined]
-                facts_dataframe
-            )
+        prepared_resolved = exporter_result.resolved_df or prepared_resolved
+        prepared_deltas = exporter_result.deltas_df or prepared_deltas
 
     total_rows = 0
     resolved_count = 0
     deltas_count = 0
+    zero_facts = facts_dataframe is None or facts_dataframe.empty
+    write_results: dict[str, duckdb_io.UpsertResult] = {}
     if writing_requested:
-        if facts_dataframe is None or facts_dataframe.empty:
+        if zero_facts:
             LOGGER.error("write_db requested but no canonical facts rows found")
             print("No canonical facts rows available for DuckDB write", file=sys.stderr)
-            return 4
-        try:
-            conn = duckdb_io.get_db(duckdb_url)
-        except duckdb.Error as exc:
-            LOGGER.error("Writer connection failed", exc_info=True)
-            print(f"DuckDB write failed: {exc}", file=sys.stderr)
-            return 3
-        try:
-            write_results = duckdb_io.write_facts_tables(
-                conn,
-                facts_resolved=prepared_resolved,
-                facts_deltas=prepared_deltas,
-            )
-            if write_results:
-                merged_stats = dict(db_stats)
-                merged_stats.update({name: result.to_dict() for name, result in write_results.items()})
-                db_stats = merged_stats
-        except duckdb.Error as exc:
-            LOGGER.error("DuckDB upsert failed", exc_info=True)
-            print(f"DuckDB write failed: {exc}", file=sys.stderr)
-            duckdb_io.close_db(conn)
-            return 3
-        except Exception as exc:
-            LOGGER.error("DuckDB write encountered an unexpected error", exc_info=True)
-            print(f"DuckDB write failed: {exc}", file=sys.stderr)
-            duckdb_io.close_db(conn)
-            return 3
-        try:
-            deltas_count = _safe_count(conn, "facts_deltas")
-            resolved_count = _safe_count(conn, "facts_resolved")
-        except duckdb.Error as exc:
-            LOGGER.error("Verification query failed", exc_info=True)
-            print(f"Verification failed: {exc}", file=sys.stderr)
-            duckdb_io.close_db(conn)
-            return 3
-        finally:
-            duckdb_io.close_db(conn)
+        else:
+            conn = None
+            try:
+                conn = duckdb_io.get_db(duckdb_url)
+            except duckdb.Error as exc:
+                LOGGER.error("Writer connection failed", exc_info=True)
+                print(f"DuckDB write failed: {exc}", file=sys.stderr)
+                return 3
+            try:
+                write_results = duckdb_io.write_facts_tables(
+                    conn,
+                    facts_resolved=prepared_resolved,
+                    facts_deltas=prepared_deltas,
+                )
+            except duckdb.Error as exc:
+                LOGGER.error("DuckDB upsert failed", exc_info=True)
+                print(f"DuckDB write failed: {exc}", file=sys.stderr)
+                duckdb_io.close_db(conn)
+                return 3
+            except Exception as exc:
+                LOGGER.error("DuckDB write encountered an unexpected error", exc_info=True)
+                print(f"DuckDB write failed: {exc}", file=sys.stderr)
+                duckdb_io.close_db(conn)
+                return 3
+            try:
+                deltas_count = _safe_count(conn, "facts_deltas")
+                resolved_count = _safe_count(conn, "facts_resolved")
+            except duckdb.Error as exc:
+                LOGGER.error("Verification query failed", exc_info=True)
+                print(f"Verification failed: {exc}", file=sys.stderr)
+                duckdb_io.close_db(conn)
+                return 3
+            finally:
+                duckdb_io.close_db(conn)
 
-        total_rows = deltas_count + resolved_count
+            total_rows = deltas_count + resolved_count
 
-        if total_rows <= 0:
-            LOGGER.warning(
-                "Verification: DuckDB tables empty after export (flows may be empty)"
-            )
+            if total_rows <= 0:
+                LOGGER.warning(
+                    "Verification: DuckDB tables empty after export (flows may be empty)"
+                )
+
+    if write_results:
+        merged_stats = dict(db_stats)
+        merged_stats.update({name: result.to_dict() for name, result in write_results.items()})
+        db_stats = merged_stats
     def _stats(values: dict[str, object] | None) -> tuple[int, int]:
         if not values:
             return 0, 0
@@ -317,7 +312,9 @@ def run(argv: Sequence[str] | None = None) -> int:
         emit("Warnings: none")
 
     exit_code = 0
-    if collected_warnings and args.strict:
+    if writing_requested and zero_facts:
+        exit_code = 4
+    if collected_warnings and args.strict and exit_code == 0:
         exit_code = 2
 
     emit(

@@ -73,8 +73,8 @@ def _collect_breakdown(conn, tables: Iterable[str], limit: int = 20) -> list[tup
         semantics_expr = _build_expr(columns, ("series_semantics", "semantics"))
         query = (
             "SELECT {table} AS table_name, {source} AS source, {metric} AS metric, "
-            "{semantics} AS semantics, COUNT(*) AS rows FROM {table} GROUP BY 1,2,3,4 "
-            "ORDER BY rows DESC, source, metric, semantics LIMIT ?"
+            "{semantics} AS semantics, COUNT(*) AS count FROM {table} GROUP BY 1,2,3,4 "
+            "ORDER BY count DESC, source, metric, semantics LIMIT ?"
         ).format(
             table=table,
             source=source_expr,
@@ -171,15 +171,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("")
             print("### Rows by source / metric / semantics")
             print("")
-            print("| table | source | metric | semantics | rows |")
+            print("| table | source | metric | semantics | count |")
             print("| --- | --- | --- | --- | ---: |")
             for table_name, source, metric, semantics, count in breakdown:
-                safe_source = source or "∅"
-                safe_metric = metric or "∅"
-                safe_semantics = semantics or "∅"
-                print(
-                    f"| {table_name} | {safe_source} | {safe_metric} | {safe_semantics} | {count} |"
-                )
+                print(f"| {table_name} | {source} | {metric} | {semantics} | {count} |")
     finally:
         duckdb_io.close_db(conn)
     return 0

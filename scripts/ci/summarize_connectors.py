@@ -13,6 +13,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import certifi
 
+from resolver.db import duckdb_io
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REASON_HISTOGRAM_LIMIT = 5
 
@@ -100,12 +102,7 @@ def _collect_duckdb_breakdown(
     window: Mapping[str, str | None],
 ) -> Tuple[Dict[str, Any], str | None]:
     try:
-        import duckdb  # type: ignore[import-not-found]
-    except Exception as exc:  # pragma: no cover - optional dependency
-        return {}, f"duckdb import failed: {exc}"
-
-    try:
-        conn = duckdb.connect(db_path, read_only=True)
+        conn = duckdb_io.get_db(db_path)
     except Exception as exc:  # pragma: no cover - defensive
         return {}, f"duckdb connect failed: {exc}"
 
@@ -166,10 +163,7 @@ def _collect_duckdb_breakdown(
                 ],
             }
     finally:
-        try:
-            conn.close()
-        except Exception:  # pragma: no cover - defensive
-            pass
+        duckdb_io.close_db(conn)
     return breakdown, error
 
 
@@ -581,7 +575,8 @@ def _collect_export_summary(
         "error": None,
         "exists": duckdb_exists,
     }
-    ingest_job = (os.environ.get("GITHUB_JOB") or "").strip().lower() == "ingest"
+    job_name = (os.environ.get("GITHUB_JOB") or "").strip().lower()
+    ingest_job = "ingest" in job_name if job_name else False
     if ingest_job:
         duckdb_info["note"] = "DB verification deferred: will run post-write in derive-freeze."
     elif duckdb_exists and duckdb_info["tables"]:
