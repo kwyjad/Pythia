@@ -28,6 +28,11 @@ DEFAULT_STAGING = Path("resolver/staging/idmc")
 DEFAULT_OUT = Path("diagnostics/ingestion/export_preview")
 DEFAULT_DB_PATH = Path("./resolver_data/resolver.duckdb")
 
+RC_OK = 0
+RC_ERR = 1
+RC_STRICT = 2
+RC_ZERO = 4
+
 
 def _normalize_db_url_arg(raw: str | None) -> tuple[str, str]:
     """Return (DuckDB URL, filesystem path) for ``raw`` input."""
@@ -234,7 +239,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         if not facts_path.is_file():
             LOGGER.error("facts.csv not found at %s", facts_path)
             print(f"facts.csv not found: {facts_path}", file=sys.stderr)
-            return 2
+            return RC_ERR
         LOGGER.info(
             "facts_csv.selected | path=%s write_db=%s",
             facts_path,
@@ -245,7 +250,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:  # pragma: no cover - pandas-level parsing issues
             LOGGER.error("Failed to read facts.csv", exc_info=True)
             print(f"Failed to read facts.csv: {exc}", file=sys.stderr)
-            return 2
+            return RC_ERR
         prepared_resolved, prepared_deltas = export_facts.prepare_duckdb_tables(
             facts_dataframe
         )
@@ -272,11 +277,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         except export_facts.DuckDBWriteError as exc:
             LOGGER.error("Exporter DuckDB write failed", exc_info=True)
             print(f"DuckDB write failed: {exc}", file=sys.stderr)
-            return 3
+            return RC_ERR
         except export_facts.ExportError as exc:
             LOGGER.error("Exporter failed", exc_info=True)
             print(f"Export failed: {exc}", file=sys.stderr)
-            return 3
+            return RC_ERR
 
         facts_dataframe = exporter_result.dataframe
         if facts_dataframe is None and exporter_result.csv_path:
@@ -347,7 +352,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             except duckdb.Error as exc:
                 LOGGER.error("Writer connection failed", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                return 3
+                return RC_ERR
             try:
                 pre_deltas = _safe_count(conn, "facts_deltas") if writing_deltas else 0
                 pre_resolved = _safe_count(conn, "facts_resolved") if writing_resolved else 0
@@ -388,11 +393,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             except duckdb.Error as exc:
                 LOGGER.error("DuckDB upsert failed", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                return 3
+                return RC_ERR
             except Exception as exc:
                 LOGGER.error("DuckDB write encountered an unexpected error", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                return 3
+                return RC_ERR
             finally:
                 duckdb_io.close_db(conn)
 
@@ -450,11 +455,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     else:
         emit("Warnings: none")
 
-    exit_code = 0
-    if writing_requested and inserted_total == 0:
-        exit_code = 4
-    if collected_warnings and args.strict and exit_code == 0:
-        exit_code = 2
+    exit_code = RC_OK
+    if writing_requested:
+        exit_code = RC_ZERO if inserted_total == 0 else RC_OK
+    if collected_warnings and args.strict:
+        exit_code = RC_STRICT
 
     emit(
         (

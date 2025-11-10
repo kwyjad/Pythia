@@ -13,6 +13,7 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
+from resolver.db import duckdb_io
 from resolver.db.conn_shared import get_shared_duckdb_conn
 from resolver.db.duckdb_io import init_schema
 from resolver.transform.resolve_sources import resolve_sources
@@ -156,6 +157,124 @@ def _insert_dataframe(conn, table: str, frame: pd.DataFrame) -> int:
     return len(frame)
 
 
+def _collapse_hazard_codes(codes: pd.Series) -> str:
+    values = pd.Series(codes).dropna().astype(str).str.strip()
+    uniques: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        upper_value = value.upper()
+        if upper_value not in uniques:
+            uniques.append(upper_value)
+    if not uniques:
+        return ""
+    if len(uniques) == 1:
+        return uniques[0]
+    return "MULTI"
+
+
+def _aggregate_deltas_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["iso3", "ym", "metric", "value_new"])
+
+    df = frame.copy()
+    df["iso3"] = df["iso3"].astype(str).str.strip().str.upper()
+    df["ym"] = df["ym"].astype(str)
+    df["metric"] = df["metric"].astype(str)
+
+    if "value_new" not in df.columns and "value" in df.columns:
+        df["value_new"] = df["value"]
+    df["value_new"] = pd.to_numeric(df["value_new"], errors="coerce").fillna(0.0)
+
+    if "value_stock" in df.columns:
+        df["value_stock"] = pd.to_numeric(df["value_stock"], errors="coerce")
+
+    group_cols = ["iso3", "ym", "metric"]
+
+    agg_spec: dict[str, pd.NamedAgg] = {
+        "value_new": pd.NamedAgg(column="value_new", aggfunc="sum"),
+    }
+
+    if "value_stock" in df.columns:
+        agg_spec["value_stock"] = pd.NamedAgg(column="value_stock", aggfunc="max")
+    if "source_id" in df.columns:
+        agg_spec["source_id"] = pd.NamedAgg(column="source_id", aggfunc="first")
+    if "as_of" in df.columns:
+        agg_spec["as_of"] = pd.NamedAgg(column="as_of", aggfunc="max")
+    if "as_of_date" in df.columns:
+        agg_spec["as_of_date"] = pd.NamedAgg(column="as_of_date", aggfunc="max")
+    if "publication_date" in df.columns:
+        agg_spec["publication_date"] = pd.NamedAgg(column="publication_date", aggfunc="max")
+    if "first_observation" in df.columns:
+        agg_spec["first_observation"] = pd.NamedAgg(column="first_observation", aggfunc="max")
+    if "rebase_flag" in df.columns:
+        agg_spec["rebase_flag"] = pd.NamedAgg(column="rebase_flag", aggfunc="max")
+    if "delta_negative_clamped" in df.columns:
+        agg_spec["delta_negative_clamped"] = pd.NamedAgg(
+            column="delta_negative_clamped", aggfunc="max"
+        )
+    if "hazard_code" in df.columns:
+        agg_spec["hazard_code"] = pd.NamedAgg(
+            column="hazard_code", aggfunc=_collapse_hazard_codes
+        )
+    if "series" in df.columns:
+        agg_spec["series"] = pd.NamedAgg(column="series", aggfunc="first")
+
+    grouped = (
+        df.groupby(group_cols, as_index=False, dropna=False)
+        .agg(**agg_spec)
+        .sort_values(group_cols)
+        .reset_index(drop=True)
+    )
+
+    grouped["series_semantics"] = "new"
+
+    defaults: dict[str, object] = {
+        "hazard_code": "",
+        "value_stock": pd.NA,
+        "source_id": pd.NA,
+        "as_of": pd.NA,
+        "as_of_date": pd.NA,
+        "publication_date": pd.NA,
+        "first_observation": 0,
+        "rebase_flag": 0,
+        "delta_negative_clamped": 0,
+        "series": pd.NA,
+    }
+    for column, default in defaults.items():
+        if column not in grouped.columns:
+            grouped[column] = default
+
+    grouped["value_new"] = pd.to_numeric(grouped["value_new"], errors="coerce").fillna(0.0)
+    if "value_stock" in grouped.columns:
+        grouped["value_stock"] = pd.to_numeric(
+            grouped["value_stock"], errors="coerce"
+        )
+
+    ordered_columns = [
+        "ym",
+        "iso3",
+        "hazard_code",
+        "metric",
+        "value_new",
+        "value_stock",
+        "series_semantics",
+        "as_of",
+        "as_of_date",
+        "publication_date",
+        "source_id",
+        "series",
+        "first_observation",
+        "rebase_flag",
+        "delta_negative_clamped",
+    ]
+    for column in ordered_columns:
+        if column not in grouped.columns:
+            grouped[column] = pd.NA
+
+    return grouped[ordered_columns]
+
+
 def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
     init_schema(conn)
     _ensure_facts_raw_table(conn)
@@ -206,14 +325,24 @@ def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
             "value_stock": None,
             "series_semantics": "new",
             "as_of": new["as_of_date"],
+            "as_of_date": new["as_of_date"],
+            "publication_date": new["as_of_date"],
             "source_id": new["source"],
             "first_observation": 0,
             "rebase_flag": 0,
             "delta_negative_clamped": 0,
         })
-        delete_months(conn, "facts_deltas", new_frame["ym"].unique())
-        deltas_rows = _insert_dataframe(conn, "facts_deltas", new_frame)
-    LOGGER.info("facts_deltas inserted rows (from canonical new): %s", deltas_rows)
+        aggregated = _aggregate_deltas_frame(new_frame)
+        if not aggregated.empty:
+            keys = duckdb_io.resolve_upsert_keys("facts_deltas", aggregated)
+            result = duckdb_io.upsert_dataframe(
+                conn,
+                "facts_deltas",
+                aggregated,
+                keys=keys,
+            )
+            deltas_rows = int(result.rows_delta)
+    LOGGER.info("facts_deltas upserted rows (from canonical new): %s", deltas_rows)
 
     return {
         "facts_raw": raw_counts,
@@ -276,6 +405,8 @@ def _derive_deltas(
                 "value_stock": stock_value,
                 "series_semantics": "new",
                 "as_of": row["as_of_date"],
+                "as_of_date": row["as_of_date"],
+                "publication_date": row["as_of_date"],
                 "source_id": row.get("source_id"),
                 "first_observation": 1 if prev_stock == 0.0 else 0,
                 "rebase_flag": 0,
@@ -289,10 +420,20 @@ def _derive_deltas(
         return 0
 
     output = pd.DataFrame.from_records(records)
-    delete_months(conn, "facts_deltas", output["ym"].unique())
-    written = _insert_dataframe(conn, "facts_deltas", output)
-    LOGGER.info("facts_deltas inserted rows (derived): %s", written)
-    return written
+    aggregated = _aggregate_deltas_frame(output)
+    if aggregated.empty:
+        LOGGER.info("No aggregated delta records for period %s", period.label)
+        return 0
+
+    keys = duckdb_io.resolve_upsert_keys("facts_deltas", aggregated)
+    result = duckdb_io.upsert_dataframe(
+        conn,
+        "facts_deltas",
+        aggregated,
+        keys=keys,
+    )
+    LOGGER.info("facts_deltas upserted rows (derived): %s", result.rows_delta)
+    return int(result.rows_delta)
 
 
 def _export_parquet(
