@@ -71,12 +71,14 @@ def _collect_breakdown(conn, tables: Iterable[str], limit: int = 20) -> list[tup
         source_expr = _build_expr(columns, ("source_id", "source"))
         metric_expr = _build_expr(columns, ("metric",))
         semantics_expr = _build_expr(columns, ("series_semantics", "semantics"))
+        table_literal = table.replace("'", "''")
         query = (
-            "SELECT {table} AS table_name, {source} AS source, {metric} AS metric, "
+            "SELECT '{table_literal}' AS table_name, {source} AS source, {metric} AS metric, "
             "{semantics} AS semantics, COUNT(*) AS count FROM {table} GROUP BY 1,2,3,4 "
             "ORDER BY 1,2,3,4"
         ).format(
             table=table,
+            table_literal=table_literal,
             source=source_expr,
             metric=metric_expr,
             semantics=semantics_expr,
