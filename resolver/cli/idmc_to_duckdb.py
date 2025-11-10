@@ -105,7 +105,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--write-db",
         action="store_true",
-        help="Enable DuckDB writes (requires --db-url)",
+        help="Enable DuckDB writes (requires --db or --db-url)",
     )
     parser.add_argument(
         "--log-level",

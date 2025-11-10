@@ -237,15 +237,16 @@ def _apply_iso3_filter(
         note["reason"] = "no_scope"
         return working, note
 
-    if not _has_col(working, "iso3"):
+    if "iso3" not in working.columns:
         rename_map: Dict[str, str] = {}
-        for candidate in ("CountryISO3", "country_iso3", "ISO3", "geo_iso3"):
-            if _has_col(working, candidate):
+        for candidate in ("iso_3", "CountryISO3", "country_iso3", "ISO3", "geo_iso3"):
+            if candidate in working.columns:
                 rename_map[candidate] = "iso3"
                 break
         if rename_map:
             working = working.rename(columns=rename_map)
-    if not _has_col(working, "iso3"):
+
+    if "iso3" not in working.columns:
         note["reason"] = "no_iso3_or_empty"
         return working, note
 
@@ -1586,8 +1587,11 @@ def _fetch_helix_chain(
     diagnostics.setdefault("source", "helix")
     diagnostics.setdefault("source_tag", "idmc_gidd")
     diagnostics["helix_endpoint"] = "gidd"
-    diagnostics["helix_attempts"] = {"gidd": dict(diag_gidd)}
-    diagnostics["raw_rows"] = int(frame_gidd.shape[0]) if isinstance(frame_gidd, pd.DataFrame) else 0
+    attempts: Dict[str, Dict[str, Any]] = {"gidd": dict(diag_gidd)}
+    diagnostics["helix_attempts"] = attempts
+    diagnostics["raw_rows"] = (
+        int(frame_gidd.shape[0]) if isinstance(frame_gidd, pd.DataFrame) else 0
+    )
 
     allowed_countries = [
         code.strip().upper()
@@ -1625,6 +1629,7 @@ def _fetch_helix_chain(
     diagnostics["rows"] = int(filtered_gidd.shape[0])
     diagnostics["columns"] = list(filtered_gidd.columns)
     diagnostics["normalized_rows"] = int(filtered_gidd.shape[0])
+    attempts["gidd"]["normalized_rows"] = int(filtered_gidd.shape[0])
 
     LOGGER.info(
         "helix.fetch.gidd | status=%s raw_rows=%s rows_after_filter=%s",
@@ -1651,13 +1656,17 @@ def _fetch_helix_chain(
 
     idus_frame, idus_diag = _fetch_helix_idus_last180(helix_client_id)
     diagnostics["helix_endpoint"] = "idus_last180"
-    diagnostics["helix_attempts"]["idus_last180"] = dict(idus_diag)
+    attempts["idus_last180"] = dict(idus_diag)
+
     idus_status = idus_diag.get("status")
-    diagnostics["status"] = idus_status if idus_status is not None else diagnostics.get("status")
-    diagnostics["raw_rows"] = (
-        int(idus_frame.shape[0]) if isinstance(idus_frame, pd.DataFrame) else 0
+    diagnostics["status"] = (
+        idus_status if idus_status is not None else diagnostics.get("status")
     )
     diagnostics["source_tag"] = "idmc_idu"
+
+    raw_rows = int(idus_frame.shape[0]) if isinstance(idus_frame, pd.DataFrame) else 0
+    diagnostics["raw_rows"] = raw_rows
+    attempts["idus_last180"]["raw_rows"] = raw_rows
 
     normalized = _normalise_helix_last180_monthly(
         idus_frame,
@@ -1665,11 +1674,15 @@ def _fetch_helix_chain(
         window_end=end_date,
         countries=allowed_countries,
     )
-    normalized_filtered, normalized_note = _apply_iso3_filter(normalized, allowed_countries)
+    normalized_filtered, normalized_note = _apply_iso3_filter(
+        normalized, allowed_countries
+    )
     diagnostics["fallback_filter"] = normalized_note
-    diagnostics["rows"] = int(normalized_filtered.shape[0])
+    normalized_rows = int(normalized_filtered.shape[0])
+    diagnostics["rows"] = normalized_rows
     diagnostics["columns"] = list(normalized_filtered.columns)
-    diagnostics["normalized_rows"] = int(normalized_filtered.shape[0])
+    diagnostics["normalized_rows"] = normalized_rows
+    attempts["idus_last180"]["normalized_rows"] = normalized_rows
 
     LOGGER.info(
         "helix.fetch.idus_last180 | status=%s raw_rows=%s normalized_rows=%s",
@@ -2016,6 +2029,14 @@ def _normalise_helix_last180_monthly(
         return pd.DataFrame(columns=canonical_columns)
 
     working = ensure_iso3_column(frame).copy()
+    if "iso3" not in working.columns:
+        rename_map: Dict[str, str] = {}
+        for candidate in ("iso_3", "CountryISO3", "country_iso3", "ISO3", "geo_iso3"):
+            if candidate in working.columns:
+                rename_map[candidate] = "iso3"
+                break
+        if rename_map:
+            working = working.rename(columns=rename_map)
     if "iso3" not in working.columns:
         return pd.DataFrame(columns=canonical_columns)
 

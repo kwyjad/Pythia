@@ -86,6 +86,7 @@ jobs:
       IDMC_ALLOW_HDX_FALLBACK: "1"
       IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
+      CONNECTOR_LIST: acled_client,dtm_client,ifrc_go_client,ipc_client,reliefweb_client,unhcr_client,unhcr_odp_client,wfp_mvam_client,who_phe_client
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
       EMPTY_POLICY: ${{ inputs.empty_policy }}
@@ -166,7 +167,6 @@ jobs:
             --start "${{ steps.window.outputs.start_iso }}" \
             --end   "${{ steps.window.outputs.end_iso }}" \
             --debug
-          echo "RESOLVER_SKIP_IDMC=1" >> "$GITHUB_ENV"
 
       - name: Run connectors (with per-connector log tee)
         env:
@@ -362,7 +362,7 @@ jobs:
             --out resolver/exports/backfill \
             --config resolver/tools/export_config.yml \
             --write-db 1 \
-            --db-url "${{ env.RESOLVER_DB_URL }}" \
+            --db "${{ env.RESOLVER_DB_URL }}" \
             --append-summary diagnostics/ingestion/summary.md
 
       - name: Load IDMC facts into DuckDB (auxiliary)
@@ -389,67 +389,6 @@ jobs:
           else
             echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
           fi
-
-      - name: Verify DuckDB contents
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          python - <<'PY'
-          import duckdb, os, pathlib
-
-          db_url = os.environ.get("RESOLVER_DB_URL")
-          if not db_url:
-              raise SystemExit("RESOLVER_DB_URL not set")
-
-          path = db_url.replace("duckdb:///", "", 1) if db_url.startswith("duckdb:///") else db_url
-          con = duckdb.connect(path)
-          try:
-              tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-              table = "facts_resolved" if "facts_resolved" in tables else ("facts" if "facts" in tables else None)
-              total = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] if table else 0
-              by_src = []
-              if table and total:
-                  try:
-                      by_src = con.execute(
-                          """
-                          SELECT COALESCE(source,'' ) AS source, COALESCE(metric,'' ) AS metric,
-                                 COALESCE(series_semantics,'') AS semantics, COUNT(*) AS rows
-                          FROM {table}
-                          GROUP BY 1,2,3
-                          ORDER BY rows DESC
-                          LIMIT 20
-                          """
-                      ).fetchall()
-                  except Exception:
-                      pass
-          finally:
-              con.close()
-
-          out = pathlib.Path("diagnostics/ingestion/duckdb_counts.md")
-          out.parent.mkdir(parents=True, exist_ok=True)
-          with out.open("w", encoding="utf-8") as f:
-              f.write("## DuckDB write verification\n\n")
-              f.write(f"- Database: {path}\n")
-              f.write(f"- Table verified: {table or '—'}\n")
-              f.write(f"- Rows total: {total}\n\n")
-              if by_src:
-                  f.write("| source | metric | semantics | rows |\n|---|---|---|---:|\n")
-                  for source, metric, semantics, rows in by_src:
-                      f.write(f"| {source} | {metric} | {semantics} | {rows} |\n")
-
-          if os.environ.get("GITHUB_STEP_SUMMARY"):
-              open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write(out.read_text(encoding="utf-8"))
-
-          summary_path = pathlib.Path("diagnostics/ingestion/summary.md")
-          if summary_path.exists():
-              with summary_path.open("a", encoding="utf-8") as fsum, out.open("r", encoding="utf-8") as fsrc:
-                  fsum.write("\n\n")
-                  fsum.write(fsrc.read())
-          PY
 
       - name: Derive and freeze monthly snapshots
         env:
@@ -555,7 +494,7 @@ jobs:
                       "resolver/snapshots",
                       "--write-db",
                       "1",
-                      "--db-url",
+                      "--db",
                       f"duckdb:///{backfill_db}",
                   ],
                   check=True,
@@ -572,6 +511,13 @@ jobs:
           python scripts/ci/duckdb_summary.py --db "${{ env.BACKFILL_DB_PATH }}" | tee diagnostics/ingestion/duckdb_summary.md
           if [ -n "$summary_file" ]; then
             cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
+          fi
+          if [ -f diagnostics/ingestion/summary.md ]; then
+            {
+              echo ""
+              echo ""
+              cat diagnostics/ingestion/duckdb_summary.md
+            } >> diagnostics/ingestion/summary.md
           fi
 
       - name: Upload snapshots and database

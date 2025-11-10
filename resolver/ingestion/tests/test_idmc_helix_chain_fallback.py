@@ -70,6 +70,7 @@ def test_gidd_404_then_idus_last180_200_writes_rows(
     attempts = diagnostics.get("helix_attempts") or {}
     assert attempts.get("gidd", {}).get("status") == 404
     assert attempts.get("idus_last180", {}).get("status") == 200
+    assert attempts.get("idus_last180", {}).get("normalized_rows") == int(frame.shape[0])
     assert {code.upper() for code in frame["iso3"].unique()} <= {"AFG", "UKR"}
 
 
@@ -145,3 +146,4 @@ def test_helix_both_empty_sets_zero_rows_reason(
     assert diagnostics.get("normalized_rows") == 0
     attempts = diagnostics.get("helix_attempts") or {}
     assert "gidd" in attempts and "idus_last180" in attempts
+    assert attempts["idus_last180"].get("normalized_rows") == 0

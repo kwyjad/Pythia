@@ -94,3 +94,16 @@ def test_write_summary_falls_back_to_minimal(tmp_path: Path, monkeypatch: pytest
     text = Path(summary_path).read_text(encoding="utf-8")
     assert "IDMC ingestion summary (fallback)" in text
     assert "## Row counts" in text
+
+
+def test_minimal_summary_includes_helix_fields():
+    context = _summary_context(
+        helix_endpoint="idus_last180",
+        zero_rows_reason="helix_empty",
+    )
+
+    rendered = idmc_cli._render_minimal_summary(context)
+
+    assert "## Helix status" in rendered
+    assert "Endpoint: idus_last180" in rendered
+    assert "Zero rows reason: helix_empty" in rendered

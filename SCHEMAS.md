@@ -351,6 +351,11 @@ structured overrides (all mirrored by environment variables):
   `iso3,as_of_date,metric,value,series_semantics,source` header even if
   normalization yielded zero rows so downstream exporters still detect the
   file.【F:resolver/ingestion/idmc/cli.py†L720-L910】【F:resolver/ingestion/idmc/staging.py†L9-L26】【F:resolver/tools/export_config.yml†L90-L116】
+- Backfill automation standardises on the `--db` flag for `export_facts`,
+  `idmc_to_duckdb`, and the monthly freeze helpers. The workflow appends the
+  `scripts/ci/duckdb_summary.py --db …` report to both the GitHub Step Summary
+  and `diagnostics/ingestion/summary.md` so row deltas are captured alongside
+  connector diagnostics without depending on ad-hoc log parsing.【F:.github/workflows/resolver-initial-backfill.yml†L148-L236】【F:scripts/ci/duckdb_summary.py†L1-L115】
 
 ### IDMC flow staging schema
 
@@ -405,6 +410,12 @@ distinguish new flows from stock snapshots.
   HTTP status codes); `attempts` entries include per-chunk `status`, `rows`, and
   optional `zero_rows_reason` so timeout- and fallback-driven zero rows can be
   identified quickly.【F:resolver/ingestion/idmc/client.py†L820-L1150】【F:resolver/ingestion/idmc/client.py†L1580-L1960】
+- Helix runs record the authoritative `helix_endpoint` (`gidd` or `idus_last180`)
+  and collapse zero-row outcomes to `helix_http_error` or `helix_empty` so
+  automation can detect whether the fallback executed. The CLI keeps
+  `rows_fetched` / `rows_normalized` / `rows_written` in sync with staged export
+  counts and includes these totals in the minimal summary when the primary
+  template fails.【F:resolver/ingestion/idmc/client.py†L1568-L1750】【F:resolver/ingestion/idmc/cli.py†L297-L520】【F:resolver/ingestion/tests/test_idmc_diagnostics_serialization.py†L74-L115】
 - `zero_rows_reasons` maps chunk labels to the recorded cause (for example
   `dns_error`, `fallback_http_error`, or `timeout_fallback_empty`) when no rows
   survive after filtering, and the CLI surfaces the first reason in

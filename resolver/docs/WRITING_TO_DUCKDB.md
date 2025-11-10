@@ -62,10 +62,10 @@ A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-runnin
 
 The `resolver-initial-backfill` GitHub Actions workflow now calls the IDMC CLI
 directly in HELIX mode before the generic connector runner starts. That
-single-shot step inherits the backfill window, writes staged exports, and then
-sets `RESOLVER_SKIP_IDMC=1` so `scripts.ci.run_connectors` bypasses IDMC on the
-second pass. As a result the workflow summary reflects a single IDMC execution
-whose diagnostics explain whether HELIX served data from `gidd` or
+single-shot step inherits the backfill window, writes staged exports, and the
+generic connector runner is restricted to the remaining connectors so IDMC runs
+exactly once per job. As a result the workflow summary reflects a single IDMC
+execution whose diagnostics explain whether HELIX served data from `gidd` or
 `idus/last-180-days`.
 
 Once the CLI has staged rows, the workflow invokes

@@ -327,6 +327,16 @@ def _render_minimal_summary(context: Dict[str, Any]) -> str:
         f"- Source: {context.get('countries_source_display', 'n/a')}",
     ]
 
+    helix_endpoint = context.get("helix_endpoint")
+    helix_zero_reason = context.get("zero_rows_reason")
+    if helix_endpoint or helix_zero_reason:
+        lines.extend([
+            "",
+            "## Helix status",
+            f"- Endpoint: {helix_endpoint or 'n/a'}",
+            f"- Zero rows reason: {helix_zero_reason or 'n/a'}",
+        ])
+
     sections = [
         ("Endpoints", context.get("endpoints_block")),
         (
@@ -376,7 +386,7 @@ def _render_summary(context: Dict[str, Any]) -> str:
         return fallback.render(**context)
     except TemplateError as exc:
         LOGGER.error("Fallback summary template render failed: %s", exc)
-        raise
+        return _render_minimal_summary(context)
 
 
 def fetch(*args, **kwargs):

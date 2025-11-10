@@ -2935,6 +2935,11 @@ def main():
         help="Optional DuckDB URL override (defaults to RESOLVER_DB_URL)",
     )
     ap.add_argument(
+        "--db",
+        default=None,
+        help="Alias for --db-url; DuckDB URL or path",
+    )
+    ap.add_argument(
         "--report-json",
         default=None,
         help="Optional path for export_report.json (defaults to <out>/export_report.json)",
@@ -2962,7 +2967,7 @@ def main():
             config_path=Path(args.config),
             out_dir=Path(args.out),
             write_db=args.write_db,
-            db_url=args.db_url,
+            db_url=args.db or args.db_url,
             only_strategy=args.only_strategy,
             report_json_path=Path(args.report_json) if args.report_json else None,
             report_md_path=Path(args.report_md) if args.report_md else None,
