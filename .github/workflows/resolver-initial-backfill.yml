@@ -508,7 +508,7 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics/ingestion
           summary_file="${GITHUB_STEP_SUMMARY:-}"
-          python scripts/ci/duckdb_summary.py --db "${{ env.BACKFILL_DB_PATH }}" | tee diagnostics/ingestion/duckdb_summary.md
+          python scripts/ci/duckdb_summary.py --db "${{ env.BACKFILL_DB_PATH }}" --tables "facts_resolved,facts_deltas" | tee diagnostics/ingestion/duckdb_summary.md
           if [ -n "$summary_file" ]; then
             cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
           fi

@@ -117,6 +117,30 @@ def _ensure_flow_value_columns(frame: pd.DataFrame | None) -> pd.DataFrame | Non
     return df
 
 
+def _read_csv_optional(path: Path) -> pd.DataFrame | None:
+    """Return a DataFrame for ``path`` if it exists and is readable."""
+
+    if not path.is_file():
+        return None
+    try:
+        return pd.read_csv(path)
+    except Exception as exc:  # pragma: no cover - defensive diagnostics
+        LOGGER.warning("failed to read staging CSV at %s: %s", path, exc)
+        return None
+
+
+def _read_parquet_optional(path: Path) -> pd.DataFrame | None:
+    """Return a DataFrame for ``path`` if it exists and is readable."""
+
+    if not path.is_file():
+        return None
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:  # pragma: no cover - defensive diagnostics
+        LOGGER.warning("failed to read staging Parquet at %s: %s", path, exc)
+        return None
+
+
 def _gather_warnings(*sources: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -291,17 +315,34 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     prepared_deltas = _ensure_flow_value_columns(prepared_deltas)
 
+    if not args.facts_csv:
+        staging_flow = _read_csv_optional(staging_dir / "flow.csv")
+        if staging_flow is not None and not staging_flow.empty:
+            prepared_deltas = _ensure_flow_value_columns(staging_flow)
+        staging_resolved = _read_parquet_optional(
+            staging_dir / "idmc_facts_flow.parquet"
+        )
+        if staging_resolved is not None and not staging_resolved.empty:
+            prepared_resolved = staging_resolved.copy()
+
+    prepared_deltas = _ensure_flow_value_columns(prepared_deltas)
+
     total_rows = 0
     resolved_count = 0
     deltas_count = 0
-    zero_facts = facts_dataframe is None or facts_dataframe.empty
+    zero_prepared = (
+        (prepared_resolved is None or prepared_resolved.empty)
+        and (prepared_deltas is None or prepared_deltas.empty)
+    )
     write_results: dict[str, duckdb_io.UpsertResult] = {}
+    written_resolved = 0
+    written_deltas = 0
     if writing_requested:
-        if zero_facts:
+        if zero_prepared:
             LOGGER.error("write_db requested but no canonical facts rows found")
             print("No canonical facts rows available for DuckDB write", file=sys.stderr)
         else:
-            conn = None
+            conn: duckdb.DuckDBPyConnection | None = None
             try:
                 conn = duckdb_io.get_db(duckdb_url)
             except duckdb.Error as exc:
@@ -309,38 +350,45 @@ def run(argv: Sequence[str] | None = None) -> int:
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
                 return 3
             try:
-                write_results = duckdb_io.write_facts_tables(
-                    conn,
-                    facts_resolved=prepared_resolved,
-                    facts_deltas=prepared_deltas,
-                )
+                if prepared_deltas is not None and not prepared_deltas.empty:
+                    delta_keys = duckdb_io.resolve_upsert_keys("facts_deltas", prepared_deltas)
+                    result = duckdb_io.upsert_dataframe(
+                        conn,
+                        "facts_deltas",
+                        prepared_deltas,
+                        keys=delta_keys,
+                    )
+                    write_results["facts_deltas"] = result
+                    written_deltas = int(result.rows_written)
+                if prepared_resolved is not None and not prepared_resolved.empty:
+                    resolved_keys = duckdb_io.resolve_upsert_keys(
+                        "facts_resolved", prepared_resolved
+                    )
+                    result = duckdb_io.upsert_dataframe(
+                        conn,
+                        "facts_resolved",
+                        prepared_resolved,
+                        keys=resolved_keys,
+                    )
+                    write_results["facts_resolved"] = result
+                    written_resolved = int(result.rows_written)
+                deltas_count = _safe_count(conn, "facts_deltas")
+                resolved_count = _safe_count(conn, "facts_resolved")
+                total_rows = deltas_count + resolved_count
+                if total_rows <= 0:
+                    LOGGER.warning(
+                        "Verification: DuckDB tables empty after export (flows may be empty)"
+                    )
             except duckdb.Error as exc:
                 LOGGER.error("DuckDB upsert failed", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                duckdb_io.close_db(conn)
                 return 3
             except Exception as exc:
                 LOGGER.error("DuckDB write encountered an unexpected error", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                duckdb_io.close_db(conn)
-                return 3
-            try:
-                deltas_count = _safe_count(conn, "facts_deltas")
-                resolved_count = _safe_count(conn, "facts_resolved")
-            except duckdb.Error as exc:
-                LOGGER.error("Verification query failed", exc_info=True)
-                print(f"Verification failed: {exc}", file=sys.stderr)
-                duckdb_io.close_db(conn)
                 return 3
             finally:
                 duckdb_io.close_db(conn)
-
-            total_rows = deltas_count + resolved_count
-
-            if total_rows <= 0:
-                LOGGER.warning(
-                    "Verification: DuckDB tables empty after export (flows may be empty)"
-                )
 
     if write_results:
         merged_stats = dict(db_stats)
@@ -360,7 +408,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     def emit(message: str) -> None:
         print(message)
 
-    rows_message = f"✅ Wrote {total_delta} rows to DuckDB"
+    total_written = int(written_deltas or 0) + int(written_resolved or 0)
+    rows_message = f"✅ Wrote {total_written} rows to DuckDB"
     if not writing_requested:
         rows_message += " (dry-run)"
     emit(rows_message)
@@ -375,6 +424,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 total=total_rows,
             )
         )
+    else:
+        emit("Verification: DB verification deferred (performed post-write in derive-freeze)")
 
     staging_warnings = []
     if not args.facts_csv and not (staging_dir / "stock.csv").is_file():
@@ -394,7 +445,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         emit("Warnings: none")
 
     exit_code = 0
-    if writing_requested and zero_facts:
+    if writing_requested and total_written == 0:
         exit_code = 4
     if collected_warnings and args.strict and exit_code == 0:
         exit_code = 2
@@ -427,6 +478,10 @@ def run(argv: Sequence[str] | None = None) -> int:
         if writing_requested:
             summary_lines.append(
                 f"- **Verification totals:** facts_resolved={resolved_count} facts_deltas={deltas_count} total={total_rows}"
+            )
+        else:
+            summary_lines.append(
+                "- **Verification:** deferred (performed post-write in derive-freeze)"
             )
         if collected_warnings:
             joined = "; ".join(collected_warnings)

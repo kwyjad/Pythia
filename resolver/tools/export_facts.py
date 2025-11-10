@@ -2910,8 +2910,8 @@ def export_facts(
         sources=source_details,
         report=report,
         db_stats=db_write_stats,
-        resolved_df=resolved_for_db,
-        deltas_df=deltas_for_db,
+        resolved_df=None if resolved_for_db is None else resolved_for_db.copy(deep=True),
+        deltas_df=None if deltas_for_db is None else deltas_for_db.copy(deep=True),
     )
 
 
