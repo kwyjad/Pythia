@@ -252,7 +252,92 @@ def _extract_run_counts(payload: Mapping[str, Any]) -> Dict[str, int]:
         counts["written"] = rows_block.get("written")
     if counts["written"] in (None, ""):
         counts["written"] = totals_block.get("rows_written")
+    staged_value: Any = payload.get("rows_staged_total")
+    if staged_value in (None, ""):
+        staged_value = rows_block.get("staged_total")
+    if staged_value in (None, ""):
+        staged_value = rows_block.get("staged")
+    counts["staged"] = _sum_staging_counts(staged_value)
     return {key: _coerce_int(value) for key, value in counts.items()}
+
+
+def _maybe_backfill_counts(
+    entry: Dict[str, Any], export_summary: Mapping[str, Any] | None = None
+) -> None:
+    counts = entry.setdefault("counts", {})
+    if any(counts.get(key, 0) > 0 for key in ("fetched", "normalized", "written")):
+        return
+
+    extras = dict(_ensure_dict(entry.get("extras")))
+    summary_counts: Dict[str, int] = {}
+    summary_path_raw = extras.get("summary_json") or extras.get("summary_path")
+    if isinstance(summary_path_raw, str) and summary_path_raw.strip():
+        summary_path = Path(summary_path_raw)
+        if not summary_path.is_absolute():
+            summary_path = (Path.cwd() / summary_path).resolve()
+        summary_payload = _safe_load_json(summary_path)
+        if summary_payload:
+            summary_counts = {
+                key: _coerce_int(value)
+                for key, value in _ensure_dict(summary_payload.get("counts")).items()
+            }
+
+    staging_total = _sum_staging_counts(extras.get("staging_counts"))
+    rows_written_extra = _coerce_int(extras.get("rows_written"))
+    rows_normalized_extra = _coerce_int(extras.get("rows_normalized"))
+    rows_fetched_extra = _coerce_int(extras.get("rows_fetched"))
+
+    export_report_rows = 0
+    if export_summary:
+        report_block = _ensure_dict(export_summary.get("report"))
+        export_report_rows = _coerce_int(report_block.get("rows_exported"))
+
+    candidate_counts: Dict[str, int] = {}
+    source: str | None = None
+    if any(summary_counts.get(key, 0) > 0 for key in ("written", "normalized", "fetched")):
+        candidate_counts = summary_counts
+        source = "summary_json"
+    elif any(
+        value > 0
+        for value in (rows_written_extra, rows_normalized_extra, rows_fetched_extra, staging_total)
+    ):
+        written_value = max(rows_written_extra, staging_total)
+        if written_value <= 0:
+            written_value = max(rows_normalized_extra, rows_fetched_extra)
+        normalized_value = rows_normalized_extra if rows_normalized_extra > 0 else max(written_value, staging_total)
+        fetched_value = rows_fetched_extra if rows_fetched_extra > 0 else max(normalized_value, written_value)
+        candidate_counts = {
+            "written": written_value,
+            "normalized": normalized_value,
+            "fetched": fetched_value,
+        }
+        if staging_total > 0:
+            candidate_counts["staged"] = staging_total
+        source = "extras"
+    elif export_report_rows > 0:
+        candidate_counts = {
+            "written": export_report_rows,
+            "normalized": export_report_rows,
+            "fetched": export_report_rows,
+        }
+        source = "export_report"
+    else:
+        return
+
+    applied = False
+    for key, value in candidate_counts.items():
+        coerced = _coerce_int(value)
+        if coerced <= 0:
+            continue
+        if counts.get(key, 0) <= 0:
+            counts[key] = coerced
+            applied = True
+
+    if applied:
+        if source:
+            extras["counts_fallback"] = source
+        entry["counts"] = counts
+        entry["extras"] = extras
 
 
 def _override_counts_from_run_json(
@@ -331,6 +416,14 @@ def _coerce_int(value: Any) -> int:
         return 0
 
 
+def _sum_staging_counts(value: Any) -> int:
+    if isinstance(value, Mapping):
+        return sum(_coerce_int(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return sum(_coerce_int(item) for item in value)
+    return _coerce_int(value)
+
+
 def _coerce_float(value: Any) -> float | None:
     try:
         return float(value)  # type: ignore[arg-type]
@@ -401,6 +494,10 @@ def _collect_export_summary(
         "warnings": [],
         "sources": [],
         "error": None,
+        "report": {},
+        "report_path": None,
+        "rows_exported": 0,
+        "db_stats": {},
     }
     try:
         from resolver.tools.export_facts import ExportError, export_facts
@@ -460,6 +557,9 @@ def _collect_export_summary(
         sources.append(entry)
     summary["sources"] = sources
     summary["csv_path"] = result.csv_path.as_posix()
+    summary["report"] = dict(getattr(result, "report", {}) or {})
+    summary["rows_exported"] = int(summary["report"].get("rows_exported", summary["rows"]))
+    summary["report_path"] = (preview_dir / "export_report.json").as_posix()
     db_stats = dict(getattr(result, "db_stats", {}) or {})
     summary["db_stats"] = db_stats
     duckdb_url, duckdb_path = _resolve_duckdb_target()
@@ -2092,6 +2192,9 @@ def build_markdown(
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
+    export_info = export_summary or {}
+    for entry in sorted_entries:
+        _maybe_backfill_counts(entry, export_info)
     total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
     total_normalized = sum(entry.get("counts", {}).get("normalized", 0) for entry in sorted_entries)
     total_written = sum(entry.get("counts", {}).get("written", 0) for entry in sorted_entries)
@@ -2113,7 +2216,6 @@ def build_markdown(
     lines.append(f"* **Rows written:** {total_written}{footnote}")
     lines.append("")
 
-    export_info = export_summary or {}
     export_error = export_info.get("error")
     if export_info or export_error or mapping_debug_records:
         lines.append("## Export Facts")

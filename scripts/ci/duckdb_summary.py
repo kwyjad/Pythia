@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from resolver.db import duckdb_io
+
 
 def _import_duckdb():  # pragma: no cover - import guarded in tests
     try:
@@ -63,10 +65,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     db_arg = args.db or args.db_url or os.environ.get("RESOLVER_DB_URL") or os.environ.get("RESOLVER_DB_PATH")
-    db_path, display_target = _normalise_db_target(db_arg)
+    db_path, canonical_url = _normalise_db_target(db_arg)
 
-    duckdb = _import_duckdb()
-    if duckdb is None:
+    if _import_duckdb() is None:
         return 0
 
     print("## DuckDB")
@@ -78,19 +79,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     fs_path = Path(db_path)
     if not fs_path.exists():
-        shown = display_target or db_path
+        shown = canonical_url or db_path
         print(f"- **Status:** database not found at `{shown}`")
         return 0
 
     try:
-        conn = duckdb.connect(db_path, read_only=True)
+        conn = duckdb_io.get_db(canonical_url or db_path)
     except Exception as exc:  # pragma: no cover - connection failure
-        shown = display_target or db_path
+        shown = canonical_url or db_path
         print(f"- **Status:** failed to open `{shown}`: {exc}")
         return 0
 
     try:
-        print(f"- **Database:** `{display_target or db_path}`")
+        print(f"- **Database:** `{canonical_url or db_path}`")
         rows: list[tuple[str, int]] = []
         for table in _iter_tables(args.tables):
             if not table:
