@@ -172,7 +172,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if breakdown:
             print("")
             print("### Rows by source / metric / semantics")
-            print("")
             print("| table | source | metric | semantics | count |")
             print("| --- | --- | --- | --- | --- |")
             for table_name, source, metric, semantics, count in breakdown:

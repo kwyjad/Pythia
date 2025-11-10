@@ -61,6 +61,62 @@ def _safe_count(conn: duckdb.DuckDBPyConnection, table: str) -> int:
     return int(value or 0)
 
 
+def _normalize_series_semantics(frame: pd.DataFrame, *, column: str) -> pd.Series:
+    series = frame[column].fillna("").astype(str)
+    return series.str.lower().str.strip()
+
+
+def _ensure_flow_value_columns(frame: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Return ``frame`` with DuckDB ``facts_deltas`` value columns populated."""
+
+    if frame is None or frame.empty:
+        return frame
+
+    df = frame.copy()
+
+    semantics_column = None
+    if "series_semantics" in df.columns:
+        semantics_column = "series_semantics"
+    elif "semantics" in df.columns:
+        semantics_column = "semantics"
+
+    if semantics_column is None:
+        df["series_semantics"] = ""
+        semantics_column = "series_semantics"
+    elif semantics_column != "series_semantics":
+        df["series_semantics"] = df[semantics_column]
+
+    semantics_normalized = _normalize_series_semantics(df, column="series_semantics")
+
+    if "value_new" not in df.columns:
+        df["value_new"] = pd.NA
+    if "value_stock" not in df.columns:
+        df["value_stock"] = pd.NA
+
+    if "value" in df.columns:
+        new_mask = semantics_normalized.eq("new")
+        stock_mask = semantics_normalized.eq("stock")
+        if new_mask.any():
+            df.loc[new_mask, "value_new"] = pd.to_numeric(
+                df.loc[new_mask, "value"], errors="coerce"
+            )
+        if stock_mask.any():
+            df.loc[stock_mask, "value_stock"] = pd.to_numeric(
+                df.loc[stock_mask, "value"], errors="coerce"
+            )
+
+    df["value_new"] = pd.to_numeric(df["value_new"], errors="coerce")
+    if "value_stock" in df.columns:
+        df["value_stock"] = pd.to_numeric(df["value_stock"], errors="coerce")
+
+    if "ym" not in df.columns or df["ym"].isna().all():
+        if "as_of_date" in df.columns:
+            as_of_series = pd.to_datetime(df["as_of_date"], errors="coerce")
+            df["ym"] = as_of_series.dt.strftime("%Y-%m")
+
+    return df
+
+
 def _gather_warnings(*sources: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -169,6 +225,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         prepared_resolved, prepared_deltas = export_facts.prepare_duckdb_tables(
             facts_dataframe
         )
+        prepared_deltas = _ensure_flow_value_columns(prepared_deltas)
         db_stats = {}
     else:
         exporter_args = dict(
@@ -212,6 +269,27 @@ def run(argv: Sequence[str] | None = None) -> int:
         if exporter_result.deltas_df is not None:
             if prepared_deltas is None or not exporter_result.deltas_df.empty:
                 prepared_deltas = exporter_result.deltas_df
+        prepared_deltas = _ensure_flow_value_columns(prepared_deltas)
+
+    if (
+        facts_dataframe is not None
+        and not facts_dataframe.empty
+        and (
+            prepared_resolved is None
+            or prepared_deltas is None
+            or prepared_deltas.empty
+            or "value_new" not in prepared_deltas.columns
+        )
+    ):
+        fallback_resolved, fallback_deltas = export_facts.prepare_duckdb_tables(
+            facts_dataframe.copy()
+        )
+        if prepared_resolved is None or (fallback_resolved is not None and not fallback_resolved.empty):
+            prepared_resolved = fallback_resolved
+        if prepared_deltas is None or prepared_deltas.empty or "value_new" not in prepared_deltas.columns:
+            prepared_deltas = fallback_deltas
+
+    prepared_deltas = _ensure_flow_value_columns(prepared_deltas)
 
     total_rows = 0
     resolved_count = 0
