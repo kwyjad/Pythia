@@ -1473,6 +1473,85 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     return frame
 
 
+def prepare_duckdb_tables(
+    facts: "pd.DataFrame | None",
+) -> tuple["pd.DataFrame | None", "pd.DataFrame | None"]:
+    """Return frames ready for DuckDB writes based on ``series_semantics`` values."""
+
+    if facts is None or facts.empty:
+        return None, None
+
+    resolved_for_db: "pd.DataFrame | None" = None
+    deltas_for_db: "pd.DataFrame | None" = None
+
+    metric_series = (
+        facts["metric"]
+        if "metric" in facts.columns
+        else pd.Series([""] * len(facts), index=facts.index)
+    )
+    metric_normalized = metric_series.fillna("").astype(str).str.lower().str.strip()
+
+    new_displacements_mask = metric_normalized.eq("new_displacements")
+    if new_displacements_mask.any():
+        if "series_semantics" not in facts.columns:
+            facts["series_semantics"] = pd.NA
+        facts.loc[new_displacements_mask, "series_semantics"] = "new"
+        if "semantics" in facts.columns:
+            facts.loc[new_displacements_mask, "semantics"] = "new"
+        LOGGER.info("duckdb.idmc.flow_semantics | rows=%s", int(new_displacements_mask.sum()))
+
+    semantics_source = ""
+    if "series_semantics" in facts.columns:
+        semantics_series = facts["series_semantics"]
+        semantics_source = "series_semantics"
+    elif "semantics" in facts.columns:
+        semantics_series = facts["semantics"]
+        semantics_source = "semantics"
+    else:
+        semantics_series = pd.Series([""] * len(facts), index=facts.index)
+
+    semantics_normalized = semantics_series.fillna("").astype(str).str.lower().str.strip()
+    deltas_mask = semantics_normalized.eq("new")
+    resolved_mask = semantics_normalized.eq("stock")
+
+    if deltas_mask.any():
+        deltas_for_db = facts.loc[deltas_mask].copy()
+    if resolved_mask.any():
+        resolved_for_db = facts.loc[resolved_mask].copy()
+
+    other_mask = ~(deltas_mask | resolved_mask)
+    other_count = int(other_mask.sum())
+    if other_count:
+        distribution = semantics_normalized[other_mask].value_counts(dropna=False).to_dict()
+        normalized_distribution = {
+            (key if key else "(empty)"): int(value) for key, value in distribution.items()
+        }
+        LOGGER.info(
+            "duckdb.semantics.routed_other | total=%s details=%s",
+            other_count,
+            normalized_distribution,
+        )
+        other_rows = facts.loc[other_mask].copy()
+        if resolved_for_db is None:
+            resolved_for_db = other_rows
+        else:
+            resolved_for_db = pd.concat(
+                [resolved_for_db, other_rows],
+                ignore_index=True,
+                sort=False,
+            )
+
+    LOGGER.info(
+        "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s other_rows=%s",
+        semantics_source or "∅",
+        0 if resolved_for_db is None else len(resolved_for_db),
+        0 if deltas_for_db is None else len(deltas_for_db),
+        other_count,
+    )
+
+    return resolved_for_db, deltas_for_db
+
+
 def _parse_write_db_flag(value: str | bool | None) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -1657,6 +1736,8 @@ class ExportResult:
     sources: List[SourceApplication] = field(default_factory=list)
     report: Dict[str, Any] = field(default_factory=dict)
     db_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    resolved_df: Optional["pd.DataFrame"] = None
+    deltas_df: Optional["pd.DataFrame"] = None
 
 
 class ExportError(RuntimeError):
@@ -2655,86 +2736,8 @@ def export_facts(
 
     resolved_for_db: Optional[pd.DataFrame] = None
     deltas_for_db: Optional[pd.DataFrame] = None
-    semantics_source: str = ""
     if isinstance(facts, pd.DataFrame) and not facts.empty:
-        metric_series = (
-            facts["metric"]
-            if "metric" in facts.columns
-            else pd.Series([""] * len(facts), index=facts.index)
-        )
-        metric_normalized = (
-            metric_series.fillna("")
-            .astype(str)
-            .str.lower()
-            .str.strip()
-        )
-        new_displacements_mask = metric_normalized.eq("new_displacements")
-        if new_displacements_mask.any():
-            if "series_semantics" not in facts.columns:
-                facts["series_semantics"] = pd.NA
-            facts.loc[new_displacements_mask, "series_semantics"] = "new"
-            if "semantics" in facts.columns:
-                facts.loc[new_displacements_mask, "semantics"] = "new"
-            locked = int(new_displacements_mask.sum())
-            LOGGER.info("duckdb.idmc.flow_semantics | rows=%s", locked)
-
-        if "series_semantics" in facts.columns:
-            semantics_series = facts["series_semantics"]
-            semantics_source = "series_semantics"
-        elif "semantics" in facts.columns:
-            semantics_series = facts["semantics"]
-            semantics_source = "semantics"
-        else:
-            semantics_series = pd.Series([""] * len(facts), index=facts.index)
-
-        semantics_normalized = (
-            semantics_series.fillna("")
-            .astype(str)
-            .str.lower()
-            .str.strip()
-        )
-        deltas_mask = semantics_normalized.eq("new")
-        resolved_mask = semantics_normalized.eq("stock")
-
-        if deltas_mask.any():
-            deltas_for_db = facts.loc[deltas_mask].copy()
-        if resolved_mask.any():
-            resolved_for_db = facts.loc[resolved_mask].copy()
-
-        other_mask = ~(deltas_mask | resolved_mask)
-        other_count = int(other_mask.sum())
-        if other_count:
-            distribution = (
-                semantics_normalized[other_mask]
-                .value_counts(dropna=False)
-                .to_dict()
-            )
-            normalized_distribution = {
-                (key if key else "(empty)"): int(value)
-                for key, value in distribution.items()
-            }
-            LOGGER.info(
-                "duckdb.semantics.routed_other | total=%s details=%s",
-                other_count,
-                normalized_distribution,
-            )
-            other_rows = facts.loc[other_mask].copy()
-            if resolved_for_db is None:
-                resolved_for_db = other_rows
-            else:
-                resolved_for_db = pd.concat(
-                    [resolved_for_db, other_rows],
-                    ignore_index=True,
-                    sort=False,
-                )
-
-        LOGGER.info(
-            "duckdb.semantics.routing | source_column=%s resolved_rows=%s deltas_rows=%s other_rows=%s",
-            semantics_source or "∅",
-            0 if resolved_for_db is None else len(resolved_for_db),
-            0 if deltas_for_db is None else len(deltas_for_db),
-            other_count,
-        )
+        resolved_for_db, deltas_for_db = prepare_duckdb_tables(facts)
 
     db_write_stats = _maybe_write_to_db(
         facts_resolved=resolved_for_db,
@@ -2907,6 +2910,8 @@ def export_facts(
         sources=source_details,
         report=report,
         db_stats=db_write_stats,
+        resolved_df=resolved_for_db,
+        deltas_df=deltas_for_db,
     )
 
 
