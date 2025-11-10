@@ -357,6 +357,11 @@ def main():
         default=None,
         help="Optional DuckDB URL override (defaults to RESOLVER_DB_URL)",
     )
+    ap.add_argument(
+        "--db",
+        default=None,
+        help="Alias for --db-url; DuckDB URL or path",
+    )
     args = ap.parse_args()
 
     try:
@@ -368,7 +373,7 @@ def main():
             deltas=Path(args.deltas) if args.deltas else None,
             resolved_csv=Path(args.resolved) if args.resolved else None,
             write_db=None if args.write_db is None else args.write_db == "1",
-            db_url=args.db_url,
+            db_url=args.db or args.db_url,
         )
     except SnapshotError as exc:
         print(str(exc), file=sys.stderr)

@@ -486,7 +486,7 @@ def _collect_export_summary(
         duckdb_info["breakdown"] = breakdown
         duckdb_info["error"] = duckdb_error
     elif not duckdb_exists:
-        duckdb_info["note"] = "not created yet; will be generated in the 'Derive & freeze' job."
+        duckdb_info["note"] = "not created yet; will be written later in the 'Derive & freeze' job."
     summary["duckdb"] = duckdb_info
     return summary
 

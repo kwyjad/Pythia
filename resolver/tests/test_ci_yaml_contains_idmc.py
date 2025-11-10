@@ -60,3 +60,28 @@ def test_backfill_uses_db_flag_for_idmc_writer() -> None:
     assert isinstance(run_script, str)
     assert "--db \"${RESOLVER_DB_URL}\"" in run_script
     assert "--db-url" not in run_script
+
+
+def test_backfill_export_and_freeze_use_db_flag() -> None:
+    yaml_data = _load_yaml(WF_BACKFILL)
+    derive_job = yaml_data.get("jobs", {}).get("derive-freeze", {})
+    steps = derive_job.get("steps", [])
+    assert isinstance(steps, list)
+    export_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Export canonical facts"
+    )
+    export_run = export_step.get("run")
+    assert isinstance(export_run, str)
+    assert "--db \"${{ env.RESOLVER_DB_URL }}\"" in export_run
+    assert "--db-url" not in export_run
+
+    freeze_script = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Derive and freeze monthly snapshots"
+    ).get("run")
+    assert isinstance(freeze_script, str)
+    assert "--db" in freeze_script
+    assert "--db-url" not in freeze_script

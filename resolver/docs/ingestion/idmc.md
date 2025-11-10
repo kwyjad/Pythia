@@ -26,21 +26,24 @@ The command:
   reflect the rows written after any HELIX fallback. When both HELIX calls fail
   the connector records `zero_rows_reason=helix_http_error`; a successful fetch
   that yields an empty window reports `zero_rows_reason=helix_empty`.
+  Even if the Markdown summary template fails to render, the CLI writes a
+  minimal summary containing those counters alongside the recorded
+  `helix_endpoint`/`zero_rows_reason` fields so automation still observes the
+  outcome.
 
 The `resolver-initial-backfill` GitHub Actions workflow now calls the CLI
 directly with `--network-mode helix` before launching the generic connector
-runner. That HELIX single-shot sets `RESOLVER_SKIP_IDMC=1` so
-`scripts.ci.run_connectors` does not trigger a second IDMC execution, ensuring
-the workflow summary reflects the outcome of the direct CLI invocation. Once the
-staging exports exist the workflow writes them to DuckDB via
-`python -m resolver.cli.idmc_to_duckdb --db "$RESOLVER_DB_URL"` and appends the
-post-freeze `scripts/ci/duckdb_summary.py` report to the GitHub Step Summary so
-operators can confirm inserted and updated row counts alongside the usual IDMC
-diagnostics. Each ingest run begins by clearing `resolver/staging/` and
-`diagnostics/ingestion/` to avoid stale artifacts, forces the HELIX fallback
-order (`gidd` → `idus_last180`) regardless of `IDMC_API_TOKEN`, and appends a
-DuckDB verification block (via `--append-summary`) describing the inserted
-rows.
+runner. The job clears both `resolver/staging/` and `diagnostics/ingestion/`
+before invoking IDMC so stale artifacts never leak into exports, and it always
+runs the HELIX path regardless of whether `IDMC_API_TOKEN` is present. The
+generic `run_connectors` invocation is restricted to the remaining connectors so
+IDMC only runs once per workflow execution. Once staging exports exist the job
+writes them to DuckDB using the unified `--db` flag (for `export_facts`,
+`idmc_to_duckdb`, and the monthly freeze helpers) and appends the
+`scripts/ci/duckdb_summary.py --db …` report to both the GitHub Step Summary and
+`diagnostics/ingestion/summary.md`. Operators therefore see the inserted and
+updated row totals alongside the usual IDMC diagnostics without searching
+through logs.
 
 The first ten normalized rows are saved to
 `diagnostics/ingestion/idmc/normalized_preview.csv` and the drop reason
