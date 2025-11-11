@@ -11,6 +11,7 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
 - [ReliefWeb PDF pipeline](docs/reliefweb_pdf.md)
 - [Operations run book](docs/operations.md)
 - [Troubleshooting guide](docs/troubleshooting.md)
+- [DuckDB write flow](docs/troubleshooting.md#initial-backfill-duckdb-writes)
 - [Governance & audit](docs/governance.md)
 
 ## Quick start
@@ -50,6 +51,12 @@ Resolver ingests humanitarian situation reports from multiple connectors, normal
    The first connection calls `duckdb_io.init_schema()` to apply the canonical
    tables and constraints defined in [`resolver/db/schema.sql`](db/schema.sql),
    so reruns always observe the same structure.
+
+   > ℹ️ The initial backfill workflow runs
+   > `resolver.tools.freeze_snapshot --write-db` against the previewed
+   > `facts.csv` to populate DuckDB automatically. See the
+   > [DuckDB write flow](docs/troubleshooting.md#initial-backfill-duckdb-writes)
+   > notes for the operator checklist.
 
 ## DTM configuration & diagnostics
 

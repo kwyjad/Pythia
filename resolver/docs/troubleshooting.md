@@ -34,3 +34,15 @@ This guide captures common issues encountered when running Resolver locally or i
 - Inspect `resolver/logs/ingestion/*.log` for structured details (JSON) including selector scores and parsing diagnostics.
 - Use `pytest -vv` on targeted tests (e.g., `pytest -vv resolver/tests/ingestion/test_reliefweb_pdf.py::test_household_conversion`) to reproduce parsing paths quickly.
 - Confirm schema expectations with `pytest -q resolver/tests/test_staging_schema_all.py` after modifying connectors.
+
+## Initial backfill DuckDB writes
+
+- The workflow step **Derive & Freeze (write DuckDB)** runs
+  `python -m resolver.tools.freeze_snapshot --facts diagnostics/ingestion/export_preview/facts.csv`
+  with `--write-db=1` and the `RESOLVER_DUCKDB_URL`. Expect log lines summarising
+  the row counts pushed into `facts_resolved` and `facts_deltas` even when one of
+  the tables is empty.
+- When debugging a failed write, confirm that the `diagnostics/ingestion/export_preview/facts.csv`
+  artifact contains both `semantics=new` and `semantics=stock` rows; the DTM
+  admin0 stock metric (`idps_present`) is enabled in the export config to seed
+  resolved tables during the initial backfill.

@@ -322,6 +322,7 @@ jobs:
     needs: ingest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb
+      RESOLVER_DUCKDB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
       BACKFILL_MONTHS_CSV: ${{ needs.ingest.outputs.months }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
@@ -346,6 +347,26 @@ jobs:
         with:
           name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
           path: .
+
+      - name: Derive freeze month env
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+
+          months = os.environ.get("BACKFILL_MONTHS_CSV", "")
+          parts = [part.strip() for part in months.split(",") if part.strip()]
+          if not parts:
+              raise SystemExit("Unable to derive BACKFILL_MONTH from BACKFILL_MONTHS_CSV")
+
+          latest = parts[-1]
+          github_env = os.environ.get("GITHUB_ENV")
+          if not github_env:
+              raise SystemExit("GITHUB_ENV is not set; cannot persist BACKFILL_MONTH")
+
+          with open(github_env, "a", encoding="utf-8") as handle:
+              handle.write(f"BACKFILL_MONTH={latest}\n")
+          PY
 
       - name: Export canonical facts
         run: |
@@ -389,6 +410,29 @@ jobs:
           else
             echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
           fi
+
+      - name: Derive & Freeze (write DuckDB)
+        env:
+          RESOLVER_WRITE_DB: "1"
+          WRITE_DB: "1"
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          facts_path="diagnostics/ingestion/export_preview/facts.csv"
+          if [ ! -f "${facts_path}" ]; then
+            echo "facts.csv not found at ${facts_path}" >&2
+            ls -la diagnostics/ingestion/export_preview || true
+            exit 1
+          fi
+          python -m resolver.tools.freeze_snapshot \
+            --facts diagnostics/ingestion/export_preview/facts.csv \
+            --month "${BACKFILL_MONTH}" \
+            --write-db=1 \
+            --db-url "${{ env.RESOLVER_DUCKDB_URL }}"
 
       - name: Derive and freeze monthly snapshots
         env:

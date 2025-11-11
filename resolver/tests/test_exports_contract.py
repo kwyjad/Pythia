@@ -7,6 +7,7 @@ from resolver.tests.test_utils import (
     discover_export_files, today_iso, require_columns
 )
 from resolver.tools import llm_context
+from resolver.tools.export_facts import prepare_duckdb_tables
 
 try:
     from resolver.db import duckdb_io
@@ -84,6 +85,47 @@ def test_exports_facts_contract_if_present():
 
     cases_wrong_unit = df[(df["metric"] == "cases") & (df["unit"] != "persons_cases")]
     assert cases_wrong_unit.empty, "Policy: cases must use unit=persons_cases"
+
+
+def test_prepare_duckdb_tables_routes_stock_and_new_rows():
+    facts = pd.DataFrame(
+        [
+            {
+                "event_id": "evt-stock",
+                "iso3": "COL",
+                "hazard_code": "HZ",
+                "metric": "idps_present",
+                "series_semantics": "stock",
+                "semantics": "stock",
+                "value": 100,
+                "unit": "persons",
+                "as_of_date": "2024-01-31",
+                "publication_date": "2024-02-01",
+                "source_id": "dtm_admin0",
+                "ym": "2024-01",
+            },
+            {
+                "event_id": "evt-new",
+                "iso3": "COL",
+                "hazard_code": "HZ",
+                "metric": "new_displacements",
+                "series_semantics": "new",
+                "semantics": "new",
+                "value": 15,
+                "unit": "persons",
+                "as_of_date": "2024-01-31",
+                "publication_date": "2024-02-01",
+                "source_id": "idmc",
+                "ym": "2024-01",
+            },
+        ]
+    )
+
+    resolved, deltas = prepare_duckdb_tables(facts)
+    assert resolved is not None and not resolved.empty
+    assert deltas is not None and not deltas.empty
+    assert set(resolved["series_semantics"].str.lower()) == {"stock"}
+    assert set(deltas["series_semantics"].str.lower()) == {"new"}
 
 def test_remote_first_state_exports_are_valid_if_present():
     # Validate any committed state exports CSVs (PR or daily). Skip gracefully if none.
