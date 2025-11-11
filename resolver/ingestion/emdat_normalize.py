@@ -163,9 +163,8 @@ def normalize_emdat_pa(
     classif_series = working.get("classif_key")
     if classif_series is None:
         classif_series = pd.Series(pd.NA, index=working.index, dtype="string")
-    classif = classif_series.astype("string")
-    classif = classif.str.strip().str.lower()
-    working["shock_type"] = classif.map(CLASSIF_TO_SHOCK)
+    classif_clean = classif_series.astype("string").str.strip().str.lower()
+    working = working.assign(shock_type=classif_clean.map(CLASSIF_TO_SHOCK))
     unmapped_mask = working["shock_type"].isna()
     dropped_unmapped = int(unmapped_mask.sum())
     if dropped_unmapped:
@@ -176,6 +175,7 @@ def normalize_emdat_pa(
                 working.at[idx, "classif_key"],
             )
     working = working.loc[~unmapped_mask].copy()
+    flood_row_count = int((working["shock_type"] == "flood").sum())
 
     affected = pd.to_numeric(
         working.get("total_affected", pd.Series(pd.NA, index=working.index)),
@@ -212,6 +212,13 @@ def normalize_emdat_pa(
     grouped = grouped[list(_OUTPUT_COLUMNS)].sort_values(["iso3", "ym", "shock_type"]).reset_index(drop=True)
 
     kept_rows = len(working)
+    LOG.debug(
+        "emdat.normalize.grouped|rows_in=%s|rows_out=%s|flood_rows=%s",
+        raw_rows,
+        len(grouped),
+        flood_row_count,
+    )
+
     LOG.info(
         "emdat.normalize.summary|raw=%s|kept=%s|groups=%s|dropped_missing_month=%s|dropped_unmapped=%s|dropped_iso=%s",
         raw_rows,
