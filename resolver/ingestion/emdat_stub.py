@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import pandas as pd
 
@@ -31,76 +32,76 @@ STUB_COLUMNS: Sequence[str] = (
     "last_update",
 )
 
-STUB_ROWS: Iterable[dict[str, object]] = (
-    {
-        "disno": "2015-0003-ETH",
-        "classif_key": "nat-cli-dro-dro",
-        "type": "Drought",
-        "subtype": "Meteorological",
-        "iso": "ETH",
-        "country": "Ethiopia",
-        "start_year": 2015,
-        "start_month": 6,
-        "start_day": 1,
-        "end_year": 2016,
-        "end_month": 3,
-        "end_day": 31,
-        "total_affected": 10500000,
-        "entry_date": "2015-06-15",
-        "last_update": "2016-04-12",
-    },
-    {
-        "disno": "2019-0007-PHL",
-        "classif_key": "nat-met-sto-tro",
-        "type": "Storm",
-        "subtype": "Tropical cyclone",
-        "iso": "PHL",
-        "country": "Philippines",
-        "start_year": 2019,
-        "start_month": 12,
-        "start_day": 3,
-        "end_year": 2019,
-        "end_month": 12,
-        "end_day": 7,
-        "total_affected": 257000,
-        "entry_date": "2019-12-09",
-        "last_update": "2020-01-05",
-    },
-    {
-        "disno": "2022-0005-BGD",
-        "classif_key": "nat-hyd-flo-riv",
-        "type": "Flood",
-        "subtype": "Riverine flood",
-        "iso": "BGD",
-        "country": "Bangladesh",
-        "start_year": 2022,
-        "start_month": 5,
-        "start_day": 14,
-        "end_year": 2022,
-        "end_month": 6,
-        "end_day": 2,
-        "total_affected": 1680000,
-        "entry_date": "2022-05-20",
-        "last_update": "2022-06-15",
-    },
-    {
-        "disno": "2023-0004-PER",
-        "classif_key": "nat-hyd-flo-fla",
-        "type": "Flood",
-        "subtype": "Flash flood",
-        "iso": "PER",
-        "country": "Peru",
-        "start_year": 2023,
-        "start_month": 3,
-        "start_day": 10,
-        "end_year": 2023,
-        "end_month": 3,
-        "end_day": 12,
-        "total_affected": 48000,
-        "entry_date": "2023-03-13",
-        "last_update": "2023-03-20",
-    },
-)
+_CLASSIF = [
+    "nat-cli-dro-dro",  # drought
+    "nat-met-sto-tro",  # tropical cyclone
+    "nat-hyd-flo-riv",  # riverine flood
+    "nat-hyd-flo-fla",  # flash flood
+]
+
+_SUBTYPE_LABEL = {
+    "nat-cli-dro-dro": "Drought",
+    "nat-met-sto-tro": "Tropical cyclone",
+    "nat-hyd-flo-riv": "Riverine flood",
+    "nat-hyd-flo-fla": "Flash flood",
+}
+
+
+def _synth_rows(
+    from_year: int,
+    to_year: int,
+    *,
+    iso_list: Sequence[str] | None,
+    classif: Sequence[str] | None,
+) -> pd.DataFrame:
+    keys = [str(value).strip() for value in (classif or []) if str(value).strip()]
+    if not keys:
+        keys = list(_CLASSIF)
+
+    iso = (iso_list[0] if iso_list else "BEL").upper()
+
+    if from_year == to_year:
+        year = max(int(from_year), int(to_year))
+    else:
+        year = int(from_year)
+
+    rows_needed = max(3, len(keys))
+
+    records: list[dict[str, object]] = []
+    for i in range(rows_needed):
+        key = keys[i % len(keys)]
+        month = (i % 3) + 1
+        disno = f"{year:04d}-{1000 + i:04d}-{iso}"
+        subtype = _SUBTYPE_LABEL.get(key, "Unknown")
+
+        if key.startswith("nat-hyd-flo"):
+            hazard_type = "Flood"
+        elif "dro" in key:
+            hazard_type = "Drought"
+        else:
+            hazard_type = "Storm"
+
+        records.append(
+            {
+                "disno": disno,
+                "classif_key": key,
+                "type": hazard_type,
+                "subtype": subtype,
+                "iso": iso,
+                "country": "Belgium",
+                "start_year": year,
+                "start_month": month,
+                "start_day": 1,
+                "end_year": year,
+                "end_month": month,
+                "end_day": 2,
+                "total_affected": 1000 + (10 * i),
+                "entry_date": date(year, month, 1).isoformat(),
+                "last_update": date(year, month, 2).isoformat(),
+            }
+        )
+
+    return pd.DataFrame.from_records(records, columns=STUB_COLUMNS)
 
 
 def fetch_raw(
@@ -114,18 +115,19 @@ def fetch_raw(
 ) -> pd.DataFrame:
     """Return a pandas ``DataFrame`` mirroring the live EM-DAT client output."""
 
-    df = pd.DataFrame(STUB_ROWS, columns=STUB_COLUMNS)
-    df = df[(df["start_year"] >= int(from_year)) & (df["start_year"] <= int(to_year))]
-
+    iso_list: Sequence[str] | None = None
     if iso:
-        iso_set = {str(value).strip().upper() for value in iso if str(value).strip()}
-        if iso_set:
-            df = df[df["iso"].isin(iso_set)]
+        if isinstance(iso, (list, tuple)):
+            iso_list = [str(value).strip().upper() for value in iso if str(value).strip()]
+        else:
+            iso_list = [str(iso).strip().upper()]
 
-    if classif:
-        classif_set = {str(value).strip() for value in classif if str(value).strip()}
-        if classif_set:
-            df = df[df["classif_key"].isin(classif_set)]
+    df = _synth_rows(
+        int(from_year),
+        int(to_year),
+        iso_list=iso_list,
+        classif=classif,
+    )
 
     if limit is not None and limit >= 0:
         df = df.head(int(limit))
