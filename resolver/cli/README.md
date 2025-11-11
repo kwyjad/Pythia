@@ -65,11 +65,15 @@ automation and fast tests can reason about outcomes:
 - `0` &mdash; Success. Warnings are allowed unless `--strict` is provided.
 - `2` &mdash; Strict mode failure. Returned when `--strict` is used and warnings are
   present.
+- `4` &mdash; Empty facts. Returned when `--write-db` is requested but no canonical
+  facts rows are available to write.
 - `1` &mdash; Error. Raised for unexpected exceptions or failed DuckDB writes.
 
 Fast regression coverage lives in
-`resolver/tests/test_cli_exit_policy_regression.py`; run it when changing the
+`resolver/tests/test_cli_exit_policy_regression.py` and
+`resolver/tests/test_idmc_exit_policy_local.py`; run them when changing the
 helper to ensure the success banner and exit codes stay stable. For additional
 context during debugging, pass `--log-level DEBUG` (or export
 `RESOLVER_LOG_LEVEL=DEBUG`) to surface the `idmc_to_duckdb.exit_decision`
-message that records the strict flag, warning state, and chosen exit code.
+message that records the strict flag, warning state, empty-facts detection, and
+chosen exit code.

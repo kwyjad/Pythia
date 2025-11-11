@@ -31,6 +31,7 @@ DEFAULT_DB_PATH = Path("./resolver_data/resolver.duckdb")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_STRICT_WARNINGS = 2
+EXIT_EMPTY_FACTS = 4
 
 
 def _normalize_db_url_arg(raw: str | None) -> tuple[str, str]:
@@ -340,10 +341,12 @@ def run(argv: Sequence[str] | None = None) -> int:
     write_results: dict[str, duckdb_io.UpsertResult] = {}
     inserted_resolved = 0
     inserted_deltas = 0
+    empty_facts_warning: str | None = None
     if writing_requested:
         if zero_prepared:
+            empty_facts_warning = "No canonical facts rows available for DuckDB write"
             LOGGER.error("write_db requested but no canonical facts rows found")
-            print("No canonical facts rows available for DuckDB write", file=sys.stderr)
+            print(empty_facts_warning, file=sys.stderr)
         else:
             conn: duckdb.DuckDBPyConnection | None = None
             try:
@@ -439,11 +442,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         emit("Verification: DB verification deferred (performed post-write in derive-freeze)")
 
     staging_warnings = []
+    manual_warnings: list[str] = []
+    if empty_facts_warning:
+        manual_warnings.append(empty_facts_warning)
     if not args.facts_csv and not (staging_dir / "stock.csv").is_file():
         staging_warnings.append("stock.csv: not present")
 
     collected_warnings = _gather_warnings(
         staging_warnings,
+        manual_warnings,
         (exporter_result.warnings if exporter_result else []) or [],
         ((exporter_result.report or {}) if exporter_result else {}).get("warnings") or [],
     )
@@ -458,15 +465,18 @@ def run(argv: Sequence[str] | None = None) -> int:
         emit("Warnings: none")
 
     exit_code = EXIT_OK
-    if args.strict and has_warnings:
+    if writing_requested and zero_prepared:
+        exit_code = EXIT_EMPTY_FACTS
+    elif writing_requested and args.strict and has_warnings:
         exit_code = EXIT_STRICT_WARNINGS
 
     LOGGER.debug(
         "idmc_to_duckdb.exit_decision | strict=%s has_warnings=%s writing=%s "
-        "inserted_resolved=%s inserted_deltas=%s exit=%s",
+        "empty_facts=%s inserted_resolved=%s inserted_deltas=%s exit=%s",
         args.strict,
         has_warnings,
         writing_requested,
+        bool(empty_facts_warning),
         inserted_resolved,
         inserted_deltas,
         exit_code,
