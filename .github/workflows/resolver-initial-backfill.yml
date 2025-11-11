@@ -78,6 +78,8 @@ jobs:
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
       DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
+      EMDAT_NETWORK: "1" 
+      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
@@ -86,7 +88,7 @@ jobs:
       IDMC_ALLOW_HDX_FALLBACK: "1"
       IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
-      CONNECTOR_LIST: acled_client,dtm_client,ifrc_go_client,ipc_client,reliefweb_client,unhcr_client,unhcr_odp_client,wfp_mvam_client,who_phe_client
+      CONNECTOR_LIST: acled_client,dtm_client,ifrc_go_client,ipc_client,reliefweb_client,unhcr_client,unhcr_odp_client,wfp_mvam_client,who_phe_client,emdat_client
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
       EMPTY_POLICY: ${{ inputs.empty_policy }}
