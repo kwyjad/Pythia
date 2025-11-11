@@ -34,3 +34,26 @@ This guide captures common issues encountered when running Resolver locally or i
 - Inspect `resolver/logs/ingestion/*.log` for structured details (JSON) including selector scores and parsing diagnostics.
 - Use `pytest -vv` on targeted tests (e.g., `pytest -vv resolver/tests/ingestion/test_reliefweb_pdf.py::test_household_conversion`) to reproduce parsing paths quickly.
 - Confirm schema expectations with `pytest -q resolver/tests/test_staging_schema_all.py` after modifying connectors.
+
+## Files backend root discovery
+
+When the resolver runs in "files" mode it needs a root directory containing
+exports and supporting CSVs. The lookup order is deterministic:
+
+1. A caller-supplied path (the `preferred` argument) if the directory exists.
+2. The `RESOLVER_FILES_ROOT` environment variable.
+3. Fast-fixture hints such as `RESOLVER_STAGING_DIR`,
+   `RESOLVER_TEST_DATA_DIR`, `RESOLVER_FAST_EXPORTS_DIR`, `FAST_EXPORTS_ROOT`,
+   and `RESOLVER_SNAPSHOTS_DIR`, plus the usual repository bootstrap
+   directories (for example `data/exports` or `resolver/exports`).
+4. The built-in repository fixtures under `resolver/tests/data`.
+
+Set `RESOLVER_FILES_ROOT` when you need to override a fast-fixture directory in
+tests or local experiments; it now takes precedence over the auto-discovered
+paths above.
+
+When investigating mismatches, enable DEBUG logging (for example,
+`RESOLVER_LOG_LEVEL=DEBUG pytest …`) to surface messages such as
+`discover_files_root: using <path> (source=RESOLVER_FILES_ROOT)` and
+`discover_files_root: no viable candidates; searched=…`. These breadcrumbs help
+confirm which branch won and why.
