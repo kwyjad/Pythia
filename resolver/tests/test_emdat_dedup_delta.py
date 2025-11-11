@@ -83,6 +83,7 @@ def test_emdat_dedup_and_monthly_aggregation(tmp_path, monkeypatch):
 
     out_path = Path(tmp_path) / "dedup_out.csv"
     monkeypatch.setenv("RESOLVER_SKIP_EMDAT", "0")
+    monkeypatch.setenv("EMDAT_NETWORK", "1")
     monkeypatch.delenv("EMDAT_ALLOC_POLICY", raising=False)
     monkeypatch.setattr(emdat_client, "OUT_DIR", Path(tmp_path))
     monkeypatch.setattr(emdat_client, "OUT_PATH", out_path)

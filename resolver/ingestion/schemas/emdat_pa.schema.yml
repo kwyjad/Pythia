@@ -1,24 +1,52 @@
-version: 1
+version: "1"
 name: emdat_pa
 table: emdat_pa
 columns:
+  - name: event_id
+    description: Stable identifier for the normalized EM-DAT bucket.
+  - name: country_name
+    description: Country name resolved from ISO3.
   - name: iso3
     description: ISO 3166-1 alpha-3 country code.
-  - name: ym
-    description: Resolver month key in YYYY-MM format.
-  - name: shock_type
-    description: Resolver shock type (drought, tropical_cyclone, flood).
-  - name: pa
-    description: People affected (EM-DAT Total Affected) aggregated to the month.
+  - name: hazard_code
+    description: Resolver hazard code (e.g., FL, DR).
+  - name: hazard_label
+    description: Human-readable hazard label.
+  - name: hazard_class
+    description: High-level hazard class grouping.
+  - name: metric
+    description: Metric identifier (e.g., total_affected).
+  - name: series_semantics
+    description: Series semantics for the metric (incident/stock/etc.).
+  - name: value
+    description: People affected aggregated to the bucket.
+  - name: unit
+    description: Unit of measurement for value.
   - name: as_of_date
-    description: Data currency date from EM-DAT metadata.
+    description: Month bucket in YYYY-MM format.
   - name: publication_date
     description: Latest EM-DAT publication/update date contributing to the bucket.
-  - name: source_id
-    description: Source identifier ("emdat").
-  - name: disno_first
-    description: Lowest EM-DAT disaster identifier contributing to the month bucket.
+  - name: publisher
+    description: Publisher or organization name.
+  - name: source_type
+    description: Source type classification.
+  - name: source_url
+    description: URL to the originating EM-DAT record.
+  - name: doc_title
+    description: Title of the EM-DAT source document.
+  - name: definition_text
+    description: Connector definition or notes for the metric.
+  - name: method
+    description: Method used to derive the figure.
+  - name: confidence
+    description: Confidence rating for the figure.
+  - name: revision
+    description: Revision number for the normalized record.
+  - name: ingested_at
+    description: ISO timestamp when the record was normalized.
 primary_key:
   - iso3
-  - ym
-  - shock_type
+  - as_of_date
+  - hazard_code
+  - metric
+  - series_semantics
