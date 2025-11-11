@@ -87,6 +87,56 @@ def current_ym_utc() -> str:
     return current_ym_istanbul()
 
 
+def resolve_db_url(preferred: Optional[str] = None) -> Optional[str]:
+    """Return a canonical DuckDB URL honouring overrides and fixture hints."""
+
+    raw_candidates: list[str] = []
+
+    def add(raw: Optional[str]) -> None:
+        if not raw:
+            return
+        text = str(raw).strip()
+        if text:
+            raw_candidates.append(text)
+
+    add(preferred)
+    add(os.environ.get("RESOLVER_DB_URL"))
+    add(os.environ.get("FAST_EXPORTS_DB_URL"))
+    add(os.environ.get("RESOLVER_DB_PATH"))
+    add(os.environ.get("FAST_EXPORTS_DB_PATH"))
+
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        if raw in seen:
+            continue
+        seen.add(raw)
+        candidate = raw
+        if "://" not in candidate:
+            path = Path(candidate).expanduser()
+            try:
+                resolved = path.resolve(strict=False)
+            except FileNotFoundError:
+                resolved = path.expanduser().absolute()
+            candidate = f"duckdb:///{resolved.as_posix()}"
+        elif candidate.lower().startswith("duckdb://") and not candidate.lower().startswith("duckdb:///"):
+            candidate = "duckdb:///" + candidate.split("://", 1)[1].lstrip("/")
+
+        if candidate.lower().startswith("duckdb:///"):
+            fs_part = candidate[len("duckdb:///") :]
+            if fs_part and fs_part != ":memory:":
+                fs_path = Path(fs_part).expanduser()
+                try:
+                    fs_path = fs_path.resolve(strict=False)
+                except FileNotFoundError:
+                    fs_path = fs_path.expanduser().absolute()
+                if not fs_path.exists():
+                    continue
+                candidate = f"duckdb:///{fs_path.as_posix()}"
+        return candidate
+
+    return None
+
+
 def ym_from_cutoff(cutoff: str) -> str:
     year, month, _ = cutoff.split("-")
     return f"{int(year):04d}-{int(month):02d}"
@@ -247,7 +297,9 @@ def prepare_deltas_frame(df: pd.DataFrame, ym: str) -> pd.DataFrame:
 
 
 def load_series_from_db(
-    ym: str, normalized_series: str
+    ym: str,
+    normalized_series: str,
+    db_url_override: Optional[str] = None,
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     LOGGER.debug("load_series_from_db called ym=%s series=%s", ym, normalized_series)
 
@@ -265,7 +317,7 @@ def load_series_from_db(
         )
         return None, "", normalized_series
 
-    db_url = os.environ.get("RESOLVER_DB_URL")
+    db_url = resolve_db_url(db_url_override)
     if not db_url:
         return None, "", normalized_series
 
@@ -431,6 +483,7 @@ def load_series_for_month(
     requested_series: str,
     *,
     backend: str = "files",
+    db_url: Optional[str] = None,
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     """Load data for the requested series ("new" or "stock")."""
 
@@ -438,7 +491,11 @@ def load_series_for_month(
     backend_choice = normalize_backend(backend, default="files")
 
     if backend_choice in {"auto", "db"}:
-        db_df, db_dataset_label, db_series = load_series_from_db(ym, normalized_series)
+        db_df, db_dataset_label, db_series = load_series_from_db(
+            ym,
+            normalized_series,
+            db_url_override=db_url,
+        )
         if db_df is not None and not db_df.empty:
             return db_df, db_dataset_label, db_series
         if backend_choice == "db":
@@ -599,8 +656,9 @@ def _resolve_from_db(
     hazard_code: str,
     cutoff: str,
     preferred_metric: str,
+    db_url_override: Optional[str] = None,
 ) -> Optional[ResolveAttempt]:
-    db_url = os.environ.get("RESOLVER_DB_URL")
+    db_url = resolve_db_url(db_url_override)
     log_json(
         DIAG_LOGGER,
         "db_read_request",
@@ -817,6 +875,8 @@ def resolve_point(
     series: str,
     metric: str = "in_need",
     backend: str = "db",
+    *,
+    db_url: Optional[str] = None,
 ) -> Optional[dict]:
     """Resolve a single point for the requested series and cutoff."""
 
@@ -854,6 +914,7 @@ def resolve_point(
                     hazard_code=hazard_code,
                     cutoff=cutoff,
                     preferred_metric=preferred_metric,
+                    db_url_override=db_url,
                 )
             else:
                 resolved = _resolve_from_files(

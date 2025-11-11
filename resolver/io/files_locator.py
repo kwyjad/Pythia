@@ -54,28 +54,55 @@ def discover_files_root(preferred: Optional[str] = None) -> Path:
 
     The search order is:
       1. ``preferred`` when provided and exists.
-      2. ``RESOLVER_SNAPSHOTS_DIR`` when set and exists.
-      3. ``$CWD/data/snapshots`` when it exists.
-      4. ``resolver/tests/data`` shipped with the repository for smoke tests.
+      2. ``RESOLVER_FILES_ROOT`` when set and exists.
+      3. ``RESOLVER_STAGING_DIR`` (optionally ``/exports``) when present.
+      4. Fixture hints such as ``RESOLVER_TEST_DATA_DIR`` (optionally ``/exports``).
+      5. ``RESOLVER_SNAPSHOTS_DIR`` when set and exists.
+      6. Repository/local fallbacks under ``data`` or ``resolver/exports``.
 
     Raises ``FileNotFoundError`` with the searched locations when none exist.
     """
 
+    package_root = Path(__file__).resolve().parents[1]
+    repo_root = package_root.parent
     candidates: List[Path] = []
+    seen: set[Path] = set()
 
-    def add_candidate(value: Optional[str | os.PathLike[str]]) -> None:
+    def _normalise(path: Path) -> Path:
+        try:
+            return path.expanduser().resolve(strict=False)
+        except FileNotFoundError:
+            return path.expanduser().absolute()
+
+    def add_candidate(value: Optional[str | os.PathLike[str]], *, sub: Optional[str] = None) -> None:
         if not value:
             return
-        path = Path(value).expanduser()
-        if path in candidates:
+        base = Path(value)
+        candidate = base / sub if sub else base
+        normalised = _normalise(candidate)
+        if normalised in seen:
             return
-        candidates.append(path)
+        seen.add(normalised)
+        candidates.append(normalised)
 
     add_candidate(preferred)
-    env_dir = os.environ.get("RESOLVER_SNAPSHOTS_DIR")
-    add_candidate(env_dir)
+    add_candidate(os.environ.get("RESOLVER_FILES_ROOT"))
+
+    staging_env = os.environ.get("RESOLVER_STAGING_DIR")
+    add_candidate(staging_env, sub="exports")
+    add_candidate(staging_env)
+
+    test_data_env = os.environ.get("RESOLVER_TEST_DATA_DIR")
+    add_candidate(test_data_env, sub="exports")
+    add_candidate(test_data_env)
+
+    add_candidate(os.environ.get("RESOLVER_SNAPSHOTS_DIR"))
+    add_candidate(Path.cwd() / "data" / "exports")
     add_candidate(Path.cwd() / "data" / "snapshots")
-    add_candidate(Path(__file__).resolve().parents[1] / "tests" / "data")
+    add_candidate(repo_root / "resolver" / "exports")
+    add_candidate(repo_root / "resolver" / "exports" / "backfill")
+    add_candidate(repo_root / "resolver" / "snapshots")
+    add_candidate(package_root / "tests" / "data")
 
     searched = _unique_paths(candidates)
     for path in searched:

@@ -151,7 +151,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         print(f"- **Database:** `{canonical_url or db_path}`")
         rows: list[tuple[str, int]] = []
-        for table in _iter_tables(args.tables):
+        tables_requested = list(_iter_tables(args.tables))
+        for table in tables_requested:
             if not table:
                 continue
             try:
@@ -164,13 +165,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("- **Status:** no matching tables present")
             return 0
 
+        rows.sort(key=lambda item: item[0])
+
         print("")
         print("| table | rows |")
         print("| --- | --- |")
         for table, count in rows:
             print(f"| {table} | {count} |")
 
-        breakdown = _collect_breakdown(conn, (table for table, _ in rows))
+        breakdown = _collect_breakdown(conn, [table for table, _ in rows])
         if breakdown:
             print("")
             print("### Rows by source / metric / semantics")
