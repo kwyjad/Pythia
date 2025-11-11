@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""FastAPI wrapper for the resolver."""
+"""
+FastAPI wrapper for the resolver.
 
-import logging
+Endpoints:
+  GET /health
+  GET /resolve?iso3=PHL&hazard_code=TC&cutoff=2025-09-30
+  # or names:
+  GET /resolve?country=Philippines&hazard=Tropical%20Cyclone&cutoff=2025-09-30
+"""
+
 import os
 from typing import List, Optional
 
@@ -15,17 +22,15 @@ from resolver.cli.resolver_cli import (
     resolve_hazard,
 )
 from resolver.query.selectors import (
+    VALID_BACKENDS,
     normalize_backend,
     resolve_point,
-    resolve_db_url,
     ym_from_cutoff,
 )
+from resolver.io import files_locator
 
 app = FastAPI(title="Resolver API", version="0.1.0")
-LOGGER = logging.getLogger(__name__)
-DEFAULT_BACKEND = normalize_backend(
-    os.environ.get("RESOLVER_API_BACKEND"), default="files"
-)
+DEFAULT_BACKEND = normalize_backend(os.environ.get("RESOLVER_API_BACKEND"), default="files")
 
 # Allow localhost by default (tweak as you like)
 app.add_middleware(
@@ -40,78 +45,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-
-def _normalise_backend_choice(value: Optional[str]) -> str:
-    """Return a validated backend identifier or raise HTTP 422."""
-
-    if value is None:
-        return DEFAULT_BACKEND
-
-    normalized = normalize_backend(value, default="")
-    if not normalized:
-        raise HTTPException(
-            status_code=422, detail="Invalid backend; choose from files, db, or auto."
-        )
-
-    return normalized
-
-
-def _resolve_query(
-    *,
-    iso3_code: str,
-    hazard_code: str,
-    cutoff: str,
-    series: str,
-    backend_choice: str,
-    country_name: str,
-    hazard_label: str,
-    hazard_class: str,
-) -> Optional[dict]:
-    """Execute a single resolution request using the selectors module."""
-
-    LOGGER.debug(
-        "resolve_api request iso3=%s hazard=%s cutoff=%s series=%s backend=%s",
-        iso3_code,
-        hazard_code,
-        cutoff,
-        series,
-        backend_choice,
-    )
-
-    db_url_override = None
-    if backend_choice in {"db", "auto"}:
-        db_url_override = resolve_db_url()
-
-    result = resolve_point(
-        iso3=iso3_code,
-        hazard_code=hazard_code,
-        cutoff=cutoff,
-        series=series,
-        metric="in_need",
-        backend=backend_choice,
-        db_url=db_url_override,
-    )
-
-    if not result:
-        LOGGER.debug("resolve_api result=not_found iso3=%s hazard=%s", iso3_code, hazard_code)
-        return None
-
-    result.setdefault("country_name", country_name)
-    result.setdefault("hazard_label", hazard_label)
-    result.setdefault("hazard_class", hazard_class)
-    result.setdefault("cutoff", cutoff)
-    result.setdefault("series_requested", series)
-
-    LOGGER.debug(
-        "resolve_api result=found iso3=%s hazard=%s backend=%s series=%s",
-        iso3_code,
-        hazard_code,
-        backend_choice,
-        result.get("series_returned", series),
-    )
-
-    return result
 
 
 @app.get("/health")
@@ -143,25 +76,95 @@ def resolve(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    backend_choice = _normalise_backend_choice(backend)
+    if backend is not None:
+        backend_clean = backend.strip().lower()
+        if backend_clean not in VALID_BACKENDS:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid backend; choose from files, db, or auto.",
+            )
+        backend_choice = backend_clean
+    else:
+        backend_choice = DEFAULT_BACKEND
 
-    result = _resolve_query(
-        iso3_code=iso3_code,
+    result = resolve_point(
+        iso3=iso3_code,
         hazard_code=hz_code,
         cutoff=cutoff,
         series=series,
-        backend_choice=backend_choice,
-        country_name=country_name,
-        hazard_label=hazard_label,
-        hazard_class=hz_class,
+        metric="in_need",
+        backend=backend_choice,
     )
 
     if not result:
-        raise HTTPException(status_code=404, detail="not found")
+        extra_hint = ""
+        if backend_choice in {"files", "csv"}:
+            try:
+                files_root = files_locator.discover_files_root(
+                    os.environ.get("RESOLVER_SNAPSHOTS_DIR")
+                )
+            except FileNotFoundError as exc:
+                extra_hint = f" Files backend root missing: {exc}."
+            else:
+                table = "facts_deltas" if series == "new" else "facts_resolved"
+                df_hint = files_locator.load_table(files_root, table)
+                if df_hint.empty:
+                    locator_reason = df_hint.attrs.get("locator_reason", "no rows located")
+                    extra_hint = (
+                        f" Files root {files_root} table {table}: {locator_reason}."
+                    )
+                else:
+                    extra_hint = (
+                        f" Files root {files_root} table {table}: rows located but none matched"
+                        " iso3/hazard/cutoff."
+                    )
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No data found for "
+                f"iso3={iso3_code}, hazard={hz_code}, series={series} at cutoff {cutoff} "
+                f"(backend {backend_choice}).{extra_hint}"
+            ),
+        )
 
-    result.setdefault("ym", ym)
-    result.setdefault("ok", True)
-    return result
+    row_series = (
+        str(result.get("series_returned", series)).strip().lower() or series
+    )
+    value = result.get("value", "")
+    try:
+        value = int(float(value))
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "iso3": iso3_code,
+        "country_name": country_name,
+        "hazard_code": hz_code,
+        "hazard_label": hazard_label,
+        "hazard_class": hz_class,
+        "cutoff": cutoff,
+        "metric": result.get("metric", ""),
+        "unit": result.get("unit", "persons"),
+        "value": value,
+        "as_of_date": result.get("as_of_date", ""),
+        "publication_date": result.get("publication_date", ""),
+        "publisher": result.get("publisher", ""),
+        "source_type": result.get("source_type", ""),
+        "source_url": result.get("source_url", ""),
+        "doc_title": result.get("doc_title", ""),
+        "definition_text": result.get("definition_text", ""),
+        "precedence_tier": result.get("precedence_tier", ""),
+        "event_id": result.get("event_id", ""),
+        "confidence": result.get("confidence", ""),
+        "proxy_for": result.get("proxy_for", ""),
+        "source": result.get("source", ""),
+        "source_dataset": result.get("source_dataset", ""),
+        "series_requested": result.get("series_requested", series),
+        "series_returned": row_series,
+        "ym": result.get("ym", ym),
+        "source_id": result.get("source_id", ""),
+    }
 
 
 @app.post("/resolve_batch", response_model=List[ResolveResponseRow])
@@ -187,20 +190,25 @@ def resolve_batch(queries: List[ResolveQuery]) -> List[ResolveResponseRow]:
         except SystemExit:
             continue
 
-        backend_choice = normalize_backend(query.backend, default=DEFAULT_BACKEND)
-        result = _resolve_query(
-            iso3_code=iso3_code,
+        backend_choice = query.backend or DEFAULT_BACKEND
+
+        result = resolve_point(
+            iso3=iso3_code,
             hazard_code=hz_code,
             cutoff=query.cutoff,
             series=query.series,
-            backend_choice=backend_choice,
-            country_name=country_name,
-            hazard_label=hazard_label,
-            hazard_class=hz_class,
+            metric="in_need",
+            backend=backend_choice,
         )
 
         if not result:
             continue
+
+        result.setdefault("country_name", country_name)
+        result.setdefault("hazard_label", hazard_label)
+        result.setdefault("hazard_class", hz_class)
+        result.setdefault("cutoff", query.cutoff)
+        result.setdefault("series_requested", query.series)
 
         responses.append(ResolveResponseRow.parse_obj(result))
 

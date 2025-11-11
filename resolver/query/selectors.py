@@ -5,14 +5,11 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 import pandas as pd
-
-_TZ_SUFFIX_RE = re.compile(r"([+-]\d\d:?\d\d|Z)$", re.IGNORECASE)
 
 from resolver.db import duckdb_io
 from resolver.db.conn_shared import normalize_duckdb_url
@@ -88,56 +85,6 @@ def current_ym_utc() -> str:
     """Backwards-compatible alias; resolver now tracks Istanbul month boundary."""
 
     return current_ym_istanbul()
-
-
-def resolve_db_url(preferred: Optional[str] = None) -> Optional[str]:
-    """Return a canonical DuckDB URL honouring overrides and fixture hints."""
-
-    raw_candidates: list[str] = []
-
-    def add(raw: Optional[str]) -> None:
-        if not raw:
-            return
-        text = str(raw).strip()
-        if text:
-            raw_candidates.append(text)
-
-    add(preferred)
-    add(os.environ.get("RESOLVER_DB_URL"))
-    add(os.environ.get("FAST_EXPORTS_DB_URL"))
-    add(os.environ.get("RESOLVER_DB_PATH"))
-    add(os.environ.get("FAST_EXPORTS_DB_PATH"))
-
-    seen: set[str] = set()
-    for raw in raw_candidates:
-        if raw in seen:
-            continue
-        seen.add(raw)
-        candidate = raw
-        if "://" not in candidate:
-            path = Path(candidate).expanduser()
-            try:
-                resolved = path.resolve(strict=False)
-            except FileNotFoundError:
-                resolved = path.expanduser().absolute()
-            candidate = f"duckdb:///{resolved.as_posix()}"
-        elif candidate.lower().startswith("duckdb://") and not candidate.lower().startswith("duckdb:///"):
-            candidate = "duckdb:///" + candidate.split("://", 1)[1].lstrip("/")
-
-        if candidate.lower().startswith("duckdb:///"):
-            fs_part = candidate[len("duckdb:///") :]
-            if fs_part and fs_part != ":memory:":
-                fs_path = Path(fs_part).expanduser()
-                try:
-                    fs_path = fs_path.resolve(strict=False)
-                except FileNotFoundError:
-                    fs_path = fs_path.expanduser().absolute()
-                if not fs_path.exists():
-                    continue
-                candidate = f"duckdb:///{fs_path.as_posix()}"
-        return candidate
-
-    return None
 
 
 def ym_from_cutoff(cutoff: str) -> str:
@@ -299,49 +246,8 @@ def prepare_deltas_frame(df: pd.DataFrame, ym: str) -> pd.DataFrame:
     return filtered.fillna("")
 
 
-def _normalise_files_date_columns(frame: pd.DataFrame, columns: Iterable[str]) -> list[str]:
-    """Normalise ``columns`` to ISO date strings in-place when present."""
-
-    normalised: list[str] = []
-    for column in columns:
-        if column not in frame.columns:
-            continue
-        series = frame[column]
-        text = series.fillna("").astype(str)
-        text = text.replace({"NaT": "", "nan": "", "NaN": "", "<NA>": ""})
-        stripped = text.str.strip().str.replace(_TZ_SUFFIX_RE, "", regex=True)
-        parsed = pd.to_datetime(stripped, errors="coerce")
-        formatted = parsed.dt.strftime("%Y-%m-%d")
-        formatted = formatted.where(parsed.notna(), stripped)
-        formatted = formatted.fillna("").replace({"NaT": "", "nan": "", "NaN": "", "<NA>": ""})
-        frame[column] = formatted.astype(str)
-        normalised.append(column)
-    return normalised
-
-
-def _coalesce_date_columns(frame: pd.DataFrame, columns: Iterable[str]) -> pd.Series:
-    """Return a datetime series combining the first valid entry from ``columns``."""
-
-    if frame.empty:
-        return pd.Series(dtype="datetime64[ns]")
-
-    combined = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
-    for column in columns:
-        if column not in frame.columns:
-            continue
-        parsed = pd.to_datetime(frame[column], errors="coerce")
-        try:
-            parsed = parsed.dt.tz_localize(None)
-        except (AttributeError, TypeError):
-            pass
-        combined = combined.combine_first(parsed)
-    return combined
-
-
 def load_series_from_db(
-    ym: str,
-    normalized_series: str,
-    db_url_override: Optional[str] = None,
+    ym: str, normalized_series: str
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     LOGGER.debug("load_series_from_db called ym=%s series=%s", ym, normalized_series)
 
@@ -359,7 +265,7 @@ def load_series_from_db(
         )
         return None, "", normalized_series
 
-    db_url = resolve_db_url(db_url_override)
+    db_url = os.environ.get("RESOLVER_DB_URL")
     if not db_url:
         return None, "", normalized_series
 
@@ -525,7 +431,6 @@ def load_series_for_month(
     requested_series: str,
     *,
     backend: str = "files",
-    db_url: Optional[str] = None,
 ) -> Tuple[Optional[pd.DataFrame], str, str]:
     """Load data for the requested series ("new" or "stock")."""
 
@@ -533,11 +438,7 @@ def load_series_for_month(
     backend_choice = normalize_backend(backend, default="files")
 
     if backend_choice in {"auto", "db"}:
-        db_df, db_dataset_label, db_series = load_series_from_db(
-            ym,
-            normalized_series,
-            db_url_override=db_url,
-        )
+        db_df, db_dataset_label, db_series = load_series_from_db(ym, normalized_series)
         if db_df is not None and not db_df.empty:
             return db_df, db_dataset_label, db_series
         if backend_choice == "db":
@@ -698,9 +599,8 @@ def _resolve_from_db(
     hazard_code: str,
     cutoff: str,
     preferred_metric: str,
-    db_url_override: Optional[str] = None,
 ) -> Optional[ResolveAttempt]:
-    db_url = resolve_db_url(db_url_override)
+    db_url = os.environ.get("RESOLVER_DB_URL")
     log_json(
         DIAG_LOGGER,
         "db_read_request",
@@ -893,117 +793,9 @@ def _resolve_from_files(
     if df is None or df.empty:
         return None
 
-    working = df.copy()
-    total_rows = len(working.index)
-    LOGGER.debug(
-        "files resolve selection dataset=%s series=%s ym=%s iso3=%s hazard=%s cutoff=%s metric_pref=%s total_rows=%s",
-        dataset_label,
-        series,
-        ym,
-        iso3,
-        hazard_code,
-        cutoff,
-        preferred_metric,
-        total_rows,
-    )
-
-    for column in ("iso3", "hazard_code", "metric", "series", "series_semantics"):
-        if column in working.columns:
-            working[column] = working[column].astype(str).fillna("").str.strip()
-
-    _normalise_files_date_columns(working, ("as_of_date", "publication_date", "as_of"))
-
-    if "iso3" not in working.columns or "hazard_code" not in working.columns:
-        LOGGER.debug("files resolve abort: iso3 or hazard_code column missing")
+    row = select_row(df, iso3, hazard_code, cutoff, preferred_metric=preferred_metric)
+    if not row:
         return None
-
-    iso_mask = (working["iso3"] == iso3) & (working["hazard_code"] == hazard_code)
-    candidates = working.loc[iso_mask].copy()
-    LOGGER.debug("files resolve iso/h filter rows=%s", len(candidates.index))
-    if candidates.empty:
-        return None
-
-    cutoff_dt = pd.to_datetime(str(cutoff), errors="coerce")
-    candidates["_as_of_parsed"] = _coalesce_date_columns(
-        candidates, ("as_of_date", "publication_date", "as_of")
-    )
-    if not pd.isna(cutoff_dt):
-        cutoff_mask = candidates["_as_of_parsed"].isna() | (
-            candidates["_as_of_parsed"] <= cutoff_dt
-        )
-        candidates = candidates.loc[cutoff_mask]
-        LOGGER.debug(
-            "files resolve cutoff filter rows=%s cutoff=%s", len(candidates.index), cutoff
-        )
-        if candidates.empty:
-            return None
-    else:
-        LOGGER.debug("files resolve cutoff parse failed for cutoff=%s", cutoff)
-
-    if "metric" not in candidates.columns:
-        candidates["metric"] = ""
-    candidates["metric"] = candidates["metric"].astype(str).fillna("").str.strip()
-    candidates["metric_rank"] = _metric_rank(candidates["metric"], preferred_metric)
-
-    if "created_at" in candidates.columns:
-        candidates["_created_at_parsed"] = pd.to_datetime(
-            candidates["created_at"], errors="coerce"
-        )
-        try:
-            candidates["_created_at_parsed"] = candidates["_created_at_parsed"].dt.tz_localize(
-                None
-            )
-        except (AttributeError, TypeError):
-            pass
-    if "publication_date" in candidates.columns:
-        candidates["_publication_parsed"] = pd.to_datetime(
-            candidates["publication_date"], errors="coerce"
-        )
-
-    sort_columns: list[str] = ["metric_rank", "_as_of_parsed"]
-    sort_orders: list[bool] = [True, False]
-    for extra_column in ("_created_at_parsed", "_publication_parsed"):
-        if extra_column in candidates.columns:
-            sort_columns.append(extra_column)
-            sort_orders.append(False)
-
-    candidates = candidates.sort_values(
-        by=sort_columns,
-        ascending=sort_orders,
-        na_position="last",
-    )
-
-    LOGGER.debug(
-        "files resolve ranked rows=%s metrics=%s",
-        len(candidates.index),
-        sorted({str(m) for m in candidates["metric"].dropna()}),
-    )
-
-    if candidates.empty:
-        return None
-
-    helper_cols = [
-        col
-        for col in (
-            "metric_rank",
-            "_as_of_parsed",
-            "_created_at_parsed",
-            "_publication_parsed",
-        )
-        if col in candidates.columns
-    ]
-    top_series = candidates.iloc[0].drop(labels=helper_cols, errors="ignore")
-    row = top_series.to_dict()
-
-    LOGGER.debug(
-        "files resolve winner iso3=%s hazard=%s metric=%s as_of=%s dataset=%s source_id=%s",
-        iso3,
-        hazard_code,
-        row.get("metric", ""),
-        row.get("as_of_date", ""),
-        dataset_label,
-        row.get("source_id", ""),
-    )
 
     resolved_series = _normalise_series(row.get("series_semantics", series_used)) or series_used
     payload = _standardise_payload(
@@ -1025,8 +817,6 @@ def resolve_point(
     series: str,
     metric: str = "in_need",
     backend: str = "db",
-    *,
-    db_url: Optional[str] = None,
 ) -> Optional[dict]:
     """Resolve a single point for the requested series and cutoff."""
 
@@ -1064,7 +854,6 @@ def resolve_point(
                     hazard_code=hazard_code,
                     cutoff=cutoff,
                     preferred_metric=preferred_metric,
-                    db_url_override=db_url,
                 )
             else:
                 resolved = _resolve_from_files(

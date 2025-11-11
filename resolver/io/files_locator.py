@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,11 +14,6 @@ __all__ = [
     "load_table",
     "series_to_column",
 ]
-
-
-LOGGER = logging.getLogger(__name__)
-if not LOGGER.handlers:  # pragma: no cover - keep logging quiet without configuration
-    LOGGER.addHandler(logging.NullHandler())
 
 
 @dataclass(frozen=True)
@@ -55,89 +49,40 @@ def _unique_paths(paths: Iterable[Path]) -> List[Path]:
     return unique
 
 
-def discover_files_root(
-    preferred: Optional[Path | str | os.PathLike[str]] = None,
-) -> Path:
-    """Return the most suitable root directory for files/csv backends."""
+def discover_files_root(preferred: Optional[str] = None) -> Path:
+    """Return the most suitable root directory for files/csv backends.
 
-    package_root = Path(__file__).resolve().parents[1]
-    repo_root = package_root.parent
-    searched: list[tuple[str, Path]] = []
+    The search order is:
+      1. ``preferred`` when provided and exists.
+      2. ``RESOLVER_SNAPSHOTS_DIR`` when set and exists.
+      3. ``$CWD/data/snapshots`` when it exists.
+      4. ``resolver/tests/data`` shipped with the repository for smoke tests.
 
-    def _normalise(
-        value: Optional[Path | str | os.PathLike[str]],
-    ) -> Optional[Path]:
-        if value is None or value == "":
-            return None
-        path = value if isinstance(value, Path) else Path(value)
-        try:
-            return path.expanduser().resolve(strict=False)
-        except (FileNotFoundError, RuntimeError):
-            # ``resolve`` may fail for certain path types (e.g., Windows drives on
-            # POSIX). Fall back to an absolute representation for diagnostics.
-            return path.expanduser().absolute()
+    Raises ``FileNotFoundError`` with the searched locations when none exist.
+    """
 
-    def _consider(
-        source: str,
-        value: Optional[Path | str | os.PathLike[str]],
-        *,
-        sub: Optional[str] = None,
-    ) -> Optional[Path]:
-        base = _normalise(value)
-        if base is None:
-            return None
-        candidate = base / sub if sub else base
-        try:
-            candidate = candidate.resolve(strict=False)
-        except (FileNotFoundError, RuntimeError):
-            candidate = candidate.absolute()
-        searched.append((source, candidate))
-        if candidate.exists():
-            LOGGER.debug("discover_files_root: using %s (source=%s)", candidate, source)
-            return candidate
-        return None
+    candidates: List[Path] = []
 
-    # 1) Explicit ``preferred`` argument wins when it exists on disk.
-    result = _consider("preferred", preferred)
-    if result is not None:
-        return result
+    def add_candidate(value: Optional[str | os.PathLike[str]]) -> None:
+        if not value:
+            return
+        path = Path(value).expanduser()
+        if path in candidates:
+            return
+        candidates.append(path)
 
-    # 2) Respect the direct environment override.
-    result = _consider("RESOLVER_FILES_ROOT", os.environ.get("RESOLVER_FILES_ROOT"))
-    if result is not None:
-        return result
+    add_candidate(preferred)
+    env_dir = os.environ.get("RESOLVER_SNAPSHOTS_DIR")
+    add_candidate(env_dir)
+    add_candidate(Path.cwd() / "data" / "snapshots")
+    add_candidate(Path(__file__).resolve().parents[1] / "tests" / "data")
 
-    # Allow callers to steer discovery via snapshot hints before consulting
-    # fast-fixture fallbacks.
-    result = _consider("RESOLVER_SNAPSHOTS_DIR", os.environ.get("RESOLVER_SNAPSHOTS_DIR"))
-    if result is not None:
-        return result
+    searched = _unique_paths(candidates)
+    for path in searched:
+        if path.exists():
+            return path
 
-    # 3) Fall back to fast-fixture hints and bootstrap artifacts.
-    for source, value, sub in [
-        ("RESOLVER_STAGING_DIR/exports", os.environ.get("RESOLVER_STAGING_DIR"), "exports"),
-        ("RESOLVER_STAGING_DIR", os.environ.get("RESOLVER_STAGING_DIR"), None),
-        ("RESOLVER_TEST_DATA_DIR/exports", os.environ.get("RESOLVER_TEST_DATA_DIR"), "exports"),
-        ("RESOLVER_TEST_DATA_DIR", os.environ.get("RESOLVER_TEST_DATA_DIR"), None),
-        ("RESOLVER_FAST_EXPORTS_DIR", os.environ.get("RESOLVER_FAST_EXPORTS_DIR"), None),
-        ("FAST_EXPORTS_ROOT", os.environ.get("FAST_EXPORTS_ROOT"), None),
-        ("cwd/data/exports", Path.cwd() / "data" / "exports", None),
-        ("cwd/data/snapshots", Path.cwd() / "data" / "snapshots", None),
-        ("repo/resolver/exports", repo_root / "resolver" / "exports", None),
-        ("repo/resolver/exports/backfill", repo_root / "resolver" / "exports" / "backfill", None),
-        ("repo/resolver/snapshots", repo_root / "resolver" / "snapshots", None),
-    ]:
-        result = _consider(source, value, sub=sub)
-        if result is not None:
-            return result
-
-    # 4) Repository test data is the final fallback before we fail.
-    result = _consider("resolver/tests/data", package_root / "tests" / "data")
-    if result is not None:
-        return result
-
-    formatted = ", ".join(f"{label}: {path}" for label, path in searched) or "<none>"
-    LOGGER.debug("discover_files_root: no viable candidates; searched=%s", formatted)
+    formatted = ", ".join(str(path) for path in searched) or "<none>"
     raise FileNotFoundError(
         "No files backend root found; searched: " + formatted
     )

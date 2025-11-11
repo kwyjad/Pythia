@@ -5,26 +5,11 @@
 - `fetch_deltas_point(conn, *, ym, iso3, hazard_code, cutoff, preferred_metric)`
 - `fetch_resolved_point(conn, *, ym, iso3, hazard_code, cutoff, preferred_metric)`
 
-## resolver.cli.idmc_to_duckdb
-
-The CLI returns deterministic exit codes that downstream automation can depend on:
-
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Success (warnings allowed when `--strict` is unset) |
-| `1` | Unhandled error while running the CLI |
-| `2` | Strict mode with warnings |
-| `4` | `--write-db` enabled but no facts were written |
-
 ## resolver.db.conn_shared
 
 - `normalize_duckdb_url(db_url)`
 - `get_shared_duckdb_conn(db_url, *, force_reopen=False)`
 - `clear_cached_connection(db_url)`
-
-## resolver.io.files_locator
-
-- `discover_files_root(preferred: Optional[pathlib.Path] = None) -> pathlib.Path` honours caller-provided directories, then `RESOLVER_FILES_ROOT`, before falling back to fast-fixture exports or `resolver/tests/data`.
 
 ## resolver.ingestion.idmc
 
@@ -44,10 +29,6 @@ The CLI returns deterministic exit codes that downstream automation can depend o
 | Source | Base URL | Endpoints | Auth mode | Terms URL |
 | --- | --- | --- | --- | --- |
 | IDMC (IDU) | `https://www.internal-displacement.org` | `idus_json`, `idus_geo` (REST) | Optional bearer token via `IDMC_API_TOKEN` | _Pending legal confirmation_ |
-
-## resolver.api.app
-
-- FastAPI application exposing `/resolve` and `/resolve_batch` routes. Each request accepts a `backend` parameter (`"db"` or `"files"`) so parity tests can compare results across storage backends.
 
 ## TypeScript / JavaScript
 

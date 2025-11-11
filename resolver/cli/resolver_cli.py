@@ -46,7 +46,6 @@ from resolver.query.selectors import (
     VALID_BACKENDS,
     normalize_backend,
     resolve_point,
-    resolve_db_url,
     ym_from_cutoff,
 )
 from resolver.io import files_locator
@@ -299,9 +298,6 @@ def _run_single(args: List[str]) -> None:
 
     series_requested = args.series
     backend_choice = args.backend
-    db_url_override = None
-    if backend_choice in {"db", "auto"}:
-        db_url_override = resolve_db_url()
 
     LOGGER.debug(
         "resolver_cli backend=%s series=%s cutoff=%s",
@@ -337,16 +333,15 @@ def _run_single(args: List[str]) -> None:
         series=series_requested,
         metric="in_need",
         backend=backend_choice,
-        db_url=db_url_override,
     )
 
     if not result:
         extra_hint = ""
-        conn = None
-        resolved_path = ""
         if backend_choice in {"files", "csv"}:
             try:
-                files_root = files_locator.discover_files_root()
+                files_root = files_locator.discover_files_root(
+                    os.environ.get("RESOLVER_SNAPSHOTS_DIR")
+                )
             except FileNotFoundError as exc:
                 extra_hint = f" Files backend root missing: {exc}."
             else:
@@ -363,9 +358,8 @@ def _run_single(args: List[str]) -> None:
                         " iso3/hazard/cutoff."
                     )
         if backend_choice in {"db", "auto"}:
-            db_url = db_url_override
-            if db_url:
-                conn, resolved_path = get_shared_duckdb_conn(db_url)
+            db_url = os.environ.get("RESOLVER_DB_URL")
+            conn, resolved_path = get_shared_duckdb_conn(db_url)
             log_json(
                 DIAG_LOGGER,
                 "cli_no_data_conn",
@@ -401,7 +395,6 @@ def _run_single(args: List[str]) -> None:
                         resolved_path=resolved_path,
                     )
             else:
-                reason = "no_connection" if db_url else "no_db_url"
                 log_json(
                     DIAG_LOGGER,
                     "db_read_no_data_diagnostics",
@@ -410,10 +403,8 @@ def _run_single(args: List[str]) -> None:
                     hazard_code=hazard_code,
                     cutoff=args.cutoff,
                     resolved_path=resolved_path,
-                    reason=reason,
+                    reason="no_connection",
                 )
-                if not extra_hint and not db_url:
-                    extra_hint = " DuckDB URL not configured (RESOLVER_DB_URL)."
         if os.getenv("RESOLVER_DIAG") == "1" and conn is not None:
             try:
                 total = conn.execute("SELECT COUNT(*) FROM facts_deltas").fetchone()[0]

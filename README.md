@@ -143,12 +143,6 @@ Fast tests no longer rely on ad-hoc exports in the repository tree. During colle
 
 Codex and other CI environments run without the optional DuckDB dependency. When DuckDB is missing—or you set `RESOLVER_FAST_FIXTURES_MODE=noop`—the fast-fixtures bootstrap falls back to a noop mode that invokes `python -m resolver.ingestion.dtm_client --offline-smoke` to emit header-only CSVs for smoke tests instead of constructing the DuckDB database.
 
-When resolving from snapshot files, `resolver.io.files_locator.discover_files_root` honours the directory precedence used by the contract tests: the optional `preferred` argument wins when supplied, `RESOLVER_FILES_ROOT` is consulted next, and fast-fixture directories or the repository’s `resolver/tests/data` tree serve as fallbacks. Enable `RESOLVER_DEBUG=1` to see which branch is selected during local runs.
-
-### Resolver API endpoints
-
-The FastAPI application in [`resolver/api/app.py`](resolver/api/app.py) exposes the `/resolve` and `/resolve_batch` routes used by the parity tests. Both routes accept a `backend` query field (`"db"` or `"files"`) so contract tests can confirm the selectors return identical payloads across storage backends.
-
 ### Resolver diagnostics
 
 Set `RESOLVER_DIAG=1` to emit JSON-formatted diagnostics for DuckDB reads and writes. When enabled, the resolver logs the source file path, Python/DuckDB versions, cache resolution events, schema/index snapshots, input column samples, and post-write row counts before each upsert. CLI reads that fail to find data record the resolved database path and row-count summaries (total rows, keyed rows, and cutoff-filtered rows) to stderr so you can distinguish empty writes from URL mismatches, and they now emit targeted DEBUG counts (total rows, rows matching the `(ym, iso3, hazard_code)` key, and rows surviving the cutoff filter) immediately before the CLI exits. When an upsert detects a declared-key mismatch, diagnostics now include the discovered unique indexes **with canonical column order** so you can confirm DuckDB has materialised the expected `ux_*` definitions, and schema initialisation logs the entire unique-index inventory for both facts tables. The flag leaves default logging untouched when unset, making it safe to toggle on only for triage runs or CI retries.
@@ -676,16 +670,8 @@ database file. The `resolver.cli.idmc_to_duckdb` wrapper turns the CLI
 exporter, forces `--write-db 1`, and then reconnects to the same filesystem
 path with `duckdb.connect` to sum row counts from both `facts_deltas` and
 `facts_resolved`. Runs always emit a canonical `Warnings:` block (`none` when
-empty) and follow the resolver exit code policy:
-
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Success (including warning scenarios when `--strict` is **not** set) |
-| `1` | Unhandled error while running the CLI |
-| `2` | Strict mode with warnings |
-| `4` | `--write-db` was enabled but no facts were written |
-
-The exporter splits the dataframe by
+empty) and return `0` for success, `2` for strict-mode warnings, or `3` if no
+rows land in either table. The exporter splits the dataframe by
 semantics—`stock` rows land in `facts_resolved`, `new` rows land in
 `facts_deltas`, and any other values default to `facts_resolved` so the DuckDB
 tables mirror the CSV preview. DuckDB persistence honours the canonical
