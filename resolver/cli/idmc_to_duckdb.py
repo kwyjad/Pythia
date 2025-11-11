@@ -420,10 +420,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(message)
 
     inserted_total = int(inserted_deltas or 0) + int(inserted_resolved or 0)
-    rows_message = f"✅ Wrote {inserted_total} rows to DuckDB"
-    if not writing_requested:
-        rows_message += " (dry-run)"
-    emit(rows_message)
+    inserted_this_run = inserted_total
+    emit(f"✅ Wrote {inserted_this_run} rows to DuckDB")
     emit(f" - facts_resolved Δ={resolved_delta} total={resolved_total}")
     emit(f" - facts_deltas  Δ={deltas_delta} total={deltas_total}")
 
@@ -457,7 +455,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     exit_code = RC_OK
     if writing_requested:
-        exit_code = RC_ZERO if inserted_total == 0 else RC_OK
+        exit_code = RC_ZERO if inserted_this_run == 0 else RC_OK
     if collected_warnings and args.strict:
         exit_code = RC_STRICT
 

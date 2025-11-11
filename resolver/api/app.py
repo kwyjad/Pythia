@@ -25,6 +25,7 @@ from resolver.query.selectors import (
     VALID_BACKENDS,
     normalize_backend,
     resolve_point,
+    resolve_db_url,
     ym_from_cutoff,
 )
 from resolver.io import files_locator
@@ -87,6 +88,10 @@ def resolve(
     else:
         backend_choice = DEFAULT_BACKEND
 
+    db_url_override = None
+    if backend_choice in {"db", "auto"}:
+        db_url_override = resolve_db_url()
+
     result = resolve_point(
         iso3=iso3_code,
         hazard_code=hz_code,
@@ -94,15 +99,14 @@ def resolve(
         series=series,
         metric="in_need",
         backend=backend_choice,
+        db_url=db_url_override,
     )
 
     if not result:
         extra_hint = ""
         if backend_choice in {"files", "csv"}:
             try:
-                files_root = files_locator.discover_files_root(
-                    os.environ.get("RESOLVER_SNAPSHOTS_DIR")
-                )
+                files_root = files_locator.discover_files_root()
             except FileNotFoundError as exc:
                 extra_hint = f" Files backend root missing: {exc}."
             else:
@@ -118,6 +122,8 @@ def resolve(
                         f" Files root {files_root} table {table}: rows located but none matched"
                         " iso3/hazard/cutoff."
                     )
+        if backend_choice in {"db", "auto"} and not db_url_override:
+            extra_hint += " DuckDB URL not configured (RESOLVER_DB_URL)."
         raise HTTPException(
             status_code=404,
             detail=(
@@ -192,6 +198,10 @@ def resolve_batch(queries: List[ResolveQuery]) -> List[ResolveResponseRow]:
 
         backend_choice = query.backend or DEFAULT_BACKEND
 
+        db_url_override = None
+        if backend_choice in {"db", "auto"}:
+            db_url_override = resolve_db_url()
+
         result = resolve_point(
             iso3=iso3_code,
             hazard_code=hz_code,
@@ -199,6 +209,7 @@ def resolve_batch(queries: List[ResolveQuery]) -> List[ResolveResponseRow]:
             series=query.series,
             metric="in_need",
             backend=backend_choice,
+            db_url=db_url_override,
         )
 
         if not result:
