@@ -15,6 +15,7 @@
 - [db.facts_raw](#dbfactsraw)
 - [db.facts_resolved](#dbfactsresolved)
 - [db.facts_deltas](#dbfactsdeltas)
+- [db.emdat_pa](#dbemdatpa)
 - [db.snapshots](#dbsnapshots)
 - [db.manifests](#dbmanifests)
 - [context.facts_last12](#contextfacts_last12)
@@ -240,6 +241,23 @@ Primary key: `(ym, iso3, hazard_code, metric)`.
 | Metric | Series semantics | Unit | Cadence | Description |
 | --- | --- | --- | --- | --- |
 | idp_displacement_new_dtm | new | persons | monthly | Monthly new internally displaced persons derived from DTM admin0 stock snapshots. Semantics `new` denotes the month-over-month increase computed from `value_type=new_displaced` rows produced by the connector. |
+
+## db.emdat_pa
+
+EM-DAT People Affected monthly aggregates written by the EM-DAT CLI.
+
+| Name | Type | Required | Enum/Format | Description |
+| --- | --- | --- | --- | --- |
+| iso3 | string | yes |  | ISO 3166-1 alpha-3 country code. |
+| ym | string | yes |  | Resolver month key in YYYY-MM format. |
+| shock_type | string | yes |  | Resolver shock type (`drought`, `tropical_cyclone`, `flood`). |
+| pa | integer | yes |  | People affected (EM-DAT Total Affected) aggregated to the month. |
+| as_of_date | string | yes |  | Data currency date sourced from EM-DAT metadata. |
+| publication_date | string | yes |  | Latest EM-DAT publication/update contributing to the bucket. |
+| source_id | string | yes |  | Source identifier (`emdat`). |
+| disno_first | string | yes |  | Lowest EM-DAT disaster identifier contributing to the month bucket. |
+
+Primary key: `(iso3, ym, shock_type)`.
 
 ## db.snapshots
 

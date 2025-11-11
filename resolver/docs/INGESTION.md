@@ -8,6 +8,40 @@ search order, fallback behaviour, and how to clean up legacy duplicates lives in
 [`ingestion/config_paths.md`](ingestion/config_paths.md). Refer to it when adding a new connector or migrating an
 existing configuration.
 
+## EM-DAT (PA)
+
+The EM-DAT integration ships with a small GraphQL client and an offline stub so fast tests never hit the
+network accidentally. Live requests are opt-in: pass `--network` (or set `EMDAT_NETWORK=1`) **and** expose a valid
+`EMDAT_API_KEY`; otherwise `EmdatClient.fetch_raw()` raises `OfflineRequested` and callers fall back to the bundled stub
+DataFrame.【F:resolver/ingestion/emdat_client.py†L466-L580】【F:resolver/tests/test_emdat_client_offline_smoke.py†L6-L36】
+
+- **Endpoint & auth:** `POST https://api.emdat.be/v1` with an `Authorization: <EMDAT_API_KEY>` header on each request.
+- **Hazard filters:** the query pins the four PA-relevant classification keys—drought (`nat-cli-dro-dro`), tropical
+  cyclone (`nat-met-sto-tro`), riverine flood (`nat-hyd-flo-riv`), and flash flood (`nat-hyd-flo-fla`). Flood subtypes are
+  merged downstream into `shock_type="flood"` for Resolver semantics.
+- **Metric:** EM-DAT `Total Affected` is coerced to a non-negative integer and surfaced as Resolver “PA”.
+- **Monthly bucketing:** rows group by `start_year`/`start_month`. Records missing `start_month` are logged as
+  `emdat.normalize.missing_month` and excluded from monthly aggregates while remaining visible in diagnostics.
+- **Metadata:** `normalize_emdat_pa` carries through `as_of_date`, `publication_date` (preferring `last_update`), and the
+  lowest contributing `disno` for traceability.
+
+Invoke `python -m resolver.cli.resolver_cli emdat-to-duckdb --help` to review the available flags. Two quick-start
+examples:
+
+```bash
+# Offline stub (default)
+python -m resolver.cli.resolver_cli emdat-to-duckdb \
+  --from 2021 --to 2021 --countries KEN --db ./resolver_data/emdat.duckdb
+
+# Live pull (requires API key and --network)
+EMDAT_API_KEY=*** python -m resolver.cli.resolver_cli emdat-to-duckdb \
+  --from 2021 --to 2021 --countries KEN --db ./resolver_data/emdat.duckdb --network
+```
+
+Both runs normalise the frame via `normalize_emdat_pa` and upsert with `write_emdat_pa_to_duckdb`. The CLI prints the
+standard success banner (`✅ Wrote …`) and emits probe logs (`emdat.probe.ok|…` / `emdat.probe.fail|…`) whenever
+`--network` is enabled.【F:resolver/cli/emdat_to_duckdb.py†L1-L156】
+
 ## DTM connector troubleshooting
 
 ### Missing `id_or_path`

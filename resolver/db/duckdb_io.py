@@ -73,6 +73,7 @@ from resolver.db.conn_shared import (
     get_shared_duckdb_conn,
 )
 from resolver.db.schema_keys import (
+    EMDAT_PA_KEY_COLUMNS,
     FACTS_DELTAS_KEY_COLUMNS,
     FACTS_RESOLVED_KEY_COLUMNS,
     UX_DELTAS,
@@ -103,14 +104,21 @@ TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
         "primary": "pk_facts_deltas_series",
         "unique": UX_DELTAS,
     },
+    "emdat_pa": {
+        "columns": EMDAT_PA_KEY_COLUMNS,
+        "primary": "pk_emdat_pa",
+        "unique": "ux_emdat_pa",
+    },
 }
 _COERCE_NUMERIC_COLUMNS: dict[str, list[str]] = {
     "facts_resolved": ["value"],
     "facts_deltas": ["value_new", "value_stock"],
+    "emdat_pa": ["pa"],
 }
 DATE_STRING_COLUMNS: dict[str, tuple[str, ...]] = {
     "facts_resolved": ("as_of_date", "publication_date"),
     "facts_deltas": ("as_of", "as_of_date", "publication_date"),
+    "emdat_pa": ("as_of_date", "publication_date"),
 }
 DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
@@ -1375,6 +1383,29 @@ def init_schema(
             "duckdb.schema.inspect | existing_tables=%s",
             ", ".join(sorted(existing_tables)) or "<none>",
         )
+
+    supplemental_tables: tuple[tuple[str, str], ...] = (
+        (
+            "emdat_pa",
+            """
+            CREATE TABLE IF NOT EXISTS emdat_pa (
+                iso3 VARCHAR NOT NULL,
+                ym VARCHAR NOT NULL,
+                shock_type VARCHAR NOT NULL,
+                pa BIGINT,
+                as_of_date VARCHAR,
+                publication_date VARCHAR,
+                source_id VARCHAR,
+                disno_first VARCHAR
+            )
+            """,
+        ),
+    )
+    for table_name, ddl in supplemental_tables:
+        if table_name in existing_tables:
+            continue
+        _run_ddl_batch(conn, [ddl], label=f"schema:{table_name}")
+        existing_tables.add(table_name)
 
     core_tables = {"facts_resolved", "facts_deltas"}
     if core_tables.issubset(existing_tables):

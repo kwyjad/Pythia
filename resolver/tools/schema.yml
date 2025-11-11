@@ -427,6 +427,43 @@ entities:
       - name: created_at
         type: datetime
         required: false
+  db.emdat_pa:
+    kind: database
+    description: EM-DAT People Affected monthly aggregates written by the EM-DAT CLI.
+    keys: [iso3, ym, shock_type]
+    columns:
+      - name: iso3
+        type: string
+        required: true
+        description: ISO 3166-1 alpha-3 country code.
+      - name: ym
+        type: string
+        required: true
+        description: Resolver month key in YYYY-MM format.
+      - name: shock_type
+        type: string
+        required: true
+        description: Resolver shock type (`drought`, `tropical_cyclone`, `flood`).
+      - name: pa
+        type: integer
+        required: true
+        description: People affected (EM-DAT Total Affected) aggregated to the month.
+      - name: as_of_date
+        type: string
+        required: true
+        description: Data currency date sourced from EM-DAT metadata.
+      - name: publication_date
+        type: string
+        required: true
+        description: Latest EM-DAT publication/update contributing to the bucket.
+      - name: source_id
+        type: string
+        required: true
+        description: Source identifier (`emdat`).
+      - name: disno_first
+        type: string
+        required: true
+        description: Lowest EM-DAT disaster identifier contributing to the month bucket.
   db.snapshots:
     kind: database
     allow_extra_columns: false

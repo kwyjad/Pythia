@@ -32,6 +32,16 @@ python -m resolver.cli.snapshot_cli make-monthly --ym 2025-01
 python -m resolver.cli.snapshot_cli list-snapshots
 ```
 
+### EM-DAT → DuckDB (People Affected)
+
+```bash
+# offline-first stub write into DuckDB
+python -m resolver.cli.resolver_cli emdat-to-duckdb --from 2021 --to 2021 --db ./resolver_data/emdat.duckdb
+
+# enable live requests after exporting EMDAT_API_KEY
+python -m resolver.cli.resolver_cli emdat-to-duckdb --from 2021 --to 2021 --db ./resolver_data/emdat.duckdb --network
+```
+
 The monthly command performs the following steps:
 
 1. Runs `resolver/tools/export_facts.py` with the configured staging inputs.
