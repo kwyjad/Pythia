@@ -28,10 +28,9 @@ DEFAULT_STAGING = Path("resolver/staging/idmc")
 DEFAULT_OUT = Path("diagnostics/ingestion/export_preview")
 DEFAULT_DB_PATH = Path("./resolver_data/resolver.duckdb")
 
-RC_OK = 0
-RC_ERR = 1
-RC_STRICT = 2
-RC_ZERO = 4
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_STRICT_WARNINGS = 2
 
 
 def _normalize_db_url_arg(raw: str | None) -> tuple[str, str]:
@@ -239,7 +238,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         if not facts_path.is_file():
             LOGGER.error("facts.csv not found at %s", facts_path)
             print(f"facts.csv not found: {facts_path}", file=sys.stderr)
-            return RC_ERR
+            return EXIT_ERROR
         LOGGER.info(
             "facts_csv.selected | path=%s write_db=%s",
             facts_path,
@@ -250,7 +249,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:  # pragma: no cover - pandas-level parsing issues
             LOGGER.error("Failed to read facts.csv", exc_info=True)
             print(f"Failed to read facts.csv: {exc}", file=sys.stderr)
-            return RC_ERR
+            return EXIT_ERROR
         prepared_resolved, prepared_deltas = export_facts.prepare_duckdb_tables(
             facts_dataframe
         )
@@ -277,11 +276,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         except export_facts.DuckDBWriteError as exc:
             LOGGER.error("Exporter DuckDB write failed", exc_info=True)
             print(f"DuckDB write failed: {exc}", file=sys.stderr)
-            return RC_ERR
+            return EXIT_ERROR
         except export_facts.ExportError as exc:
             LOGGER.error("Exporter failed", exc_info=True)
             print(f"Export failed: {exc}", file=sys.stderr)
-            return RC_ERR
+            return EXIT_ERROR
 
         facts_dataframe = exporter_result.dataframe
         if facts_dataframe is None and exporter_result.csv_path:
@@ -352,7 +351,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             except duckdb.Error as exc:
                 LOGGER.error("Writer connection failed", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                return RC_ERR
+                return EXIT_ERROR
             try:
                 pre_deltas = _safe_count(conn, "facts_deltas") if writing_deltas else 0
                 pre_resolved = _safe_count(conn, "facts_resolved") if writing_resolved else 0
@@ -393,11 +392,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             except duckdb.Error as exc:
                 LOGGER.error("DuckDB upsert failed", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                return RC_ERR
+                return EXIT_ERROR
             except Exception as exc:
                 LOGGER.error("DuckDB write encountered an unexpected error", exc_info=True)
                 print(f"DuckDB write failed: {exc}", file=sys.stderr)
-                return RC_ERR
+                return EXIT_ERROR
             finally:
                 duckdb_io.close_db(conn)
 
@@ -421,7 +420,10 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     inserted_total = int(inserted_deltas or 0) + int(inserted_resolved or 0)
     inserted_this_run = inserted_total
-    emit(f"✅ Wrote {inserted_this_run} rows to DuckDB")
+    if writing_requested:
+        emit(f"✅ Wrote {inserted_this_run} rows to DuckDB")
+    else:
+        emit(f"✅ Wrote {inserted_this_run} rows to DuckDB (dry-run)")
     emit(f" - facts_resolved Δ={resolved_delta} total={resolved_total}")
     emit(f" - facts_deltas  Δ={deltas_delta} total={deltas_total}")
 
@@ -446,18 +448,29 @@ def run(argv: Sequence[str] | None = None) -> int:
         ((exporter_result.report or {}) if exporter_result else {}).get("warnings") or [],
     )
 
-    if collected_warnings:
+    has_warnings = bool(collected_warnings)
+
+    if has_warnings:
         emit("Warnings:")
         for message in collected_warnings:
             emit(f" - {message}")
     else:
         emit("Warnings: none")
 
-    exit_code = RC_OK
-    if writing_requested:
-        exit_code = RC_ZERO if inserted_this_run == 0 else RC_OK
-    if collected_warnings and args.strict:
-        exit_code = RC_STRICT
+    exit_code = EXIT_OK
+    if args.strict and has_warnings:
+        exit_code = EXIT_STRICT_WARNINGS
+
+    LOGGER.debug(
+        "idmc_to_duckdb.exit_decision | strict=%s has_warnings=%s writing=%s "
+        "inserted_resolved=%s inserted_deltas=%s exit=%s",
+        args.strict,
+        has_warnings,
+        writing_requested,
+        inserted_resolved,
+        inserted_deltas,
+        exit_code,
+    )
 
     emit(
         (
