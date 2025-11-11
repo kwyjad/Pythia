@@ -102,6 +102,8 @@ sources:
       value:
         from: idp_count
         ops: [to_number]
+      series_semantics:
+        const: stock
       semantics:
         const: stock
       source:
@@ -206,7 +208,7 @@ metrics:
     series_semantics: new
     source: IOM DTM (admin0)
   idps_present:
-    enabled: false
+    enabled: true
     series_semantics: stock
     source: IOM DTM (admin0)
   new_displacements:

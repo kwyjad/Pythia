@@ -85,3 +85,23 @@ def test_backfill_export_and_freeze_use_db_flag() -> None:
     assert isinstance(freeze_script, str)
     assert "--db" in freeze_script
     assert "--db-url" not in freeze_script
+
+
+def test_backfill_freeze_snapshot_duckdb_step_present() -> None:
+    yaml_data = _load_yaml(WF_BACKFILL)
+    derive_job = yaml_data.get("jobs", {}).get("derive-freeze", {})
+    steps = derive_job.get("steps", [])
+    assert isinstance(steps, list)
+    freeze_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Derive & Freeze (write DuckDB)"
+    )
+    run_script = freeze_step.get("run")
+    assert isinstance(run_script, str)
+    assert "--facts diagnostics/ingestion/export_preview/facts.csv" in run_script
+    assert "--write-db=1" in run_script
+    assert '--db-url "${{ env.RESOLVER_DUCKDB_URL }}"' in run_script
+    env_block = freeze_step.get("env", {}) or {}
+    assert env_block.get("RESOLVER_WRITE_DB") == "1"
+    assert env_block.get("WRITE_DB") == "1"

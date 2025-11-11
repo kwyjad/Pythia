@@ -37,6 +37,15 @@ sources snapshot (`diagnostics/ingestion/dtm_sources_resolved.json`) mirrors the
 post-preflight source list so you can confirm inferred column names, resolved
 paths, and skip reasons locally before a retry.
 
+### Admin0 stock exports
+
+The initial backfill enables the DTM admin0 stock dataset (`idps_present`) in
+[`resolver/tools/export_config.yml`](../tools/export_config.yml). Expect
+`diagnostics/ingestion/export_preview/facts.csv` to include rows with
+`semantics=stock` so DuckDB writes can populate `facts_resolved` alongside the
+delta table. Toggle the metric in the export config if you need to isolate
+flows-only runs during local debugging.
+
 ## IDMC skeleton smoke test
 
 The IDMC connector is currently offline-only and exists to wire fixtures, normalization, and diagnostics. Run the smoke test locally with:

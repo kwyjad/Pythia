@@ -1290,7 +1290,15 @@ def write_facts_tables(
 
     init_schema(conn)
 
-    if facts_resolved is not None and not facts_resolved.empty:
+    resolved_count = int(len(facts_resolved)) if facts_resolved is not None else 0
+    deltas_count = int(len(facts_deltas)) if facts_deltas is not None else 0
+    LOGGER.info(
+        "duckdb.write_facts_tables.inputs | facts_resolved=%s facts_deltas=%s",
+        resolved_count,
+        deltas_count,
+    )
+
+    if resolved_count:
         written_resolved = upsert_dataframe(
             conn,
             "facts_resolved",
@@ -1298,8 +1306,21 @@ def write_facts_tables(
             keys=FACTS_RESOLVED_KEY_COLUMNS,
         )
         results["facts_resolved"] = written_resolved
+        LOGGER.info(
+            "duckdb.write_facts_tables.result | table=facts_resolved rows_in=%s rows_written=%s rows_delta=%s matched_existing=%s",
+            int(written_resolved.rows_in),
+            int(written_resolved.rows_written),
+            int(written_resolved.rows_delta),
+            "none"
+            if written_resolved.matched_existing is None
+            else int(written_resolved.matched_existing),
+        )
+    else:
+        LOGGER.info(
+            "duckdb.write_facts_tables.skip | table=facts_resolved reason=no_rows"
+        )
 
-    if facts_deltas is not None and not facts_deltas.empty:
+    if deltas_count:
         written_deltas = upsert_dataframe(
             conn,
             "facts_deltas",
@@ -1307,6 +1328,19 @@ def write_facts_tables(
             keys=FACTS_DELTAS_KEY_COLUMNS,
         )
         results["facts_deltas"] = written_deltas
+        LOGGER.info(
+            "duckdb.write_facts_tables.result | table=facts_deltas rows_in=%s rows_written=%s rows_delta=%s matched_existing=%s",
+            int(written_deltas.rows_in),
+            int(written_deltas.rows_written),
+            int(written_deltas.rows_delta),
+            "none"
+            if written_deltas.matched_existing is None
+            else int(written_deltas.matched_existing),
+        )
+    else:
+        LOGGER.info(
+            "duckdb.write_facts_tables.skip | table=facts_deltas reason=no_rows"
+        )
 
     return results
 
