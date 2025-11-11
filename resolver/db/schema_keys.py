@@ -15,9 +15,14 @@ FACTS_RESOLVED_KEY_COLUMNS = [
 ]
 
 FACTS_DELTAS_KEY_COLUMNS = [
+    "event_id",
     "iso3",
-    "ym",
+    "hazard_code",
     "metric",
+    "as_of_date",
+    "publication_date",
+    "source_id",
+    "ym",
 ]
 
 UX_RESOLVED = "ux_facts_resolved_series"
