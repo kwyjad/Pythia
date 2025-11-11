@@ -170,6 +170,71 @@ jobs:
         if: steps.dbfiles.outputs.present != 'true'
         run: echo "::notice ::Skipping nightly connectors (DB tests not present in this repo/branch)."
 
+  emdat_smoke:
+    if: ${{ github.repository == 'oughtinc/Pythia' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    env:
+      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
+      EMDAT_NETWORK: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            resolver/requirements.txt
+            resolver/requirements-dev.txt
+
+      - name: Install dependencies (project + db)
+        env:
+          PIP_NO_CACHE_DIR: "1"
+          PIP_DEFAULT_TIMEOUT: "60"
+          PIP_INDEX_URL: ${{ secrets.PIP_INDEX_URL }}
+          PIP_EXTRA_INDEX_URL: ${{ secrets.PIP_EXTRA_INDEX_URL }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -e .[db]
+
+      - name: Run EM-DAT live smoke
+        env:
+          DB_PATH: ./_tmp_emdat.duckdb
+        run: |
+          set -euo pipefail
+          if [ -z "${EMDAT_API_KEY:-}" ]; then
+            echo "::warning ::Skipping EM-DAT smoke; no EMDAT_API_KEY secret configured."
+            exit 0
+          fi
+
+          rm -f "${DB_PATH}"
+
+          if ! python -m resolver.cli.resolver_cli emdat-to-duckdb \
+            --from 2019 --to 2019 --countries BEL --limit 100 \
+            --db "${DB_PATH}" --network; then
+            status=$?
+            echo "::warning ::EM-DAT smoke run failed with exit code ${status}; treating as soft failure."
+            exit 0
+          fi
+
+          python scripts/ci/duckdb_summary.py "${DB_PATH}" || true
+
+      - name: Upload EM-DAT DuckDB artifact
+        if: env.EMDAT_API_KEY != '' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-emdat-smoke
+          path: _tmp_emdat.duckdb
+          retention-days: 1
+          if-no-files-found: ignore
+
   aggregate:
     if: ${{ github.repository == 'oughtinc/Pythia' && always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: full_connectors

@@ -22,6 +22,7 @@ Behavior:
 """
 
 import argparse
+import importlib
 import json
 import logging
 import math
@@ -63,6 +64,11 @@ if os.getenv("RESOLVER_DEBUG") == "1":
     LOGGER.setLevel(logging.DEBUG)
 
 DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
+
+_SUBCOMMANDS: dict[str, str] = {
+    "idmc-to-duckdb": "resolver.cli.idmc_to_duckdb",
+    "emdat-to-duckdb": "resolver.cli.emdat_to_duckdb",
+}
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -184,6 +190,23 @@ def _write_batch_output(rows: Iterable[dict], path: Path) -> None:
                     handle.write(json.dumps(row, default=json_default, ensure_ascii=False) + "\n")
         return
     raise ValueError("Batch output must be .csv, .json, or .jsonl")
+
+
+def _maybe_run_subcommand(argv: List[str]) -> Optional[int]:
+    if not argv:
+        return None
+    subcommand = argv[0]
+    module_name = _SUBCOMMANDS.get(subcommand)
+    if not module_name:
+        return None
+    module = importlib.import_module(module_name)
+    handler = getattr(module, "run", None)
+    if handler is None or not callable(handler):
+        raise SystemExit(f"Subcommand {subcommand!r} is missing a callable run() helper")
+    result = handler(argv[1:])
+    if result is None:
+        return 0
+    return int(result)
 
 
 def _resolve_batch_query(
@@ -524,7 +547,11 @@ def _run_single(args: List[str]) -> None:
 
 
 def main() -> None:
-    _run_single(sys.argv[1:])
+    argv = sys.argv[1:]
+    subcommand_code = _maybe_run_subcommand(argv)
+    if subcommand_code is not None:
+        sys.exit(subcommand_code)
+    _run_single(argv)
 
 
 if __name__ == "__main__":

@@ -1,29 +1,24 @@
 version: 1
-name: emdat_people_affected
+name: emdat_pa
+table: emdat_pa
 columns:
-  - name: source
-    description: Data source identifier ("emdat").
-  - name: hazard_type
-    description: Canonical hazard classification for the disaster.
-  - name: country_iso3
-    description: ISO3 country code associated with the record.
-  - name: event_id
-    description: Deterministic Resolver event identifier for the month bucket.
-  - name: as_of
-    description: ISO8601 timestamp representing latest dataset publication.
-  - name: month_start
-    description: First day of the month representing the allocation bucket.
-  - name: value_type
-    description: Impact metric emitted (affected, deaths, injured, homeless).
-  - name: value
-    description: People count for the metric in the given month.
-  - name: unit
-    description: Unit for value, typically "people".
-  - name: method
-    description: Allocation method label (e.g. emdat_linear_allocation).
-  - name: confidence
-    description: Qualitative confidence string when provided.
-  - name: raw_event_id
-    description: Native EM-DAT disaster identifier.
-  - name: raw_fields_json
-    description: JSON blob containing source fields for auditability.
+  - name: iso3
+    description: ISO 3166-1 alpha-3 country code.
+  - name: ym
+    description: Resolver month key in YYYY-MM format.
+  - name: shock_type
+    description: Resolver shock type (drought, tropical_cyclone, flood).
+  - name: pa
+    description: People affected (EM-DAT Total Affected) aggregated to the month.
+  - name: as_of_date
+    description: Data currency date from EM-DAT metadata.
+  - name: publication_date
+    description: Latest EM-DAT publication/update date contributing to the bucket.
+  - name: source_id
+    description: Source identifier ("emdat").
+  - name: disno_first
+    description: Lowest EM-DAT disaster identifier contributing to the month bucket.
+primary_key:
+  - iso3
+  - ym
+  - shock_type

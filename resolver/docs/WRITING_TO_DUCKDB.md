@@ -1,6 +1,6 @@
 # Writing IDMC Exports to DuckDB
 
-This guide explains how to load the IDMC staging exports into a local DuckDB database using the bundled helper CLI and Makefile targets.
+This guide explains how to load the IDMC staging exports into a local DuckDB database using the bundled helper CLI and Makefile targets. The same DuckDB helpers now service the EM-DAT People Affected pipeline, so a short recipe for that workflow is included below.
 
 ## Prerequisites
 
@@ -34,6 +34,25 @@ DuckDB write is always attempted during wrapper runs. The CLI accepts a
 filesystem path or a `duckdb:///` URL; paths are canonicalised to absolute URLs
 before the exporter runs so the write, verification, and any follow-up queries
 all point at the same database file.
+
+## EM-DAT PA quick write
+
+EM-DAT normalisation produces a country-month frame backed by the composite key
+`(iso3, ym, shock_type)` and surfaced through the helper `write_emdat_pa_to_duckdb`.
+To write the offline stub into DuckDB, run:
+
+```bash
+python -m resolver.cli.resolver_cli emdat-to-duckdb \
+  --from 2021 --to 2021 --countries KEN \
+  --db ./resolver_data/emdat.duckdb
+```
+
+Add `--network` (and export `EMDAT_API_KEY`) to trigger the live client when
+credentials are available. Re-running the command is idempotent: the upsert
+targets the `emdat_pa` table with `iso3`, `ym`, and `shock_type` as key columns
+so monthly totals replace prior values instead of duplicating them. The CLI
+prints the canonical success line `✅ Wrote …` once DuckDB confirms the merge
+completed.
 
 ## Write the IDMC flow data
 
@@ -197,3 +216,31 @@ python -m resolver.cli.idmc_to_duckdb \
 ```
 
 Passing `--strict` causes the command to exit with a non-zero status if any exporter warnings are produced.
+
+## EM-DAT monthly PA writes
+
+The EM-DAT ingestion path ships with a minimal helper that reuses the standard upsert machinery. Normalized monthly People Affected
+rows can be persisted with:
+
+```python
+from resolver.db import duckdb_io
+from resolver.ingestion.emdat_normalize import (
+    normalize_emdat_pa,
+    write_emdat_pa_to_duckdb,
+)
+from resolver.ingestion.emdat_stub import fetch_raw
+
+conn = duckdb_io.get_db("duckdb:///:memory:")
+raw = fetch_raw(2010, 2030)
+frame = normalize_emdat_pa(raw, info={"timestamp": "2024-01-15T00:00:00Z"})
+write_emdat_pa_to_duckdb(conn, frame)
+```
+
+The helper wraps `duckdb_io.upsert_dataframe` with the canonical key set declared in `resolver/db/schema_keys.py`:
+
+```python
+EMDAT_PA_KEY_COLUMNS = ["iso3", "ym", "shock_type"]
+```
+
+Running it multiple times is idempotent: the `(iso3, ym, shock_type)` composite key enforces uniqueness and the helper writes a
+`ux_emdat_pa` unique index alongside a primary key so repeated calls simply update existing rows.

@@ -11,3 +11,12 @@ value_types:
   - homeless
 hazard_map: {}
 country_aliases: {}
+classif_keys:
+  - "nat-cli-dro-dro"
+  - "nat-met-sto-tro"
+  - "nat-hyd-flo-riv"
+  - "nat-hyd-flo-fla"
+include_hist: false
+default_from_year: 1990
+default_to_year: 2024
+iso: []

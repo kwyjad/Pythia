@@ -68,3 +68,16 @@ All records **must** include both **country_name + iso3** and **hazard_label + h
 | source_tier | string | Precedence tier recorded in `facts_resolved`. |
 | hazard_class | string | Hazard class from the shocks registry. |
 | generated_at_utc | string | Feature build timestamp (`YYYY-MM-DDTHH:MM:SSZ`). |
+
+## Table: emdat_pa
+
+| Column | Type | Description |
+| --- | --- | --- |
+| iso3 | string | ISO 3166-1 alpha-3 country code. |
+| ym | string | Month bucket in `YYYY-MM` aligned to EM-DAT disaster start dates. |
+| shock_type | enum | `drought`, `tropical_cyclone`, or `flood` after EM-DAT subtype mapping. |
+| pa | integer | People affected (EM-DAT Total Affected) summed per country-month-shock. |
+| as_of_date | date | Data currency date from EM-DAT metadata (probe info timestamp). |
+| publication_date | date | Latest EM-DAT `last_update` (fallback `entry_date`) contributing to the bucket. |
+| source_id | string | Source identifier (`emdat`). |
+| disno_first | string | Lowest EM-DAT `disno` contributing to the aggregate (traceability). |

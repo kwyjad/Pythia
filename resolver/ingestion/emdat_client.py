@@ -15,8 +15,10 @@ paths easily.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -24,9 +26,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import pandas as pd
+import requests
 import yaml
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from resolver.ingestion._manifest import ensure_manifest_for_csv
+from resolver.ingestion._shared import feature_flags
+from resolver.ingestion.emdat_query import EMDAT_PA_QUERY, apply_limit_override
 from resolver.ingestion.utils import (
     ensure_headers,
     linear_split,
@@ -525,6 +532,351 @@ def _write_rows(rows: Sequence[Mapping[str, Any]]) -> None:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUT_PATH, index=False)
     ensure_manifest_for_csv(OUT_PATH)
+
+
+API_LOG = logging.getLogger("resolver.ingestion.emdat.api")
+
+EMDAT_API_URL = "https://api.emdat.be/v1"
+EMDAT_API_KEY_ENV = "EMDAT_API_KEY"
+EMDAT_NETWORK_ENV = "EMDAT_NETWORK"
+REQUEST_TIMEOUT = (5, 30)
+RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
+
+FETCH_COLUMNS: Sequence[str] = (
+    "disno",
+    "classif_key",
+    "type",
+    "subtype",
+    "iso",
+    "country",
+    "start_year",
+    "start_month",
+    "start_day",
+    "end_year",
+    "end_month",
+    "end_day",
+    "total_affected",
+    "entry_date",
+    "last_update",
+)
+
+NUMERIC_COLUMNS: Sequence[str] = (
+    "start_year",
+    "start_month",
+    "start_day",
+    "end_year",
+    "end_month",
+    "end_day",
+    "total_affected",
+)
+
+DEFAULT_CLASSIF_KEYS: Sequence[str] = (
+    "nat-cli-dro-dro",
+    "nat-met-sto-tro",
+    "nat-hyd-flo-riv",
+    "nat-hyd-flo-fla",
+)
+
+
+class OfflineRequested(RuntimeError):
+    """Raised when a live EM-DAT request was explicitly disabled."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _build_retry_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        status=2,
+        backoff_factor=0.3,
+        status_forcelist=RETRY_STATUS_FORCELIST,
+        allowed_methods=("POST",),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _normalise_iso(values: Sequence[str] | None) -> list[str]:
+    if not values:
+        return []
+    normalised: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text:
+            normalised.append(text.upper())
+    return normalised
+
+
+def _normalise_text(values: Sequence[str] | None) -> list[str]:
+    if not values:
+        return []
+    normalised: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text:
+            normalised.append(text)
+    return normalised
+
+
+def _iso_from_disno(disno: Any) -> str:
+    text = str(disno or "").strip().upper()
+    if not text or "-" not in text:
+        return ""
+    suffix = text.rsplit("-", 1)[-1]
+    if len(suffix) == 3 and suffix.isalpha():
+        return suffix
+    return ""
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return coerced
+
+
+def _default_config() -> Dict[str, Any]:
+    cfg = load_config()
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _default_classif(cfg: Mapping[str, Any]) -> list[str]:
+    classif = _normalise_text(cfg.get("classif_keys"))
+    return classif or list(DEFAULT_CLASSIF_KEYS)
+
+
+def _default_iso(cfg: Mapping[str, Any]) -> list[str]:
+    iso_values = cfg.get("iso")
+    if isinstance(iso_values, (list, tuple)):
+        return _normalise_iso(iso_values)
+    return []
+
+
+def _default_year_bounds(cfg: Mapping[str, Any]) -> tuple[int, int]:
+    current_year = date.today().year
+    default_from = _coerce_int(cfg.get("default_from_year"), current_year)
+    default_to = _coerce_int(cfg.get("default_to_year"), current_year)
+    if default_from > default_to:
+        default_from = default_to
+    return default_from, default_to
+
+
+def _apply_include_hist_flag(query: str, include_hist: bool) -> str:
+    if not include_hist:
+        return query
+    return query.replace("include_hist: false", "include_hist: true")
+
+
+class EmdatClient:
+    """Thin GraphQL client for the EM-DAT public API."""
+
+    def __init__(
+        self,
+        *,
+        network: bool | None = None,
+        api_key: Optional[str] = None,
+        session: Optional[requests.Session] = None,
+        base_url: str = EMDAT_API_URL,
+        timeout: tuple[int, int] = REQUEST_TIMEOUT,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        self._network = (
+            network
+            if network is not None
+            else feature_flags.getenv_bool(EMDAT_NETWORK_ENV, default=False)
+        )
+        self._api_key = (api_key or os.getenv(EMDAT_API_KEY_ENV, "")).strip()
+        self.base_url = base_url
+        self.timeout = timeout
+        self.session = session or _build_retry_session()
+        self.log = logger or API_LOG
+
+    @property
+    def headers(self) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self._api_key:
+            headers["Authorization"] = self._api_key
+        return headers
+
+    def _ensure_online(self) -> None:
+        if not self._network:
+            raise OfflineRequested("network access disabled; pass --network to enable")
+        if not self._api_key:
+            raise OfflineRequested(f"missing {EMDAT_API_KEY_ENV} environment variable")
+
+    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self._ensure_online()
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.log.debug("emdat.request.start|payload_bytes=%s", len(encoded))
+        start = time.perf_counter()
+        try:
+            response = self.session.post(
+                self.base_url,
+                data=encoded,
+                headers=self.headers,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:  # pragma: no cover - defensive
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            self.log.debug("emdat.request.error|elapsed_ms=%.2f|error=%s", elapsed_ms, exc)
+            raise
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        self.log.debug(
+            "emdat.request.done|status=%s|elapsed_ms=%.2f",
+            getattr(response, "status_code", "?"),
+            elapsed_ms,
+        )
+        response.raise_for_status()
+        try:
+            parsed = response.json()
+        except ValueError as exc:
+            raise RuntimeError("failed to decode EM-DAT response as JSON") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("unexpected EM-DAT response payload type")
+        if parsed.get("errors"):
+            raise RuntimeError(f"EM-DAT returned errors: {parsed['errors']}")
+        return parsed
+
+    def probe(
+        self,
+        *,
+        from_year: Optional[int] = None,
+        to_year: Optional[int] = None,
+        iso: Sequence[str] | None = None,
+        classif: Sequence[str] | None = None,
+    ) -> Dict[str, Any]:
+        cfg = _default_config()
+        default_from, default_to = _default_year_bounds(cfg)
+        probe_to = _coerce_int(to_year, default_to)
+        probe_from = _coerce_int(from_year, probe_to)
+        classif_filter = _normalise_text(classif) or _default_classif(cfg)
+        iso_filter = _normalise_iso(iso) or _default_iso(cfg)
+
+        query = apply_limit_override(EMDAT_PA_QUERY, limit=1)
+        query = _apply_include_hist_flag(query, include_hist=cfg.get("include_hist", False))
+        payload = {
+            "query": query,
+            "variables": {
+                "iso": iso_filter or None,
+                "from": probe_from,
+                "to": probe_to,
+                "classif": classif_filter,
+            },
+        }
+
+        try:
+            parsed = self._post(payload)
+        except OfflineRequested as offline:
+            reason = str(offline)
+            self.log.info("emdat.probe.fail|reason=%s", reason)
+            return {"ok": False, "error": reason}
+        except Exception as exc:  # pragma: no cover - defensive logging
+            reason = str(exc)
+            self.log.info("emdat.probe.fail|reason=%s", reason)
+            return {"ok": False, "error": reason}
+
+        data = parsed.get("data") or {}
+        api_version = data.get("api_version")
+        public = data.get("public_emdat") or {}
+        total = public.get("total_available")
+        info = public.get("info") or {}
+        self.log.info("emdat.probe.ok|api_version=%s|total=%s", api_version, total)
+        return {
+            "ok": True,
+            "api_version": api_version,
+            "total_available": total,
+            "info": info,
+        }
+
+    def fetch_raw(
+        self,
+        from_year: int,
+        to_year: int,
+        *,
+        iso: Sequence[str] | None = None,
+        classif: Sequence[str] | None = None,
+        include_hist: bool = False,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        cfg = _default_config()
+        classif_filter = _normalise_text(classif) or _default_classif(cfg)
+        iso_filter = _normalise_iso(iso) or _default_iso(cfg)
+
+        query = apply_limit_override(
+            _apply_include_hist_flag(EMDAT_PA_QUERY, include_hist or cfg.get("include_hist", False)),
+            limit=limit,
+        )
+        payload = {
+            "query": query,
+            "variables": {
+                "iso": iso_filter or None,
+                "from": _coerce_int(from_year, from_year),
+                "to": _coerce_int(to_year, to_year),
+                "classif": classif_filter,
+            },
+        }
+
+        self.log.debug(
+            "emdat.fetch.start|from=%s|to=%s|iso=%s|classif=%s|limit=%s",
+            payload["variables"]["from"],
+            payload["variables"]["to"],
+            len(iso_filter),
+            len(classif_filter),
+            limit if limit is not None else -1,
+        )
+        parsed = self._post(payload)
+        frame = self._frame_from_payload(parsed)
+        self.log.debug("emdat.fetch.finish|rows=%s", len(frame))
+        return frame
+
+    def _frame_from_payload(self, payload: Mapping[str, Any]) -> pd.DataFrame:
+        data = payload.get("data") or {}
+        public = data.get("public_emdat") or {}
+        records = public.get("data") or []
+        if not isinstance(records, list):
+            records = []
+        frame = pd.DataFrame(records)
+        if frame.empty:
+            return pd.DataFrame(columns=list(FETCH_COLUMNS))
+
+        for column in FETCH_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = pd.NA
+        frame = frame[list(FETCH_COLUMNS)]
+
+        frame["iso"] = frame["iso"].fillna("").astype(str)
+        missing_iso = frame["iso"].str.strip() == ""
+        for idx in frame.index[missing_iso]:
+            derived = _iso_from_disno(frame.at[idx, "disno"])
+            if derived:
+                frame.at[idx, "iso"] = derived
+                self.log.debug(
+                    "emdat.fetch.iso_from_disno|disno=%s|iso=%s",
+                    frame.at[idx, "disno"],
+                    derived,
+                )
+        frame["iso"] = frame["iso"].str.strip().str.upper()
+
+        for column in NUMERIC_COLUMNS:
+            if column in frame.columns:
+                series = pd.to_numeric(frame[column], errors="coerce")
+                if column == "total_affected":
+                    frame[column] = series
+                else:
+                    frame[column] = series.astype("Int64")
+
+        return frame.reset_index(drop=True)
 
 
 def main() -> bool:

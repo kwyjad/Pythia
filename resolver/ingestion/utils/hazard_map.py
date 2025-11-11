@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
+CLASSIF_TO_SHOCK: Mapping[str, str] = {
+    "nat-cli-dro-dro": "drought",
+    "nat-met-sto-tro": "tropical_cyclone",
+    "nat-hyd-flo-riv": "flood",
+    "nat-hyd-flo-fla": "flood",
+}
+
 _DEFAULT_MAP = {
     "eq": "earthquake",
     "earthquake": "earthquake",

@@ -25,12 +25,19 @@ FACTS_DELTAS_KEY_COLUMNS = [
     "ym",
 ]
 
+EMDAT_PA_KEY_COLUMNS = [
+    "iso3",
+    "ym",
+    "shock_type",
+]
+
 UX_RESOLVED = "ux_facts_resolved_series"
 UX_DELTAS = "ux_facts_deltas_series"
 
 __all__ = [
     "FACTS_RESOLVED_KEY_COLUMNS",
     "FACTS_DELTAS_KEY_COLUMNS",
+    "EMDAT_PA_KEY_COLUMNS",
     "UX_RESOLVED",
     "UX_DELTAS",
 ]

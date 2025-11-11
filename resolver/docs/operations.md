@@ -106,3 +106,5 @@ Use the GitHub Actions diagnostics table (rendered by `scripts/ci/summarize_conn
 ## Continuous integration
 
 The `resolver-ci` workflow executes offline smoke tests plus the ReliefWeb PDF unit suite. When the optional Markdown link checker is enabled it runs after the tests and reports broken intra-repo links in the job logs without failing the build.
+
+The nightly workflow (`resolver-ci-nightly`) now includes an `emdat_smoke` job that exercises the live EM-DAT path when `EMDAT_API_KEY` is configured. The job sets `EMDAT_NETWORK=1`, probes the API before fetching a tiny Belgium window, writes the results to a temporary DuckDB, and uploads the database artifact for one day. Nightly logs should show `emdat.probe.ok` and a small `emdat_pa` row count; when the secret is missing the job exits with a warning without impacting the remaining nightly checks.
