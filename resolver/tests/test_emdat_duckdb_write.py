@@ -113,7 +113,7 @@ def test_emdat_export_and_freeze_to_duckdb(tmp_path, monkeypatch: pytest.MonkeyP
     )
 
     preview_map = {
-        (row["iso3"], row["ym"], row["metric"], row["series_semantics"]): int(float(row["value"]))
+        (row["iso3"], row["ym"], row["hazard_code"], row["metric"]): int(float(row["value"]))
         for row in preview_rows
     }
 
@@ -123,12 +123,13 @@ def test_emdat_export_and_freeze_to_duckdb(tmp_path, monkeypatch: pytest.MonkeyP
         assert count == len(preview_rows)
 
         db_rows = conn.execute(
-            "SELECT iso3, ym, metric, series_semantics, value_new FROM facts_deltas"
+            "SELECT iso3, ym, hazard_code, metric, series_semantics, value_new FROM facts_deltas"
         ).fetchall()
         assert len(db_rows) == len(preview_map)
-        for iso3, ym, metric, semantics, value_new in db_rows:
-            key = (iso3, ym, metric, semantics)
+        for iso3, ym, hazard_code, metric, semantics, value_new in db_rows:
+            key = (iso3, ym, hazard_code, metric)
             assert key in preview_map
             assert int(value_new) == preview_map[key]
+            assert semantics == "new"
     finally:
         duckdb_io.close_db(conn)

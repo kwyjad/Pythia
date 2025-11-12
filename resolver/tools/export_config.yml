@@ -222,22 +222,14 @@ sources:
         ops: [trim, lowercase]
       metric:
         const: affected
-      series_semantics:
-        const: new
-      semantics:
-        const: new
       value:
         from: pa
         ops: [to_number]
-      unit:
-        const: persons
-      source:
-        const: emdat
     filters:
       - keep_if_not_null: [iso3, ym, shock_type, pa, as_of_date]
       - keep_if_positive: [value]
     dedupe:
-      keys: [iso3, ym, hazard_code, metric, series_semantics]
+      keys: [iso3, ym, hazard_code, metric]
       keep: last
 metrics:
   idp_displacement_new_dtm:

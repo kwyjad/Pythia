@@ -388,6 +388,7 @@ from resolver.common import (
     df_schema,
 )
 from resolver.helpers.series_semantics import normalize_series_semantics
+from resolver.tools._facts_preview import enforce_canonical_preview
 
 try:
     import yaml
@@ -2686,6 +2687,8 @@ def export_facts(
             source_details.pop()
 
     facts = _apply_series_semantics(facts)
+
+    preview_facts = enforce_canonical_preview(facts)
     for col in ["as_of_date", "publication_date"]:
         if col in facts.columns:
             parsed = pd.to_datetime(facts[col], errors="coerce")
@@ -2734,7 +2737,7 @@ def export_facts(
         if preview_path.resolve() == csv_path.resolve():
             LOGGER.debug("Export preview path matches output path; skipping duplicate write")
         else:
-            facts.to_csv(preview_path, index=False)
+            preview_facts.to_csv(preview_path, index=False)
     except Exception as exc:  # pragma: no cover - diagnostics should not block export
         LOGGER.warning("Failed to write export preview facts.csv: %s", exc)
 
@@ -2863,7 +2866,7 @@ def export_facts(
         "dedupe_keys": dedupe_keys_ordered,
         "dedupe_keep": sorted(dedupe_keep_values) if dedupe_keep_values else [],
         "dropped_by_filter": dropped_by_filter,
-        "preview": facts.head(5).to_dict(orient="records"),
+        "preview": preview_facts.head(5).to_dict(orient="records"),
         "warnings": warnings,
         "meta_files_skipped": [str(path) for path in skipped_meta],
         "monthly_summary": monthly_summary,

@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from resolver.tools import export_facts
+from resolver.tools._facts_preview import CANONICAL_PREVIEW_COLUMNS
 from resolver.tools.export_facts import DEFAULT_CONFIG
 
 
@@ -38,4 +39,4 @@ def test_exporter_writes_preview_for_empty_dataframe(tmp_path, monkeypatch):
 
     preview_df = pd.read_csv(preview_path)
     assert preview_df.empty
-    assert list(preview_df.columns) == list(result.dataframe.columns)
+    assert list(preview_df.columns) == CANONICAL_PREVIEW_COLUMNS
