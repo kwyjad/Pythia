@@ -8,13 +8,18 @@ import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
 
-__all__ = ["ProbeResult", "probe_host", "format_markdown_block"]
+__all__ = [
+    "ProbeResult",
+    "probe_host",
+    "format_markdown_block",
+    "summarize_graphql_probe",
+]
 
 
 @dataclass
@@ -296,3 +301,60 @@ def format_markdown_block(title: str, result: ProbeResult) -> str:
     lines.append(result.to_json())
     lines.append("```")
     return "\n".join(lines)
+
+
+def summarize_graphql_probe(result: Mapping[str, Any]) -> list[str]:
+    """Return bullet lines summarizing a GraphQL metadata probe outcome."""
+
+    lines: list[str] = []
+    if not isinstance(result, Mapping):
+        return ["- probe.json: unexpected payload type"]
+
+    ok = bool(result.get("ok"))
+    status_text = "ok" if ok else "fail"
+    details: list[str] = []
+    http_status = result.get("http_status")
+    if isinstance(http_status, int):
+        details.append(f"HTTP {http_status}")
+    elif http_status:
+        details.append(f"http={http_status}")
+    elapsed_ms = result.get("elapsed_ms")
+    if isinstance(elapsed_ms, (int, float)):
+        details.append(f"{int(round(elapsed_ms))} ms")
+    elif elapsed_ms is not None:
+        details.append(f"elapsed={elapsed_ms}")
+
+    line = f"- status: {status_text}"
+    if details:
+        line += f" ({', '.join(details)})"
+    lines.append(line)
+
+    if result.get("skipped"):
+        lines.append("- note: probe skipped (offline mode)")
+
+    error = result.get("error")
+    if error and not result.get("skipped"):
+        lines.append(f"- error: {error}")
+
+    api_version = result.get("api_version")
+    if api_version:
+        lines.append(f"- api_version: {api_version}")
+
+    info = result.get("info")
+    if isinstance(info, Mapping):
+        version = info.get("version")
+        if version:
+            lines.append(f"- dataset version: {version}")
+        timestamp = info.get("timestamp")
+        if timestamp:
+            lines.append(f"- metadata timestamp: {timestamp}")
+
+    recorded_at = result.get("recorded_at")
+    if recorded_at:
+        lines.append(f"- recorded_at: {recorded_at}")
+
+    total_available = result.get("total_available")
+    if total_available is not None:
+        lines.append(f"- total_available: {total_available}")
+
+    return lines

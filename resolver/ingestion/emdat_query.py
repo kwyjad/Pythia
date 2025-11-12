@@ -53,6 +53,36 @@ EMDAT_PA_QUERY = dedent(
 )
 
 
+EMDAT_METADATA_QUERY = dedent(
+    """
+    query PublicEmdatMetadata(
+      $iso: [String!]
+      $from: Int!
+      $to: Int!
+      $classif: [String!]!
+    ) {
+      api_version
+      public_emdat(
+        filters: {
+          iso: $iso
+          from: $from
+          to: $to
+          classif: $classif
+          include_hist: false
+        }
+        cursor: { limit: 1 }
+      ) {
+        total_available
+        info {
+          timestamp
+          version
+        }
+      }
+    }
+    """
+)
+
+
 def apply_limit_override(query: str, limit: int | None) -> str:
     """Return *query* with the cursor limit overridden when *limit* is provided."""
 
@@ -65,4 +95,4 @@ def apply_limit_override(query: str, limit: int | None) -> str:
     return query.replace("limit: -1", f"limit: {int(limit)}")
 
 
-__all__ = ["EMDAT_PA_QUERY", "apply_limit_override"]
+__all__ = ["EMDAT_PA_QUERY", "EMDAT_METADATA_QUERY", "apply_limit_override"]
