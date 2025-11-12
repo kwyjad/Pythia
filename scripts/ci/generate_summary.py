@@ -11,126 +11,12 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-
-def _summarize_emdat_probe(payload: Mapping[str, Any] | None) -> list[str]:
-    if not isinstance(payload, Mapping):
-        if payload is None:
-            return ["- probe.json: missing"]
-        return [f"- probe.json: unexpected payload type ({type(payload).__name__})"]
-
-    lines: list[str] = []
-    ok = bool(payload.get("ok"))
-    status = payload.get("status")
-    if status is None:
-        status = payload.get("http_status")
-    details: list[str] = []
-    if isinstance(status, int):
-        details.append(f"HTTP {status}")
-    elif status:
-        details.append(str(status))
-    elapsed = payload.get("elapsed_ms")
-    if isinstance(elapsed, (int, float)):
-        details.append(f"{int(round(elapsed))} ms")
-    elif elapsed is not None:
-        details.append(f"elapsed={elapsed}")
-
-    line = f"- status: {'ok' if ok else 'fail'}"
-    if details:
-        line += f" ({', '.join(details)})"
-    lines.append(line)
-
-    if payload.get("skipped"):
-        lines.append("- note: probe skipped (offline mode)")
-
-    error = payload.get("error")
-    if error:
-        lines.append(f"- error: {error}")
-
-    api_version = payload.get("api_version")
-    if api_version:
-        lines.append(f"- api_version: {api_version}")
-
-    version = payload.get("version")
-    timestamp = payload.get("timestamp")
-    info = payload.get("info")
-    if isinstance(info, Mapping):
-        version = version or info.get("version")
-        timestamp = timestamp or info.get("timestamp")
-
-    if version:
-        lines.append(f"- dataset version: {version}")
-    if timestamp:
-        lines.append(f"- metadata timestamp: {timestamp}")
-
-    recorded_at = payload.get("recorded_at")
-    if recorded_at:
-        lines.append(f"- recorded_at: {recorded_at}")
-
-    total_available = payload.get("total_available")
-    if total_available is not None:
-        lines.append(f"- total_available: {total_available}")
-
-    return lines
-
-
-def _summarize_effective_params(payload: Mapping[str, Any] | None) -> list[str]:
-    if not isinstance(payload, Mapping):
-        if payload is None:
-            return ["- effective_params.json: missing"]
-        return [
-            f"- effective_params.json: unexpected payload type ({type(payload).__name__})"
-        ]
-
-    lines: list[str] = []
-    network = payload.get("network") if isinstance(payload.get("network"), Mapping) else {}
-    api = payload.get("api") if isinstance(payload.get("api"), Mapping) else {}
-    filters = payload.get("filters") if isinstance(payload.get("filters"), Mapping) else {}
-
-    requested = network.get("requested") if isinstance(network, Mapping) else None
-    env_value = network.get("env_value") if isinstance(network, Mapping) else None
-    if requested is not None or env_value:
-        lines.append(
-            f"- network: {'on' if requested else 'off'} (env={env_value or 'unset'})"
-        )
-
-    base_url = api.get("base_url") if isinstance(api, Mapping) else None
-    key_present = api.get("key_present") if isinstance(api, Mapping) else None
-    if base_url:
-        lines.append(f"- api base: {base_url}")
-    if key_present is not None:
-        lines.append(f"- api key present: {bool(key_present)}")
-
-    classif = filters.get("classif") if isinstance(filters, Mapping) else []
-    iso = filters.get("iso") if isinstance(filters, Mapping) else None
-    include_hist = filters.get("include_hist") if isinstance(filters, Mapping) else None
-    from_year = filters.get("from") if isinstance(filters, Mapping) else None
-    to_year = filters.get("to") if isinstance(filters, Mapping) else None
-
-    if from_year is not None and to_year is not None:
-        lines.append(f"- window: {from_year} → {to_year}")
-    if include_hist is not None:
-        lines.append(f"- include_hist: {bool(include_hist)}")
-
-    classif_count = len(classif) if isinstance(classif, list) else 0
-    if classif_count:
-        lines.append(f"- classif keys: {classif_count}")
-    else:
-        lines.append("- classif keys: none")
-
-    if isinstance(iso, list) and iso:
-        lines.append(f"- iso filters: {len(iso)}")
-    else:
-        lines.append("- iso filters: none")
-
-    graph_vars = payload.get("graphQL_vars")
-    if isinstance(graph_vars, Mapping):
-        lines.append(f"- graphQL vars: {json.dumps(graph_vars, sort_keys=True)}")
-
-    recorded_at = payload.get("recorded_at")
-    if recorded_at:
-        lines.append(f"- recorded_at: {recorded_at}")
-
-    return lines
+from scripts.ci._emdat_probe import (
+    load_effective_payload,
+    load_probe_payload,
+    summarize_effective,
+    summarize_probe,
+)
 
 
 def _summarize_probe_sample(payload: Mapping[str, Any] | None) -> list[str]:
@@ -215,23 +101,21 @@ def main() -> int:
 
     probe_path = Path("diagnostics/ingestion/emdat/probe.json")
     try:
-        probe_payload = None
-        if probe_path.exists():
-            raw = probe_path.read_text(encoding="utf-8", errors="replace")
-            probe_payload = json.loads(raw)
-        probe_lines = _summarize_emdat_probe(probe_payload)
+        probe_payload = load_probe_payload(probe_path)
+        probe_lines = summarize_probe(probe_payload)
+    except TypeError as exc:
+        probe_lines = [f"- probe.json: {exc}"]
     except Exception as exc:  # pragma: no cover - diagnostics only
         probe_lines = [f"- error reading probe.json ({exc})"]
 
-    effective_path = Path("diagnostics/ingestion/emdat/effective_params.json")
+    effective_path = Path("diagnostics/ingestion/emdat/effective.json")
     try:
-        effective_payload = None
-        if effective_path.exists():
-            raw = effective_path.read_text(encoding="utf-8", errors="replace")
-            effective_payload = json.loads(raw)
-        effective_lines = _summarize_effective_params(effective_payload)
+        effective_payload = load_effective_payload(effective_path)
+        effective_lines = summarize_effective(effective_payload)
+    except TypeError as exc:
+        effective_lines = [f"- effective.json: {exc}"]
     except Exception as exc:  # pragma: no cover - diagnostics only
-        effective_lines = [f"- error reading effective_params.json ({exc})"]
+        effective_lines = [f"- error reading effective.json ({exc})"]
 
     sample_path = Path("diagnostics/ingestion/emdat/probe_sample.json")
     try:
@@ -285,10 +169,10 @@ def main() -> int:
         sections.append("## pytest stdout (tail)\n```\n" + _read_tail(pytest_log, 4000) + "\n```")
 
     content_lines = ["# CI Diagnostics Summary", "## Environment", *env_lines, ""]
+    if effective_lines:
+        content_lines.extend(["## EMDAT Effective Mode", *effective_lines, ""])
     if probe_lines:
         content_lines.extend(["## EMDAT Probe", *probe_lines, ""])
-    if effective_lines:
-        content_lines.extend(["## EMDAT Effective Params", *effective_lines, ""])
     if sample_lines:
         content_lines.extend(["## EMDAT Probe Sample", *sample_lines, ""])
     if preview_status:

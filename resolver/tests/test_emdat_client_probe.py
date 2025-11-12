@@ -63,14 +63,14 @@ def test_emdat_probe_writes_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     result = client.probe(from_year=2020, to_year=2021, iso=["PHL"])
 
     assert result["ok"] is True
-    assert result["http_status"] == 200
+    assert result["status"] == 200
     assert result["api_version"] == "2024-05"
-    assert result["info"] == {
-        "timestamp": "2024-05-01T00:00:00Z",
-        "version": "dataset-v1",
-    }
+    assert result["table_version"] == "dataset-v1"
+    assert result["metadata_timestamp"] == "2024-05-01T00:00:00Z"
     assert result["total_available"] == 0
     assert result["recorded_at"] == "2024-06-01T00:00:00Z"
+    assert result["requests"]["2xx"] == 1
+    assert result["latency_ms"] == pytest.approx(321, rel=0.01)
     assert result["filters"]["iso"] == ["PHL"]
     assert result["filters"]["from"] == 2020
     assert result["filters"]["to"] == 2021
@@ -79,10 +79,11 @@ def test_emdat_probe_writes_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     assert probe_path.exists()
     saved = json.loads(probe_path.read_text(encoding="utf-8"))
     assert saved["ok"] is True
-    assert saved["http_status"] == 200
+    assert saved["status"] == 200
     assert saved["api_version"] == "2024-05"
-    assert saved["info"]["version"] == "dataset-v1"
-    assert pytest.approx(saved["elapsed_ms"], rel=0.01) == result["elapsed_ms"]
+    assert saved["table_version"] == "dataset-v1"
+    assert saved["requests"]["2xx"] == 1
+    assert saved["latency_ms"] == pytest.approx(result["latency_ms"], rel=0.01)
 
 
 def test_emdat_probe_handles_timeout(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,15 +101,15 @@ def test_emdat_probe_handles_timeout(tmp_path, monkeypatch: pytest.MonkeyPatch) 
 
     assert result["ok"] is False
     assert "timeout" in (result.get("error") or "").lower()
-    assert result["http_status"] is None
-    assert result["elapsed_ms"] is None
+    assert result["status"] == "error"
+    assert result["latency_ms"] is None
     assert result["total_available"] is None
 
     probe_path = Path("diagnostics/ingestion/emdat/probe.json")
     assert probe_path.exists()
     saved = json.loads(probe_path.read_text(encoding="utf-8"))
     assert saved["ok"] is False
-    assert saved["http_status"] is None
+    assert saved["status"] == "error"
     assert saved["total_available"] is None
     assert "timeout" in (saved.get("error") or "").lower()
 
@@ -137,13 +138,14 @@ def test_probe_emdat_success(monkeypatch: pytest.MonkeyPatch) -> None:
             return _ProbeResponse()
 
     session = _Session()
-    result = probe_emdat("https://example.test/graphql", "token", timeout_s=3, session=session)
+    result = probe_emdat("token", "https://example.test/graphql", timeout_s=3, session=session)
 
     assert result["ok"] is True
     assert result["status"] == 200
     assert result["api_version"] == "2024-05"
-    assert result["version"] == "v1"
-    assert result["timestamp"] == "2024-05-01"
+    assert result["table_version"] == "v1"
+    assert result["metadata_timestamp"] == "2024-05-01"
+    assert result["requests"]["2xx"] == 1
     assert session.calls[0]["headers"]["Authorization"] == "token"
     assert session.calls[0]["json"]["query"]
 
@@ -162,7 +164,7 @@ def test_probe_emdat_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
         def post(self, *args, **kwargs):  # noqa: ANN001
             return _ProbeResponse()
 
-    result = probe_emdat("https://example.test/graphql", "token", timeout_s=3, session=_Session())
+    result = probe_emdat("token", "https://example.test/graphql", timeout_s=3, session=_Session())
 
     assert result["ok"] is False
     assert result["status"] == 401
@@ -178,11 +180,19 @@ def test_build_effective_params_iso_handling(monkeypatch: pytest.MonkeyPatch) ->
         "iso": [],
     }
 
-    params, meta = _build_effective_params(network_requested=False, api_key_present=False, cfg=cfg)
+    params, meta = _build_effective_params(
+        network_requested=False,
+        api_key_present=False,
+        cfg=cfg,
+        source_mode="file",
+        network_env=None,
+        source_override=None,
+    )
 
     assert "iso" not in params["filters"]
-    assert "iso" not in params["graphQL_vars"]
     assert meta["iso"] == []
+    assert params["source_type"] == "file"
+    assert params["network"] is False
 
     cfg_with_iso = {
         "include_hist": True,
@@ -195,9 +205,13 @@ def test_build_effective_params_iso_handling(monkeypatch: pytest.MonkeyPatch) ->
         network_requested=True,
         api_key_present=True,
         cfg=cfg_with_iso,
+        source_mode="api",
+        network_env="1",
+        source_override="api",
     )
 
-    assert params_with_iso["filters"]["iso"] == ["PHL", "IDN"]
-    assert params_with_iso["graphQL_vars"]["iso"] == ["PHL", "IDN"]
-    assert meta_with_iso["iso"] == ["PHL", "IDN"]
+    assert params_with_iso["filters"]["iso"] == ["IDN", "PHL"]
+    assert meta_with_iso["iso"] == ["IDN", "PHL"]
     assert params_with_iso["filters"]["include_hist"] is True
+    assert params_with_iso["iso_values"] == ["IDN", "PHL"]
+    assert params_with_iso["source_override"] == "api"
