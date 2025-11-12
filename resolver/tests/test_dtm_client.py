@@ -16,6 +16,9 @@ import requests
 from resolver.ingestion import dtm_client
 
 
+SLOW = pytest.mark.slow_ci
+
+
 @pytest.fixture(autouse=True)
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DTM_API_KEY", raising=False)
@@ -320,6 +323,7 @@ def test_main_writes_outputs_and_diagnostics(
     assert run_payload["extras"]["diagnostics"]["raw_countries"] == str(discovery_raw)
 
 
+@SLOW
 def test_main_strict_empty_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
 ) -> None:
@@ -359,6 +363,7 @@ def test_main_strict_empty_exits_nonzero(
     assert run_payload["extras"]["exit_code"] == 2
 
 
+@SLOW
 def test_main_zero_rows_reason_and_totals(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
 ) -> None:
@@ -430,6 +435,7 @@ def test_main_zero_rows_reason_and_totals(
     assert report["extras"]["rows_written"] == 0
 
 
+@SLOW
 def test_main_invalid_key_aborts(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
 ) -> None:
@@ -528,6 +534,7 @@ def test_discovery_empty_hard_fail(
     assert fetch_calls  # minimal fallback attempted fetches
     assert set(fetch_calls).issuperset({name for name, _ in dtm_client.STATIC_MINIMAL_FALLBACK})
 
+@SLOW
 def test_http_trace_written(
     monkeypatch: pytest.MonkeyPatch, patch_paths: Dict[str, Path], tmp_path: Path
 ) -> None:

@@ -152,11 +152,16 @@ def main() -> int:
             f"- facts.csv: error reading preview ({exc})"
         )
 
-    junit_path = Path("pytest-junit.xml")
-    if not junit_path.exists():
-        junit_path = out_path.parent / "pytest-junit.xml"
-    if junit_path.exists():
-        sections.append("## PyTest JUnit\n```\n" + _read_tail(junit_path, 4000) + "\n```")
+    junit_candidates = [
+        Path("diagnostics/pytest-junit.xml"),
+        Path("pytest-junit.xml"),
+        out_path.parent / "pytest-junit.xml",
+    ]
+    for candidate in junit_candidates:
+        if candidate.exists():
+            sections.append(
+                "## PyTest JUnit\n```\n" + _read_tail(candidate, 4000) + "\n```")
+            break
 
     db_junit = Path("db.junit.xml")
     if not db_junit.exists():

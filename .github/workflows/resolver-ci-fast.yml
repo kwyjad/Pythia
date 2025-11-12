@@ -5,6 +5,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
 
 concurrency:
   group: resolver-fast-${{ github.ref }}
@@ -23,6 +25,9 @@ jobs:
       IDMC_NETWORK_MODE: "fixture"
       IDMC_ALLOW_HDX_FALLBACK: "0"
       DTM_SOFT_TIMEOUTS: "1"
+      DTM_HTTP_CONNECT_TIMEOUT: "0.2"
+      DTM_HTTP_READ_TIMEOUT: "0.5"
+      DTM_RETRIES: "0"
       PYTEST_PROC_TIMEOUT: "60"
     steps:
       - name: Checkout
@@ -41,6 +46,7 @@ jobs:
           ART_DIR="$GITHUB_WORKSPACE/.ci/diagnostics"
           echo "ART_DIR=$ART_DIR" >> "$GITHUB_ENV"
           mkdir -p "$ART_DIR"
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
 
       - name: Diagnostics collector syntax check
         shell: bash
@@ -106,21 +112,22 @@ jobs:
           set -euo pipefail
 
           # Collect-only (always allowed to fail non-fatally but we still want logs)
-          if ! bash scripts/ci/run_and_capture.sh pytest-collect "pytest resolver/tests -k 'not slow and not nightly' --collect-only"; then
+          if ! bash scripts/ci/run_and_capture.sh pytest-collect "pytest resolver/tests -m \"not slow_ci\" -k 'not slow and not nightly' --collect-only"; then
             echo "pytest --collect-only failed (non-fatal for diagnostics)" >&2
           fi
 
           # Durations (non-fatal)
-          if ! bash scripts/ci/run_and_capture.sh pytest-durations "pytest resolver/tests -k 'not slow and not nightly' --durations=15 -x"; then
+          if ! bash scripts/ci/run_and_capture.sh pytest-durations "pytest resolver/tests -q -m \"not slow_ci\" -k 'not slow and not nightly' -n auto --dist=worksteal --durations=15 -x"; then
             echo "pytest --durations failed (non-fatal)" >&2
           fi
 
           # Real run with JUnit (this one we care about)
-          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests -k 'not slow and not nightly' --junitxml $ART_DIR/pytest-junit.xml"
+          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests -q -m \"not slow_ci\" -k 'not slow and not nightly' -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
 
           # Mirror to legacy root filename for collectors that still look there
           if [ -f "$ART_DIR/pytest-junit.xml" ]; then
             cp "$ART_DIR/pytest-junit.xml" pytest-junit.xml
+            cp "$ART_DIR/pytest-junit.xml" "$GITHUB_WORKSPACE/diagnostics/pytest-junit.xml"
           fi
 
       - name: Verify imports (python, pytest, duckdb)
@@ -240,3 +247,31 @@ jobs:
         shell: bash
         run: |
           echo "No consolidated summary produced" >> "$GITHUB_STEP_SUMMARY"
+
+  slow-tests:
+    name: Slow DTM tests
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' }}
+    needs: [fast-tests]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c constraints-ci.txt -e '.[db,test]' 'pytest-timeout==2.3.1'
+          if [ -f resolver/requirements.txt ]; then pip install -c constraints-ci.txt -r resolver/requirements.txt; fi
+
+      - name: Run slow DTM tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "0"
+        run: |
+          set -euo pipefail
+          pytest -q -m slow_ci
