@@ -5,8 +5,8 @@ source:
 allocation:
   multi_month: linear
 value_types:
+  - total_affected
   - affected
-  - deaths
   - injured
   - homeless
 hazard_map: {}

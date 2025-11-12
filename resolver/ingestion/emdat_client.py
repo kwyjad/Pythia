@@ -341,6 +341,24 @@ def _parse_people(value: Any) -> Optional[float]:
     return float(number)
 
 
+def _parse_people_int(value: Any) -> Optional[int]:
+    """Best-effort integer parsing for population-style metrics."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = text.replace(",", "")
+    try:
+        return int(cleaned)
+    except (TypeError, ValueError):
+        try:
+            return int(float(cleaned))
+        except (TypeError, ValueError):
+            return None
+
+
 def _normalise_date_value(value: Any) -> str:
     parsed = parse_date(value)
     if parsed:
@@ -439,18 +457,39 @@ def _extract_metric_values(
     prefer_hxl: bool,
 ) -> Dict[str, float]:
     metrics: Dict[str, float] = {}
-    key_map = {
-        "affected": ["total_affected_keys", "affected_keys"],
-        "injured": ["injured_keys"],
-        "homeless": ["homeless_keys"],
+
+    total_value = _parse_people_int(
+        _best_of(record, frame, source.get("total_affected_keys") or [], prefer_hxl=prefer_hxl)
+    )
+    affected_value = _parse_people_int(
+        _best_of(record, frame, source.get("affected_keys") or [], prefer_hxl=prefer_hxl)
+    )
+    injured_value = _parse_people_int(
+        _best_of(record, frame, source.get("injured_keys") or [], prefer_hxl=prefer_hxl)
+    )
+    homeless_value = _parse_people_int(
+        _best_of(record, frame, source.get("homeless_keys") or [], prefer_hxl=prefer_hxl)
+    )
+
+    if total_value is None:
+        if any(value is not None for value in (affected_value, injured_value, homeless_value)):
+            total_value = (affected_value or 0) + (injured_value or 0) + (homeless_value or 0)
+
+    if total_value is None:
+        total_value = 0
+
+    if total_value > 0:
+        metrics["total_affected"] = float(total_value)
+
+    extra_metrics = {
+        "injured": injured_value,
+        "homeless": homeless_value,
     }
-    for metric, groups in key_map.items():
-        for group in groups:
-            keys = source.get(group) or []
-            value = _parse_people(_best_of(record, frame, keys, prefer_hxl=prefer_hxl))
-            if value is None:
-                continue
-            metrics[metric] = metrics.get(metric, 0.0) + float(value)
+    for metric, value in extra_metrics.items():
+        if value is None or value <= 0:
+            continue
+        metrics[metric] = metrics.get(metric, 0.0) + float(value)
+
     return metrics
 
 
@@ -1214,7 +1253,7 @@ class EmdatClient:
         return frame.reset_index(drop=True)
 
 
-def main() -> bool:
+def main(argv: List[str] | None = None) -> bool:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     if _env_bool("RESOLVER_SKIP_EMDAT"):
         LOG.info("emdat: skipped via RESOLVER_SKIP_EMDAT")
@@ -1224,6 +1263,27 @@ def main() -> bool:
     cfg = load_config()
     live_mode = getenv_bool("EMDAT_NETWORK", False)
     api_key = (os.getenv(EMDAT_API_KEY_ENV, "") or "").strip()
+
+    source_cfg = cfg.get("source") if isinstance(cfg.get("source"), Mapping) else {}
+    if isinstance(source_cfg, Mapping):
+        src_type_raw = source_cfg.get("type")
+    else:
+        src_type_raw = None
+    src_type = str(src_type_raw or "").strip().lower()
+    if not src_type:
+        sources_cfg = cfg.get("sources")
+        if sources_cfg:
+            src_type = "file"
+    mode = "file" if src_type == "file" else "api"
+
+    LOG.debug(
+        "emdat.effective",
+        extra={
+            "source_type": mode,
+            "network": bool(live_mode),
+            "api_key_present": bool(api_key),
+        },
+    )
 
     effective_params, filter_meta = _build_effective_params(
         network_requested=live_mode,
@@ -1241,7 +1301,7 @@ def main() -> bool:
         len([value for value in filter_meta["iso"] if value]),
     )
 
-    if not live_mode:
+    if mode != "file" and not live_mode:
         probe_payload = {
             "ok": False,
             "skipped": True,
@@ -1282,109 +1342,117 @@ def main() -> bool:
         return False
 
     preflight_failed = False
+    preflight_reason: Optional[str] = None
     client: EmdatClient | None = None
 
-    if not api_key:
-        preflight_failed = True
-        probe_payload = {
-            "ok": False,
-            "skipped": True,
-            "status": None,
-            "http_status": None,
-            "elapsed_ms": None,
-            "api_version": None,
-            "version": None,
-            "timestamp": None,
-            "info": {},
-            "total_available": None,
-            "error": "missing API key",
-            "recorded_at": _current_timestamp(),
-        }
-        write_json(EMDAT_PROBE_PATH, probe_payload)
-        LOG.info("emdat.offline|reason=missing_key")
-    else:
-        client = EmdatClient(network=True, api_key=api_key)
-        reachability = probe_emdat(
-            client.base_url,
-            api_key,
-            timeout_s=REQUEST_TIMEOUT[0],
-            session=client.session,
-        )
-        probe_payload = {
-            "ok": reachability["ok"],
-            "status": reachability["status"],
-            "http_status": reachability["status"],
-            "elapsed_ms": reachability["elapsed_ms"],
-            "api_version": reachability["api_version"],
-            "version": reachability["version"],
-            "timestamp": reachability["timestamp"],
-            "info": {
+    if mode == "api":
+        if not api_key:
+            preflight_failed = True
+            preflight_reason = "missing_key"
+            probe_payload = {
+                "ok": False,
+                "skipped": True,
+                "status": None,
+                "http_status": None,
+                "elapsed_ms": None,
+                "api_version": None,
+                "version": None,
+                "timestamp": None,
+                "info": {},
+                "total_available": None,
+                "error": "missing API key",
+                "recorded_at": _current_timestamp(),
+            }
+            write_json(EMDAT_PROBE_PATH, probe_payload)
+            LOG.info("emdat.offline|reason=missing_key")
+        else:
+            client = EmdatClient(network=True, api_key=api_key)
+            reachability = probe_emdat(
+                client.base_url,
+                api_key,
+                timeout_s=REQUEST_TIMEOUT[0],
+                session=client.session,
+            )
+            probe_payload = {
+                "ok": reachability["ok"],
+                "status": reachability["status"],
+                "http_status": reachability["status"],
+                "elapsed_ms": reachability["elapsed_ms"],
+                "api_version": reachability["api_version"],
                 "version": reachability["version"],
                 "timestamp": reachability["timestamp"],
-            },
-            "total_available": None,
-            "error": reachability["error"],
-            "recorded_at": _current_timestamp(),
-        }
-        write_json(EMDAT_PROBE_PATH, probe_payload)
-        if reachability["ok"]:
-            LOG.info(
-                "emdat.probe.ok|status=%s|ms=%s|api_version=%s|ver=%s",
-                probe_payload["http_status"],
-                probe_payload["elapsed_ms"],
-                probe_payload["api_version"],
-                probe_payload["version"],
-            )
-        else:
-            LOG.info(
-                "emdat.probe.fail|status=%s|ms=%s|api_version=%s|ver=%s|error=%s",
-                probe_payload["http_status"],
-                probe_payload["elapsed_ms"],
-                probe_payload["api_version"],
-                probe_payload["version"],
-                probe_payload.get("error"),
-            )
-        try:
-            status_code, parsed, elapsed_ms = client._post_with_status(
-                _build_pa_payload(filter_meta)
-            )
-        except OfflineRequested as exc:
-            LOG.info("emdat.offline|reason=%s", exc)
-            preflight_failed = True
-        except Exception as exc:  # pragma: no cover - defensive logging
-            LOG.info("emdat.fetch.error|error=%s", exc)
-        else:
-            frame = client._frame_from_payload(parsed)
-            row_count = len(frame)
-            if row_count == 0:
+                "info": {
+                    "version": reachability["version"],
+                    "timestamp": reachability["timestamp"],
+                },
+                "total_available": None,
+                "error": reachability["error"],
+                "recorded_at": _current_timestamp(),
+            }
+            write_json(EMDAT_PROBE_PATH, probe_payload)
+            if reachability["ok"]:
                 LOG.info(
-                    "emdat.fetch.ok.zero|from=%s|to=%s|iso=%s",
-                    filter_meta["from"],
-                    filter_meta["to"],
-                    len([value for value in filter_meta.get("iso", []) if value]),
+                    "emdat.probe.ok|status=%s|ms=%s|api_version=%s|ver=%s",
+                    probe_payload["http_status"],
+                    probe_payload["elapsed_ms"],
+                    probe_payload["api_version"],
+                    probe_payload["version"],
                 )
-                if status_code is not None and 200 <= status_code < 300:
-                    probe_sample = _run_widened_probe(client, meta=filter_meta)
-                    write_json(EMDAT_PROBE_SAMPLE_PATH, probe_sample)
             else:
                 LOG.info(
-                    "emdat.fetch.ok|rows=%s|status=%s|elapsed_ms=%.2f",
-                    row_count,
-                    status_code,
-                    elapsed_ms,
+                    "emdat.probe.fail|status=%s|ms=%s|api_version=%s|ver=%s|error=%s",
+                    probe_payload["http_status"],
+                    probe_payload["elapsed_ms"],
+                    probe_payload["api_version"],
+                    probe_payload["version"],
+                    probe_payload.get("error"),
                 )
+            try:
+                status_code, parsed, elapsed_ms = client._post_with_status(
+                    _build_pa_payload(filter_meta)
+                )
+            except OfflineRequested as exc:
+                LOG.info("emdat.offline|reason=%s", exc)
+                preflight_failed = True
+                preflight_reason = str(exc) or "offline-requested"
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOG.info("emdat.fetch.error|error=%s", exc)
+                preflight_failed = True
+                preflight_reason = "fetch-error"
+            else:
+                frame = client._frame_from_payload(parsed)
+                row_count = len(frame)
+                if row_count == 0:
+                    LOG.info(
+                        "emdat.fetch.ok.zero|from=%s|to=%s|iso=%s",
+                        filter_meta["from"],
+                        filter_meta["to"],
+                        len([value for value in filter_meta.get("iso", []) if value]),
+                    )
+                    if status_code is not None and 200 <= status_code < 300:
+                        probe_sample = _run_widened_probe(client, meta=filter_meta)
+                        write_json(EMDAT_PROBE_SAMPLE_PATH, probe_sample)
+                else:
+                    LOG.info(
+                        "emdat.fetch.ok|rows=%s|status=%s|elapsed_ms=%.2f",
+                        row_count,
+                        status_code,
+                        elapsed_ms,
+                    )
 
-    diagnostics_ctx = diagnostics_emitter.start_run("emdat_client", mode="live")
+    diagnostics_mode = "live" if (mode == "file" or live_mode) else "offline"
+    diagnostics_ctx = diagnostics_emitter.start_run("emdat_client", mode=diagnostics_mode)
     if preflight_failed:
         ensure_header_only()
+        status = "ok" if preflight_reason == "missing_key" else "error"
         diagnostics_emitter.finalize_run(
             diagnostics_ctx,
-            status="error",
-            reason="preflight-failed",
+            status=status,
+            reason=preflight_reason or "preflight-failed",
             http={},
             counts={"rows": 0},
         )
-        return False
+        return status == "ok"
 
     try:
         rows = collect_rows(cfg)

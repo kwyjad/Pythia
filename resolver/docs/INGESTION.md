@@ -19,7 +19,12 @@ DataFrame.【F:resolver/ingestion/emdat_client.py†L466-L580】【F:resolver/te
 - **Hazard filters:** the query pins the four PA-relevant classification keys—drought (`nat-cli-dro-dro`), tropical
   cyclone (`nat-met-sto-tro`), riverine flood (`nat-hyd-flo-riv`), and flash flood (`nat-hyd-flo-fla`). Flood subtypes are
   merged downstream into `shock_type="flood"` for Resolver semantics.
-- **Metric:** EM-DAT `Total Affected` is coerced to a non-negative integer and surfaced as Resolver “PA”.
+- **Metric:** EM-DAT `Total Affected` is coerced to a non-negative integer and surfaced as Resolver “PA”. When the
+  source omits `Total Affected`, the client falls back to the sum of `Affected`, `Injured`, and `Homeless` while
+  intentionally ignoring deaths so the PA column remains aligned with EM-DAT guidance.
+- **File sources:** Configurations that specify `source.type: file` (or declare explicit `sources` blocks) bypass the
+  live-network gate. They continue to normalize local CSV inputs and return success even when `EMDAT_NETWORK=1` but no
+  API key is present so fast tests stay green.
 - **Monthly bucketing:** rows group by `start_year`/`start_month`. Records missing `start_month` are logged as
   `emdat.normalize.missing_month` and excluded from monthly aggregates while remaining visible in diagnostics.
 - **Metadata:** `normalize_emdat_pa` carries through `as_of_date`, `publication_date` (preferring `last_update`), and the
