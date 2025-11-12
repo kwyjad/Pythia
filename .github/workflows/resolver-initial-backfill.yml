@@ -321,79 +321,8 @@ jobs:
 
       - name: Build single flat artifacts zip
         if: always()
-        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p diagnostics/flatten_inputs
-          declare -a inputs=()
-
-          make_zip() {
-            local zip_path="$1"
-            shift || true
-            local -a sources=("$@")
-            local has_existing=0
-            for candidate in "${sources[@]}"; do
-              if [ -e "$candidate" ]; then
-                has_existing=1
-                break
-              fi
-            done
-            if [ "$has_existing" -eq 0 ]; then
-              return
-            fi
-
-            python - "$zip_path" "${sources[@]}" <<'PY'
-import sys
-import zipfile
-from pathlib import Path
-
-zip_path = Path(sys.argv[1])
-sources = [Path(p) for p in sys.argv[2:]]
-zip_path.parent.mkdir(parents=True, exist_ok=True)
-
-with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-    wrote = False
-    for src in sources:
-        if not src.exists():
-            continue
-        if src.is_file():
-            zf.write(src, arcname=src.name)
-            wrote = True
-            continue
-        root = src.name or src.as_posix().replace("/", "_") or "artifact"
-        for path in sorted(src.rglob("*")):
-            if not path.is_file():
-                continue
-            arcname = str(Path(root) / path.relative_to(src))
-            zf.write(path, arcname=arcname)
-            wrote = True
-    if not wrote:
-        zf.writestr("EMPTY.txt", "no files were collected")
-PY
-
-            inputs+=("$zip_path")
-          }
-
-          make_zip diagnostics/flatten_inputs/connector-logs.zip diagnostics/ingestion/logs
-          make_zip diagnostics/flatten_inputs/connector-diagnostics.zip diagnostics/ingestion
-          make_zip diagnostics/flatten_inputs/dtm-diagnostics-raw.zip diagnostics/ingestion/raw
-          make_zip diagnostics/flatten_inputs/dtm-diagnostics-metrics.zip diagnostics/ingestion/metrics
-          make_zip diagnostics/flatten_inputs/dtm-diagnostics-samples.zip diagnostics/ingestion/samples
-          make_zip diagnostics/flatten_inputs/resolver-backfill-ingest.zip data resolver/staging resolver/logs/ingestion
-
-          if [ "${#inputs[@]}" -eq 0 ]; then
-            python - <<'PY'
-import zipfile
-from pathlib import Path
-
-out = Path("diagnostics/all-artifacts-flat.zip")
-out.parent.mkdir(parents=True, exist_ok=True)
-with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED):
-    pass
-PY
-          else
-            python scripts/ci/flatten_artifacts.py --out diagnostics/all-artifacts-flat.zip "${inputs[@]}"
-          fi
+          python scripts/ci/backfill_helpers.py --out diagnostics/all-artifacts-flat.zip
 
       - name: Upload flat artifacts bundle
         if: always()
@@ -519,7 +448,7 @@ PY
             --facts diagnostics/ingestion/export_preview/facts.csv \
             --month "${BACKFILL_MONTH}" \
             --write-db=1 \
-            --db-url "${{ env.RESOLVER_DB_URL }}"
+            --db-url "${{ env.RESOLVER_DUCKDB_URL }}"
 
       - name: Verify DuckDB counts
         env:

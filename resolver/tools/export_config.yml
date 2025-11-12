@@ -206,7 +206,7 @@ sources:
     allow_empty: true
     match:
       filename_regex: "(?i)(?:^|.*/resolver/staging/)emdat_pa\\.csv$"
-      required_columns: [iso3, as_of_date, metric]
+      required_columns: [iso3, ym, shock_type, pa]
     map:
       event_id:
         from: event_id
@@ -217,9 +217,12 @@ sources:
       iso3:
         from: iso3
         ops: [trim, uppercase]
+      ym:
+        from: ym
+        ops: [trim]
       hazard_code:
-        from: hazard_code
-        ops: [trim, uppercase]
+        from: shock_type
+        ops: [trim, lowercase]
       hazard_label:
         from: hazard_label
         ops: [trim]
@@ -227,16 +230,14 @@ sources:
         from: hazard_class
         ops: [trim]
       metric:
-        from: metric
-        ops: [trim]
+        const: affected
       series_semantics:
-        from: series_semantics
-        ops: [trim]
+        const: new
       semantics:
         from: semantics
         ops: [trim]
       value:
-        from: value
+        from: pa
         ops: [to_number]
       unit:
         from: unit
@@ -250,6 +251,8 @@ sources:
       publisher:
         from: publisher
         ops: [trim]
+      source:
+        const: EM-DAT
       source_type:
         from: source_type
         ops: [trim]
@@ -274,10 +277,8 @@ sources:
       ingested_at:
         from: ingested_at
         ops: [trim]
-      source:
-        const: EM-DAT
     dedupe:
-      keys: [iso3, as_of_date, hazard_code, metric, series_semantics]
+      keys: [iso3, ym, hazard_code, metric, series_semantics]
       keep: last
 metrics:
   idp_displacement_new_dtm:
