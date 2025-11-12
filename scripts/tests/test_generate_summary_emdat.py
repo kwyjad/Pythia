@@ -21,28 +21,32 @@ def test_summary_includes_emdat_probe(monkeypatch: pytest.MonkeyPatch, tmp_path:
     probe_dir.mkdir(parents=True, exist_ok=True)
     probe_payload = {
         "ok": True,
-        "http_status": 200,
-        "elapsed_ms": 123.4,
+        "status": 200,
+        "latency_ms": 123.4,
         "api_version": "2024-05",
-        "info": {"version": "dataset-v1", "timestamp": "2024-05-01T00:00:00Z"},
+        "table_version": "dataset-v1",
+        "metadata_timestamp": "2024-05-01T00:00:00Z",
+        "requests": {"total": 1, "2xx": 1, "4xx": 0, "5xx": 0},
         "recorded_at": "2024-06-01T00:00:00Z",
-        "total_available": 0,
     }
     (probe_dir / "probe.json").write_text(json.dumps(probe_payload), encoding="utf-8")
 
     effective_payload = {
-        "network": {"requested": True, "env_value": "1"},
-        "api": {"base_url": "https://api.example", "key_present": True},
-        "filters": {
-            "from": 2022,
-            "to": 2023,
-            "classif": ["foo"],
-            "include_hist": False,
-        },
-        "graphQL_vars": {"from": 2022, "to": 2023, "classif": ["foo"]},
         "recorded_at": "2024-06-01T01:00:00Z",
+        "source_type": "api",
+        "source_override": "api",
+        "network": True,
+        "network_env": "1",
+        "api_key_present": True,
+        "default_from_year": 2022,
+        "default_to_year": 2023,
+        "include_hist": False,
+        "classif_count": 1,
+        "classif_keys": ["foo"],
+        "iso_filter_applied": False,
+        "iso_count": 0,
     }
-    (probe_dir / "effective_params.json").write_text(
+    (probe_dir / "effective.json").write_text(
         json.dumps(effective_payload), encoding="utf-8"
     )
 
@@ -67,13 +71,16 @@ def test_summary_includes_emdat_probe(monkeypatch: pytest.MonkeyPatch, tmp_path:
     content = _run_summary(tmp_path, monkeypatch)
 
     assert "## EMDAT Probe" in content
-    assert "- status: ok (HTTP 200, 123 ms)" in content
-    assert "- api_version: 2024-05" in content
-    assert "- dataset version: dataset-v1" in content
+    assert "- status: 200 (ok)" in content
+    assert "- api_version: 2024-05   table_version: dataset-v1" in content
     assert "- metadata timestamp: 2024-05-01T00:00:00Z" in content
-    assert "## EMDAT Effective Params" in content
+    assert "- requests: total=1  2xx=1  4xx=0  5xx=0" in content
+    assert "## EMDAT Effective Mode" in content
+    assert "- source: api (override=api)" in content
     assert "- network: on (env=1)" in content
-    assert "- graphQL vars: {\"classif\": [\"foo\"], \"from\": 2022, \"to\": 2023}" in content
+    assert "- api key: present" in content
+    assert "- default window: 2022–2023 (include_hist=false)" in content
+    assert "- classif: 1  iso filter: none" in content
     assert "## EMDAT Probe Sample" in content
     assert "- classif histogram: foo: 1" in content
     assert "## Export Preview" in content
@@ -90,5 +97,5 @@ def test_summary_handles_missing_probe(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     assert "## EMDAT Probe" in content
     assert "- probe.json: missing" in content
-    assert "## EMDAT Effective Params" in content
-    assert "- effective_params.json: missing" in content
+    assert "## EMDAT Effective Mode" in content
+    assert "- effective.json: missing" in content

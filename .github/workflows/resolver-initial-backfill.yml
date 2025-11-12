@@ -80,7 +80,7 @@ jobs:
       DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
       EMDAT_NETWORK: "1"
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
-      EGMAT_SOURCE: "api"
+      EMDAT_SOURCE: "api"  # explicit override (safety)
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}

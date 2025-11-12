@@ -66,7 +66,7 @@ OUT_DIR = OUT_PATH.parent
 SCHEMA_PATH = Path(__file__).with_name("schemas") / "emdat_pa.schema.yml"
 EMDAT_DIAGNOSTICS_DIR = Path("diagnostics/ingestion/emdat")
 EMDAT_PROBE_PATH = EMDAT_DIAGNOSTICS_DIR / "probe.json"
-EMDAT_EFFECTIVE_PARAMS_PATH = EMDAT_DIAGNOSTICS_DIR / "effective_params.json"
+EMDAT_EFFECTIVE_PARAMS_PATH = EMDAT_DIAGNOSTICS_DIR / "effective.json"
 EMDAT_PROBE_SAMPLE_PATH = EMDAT_DIAGNOSTICS_DIR / "probe_sample.json"
 
 EMDAT_REACHABILITY_QUERY = """
@@ -140,9 +140,9 @@ def _current_timestamp() -> str:
 
 
 def probe_emdat(
-    base_url: str,
     api_key: str,
-    timeout_s: int = 5,
+    base_url: str,
+    timeout_s: float = 5.0,
     *,
     session: requests.Session | None = None,
 ) -> Dict[str, Any]:
@@ -151,11 +151,13 @@ def probe_emdat(
     result: Dict[str, Any] = {
         "ok": False,
         "status": None,
+        "latency_ms": None,
         "elapsed_ms": None,
         "api_version": None,
-        "version": None,
-        "timestamp": None,
+        "table_version": None,
+        "metadata_timestamp": None,
         "error": None,
+        "requests": {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0},
     }
 
     if not api_key:
@@ -170,18 +172,30 @@ def probe_emdat(
     try:
         response = sender(base_url, json=payload, headers=headers, timeout=timeout_s)
     except requests.RequestException as exc:
-        result["elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
+        result["latency_ms"] = result["elapsed_ms"] = int(
+            round((time.perf_counter() - started) * 1000)
+        )
         result["error"] = str(exc)
         return result
     except Exception as exc:  # pragma: no cover - defensive guard
-        result["elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
+        result["latency_ms"] = result["elapsed_ms"] = int(
+            round((time.perf_counter() - started) * 1000)
+        )
         result["error"] = str(exc)
         return result
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     status = getattr(response, "status_code", None)
-    result["status"] = status if isinstance(status, int) else None
-    result["elapsed_ms"] = elapsed_ms
+    if isinstance(status, int):
+        result["status"] = status
+        if 200 <= status < 300:
+            result["requests"]["2xx"] += 1
+        elif 400 <= status < 500:
+            result["requests"]["4xx"] += 1
+        elif 500 <= status < 600:
+            result["requests"]["5xx"] += 1
+        result["requests"]["total"] += 1
+    result["latency_ms"] = result["elapsed_ms"] = elapsed_ms
 
     try:
         response.raise_for_status()
@@ -214,10 +228,10 @@ def probe_emdat(
         result["api_version"] = str(api_version)
     timestamp = info.get("timestamp")
     if timestamp is not None:
-        result["timestamp"] = str(timestamp)
+        result["metadata_timestamp"] = str(timestamp)
     version = info.get("version")
     if version is not None:
-        result["version"] = str(version)
+        result["table_version"] = str(version)
 
     result["ok"] = True
     return result
@@ -722,6 +736,7 @@ API_LOG = logging.getLogger("resolver.ingestion.emdat.api")
 EMDAT_API_URL = "https://api.emdat.be/v1"
 EMDAT_API_KEY_ENV = "EMDAT_API_KEY"
 EMDAT_NETWORK_ENV = "EMDAT_NETWORK"
+EMDAT_SOURCE_ENV = "EMDAT_SOURCE"
 REQUEST_TIMEOUT = (5, 30)
 RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
 
@@ -858,14 +873,16 @@ def _build_effective_params(
     network_requested: bool,
     api_key_present: bool,
     cfg: Mapping[str, Any],
-    base_url: str = EMDAT_API_URL,
+    source_mode: str,
+    network_env: str | None = None,
+    source_override: str | None = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Return diagnostics payload and filter metadata for the current run."""
 
     from_year, to_year = _default_year_bounds(cfg)
     include_hist = bool(cfg.get("include_hist", False))
     classif_filter = _default_classif(cfg)
-    iso_filter = _default_iso(cfg)
+    iso_filter = sorted({value for value in _default_iso(cfg) if value})
 
     filters: Dict[str, Any] = {
         "from": from_year,
@@ -873,29 +890,27 @@ def _build_effective_params(
         "classif": list(classif_filter),
         "include_hist": include_hist,
     }
-    graphql_vars: Dict[str, Any] = {
-        "from": from_year,
-        "to": to_year,
-        "classif": list(classif_filter),
-    }
     if iso_filter:
-        iso_values = list(iso_filter)
-        filters["iso"] = iso_values
-        graphql_vars["iso"] = iso_values
+        filters["iso"] = iso_filter
 
     params = {
         "recorded_at": _current_timestamp(),
-        "network": {
-            "requested": bool(network_requested),
-            "env_value": os.getenv(EMDAT_NETWORK_ENV, ""),
-        },
-        "api": {
-            "base_url": base_url,
-            "key_present": bool(api_key_present),
-        },
+        "source_type": source_mode,
+        "source_override": source_override or "",
+        "network": bool(network_requested),
+        "network_env": (network_env or ""),
+        "api_key_present": bool(api_key_present),
+        "default_from_year": from_year,
+        "default_to_year": to_year,
+        "include_hist": include_hist,
+        "classif_count": len(classif_filter),
+        "classif_keys": list(classif_filter),
+        "iso_filter_applied": bool(iso_filter),
+        "iso_count": len(iso_filter),
         "filters": filters,
-        "graphQL_vars": graphql_vars,
     }
+    if iso_filter:
+        params["iso_values"] = iso_filter
 
     meta = {
         "from": from_year,
@@ -1118,15 +1133,21 @@ class EmdatClient:
             self.log.info("emdat.probe.fail|reason=%s", reason)
             result = {
                 "ok": False,
-                "error": reason,
-                "http_status": None,
+                "status": "skipped",
+                "latency_ms": None,
                 "elapsed_ms": None,
                 "api_version": None,
-                "info": {},
+                "table_version": None,
+                "metadata_timestamp": None,
+                "error": reason,
+                "requests": {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0},
                 "total_available": None,
                 "recorded_at": recorded_at,
+                "ts": recorded_at,
                 "filters": filters_payload,
-                "skipped": True,
+                "network": bool(self._network),
+                "api_key_present": bool(self._api_key),
+                "source_type": "api",
             }
             write_json(EMDAT_PROBE_PATH, result)
             return result
@@ -1135,14 +1156,21 @@ class EmdatClient:
             self.log.info("emdat.probe.fail|reason=%s", reason)
             result = {
                 "ok": False,
-                "error": reason,
-                "http_status": None,
+                "status": "error",
+                "latency_ms": None,
                 "elapsed_ms": None,
                 "api_version": None,
-                "info": {},
+                "table_version": None,
+                "metadata_timestamp": None,
+                "error": reason,
+                "requests": {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0},
                 "total_available": None,
                 "recorded_at": recorded_at,
+                "ts": recorded_at,
                 "filters": filters_payload,
+                "network": bool(self._network),
+                "api_key_present": bool(self._api_key),
+                "source_type": "api",
             }
             write_json(EMDAT_PROBE_PATH, result)
             return result
@@ -1152,25 +1180,38 @@ class EmdatClient:
         public = data.get("public_emdat") or {}
         info = public.get("info") or {}
         total_available = public.get("total_available")
+        requests_summary = {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0}
+        if isinstance(status_code, int):
+            requests_summary["total"] = 1
+            if 200 <= status_code < 300:
+                requests_summary["2xx"] = 1
+            elif 400 <= status_code < 500:
+                requests_summary["4xx"] = 1
+            elif 500 <= status_code < 600:
+                requests_summary["5xx"] = 1
         result = {
             "ok": True,
-            "error": None,
-            "http_status": status_code,
-            "elapsed_ms": elapsed_ms,
+            "status": status_code,
+            "latency_ms": int(round(elapsed_ms)),
+            "elapsed_ms": int(round(elapsed_ms)),
             "api_version": api_version,
-            "info": {
-                "version": info.get("version"),
-                "timestamp": info.get("timestamp"),
-            },
+            "table_version": info.get("version"),
+            "metadata_timestamp": info.get("timestamp"),
+            "error": None,
+            "requests": requests_summary,
             "total_available": total_available,
             "recorded_at": recorded_at,
+            "ts": recorded_at,
             "filters": filters_payload,
+            "network": bool(self._network),
+            "api_key_present": bool(self._api_key),
+            "source_type": "api",
         }
         write_json(EMDAT_PROBE_PATH, result)
         self.log.info(
             "emdat.probe.ok|api_version=%s|status=%s",
             api_version,
-            result["http_status"],
+            result["status"],
         )
         return result
 
@@ -1261,39 +1302,66 @@ def main(argv: List[str] | None = None) -> bool:
         return False
 
     cfg = load_config()
-    live_mode = getenv_bool("EMDAT_NETWORK", False)
+    network_env_raw = os.getenv(EMDAT_NETWORK_ENV, "")
+    network_on = getenv_bool(EMDAT_NETWORK_ENV, False)
     api_key = (os.getenv(EMDAT_API_KEY_ENV, "") or "").strip()
+    force_source = (os.getenv(EMDAT_SOURCE_ENV, "") or "").strip().lower()
 
     source_cfg = cfg.get("source") if isinstance(cfg.get("source"), Mapping) else {}
-    if isinstance(source_cfg, Mapping):
-        src_type_raw = source_cfg.get("type")
-    else:
-        src_type_raw = None
+    src_type_raw = source_cfg.get("type") if isinstance(source_cfg, Mapping) else None
     src_type = str(src_type_raw or "").strip().lower()
     if not src_type:
         sources_cfg = cfg.get("sources")
         if sources_cfg:
             src_type = "file"
+
+    if force_source == "api":
+        if network_on and api_key:
+            src_type = "api"
+        else:
+            LOG.info(
+                "emdat.mode.override_skipped|force=%s|network=%s|key=%s",
+                force_source,
+                1 if network_on else 0,
+                1 if api_key else 0,
+            )
+
+    if (
+        src_type == "file"
+        and isinstance(source_cfg, Mapping)
+        and not str(source_cfg.get("path", "")).strip()
+        and network_on
+        and api_key
+    ):
+        LOG.warning(
+            "emdat.mode|yaml=FILE but no path and network+key present; promoting to API mode"
+        )
+        src_type = "api"
+
     mode = "file" if src_type == "file" else "api"
 
     LOG.debug(
         "emdat.effective",
         extra={
             "source_type": mode,
-            "network": bool(live_mode),
+            "network": bool(network_on),
             "api_key_present": bool(api_key),
         },
     )
 
     effective_params, filter_meta = _build_effective_params(
-        network_requested=live_mode,
+        network_requested=network_on,
         api_key_present=bool(api_key),
         cfg=cfg,
+        source_mode=mode,
+        network_env=network_env_raw,
+        source_override=force_source or None,
     )
     write_json(EMDAT_EFFECTIVE_PARAMS_PATH, effective_params)
     LOG.info(
-        "emdat.effective|network=%s|key_present=%s|from=%s|to=%s|classif_count=%s|iso_count=%s",
-        1 if live_mode else 0,
+        "emdat.effective|source=%s|network=%s|key_present=%s|from=%s|to=%s|classif_count=%s|iso_count=%s",
+        mode,
+        1 if network_on else 0,
         1 if api_key else 0,
         filter_meta["from"],
         filter_meta["to"],
@@ -1301,19 +1369,21 @@ def main(argv: List[str] | None = None) -> bool:
         len([value for value in filter_meta["iso"] if value]),
     )
 
-    if mode != "file" and not live_mode:
+    if mode != "file" and not network_on:
         probe_payload = {
             "ok": False,
-            "skipped": True,
-            "status": None,
-            "http_status": None,
+            "status": "skipped",
+            "latency_ms": None,
             "elapsed_ms": None,
             "api_version": None,
-            "version": None,
-            "timestamp": None,
-            "info": {},
-            "total_available": None,
             "error": "offline mode (EMDAT_NETWORK != '1')",
+            "table_version": None,
+            "metadata_timestamp": None,
+            "requests": {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0},
+            "network": bool(network_on),
+            "api_key_present": bool(api_key),
+            "source_type": mode,
+            "ts": _current_timestamp(),
             "recorded_at": _current_timestamp(),
         }
         write_json(EMDAT_PROBE_PATH, probe_payload)
@@ -1351,16 +1421,18 @@ def main(argv: List[str] | None = None) -> bool:
             preflight_reason = "missing_key"
             probe_payload = {
                 "ok": False,
-                "skipped": True,
-                "status": None,
-                "http_status": None,
+                "status": "missing-key",
+                "latency_ms": None,
                 "elapsed_ms": None,
                 "api_version": None,
-                "version": None,
-                "timestamp": None,
-                "info": {},
-                "total_available": None,
                 "error": "missing API key",
+                "table_version": None,
+                "metadata_timestamp": None,
+                "requests": {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0},
+                "network": bool(network_on),
+                "api_key_present": False,
+                "source_type": mode,
+                "ts": _current_timestamp(),
                 "recorded_at": _current_timestamp(),
             }
             write_json(EMDAT_PROBE_PATH, probe_payload)
@@ -1368,43 +1440,47 @@ def main(argv: List[str] | None = None) -> bool:
         else:
             client = EmdatClient(network=True, api_key=api_key)
             reachability = probe_emdat(
-                client.base_url,
                 api_key,
+                client.base_url,
                 timeout_s=REQUEST_TIMEOUT[0],
                 session=client.session,
             )
             probe_payload = {
                 "ok": reachability["ok"],
-                "status": reachability["status"],
-                "http_status": reachability["status"],
-                "elapsed_ms": reachability["elapsed_ms"],
+                "status": reachability.get("status")
+                if reachability.get("status") is not None
+                else ("error" if reachability.get("error") else None),
+                "latency_ms": reachability.get("latency_ms"),
+                "elapsed_ms": reachability.get("elapsed_ms"),
                 "api_version": reachability["api_version"],
-                "version": reachability["version"],
-                "timestamp": reachability["timestamp"],
-                "info": {
-                    "version": reachability["version"],
-                    "timestamp": reachability["timestamp"],
-                },
-                "total_available": None,
                 "error": reachability["error"],
+                "table_version": reachability["table_version"],
+                "metadata_timestamp": reachability["metadata_timestamp"],
+                "requests": reachability.get(
+                    "requests", {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0}
+                ),
+                "network": bool(network_on),
+                "api_key_present": bool(api_key),
+                "source_type": mode,
+                "ts": _current_timestamp(),
                 "recorded_at": _current_timestamp(),
             }
             write_json(EMDAT_PROBE_PATH, probe_payload)
             if reachability["ok"]:
                 LOG.info(
-                    "emdat.probe.ok|status=%s|ms=%s|api_version=%s|ver=%s",
-                    probe_payload["http_status"],
-                    probe_payload["elapsed_ms"],
+                    "emdat.probe.ok|status=%s|ms=%s|api_version=%s|table=%s",
+                    probe_payload["status"],
+                    probe_payload["latency_ms"],
                     probe_payload["api_version"],
-                    probe_payload["version"],
+                    probe_payload["table_version"],
                 )
             else:
                 LOG.info(
-                    "emdat.probe.fail|status=%s|ms=%s|api_version=%s|ver=%s|error=%s",
-                    probe_payload["http_status"],
-                    probe_payload["elapsed_ms"],
+                    "emdat.probe.fail|status=%s|ms=%s|api_version=%s|table=%s|error=%s",
+                    probe_payload["status"],
+                    probe_payload["latency_ms"],
                     probe_payload["api_version"],
-                    probe_payload["version"],
+                    probe_payload["table_version"],
                     probe_payload.get("error"),
                 )
             try:
@@ -1440,7 +1516,7 @@ def main(argv: List[str] | None = None) -> bool:
                         elapsed_ms,
                     )
 
-    diagnostics_mode = "live" if (mode == "file" or live_mode) else "offline"
+    diagnostics_mode = "live" if (mode == "file" or network_on) else "offline"
     diagnostics_ctx = diagnostics_emitter.start_run("emdat_client", mode=diagnostics_mode)
     if preflight_failed:
         ensure_header_only()
