@@ -232,6 +232,9 @@ sources:
       series_semantics:
         from: series_semantics
         ops: [trim]
+      semantics:
+        from: semantics
+        ops: [trim]
       value:
         from: value
         ops: [to_number]

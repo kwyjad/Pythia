@@ -1326,7 +1326,7 @@ def main(argv: List[str] | None = None) -> bool:
         return False
 
     cfg = load_config()
-    http_tally: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0}
+    http_tally: Dict[str, int] = {"total": 0, "2xx": 0, "4xx": 0, "5xx": 0}
     raw_row_count: Optional[int] = None
     normalized_row_count: Optional[int] = None
     facts_frame: Optional[pd.DataFrame] = None
@@ -1341,17 +1341,18 @@ def main(argv: List[str] | None = None) -> bool:
             http_tally["4xx"] += 1
         elif 500 <= status < 600:
             http_tally["5xx"] += 1
+        http_tally["total"] += 1
 
     def _merge_http_counts(summary: Mapping[str, Any] | None) -> None:
         if not isinstance(summary, Mapping):
             return
-        for bucket in ("2xx", "4xx", "5xx"):
+        for bucket in ("total", "2xx", "4xx", "5xx"):
             value = summary.get(bucket)
             if isinstance(value, int):
                 http_tally[bucket] += value
 
     def _http_payload() -> Dict[str, int]:
-        return {bucket: http_tally[bucket] for bucket in ("2xx", "4xx", "5xx")}
+        return {bucket: http_tally[bucket] for bucket in ("total", "2xx", "4xx", "5xx")}
 
     def _counts_payload(written: Optional[int]) -> Dict[str, int]:
         fetched = raw_row_count if raw_row_count is not None else 0
@@ -1652,6 +1653,11 @@ def main(argv: List[str] | None = None) -> bool:
             counts=_counts_payload(0),
         )
         return False
+
+    if raw_row_count is None:
+        raw_row_count = len(rows)
+    if normalized_row_count is None:
+        normalized_row_count = len(rows)
 
     if not rows:
         LOG.info("emdat: no rows collected; writing header only")
