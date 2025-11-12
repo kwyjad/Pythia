@@ -647,7 +647,8 @@ def collect_rows(cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
                             "hazard_label": hazard_label,
                             "hazard_class": hazard_class,
                             "metric": metric,
-                            "series_semantics": "incident",
+                            "series_semantics": "new",
+                            "semantics": "new",
                             "unit": "persons",
                             "publisher": publisher,
                             "source_type": source_type,
@@ -689,14 +690,17 @@ def collect_rows(cfg: Mapping[str, Any]) -> List[Dict[str, Any]]:
                 "event_id": event_id,
                 "country_name": entry.get("country_name", ""),
                 "iso3": iso3,
+                "ym": month,
                 "hazard_code": hazard_code,
                 "hazard_label": entry.get("hazard_label", ""),
                 "hazard_class": entry.get("hazard_class", ""),
                 "metric": metric,
-                "series_semantics": entry.get("series_semantics", "incident"),
+                "series_semantics": entry.get("series_semantics", "new"),
+                "semantics": entry.get("semantics", entry.get("series_semantics", "new")),
                 "value": value_int,
                 "unit": entry.get("unit", "persons"),
                 "as_of_date": month,
+                "source_id": "emdat",
                 "publication_date": entry.get("publication_date", ""),
                 "publisher": entry.get("publisher", ""),
                 "source_type": entry.get("source_type", ""),
@@ -721,7 +725,7 @@ def _write_rows(rows: Sequence[Mapping[str, Any]]) -> None:
     df = pd.DataFrame(rows)
     for column in CANONICAL_HEADERS:
         if column not in df.columns:
-            df[column] = ""
+            df[column] = pd.NA
     df = df[CANONICAL_HEADERS]
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUT_PATH, index=False)
@@ -730,6 +734,25 @@ def _write_rows(rows: Sequence[Mapping[str, Any]]) -> None:
         schema_version=_emdat_schema_version(),
         source_id="emdat",
     )
+
+
+def _write_facts_frame(frame: pd.DataFrame | None) -> int:
+    if frame is None or frame.empty:
+        ensure_header_only()
+        return 0
+    prepared = frame.copy()
+    for column in CANONICAL_HEADERS:
+        if column not in prepared.columns:
+            prepared[column] = pd.NA
+    prepared = prepared[CANONICAL_HEADERS]
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    prepared.to_csv(OUT_PATH, index=False)
+    ensure_manifest_for_csv(
+        OUT_PATH,
+        schema_version=_emdat_schema_version(),
+        source_id="emdat",
+    )
+    return len(prepared)
 
 
 API_LOG = logging.getLogger("resolver.ingestion.emdat.api")
@@ -1306,6 +1329,8 @@ def main(argv: List[str] | None = None) -> bool:
     http_tally: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0}
     raw_row_count: Optional[int] = None
     normalized_row_count: Optional[int] = None
+    facts_frame: Optional[pd.DataFrame] = None
+    written_row_count: Optional[int] = None
 
     def _record_http_status(status: Optional[int]) -> None:
         if status is None:
@@ -1328,18 +1353,15 @@ def main(argv: List[str] | None = None) -> bool:
     def _http_payload() -> Dict[str, int]:
         return {bucket: http_tally[bucket] for bucket in ("2xx", "4xx", "5xx")}
 
-    def _counts_payload(written: int) -> Dict[str, int]:
-        fetched = raw_row_count if raw_row_count is not None else written
-        normalized = (
-            normalized_row_count if normalized_row_count is not None else written
-        )
-        payload = {
+    def _counts_payload(written: Optional[int]) -> Dict[str, int]:
+        fetched = raw_row_count if raw_row_count is not None else 0
+        normalized = normalized_row_count if normalized_row_count is not None else 0
+        written_count = written if written is not None else 0
+        return {
             "fetched": int(fetched),
             "normalized": int(normalized),
-            "written": int(written),
-            "rows": int(written),
+            "written": int(written_count),
         }
-        return payload
 
     network_env_raw = os.getenv(EMDAT_NETWORK_ENV, "")
     network_on = getenv_bool(EMDAT_NETWORK_ENV, False)
@@ -1561,6 +1583,7 @@ def main(argv: List[str] | None = None) -> bool:
                     except Exception:  # pragma: no cover - defensive normalization
                         normalized_row_count = None
                     else:
+                        facts_frame = normalized_frame
                         stats = normalized_frame.attrs.get("normalize_stats")
                         if isinstance(stats, Mapping) and "kept_rows" in stats:
                             try:
@@ -1604,6 +1627,18 @@ def main(argv: List[str] | None = None) -> bool:
         )
         return status == "ok"
 
+    if facts_frame is not None and not facts_frame.empty:
+        written_row_count = _write_facts_frame(facts_frame)
+        LOG.info("emdat: wrote %s rows", written_row_count)
+        diagnostics_emitter.finalize_run(
+            diagnostics_ctx,
+            status="ok",
+            reason=None,
+            http=_http_payload(),
+            counts=_counts_payload(written_row_count),
+        )
+        return True
+
     try:
         rows = collect_rows(cfg)
     except Exception as exc:  # pragma: no cover - defensive logging for tests
@@ -1636,13 +1671,14 @@ def main(argv: List[str] | None = None) -> bool:
         return bool(empty_ok)
 
     _write_rows(rows)
-    LOG.info("emdat: wrote %s rows", len(rows))
+    written_row_count = len(rows)
+    LOG.info("emdat: wrote %s rows", written_row_count)
     diagnostics_emitter.finalize_run(
         diagnostics_ctx,
         status="ok",
         reason=None,
         http=_http_payload(),
-        counts=_counts_payload(len(rows)),
+        counts=_counts_payload(written_row_count),
     )
     return True
 

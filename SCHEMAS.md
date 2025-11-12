@@ -249,15 +249,32 @@ EM-DAT People Affected monthly aggregates written by the EM-DAT CLI.
 | Name | Type | Required | Enum/Format | Description |
 | --- | --- | --- | --- | --- |
 | iso3 | string | yes |  | ISO 3166-1 alpha-3 country code. |
+| as_of_date | string | yes | date | Data currency date sourced from EM-DAT metadata (YYYY-MM-DD). |
 | ym | string | yes |  | Resolver month key in YYYY-MM format. |
-| shock_type | string | yes |  | Resolver shock type (`drought`, `tropical_cyclone`, `flood`). |
-| pa | integer | yes |  | People affected (EM-DAT Total Affected) aggregated to the month. |
-| as_of_date | string | yes |  | Data currency date sourced from EM-DAT metadata. |
-| publication_date | string | yes |  | Latest EM-DAT publication/update contributing to the bucket. |
+| metric | string | yes |  | Metric identifier (`total_affected`). |
+| value | integer | yes |  | People affected (EM-DAT Total Affected) aggregated to the month. |
+| unit | string | yes |  | Unit of measurement for value (`persons`). |
+| series_semantics | string | yes |  | Series semantics for the metric (always `new`). |
+| semantics | string | yes |  | Semantic upsert policy (`new`). |
+| hazard_code | string | yes |  | Resolver hazard code (`flood`, `drought`, `tropical_cyclone`). |
+| hazard_label | string | no |  | Human-readable hazard label. |
+| hazard_class | string | no |  | High-level hazard class grouping. |
+| country_name | string | no |  | Country name resolved from ISO3. |
 | source_id | string | yes |  | Source identifier (`emdat`). |
-| disno_first | string | yes |  | Lowest EM-DAT disaster identifier contributing to the month bucket. |
+| publication_date | string | no | date | Latest EM-DAT publication/update contributing to the bucket. |
+| publisher | string | no |  | Publisher or organization name. |
+| source_type | string | no |  | Source type classification. |
+| source_url | string | no |  | URL to the originating EM-DAT record. |
+| doc_title | string | no |  | Title of the EM-DAT source document. |
+| definition_text | string | no |  | Connector definition or notes for the metric. |
+| method | string | no |  | Method used to derive the figure. |
+| confidence | string | no |  | Confidence rating for the figure. |
+| revision | integer | no |  | Revision number for the normalized record. |
+| ingested_at | string | no | datetime | ISO timestamp when the record was normalized. |
+| event_id | string | no |  | Stable identifier for the normalized EM-DAT bucket. |
+| disno_first | string | no |  | Lowest EM-DAT disaster identifier contributing to the month bucket. |
 
-Primary key: `(iso3, ym, shock_type)`.
+Primary key: `(iso3, ym, metric, hazard_code, series_semantics)`.
 
 ## db.snapshots
 

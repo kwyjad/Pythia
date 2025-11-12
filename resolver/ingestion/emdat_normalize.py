@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, Sequence
 
@@ -13,6 +13,7 @@ import pandas as pd
 from resolver.db.schema_keys import EMDAT_PA_KEY_COLUMNS
 from resolver.ingestion._shared.run_io import write_json
 from resolver.ingestion.utils.hazard_map import CLASSIF_TO_SHOCK
+from resolver.ingestion.utils import stable_digest
 
 LOG = logging.getLogger("resolver.ingestion.emdat.normalize")
 
@@ -25,7 +26,35 @@ try:  # Import lazily to avoid hard dependency during tests
 except Exception:  # pragma: no cover - defensive fallback
     _NORMALIZE_DEBUG_PATH = Path("diagnostics/ingestion/emdat/normalize_debug.json")
 
-_OUTPUT_COLUMNS: Sequence[str] = (
+_FACTS_COLUMNS: Sequence[str] = (
+    "iso3",
+    "as_of_date",
+    "ym",
+    "metric",
+    "value",
+    "unit",
+    "series_semantics",
+    "semantics",
+    "hazard_code",
+    "hazard_label",
+    "hazard_class",
+    "country_name",
+    "source_id",
+    "publication_date",
+    "publisher",
+    "source_type",
+    "source_url",
+    "doc_title",
+    "definition_text",
+    "method",
+    "confidence",
+    "revision",
+    "ingested_at",
+    "event_id",
+    "disno_first",
+)
+
+_DUCKDB_COLUMNS: Sequence[str] = (
     "iso3",
     "ym",
     "shock_type",
@@ -44,18 +73,36 @@ if TYPE_CHECKING:
 
 
 def _empty_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "iso3": pd.Series(dtype="string"),
-            "ym": pd.Series(dtype="string"),
-            "shock_type": pd.Series(dtype="string"),
-            "pa": pd.Series(dtype="Int64"),
-            "as_of_date": pd.Series(dtype="string"),
-            "publication_date": pd.Series(dtype="string"),
-            "source_id": pd.Series(dtype="string"),
-            "disno_first": pd.Series(dtype="string"),
-        }
-    )
+    columns: dict[str, pd.Series] = {
+        "iso3": pd.Series(dtype="string"),
+        "as_of_date": pd.Series(dtype="string"),
+        "ym": pd.Series(dtype="string"),
+        "metric": pd.Series(dtype="string"),
+        "value": pd.Series(dtype="Int64"),
+        "unit": pd.Series(dtype="string"),
+        "series_semantics": pd.Series(dtype="string"),
+        "semantics": pd.Series(dtype="string"),
+        "hazard_code": pd.Series(dtype="string"),
+        "hazard_label": pd.Series(dtype="string"),
+        "hazard_class": pd.Series(dtype="string"),
+        "country_name": pd.Series(dtype="string"),
+        "source_id": pd.Series(dtype="string"),
+        "publication_date": pd.Series(dtype="string"),
+        "publisher": pd.Series(dtype="string"),
+        "source_type": pd.Series(dtype="string"),
+        "source_url": pd.Series(dtype="string"),
+        "doc_title": pd.Series(dtype="string"),
+        "definition_text": pd.Series(dtype="string"),
+        "method": pd.Series(dtype="string"),
+        "confidence": pd.Series(dtype="string"),
+        "revision": pd.Series(dtype="Int64"),
+        "ingested_at": pd.Series(dtype="string"),
+        "event_id": pd.Series(dtype="string"),
+        "disno_first": pd.Series(dtype="string"),
+        "shock_type": pd.Series(dtype="string"),
+        "pa": pd.Series(dtype="Int64"),
+    }
+    return pd.DataFrame(columns)
 
 
 def _iso_from_disno(value: Any) -> str | None:
@@ -355,16 +402,66 @@ def normalize_emdat_pa(
             "disno",
             lambda s: min((str(v) for v in s if str(v).strip()), default=""),
         ),
+        country_name=(
+            "country",
+            lambda s: next((str(v).strip() for v in s if str(v).strip()), ""),
+        ),
     )
 
     grouped["pa"] = grouped["pa"].round().astype("Int64")
     grouped["publication_date"] = grouped["publication_date"].astype("string")
+    grouped["country_name"] = grouped["country_name"].astype("string")
     grouped["as_of_date"] = as_of_date
     grouped["source_id"] = SOURCE_ID
 
-    grouped = grouped[list(_OUTPUT_COLUMNS)].sort_values(["iso3", "ym", "shock_type"]).reset_index(
-        drop=True
-    )
+    grouped["value"] = grouped["pa"].astype("Int64")
+    grouped["metric"] = "total_affected"
+    grouped["unit"] = "persons"
+    grouped["series_semantics"] = "new"
+    grouped["semantics"] = "new"
+    grouped["hazard_code"] = grouped["shock_type"].astype("string")
+    grouped["hazard_label"] = grouped["hazard_code"].str.replace("_", " ").str.title()
+    grouped["hazard_class"] = grouped["hazard_label"]
+    grouped["publisher"] = "CRED/EM-DAT"
+    grouped["source_type"] = "api"
+    grouped["source_url"] = ""
+    grouped["doc_title"] = ""
+    grouped["definition_text"] = "EM-DAT total affected persons (monthly aggregate)."
+    grouped["method"] = "EM-DAT API monthly aggregation"
+    grouped["confidence"] = ""
+    grouped["revision"] = pd.Series(0, index=grouped.index, dtype="Int64")
+    ingested_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    grouped["ingested_at"] = ingested_at
+
+    digests = [
+        stable_digest(
+            [
+                row.iso3,
+                row.shock_type,
+                "total_affected",
+                row.ym,
+                row.disno_first,
+            ]
+        )
+        for row in grouped.itertuples(index=False)
+    ]
+    grouped["event_id"] = [
+        f"{row.iso3}-EMDAT-{row.shock_type}-total_affected-{row.ym.replace('-', '')}-{digest}"
+        for row, digest in zip(grouped.itertuples(index=False), digests, strict=False)
+    ]
+
+    for column in ("unit", "series_semantics", "semantics", "hazard_label", "hazard_class", "publisher", "source_type", "source_url", "doc_title", "definition_text", "confidence", "event_id"):
+        grouped[column] = grouped[column].astype("string")
+
+    grouped = grouped.sort_values(["iso3", "ym", "shock_type"]).reset_index(drop=True)
+
+    for column in _FACTS_COLUMNS:
+        if column not in grouped.columns:
+            grouped[column] = pd.NA
+    ordered_columns = list(_FACTS_COLUMNS) + [
+        column for column in grouped.columns if column not in _FACTS_COLUMNS
+    ]
+    grouped = grouped.reindex(columns=ordered_columns)
 
     drop_counts_payload: dict[str, int] = {
         "missing_iso": int(drop_counts.get("missing_iso", 0)),
@@ -418,12 +515,17 @@ def write_emdat_pa_to_duckdb(
 
     from resolver.db import duckdb_io
 
-    if frame is None:
+    if frame is None or frame.empty:
         working = _empty_frame()
     else:
-        working = frame
+        working = frame.copy()
 
-    ordered = working.reindex(columns=list(_OUTPUT_COLUMNS))
+    if "pa" not in working.columns and "value" in working.columns:
+        working["pa"] = working["value"]
+    if "shock_type" not in working.columns and "hazard_code" in working.columns:
+        working["shock_type"] = working["hazard_code"]
+
+    ordered = working.reindex(columns=list(_DUCKDB_COLUMNS))
 
     return duckdb_io.upsert_dataframe(
         conn,

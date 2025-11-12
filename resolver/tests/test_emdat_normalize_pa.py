@@ -144,6 +144,12 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
 
     assert set(normalized["as_of_date"]) == {"2024-01-15"}
     assert set(normalized["source_id"]) == {"emdat"}
+    assert set(normalized["metric"]) == {"total_affected"}
+    assert set(normalized["series_semantics"]) == {"new"}
+    assert set(normalized["semantics"]) == {"new"}
+    assert set(normalized["unit"]) == {"persons"}
+    assert normalized["value"].equals(normalized["pa"])
+    assert normalized["hazard_code"].tolist() == normalized["shock_type"].tolist()
     assert "KEN" not in set(normalized["iso3"])
 
     bgd_row = normalized[(normalized["iso3"] == "BGD") & (normalized["ym"] == "2022-05")].iloc[0]
