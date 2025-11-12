@@ -1303,6 +1303,44 @@ def main(argv: List[str] | None = None) -> bool:
         return False
 
     cfg = load_config()
+    http_tally: Dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0}
+    raw_row_count: Optional[int] = None
+    normalized_row_count: Optional[int] = None
+
+    def _record_http_status(status: Optional[int]) -> None:
+        if status is None:
+            return
+        if 200 <= status < 300:
+            http_tally["2xx"] += 1
+        elif 400 <= status < 500:
+            http_tally["4xx"] += 1
+        elif 500 <= status < 600:
+            http_tally["5xx"] += 1
+
+    def _merge_http_counts(summary: Mapping[str, Any] | None) -> None:
+        if not isinstance(summary, Mapping):
+            return
+        for bucket in ("2xx", "4xx", "5xx"):
+            value = summary.get(bucket)
+            if isinstance(value, int):
+                http_tally[bucket] += value
+
+    def _http_payload() -> Dict[str, int]:
+        return {bucket: http_tally[bucket] for bucket in ("2xx", "4xx", "5xx")}
+
+    def _counts_payload(written: int) -> Dict[str, int]:
+        fetched = raw_row_count if raw_row_count is not None else written
+        normalized = (
+            normalized_row_count if normalized_row_count is not None else written
+        )
+        payload = {
+            "fetched": int(fetched),
+            "normalized": int(normalized),
+            "written": int(written),
+            "rows": int(written),
+        }
+        return payload
+
     network_env_raw = os.getenv(EMDAT_NETWORK_ENV, "")
     network_on = getenv_bool(EMDAT_NETWORK_ENV, False)
     api_key = (os.getenv(EMDAT_API_KEY_ENV, "") or "").strip()
@@ -1397,8 +1435,8 @@ def main(argv: List[str] | None = None) -> bool:
             diagnostics_ctx,
             status="ok",
             reason="offline-no-data",
-            http={},
-            counts={"rows": 0},
+            http=_http_payload(),
+            counts=_counts_payload(0),
         )
         return True
 
@@ -1437,6 +1475,7 @@ def main(argv: List[str] | None = None) -> bool:
                 "recorded_at": _current_timestamp(),
             }
             write_json(EMDAT_PROBE_PATH, probe_payload)
+            _merge_http_counts(probe_payload.get("requests"))
             LOG.info("emdat.offline|reason=missing_key")
         else:
             client = EmdatClient(network=True, api_key=api_key)
@@ -1467,6 +1506,7 @@ def main(argv: List[str] | None = None) -> bool:
                 "recorded_at": _current_timestamp(),
             }
             write_json(EMDAT_PROBE_PATH, probe_payload)
+            _merge_http_counts(probe_payload.get("requests"))
             if reachability["ok"]:
                 LOG.info(
                     "emdat.probe.ok|status=%s|ms=%s|api_version=%s|table=%s",
@@ -1488,6 +1528,7 @@ def main(argv: List[str] | None = None) -> bool:
                 status_code, parsed, elapsed_ms = client._post_with_status(
                     _build_pa_payload(filter_meta)
                 )
+                _record_http_status(status_code)
             except OfflineRequested as exc:
                 LOG.info("emdat.offline|reason=%s", exc)
                 preflight_failed = True
@@ -1499,6 +1540,37 @@ def main(argv: List[str] | None = None) -> bool:
             else:
                 frame = client._frame_from_payload(parsed)
                 row_count = len(frame)
+                raw_row_count = row_count
+                info_payload: Mapping[str, Any] | None = None
+                if isinstance(parsed, Mapping):
+                    data = parsed.get("data")
+                    if isinstance(data, Mapping):
+                        public = data.get("public_emdat")
+                        if isinstance(public, Mapping):
+                            potential_info = public.get("info")
+                            if isinstance(potential_info, Mapping):
+                                info_payload = potential_info
+                if row_count:
+                    from resolver.ingestion.emdat_normalize import normalize_emdat_pa
+
+                    try:
+                        normalized_frame = normalize_emdat_pa(
+                            frame,
+                            info=info_payload,
+                        )
+                    except Exception:  # pragma: no cover - defensive normalization
+                        normalized_row_count = None
+                    else:
+                        stats = normalized_frame.attrs.get("normalize_stats")
+                        if isinstance(stats, Mapping) and "kept_rows" in stats:
+                            try:
+                                normalized_row_count = int(stats.get("kept_rows") or 0)
+                            except (TypeError, ValueError):
+                                normalized_row_count = int(len(normalized_frame))
+                        else:
+                            normalized_row_count = int(len(normalized_frame))
+                else:
+                    normalized_row_count = 0
                 if row_count == 0:
                     LOG.info(
                         "emdat.fetch.ok.zero|from=%s|to=%s|iso=%s",
@@ -1508,6 +1580,7 @@ def main(argv: List[str] | None = None) -> bool:
                     )
                     if status_code is not None and 200 <= status_code < 300:
                         probe_sample = _run_widened_probe(client, meta=filter_meta)
+                        _record_http_status(probe_sample.get("http_status"))
                         write_json(EMDAT_PROBE_SAMPLE_PATH, probe_sample)
                 else:
                     LOG.info(
@@ -1526,8 +1599,8 @@ def main(argv: List[str] | None = None) -> bool:
             diagnostics_ctx,
             status=status,
             reason=preflight_reason or "preflight-failed",
-            http={},
-            counts={"rows": 0},
+            http=_http_payload(),
+            counts=_counts_payload(0),
         )
         return status == "ok"
 
@@ -1540,8 +1613,8 @@ def main(argv: List[str] | None = None) -> bool:
             diagnostics_ctx,
             status="error",
             reason="collect-failed",
-            http={},
-            counts={"rows": 0},
+            http=_http_payload(),
+            counts=_counts_payload(0),
         )
         return False
 
@@ -1557,8 +1630,8 @@ def main(argv: List[str] | None = None) -> bool:
             diagnostics_ctx,
             status=status,
             reason="no-data",
-            http={},
-            counts={"rows": 0},
+            http=_http_payload(),
+            counts=_counts_payload(0),
         )
         return bool(empty_ok)
 
@@ -1568,8 +1641,8 @@ def main(argv: List[str] | None = None) -> bool:
         diagnostics_ctx,
         status="ok",
         reason=None,
-        http={},
-        counts={"rows": len(rows)},
+        http=_http_payload(),
+        counts=_counts_payload(len(rows)),
     )
     return True
 
