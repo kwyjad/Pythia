@@ -1,6 +1,6 @@
 enabled: true
 source:
-  type: file
+  type: api
   path: ""
 allocation:
   multi_month: linear
@@ -17,6 +17,6 @@ classif_keys:
   - "nat-hyd-flo-riv"
   - "nat-hyd-flo-fla"
 include_hist: false
-default_from_year: 1990
+default_from_year: 2024
 default_to_year: 2025
 iso: []
