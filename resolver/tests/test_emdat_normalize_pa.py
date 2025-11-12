@@ -21,6 +21,18 @@ def _derive_iso(row: dict[str, object]) -> str | None:
     return candidate or None
 
 
+def _parse_int(value: object) -> int | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text.replace(",", "")))
+    except (TypeError, ValueError):
+        return None
+
+
 def test_emdat_normalize_pa_groups_and_sums() -> None:
     raw = emdat_stub.fetch_raw(2015, 2023)
 
@@ -51,6 +63,21 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
         }
     )
 
+    flood_components = extra_flash.copy()
+    flood_components.update(
+        {
+            "disno": "2022-9997-BGD",
+            "start_month": 7,
+            "end_month": 7,
+            "total_affected": pd.NA,
+            "affected": "1,000",
+            "injured": "200",
+            "homeless": 300,
+            "entry_date": "2022-07-05",
+            "last_update": "2022-07-18",
+        }
+    )
+
     drought_missing_month = raw.iloc[0].to_dict()
     drought_missing_month.update(
         {
@@ -66,7 +93,12 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
     )
 
     augmented = pd.concat(
-        [raw, pd.DataFrame([extra_flash, flood_end_fallback, drought_missing_month])],
+        [
+            raw,
+            pd.DataFrame(
+                [extra_flash, flood_end_fallback, flood_components, drought_missing_month]
+            ),
+        ],
         ignore_index=True,
     )
 
@@ -93,8 +125,12 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
         if month_int < 1 or month_int > 12:
             continue
         ym = f"{int(year_value):04d}-{month_int:02d}"
-        value = pd.to_numeric(record.get("total_affected"), errors="coerce")
-        if pd.isna(value) or value <= 0:
+        value = _parse_int(record.get("total_affected"))
+        if value is None:
+            value = 0
+            for column in ("affected", "injured", "homeless"):
+                value += _parse_int(record.get(column)) or 0
+        if value <= 0:
             continue
         key = (iso3, ym, shock)
         expected_totals[key] = expected_totals.get(key, 0) + int(value)
@@ -124,9 +160,17 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
         ].iloc[0]
         assert int(june_row["pa"]) == expected_totals[june_key]
 
+    july_row = normalized[
+        (normalized["iso3"] == "BGD")
+        & (normalized["ym"] == "2022-07")
+        & (normalized["shock_type"] == "flood")
+    ].iloc[0]
+    assert int(july_row["pa"]) == 1500
+
     assert set(normalized["shock_type"]) == {"drought", "tropical_cyclone", "flood"}
 
     stats = normalized.attrs.get("normalize_stats")
     assert stats is not None
     assert stats["kept_rows"] > 0
     assert stats["drop_counts"]["missing_month"] >= 1
+    assert stats["fallback_counts"]["used_end_month"] >= 1

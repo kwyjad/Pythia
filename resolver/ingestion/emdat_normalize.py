@@ -71,6 +71,25 @@ def _iso_from_disno(value: Any) -> str | None:
     return None
 
 
+def _parse_int(value: Any) -> int | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == "NA":
+        return None
+    normalized = text.replace(",", "")
+    try:
+        number = float(normalized)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(number):
+        return None
+    try:
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _coerce_publication(series: pd.Series, fallback: pd.Series) -> pd.Series:
     primary = pd.to_datetime(series, errors="coerce")
     fallback_ts = pd.to_datetime(fallback, errors="coerce")
@@ -144,6 +163,7 @@ def normalize_emdat_pa(
 
     drop_counts: MutableMapping[str, int] = defaultdict(int)
     dropped_sample: list[dict[str, str]] = []
+    fallback_counts: MutableMapping[str, int] = defaultdict(int)
 
     if df_raw is None or df_raw.empty:
         LOG.debug("emdat.normalize.empty_input")
@@ -158,6 +178,7 @@ def normalize_emdat_pa(
                 "non_positive_value": 0,
             },
             "dropped_sample": [],
+            "fallback_counts": {},
         }
         _write_normalize_diagnostics(stats_payload)
         empty = _empty_frame()
@@ -236,6 +257,7 @@ def normalize_emdat_pa(
     sudden_mask = working["shock_type"].isin({"flood", "tropical_cyclone"})
     fallback_mask = start_missing_month & sudden_mask & working["end_month"].notna()
     if fallback_mask.any():
+        fallback_counts["used_end_month"] += int(fallback_mask.sum())
         working.loc[fallback_mask, "start_month"] = working.loc[fallback_mask, "end_month"]
 
     working["start_month"] = working["start_month"].where(
@@ -283,11 +305,26 @@ def normalize_emdat_pa(
         + working["start_month"].astype(int).map(lambda value: f"{value:02d}")
     )
 
-    affected = pd.to_numeric(
-        working.get("total_affected", pd.Series(pd.NA, index=working.index)),
-        errors="coerce",
+    def _resolve_pa(row: pd.Series) -> int | None:
+        total = _parse_int(row.get("total_affected"))
+        if total is None:
+            running = 0
+            observed = False
+            for field in ("affected", "injured", "homeless"):
+                value = _parse_int(row.get(field))
+                if value is not None:
+                    observed = True
+                    running += value
+            if not observed:
+                return None
+            total = running
+        return total
+
+    pa_series = pd.Series(
+        pd.array(working.apply(_resolve_pa, axis=1), dtype="Int64"),
+        index=working.index,
     )
-    non_positive_mask = affected.isna() | (affected <= 0)
+    non_positive_mask = pa_series.isna() | (pa_series <= 0)
     if non_positive_mask.any():
         _record_drops(
             working,
@@ -297,8 +334,8 @@ def normalize_emdat_pa(
             dropped_sample=dropped_sample,
         )
     working = working.loc[~non_positive_mask].copy()
-    affected = affected.loc[working.index]
-    working["total_affected"] = affected
+    pa_series = pa_series.loc[working.index]
+    working["total_affected"] = pa_series.astype("Int64")
 
     working["publication_date"] = _coerce_publication(
         working.get("last_update", pd.Series(pd.NA, index=working.index)),
@@ -345,6 +382,7 @@ def normalize_emdat_pa(
         "dropped_rows": int(raw_rows - kept_rows),
         "drop_counts": drop_counts_payload,
         "dropped_sample": dropped_sample,
+        "fallback_counts": {k: int(v) for k, v in fallback_counts.items()},
     }
 
     grouped.attrs["normalize_stats"] = diagnostics_payload
