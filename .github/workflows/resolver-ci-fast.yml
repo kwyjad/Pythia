@@ -46,6 +46,7 @@ jobs:
           ART_DIR="$GITHUB_WORKSPACE/.ci/diagnostics"
           echo "ART_DIR=$ART_DIR" >> "$GITHUB_ENV"
           mkdir -p "$ART_DIR"
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
 
       - name: Diagnostics collector syntax check
         shell: bash
@@ -126,6 +127,7 @@ jobs:
           # Mirror to legacy root filename for collectors that still look there
           if [ -f "$ART_DIR/pytest-junit.xml" ]; then
             cp "$ART_DIR/pytest-junit.xml" pytest-junit.xml
+            cp "$ART_DIR/pytest-junit.xml" "$GITHUB_WORKSPACE/diagnostics/pytest-junit.xml"
           fi
 
       - name: Verify imports (python, pytest, duckdb)
