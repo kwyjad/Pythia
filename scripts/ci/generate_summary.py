@@ -147,6 +147,25 @@ def main() -> int:
             preview_status.append(
                 f"- facts.csv: missing (expected at {preview_path})"
             )
+
+        diag_dir = preview_path.parent
+        diag_files = [
+            (diag_dir / "validator_stdout.txt", "stdout"),
+            (diag_dir / "validator_stderr.txt", "stderr"),
+        ]
+        for diag_path, label in diag_files:
+            if not diag_path.exists():
+                continue
+            snippet = _read_tail(diag_path, 400).strip()
+            if snippet:
+                headline = snippet.splitlines()[0].strip()
+                preview_status.append(
+                    f"- validator {label}: {diag_path} — {headline}"
+                )
+            else:
+                preview_status.append(
+                    f"- validator {label}: {diag_path} (empty)"
+                )
     except Exception as exc:  # pragma: no cover - diagnostics only
         preview_status.append(
             f"- facts.csv: error reading preview ({exc})"

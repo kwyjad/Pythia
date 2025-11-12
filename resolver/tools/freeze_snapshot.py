@@ -165,8 +165,22 @@ def run_validator(facts_path: Path) -> None:
     if not VALIDATOR.exists():
         print(f"Validator not found at {VALIDATOR}", file=sys.stderr)
         sys.exit(2)
+
+    preview_dir = facts_path.parent
+    try:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - defensive guard
+        pass
+
+    stdout_path = preview_dir / "validator_stdout.txt"
+    stderr_path = preview_dir / "validator_stderr.txt"
+
     cmd = [sys.executable, str(VALIDATOR), "--facts", str(facts_path)]
-    res = subprocess.run(cmd)
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    stdout_path.write_text(res.stdout or "", encoding="utf-8")
+    stderr_path.write_text(res.stderr or "", encoding="utf-8")
+
     if res.returncode != 0:
         print("Validation failed; aborting snapshot.", file=sys.stderr)
         sys.exit(res.returncode)

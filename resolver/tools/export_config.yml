@@ -206,77 +206,36 @@ sources:
     allow_empty: true
     match:
       filename_regex: "(?i)(?:^|.*/resolver/staging/)emdat_pa\\.csv$"
-      required_columns: [iso3, ym, shock_type, pa]
+      required_columns: [iso3, ym, shock_type, pa, as_of_date]
     map:
-      event_id:
-        from: event_id
-        ops: [trim]
-      country_name:
-        from: country_name
-        ops: [trim]
       iso3:
         from: iso3
         ops: [trim, uppercase]
+      as_of_date:
+        from: as_of_date
+        ops: [trim]
       ym:
         from: ym
         ops: [trim]
       hazard_code:
         from: shock_type
         ops: [trim, lowercase]
-      hazard_label:
-        from: hazard_label
-        ops: [trim]
-      hazard_class:
-        from: hazard_class
-        ops: [trim]
       metric:
         const: affected
       series_semantics:
         const: new
       semantics:
-        from: semantics
-        ops: [trim]
+        const: new
       value:
         from: pa
         ops: [to_number]
       unit:
-        from: unit
-        ops: [trim]
-      as_of_date:
-        from: as_of_date
-        ops: [trim]
-      publication_date:
-        from: publication_date
-        ops: [trim]
-      publisher:
-        from: publisher
-        ops: [trim]
+        const: persons
       source:
-        const: EM-DAT
-      source_type:
-        from: source_type
-        ops: [trim]
-      source_url:
-        from: source_url
-        ops: [trim]
-      doc_title:
-        from: doc_title
-        ops: [trim]
-      definition_text:
-        from: definition_text
-        ops: [trim]
-      method:
-        from: method
-        ops: [trim]
-      confidence:
-        from: confidence
-        ops: [trim]
-      revision:
-        from: revision
-        ops: [to_number]
-      ingested_at:
-        from: ingested_at
-        ops: [trim]
+        const: emdat
+    filters:
+      - keep_if_not_null: [iso3, ym, shock_type, pa, as_of_date]
+      - keep_if_positive: [value]
     dedupe:
       keys: [iso3, ym, hazard_code, metric, series_semantics]
       keep: last
