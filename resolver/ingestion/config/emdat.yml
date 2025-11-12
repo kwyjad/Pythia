@@ -18,5 +18,5 @@ classif_keys:
   - "nat-hyd-flo-fla"
 include_hist: false
 default_from_year: 1990
-default_to_year: 2024
+default_to_year: 2025
 iso: []
