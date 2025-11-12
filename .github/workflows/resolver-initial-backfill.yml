@@ -78,7 +78,7 @@ jobs:
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
       DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
-      EMDAT_NETWORK: "1" 
+      EMDAT_NETWORK: "1"
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
       RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}

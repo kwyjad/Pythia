@@ -22,6 +22,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
@@ -31,11 +32,13 @@ import yaml
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from resolver.ingestion import diagnostics_emitter
 from resolver.ingestion._manifest import ensure_manifest_for_csv
-from resolver.ingestion._shared import feature_flags
+from resolver.ingestion._shared.config_loader import _load_yaml
+from resolver.ingestion._shared.feature_flags import getenv_bool
+from resolver.ingestion._shared.run_io import _ensure_parent, write_text
 from resolver.ingestion.emdat_query import EMDAT_PA_QUERY, apply_limit_override
 from resolver.ingestion.utils import (
-    ensure_headers,
     linear_split,
     map_hazard,
     month_start,
@@ -56,31 +59,54 @@ DEFAULT_OUTPUT = ROOT / "staging" / "emdat_pa.csv"
 OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 OUT_DIR = OUT_PATH.parent
 
+SCHEMA_PATH = Path(__file__).with_name("schemas") / "emdat_pa.schema.yml"
+
+
+@lru_cache(maxsize=1)
+def _emdat_schema() -> Dict[str, Any]:
+    schema = _load_yaml(SCHEMA_PATH)
+    if not schema:
+        raise RuntimeError(f"Unexpected or empty EMDAT schema at {SCHEMA_PATH}")
+    return schema
+
+
+def _emdat_normalized_headers() -> List[str]:
+    schema = _emdat_schema()
+    columns = schema.get("columns", [])
+    headers: List[str] = []
+    for column in columns:
+        name: Optional[str]
+        if isinstance(column, Mapping):
+            raw_name = column.get("name")
+            name = str(raw_name) if raw_name is not None else None
+        else:
+            name = str(column) if column is not None else None
+        if name:
+            headers.append(name)
+    if not headers or "iso3" not in headers or "as_of_date" not in headers:
+        raise RuntimeError(f"Unexpected or empty EMDAT schema at {SCHEMA_PATH}")
+    return headers
+
+
+def _emdat_schema_version() -> str:
+    schema = _emdat_schema()
+    version = schema.get("version")
+    if version is None:
+        return "1"
+    return str(version)
+
+
+def _write_emdat_header_only_csv(out_path: Path | str) -> None:
+    headers = CANONICAL_HEADERS
+    target = Path(out_path)
+    _ensure_parent(target)
+    csv_header = ",".join(headers) + "\n"
+    write_text(target, csv_header, encoding="utf-8")
+    ensure_manifest_for_csv(target, schema_version=_emdat_schema_version(), source_id="emdat")
+
 LOG = logging.getLogger("resolver.ingestion.emdat")
 
-CANONICAL_HEADERS = [
-    "event_id",
-    "country_name",
-    "iso3",
-    "hazard_code",
-    "hazard_label",
-    "hazard_class",
-    "metric",
-    "series_semantics",
-    "value",
-    "unit",
-    "as_of_date",
-    "publication_date",
-    "publisher",
-    "source_type",
-    "source_url",
-    "doc_title",
-    "definition_text",
-    "method",
-    "confidence",
-    "revision",
-    "ingested_at",
-]
+CANONICAL_HEADERS = _emdat_normalized_headers()
 
 _HAZARD_INFO: Dict[str, Tuple[str, str, str]] = {
     "flood": ("FL", "Flood", "natural"),
@@ -115,8 +141,7 @@ def load_config() -> Dict[str, Any]:
 
 
 def ensure_header_only() -> None:
-    ensure_headers(OUT_PATH, CANONICAL_HEADERS)
-    ensure_manifest_for_csv(OUT_PATH)
+    _write_emdat_header_only_csv(OUT_PATH)
 
 
 def _normalise_key(value: Any) -> str:
@@ -531,7 +556,11 @@ def _write_rows(rows: Sequence[Mapping[str, Any]]) -> None:
     df = df[CANONICAL_HEADERS]
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUT_PATH, index=False)
-    ensure_manifest_for_csv(OUT_PATH)
+    ensure_manifest_for_csv(
+        OUT_PATH,
+        schema_version=_emdat_schema_version(),
+        source_id="emdat",
+    )
 
 
 API_LOG = logging.getLogger("resolver.ingestion.emdat.api")
@@ -692,7 +721,7 @@ class EmdatClient:
         self._network = (
             network
             if network is not None
-            else feature_flags.getenv_bool(EMDAT_NETWORK_ENV, default=False)
+            else getenv_bool(EMDAT_NETWORK_ENV, default=False)
         )
         self._api_key = (api_key or os.getenv(EMDAT_API_KEY_ENV, "")).strip()
         self.base_url = base_url
@@ -886,6 +915,22 @@ def main() -> bool:
         ensure_header_only()
         return False
 
+    live_mode = getenv_bool("EMDAT_NETWORK", False)
+    if not live_mode:
+        LOG.info(
+            "emdat: EMDAT_NETWORK != '1' → offline mode; emitting schema header only"
+        )
+        _write_emdat_header_only_csv(OUT_PATH)
+        diagnostics_ctx = diagnostics_emitter.start_run("emdat_client", mode="offline")
+        diagnostics_emitter.finalize_run(
+            diagnostics_ctx,
+            status="ok",
+            reason="offline-no-data",
+            http={},
+            counts={"rows": 0},
+        )
+        return True
+
     cfg = load_config()
     enabled_flag = cfg.get("enabled")
     if enabled_flag is None:
@@ -897,20 +942,47 @@ def main() -> bool:
         ensure_header_only()
         return False
 
+    diagnostics_ctx = diagnostics_emitter.start_run("emdat_client", mode="live")
     try:
         rows = collect_rows(cfg)
     except Exception as exc:  # pragma: no cover - defensive logging for tests
         LOG.info("emdat: failed to collect rows: %s", exc)
         ensure_header_only()
+        diagnostics_emitter.finalize_run(
+            diagnostics_ctx,
+            status="error",
+            reason="collect-failed",
+            http={},
+            counts={"rows": 0},
+        )
         return False
 
     if not rows:
         LOG.info("emdat: no rows collected; writing header only")
         ensure_header_only()
-        return False
+        empty_ok = getenv_bool("EMPTY_POLICY", True)
+        if not empty_ok:
+            raw_policy = os.getenv("EMPTY_POLICY", "")
+            empty_ok = raw_policy.strip().lower() in {"1", "true", "yes"}
+        status = "ok" if empty_ok else "no-data"
+        diagnostics_emitter.finalize_run(
+            diagnostics_ctx,
+            status=status,
+            reason="no-data",
+            http={},
+            counts={"rows": 0},
+        )
+        return bool(empty_ok)
 
     _write_rows(rows)
     LOG.info("emdat: wrote %s rows", len(rows))
+    diagnostics_emitter.finalize_run(
+        diagnostics_ctx,
+        status="ok",
+        reason=None,
+        http={},
+        counts={"rows": len(rows)},
+    )
     return True
 
 
