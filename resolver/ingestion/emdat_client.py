@@ -66,6 +66,22 @@ OUT_DIR = OUT_PATH.parent
 SCHEMA_PATH = Path(__file__).with_name("schemas") / "emdat_pa.schema.yml"
 EMDAT_DIAGNOSTICS_DIR = Path("diagnostics/ingestion/emdat")
 EMDAT_PROBE_PATH = EMDAT_DIAGNOSTICS_DIR / "probe.json"
+EMDAT_EFFECTIVE_PARAMS_PATH = EMDAT_DIAGNOSTICS_DIR / "effective_params.json"
+EMDAT_PROBE_SAMPLE_PATH = EMDAT_DIAGNOSTICS_DIR / "probe_sample.json"
+
+EMDAT_REACHABILITY_QUERY = """
+query ProbeEmdat {
+  api_version
+  public_emdat {
+    info {
+      timestamp
+      version
+    }
+  }
+}
+"""
+
+EMDAT_PROBE_SAMPLE_LIMIT = 20
 
 
 @lru_cache(maxsize=1)
@@ -121,6 +137,90 @@ def _current_timestamp() -> str:
     if text.endswith("+00:00"):
         return text[:-6] + "Z"
     return text
+
+
+def probe_emdat(
+    base_url: str,
+    api_key: str,
+    timeout_s: int = 5,
+    *,
+    session: requests.Session | None = None,
+) -> Dict[str, Any]:
+    """Return reachability details for the EM-DAT GraphQL endpoint."""
+
+    result: Dict[str, Any] = {
+        "ok": False,
+        "status": None,
+        "elapsed_ms": None,
+        "api_version": None,
+        "version": None,
+        "timestamp": None,
+        "error": None,
+    }
+
+    if not api_key:
+        result["error"] = "missing API key"
+        return result
+
+    headers = {"Content-Type": "application/json", "Authorization": api_key}
+    payload = {"query": EMDAT_REACHABILITY_QUERY}
+
+    sender = session.post if session is not None else requests.post  # type: ignore[union-attr]
+    started = time.perf_counter()
+    try:
+        response = sender(base_url, json=payload, headers=headers, timeout=timeout_s)
+    except requests.RequestException as exc:
+        result["elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
+        result["error"] = str(exc)
+        return result
+    except Exception as exc:  # pragma: no cover - defensive guard
+        result["elapsed_ms"] = int(round((time.perf_counter() - started) * 1000))
+        result["error"] = str(exc)
+        return result
+
+    elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    status = getattr(response, "status_code", None)
+    result["status"] = status if isinstance(status, int) else None
+    result["elapsed_ms"] = elapsed_ms
+
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        result["error"] = str(exc)
+        return result
+
+    try:
+        parsed = response.json()
+    except ValueError as exc:
+        result["error"] = f"invalid JSON: {exc}"
+        return result
+
+    if not isinstance(parsed, Mapping):
+        result["error"] = f"unexpected payload type: {type(parsed).__name__}"
+        return result
+
+    data = parsed.get("data")
+    if not isinstance(data, Mapping):
+        data = {}
+    api_version = data.get("api_version")
+    public = data.get("public_emdat")
+    if not isinstance(public, Mapping):
+        public = {}
+    info = public.get("info")
+    if not isinstance(info, Mapping):
+        info = {}
+
+    if api_version is not None:
+        result["api_version"] = str(api_version)
+    timestamp = info.get("timestamp")
+    if timestamp is not None:
+        result["timestamp"] = str(timestamp)
+    version = info.get("version")
+    if version is not None:
+        result["version"] = str(version)
+
+    result["ok"] = True
+    return result
 
 
 _HAZARD_INFO: Dict[str, Tuple[str, str, str]] = {
@@ -714,10 +814,148 @@ def _default_year_bounds(cfg: Mapping[str, Any]) -> tuple[int, int]:
     return default_from, default_to
 
 
+def _build_effective_params(
+    *,
+    network_requested: bool,
+    api_key_present: bool,
+    cfg: Mapping[str, Any],
+    base_url: str = EMDAT_API_URL,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Return diagnostics payload and filter metadata for the current run."""
+
+    from_year, to_year = _default_year_bounds(cfg)
+    include_hist = bool(cfg.get("include_hist", False))
+    classif_filter = _default_classif(cfg)
+    iso_filter = _default_iso(cfg)
+
+    filters: Dict[str, Any] = {
+        "from": from_year,
+        "to": to_year,
+        "classif": list(classif_filter),
+        "include_hist": include_hist,
+    }
+    graphql_vars: Dict[str, Any] = {
+        "from": from_year,
+        "to": to_year,
+        "classif": list(classif_filter),
+    }
+    if iso_filter:
+        iso_values = list(iso_filter)
+        filters["iso"] = iso_values
+        graphql_vars["iso"] = iso_values
+
+    params = {
+        "recorded_at": _current_timestamp(),
+        "network": {
+            "requested": bool(network_requested),
+            "env_value": os.getenv(EMDAT_NETWORK_ENV, ""),
+        },
+        "api": {
+            "base_url": base_url,
+            "key_present": bool(api_key_present),
+        },
+        "filters": filters,
+        "graphQL_vars": graphql_vars,
+    }
+
+    meta = {
+        "from": from_year,
+        "to": to_year,
+        "include_hist": include_hist,
+        "classif": list(classif_filter),
+        "iso": list(iso_filter),
+    }
+    return params, meta
+
+
 def _apply_include_hist_flag(query: str, include_hist: bool) -> str:
     if not include_hist:
         return query
     return query.replace("include_hist: false", "include_hist: true")
+
+
+def _build_pa_payload(meta: Mapping[str, Any], *, limit: Optional[int] = None) -> Dict[str, Any]:
+    include_hist = bool(meta.get("include_hist", False))
+    query = apply_limit_override(
+        _apply_include_hist_flag(EMDAT_PA_QUERY, include_hist),
+        limit=limit,
+    )
+
+    variables: Dict[str, Any] = {
+        "from": _coerce_int(meta.get("from"), meta.get("from", 0)),
+        "to": _coerce_int(meta.get("to"), meta.get("to", 0)),
+        "classif": [str(value) for value in meta.get("classif", []) if str(value)],
+    }
+
+    iso_values = [str(value).upper() for value in meta.get("iso", []) if str(value).strip()]
+    if iso_values:
+        variables["iso"] = iso_values
+
+    return {"query": query, "variables": variables}
+
+
+def _summarize_classif_histogram(frame: pd.DataFrame) -> list[Dict[str, Any]]:
+    if frame.empty or "classif_key" not in frame.columns:
+        return []
+    histogram: list[Dict[str, Any]] = []
+    counts = (
+        frame["classif_key"].fillna("").astype(str).value_counts()
+    )
+    for key in sorted(counts.index):
+        histogram.append({"classif_key": key, "count": int(counts[key])})
+    return histogram
+
+
+def _run_widened_probe(
+    client: "EmdatClient",
+    *,
+    meta: Mapping[str, Any],
+) -> Dict[str, Any]:
+    to_year = _coerce_int(meta.get("to"), meta.get("to", 0))
+    from_year = max(to_year - 1, 0)
+    diag_meta = {
+        "from": from_year,
+        "to": to_year,
+        "classif": list(meta.get("classif", [])),
+        "iso": [],
+        "include_hist": meta.get("include_hist", False),
+    }
+
+    payload = _build_pa_payload(diag_meta, limit=EMDAT_PROBE_SAMPLE_LIMIT)
+
+    try:
+        status_code, parsed, elapsed_ms = client._post_with_status(payload)
+    except Exception as exc:  # pragma: no cover - defensive network errors
+        return {
+            "ok": False,
+            "error": str(exc),
+            "filters": diag_meta,
+            "recorded_at": _current_timestamp(),
+        }
+
+    frame = client._frame_from_payload(parsed)
+    data = parsed.get("data") if isinstance(parsed, Mapping) else {}
+    if not isinstance(data, Mapping):
+        data = {}
+    public = data.get("public_emdat")
+    if not isinstance(public, Mapping):
+        public = {}
+    info = public.get("info")
+    if not isinstance(info, Mapping):
+        info = {}
+
+    result = {
+        "ok": True,
+        "http_status": status_code,
+        "elapsed_ms": elapsed_ms,
+        "rows": int(len(frame)),
+        "total_available": public.get("total_available"),
+        "info": {"version": info.get("version"), "timestamp": info.get("timestamp")},
+        "filters": diag_meta,
+        "classif_histogram": _summarize_classif_histogram(frame),
+        "recorded_at": _current_timestamp(),
+    }
+    return result
 
 
 class EmdatClient:
@@ -816,15 +1054,14 @@ class EmdatClient:
 
         include_hist = bool(cfg.get("include_hist", False))
         query = _apply_include_hist_flag(EMDAT_METADATA_QUERY, include_hist=include_hist)
-        payload = {
-            "query": query,
-            "variables": {
-                "iso": iso_filter or None,
-                "from": probe_from,
-                "to": probe_to,
-                "classif": classif_filter,
-            },
+        variables: Dict[str, Any] = {
+            "from": probe_from,
+            "to": probe_to,
+            "classif": classif_filter,
         }
+        if iso_filter:
+            variables["iso"] = iso_filter
+        payload = {"query": query, "variables": variables}
 
         filters_payload = {
             "iso": list(iso_filter) if iso_filter else [],
@@ -916,15 +1153,14 @@ class EmdatClient:
             _apply_include_hist_flag(EMDAT_PA_QUERY, include_hist or cfg.get("include_hist", False)),
             limit=limit,
         )
-        payload = {
-            "query": query,
-            "variables": {
-                "iso": iso_filter or None,
-                "from": _coerce_int(from_year, from_year),
-                "to": _coerce_int(to_year, to_year),
-                "classif": classif_filter,
-            },
+        variables: Dict[str, Any] = {
+            "from": _coerce_int(from_year, from_year),
+            "to": _coerce_int(to_year, to_year),
+            "classif": classif_filter,
         }
+        if iso_filter:
+            variables["iso"] = iso_filter
+        payload = {"query": query, "variables": variables}
 
         self.log.debug(
             "emdat.fetch.start|from=%s|to=%s|iso=%s|classif=%s|limit=%s",
@@ -985,8 +1221,42 @@ def main() -> bool:
         ensure_header_only()
         return False
 
+    cfg = load_config()
     live_mode = getenv_bool("EMDAT_NETWORK", False)
+    api_key = (os.getenv(EMDAT_API_KEY_ENV, "") or "").strip()
+
+    effective_params, filter_meta = _build_effective_params(
+        network_requested=live_mode,
+        api_key_present=bool(api_key),
+        cfg=cfg,
+    )
+    write_json(EMDAT_EFFECTIVE_PARAMS_PATH, effective_params)
+    LOG.info(
+        "emdat.effective|network=%s|key_present=%s|from=%s|to=%s|classif_count=%s|iso_count=%s",
+        1 if live_mode else 0,
+        1 if api_key else 0,
+        filter_meta["from"],
+        filter_meta["to"],
+        len(filter_meta["classif"]),
+        len([value for value in filter_meta["iso"] if value]),
+    )
+
     if not live_mode:
+        probe_payload = {
+            "ok": False,
+            "skipped": True,
+            "status": None,
+            "http_status": None,
+            "elapsed_ms": None,
+            "api_version": None,
+            "version": None,
+            "timestamp": None,
+            "info": {},
+            "total_available": None,
+            "error": "offline mode (EMDAT_NETWORK != '1')",
+            "recorded_at": _current_timestamp(),
+        }
+        write_json(EMDAT_PROBE_PATH, probe_payload)
         LOG.info(
             "emdat: EMDAT_NETWORK != '1' → offline mode; emitting schema header only"
         )
@@ -1001,7 +1271,6 @@ def main() -> bool:
         )
         return True
 
-    cfg = load_config()
     enabled_flag = cfg.get("enabled")
     if enabled_flag is None:
         enabled = bool(cfg.get("sources"))
@@ -1012,7 +1281,111 @@ def main() -> bool:
         ensure_header_only()
         return False
 
+    preflight_failed = False
+    client: EmdatClient | None = None
+
+    if not api_key:
+        preflight_failed = True
+        probe_payload = {
+            "ok": False,
+            "skipped": True,
+            "status": None,
+            "http_status": None,
+            "elapsed_ms": None,
+            "api_version": None,
+            "version": None,
+            "timestamp": None,
+            "info": {},
+            "total_available": None,
+            "error": "missing API key",
+            "recorded_at": _current_timestamp(),
+        }
+        write_json(EMDAT_PROBE_PATH, probe_payload)
+        LOG.info("emdat.offline|reason=missing_key")
+    else:
+        client = EmdatClient(network=True, api_key=api_key)
+        reachability = probe_emdat(
+            client.base_url,
+            api_key,
+            timeout_s=REQUEST_TIMEOUT[0],
+            session=client.session,
+        )
+        probe_payload = {
+            "ok": reachability["ok"],
+            "status": reachability["status"],
+            "http_status": reachability["status"],
+            "elapsed_ms": reachability["elapsed_ms"],
+            "api_version": reachability["api_version"],
+            "version": reachability["version"],
+            "timestamp": reachability["timestamp"],
+            "info": {
+                "version": reachability["version"],
+                "timestamp": reachability["timestamp"],
+            },
+            "total_available": None,
+            "error": reachability["error"],
+            "recorded_at": _current_timestamp(),
+        }
+        write_json(EMDAT_PROBE_PATH, probe_payload)
+        if reachability["ok"]:
+            LOG.info(
+                "emdat.probe.ok|status=%s|ms=%s|api_version=%s|ver=%s",
+                probe_payload["http_status"],
+                probe_payload["elapsed_ms"],
+                probe_payload["api_version"],
+                probe_payload["version"],
+            )
+        else:
+            LOG.info(
+                "emdat.probe.fail|status=%s|ms=%s|api_version=%s|ver=%s|error=%s",
+                probe_payload["http_status"],
+                probe_payload["elapsed_ms"],
+                probe_payload["api_version"],
+                probe_payload["version"],
+                probe_payload.get("error"),
+            )
+        try:
+            status_code, parsed, elapsed_ms = client._post_with_status(
+                _build_pa_payload(filter_meta)
+            )
+        except OfflineRequested as exc:
+            LOG.info("emdat.offline|reason=%s", exc)
+            preflight_failed = True
+        except Exception as exc:  # pragma: no cover - defensive logging
+            LOG.info("emdat.fetch.error|error=%s", exc)
+        else:
+            frame = client._frame_from_payload(parsed)
+            row_count = len(frame)
+            if row_count == 0:
+                LOG.info(
+                    "emdat.fetch.ok.zero|from=%s|to=%s|iso=%s",
+                    filter_meta["from"],
+                    filter_meta["to"],
+                    len([value for value in filter_meta.get("iso", []) if value]),
+                )
+                if status_code is not None and 200 <= status_code < 300:
+                    probe_sample = _run_widened_probe(client, meta=filter_meta)
+                    write_json(EMDAT_PROBE_SAMPLE_PATH, probe_sample)
+            else:
+                LOG.info(
+                    "emdat.fetch.ok|rows=%s|status=%s|elapsed_ms=%.2f",
+                    row_count,
+                    status_code,
+                    elapsed_ms,
+                )
+
     diagnostics_ctx = diagnostics_emitter.start_run("emdat_client", mode="live")
+    if preflight_failed:
+        ensure_header_only()
+        diagnostics_emitter.finalize_run(
+            diagnostics_ctx,
+            status="error",
+            reason="preflight-failed",
+            http={},
+            counts={"rows": 0},
+        )
+        return False
+
     try:
         rows = collect_rows(cfg)
     except Exception as exc:  # pragma: no cover - defensive logging for tests
