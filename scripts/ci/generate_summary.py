@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import os
 import sys
 from pathlib import Path
+
+from .protocol_probe import summarize_graphql_probe
 
 
 def _read_tail(path: Path, limit: int = 4000) -> str:
@@ -36,6 +40,50 @@ def main() -> int:
 
     sections: list[str] = []
 
+    probe_path = Path("diagnostics/ingestion/emdat/probe.json")
+    probe_lines: list[str] = []
+    try:
+        if probe_path.exists():
+            raw = probe_path.read_text(encoding="utf-8", errors="replace")
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                probe_lines = summarize_graphql_probe(payload)
+            else:
+                probe_lines = [
+                    f"- probe.json: unexpected payload type ({type(payload).__name__})"
+                ]
+        else:
+            probe_lines = [
+                f"- probe.json: missing (expected at {probe_path})"
+            ]
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        probe_lines = [f"- error reading probe.json ({exc})"]
+
+    preview_path = Path("diagnostics/ingestion/export_preview/facts.csv")
+    preview_status: list[str] = []
+    try:
+        resolved_preview_path = preview_path if preview_path.exists() else None
+        if resolved_preview_path:
+            with resolved_preview_path.open(newline="", encoding="utf-8") as fh:
+                reader = csv.reader(fh)
+                header = next(reader, None)
+                rows = sum(1 for _ in reader)
+            preview_status.append(
+                f"- facts.csv: present ({rows} row{'s' if rows != 1 else ''}) @ {resolved_preview_path}"
+            )
+            if header:
+                preview_status.append(
+                    f"  - columns: {', '.join(header)}"
+                )
+        else:
+            preview_status.append(
+                f"- facts.csv: missing (expected at {preview_path})"
+            )
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        preview_status.append(
+            f"- facts.csv: error reading preview ({exc})"
+        )
+
     junit_path = Path("pytest-junit.xml")
     if not junit_path.exists():
         junit_path = out_path.parent / "pytest-junit.xml"
@@ -53,6 +101,10 @@ def main() -> int:
         sections.append("## pytest stdout (tail)\n```\n" + _read_tail(pytest_log, 4000) + "\n```")
 
     content_lines = ["# CI Diagnostics Summary", "## Environment", *env_lines, ""]
+    if probe_lines:
+        content_lines.extend(["## EMDAT Reachability", *probe_lines, ""])
+    if preview_status:
+        content_lines.extend(["## Export Preview", *preview_status, ""])
     content_lines.extend(sections)
     if sections:
         content_lines.append("")

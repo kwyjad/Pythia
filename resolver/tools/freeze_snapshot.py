@@ -193,11 +193,13 @@ def write_parquet(df: pd.DataFrame, out_path: Path) -> None:
 class SnapshotResult:
     ym: str
     out_dir: Path
-    resolved_parquet: Path
-    resolved_csv: Path
-    deltas_parquet: Optional[Path]
-    deltas_csv: Optional[Path]
-    manifest: Path
+    resolved_parquet: Optional[Path] = None
+    resolved_csv: Optional[Path] = None
+    deltas_parquet: Optional[Path] = None
+    deltas_csv: Optional[Path] = None
+    manifest: Optional[Path] = None
+    skipped: bool = False
+    skip_reason: str = ""
 
 
 class SnapshotError(RuntimeError):
@@ -230,11 +232,23 @@ def freeze_snapshot(
     if not facts_path.exists():
         raise SnapshotError(f"Facts not found: {facts_path}")
 
-    run_validator(facts_path)
-
     ym = _parse_month(month)
     base_out_dir = Path(outdir)
     out_dir = base_out_dir / ym
+
+    facts_df = load_table(facts_path)
+    if facts_df.empty:
+        LOGGER.info(
+            "Snapshot freeze skipped for %s: %s has 0 rows", ym, facts_path
+        )
+        return SnapshotResult(
+            ym=ym,
+            out_dir=out_dir,
+            skipped=True,
+            skip_reason=f"No rows in {facts_path}",
+        )
+
+    run_validator(facts_path)
 
     if deltas:
         deltas_path = Path(deltas)
@@ -253,7 +267,10 @@ def freeze_snapshot(
         resolved_path = default_resolved if default_resolved.exists() else None
 
     resolved_source = resolved_path if resolved_path else facts_path
-    resolved_df = load_table(resolved_source)
+    if resolved_path:
+        resolved_df = load_table(resolved_source)
+    else:
+        resolved_df = facts_df.copy()
     deltas_df = load_table(deltas_path) if deltas_path else None
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
@@ -311,7 +328,7 @@ def freeze_snapshot(
 
     _maybe_write_db(
         ym=ym,
-        facts_df=resolved_df,
+        facts_df=facts_df,
         resolved_df=load_table(resolved_path) if resolved_path else resolved_df,
         deltas_df=deltas_df,
         manifest=manifest,
@@ -378,6 +395,11 @@ def main():
     except SnapshotError as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
+
+    if result.skipped:
+        reason = result.skip_reason or "No rows to freeze"
+        print(f"ℹ️ Snapshot skipped: {reason}")
+        return
 
     print("✅ Snapshot written:")
     print(f" - {result.resolved_parquet}")

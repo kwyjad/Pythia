@@ -2727,6 +2727,17 @@ def export_facts(
 
     facts.to_csv(csv_path, index=False)
 
+    preview_dir = Path("diagnostics/ingestion/export_preview")
+    preview_path = preview_dir / "facts.csv"
+    try:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        if preview_path.resolve() == csv_path.resolve():
+            LOGGER.debug("Export preview path matches output path; skipping duplicate write")
+        else:
+            facts.to_csv(preview_path, index=False)
+    except Exception as exc:  # pragma: no cover - diagnostics should not block export
+        LOGGER.warning("Failed to write export preview facts.csv: %s", exc)
+
     parquet_written: Optional[Path] = None
     try:
         facts.to_parquet(pq_path, index=False)

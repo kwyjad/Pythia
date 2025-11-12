@@ -21,7 +21,7 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
@@ -36,8 +36,12 @@ from resolver.ingestion import diagnostics_emitter
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion._shared.config_loader import _load_yaml
 from resolver.ingestion._shared.feature_flags import getenv_bool
-from resolver.ingestion._shared.run_io import _ensure_parent, write_text
-from resolver.ingestion.emdat_query import EMDAT_PA_QUERY, apply_limit_override
+from resolver.ingestion._shared.run_io import _ensure_parent, write_json, write_text
+from resolver.ingestion.emdat_query import (
+    EMDAT_METADATA_QUERY,
+    EMDAT_PA_QUERY,
+    apply_limit_override,
+)
 from resolver.ingestion.utils import (
     linear_split,
     map_hazard,
@@ -60,6 +64,8 @@ OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 OUT_DIR = OUT_PATH.parent
 
 SCHEMA_PATH = Path(__file__).with_name("schemas") / "emdat_pa.schema.yml"
+EMDAT_DIAGNOSTICS_DIR = Path("diagnostics/ingestion/emdat")
+EMDAT_PROBE_PATH = EMDAT_DIAGNOSTICS_DIR / "probe.json"
 
 
 @lru_cache(maxsize=1)
@@ -107,6 +113,15 @@ def _write_emdat_header_only_csv(out_path: Path | str) -> None:
 LOG = logging.getLogger("resolver.ingestion.emdat")
 
 CANONICAL_HEADERS = _emdat_normalized_headers()
+
+
+def _current_timestamp() -> str:
+    stamp = datetime.now(timezone.utc)
+    text = stamp.isoformat()
+    if text.endswith("+00:00"):
+        return text[:-6] + "Z"
+    return text
+
 
 _HAZARD_INFO: Dict[str, Tuple[str, str, str]] = {
     "flood": ("FL", "Flood", "natural"),
@@ -744,7 +759,9 @@ class EmdatClient:
         if not self._api_key:
             raise OfflineRequested(f"missing {EMDAT_API_KEY_ENV} environment variable")
 
-    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_with_status(
+        self, payload: Dict[str, Any]
+    ) -> tuple[Optional[int], Dict[str, Any], float]:
         self._ensure_online()
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.log.debug("emdat.request.start|payload_bytes=%s", len(encoded))
@@ -761,9 +778,10 @@ class EmdatClient:
             self.log.debug("emdat.request.error|elapsed_ms=%.2f|error=%s", elapsed_ms, exc)
             raise
         elapsed_ms = (time.perf_counter() - start) * 1000
+        status_code = getattr(response, "status_code", None)
         self.log.debug(
             "emdat.request.done|status=%s|elapsed_ms=%.2f",
-            getattr(response, "status_code", "?"),
+            status_code if status_code is not None else "?",
             elapsed_ms,
         )
         response.raise_for_status()
@@ -775,6 +793,10 @@ class EmdatClient:
             raise RuntimeError("unexpected EM-DAT response payload type")
         if parsed.get("errors"):
             raise RuntimeError(f"EM-DAT returned errors: {parsed['errors']}")
+        return status_code if isinstance(status_code, int) else None, parsed, elapsed_ms
+
+    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        _, parsed, _ = self._post_with_status(payload)
         return parsed
 
     def probe(
@@ -792,8 +814,8 @@ class EmdatClient:
         classif_filter = _normalise_text(classif) or _default_classif(cfg)
         iso_filter = _normalise_iso(iso) or _default_iso(cfg)
 
-        query = apply_limit_override(EMDAT_PA_QUERY, limit=1)
-        query = _apply_include_hist_flag(query, include_hist=cfg.get("include_hist", False))
+        include_hist = bool(cfg.get("include_hist", False))
+        query = _apply_include_hist_flag(EMDAT_METADATA_QUERY, include_hist=include_hist)
         payload = {
             "query": query,
             "variables": {
@@ -804,29 +826,77 @@ class EmdatClient:
             },
         }
 
+        filters_payload = {
+            "iso": list(iso_filter) if iso_filter else [],
+            "from": probe_from,
+            "to": probe_to,
+            "classif": list(classif_filter),
+            "include_hist": include_hist,
+        }
+        recorded_at = _current_timestamp()
+
         try:
-            parsed = self._post(payload)
+            status_code, parsed, elapsed_ms = self._post_with_status(payload)
         except OfflineRequested as offline:
             reason = str(offline)
             self.log.info("emdat.probe.fail|reason=%s", reason)
-            return {"ok": False, "error": reason}
+            result = {
+                "ok": False,
+                "error": reason,
+                "http_status": None,
+                "elapsed_ms": None,
+                "api_version": None,
+                "info": {},
+                "total_available": None,
+                "recorded_at": recorded_at,
+                "filters": filters_payload,
+                "skipped": True,
+            }
+            write_json(EMDAT_PROBE_PATH, result)
+            return result
         except Exception as exc:  # pragma: no cover - defensive logging
             reason = str(exc)
             self.log.info("emdat.probe.fail|reason=%s", reason)
-            return {"ok": False, "error": reason}
+            result = {
+                "ok": False,
+                "error": reason,
+                "http_status": None,
+                "elapsed_ms": None,
+                "api_version": None,
+                "info": {},
+                "total_available": None,
+                "recorded_at": recorded_at,
+                "filters": filters_payload,
+            }
+            write_json(EMDAT_PROBE_PATH, result)
+            return result
 
         data = parsed.get("data") or {}
         api_version = data.get("api_version")
         public = data.get("public_emdat") or {}
-        total = public.get("total_available")
         info = public.get("info") or {}
-        self.log.info("emdat.probe.ok|api_version=%s|total=%s", api_version, total)
-        return {
+        total_available = public.get("total_available")
+        result = {
             "ok": True,
+            "error": None,
+            "http_status": status_code,
+            "elapsed_ms": elapsed_ms,
             "api_version": api_version,
-            "total_available": total,
-            "info": info,
+            "info": {
+                "version": info.get("version"),
+                "timestamp": info.get("timestamp"),
+            },
+            "total_available": total_available,
+            "recorded_at": recorded_at,
+            "filters": filters_payload,
         }
+        write_json(EMDAT_PROBE_PATH, result)
+        self.log.info(
+            "emdat.probe.ok|api_version=%s|status=%s",
+            api_version,
+            result["http_status"],
+        )
+        return result
 
     def fetch_raw(
         self,
