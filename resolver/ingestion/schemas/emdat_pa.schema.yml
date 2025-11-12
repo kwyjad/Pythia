@@ -1,29 +1,33 @@
-version: "1"
+version: "2"
 name: emdat_pa
 table: emdat_pa
 columns:
-  - name: event_id
-    description: Stable identifier for the normalized EM-DAT bucket.
-  - name: country_name
-    description: Country name resolved from ISO3.
   - name: iso3
     description: ISO 3166-1 alpha-3 country code.
-  - name: hazard_code
-    description: Resolver hazard code (e.g., FL, DR).
-  - name: hazard_label
-    description: Human-readable hazard label.
-  - name: hazard_class
-    description: High-level hazard class grouping.
+  - name: as_of_date
+    description: Data currency date for the normalized run (YYYY-MM-DD).
+  - name: ym
+    description: Resolver month bucket in YYYY-MM format.
   - name: metric
     description: Metric identifier (e.g., total_affected).
-  - name: series_semantics
-    description: Series semantics for the metric (incident/stock/etc.).
   - name: value
     description: People affected aggregated to the bucket.
   - name: unit
     description: Unit of measurement for value.
-  - name: as_of_date
-    description: Month bucket in YYYY-MM format.
+  - name: series_semantics
+    description: Series semantics for the metric (incident/stock/etc.).
+  - name: semantics
+    description: Semantic upsert policy for downstream exporters (typically matches series_semantics).
+  - name: hazard_code
+    description: Resolver hazard code (e.g., flood, drought).
+  - name: hazard_label
+    description: Human-readable hazard label.
+  - name: hazard_class
+    description: High-level hazard class grouping.
+  - name: country_name
+    description: Country name resolved from ISO3.
+  - name: source_id
+    description: Source identifier (e.g., emdat).
   - name: publication_date
     description: Latest EM-DAT publication/update date contributing to the bucket.
   - name: publisher
@@ -44,9 +48,13 @@ columns:
     description: Revision number for the normalized record.
   - name: ingested_at
     description: ISO timestamp when the record was normalized.
+  - name: event_id
+    description: Stable identifier for the normalized EM-DAT bucket.
+  - name: disno_first
+    description: Lowest EM-DAT disaster identifier contributing to the month bucket.
 primary_key:
   - iso3
-  - as_of_date
-  - hazard_code
+  - ym
   - metric
+  - hazard_code
   - series_semantics

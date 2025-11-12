@@ -114,6 +114,12 @@ You can reproduce the diagnostics locally by running the same helpers; for examp
 scripts/ci/run_and_capture.sh demo-load "python -m resolver.tools.load_and_derive --help"
 python scripts/ci/list_canonical.py --dir data/staging/ci-smoke/canonical --out .ci/diagnostics/canonical-listing.txt
 python scripts/ci/db_counts.py --db data/resolver.duckdb --out .ci/diagnostics/duckdb-counts.txt
+python scripts/ci/flatten_artifacts.py \
+  --out diagnostics/all-artifacts-flat.zip \
+  diagnostics/resolver-backfill-ingest-*.zip \
+  diagnostics/resolver-backfill-snapshots-*.zip \
+  diagnostics/connector-diagnostics*.zip \
+  diagnostics/resolver-initial-backfill-*.zip
 ```
 
 All workflows upload `.ci/diagnostics/**` and `.ci/exitcodes/**` so the aggregated `SUMMARY.md` produced by `.github/actions/collect-diagnostics` has consistent log attachments and exit breadcrumbs.
