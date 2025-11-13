@@ -55,11 +55,13 @@ except Exception:  # pragma: no cover - defensive: fall back to local implementa
     exporter_prepare_deltas_for_db = None  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[1]      # .../resolver
+REPO_ROOT = ROOT.parent
 TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
 SCHEMA_PATH = TOOLS / "schema.yml"
 SUMMARY_PATH = Path("diagnostics") / "summary.md"
+REPO_SUMMARY_PATH = REPO_ROOT / "diagnostics" / "summary.md"
 
 LOGGER = get_logger(__name__)
 
@@ -76,6 +78,22 @@ def _append_to_summary(section_title: str, body_markdown: str) -> None:
                 handle.write("\n")
     except Exception:
         LOGGER.error("Failed to append to summary.md:\n%s", traceback.format_exc())
+
+
+def _append_to_repo_summary(section_title: str, body_markdown: str) -> None:
+    """Append diagnostics to the repository-level summary for CI collection."""
+
+    try:
+        REPO_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REPO_SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n### {section_title}\n\n")
+            handle.write(body_markdown)
+            if not body_markdown.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        LOGGER.error(
+            "Failed to append to repo-level summary.md:\n%s", traceback.format_exc()
+        )
 
 
 def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
@@ -283,17 +301,37 @@ def run_validator(facts_path: Path) -> None:
                 else:
                     snapshot_md_parts.append("(No required columns configured)")
 
-        _append_to_summary(
-            "Preview validator stderr (tail)", f"```\n{tail or '(no stderr)'}\n```"
-        )
+        tail_block = f"```\n{tail or '(no stderr)'}\n```"
         snapshot_md = "\n".join(snapshot_md_parts) or "(No snapshot data captured)"
-        _append_to_summary("facts_for_month.csv snapshot", snapshot_md)
+
+        _append_to_summary("Preview validator stderr (tail)", tail_block)
+        _append_to_summary("facts_for_month.csv (validated) snapshot", snapshot_md)
+
+        try:
+            _append_to_repo_summary("Preview validator stderr (tail)", tail_block)
+            _append_to_repo_summary(
+                "facts_for_month.csv (validated) snapshot", snapshot_md
+            )
+        except Exception:
+            LOGGER.warning(
+                "Could not append validator diagnostics to repo summary", exc_info=True
+            )
 
         if tail:
             LOGGER.error("Preview validator failed:\n%s", tail)
         else:
             LOGGER.error("Preview validator failed (no stderr captured)")
-        raise SystemExit(res.returncode)
+
+        exc_msg_lines: List[str] = ["validate_facts failed"]
+        if tail:
+            exc_msg_lines.append("---- validator stderr (tail) ----")
+            exc_msg_lines.append(tail)
+        if snapshot_md_parts:
+            exc_msg_lines.append("---- facts_for_month.csv snapshot ----")
+            for line in snapshot_md_parts[:8]:
+                if line:
+                    exc_msg_lines.append(line)
+        raise SystemExit("\n".join(exc_msg_lines))
 
 def load_table(path: Path) -> pd.DataFrame:
     ext = path.suffix.lower()
@@ -473,6 +511,10 @@ def freeze_snapshot(
         )
         LOGGER.info("freeze: %s", msg)
         _append_to_summary("Freeze snapshot", msg)
+        _append_to_repo_summary(
+            "Freeze snapshot",
+            f"**{msg}**\n\n**facts_for_month path:** `{filtered_facts_path.resolve()}`",
+        )
         return SnapshotResult(
             ym=ym,
             out_dir=out_dir,
