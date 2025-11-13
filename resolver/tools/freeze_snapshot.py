@@ -689,6 +689,8 @@ def freeze_snapshot(
     ]
     _append_to_summary("Freeze snapshot — context", "\n".join(context_lines))
 
+    validated_facts_df: Optional[pd.DataFrame] = None
+
     if facts_df.empty:
         msg = (
             f"No rows for month {ym} after filtering preview; "
@@ -710,6 +712,10 @@ def freeze_snapshot(
     if filter_result.filtered_rows > 0:
         _normalize_facts_for_validation(filtered_facts_path)
         run_validator(filtered_facts_path)
+        try:
+            validated_facts_df = load_table(filtered_facts_path)
+        except Exception:
+            validated_facts_df = None
 
     if deltas:
         deltas_path = Path(deltas)
@@ -792,6 +798,7 @@ def freeze_snapshot(
     _maybe_write_db(
         ym=ym,
         facts_df=facts_df,
+        validated_facts_df=validated_facts_df,
         resolved_df=resolved_df,
         deltas_df=deltas_df,
         manifest=manifest,
@@ -881,6 +888,7 @@ def _maybe_write_db(
     *,
     ym: str,
     facts_df: "pd.DataFrame",
+    validated_facts_df: "pd.DataFrame | None",
     resolved_df: "pd.DataFrame | None",
     deltas_df: "pd.DataFrame | None",
     manifest: Dict[str, Any],
@@ -894,28 +902,78 @@ def _maybe_write_db(
         db_url = db_url.strip()
     else:
         db_url = env_url
+    summary_title = "Freeze snapshot — DB write"
+
     if write_db is None:
-        write_db = bool(db_url)
-    if not write_db:
-        LOGGER.debug("DuckDB snapshot write skipped: disabled via flag")
+        allow_write = bool(db_url)
+    else:
+        allow_write = bool(write_db)
+
+    if not allow_write:
+        msg = "DuckDB snapshot write skipped: disabled via flag"
+        LOGGER.debug(msg)
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
         return
     if not db_url:
-        LOGGER.debug("DuckDB snapshot write skipped: no RESOLVER_DB_URL provided")
+        msg = "DuckDB snapshot write skipped: no RESOLVER_DB_URL provided"
+        LOGGER.debug(msg)
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
         return
     if duckdb_io is None:
-        LOGGER.debug("DuckDB snapshot write skipped: duckdb_io unavailable")
+        msg = "DuckDB snapshot write skipped: duckdb_io unavailable"
+        LOGGER.debug(msg)
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
         return
 
     conn = None
+    deltas_result = None
+    deltas_input_rows = 0
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
-        resolved_payload = resolved_df if resolved_df is not None else facts_df
+        resolved_payload = (
+            resolved_df
+            if resolved_df is not None
+            else (
+                validated_facts_df
+                if validated_facts_df is not None and not validated_facts_df.empty
+                else facts_df
+            )
+        )
         prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
-        prepared_deltas = _prepare_deltas_frame_for_db(deltas_df)
+
+        if deltas_df is not None and not deltas_df.empty:
+            deltas_source = deltas_df.copy()
+        else:
+            base_source = (
+                validated_facts_df
+                if validated_facts_df is not None and not validated_facts_df.empty
+                else facts_df
+            )
+            deltas_source = base_source.copy() if base_source is not None and not base_source.empty else None
+
+        deltas_input_rows = int(len(deltas_source)) if deltas_source is not None else 0
+
+        if deltas_source is not None and not deltas_source.empty:
+            for column in ("iso3", "ym", "hazard_code", "metric", "value"):
+                if column not in deltas_source.columns:
+                    deltas_source[column] = 0 if column == "value" else ""
+            deltas_source["value"] = pd.to_numeric(
+                deltas_source["value"], errors="coerce"
+            )
+            semantics_col = deltas_source.get("series_semantics")
+            if semantics_col is None:
+                deltas_source["series_semantics"] = "new"
+            else:
+                semantics = semantics_col.astype(str).str.strip()
+                deltas_source.loc[semantics.eq(""), "series_semantics"] = "new"
+
+        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
 
         facts_result = None
-        deltas_result = None
 
         if prepared_resolved is not None and not prepared_resolved.empty:
             LOGGER.debug(
@@ -956,8 +1014,10 @@ def _maybe_write_db(
                 "DuckDB snapshot facts_deltas rows written: %s",
                 deltas_result.rows_delta,
             )
-        elif deltas_df is not None:
-            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no rows prepared")
+        elif deltas_input_rows:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped after preparation")
+        else:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no source rows")
 
         created_at = str(manifest.get("created_at_utc") or dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
         git_sha = str(manifest.get("source_commit_sha") or os.environ.get("GITHUB_SHA", ""))
@@ -978,8 +1038,25 @@ def _maybe_write_db(
             LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)
         except Exception:
             LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
+        if deltas_result is not None:
+            written = int(deltas_result.rows_delta)
+            msg = (
+                f"Wrote {written} facts_deltas rows (input={int(deltas_result.rows_in)}) for month {ym}"
+            )
+        elif deltas_input_rows:
+            msg = (
+                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows} for month {ym}"
+            )
+        else:
+            msg = f"No facts_deltas rows available for month {ym}; skipped DB write"
+
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
+
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
+        _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
+        _append_to_repo_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
     finally:
         if conn is not None:
             try:

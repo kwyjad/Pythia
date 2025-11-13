@@ -121,6 +121,7 @@ def test_dual_writes_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     freeze_snapshot._maybe_write_db(
         ym="2024-01",
         facts_df=facts,
+        validated_facts_df=facts,
         resolved_df=facts,
         deltas_df=None,
         manifest=manifest,
@@ -130,6 +131,7 @@ def test_dual_writes_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     freeze_snapshot._maybe_write_db(
         ym="2024-01",
         facts_df=facts,
+        validated_facts_df=facts,
         resolved_df=facts,
         deltas_df=None,
         manifest=manifest,
