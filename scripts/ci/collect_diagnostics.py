@@ -53,19 +53,34 @@ def _read_text(path: Path, default: str = "(no output captured)") -> str:
 
 
 def _preview_validator_section(repo_root: Path) -> str:
-    path = repo_root / "diagnostics" / "ingestion" / "preview_validator.stderr.txt"
-    try:
-        if not path.exists():
-            return ""
-        content = path.read_text(encoding="utf-8", errors="replace").strip()
-    except Exception:
-        return ""
+    candidates = [
+        repo_root / "diagnostics" / "ingestion" / "preview_validator.stderr.txt",
+        repo_root
+        / "diagnostics"
+        / "ingestion"
+        / "export_preview"
+        / "validator_stderr.txt",
+    ]
+
+    content = ""
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        if text:
+            content = text
+            break
+
     if not content:
         return ""
+
     tail = content[-5000:]
     return "\n".join(
         [
-            "## Preview Validator (stderr)",
+            "### Preview Validator (stderr)",
             "```",
             tail,
             "```",
