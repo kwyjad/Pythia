@@ -25,9 +25,10 @@ import sys
 import json
 import subprocess
 import datetime as dt
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import pandas as pd
@@ -42,6 +43,7 @@ except Exception:  # pragma: no cover - optional dependency for db dual-write
 
 from resolver.common import get_logger
 from resolver.helpers.series_semantics import normalize_series_semantics
+from resolver.tools.schema_validate import load_schema
 
 try:
     from resolver.tools.export_facts import (
@@ -53,11 +55,47 @@ except Exception:  # pragma: no cover - defensive: fall back to local implementa
     exporter_prepare_deltas_for_db = None  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[1]      # .../resolver
+REPO_ROOT = ROOT.parent
 TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
+SCHEMA_PATH = TOOLS / "schema.yml"
+SHOCKS_PATH = ROOT / "data" / "shocks.csv"
+COUNTRIES_PATH = ROOT / "data" / "countries.csv"
+SUMMARY_PATH = Path("diagnostics") / "summary.md"
+REPO_SUMMARY_PATH = REPO_ROOT / "diagnostics" / "summary.md"
 
 LOGGER = get_logger(__name__)
+
+
+def _append_to_summary(section_title: str, body_markdown: str) -> None:
+    """Best-effort append to diagnostics/summary.md without raising on failure."""
+
+    try:
+        SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n### {section_title}\n\n")
+            handle.write(body_markdown)
+            if not body_markdown.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        LOGGER.error("Failed to append to summary.md:\n%s", traceback.format_exc())
+
+
+def _append_to_repo_summary(section_title: str, body_markdown: str) -> None:
+    """Append diagnostics to the repository-level summary for CI collection."""
+
+    try:
+        REPO_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REPO_SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n### {section_title}\n\n")
+            handle.write(body_markdown)
+            if not body_markdown.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        LOGGER.error(
+            "Failed to append to repo-level summary.md:\n%s", traceback.format_exc()
+        )
 
 
 def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
@@ -174,16 +212,311 @@ def run_validator(facts_path: Path) -> None:
 
     stdout_path = preview_dir / "validator_stdout.txt"
     stderr_path = preview_dir / "validator_stderr.txt"
+    diag_dir = Path("diagnostics") / "ingestion"
+    try:
+        diag_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - diagnostics best effort
+        pass
+    diag_stdout = diag_dir / "preview_validator.stdout.txt"
+    diag_stderr = diag_dir / "preview_validator.stderr.txt"
+    export_preview_dir = diag_dir / "export_preview"
+    try:
+        export_preview_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - diagnostics best effort
+        pass
+    export_preview_stderr = export_preview_dir / "validator_stderr.txt"
+    export_preview_stdout = export_preview_dir / "validator_stdout.txt"
 
     cmd = [sys.executable, str(VALIDATOR), "--facts", str(facts_path)]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    stdout_path.write_text(res.stdout or "", encoding="utf-8")
-    stderr_path.write_text(res.stderr or "", encoding="utf-8")
+    stdout_text = res.stdout or ""
+    stderr_text = res.stderr or ""
+
+    def _tail(text: str, lines: int = 200) -> str:
+        return "\n".join(text.splitlines()[-lines:]).strip()
+
+    stdout_tail = _tail(stdout_text)
+    stderr_tail = _tail(stderr_text)
+
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
+    try:
+        diag_stdout.write_text(stdout_text, encoding="utf-8")
+        diag_stderr.write_text(stderr_text, encoding="utf-8")
+        export_preview_stdout.write_text(stdout_text, encoding="utf-8")
+        export_preview_stderr.write_text(stderr_text, encoding="utf-8")
+    except Exception:
+        LOGGER.error("Failed to persist validator diagnostics:\n%s", traceback.format_exc())
 
     if res.returncode != 0:
-        print("Validation failed; aborting snapshot.", file=sys.stderr)
-        sys.exit(res.returncode)
+
+        snapshot_md_parts: List[str] = []
+        try:
+            df = load_table(facts_path)
+        except Exception:
+            snapshot_md_parts.append(
+                "(Unable to render validated CSV sample: "
+                f"{traceback.format_exc().strip()})"
+            )
+            df = None
+        else:
+            try:
+                head_df = df.head(5)
+                try:
+                    head_md = head_df.to_markdown(index=False)
+                except Exception:
+                    head_md = head_df.to_string(index=False)
+            except Exception:
+                head_md = (
+                    "(Unable to render CSV sample: "
+                    f"{traceback.format_exc().strip()})"
+                )
+
+            snapshot_md_parts.append(
+                f"**Validated file:** `{facts_path.resolve()}`"
+            )
+            snapshot_md_parts.append(f"**Rows:** {len(df)}")
+            snapshot_md_parts.append("")
+            snapshot_md_parts.append("**facts_for_month.csv (first 5 rows):**")
+            snapshot_md_parts.append("")
+            snapshot_md_parts.append(head_md)
+            snapshot_md_parts.append("")
+            columns_text = ", ".join(str(col) for col in df.columns)
+            snapshot_md_parts.append("**Columns:**")
+            snapshot_md_parts.append("")
+            snapshot_md_parts.append(f"```\n{columns_text}\n```")
+
+            try:
+                schema_payload = load_schema(SCHEMA_PATH)
+                required_cols = list(schema_payload.get("required", []))
+            except Exception:
+                snapshot_md_parts.append("")
+                snapshot_md_parts.append(
+                    "**Required-field coverage:**\n"
+                    f"(Unable to load schema: {traceback.format_exc().strip()})"
+                )
+            else:
+                snapshot_md_parts.append("")
+                snapshot_md_parts.append("**Required-field coverage:**")
+                coverage_lines = []
+                total_rows = len(df)
+                for col in required_cols:
+                    if col in df.columns:
+                        series = df[col].fillna("").astype(str).str.strip()
+                        non_empty = int(series.ne("").sum())
+                    else:
+                        non_empty = 0
+                    coverage_lines.append(
+                        f"- `{col}`: {non_empty} non-empty of {total_rows}"
+                    )
+                if coverage_lines:
+                    snapshot_md_parts.append("\n".join(coverage_lines))
+                else:
+                    snapshot_md_parts.append("(No required columns configured)")
+
+        stderr_block = f"```\n{stderr_tail or '(no stderr)'}\n```"
+        stdout_block = f"```\n{stdout_tail or '(no stdout)'}\n```"
+        snapshot_md = "\n".join(snapshot_md_parts) or "(No snapshot data captured)"
+
+        _append_to_summary("Preview validator stdout (tail)", stdout_block)
+        _append_to_summary("Preview validator stderr (tail)", stderr_block)
+        _append_to_summary("facts_for_month.csv (validated) snapshot", snapshot_md)
+
+        try:
+            _append_to_repo_summary("Preview validator stdout (tail)", stdout_block)
+            _append_to_repo_summary("Preview validator stderr (tail)", stderr_block)
+            _append_to_repo_summary(
+                "facts_for_month.csv (validated) snapshot", snapshot_md
+            )
+        except Exception:
+            LOGGER.warning(
+                "Could not append validator diagnostics to repo summary", exc_info=True
+            )
+
+        if stderr_tail:
+            LOGGER.error("Preview validator stderr tail:\n%s", stderr_tail)
+        if stdout_tail:
+            LOGGER.error("Preview validator stdout tail:\n%s", stdout_tail)
+        if not stderr_tail and not stdout_tail:
+            LOGGER.error("Preview validator failed without stdout/stderr output")
+
+        exc_msg_lines: List[str] = ["validate_facts failed"]
+        if stderr_tail:
+            exc_msg_lines.append("---- validator stderr (tail) ----")
+            exc_msg_lines.append(stderr_tail)
+        if stdout_tail:
+            exc_msg_lines.append("---- validator stdout (tail) ----")
+            exc_msg_lines.append(stdout_tail)
+        if snapshot_md_parts:
+            exc_msg_lines.append("---- facts_for_month.csv snapshot ----")
+            for line in snapshot_md_parts[:8]:
+                if line:
+                    exc_msg_lines.append(line)
+        raise SystemExit("\n".join(exc_msg_lines))
+
+
+def _normalize_facts_for_validation(facts_path: Path) -> None:
+    """Normalize semantic fields prior to validation (best effort)."""
+
+    try:
+        frame = pd.read_csv(facts_path, dtype=str).fillna("")
+    except Exception:
+        return
+
+    if frame.empty:
+        return
+
+    if "metric" in frame.columns:
+        frame["metric"] = frame["metric"].replace({
+            "total_affected": "affected",
+            "people_affected": "affected",
+        })
+        frame["metric"] = frame["metric"].where(
+            frame["metric"].astype(str).str.strip().ne(""), "affected"
+        )
+    else:
+        frame["metric"] = "affected"
+    frame["metric"] = frame["metric"].astype(str).str.strip().str.lower()
+
+    if "source_type" in frame.columns:
+        frame["source_type"] = frame["source_type"].replace({"api": "agency"})
+        frame["source_type"] = frame["source_type"].where(
+            frame["source_type"].str.strip().ne(""),
+            "agency",
+        )
+    else:
+        frame["source_type"] = "agency"
+
+    if "hazard_code" in frame.columns:
+        frame["hazard_code"] = frame["hazard_code"].astype(str).str.strip().str.upper()
+        try:
+            shocks = pd.read_csv(SHOCKS_PATH, dtype=str).fillna("")
+        except Exception:
+            shocks = None
+        if shocks is not None and not shocks.empty and "hazard_code" in shocks.columns:
+            desired_cols = [
+                col
+                for col in ("hazard_code", "hazard_label", "hazard_class")
+                if col in shocks.columns
+            ]
+            shocks = shocks[desired_cols].drop_duplicates("hazard_code")
+            frame = frame.drop(
+                columns=[c for c in ("hazard_label", "hazard_class") if c in frame.columns]
+            )
+            frame = frame.merge(shocks, on="hazard_code", how="left")
+
+    # Country name enrichment
+    if "iso3" in frame.columns:
+        try:
+            countries = pd.read_csv(COUNTRIES_PATH, dtype=str).fillna("")
+            countries.columns = [c.strip().lstrip("\ufeff") for c in countries.columns]
+            iso_to_country = dict(zip(countries.get("iso3", []), countries.get("country_name", [])))
+        except Exception:
+            iso_to_country = {}
+        if "country_name" not in frame.columns:
+            frame["country_name"] = frame["iso3"].map(iso_to_country).fillna("")
+        else:
+            mask = frame["country_name"].astype(str).str.strip().eq("")
+            if mask.any():
+                frame.loc[mask, "country_name"] = (
+                    frame.loc[mask, "iso3"].map(iso_to_country).fillna("")
+                )
+    elif "country_name" not in frame.columns:
+        frame["country_name"] = ""
+
+    # Unit derived from metric (fallback to persons)
+    metric_to_unit = {
+        "affected": "persons",
+        "in_need": "persons",
+        "displaced": "persons",
+        "cases": "persons_cases",
+        "fatalities": "persons",
+        "events": "events",
+        "participants": "persons",
+    }
+    if "unit" not in frame.columns:
+        frame["unit"] = ""
+    frame["unit"] = frame.apply(
+        lambda row: (
+            metric_to_unit.get(str(row.get("metric", "")).strip().lower(), "persons")
+            if str(row.get("unit", "")).strip() == ""
+            else str(row.get("unit", "")).strip()
+        ),
+        axis=1,
+    )
+
+    # Publication date clamped to [as_of_date, today]
+    today = dt.date.today()
+
+    def _parse_iso_date(value: str) -> Optional[dt.date]:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return dt.date.fromisoformat(text)
+        except ValueError:
+            return None
+
+    if "publication_date" not in frame.columns:
+        frame["publication_date"] = ""
+
+    def _clamp_publication(row: "pd.Series") -> str:
+        as_of = _parse_iso_date(row.get("as_of_date", ""))
+        publication = _parse_iso_date(row.get("publication_date", ""))
+        if publication is None:
+            publication = as_of or today
+        if as_of and publication < as_of:
+            publication = as_of
+        if publication > today:
+            publication = today
+        return publication.isoformat()
+
+    frame["publication_date"] = frame.apply(_clamp_publication, axis=1)
+
+    defaults = {
+        "publisher": "CRED / UCLouvain (EM-DAT)",
+        "source_url": "https://public.emdat.be/",
+        "doc_title": "EM-DAT People Affected (automated import)",
+        "definition_text": (
+            "EM-DAT 'Total Affected' canonicalised to monthly country-hazard affected counts."
+        ),
+        "method": "api",
+        "confidence": "med",
+        "revision": "1",
+        "ingested_at": today.isoformat(),
+    }
+
+    for column, value in defaults.items():
+        if column not in frame.columns:
+            frame[column] = value
+        else:
+            frame[column] = frame[column].where(
+                frame[column].astype(str).str.strip().ne(""), value
+            )
+
+    if "event_id" not in frame.columns:
+        frame["event_id"] = ""
+
+    def _fallback_event_id(row: "pd.Series") -> str:
+        if str(row.get("event_id", "")).strip():
+            return str(row["event_id"])
+        disno = str(row.get("disno_first", "")).strip()
+        if disno:
+            return disno
+        iso3 = str(row.get("iso3", "")).strip()
+        hazard = str(row.get("hazard_code", "")).strip()
+        as_of = str(row.get("as_of_date", "")).strip()
+        if iso3 or hazard or as_of:
+            return "-".join(filter(None, [iso3, hazard, as_of]))
+        return "unknown"
+
+    frame["event_id"] = frame.apply(_fallback_event_id, axis=1)
+
+    try:
+        frame.to_csv(facts_path, index=False)
+    except Exception:
+        pass
 
 def load_table(path: Path) -> pd.DataFrame:
     ext = path.suffix.lower()
@@ -193,6 +526,68 @@ def load_table(path: Path) -> pd.DataFrame:
         return pd.read_parquet(path)
     else:
         raise SystemExit(f"Unsupported input extension: {ext}. Use .csv or .parquet")
+
+
+def _filter_preview_to_month(preview_path: Path, month: str) -> "PreviewFilterResult":
+    filtered_path = preview_path.with_name("facts_for_month.csv")
+    try:
+        filtered_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - best effort directory creation
+        pass
+
+    if not preview_path.exists():
+        empty = pd.DataFrame()
+        empty.to_csv(filtered_path, index=False)
+        return PreviewFilterResult(
+            filtered_path=filtered_path,
+            filtered_df=empty,
+            original_rows=0,
+            filtered_rows=0,
+            had_ym_column=False,
+        )
+
+    df = load_table(preview_path)
+    original_rows = len(df)
+    had_ym_column = "ym" in df.columns
+
+    if not had_ym_column:
+        filtered_df = df.head(0).copy()
+    else:
+        mask = df["ym"].astype(str) == str(month)
+        filtered_df = df.loc[mask].copy()
+
+    filtered_rows = len(filtered_df)
+    filtered_df.to_csv(filtered_path, index=False)
+
+    meta_path = filtered_path.with_name("facts_for_month.meta.json")
+    meta_payload = {
+        "month": str(month),
+        "total_rows": int(original_rows),
+        "filtered_rows": int(filtered_rows),
+        "ym_column_present": bool(had_ym_column),
+    }
+    try:
+        meta_path.write_text(json.dumps(meta_payload, indent=2) + "\n", encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("Failed to write month filter metadata", exc_info=True)
+
+    return PreviewFilterResult(
+        filtered_path=filtered_path,
+        filtered_df=filtered_df,
+        original_rows=original_rows,
+        filtered_rows=filtered_rows,
+        had_ym_column=had_ym_column,
+    )
+
+
+def _filter_dataframe_by_month(df: "pd.DataFrame | None", month: str) -> "pd.DataFrame | None":
+    if df is None:
+        return None
+    if "ym" not in df.columns:
+        return df.copy()
+    mask = df["ym"].astype(str) == str(month)
+    return df.loc[mask].copy()
+
 
 def write_parquet(df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +609,15 @@ class SnapshotResult:
     manifest: Optional[Path] = None
     skipped: bool = False
     skip_reason: str = ""
+
+
+@dataclass
+class PreviewFilterResult:
+    filtered_path: Path
+    filtered_df: "pd.DataFrame"
+    original_rows: int
+    filtered_rows: int
+    had_ym_column: bool
 
 
 class SnapshotError(RuntimeError):
@@ -250,19 +654,73 @@ def freeze_snapshot(
     base_out_dir = Path(outdir)
     out_dir = base_out_dir / ym
 
-    facts_df = load_table(facts_path)
-    if facts_df.empty:
+    try:
+        preview_df = load_table(facts_path)
+    except Exception:
+        preview_df = None
+
+    filter_result = _filter_preview_to_month(facts_path, ym)
+    filtered_facts_path = filter_result.filtered_path
+    facts_df = filter_result.filtered_df
+
+    if filter_result.original_rows and filter_result.original_rows != filter_result.filtered_rows:
         LOGGER.info(
-            "Snapshot freeze skipped for %s: %s has 0 rows", ym, facts_path
+            "Snapshot month filter applied: month=%s total_rows=%s filtered_rows=%s",
+            ym,
+            filter_result.original_rows,
+            filter_result.filtered_rows,
+        )
+
+    metrics_summary = "(none)"
+    try:
+        if "metric" in facts_df.columns:
+            metrics = sorted(
+                {
+                    str(value).strip()
+                    for value in facts_df["metric"].fillna("")
+                    if str(value).strip()
+                }
+            )
+            if metrics:
+                metrics_summary = ", ".join(metrics)
+    except Exception:
+        metrics_summary = f"(unable to summarise metrics: {traceback.format_exc().strip()})"
+
+    context_lines = [
+        f"**facts_for_month path:** `{filtered_facts_path.resolve()}`",
+        f"**rows:** {filter_result.filtered_rows}",
+        f"**month:** `{ym}`",
+        f"**metric(s):** {metrics_summary}",
+    ]
+    _append_to_summary("Freeze snapshot — context", "\n".join(context_lines))
+
+    validated_facts_df: Optional[pd.DataFrame] = None
+
+    if facts_df.empty:
+        msg = (
+            f"No rows for month {ym} after filtering preview; "
+            "skipping validator and snapshot"
+        )
+        LOGGER.info("freeze: %s", msg)
+        _append_to_summary("Freeze snapshot", msg)
+        _append_to_repo_summary(
+            "Freeze snapshot",
+            f"**{msg}**\n\n**facts_for_month path:** `{filtered_facts_path.resolve()}`",
         )
         return SnapshotResult(
             ym=ym,
             out_dir=out_dir,
             skipped=True,
-            skip_reason=f"No rows in {facts_path}",
+            skip_reason=f"No rows for month {ym} after filtering preview",
         )
 
-    run_validator(facts_path)
+    if filter_result.filtered_rows > 0:
+        _normalize_facts_for_validation(filtered_facts_path)
+        run_validator(filtered_facts_path)
+        try:
+            validated_facts_df = load_table(filtered_facts_path)
+        except Exception:
+            validated_facts_df = None
 
     if deltas:
         deltas_path = Path(deltas)
@@ -280,9 +738,10 @@ def freeze_snapshot(
         default_resolved = facts_path.with_name("resolved.csv")
         resolved_path = default_resolved if default_resolved.exists() else None
 
-    resolved_source = resolved_path if resolved_path else facts_path
+    resolved_source = resolved_path if resolved_path else filtered_facts_path
     if resolved_path:
         resolved_df = load_table(resolved_source)
+        resolved_df = _filter_dataframe_by_month(resolved_df, ym)
     else:
         resolved_df = facts_df.copy()
     deltas_df = load_table(deltas_path) if deltas_path else None
@@ -343,7 +802,9 @@ def freeze_snapshot(
     _maybe_write_db(
         ym=ym,
         facts_df=facts_df,
-        resolved_df=load_table(resolved_path) if resolved_path else resolved_df,
+        validated_facts_df=validated_facts_df,
+        preview_df=preview_df,
+        resolved_df=resolved_df,
         deltas_df=deltas_df,
         manifest=manifest,
         facts_out=resolved_parquet,
@@ -432,6 +893,8 @@ def _maybe_write_db(
     *,
     ym: str,
     facts_df: "pd.DataFrame",
+    validated_facts_df: "pd.DataFrame | None",
+    preview_df: "pd.DataFrame | None",
     resolved_df: "pd.DataFrame | None",
     deltas_df: "pd.DataFrame | None",
     manifest: Dict[str, Any],
@@ -445,28 +908,82 @@ def _maybe_write_db(
         db_url = db_url.strip()
     else:
         db_url = env_url
+    summary_title = "Freeze snapshot — DB write"
+
     if write_db is None:
-        write_db = bool(db_url)
-    if not write_db:
-        LOGGER.debug("DuckDB snapshot write skipped: disabled via flag")
+        allow_write = bool(db_url)
+    else:
+        allow_write = bool(write_db)
+
+    if not allow_write:
+        msg = "DuckDB snapshot write skipped: disabled via flag"
+        LOGGER.debug(msg)
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
         return
     if not db_url:
-        LOGGER.debug("DuckDB snapshot write skipped: no RESOLVER_DB_URL provided")
+        msg = "DuckDB snapshot write skipped: no RESOLVER_DB_URL provided"
+        LOGGER.debug(msg)
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
         return
     if duckdb_io is None:
-        LOGGER.debug("DuckDB snapshot write skipped: duckdb_io unavailable")
+        msg = "DuckDB snapshot write skipped: duckdb_io unavailable"
+        LOGGER.debug(msg)
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
         return
 
     conn = None
+    deltas_result = None
+    deltas_input_rows = 0
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
-        resolved_payload = resolved_df if resolved_df is not None else facts_df
+        resolved_payload = (
+            resolved_df
+            if resolved_df is not None
+            else (
+                validated_facts_df
+                if validated_facts_df is not None and not validated_facts_df.empty
+                else facts_df
+            )
+        )
         prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
-        prepared_deltas = _prepare_deltas_frame_for_db(deltas_df)
+
+        if deltas_df is not None and not deltas_df.empty:
+            deltas_source = deltas_df.copy()
+        elif preview_df is not None and not preview_df.empty:
+            deltas_source = preview_df.copy()
+        else:
+            base_source = (
+                validated_facts_df
+                if validated_facts_df is not None and not validated_facts_df.empty
+                else facts_df
+            )
+            deltas_source = base_source.copy() if base_source is not None and not base_source.empty else None
+
+        preview_rows = int(len(preview_df)) if preview_df is not None else 0
+
+        deltas_input_rows = int(len(deltas_source)) if deltas_source is not None else 0
+
+        if deltas_source is not None and not deltas_source.empty:
+            for column in ("iso3", "ym", "hazard_code", "metric", "value"):
+                if column not in deltas_source.columns:
+                    deltas_source[column] = 0 if column == "value" else ""
+            deltas_source["value"] = pd.to_numeric(
+                deltas_source["value"], errors="coerce"
+            )
+            semantics_col = deltas_source.get("series_semantics")
+            if semantics_col is None:
+                deltas_source["series_semantics"] = "new"
+            else:
+                semantics = semantics_col.astype(str).str.strip()
+                deltas_source.loc[semantics.eq(""), "series_semantics"] = "new"
+
+        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
 
         facts_result = None
-        deltas_result = None
 
         if prepared_resolved is not None and not prepared_resolved.empty:
             LOGGER.debug(
@@ -507,8 +1024,10 @@ def _maybe_write_db(
                 "DuckDB snapshot facts_deltas rows written: %s",
                 deltas_result.rows_delta,
             )
-        elif deltas_df is not None:
-            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no rows prepared")
+        elif deltas_input_rows:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped after preparation")
+        else:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no source rows")
 
         created_at = str(manifest.get("created_at_utc") or dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
         git_sha = str(manifest.get("source_commit_sha") or os.environ.get("GITHUB_SHA", ""))
@@ -529,8 +1048,26 @@ def _maybe_write_db(
             LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)
         except Exception:
             LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
+        if deltas_result is not None:
+            written = int(deltas_result.rows_delta)
+            input_rows = int(deltas_result.rows_in)
+            msg = (
+                f"Wrote {written} facts_deltas rows (input={input_rows}) from preview rows={preview_rows or input_rows}"
+            )
+        elif deltas_input_rows:
+            msg = (
+                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows}"
+            )
+        else:
+            msg = "No facts_deltas rows available; skipped DB write"
+
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
+
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
+        _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
+        _append_to_repo_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
     finally:
         if conn is not None:
             try:

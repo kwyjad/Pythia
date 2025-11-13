@@ -52,6 +52,107 @@ def _read_text(path: Path, default: str = "(no output captured)") -> str:
     return default
 
 
+def _preview_validator_section(repo_root: Path) -> str:
+    candidates = [
+        repo_root / "diagnostics" / "ingestion" / "preview_validator.stderr.txt",
+        repo_root
+        / "diagnostics"
+        / "ingestion"
+        / "export_preview"
+        / "validator_stderr.txt",
+    ]
+
+    content = ""
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            continue
+        if text:
+            content = text
+            break
+
+    if not content:
+        return ""
+
+    tail_lines = content.splitlines()[-200:]
+    tail = "\n".join(tail_lines)
+    return "\n".join(
+        [
+            "### Preview Validator (stderr)",
+            "```",
+            tail,
+            "```",
+            "",
+        ]
+    )
+
+
+def _collect_additional_diagnostics() -> str:
+    lines: List[str] = []
+    heading_added = False
+
+    def _ensure_heading() -> None:
+        nonlocal heading_added
+        if not heading_added:
+            lines.append("\n\n---\n## Additional Diagnostics\n")
+            heading_added = True
+
+    summary_path = Path("diagnostics") / "summary.md"
+    try:
+        summary_text = summary_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        summary_text = ""
+    if summary_text.strip():
+        _ensure_heading()
+        lines.append(summary_text.strip())
+
+    candidate_files = [
+        (
+            Path("diagnostics") / "ingestion" / "preview_validator.stderr.txt",
+            "Preview validator stderr (tail)",
+        ),
+        (
+            Path("diagnostics") / "ingestion" / "export_preview" / "validator_stderr.txt",
+            "Preview validator stderr (tail)",
+        ),
+        (
+            Path("diagnostics") / "ingestion" / "preview_validator.stdout.txt",
+            "Preview validator stdout (tail)",
+        ),
+        (
+            Path("diagnostics")
+            / "ingestion"
+            / "export_preview"
+            / "validator_stdout.txt",
+            "Preview validator stdout (tail)",
+        ),
+    ]
+    for candidate, title in candidate_files:
+        try:
+            if not candidate.exists():
+                continue
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        tail_lines = text.splitlines()[-200:]
+        tail = "\n".join(tail_lines).strip()
+        if not tail:
+            continue
+        _ensure_heading()
+        lines.append(
+            "\n\n### "
+            + title
+            + "\n\n```\n"
+            + tail
+            + "\n```"
+        )
+
+    return "".join(lines)
+
+
 def _try_junit_totals(junit_path: Path) -> Mapping[str, object]:
     try:
         import xml.etree.ElementTree as ET
@@ -448,6 +549,7 @@ def _render_summary(
     run_details: str,
     dtm_debug: str,
     pytest_tail: str,
+    preview_validator_section: str,
 ) -> str:
     pytest_summary = "JUnit report: unavailable"
     if junit:
@@ -517,6 +619,8 @@ def _render_summary(
             ## DTM Debug
             $dtm_debug
 
+            $preview_validator_section
+
             ## Pytest output tail
             ```
             $pytest_tail
@@ -560,6 +664,7 @@ def _render_summary(
         lda_log=lda_log,
         normalize_log=normalize_log,
         duckdb_json=duckdb_json,
+        preview_validator_section=preview_validator_section,
     )
 
 
@@ -631,6 +736,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         pytest_failures_text = _format_failures(junit)
         pytest_overview_text = _format_pytest_overview(junit)
         dtm_debug_text = _dtm_debug_block(run_details)
+        preview_validator_text = _preview_validator_section(Path.cwd())
 
         summary_text = _render_summary(
             env,
@@ -645,7 +751,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             run_details=run_details,
             dtm_debug=dtm_debug_text,
             pytest_tail=pytest_tail,
+            preview_validator_section=preview_validator_text,
         )
+
+        additional = _collect_additional_diagnostics()
+        if additional:
+            summary_text = summary_text.rstrip() + additional
 
         _write_summary_files(art_dir, summary_text)
         _append_step_summary(summary_text)

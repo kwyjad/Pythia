@@ -73,12 +73,14 @@ def canonicalize_duckdb_target(url_or_path: str | None) -> tuple[str, str]:
     if raw.startswith("duckdb://"):
         parsed = urlparse(raw)
         path = parsed.path or ""
+        triple_slash_relative = raw.startswith("duckdb:///") and not raw.startswith("duckdb:////")
         if parsed.netloc and parsed.netloc != ":memory:":
             path = f"{parsed.netloc}{path}"
+            triple_slash_relative = False
         if path == ":memory:":
             return ":memory:", "duckdb:///:memory:"
-        if not path.startswith("/"):
-            path = os.path.join(os.getcwd(), path)
+        if triple_slash_relative:
+            path = path.lstrip("/")
     else:
         path = raw
 
