@@ -33,6 +33,11 @@ constants:
   method: "api"
   confidence: "med"
   revision: 1
+  publisher: "CRED / UCLouvain (EM-DAT)"
+  source_type: "agency"
+  source_url: "https://public.emdat.be/"
+  doc_title: "EM-DAT People Affected (automated import)"
+  definition_text: "EM-DAT Total Affected (injured + affected + homeless) aggregated to monthly country-hazard; imported via EM-DAT GraphQL."
 
 ignore:
   filenames:
@@ -225,6 +230,12 @@ sources:
       value:
         from: pa
         ops: [to_number]
+      publication_date:
+        from_any: [publication_date, as_of_date]
+        ops: [to_date]
+      event_id:
+        from: disno_first
+        ops: [trim]
     filters:
       - keep_if_not_null: [iso3, ym, hazard_code, value, as_of_date]
       - keep_if_positive: [value]

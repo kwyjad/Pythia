@@ -174,16 +174,35 @@ def run_validator(facts_path: Path) -> None:
 
     stdout_path = preview_dir / "validator_stdout.txt"
     stderr_path = preview_dir / "validator_stderr.txt"
+    diag_dir = Path("diagnostics") / "ingestion"
+    try:
+        diag_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - diagnostics best effort
+        pass
+    diag_stdout = diag_dir / "preview_validator.stdout.txt"
+    diag_stderr = diag_dir / "preview_validator.stderr.txt"
 
     cmd = [sys.executable, str(VALIDATOR), "--facts", str(facts_path)]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    stdout_path.write_text(res.stdout or "", encoding="utf-8")
-    stderr_path.write_text(res.stderr or "", encoding="utf-8")
+    stdout_text = res.stdout or ""
+    stderr_text = res.stderr or ""
+
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
+    try:
+        diag_stdout.write_text(stdout_text, encoding="utf-8")
+        diag_stderr.write_text(stderr_text, encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics should not fail freeze
+        LOGGER.debug("Failed to persist validator diagnostics", exc_info=True)
 
     if res.returncode != 0:
-        print("Validation failed; aborting snapshot.", file=sys.stderr)
-        sys.exit(res.returncode)
+        tail = "\n".join(stderr_text.splitlines()[-50:]).strip()
+        if tail:
+            LOGGER.error("Preview validator failed:\n%s", tail)
+        else:
+            LOGGER.error("Preview validator failed (no stderr captured)")
+        raise SystemExit(res.returncode)
 
 def load_table(path: Path) -> pd.DataFrame:
     ext = path.suffix.lower()
@@ -335,13 +354,14 @@ def freeze_snapshot(
 
     if facts_df.empty:
         LOGGER.info(
-            "freeze: month=%s had 0 rows after filter; skipping snapshot", ym
+            "freeze: No rows for month %s after filtering preview; skipping snapshot",
+            ym,
         )
         return SnapshotResult(
             ym=ym,
             out_dir=out_dir,
             skipped=True,
-            skip_reason=f"month={ym} had 0 rows after filter",
+            skip_reason=f"No rows for month {ym} after filtering preview",
         )
 
     if filter_result.filtered_rows > 0:

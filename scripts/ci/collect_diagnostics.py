@@ -52,6 +52,28 @@ def _read_text(path: Path, default: str = "(no output captured)") -> str:
     return default
 
 
+def _preview_validator_section(repo_root: Path) -> str:
+    path = repo_root / "diagnostics" / "ingestion" / "preview_validator.stderr.txt"
+    try:
+        if not path.exists():
+            return ""
+        content = path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if not content:
+        return ""
+    tail = content[-5000:]
+    return "\n".join(
+        [
+            "## Preview Validator (stderr)",
+            "```",
+            tail,
+            "```",
+            "",
+        ]
+    )
+
+
 def _try_junit_totals(junit_path: Path) -> Mapping[str, object]:
     try:
         import xml.etree.ElementTree as ET
@@ -448,6 +470,7 @@ def _render_summary(
     run_details: str,
     dtm_debug: str,
     pytest_tail: str,
+    preview_validator_section: str,
 ) -> str:
     pytest_summary = "JUnit report: unavailable"
     if junit:
@@ -517,6 +540,8 @@ def _render_summary(
             ## DTM Debug
             $dtm_debug
 
+            $preview_validator_section
+
             ## Pytest output tail
             ```
             $pytest_tail
@@ -560,6 +585,7 @@ def _render_summary(
         lda_log=lda_log,
         normalize_log=normalize_log,
         duckdb_json=duckdb_json,
+        preview_validator_section=preview_validator_section,
     )
 
 
@@ -631,6 +657,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         pytest_failures_text = _format_failures(junit)
         pytest_overview_text = _format_pytest_overview(junit)
         dtm_debug_text = _dtm_debug_block(run_details)
+        preview_validator_text = _preview_validator_section(Path.cwd())
 
         summary_text = _render_summary(
             env,
@@ -645,6 +672,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             run_details=run_details,
             dtm_debug=dtm_debug_text,
             pytest_tail=pytest_tail,
+            preview_validator_section=preview_validator_text,
         )
 
         _write_summary_files(art_dir, summary_text)
