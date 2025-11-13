@@ -199,6 +199,13 @@ def run_validator(facts_path: Path) -> None:
         pass
     diag_stdout = diag_dir / "preview_validator.stdout.txt"
     diag_stderr = diag_dir / "preview_validator.stderr.txt"
+    export_preview_dir = diag_dir / "export_preview"
+    try:
+        export_preview_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - diagnostics best effort
+        pass
+    export_preview_stderr = export_preview_dir / "validator_stderr.txt"
+    export_preview_stdout = export_preview_dir / "validator_stdout.txt"
 
     cmd = [sys.executable, str(VALIDATOR), "--facts", str(facts_path)]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -211,6 +218,8 @@ def run_validator(facts_path: Path) -> None:
     try:
         diag_stdout.write_text(stdout_text, encoding="utf-8")
         diag_stderr.write_text(stderr_text, encoding="utf-8")
+        export_preview_stdout.write_text(stdout_text, encoding="utf-8")
+        export_preview_stderr.write_text(stderr_text, encoding="utf-8")
     except Exception:
         LOGGER.error("Failed to persist validator diagnostics:\n%s", traceback.format_exc())
 

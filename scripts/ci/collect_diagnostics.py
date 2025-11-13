@@ -90,6 +90,50 @@ def _preview_validator_section(repo_root: Path) -> str:
     )
 
 
+def _collect_additional_diagnostics() -> str:
+    lines: List[str] = []
+    heading_added = False
+
+    def _ensure_heading() -> None:
+        nonlocal heading_added
+        if not heading_added:
+            lines.append("\n\n---\n## Additional Diagnostics\n")
+            heading_added = True
+
+    summary_path = Path("diagnostics") / "summary.md"
+    try:
+        summary_text = summary_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        summary_text = ""
+    if summary_text.strip():
+        _ensure_heading()
+        lines.append(summary_text.strip())
+
+    candidate_files = [
+        Path("diagnostics") / "ingestion" / "preview_validator.stderr.txt",
+        Path("diagnostics") / "ingestion" / "export_preview" / "validator_stderr.txt",
+    ]
+    for candidate in candidate_files:
+        try:
+            if not candidate.exists():
+                continue
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        tail_lines = text.splitlines()[-200:]
+        tail = "\n".join(tail_lines).strip()
+        if not tail:
+            continue
+        _ensure_heading()
+        lines.append(
+            "\n\n### Preview validator stderr (tail)\n\n```\n"
+            + tail
+            + "\n```"
+        )
+
+    return "".join(lines)
+
+
 def _try_junit_totals(junit_path: Path) -> Mapping[str, object]:
     try:
         import xml.etree.ElementTree as ET
@@ -690,6 +734,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             pytest_tail=pytest_tail,
             preview_validator_section=preview_validator_text,
         )
+
+        additional = _collect_additional_diagnostics()
+        if additional:
+            summary_text = summary_text.rstrip() + additional
 
         _write_summary_files(art_dir, summary_text)
         _append_step_summary(summary_text)
