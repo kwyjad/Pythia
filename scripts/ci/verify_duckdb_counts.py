@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import pathlib
 import sys
-from typing import Iterable, Tuple
+from typing import Iterable, Sequence, Tuple
 
 try:
     import duckdb
@@ -84,10 +85,25 @@ def _append_to_step_summary(markdown: str) -> None:
             handle.write(markdown)
 
 
-def main() -> int:
-    db_url = os.environ.get("RESOLVER_DB_URL")
-    if not db_url:
-        raise SystemExit("RESOLVER_DB_URL not set")
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify DuckDB facts_resolved counts and append diagnostics summaries."
+    )
+    parser.add_argument(
+        "db",
+        nargs="?",
+        help="Optional DuckDB URL or path override (defaults to RESOLVER_DB_URL).",
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    candidate = (args.db or "").strip()
+    if candidate:
+        db_url = candidate
+    else:
+        env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
+        if not env_url:
+            raise SystemExit("RESOLVER_DB_URL not set")
+        db_url = env_url
 
     db_path = _normalise_db_path(db_url)
 
@@ -118,4 +134,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

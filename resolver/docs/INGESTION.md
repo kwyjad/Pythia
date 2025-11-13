@@ -30,6 +30,12 @@ DataFrame.【F:resolver/ingestion/emdat_client.py†L466-L580】【F:resolver/te
 - **Metadata:** `normalize_emdat_pa` carries through `as_of_date`, `publication_date` (preferring `last_update`), and the
   lowest contributing `disno` for traceability.
 
+The export mapping in [`resolver/tools/export_config.yml`](../tools/export_config.yml) reshapes the staging CSV into the
+canonical facts layout consumed by `freeze_snapshot`. People Affected totals (`pa`) become the unified `value` column with
+`metric=affected` and `series_semantics=new`, while the monthly bucket (`ym`) and Resolver `shock_type` are surfaced as the
+facts `ym` and `hazard_code` columns. Aligning the preview with this schema keeps the validator happy and unblocks the
+DuckDB freeze step.
+
 Invoke `python -m resolver.cli.resolver_cli emdat-to-duckdb --help` to review the available flags. Two quick-start
 examples:
 

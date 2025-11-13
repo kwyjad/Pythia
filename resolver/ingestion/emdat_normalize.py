@@ -411,7 +411,7 @@ def normalize_emdat_pa(
     grouped["pa"] = grouped["pa"].round().astype("Int64")
     grouped["publication_date"] = grouped["publication_date"].astype("string")
     grouped["country_name"] = grouped["country_name"].astype("string")
-    grouped["as_of_date"] = as_of_date
+    grouped["as_of_date"] = str(as_of_date)
     grouped["source_id"] = SOURCE_ID
 
     grouped["value"] = grouped["pa"].astype("Int64")
@@ -450,8 +450,33 @@ def normalize_emdat_pa(
         for row, digest in zip(grouped.itertuples(index=False), digests, strict=False)
     ]
 
-    for column in ("unit", "series_semantics", "semantics", "hazard_label", "hazard_class", "publisher", "source_type", "source_url", "doc_title", "definition_text", "confidence", "event_id"):
-        grouped[column] = grouped[column].astype("string")
+    string_columns = [
+        "iso3",
+        "as_of_date",
+        "ym",
+        "metric",
+        "unit",
+        "series_semantics",
+        "semantics",
+        "hazard_code",
+        "hazard_label",
+        "hazard_class",
+        "country_name",
+        "source_id",
+        "publication_date",
+        "publisher",
+        "source_type",
+        "source_url",
+        "doc_title",
+        "definition_text",
+        "method",
+        "confidence",
+        "ingested_at",
+        "event_id",
+        "disno_first",
+    ]
+    for column in string_columns:
+        grouped[column] = grouped[column].astype("string").fillna("")
 
     grouped = grouped.sort_values(["iso3", "ym", "shock_type"]).reset_index(drop=True)
 

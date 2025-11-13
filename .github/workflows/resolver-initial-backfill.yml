@@ -319,6 +319,19 @@ jobs:
             resolver/staging/
             resolver/logs/ingestion/
 
+      - name: Build single flat artifacts zip
+        if: always()
+        run: |
+          python scripts/ci/backfill_helpers.py --out diagnostics/all-artifacts-flat.zip
+
+      - name: Upload flat artifacts bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-artifacts-flat
+          path: diagnostics/all-artifacts-flat.zip
+          if-no-files-found: warn
+
   derive-freeze:
     name: Derive & freeze snapshots
     runs-on: ubuntu-latest
@@ -436,6 +449,18 @@ jobs:
             --month "${BACKFILL_MONTH}" \
             --write-db=1 \
             --db-url "${{ env.RESOLVER_DUCKDB_URL }}"
+
+      - name: Verify DuckDB counts
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          python scripts/ci/verify_duckdb_counts.py "${RESOLVER_DB_URL#duckdb:///}"
 
       - name: Derive and freeze monthly snapshots
         env:

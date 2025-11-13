@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -70,6 +71,7 @@ def test_emdat_probe_writes_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     assert result["total_available"] == 0
     assert result["recorded_at"] == "2024-06-01T00:00:00Z"
     assert result["requests"]["2xx"] == 1
+    assert result["requests"]["total"] == 1
     assert result["latency_ms"] == pytest.approx(321, rel=0.01)
     assert result["filters"]["iso"] == ["PHL"]
     assert result["filters"]["from"] == 2020
@@ -83,6 +85,7 @@ def test_emdat_probe_writes_metadata(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     assert saved["api_version"] == "2024-05"
     assert saved["table_version"] == "dataset-v1"
     assert saved["requests"]["2xx"] == 1
+    assert saved["requests"]["total"] == 1
     assert saved["latency_ms"] == pytest.approx(result["latency_ms"], rel=0.01)
 
 
@@ -146,6 +149,7 @@ def test_probe_emdat_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["table_version"] == "v1"
     assert result["metadata_timestamp"] == "2024-05-01"
     assert result["requests"]["2xx"] == 1
+    assert result["requests"]["total"] == 1
     assert session.calls[0]["headers"]["Authorization"] == "token"
     assert session.calls[0]["json"]["query"]
 
@@ -169,6 +173,95 @@ def test_probe_emdat_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["ok"] is False
     assert result["status"] == 401
     assert "unauthorized" in (result.get("error") or "").lower()
+
+
+def test_emdat_main_records_diagnostics(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    staging_dir = Path("resolver/staging")
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = staging_dir / "emdat_pa.csv"
+
+    monkeypatch.setenv("EMDAT_NETWORK", "1")
+    monkeypatch.setenv("EMDAT_API_KEY", "token")
+    monkeypatch.setenv("EMDAT_SOURCE", "api")
+    monkeypatch.delenv("RESOLVER_SKIP_EMDAT", raising=False)
+
+    monkeypatch.setattr(emdat_client, "OUT_DIR", staging_dir)
+    monkeypatch.setattr(emdat_client, "OUT_PATH", csv_path)
+
+    sample_payload = {
+        "data": {
+            "api_version": "2024-05",
+            "public_emdat": {
+                "info": {"timestamp": "2024-02-05T00:00:00Z"},
+                "data": [
+                    {
+                        "disno": "2024-0001-PHL",
+                        "classif_key": "nat-hyd-flo-riv",
+                        "type": "Flood",
+                        "subtype": "",
+                        "iso": "PHL",
+                        "country": "Philippines",
+                        "start_year": 2024,
+                        "start_month": 1,
+                        "start_day": 1,
+                        "end_year": 2024,
+                        "end_month": 1,
+                        "end_day": 2,
+                        "total_affected": 125,
+                        "entry_date": "2024-02-01",
+                        "last_update": "2024-02-05",
+                    }
+                ],
+            },
+        }
+    }
+
+    def _fake_post_with_status(self, payload):  # noqa: ANN001
+        self._ensure_online()
+        return 200, sample_payload, 15.0
+
+    monkeypatch.setattr(emdat_client.EmdatClient, "_post_with_status", _fake_post_with_status)
+
+    def _fake_probe(api_key, base_url, timeout_s, session):  # noqa: ANN001
+        return {
+            "ok": True,
+            "status": 200,
+            "latency_ms": 20,
+            "elapsed_ms": 20,
+            "api_version": "2024-05",
+            "table_version": "dataset-v1",
+            "metadata_timestamp": "2024-02-05T00:00:00Z",
+            "error": None,
+            "requests": {"total": 1, "2xx": 1, "4xx": 0, "5xx": 0},
+        }
+
+    monkeypatch.setattr(emdat_client, "probe_emdat", _fake_probe)
+
+    captured: dict[str, dict[str, int] | str | None] = {}
+    original_finalize = emdat_client.diagnostics_emitter.finalize_run
+
+    def _capture_finalize(context, status, **kwargs):  # noqa: ANN001
+        captured["http"] = kwargs.get("http")
+        captured["counts"] = kwargs.get("counts")
+        return original_finalize(context, status, **kwargs)
+
+    monkeypatch.setattr(emdat_client.diagnostics_emitter, "finalize_run", _capture_finalize)
+
+    assert emdat_client.main([]) is True
+
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        data_rows = list(csv.DictReader(handle))
+    assert len(data_rows) == 1
+    assert data_rows[0]["metric"] == "total_affected"
+
+    http_stats = captured.get("http") or {}
+    count_stats = captured.get("counts") or {}
+    assert http_stats.get("2xx", 0) >= 1
+    assert http_stats.get("total", 0) >= http_stats.get("2xx", 0)
+    assert count_stats.get("fetched") == 1
+    assert count_stats.get("normalized") == 1
+    assert count_stats.get("written") == 1
 
 
 def test_build_effective_params_iso_handling(monkeypatch: pytest.MonkeyPatch) -> None:
