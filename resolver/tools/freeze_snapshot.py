@@ -60,6 +60,7 @@ TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
 SCHEMA_PATH = TOOLS / "schema.yml"
+SHOCKS_PATH = ROOT / "data" / "shocks.csv"
 SUMMARY_PATH = Path("diagnostics") / "summary.md"
 REPO_SUMMARY_PATH = REPO_ROOT / "diagnostics" / "summary.md"
 
@@ -353,6 +354,51 @@ def run_validator(facts_path: Path) -> None:
                     exc_msg_lines.append(line)
         raise SystemExit("\n".join(exc_msg_lines))
 
+
+def _normalize_facts_for_validation(facts_path: Path) -> None:
+    """Normalize semantic fields prior to validation (best effort)."""
+
+    try:
+        frame = pd.read_csv(facts_path, dtype=str).fillna("")
+    except Exception:
+        return
+
+    if frame.empty:
+        return
+
+    if "metric" in frame.columns:
+        frame["metric"] = frame["metric"].replace({"total_affected": "affected"})
+
+    if "source_type" in frame.columns:
+        frame["source_type"] = frame["source_type"].replace({"api": "agency"})
+        frame["source_type"] = frame["source_type"].where(
+            frame["source_type"].str.strip().ne(""),
+            "agency",
+        )
+
+    if "hazard_code" in frame.columns:
+        frame["hazard_code"] = frame["hazard_code"].astype(str).str.strip().str.upper()
+        try:
+            shocks = pd.read_csv(SHOCKS_PATH, dtype=str).fillna("")
+        except Exception:
+            shocks = None
+        if shocks is not None and not shocks.empty and "hazard_code" in shocks.columns:
+            desired_cols = [
+                col
+                for col in ("hazard_code", "hazard_label", "hazard_class")
+                if col in shocks.columns
+            ]
+            shocks = shocks[desired_cols].drop_duplicates("hazard_code")
+            frame = frame.drop(
+                columns=[c for c in ("hazard_label", "hazard_class") if c in frame.columns]
+            )
+            frame = frame.merge(shocks, on="hazard_code", how="left")
+
+    try:
+        frame.to_csv(facts_path, index=False)
+    except Exception:
+        pass
+
 def load_table(path: Path) -> pd.DataFrame:
     ext = path.suffix.lower()
     if ext in [".csv", ".tsv"]:
@@ -543,6 +589,7 @@ def freeze_snapshot(
         )
 
     if filter_result.filtered_rows > 0:
+        _normalize_facts_for_validation(filtered_facts_path)
         run_validator(filtered_facts_path)
 
     if deltas:
