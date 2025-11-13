@@ -25,9 +25,10 @@ import sys
 import json
 import subprocess
 import datetime as dt
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import pandas as pd
@@ -42,6 +43,7 @@ except Exception:  # pragma: no cover - optional dependency for db dual-write
 
 from resolver.common import get_logger
 from resolver.helpers.series_semantics import normalize_series_semantics
+from resolver.tools.schema_validate import load_schema
 
 try:
     from resolver.tools.export_facts import (
@@ -56,8 +58,24 @@ ROOT = Path(__file__).resolve().parents[1]      # .../resolver
 TOOLS = ROOT / "tools"
 SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
+SCHEMA_PATH = TOOLS / "schema.yml"
+SUMMARY_PATH = Path("diagnostics") / "summary.md"
 
 LOGGER = get_logger(__name__)
+
+
+def _append_to_summary(section_title: str, body_markdown: str) -> None:
+    """Best-effort append to diagnostics/summary.md without raising on failure."""
+
+    try:
+        SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n### {section_title}\n\n")
+            handle.write(body_markdown)
+            if not body_markdown.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        LOGGER.error("Failed to append to summary.md:\n%s", traceback.format_exc())
 
 
 def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
@@ -193,11 +211,75 @@ def run_validator(facts_path: Path) -> None:
     try:
         diag_stdout.write_text(stdout_text, encoding="utf-8")
         diag_stderr.write_text(stderr_text, encoding="utf-8")
-    except Exception:  # pragma: no cover - diagnostics should not fail freeze
-        LOGGER.debug("Failed to persist validator diagnostics", exc_info=True)
+    except Exception:
+        LOGGER.error("Failed to persist validator diagnostics:\n%s", traceback.format_exc())
 
     if res.returncode != 0:
-        tail = "\n".join(stderr_text.splitlines()[-50:]).strip()
+        tail = "\n".join(stderr_text.splitlines()[-200:]).strip()
+
+        snapshot_md_parts: List[str] = []
+        try:
+            df = load_table(facts_path)
+        except Exception:
+            snapshot_md_parts.append(
+                "(Unable to render validated CSV sample: "
+                f"{traceback.format_exc().strip()})"
+            )
+            df = None
+        else:
+            try:
+                head_md = df.head(5).to_markdown(index=False)
+            except Exception:
+                head_md = f"(Failed to render markdown table: {traceback.format_exc().strip()})"
+
+            snapshot_md_parts.append(
+                f"**Validated file:** `{facts_path.resolve()}`"
+            )
+            snapshot_md_parts.append(f"**Rows:** {len(df)}")
+            snapshot_md_parts.append("")
+            snapshot_md_parts.append("**facts_for_month.csv (first 5 rows):**")
+            snapshot_md_parts.append("")
+            snapshot_md_parts.append(head_md)
+            snapshot_md_parts.append("")
+            columns_text = ", ".join(str(col) for col in df.columns)
+            snapshot_md_parts.append("**Columns:**")
+            snapshot_md_parts.append("")
+            snapshot_md_parts.append(f"```\n{columns_text}\n```")
+
+            try:
+                schema_payload = load_schema(SCHEMA_PATH)
+                required_cols = list(schema_payload.get("required", []))
+            except Exception:
+                snapshot_md_parts.append("")
+                snapshot_md_parts.append(
+                    "**Required-field coverage:**\n"
+                    f"(Unable to load schema: {traceback.format_exc().strip()})"
+                )
+            else:
+                snapshot_md_parts.append("")
+                snapshot_md_parts.append("**Required-field coverage:**")
+                coverage_lines = []
+                total_rows = len(df)
+                for col in required_cols:
+                    if col in df.columns:
+                        series = df[col].fillna("").astype(str).str.strip()
+                        non_empty = int(series.ne("").sum())
+                    else:
+                        non_empty = 0
+                    coverage_lines.append(
+                        f"- `{col}`: {non_empty} non-empty of {total_rows}"
+                    )
+                if coverage_lines:
+                    snapshot_md_parts.append("\n".join(coverage_lines))
+                else:
+                    snapshot_md_parts.append("(No required columns configured)")
+
+        _append_to_summary(
+            "Preview validator stderr (tail)", f"```\n{tail or '(no stderr)'}\n```"
+        )
+        snapshot_md = "\n".join(snapshot_md_parts) or "(No snapshot data captured)"
+        _append_to_summary("facts_for_month.csv snapshot", snapshot_md)
+
         if tail:
             LOGGER.error("Preview validator failed:\n%s", tail)
         else:
@@ -352,11 +434,36 @@ def freeze_snapshot(
             filter_result.filtered_rows,
         )
 
+    metrics_summary = "(none)"
+    try:
+        if "metric" in facts_df.columns:
+            metrics = sorted(
+                {
+                    str(value).strip()
+                    for value in facts_df["metric"].fillna("")
+                    if str(value).strip()
+                }
+            )
+            if metrics:
+                metrics_summary = ", ".join(metrics)
+    except Exception:
+        metrics_summary = f"(unable to summarise metrics: {traceback.format_exc().strip()})"
+
+    context_lines = [
+        f"**facts_for_month path:** `{filtered_facts_path.resolve()}`",
+        f"**rows:** {filter_result.filtered_rows}",
+        f"**month:** `{ym}`",
+        f"**metric(s):** {metrics_summary}",
+    ]
+    _append_to_summary("Freeze snapshot — context", "\n".join(context_lines))
+
     if facts_df.empty:
-        LOGGER.info(
-            "freeze: No rows for month %s after filtering preview; skipping snapshot",
-            ym,
+        msg = (
+            f"No rows for month {ym} after filtering preview; "
+            "skipping validator and snapshot"
         )
+        LOGGER.info("freeze: %s", msg)
+        _append_to_summary("Freeze snapshot", msg)
         return SnapshotResult(
             ym=ym,
             out_dir=out_dir,

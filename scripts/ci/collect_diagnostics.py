@@ -77,7 +77,8 @@ def _preview_validator_section(repo_root: Path) -> str:
     if not content:
         return ""
 
-    tail = content[-5000:]
+    tail_lines = content.splitlines()[-200:]
+    tail = "\n".join(tail_lines)
     return "\n".join(
         [
             "### Preview Validator (stderr)",
