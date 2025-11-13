@@ -399,7 +399,10 @@ except ImportError:
 ROOT = Path(__file__).resolve().parents[1]     # .../resolver
 TOOLS = ROOT / "tools"
 EXPORTS = ROOT / "exports"
+DATA_DIR = ROOT / "data"
 DEFAULT_CONFIG = TOOLS / "export_config.yml"
+SHOCKS_PATH = DATA_DIR / "shocks.csv"
+COUNTRIES_PATH = DATA_DIR / "countries.csv"
 
 REQUIRED = [
     "event_id",
@@ -466,6 +469,234 @@ EXPORT_ORDER: List[str] = BASE_COLS + REPORT_META_COLS
 DATE_STRING_COLS = ["as_of_date", "publication_date"]  # must serialize as strings for tests
 
 
+def _load_registry_table(path: Path) -> "pd.DataFrame":
+    try:
+        table = pd.read_csv(path, dtype=str)
+    except FileNotFoundError:
+        return pd.DataFrame()
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        logging.getLogger(__name__).warning("Failed to load registry %s: %s", path, exc)
+        return pd.DataFrame()
+    return table.fillna("")
+
+
+def _normalize_label(series: "pd.Series") -> "pd.Series":
+    if not isinstance(series, pd.Series):
+        return pd.Series([], dtype="object")
+    return (
+        series.fillna("")
+        .astype(str)
+        .str.lower()
+        .str.replace("_", " ", regex=False)
+        .str.replace("-", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
+
+
+def _ensure_series(df: "pd.DataFrame", column: str) -> "pd.Series":
+    if column in df.columns:
+        return df[column].fillna("").astype(str)
+    series = pd.Series([""] * len(df), index=df.index, dtype="object")
+    df[column] = series
+    return series
+
+
+def _enrich_facts_for_validation(df: "pd.DataFrame") -> "pd.DataFrame":
+    if df is None or df.empty:
+        return df
+
+    facts = df.copy()
+
+    facts["iso3"] = _ensure_series(facts, "iso3").str.upper()
+    hazard_series = _ensure_series(facts, "hazard_code")
+    hazard_series = hazard_series.str.upper()
+    facts["hazard_code"] = hazard_series
+
+    shocks = _load_registry_table(SHOCKS_PATH)
+    if not shocks.empty:
+        shocks = shocks.copy()
+        shocks["hazard_code"] = shocks["hazard_code"].fillna("").astype(str).str.upper()
+        shocks["hazard_label"] = shocks["hazard_label"].fillna("")
+        shocks["hazard_class"] = shocks["hazard_class"].fillna("")
+        hazard_codes = set(shocks["hazard_code"].tolist())
+        label_lookup = dict(
+            zip(_normalize_label(shocks["hazard_label"]), shocks["hazard_code"])
+        )
+    else:
+        hazard_codes = set()
+        label_lookup = {}
+
+    fallback_lookup = {
+        "flood": "FL",
+        "drought": "DR",
+        "tropical cyclone": "TC",
+    }
+
+    candidates: List["pd.Series"] = []
+    if "shock_type" in facts.columns:
+        candidates.append(_normalize_label(facts["shock_type"]))
+    if "hazard_label" in facts.columns:
+        candidates.append(_normalize_label(facts["hazard_label"]))
+    candidates.append(_normalize_label(facts["hazard_code"]))
+
+    mapped_codes = pd.Series([""] * len(facts), index=facts.index, dtype="object")
+    if label_lookup:
+        for candidate in candidates:
+            mapped = candidate.map(label_lookup).fillna("")
+            mapped_codes = mapped_codes.where(mapped_codes.str.strip().ne(""), mapped)
+    for candidate in candidates:
+        mapped = candidate.map(fallback_lookup).fillna("")
+        mapped_codes = mapped_codes.where(mapped_codes.str.strip().ne(""), mapped)
+
+    hazard_upper = facts["hazard_code"].str.upper()
+    needs_mapping = hazard_upper.isin(hazard_codes)
+    needs_mapping = ~needs_mapping | hazard_upper.str.strip().eq("")
+    if needs_mapping.any():
+        replacement = mapped_codes.str.upper()
+        facts.loc[needs_mapping, "hazard_code"] = replacement.loc[needs_mapping].where(
+            replacement.loc[needs_mapping].str.strip().ne(""),
+            facts.loc[needs_mapping, "hazard_code"],
+        )
+        facts["hazard_code"] = facts["hazard_code"].fillna("").astype(str).str.upper()
+
+    if not shocks.empty:
+        registry = shocks[["hazard_code", "hazard_label", "hazard_class"]].copy()
+        registry.columns = ["hazard_code", "_registry_hazard_label", "_registry_hazard_class"]
+        facts = facts.merge(registry, on="hazard_code", how="left")
+        for column, registry_column in (
+            ("hazard_label", "_registry_hazard_label"),
+            ("hazard_class", "_registry_hazard_class"),
+        ):
+            registry_values = facts.pop(registry_column)
+            if column in facts.columns:
+                current = facts[column].fillna("").astype(str)
+                mask = current.str.strip().eq("")
+                facts.loc[mask, column] = registry_values.fillna("").astype(str)[mask]
+            else:
+                facts[column] = registry_values.fillna("").astype(str)
+
+    countries = _load_registry_table(COUNTRIES_PATH)
+    if not countries.empty:
+        countries = countries.copy()
+        countries["iso3"] = countries["iso3"].fillna("").astype(str).str.upper()
+        registry_country = countries[["iso3", "country_name"]].rename(
+            columns={"country_name": "_registry_country_name"}
+        )
+        facts = facts.merge(registry_country, on="iso3", how="left")
+        registry_values = facts.pop("_registry_country_name")
+        if "country_name" in facts.columns:
+            current = facts["country_name"].fillna("").astype(str)
+            mask = current.str.strip().eq("")
+            facts.loc[mask, "country_name"] = registry_values.fillna("").astype(str)[mask]
+        else:
+            facts["country_name"] = registry_values.fillna("").astype(str)
+
+    facts["metric"] = _ensure_series(facts, "metric")
+    empty_metric = facts["metric"].str.strip().eq("")
+    if empty_metric.any():
+        facts.loc[empty_metric, "metric"] = "affected"
+
+    facts["unit"] = _ensure_series(facts, "unit")
+    empty_unit = facts["unit"].str.strip().eq("")
+    if empty_unit.any():
+        facts.loc[empty_unit, "unit"] = "persons"
+
+    today = dt.date.today()
+
+    def _coerce_date(value: Any) -> Optional[dt.date]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            if len(text) == 10:
+                return dt.date.fromisoformat(text)
+        except Exception:
+            pass
+        if len(text) == 7 and text[4] == "-":
+            try:
+                year = int(text[:4])
+                month = int(text[5:7])
+                if month == 12:
+                    return dt.date(year, 12, 31)
+                start_next = dt.date(year, month + 1, 1)
+                return start_next - dt.timedelta(days=1)
+            except Exception:
+                return None
+        return None
+
+    facts["as_of_date"] = _ensure_series(facts, "as_of_date")
+    publication = _ensure_series(facts, "publication_date")
+
+    def _fix_publication(row: "pd.Series") -> str:
+        pub_candidate = _coerce_date(row.get("publication_date"))
+        as_of_candidate = _coerce_date(row.get("as_of_date"))
+        if pub_candidate is None:
+            pub_candidate = as_of_candidate or today
+        if as_of_candidate and pub_candidate < as_of_candidate:
+            pub_candidate = as_of_candidate
+        if pub_candidate > today:
+            pub_candidate = today
+        return pub_candidate.isoformat()
+
+    if len(facts):
+        facts["publication_date"] = facts.apply(_fix_publication, axis=1)
+    else:
+        facts["publication_date"] = publication
+
+    defaults: Dict[str, Any] = {
+        "publisher": "CRED / UCLouvain (EM-DAT)",
+        "source_type": "agency",
+        "source_url": "https://public.emdat.be/",
+        "doc_title": "EM-DAT People Affected (automated import)",
+        "definition_text": "EM-DAT Total Affected = injured + affected + homeless; monthly country–hazard aggregation via EM-DAT GraphQL.",
+        "method": "api",
+        "confidence": "med",
+    }
+
+    for column, default_value in defaults.items():
+        series = _ensure_series(facts, column)
+        mask = series.str.strip().eq("")
+        if mask.any():
+            facts.loc[mask, column] = str(default_value)
+
+    if "revision" in facts.columns:
+        revision_series = facts["revision"]
+        if pd.api.types.is_numeric_dtype(revision_series):
+            mask = revision_series.isna()
+        else:
+            revision_series = revision_series.fillna("")
+            mask = revision_series.astype(str).str.strip().eq("")
+        if mask.any():
+            facts.loc[mask, "revision"] = 1
+    else:
+        facts["revision"] = 1
+
+    ingested = _ensure_series(facts, "ingested_at")
+    mask_ingested = ingested.str.strip().eq("")
+    if mask_ingested.any():
+        facts.loc[mask_ingested, "ingested_at"] = today.isoformat()
+
+    event_series = _ensure_series(facts, "event_id")
+    missing_event = event_series.str.strip().eq("")
+    if "disno_first" in facts.columns:
+        disno_series = facts["disno_first"].fillna("").astype(str).str.strip()
+        use_disno = missing_event & disno_series.ne("")
+        if use_disno.any():
+            facts.loc[use_disno, "event_id"] = disno_series[use_disno]
+        missing_event = facts["event_id"].fillna("").astype(str).str.strip().eq("")
+    if missing_event.any():
+        fallback_values = []
+        for idx in facts.index[missing_event]:
+            iso_val = facts.at[idx, "iso3"] if "iso3" in facts.columns else "UNK"
+            hazard_val = facts.at[idx, "hazard_code"] if "hazard_code" in facts.columns else "UNK"
+            as_of_val = facts.at[idx, "as_of_date"] if "as_of_date" in facts.columns else ""
+            fallback_values.append(f"{iso_val or 'UNK'}-{hazard_val or 'UNK'}-{as_of_val or ''}")
+        facts.loc[missing_event, "event_id"] = fallback_values
+
+    return facts
 def _ensure_export_contract(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         # Still enforce headers for downstream tools/tests
@@ -2687,6 +2918,8 @@ def export_facts(
             source_details.pop()
 
     facts = _apply_series_semantics(facts)
+
+    facts = _enrich_facts_for_validation(facts)
 
     preview_facts = enforce_canonical_preview(facts)
     for col in ["as_of_date", "publication_date"]:
