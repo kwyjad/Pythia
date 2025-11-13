@@ -212,7 +212,7 @@ sources:
     allow_empty: true
     match:
       filename_regex: "(?i)(?:^|.*/resolver/staging/)emdat_pa\\.csv$"
-      required_columns: [iso3, ym, shock_type, pa, as_of_date]
+      required_columns: [iso3, ym, as_of_date]
     map:
       iso3:
         from: iso3
@@ -224,13 +224,19 @@ sources:
         from: ym
         ops: [trim]
       hazard_code:
-        from: shock_type
+        from_any: [hazard_code, shock_type]
         ops: [trim, lowercase]
       metric:
         const: affected
       value:
-        from: pa
+        from_any: [value, pa, total_affected]
         ops: [to_number]
+      semantics:
+        const: new
+      series_semantics:
+        const: new
+      source:
+        const: emdat
       publication_date:
         from_any: [publication_date, as_of_date]
         ops: [to_date]
