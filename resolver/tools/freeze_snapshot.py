@@ -61,6 +61,7 @@ SNAPSHOTS = ROOT / "snapshots"
 VALIDATOR = TOOLS / "validate_facts.py"
 SCHEMA_PATH = TOOLS / "schema.yml"
 SHOCKS_PATH = ROOT / "data" / "shocks.csv"
+COUNTRIES_PATH = ROOT / "data" / "countries.csv"
 SUMMARY_PATH = Path("diagnostics") / "summary.md"
 REPO_SUMMARY_PATH = REPO_ROOT / "diagnostics" / "summary.md"
 
@@ -367,7 +368,16 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
         return
 
     if "metric" in frame.columns:
-        frame["metric"] = frame["metric"].replace({"total_affected": "affected"})
+        frame["metric"] = frame["metric"].replace({
+            "total_affected": "affected",
+            "people_affected": "affected",
+        })
+        frame["metric"] = frame["metric"].where(
+            frame["metric"].astype(str).str.strip().ne(""), "affected"
+        )
+    else:
+        frame["metric"] = "affected"
+    frame["metric"] = frame["metric"].astype(str).str.strip().str.lower()
 
     if "source_type" in frame.columns:
         frame["source_type"] = frame["source_type"].replace({"api": "agency"})
@@ -375,6 +385,8 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
             frame["source_type"].str.strip().ne(""),
             "agency",
         )
+    else:
+        frame["source_type"] = "agency"
 
     if "hazard_code" in frame.columns:
         frame["hazard_code"] = frame["hazard_code"].astype(str).str.strip().str.upper()
@@ -393,6 +405,113 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
                 columns=[c for c in ("hazard_label", "hazard_class") if c in frame.columns]
             )
             frame = frame.merge(shocks, on="hazard_code", how="left")
+
+    # Country name enrichment
+    if "iso3" in frame.columns:
+        try:
+            countries = pd.read_csv(COUNTRIES_PATH, dtype=str).fillna("")
+            countries.columns = [c.strip().lstrip("\ufeff") for c in countries.columns]
+            iso_to_country = dict(zip(countries.get("iso3", []), countries.get("country_name", [])))
+        except Exception:
+            iso_to_country = {}
+        if "country_name" not in frame.columns:
+            frame["country_name"] = frame["iso3"].map(iso_to_country).fillna("")
+        else:
+            mask = frame["country_name"].astype(str).str.strip().eq("")
+            if mask.any():
+                frame.loc[mask, "country_name"] = (
+                    frame.loc[mask, "iso3"].map(iso_to_country).fillna("")
+                )
+    elif "country_name" not in frame.columns:
+        frame["country_name"] = ""
+
+    # Unit derived from metric (fallback to persons)
+    metric_to_unit = {
+        "affected": "persons",
+        "in_need": "persons",
+        "displaced": "persons",
+        "cases": "persons_cases",
+        "fatalities": "persons",
+        "events": "events",
+        "participants": "persons",
+    }
+    if "unit" not in frame.columns:
+        frame["unit"] = ""
+    frame["unit"] = frame.apply(
+        lambda row: (
+            metric_to_unit.get(str(row.get("metric", "")).strip().lower(), "persons")
+            if str(row.get("unit", "")).strip() == ""
+            else str(row.get("unit", "")).strip()
+        ),
+        axis=1,
+    )
+
+    # Publication date clamped to [as_of_date, today]
+    today = dt.date.today()
+
+    def _parse_iso_date(value: str) -> Optional[dt.date]:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return dt.date.fromisoformat(text)
+        except ValueError:
+            return None
+
+    if "publication_date" not in frame.columns:
+        frame["publication_date"] = ""
+
+    def _clamp_publication(row: "pd.Series") -> str:
+        as_of = _parse_iso_date(row.get("as_of_date", ""))
+        publication = _parse_iso_date(row.get("publication_date", ""))
+        if publication is None:
+            publication = as_of or today
+        if as_of and publication < as_of:
+            publication = as_of
+        if publication > today:
+            publication = today
+        return publication.isoformat()
+
+    frame["publication_date"] = frame.apply(_clamp_publication, axis=1)
+
+    defaults = {
+        "publisher": "CRED / UCLouvain (EM-DAT)",
+        "source_url": "https://public.emdat.be/",
+        "doc_title": "EM-DAT People Affected (automated import)",
+        "definition_text": (
+            "EM-DAT 'Total Affected' canonicalised to monthly country-hazard affected counts."
+        ),
+        "method": "api",
+        "confidence": "med",
+        "revision": "1",
+        "ingested_at": today.isoformat(),
+    }
+
+    for column, value in defaults.items():
+        if column not in frame.columns:
+            frame[column] = value
+        else:
+            frame[column] = frame[column].where(
+                frame[column].astype(str).str.strip().ne(""), value
+            )
+
+    if "event_id" not in frame.columns:
+        frame["event_id"] = ""
+
+    def _fallback_event_id(row: "pd.Series") -> str:
+        if str(row.get("event_id", "")).strip():
+            return str(row["event_id"])
+        disno = str(row.get("disno_first", "")).strip()
+        if disno:
+            return disno
+        iso3 = str(row.get("iso3", "")).strip()
+        hazard = str(row.get("hazard_code", "")).strip()
+        as_of = str(row.get("as_of_date", "")).strip()
+        if iso3 or hazard or as_of:
+            return "-".join(filter(None, [iso3, hazard, as_of]))
+        return "unknown"
+
+    frame["event_id"] = frame.apply(_fallback_event_id, axis=1)
 
     try:
         frame.to_csv(facts_path, index=False)
