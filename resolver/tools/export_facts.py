@@ -696,6 +696,45 @@ def _enrich_facts_for_validation(df: "pd.DataFrame") -> "pd.DataFrame":
         facts.loc[missing_event, "event_id"] = fallback_values
 
     return facts
+CANONICAL_PREVIEW_COLUMNS = [
+    "iso3",
+    "ym",
+    "as_of_date",
+    "hazard_code",
+    "metric",
+    "value",
+]
+
+
+def _build_canonical_preview(df: pd.DataFrame) -> pd.DataFrame:
+    """Return the canonical six-column preview DataFrame."""
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=CANONICAL_PREVIEW_COLUMNS)
+
+    preview = df.copy()
+
+    for column in CANONICAL_PREVIEW_COLUMNS:
+        if column not in preview.columns:
+            preview[column] = ""
+
+    preview["metric"] = (
+        preview["metric"].fillna("").astype(str).str.strip().replace({"total_affected": "affected"})
+    )
+
+    ym_series = pd.to_datetime(preview["ym"].astype(str) + "-01", errors="coerce")
+    aligned_as_of = (ym_series + pd.offsets.MonthEnd(0)).dt.strftime("%Y-%m-%d")
+    existing_as_of = preview["as_of_date"].fillna("").astype(str)
+    preview["as_of_date"] = aligned_as_of.where(ym_series.notna(), existing_as_of)
+
+    preview["iso3"] = preview["iso3"].fillna("").astype(str)
+    preview["ym"] = preview["ym"].fillna("").astype(str)
+    preview["hazard_code"] = preview["hazard_code"].fillna("").astype(str)
+    preview["value"] = preview["value"]
+
+    return preview.loc[:, CANONICAL_PREVIEW_COLUMNS]
+
+
 def _ensure_export_contract(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         # Still enforce headers for downstream tools/tests
@@ -2951,7 +2990,7 @@ def export_facts(
 
     # === PATCH START: export_facts finalize before write ===
     facts = _ensure_export_contract(facts)
-    preview_facts = facts.copy()
+    preview_facts = _build_canonical_preview(facts)
 
     try:
         dist = facts["series_semantics"].fillna("").value_counts(dropna=False).to_dict()
