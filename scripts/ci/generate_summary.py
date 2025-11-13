@@ -185,6 +185,48 @@ def main() -> int:
                 preview_status.append(
                     f"- validator {label}: {diag_path} (empty)"
                 )
+
+        filtered_preview_path = preview_path.with_name("facts_for_month.csv")
+        filter_meta_path = preview_path.with_name("facts_for_month.meta.json")
+        if filter_meta_path.exists():
+            try:
+                meta_raw = filter_meta_path.read_text(encoding="utf-8", errors="replace")
+                meta = json.loads(meta_raw)
+                month_value = meta.get("month", "<unknown>")
+                total_rows = meta.get("total_rows")
+                filtered_rows = meta.get("filtered_rows")
+                ym_flag = meta.get("ym_column_present")
+                total_text = str(total_rows) if total_rows is not None else "unknown"
+                filtered_text = (
+                    str(filtered_rows) if filtered_rows is not None else "unknown"
+                )
+                ym_text = (
+                    "yes"
+                    if ym_flag is True
+                    else "no" if ym_flag is False else "unknown"
+                )
+                preview_status.append(
+                    "- month filter: "
+                    f"month={month_value} total_rows={total_text} "
+                    f"filtered_rows={filtered_text} ym_column_present={ym_text}"
+                )
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                preview_status.append(
+                    f"- month filter: error reading {filter_meta_path} ({exc})"
+                )
+        elif filtered_preview_path.exists():
+            with filtered_preview_path.open(newline="", encoding="utf-8") as fh:
+                reader = csv.reader(fh)
+                next(reader, None)
+                filtered_rows = sum(1 for _ in reader)
+            preview_status.append(
+                f"- month filter: facts_for_month.csv present ("
+                f"{filtered_rows} row{'s' if filtered_rows != 1 else ''}) @ {filtered_preview_path}"
+            )
+        else:
+            preview_status.append(
+                "- month filter: facts_for_month.csv missing"
+            )
     except Exception as exc:  # pragma: no cover - diagnostics only
         preview_status.append(
             f"- facts.csv: error reading preview ({exc})"

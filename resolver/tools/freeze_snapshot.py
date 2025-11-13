@@ -194,6 +194,68 @@ def load_table(path: Path) -> pd.DataFrame:
     else:
         raise SystemExit(f"Unsupported input extension: {ext}. Use .csv or .parquet")
 
+
+def _filter_preview_to_month(preview_path: Path, month: str) -> "PreviewFilterResult":
+    filtered_path = preview_path.with_name("facts_for_month.csv")
+    try:
+        filtered_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:  # pragma: no cover - best effort directory creation
+        pass
+
+    if not preview_path.exists():
+        empty = pd.DataFrame()
+        empty.to_csv(filtered_path, index=False)
+        return PreviewFilterResult(
+            filtered_path=filtered_path,
+            filtered_df=empty,
+            original_rows=0,
+            filtered_rows=0,
+            had_ym_column=False,
+        )
+
+    df = load_table(preview_path)
+    original_rows = len(df)
+    had_ym_column = "ym" in df.columns
+
+    if not had_ym_column:
+        filtered_df = df.head(0).copy()
+    else:
+        mask = df["ym"].astype(str) == str(month)
+        filtered_df = df.loc[mask].copy()
+
+    filtered_rows = len(filtered_df)
+    filtered_df.to_csv(filtered_path, index=False)
+
+    meta_path = filtered_path.with_name("facts_for_month.meta.json")
+    meta_payload = {
+        "month": str(month),
+        "total_rows": int(original_rows),
+        "filtered_rows": int(filtered_rows),
+        "ym_column_present": bool(had_ym_column),
+    }
+    try:
+        meta_path.write_text(json.dumps(meta_payload, indent=2) + "\n", encoding="utf-8")
+    except Exception:  # pragma: no cover - diagnostics only
+        LOGGER.debug("Failed to write month filter metadata", exc_info=True)
+
+    return PreviewFilterResult(
+        filtered_path=filtered_path,
+        filtered_df=filtered_df,
+        original_rows=original_rows,
+        filtered_rows=filtered_rows,
+        had_ym_column=had_ym_column,
+    )
+
+
+def _filter_dataframe_by_month(df: "pd.DataFrame | None", month: str) -> "pd.DataFrame | None":
+    if df is None:
+        return None
+    if "ym" not in df.columns:
+        return df.copy()
+    mask = df["ym"].astype(str) == str(month)
+    return df.loc[mask].copy()
+
+
 def write_parquet(df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Ensure string columns are strings (avoid mixed dtypes)
@@ -214,6 +276,15 @@ class SnapshotResult:
     manifest: Optional[Path] = None
     skipped: bool = False
     skip_reason: str = ""
+
+
+@dataclass
+class PreviewFilterResult:
+    filtered_path: Path
+    filtered_df: "pd.DataFrame"
+    original_rows: int
+    filtered_rows: int
+    had_ym_column: bool
 
 
 class SnapshotError(RuntimeError):
@@ -250,19 +321,31 @@ def freeze_snapshot(
     base_out_dir = Path(outdir)
     out_dir = base_out_dir / ym
 
-    facts_df = load_table(facts_path)
+    filter_result = _filter_preview_to_month(facts_path, ym)
+    filtered_facts_path = filter_result.filtered_path
+    facts_df = filter_result.filtered_df
+
+    if filter_result.original_rows and filter_result.original_rows != filter_result.filtered_rows:
+        LOGGER.info(
+            "Snapshot month filter applied: month=%s total_rows=%s filtered_rows=%s",
+            ym,
+            filter_result.original_rows,
+            filter_result.filtered_rows,
+        )
+
     if facts_df.empty:
         LOGGER.info(
-            "Snapshot freeze skipped for %s: %s has 0 rows", ym, facts_path
+            "freeze: month=%s had 0 rows after filter; skipping snapshot", ym
         )
         return SnapshotResult(
             ym=ym,
             out_dir=out_dir,
             skipped=True,
-            skip_reason=f"No rows in {facts_path}",
+            skip_reason=f"month={ym} had 0 rows after filter",
         )
 
-    run_validator(facts_path)
+    if filter_result.filtered_rows > 0:
+        run_validator(filtered_facts_path)
 
     if deltas:
         deltas_path = Path(deltas)
@@ -280,12 +363,14 @@ def freeze_snapshot(
         default_resolved = facts_path.with_name("resolved.csv")
         resolved_path = default_resolved if default_resolved.exists() else None
 
-    resolved_source = resolved_path if resolved_path else facts_path
+    resolved_source = resolved_path if resolved_path else filtered_facts_path
     if resolved_path:
         resolved_df = load_table(resolved_source)
+        resolved_df = _filter_dataframe_by_month(resolved_df, ym)
     else:
         resolved_df = facts_df.copy()
     deltas_df = load_table(deltas_path) if deltas_path else None
+    deltas_df = _filter_dataframe_by_month(deltas_df, ym)
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
@@ -343,7 +428,7 @@ def freeze_snapshot(
     _maybe_write_db(
         ym=ym,
         facts_df=facts_df,
-        resolved_df=load_table(resolved_path) if resolved_path else resolved_df,
+        resolved_df=resolved_df,
         deltas_df=deltas_df,
         manifest=manifest,
         facts_out=resolved_parquet,
