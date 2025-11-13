@@ -1381,15 +1381,37 @@ def _enrich_facts_for_validation(frame: "pd.DataFrame") -> "pd.DataFrame":
         facts["iso3"] = facts["iso3"].fillna("").astype(str).str.upper().str.strip()
 
     # Hazard code normalisation (map labels → registry codes)
+    def _normalise_label_series(series: "pd.Series | None") -> "pd.Series":
+        if series is None:
+            return pd.Series([""] * len(facts), index=facts.index)
+        return (
+            series.fillna("")
+            .astype(str)
+            .str.replace("_", " ", regex=False)
+            .str.replace("-", " ", regex=False)
+            .str.replace(r"\s+", " ", regex=True)
+            .str.lower()
+            .str.strip()
+        )
+
     hazard_label_map: dict[str, str] = {}
+    hazard_code_norm_map: dict[str, str] = {}
+    hazard_codes_set: set[str] = set()
     if not shocks.empty and {"hazard_code", "hazard_label"} <= set(shocks.columns):
         shocks = shocks.copy()
         shocks["hazard_code"] = shocks["hazard_code"].astype(str).str.upper().str.strip()
-        shocks["hazard_label_norm"] = shocks["hazard_label"].astype(str).str.lower().str.strip()
+        hazard_codes_set = set(shocks["hazard_code"].tolist())
+        label_norm = _normalise_label_series(shocks["hazard_label"])
         hazard_label_map = {
-            row.hazard_label_norm: row.hazard_code
-            for row in shocks.itertuples(index=False)
-            if row.hazard_label_norm
+            norm: code
+            for norm, code in zip(label_norm, shocks["hazard_code"])
+            if norm
+        }
+        code_norm = _normalise_label_series(shocks["hazard_code"])
+        hazard_code_norm_map = {
+            norm: code
+            for norm, code in zip(code_norm, shocks["hazard_code"])
+            if norm
         }
 
     if "hazard_code" not in facts.columns:
@@ -1397,26 +1419,37 @@ def _enrich_facts_for_validation(frame: "pd.DataFrame") -> "pd.DataFrame":
     else:
         facts["hazard_code"] = facts["hazard_code"].fillna("").astype(str)
 
-    candidate_labels = []
+    candidate_labels: list[pd.Series] = []
     if "shock_type" in facts.columns:
-        candidate_labels.append(facts["shock_type"].fillna("").astype(str))
+        candidate_labels.append(_normalise_label_series(facts["shock_type"]))
     if "hazard_label" in facts.columns:
-        candidate_labels.append(facts["hazard_label"].fillna("").astype(str))
-    candidate_labels.append(facts["hazard_code"].fillna("").astype(str))
+        candidate_labels.append(_normalise_label_series(facts["hazard_label"]))
+    candidate_labels.append(_normalise_label_series(facts["hazard_code"]))
 
-    hazard_codes = shocks["hazard_code"].astype(str).str.upper().unique().tolist() if not shocks.empty else []
-    hazard_codes_set = set(hazard_codes)
+    mapped = pd.Series([""] * len(facts), index=facts.index)
+    if hazard_label_map:
+        for series in candidate_labels:
+            lookup = series.map(hazard_label_map).fillna("")
+            mapped = mapped.where(mapped != "", lookup)
+    if hazard_code_norm_map:
+        for series in candidate_labels:
+            lookup = series.map(hazard_code_norm_map).fillna("")
+            mapped = mapped.where(mapped != "", lookup)
+
+    emdat_fallback = {"flood": "FL", "drought": "DR", "tropical cyclone": "TC"}
+    for series in candidate_labels:
+        lookup = series.map(emdat_fallback).fillna("")
+        mapped = mapped.where(mapped != "", lookup)
 
     facts["hazard_code"] = facts["hazard_code"].astype(str).str.upper().str.strip()
-    if hazard_label_map:
-        missing_mask = facts["hazard_code"].eq("") | ~facts["hazard_code"].isin(hazard_codes_set)
-        if missing_mask.any():
-            mapped = pd.Series([""] * len(facts), index=facts.index)
-            for series in candidate_labels:
-                lookup = series.astype(str).str.lower().str.strip().map(hazard_label_map)
-                mapped = mapped.where(mapped != "", lookup.fillna(""))
-            fill_mask = missing_mask & mapped.ne("")
-            facts.loc[fill_mask, "hazard_code"] = mapped.loc[fill_mask]
+    missing_mask = facts["hazard_code"].eq("")
+    if hazard_codes_set:
+        missing_mask = missing_mask | ~facts["hazard_code"].isin(hazard_codes_set)
+    if mapped.notna().any():
+        fill_values = mapped.astype(str).str.upper().str.strip()
+        fill_mask = missing_mask & fill_values.ne("")
+        if fill_mask.any():
+            facts.loc[fill_mask, "hazard_code"] = fill_values.loc[fill_mask]
 
     facts["hazard_code"] = facts["hazard_code"].fillna("").astype(str).str.upper()
 
