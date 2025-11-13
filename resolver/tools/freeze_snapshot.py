@@ -231,6 +231,12 @@ def run_validator(facts_path: Path) -> None:
     stdout_text = res.stdout or ""
     stderr_text = res.stderr or ""
 
+    def _tail(text: str, lines: int = 200) -> str:
+        return "\n".join(text.splitlines()[-lines:]).strip()
+
+    stdout_tail = _tail(stdout_text)
+    stderr_tail = _tail(stderr_text)
+
     stdout_path.write_text(stdout_text, encoding="utf-8")
     stderr_path.write_text(stderr_text, encoding="utf-8")
     try:
@@ -242,7 +248,6 @@ def run_validator(facts_path: Path) -> None:
         LOGGER.error("Failed to persist validator diagnostics:\n%s", traceback.format_exc())
 
     if res.returncode != 0:
-        tail = "\n".join(stderr_text.splitlines()[-200:]).strip()
 
         snapshot_md_parts: List[str] = []
         try:
@@ -255,9 +260,16 @@ def run_validator(facts_path: Path) -> None:
             df = None
         else:
             try:
-                head_md = df.head(5).to_markdown(index=False)
+                head_df = df.head(5)
+                try:
+                    head_md = head_df.to_markdown(index=False)
+                except Exception:
+                    head_md = head_df.to_string(index=False)
             except Exception:
-                head_md = f"(Failed to render markdown table: {traceback.format_exc().strip()})"
+                head_md = (
+                    "(Unable to render CSV sample: "
+                    f"{traceback.format_exc().strip()})"
+                )
 
             snapshot_md_parts.append(
                 f"**Validated file:** `{facts_path.resolve()}`"
@@ -301,14 +313,17 @@ def run_validator(facts_path: Path) -> None:
                 else:
                     snapshot_md_parts.append("(No required columns configured)")
 
-        tail_block = f"```\n{tail or '(no stderr)'}\n```"
+        stderr_block = f"```\n{stderr_tail or '(no stderr)'}\n```"
+        stdout_block = f"```\n{stdout_tail or '(no stdout)'}\n```"
         snapshot_md = "\n".join(snapshot_md_parts) or "(No snapshot data captured)"
 
-        _append_to_summary("Preview validator stderr (tail)", tail_block)
+        _append_to_summary("Preview validator stdout (tail)", stdout_block)
+        _append_to_summary("Preview validator stderr (tail)", stderr_block)
         _append_to_summary("facts_for_month.csv (validated) snapshot", snapshot_md)
 
         try:
-            _append_to_repo_summary("Preview validator stderr (tail)", tail_block)
+            _append_to_repo_summary("Preview validator stdout (tail)", stdout_block)
+            _append_to_repo_summary("Preview validator stderr (tail)", stderr_block)
             _append_to_repo_summary(
                 "facts_for_month.csv (validated) snapshot", snapshot_md
             )
@@ -317,15 +332,20 @@ def run_validator(facts_path: Path) -> None:
                 "Could not append validator diagnostics to repo summary", exc_info=True
             )
 
-        if tail:
-            LOGGER.error("Preview validator failed:\n%s", tail)
-        else:
-            LOGGER.error("Preview validator failed (no stderr captured)")
+        if stderr_tail:
+            LOGGER.error("Preview validator stderr tail:\n%s", stderr_tail)
+        if stdout_tail:
+            LOGGER.error("Preview validator stdout tail:\n%s", stdout_tail)
+        if not stderr_tail and not stdout_tail:
+            LOGGER.error("Preview validator failed without stdout/stderr output")
 
         exc_msg_lines: List[str] = ["validate_facts failed"]
-        if tail:
+        if stderr_tail:
             exc_msg_lines.append("---- validator stderr (tail) ----")
-            exc_msg_lines.append(tail)
+            exc_msg_lines.append(stderr_tail)
+        if stdout_tail:
+            exc_msg_lines.append("---- validator stdout (tail) ----")
+            exc_msg_lines.append(stdout_tail)
         if snapshot_md_parts:
             exc_msg_lines.append("---- facts_for_month.csv snapshot ----")
             for line in snapshot_md_parts[:8]:

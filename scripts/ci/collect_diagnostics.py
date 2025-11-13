@@ -110,10 +110,27 @@ def _collect_additional_diagnostics() -> str:
         lines.append(summary_text.strip())
 
     candidate_files = [
-        Path("diagnostics") / "ingestion" / "preview_validator.stderr.txt",
-        Path("diagnostics") / "ingestion" / "export_preview" / "validator_stderr.txt",
+        (
+            Path("diagnostics") / "ingestion" / "preview_validator.stderr.txt",
+            "Preview validator stderr (tail)",
+        ),
+        (
+            Path("diagnostics") / "ingestion" / "export_preview" / "validator_stderr.txt",
+            "Preview validator stderr (tail)",
+        ),
+        (
+            Path("diagnostics") / "ingestion" / "preview_validator.stdout.txt",
+            "Preview validator stdout (tail)",
+        ),
+        (
+            Path("diagnostics")
+            / "ingestion"
+            / "export_preview"
+            / "validator_stdout.txt",
+            "Preview validator stdout (tail)",
+        ),
     ]
-    for candidate in candidate_files:
+    for candidate, title in candidate_files:
         try:
             if not candidate.exists():
                 continue
@@ -126,7 +143,9 @@ def _collect_additional_diagnostics() -> str:
             continue
         _ensure_heading()
         lines.append(
-            "\n\n### Preview validator stderr (tail)\n\n```\n"
+            "\n\n### "
+            + title
+            + "\n\n```\n"
             + tail
             + "\n```"
         )
