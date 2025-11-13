@@ -388,7 +388,6 @@ from resolver.common import (
     df_schema,
 )
 from resolver.helpers.series_semantics import normalize_series_semantics
-from resolver.tools._facts_preview import enforce_canonical_preview
 
 try:
     import yaml
@@ -2921,7 +2920,6 @@ def export_facts(
 
     facts = _enrich_facts_for_validation(facts)
 
-    preview_facts = enforce_canonical_preview(facts)
     for col in ["as_of_date", "publication_date"]:
         if col in facts.columns:
             parsed = pd.to_datetime(facts[col], errors="coerce")
@@ -2953,6 +2951,7 @@ def export_facts(
 
     # === PATCH START: export_facts finalize before write ===
     facts = _ensure_export_contract(facts)
+    preview_facts = facts.copy()
 
     try:
         dist = facts["series_semantics"].fillna("").value_counts(dropna=False).to_dict()
