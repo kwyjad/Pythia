@@ -654,6 +654,11 @@ def freeze_snapshot(
     base_out_dir = Path(outdir)
     out_dir = base_out_dir / ym
 
+    try:
+        preview_df = load_table(facts_path)
+    except Exception:
+        preview_df = None
+
     filter_result = _filter_preview_to_month(facts_path, ym)
     filtered_facts_path = filter_result.filtered_path
     facts_df = filter_result.filtered_df
@@ -740,7 +745,6 @@ def freeze_snapshot(
     else:
         resolved_df = facts_df.copy()
     deltas_df = load_table(deltas_path) if deltas_path else None
-    deltas_df = _filter_dataframe_by_month(deltas_df, ym)
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
@@ -799,6 +803,7 @@ def freeze_snapshot(
         ym=ym,
         facts_df=facts_df,
         validated_facts_df=validated_facts_df,
+        preview_df=preview_df,
         resolved_df=resolved_df,
         deltas_df=deltas_df,
         manifest=manifest,
@@ -889,6 +894,7 @@ def _maybe_write_db(
     ym: str,
     facts_df: "pd.DataFrame",
     validated_facts_df: "pd.DataFrame | None",
+    preview_df: "pd.DataFrame | None",
     resolved_df: "pd.DataFrame | None",
     deltas_df: "pd.DataFrame | None",
     manifest: Dict[str, Any],
@@ -947,6 +953,8 @@ def _maybe_write_db(
 
         if deltas_df is not None and not deltas_df.empty:
             deltas_source = deltas_df.copy()
+        elif preview_df is not None and not preview_df.empty:
+            deltas_source = preview_df.copy()
         else:
             base_source = (
                 validated_facts_df
@@ -954,6 +962,8 @@ def _maybe_write_db(
                 else facts_df
             )
             deltas_source = base_source.copy() if base_source is not None and not base_source.empty else None
+
+        preview_rows = int(len(preview_df)) if preview_df is not None else 0
 
         deltas_input_rows = int(len(deltas_source)) if deltas_source is not None else 0
 
@@ -1040,15 +1050,16 @@ def _maybe_write_db(
             LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
         if deltas_result is not None:
             written = int(deltas_result.rows_delta)
+            input_rows = int(deltas_result.rows_in)
             msg = (
-                f"Wrote {written} facts_deltas rows (input={int(deltas_result.rows_in)}) for month {ym}"
+                f"Wrote {written} facts_deltas rows (input={input_rows}) from preview rows={preview_rows or input_rows}"
             )
         elif deltas_input_rows:
             msg = (
-                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows} for month {ym}"
+                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows}"
             )
         else:
-            msg = f"No facts_deltas rows available for month {ym}; skipped DB write"
+            msg = "No facts_deltas rows available; skipped DB write"
 
         _append_to_summary(summary_title, msg)
         _append_to_repo_summary(summary_title, msg)
