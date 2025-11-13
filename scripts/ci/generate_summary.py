@@ -84,6 +84,25 @@ def _read_tail(path: Path, limit: int = 4000) -> str:
     return data
 
 
+def _append_preview_validator_section(lines: list[str]) -> None:
+    diag_dir = Path("diagnostics/ingestion/export_preview")
+    stderr_path = diag_dir / "validator_stderr.txt"
+    stdout_path = diag_dir / "validator_stdout.txt"
+    if not stderr_path.exists() and not stdout_path.exists():
+        return
+
+    lines.extend(["### Preview Validator Output", ""])
+
+    if stderr_path.exists():
+        stderr_tail = _read_tail(stderr_path, 1000).strip()
+        lines.extend(["**stderr (tail):**", "```", stderr_tail or "<empty>", "```", ""])
+    else:
+        lines.extend(["**stderr:** (missing)", ""])
+
+    if stdout_path.exists():
+        stdout_tail = _read_tail(stdout_path, 1000).strip()
+        lines.extend(["**stdout (tail):**", "```", stdout_tail or "<empty>", "```", ""])
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True, help="Path to write SUMMARY.md")
@@ -201,6 +220,7 @@ def main() -> int:
         content_lines.extend(["## EMDAT Probe Sample", *sample_lines, ""])
     if preview_status:
         content_lines.extend(["## Export Preview", *preview_status, ""])
+    _append_preview_validator_section(content_lines)
     content_lines.extend(sections)
     if sections:
         content_lines.append("")

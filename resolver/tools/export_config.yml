@@ -226,7 +226,7 @@ sources:
         from: pa
         ops: [to_number]
     filters:
-      - keep_if_not_null: [iso3, ym, shock_type, pa, as_of_date]
+      - keep_if_not_null: [iso3, ym, hazard_code, value, as_of_date]
       - keep_if_positive: [value]
     dedupe:
       keys: [iso3, ym, hazard_code, metric]
