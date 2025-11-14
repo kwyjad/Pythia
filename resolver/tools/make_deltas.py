@@ -2,10 +2,13 @@
 """Build monthly new PIN/PA deltas from resolved totals."""
 
 import argparse
+import json
 import math
 import re
+import subprocess
+import sys
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Sequence
 
 import pandas as pd
 
@@ -42,7 +45,35 @@ OUTPUT_BASE_COLUMNS = [
 YM_REGEX = re.compile(r"^\d{4}-\d{2}$")
 
 
-def parse_args() -> argparse.Namespace:
+def _append_cli_error_to_summary(section: str, exc: Exception, context: Dict[str, object]) -> None:
+    """Best-effort append of CLI errors to the ingestion summary."""
+
+    if not sys.executable:
+        return
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.ci.append_error_to_summary",
+                "--section",
+                section,
+                "--error-type",
+                type(exc).__name__,
+                "--message",
+                str(exc),
+                "--context",
+                json.dumps(context, sort_keys=True),
+            ],
+            check=False,
+        )
+    except Exception:
+        # Never mask the original CLI failure.
+        pass
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate monthly new deltas from resolved totals.")
     parser.add_argument("--resolved", required=True, help="Path to resolved.csv")
     parser.add_argument("--out", required=True, help="Path to write deltas CSV")
@@ -52,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional number of trailing months to keep (e.g., 24)",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def validate_columns(df: pd.DataFrame) -> None:
@@ -133,8 +164,8 @@ def process_group(group: pd.DataFrame) -> List[dict]:
     return records
 
 
-def main() -> None:
-    args = parse_args()
+def _main_impl(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
 
     resolved_path = Path(args.resolved)
     out_path = Path(args.out)
@@ -193,6 +224,18 @@ def main() -> None:
     output_df.to_csv(out_path, index=False)
 
     print(f"✅ Wrote {len(output_df)} monthly deltas to {out_path}")
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    try:
+        _main_impl(argv)
+    except Exception as exc:
+        context: Dict[str, object] = {
+            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "exception_class": type(exc).__name__,
+        }
+        _append_cli_error_to_summary("Make Deltas — CLI error", exc, context)
+        raise
 
 
 if __name__ == "__main__":
