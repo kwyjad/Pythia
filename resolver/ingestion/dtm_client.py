@@ -170,6 +170,26 @@ STATIC_MINIMAL_FALLBACK: List[Tuple[str, str]] = [
 STATIC_DATA_DIR = pathlib.Path(__file__).resolve().parent / "static"
 STATIC_ISO3_PATH = STATIC_DATA_DIR / "iso3_master.csv"
 
+# Canonical staging schema columns; kept in sync with SCHEMAS.md and
+# resolver/ingestion/dtm/normalize.py expectations.  This constant is imported
+# by fast tests to validate headers without instantiating the full client.
+CANONICAL_COLUMNS: List[str] = [
+    "iso3",
+    "admin1",
+    "admin2",
+    "admin3",
+    "as_of_date",
+    "ym",
+    "metric",
+    "value",
+    "semantics",
+    "unit",
+    "source",
+    "hazard_code",
+    "hazard_label",
+    "hazard_class",
+]
+
 CANONICAL_HEADERS = [
     "source",
     "country_iso3",
@@ -332,6 +352,7 @@ _DATE_CANDIDATES: list[str] = [
 DATE_CANDIDATES: Tuple[str, ...] = tuple(_DATE_CANDIDATES)
 
 __all__ = [
+    "CANONICAL_COLUMNS",
     "CANONICAL_HEADERS",
     "SERIES_INCIDENT",
     "SERIES_CUMULATIVE",
