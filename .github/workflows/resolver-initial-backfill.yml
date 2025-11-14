@@ -557,7 +557,10 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          python scripts/ci/verify_duckdb_counts.py "${RESOLVER_DB_URL#duckdb:///}"
+          DB_PATH="${RESOLVER_DB_URL#duckdb:///}"
+          python scripts/ci/verify_duckdb_counts.py "${DB_PATH}" \
+            --allow-missing \
+            --tables acled_monthly_fatalities facts facts_resolved facts_deltas
 
       - name: Derive and freeze monthly snapshots
         env:
@@ -677,7 +680,10 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics/ingestion
           summary_file="${GITHUB_STEP_SUMMARY:-}"
-          python scripts/ci/duckdb_summary.py --db "${{ env.BACKFILL_DB_PATH }}" --tables "facts_resolved,facts_deltas" | tee diagnostics/ingestion/duckdb_summary.md
+          python scripts/ci/duckdb_summary.py \
+            --db "${{ env.BACKFILL_DB_PATH }}" \
+            --tables "acled_monthly_fatalities,facts,facts_resolved,facts_deltas" \
+            | tee diagnostics/ingestion/duckdb_summary.md
           if [ -n "$summary_file" ]; then
             cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
           fi

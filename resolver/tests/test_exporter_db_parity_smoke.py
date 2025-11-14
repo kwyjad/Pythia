@@ -310,10 +310,76 @@ def test_verify_duckdb_counts_writes_markdown(monkeypatch, tmp_path):
     contents = counts_path.read_text(encoding="utf-8")
     assert "## DuckDB write verification" in contents
     assert "facts_resolved rows: 2" in contents
+    assert "| table | rows |" in contents
+    assert "| facts_resolved | 2 |" in contents
     assert "| idmc |" in contents
+    assert "Missing tables" not in contents
 
     combined_summary = summary_file.read_text(encoding="utf-8")
     assert combined_summary.count("DuckDB write verification") == 1
 
     summary_echo = step_summary.read_text(encoding="utf-8")
     assert "DuckDB write verification" in summary_echo
+
+
+def test_verify_duckdb_counts_allow_missing(monkeypatch, tmp_path):
+    import duckdb
+
+    db_path = tmp_path / "resolver.duckdb"
+    con = duckdb.connect(db_path)
+    con.execute(
+        "CREATE TABLE acled_monthly_fatalities (country TEXT, deaths INTEGER)"
+    )
+    con.execute(
+        "INSERT INTO acled_monthly_fatalities VALUES (?, ?)",
+        ("KEN", 12),
+    )
+    con.close()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(repo_root))
+    monkeypatch.chdir(tmp_path)
+
+    diagnostics = Path("diagnostics/ingestion")
+    diagnostics.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
+
+    rc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.ci.verify_duckdb_counts",
+            str(db_path),
+            "--tables",
+            "acled_monthly_fatalities",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rc.returncode == 1
+    assert "ERROR:" in rc.stdout
+
+    rc_allow = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.ci.verify_duckdb_counts",
+            str(db_path),
+            "--tables",
+            "acled_monthly_fatalities",
+            "--allow-missing",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rc_allow.returncode == 0
+    assert "WARNING:" in rc_allow.stdout
+
+    counts_path = diagnostics / "duckdb_counts.md"
+    assert counts_path.exists()
+    contents = counts_path.read_text(encoding="utf-8")
+    assert "facts_resolved rows: 0" in contents
+    assert "| acled_monthly_fatalities | 1 |" in contents
+    assert "**Missing tables**" in contents
+    assert "- facts_resolved" in contents
