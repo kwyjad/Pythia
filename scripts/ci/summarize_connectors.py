@@ -32,6 +32,7 @@ EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semant
 IDMC_WHY_ZERO_PATH = Path("diagnostics/ingestion/idmc/why_zero.json")
 ACLED_ZERO_ROWS_PATH = Path("diagnostics/ingestion/acled/zero_rows.json")
 ACLED_RUN_INFO_PATH = Path("diagnostics/ingestion/acled_client/acled_client_run.json")
+ACLED_HTTP_DIAG_PATH = Path("diagnostics/ingestion/acled/http_diag.json")
 
 
 def _normalise_duckdb_path(raw: str) -> str | None:
@@ -199,6 +200,15 @@ def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
     except (TypeError, json.JSONDecodeError):
         return None
     return data if isinstance(data, Mapping) else None
+
+
+def _load_acled_http_diag() -> Dict[str, Any] | None:
+    if not ACLED_HTTP_DIAG_PATH.exists():
+        return None
+    try:
+        return json.loads(ACLED_HTTP_DIAG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _candidate_run_paths(raw_entry: Mapping[str, Any], connector_id: str) -> List[Path]:
@@ -860,6 +870,7 @@ def _render_acled_http_section(entries: Sequence[Mapping[str, Any]]) -> List[str
 
     counts = _ensure_dict(acled_entry.get("counts"))
     http_block = _ensure_dict(acled_entry.get("http"))
+    acled_http_diag = _load_acled_http_diag()
     run_info = _safe_load_json(ACLED_RUN_INFO_PATH) or {}
     zero_info = _safe_load_json(ACLED_ZERO_ROWS_PATH) or {}
 
@@ -870,6 +881,8 @@ def _render_acled_http_section(entries: Sequence[Mapping[str, Any]]) -> List[str
     http_status = run_info.get("http_status")
     if http_status in (None, ""):
         http_status = http_block.get("last_status")
+    if acled_http_diag and acled_http_diag.get("status") not in (None, ""):
+        http_status = acled_http_diag.get("status")
 
     base_url = run_info.get("base_url") or zero_info.get("base_url")
     window = _ensure_dict(run_info.get("window")) or _ensure_dict(zero_info)
@@ -890,6 +903,9 @@ def _render_acled_http_section(entries: Sequence[Mapping[str, Any]]) -> List[str
 
     if base_url:
         lines.append(f"- **Base URL:** `{base_url}`")
+
+    if acled_http_diag and acled_http_diag.get("url"):
+        lines.append(f"- **Last API URL:** `{acled_http_diag.get('url')}`")
 
     if params_keys:
         if isinstance(params_keys, (list, tuple, set)):
