@@ -6,7 +6,7 @@ auth:
   type: query
   params:
     email: "${ACLED_USERNAME}"
-    key: "${ACLED_PASSWORD}"
+    key: "${ACLED_ACCESS_KEY}"
 query:
   event_date_where: "between"
   format: "json"

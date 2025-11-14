@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from resolver.ingestion.diagnostics_emitter import append_jsonl, finalize_run, start_run
+
 from scripts.ci import summarize_connectors
 
 
@@ -131,3 +133,57 @@ def test_summary_renders_per_country_table(tmp_path: Path, monkeypatch: pytest.M
     assert "## DTM per-country results" in content
     assert "| SSD | admin0 | CountryISO3" in content
     assert "no_country_match" in content
+
+
+def test_summary_includes_acled_http_diagnostics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    diagnostics_dir = tmp_path / "diagnostics" / "ingestion"
+    report_path = diagnostics_dir / "connectors_report.jsonl"
+    summary_path = diagnostics_dir / "summary.md"
+
+    ctx = start_run("acled_client", "real")
+    result = finalize_run(ctx, status="ok", counts={"fetched": 0, "normalized": 0, "written": 0})
+    append_jsonl(report_path, result)
+
+    acled_client_dir = diagnostics_dir / "acled_client"
+    acled_client_dir.mkdir(parents=True, exist_ok=True)
+    run_info = {
+        "rows_fetched": 0,
+        "rows_normalized": 0,
+        "rows_written": 0,
+        "http_status": 200,
+        "base_url": "https://api.acleddata.com/acled/read",
+        "window": {"start": "2024-01-01", "end": "2024-03-31"},
+        "params_keys": ["event_date", "event_date_where", "format", "limit", "page"],
+    }
+    (acled_client_dir / "acled_client_run.json").write_text(
+        json.dumps(run_info, indent=2),
+        encoding="utf-8",
+    )
+
+    zero_rows_src = Path(__file__).resolve().parent / "fixtures" / "ingestion" / "acled_zero_rows.json"
+    zero_rows_dst = diagnostics_dir / "acled" / "zero_rows.json"
+    zero_rows_dst.parent.mkdir(parents=True, exist_ok=True)
+    zero_rows_dst.write_text(zero_rows_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    mapping_dir = diagnostics_dir / "export_preview"
+    mapping_dir.mkdir(parents=True, exist_ok=True)
+    mapping_record = {
+        "file": "resolver/staging/acled.csv",
+        "matched": False,
+        "reasons": {"regex_miss": True},
+    }
+    (mapping_dir / "mapping_debug.jsonl").write_text(json.dumps(mapping_record) + "\n", encoding="utf-8")
+
+    rc = summarize_connectors.main(
+        ["--report", str(report_path), "--out", str(summary_path)]
+    )
+    assert rc == 0
+
+    content = summary_path.read_text(encoding="utf-8")
+    assert "## ACLED HTTP diagnostics" in content
+    assert "Rows fetched:** 0" in content
+    assert "Last HTTP status:** 200" in content
+    assert "Base URL:** `https://api.acleddata.com/acled/read`" in content
+    assert "Zero rows reason:" in content
+    assert "ACLED export note" in content
