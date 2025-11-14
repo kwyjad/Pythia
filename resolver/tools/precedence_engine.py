@@ -21,9 +21,9 @@ Rules implemented (from policy A2):
   - Always carry citation fields and definition_text
 """
 
-import argparse, os, sys, json, datetime as dt
+import argparse, os, sys, json, datetime as dt, subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Sequence
 from zoneinfo import ZoneInfo
 
 try:
@@ -291,12 +291,42 @@ def _pct_diff(a: float, b: float) -> float:
     denom = max(abs(a), abs(b))
     return abs(a - b) / denom * 100.0
 
-def main():
+def _append_cli_error_to_summary(section: str, exc: Exception, context: Dict[str, Any]) -> None:
+    """Best-effort append of CLI errors to the ingestion summary."""
+
+    if not sys.executable:
+        return
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.ci.append_error_to_summary",
+                "--section",
+                section,
+                "--error-type",
+                type(exc).__name__,
+                "--message",
+                str(exc),
+                "--context",
+                json.dumps(context, sort_keys=True),
+            ],
+            check=False,
+        )
+    except Exception:
+        # Never let diagnostics failures mask the real error.
+        pass
+
+
+def _main_impl(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--facts", required=True, help="Path to canonical facts CSV/Parquet")
-    ap.add_argument("--cutoff", required=True, help="Cut-off date YYYY-MM-DD (Europe/Istanbul at 23:59)")
+    ap.add_argument(
+        "--cutoff", required=True, help="Cut-off date YYYY-MM-DD (Europe/Istanbul at 23:59)"
+    )
     ap.add_argument("--outdir", default=str(EXPORTS), help="Output directory")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     facts_path = Path(args.facts)
     outdir = Path(args.outdir)
@@ -444,6 +474,19 @@ def main():
     print(f" - {csv_out}")
     print(f" - {jl_out}")
     print(f" - {diag_out}")
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    try:
+        _main_impl(argv)
+    except Exception as exc:
+        context: Dict[str, Any] = {
+            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "exception_class": type(exc).__name__,
+        }
+        _append_cli_error_to_summary("Precedence Engine — CLI error", exc, context)
+        raise
+
 
 if __name__ == "__main__":
     main()

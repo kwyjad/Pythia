@@ -158,3 +158,12 @@ The companion `idmc_to_duckdb` helper accepts both `--db-url` and the shorter
 `--db` flag. Empty stock exports no longer trigger a hard failure—the command
 emits a warning, keeps the success banner (`✅ Wrote …`), and returns `0` so it
 can run as part of automated pipelines focused on flow updates.
+
+All downstream tools invoked by `resolver-initial-backfill` now report
+failures directly into `diagnostics/ingestion/summary.md`. Each CLI wraps its
+entrypoint with a best-effort call to `scripts.ci.append_error_to_summary`,
+emitting sections such as “Export Facts — DB write”, “Precedence Engine — CLI
+error”, or “Verify DuckDB Counts — error” that include the DB URL, relevant
+row counts, and the exception details. The next failing run therefore points to
+the precise step and context that needs attention without digging through the
+workflow logs.

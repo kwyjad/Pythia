@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
+import subprocess
 import sys
 from typing import Iterable, Sequence, Tuple
 
@@ -20,6 +22,31 @@ MARKDOWN_HEADER = "## DuckDB write verification\n\n"
 COUNTS_PATH = pathlib.Path("diagnostics/ingestion/duckdb_counts.md")
 SUMMARY_PATH = pathlib.Path("diagnostics/ingestion/summary.md")
 DEFAULT_TABLES: Tuple[str, ...] = ("facts_resolved",)
+
+
+def _append_error_to_summary(section: str, exc: Exception, context: dict[str, object]) -> None:
+    if not sys.executable:
+        return
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.ci.append_error_to_summary",
+                "--section",
+                section,
+                "--error-type",
+                type(exc).__name__,
+                "--message",
+                str(exc),
+                "--context",
+                json.dumps(context, sort_keys=True),
+            ],
+            check=False,
+        )
+    except Exception:
+        pass
 
 
 def _normalise_db_path(db_url: str) -> str:
@@ -99,7 +126,7 @@ def _append_to_step_summary(markdown: str) -> None:
             handle.write(markdown)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main_impl(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify DuckDB facts_resolved counts and append diagnostics summaries."
     )
@@ -188,6 +215,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         for table in missing_tables:
             print(f"WARNING: Table '{table}' not found in {db_path}")
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return _main_impl(argv)
+    except Exception as exc:
+        context = {
+            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "exception_class": type(exc).__name__,
+            "resolver_db_url": os.environ.get("RESOLVER_DB_URL", ""),
+        }
+        _append_error_to_summary("Verify DuckDB Counts — error", exc, context)
+        raise
 
 
 if __name__ == "__main__":
