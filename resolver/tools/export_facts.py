@@ -32,6 +32,7 @@ import numbers
 import os
 import re
 import sys
+import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2142,6 +2143,13 @@ def _maybe_write_to_db(
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
+        _append_db_error_to_summary(
+            section="Export Facts — DB write",
+            exc=exc,
+            db_url=canonical_url or candidate,
+            facts_resolved=resolved_prepared,
+            facts_deltas=deltas_prepared,
+        )
         error_block = _render_db_error_markdown("Export Facts", diagnostics_payload, exc)
         _append_ingestion_summary_block(error_block)
         if fail_on_error:
@@ -2154,6 +2162,53 @@ def _maybe_write_to_db(
         pass
 
     return stats
+
+
+def _append_db_error_to_summary(
+    *,
+    section: str,
+    exc: Exception,
+    db_url: str | None,
+    facts_resolved: "Optional[pd.DataFrame]",
+    facts_deltas: "Optional[pd.DataFrame]",
+) -> None:
+    """Best-effort append of DuckDB errors to the ingestion summary."""
+
+    if not sys.executable:
+        return
+
+    def _safe_len(frame: "Optional[pd.DataFrame]") -> int:
+        try:
+            return int(len(frame)) if frame is not None else 0
+        except Exception:
+            return 0
+
+    context = {
+        "db_url": db_url or "",
+        "exception_class": type(exc).__name__,
+        "facts_resolved_rows": _safe_len(facts_resolved),
+        "facts_deltas_rows": _safe_len(facts_deltas),
+    }
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.ci.append_error_to_summary",
+                "--section",
+                section,
+                "--error-type",
+                type(exc).__name__,
+                "--message",
+                str(exc),
+                "--context",
+                json.dumps(context, sort_keys=True),
+            ],
+            check=False,
+        )
+    except Exception:
+        LOGGER.debug("Failed to append DuckDB error summary", exc_info=True)
 
 
 @dataclass

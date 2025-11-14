@@ -33,6 +33,9 @@ IDMC_WHY_ZERO_PATH = Path("diagnostics/ingestion/idmc/why_zero.json")
 ACLED_ZERO_ROWS_PATH = Path("diagnostics/ingestion/acled/zero_rows.json")
 ACLED_RUN_INFO_PATH = Path("diagnostics/ingestion/acled_client/acled_client_run.json")
 ACLED_HTTP_DIAG_PATH = Path("diagnostics/ingestion/acled/http_diag.json")
+DUCKDB_SUMMARY_PATH = Path("diagnostics/ingestion/duckdb_summary.md")
+EXPORT_DB_DIAG_PATH = Path("diagnostics/ingestion/export_facts_db.json")
+FREEZE_DB_DIAG_PATH = Path("diagnostics/ingestion/freeze_db.json")
 
 
 def _normalise_duckdb_path(raw: str) -> str | None:
@@ -200,6 +203,15 @@ def _safe_load_json(path: Path) -> Mapping[str, Any] | None:
     except (TypeError, json.JSONDecodeError):
         return None
     return data if isinstance(data, Mapping) else None
+
+
+def _safe_read_markdown(path: Path) -> List[str]:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return []
+    lines = [line.rstrip() for line in text.splitlines()]
+    return [line for line in lines if line is not None]
 
 
 def _load_acled_http_diag() -> Dict[str, Any] | None:
@@ -683,6 +695,82 @@ def _render_duckdb_section(duckdb_info: Mapping[str, Any] | None) -> List[str]:
 
     lines.append("")
     return lines
+
+
+def _render_downstream_db_summary(
+    export_payload: Mapping[str, Any] | None,
+    freeze_payload: Mapping[str, Any] | None,
+) -> List[str]:
+    export_info = dict(export_payload or {})
+    freeze_info = dict(freeze_payload or {})
+
+    if not export_info and not freeze_info:
+        return []
+
+    lines = ["### DuckDB — downstream writes (summary)", ""]
+
+    if export_info:
+        lines.append("- **Export Facts:**")
+        lines.extend(
+            _format_downstream_block(
+                export_info,
+                keys=(
+                    ("db_url", "db_url"),
+                    ("facts_resolved_rows", "facts_resolved rows"),
+                    ("facts_deltas_rows", "facts_deltas rows"),
+                    ("facts_resolved_semantics", "facts_resolved semantics"),
+                    ("facts_deltas_semantics", "facts_deltas semantics"),
+                ),
+            )
+        )
+
+    if freeze_info:
+        if export_info:
+            lines.append("")
+        month_label = freeze_info.get("month")
+        header = "- **Freeze Snapshot:**" if not month_label else f"- **Freeze Snapshot ({month_label}):**"
+        lines.append(header)
+        lines.extend(
+            _format_downstream_block(
+                freeze_info,
+                keys=(
+                    ("db_url", "db_url"),
+                    ("facts_resolved_rows", "facts_resolved rows"),
+                    ("facts_deltas_rows", "facts_deltas rows"),
+                    ("facts_resolved_semantics", "facts_resolved semantics"),
+                    ("facts_deltas_semantics", "facts_deltas semantics"),
+                ),
+            )
+        )
+
+    lines.append("")
+    return lines
+
+
+def _format_downstream_block(
+    payload: Mapping[str, Any],
+    *,
+    keys: Sequence[tuple[str, str]],
+) -> List[str]:
+    formatted: List[str] = []
+    for key, label in keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, (dict, list)):
+            try:
+                rendered = json.dumps(value, sort_keys=True)
+            except Exception:
+                rendered = str(value)
+        else:
+            try:
+                rendered = str(_coerce_int(value)) if isinstance(value, (int, float)) else str(value)
+            except Exception:
+                rendered = str(value)
+        formatted.append(f"  - {label}: {rendered}")
+    if not formatted:
+        formatted.append("  - (no details recorded)")
+    return formatted
 
 
 def _format_meta_cell(
@@ -2339,6 +2427,21 @@ def build_markdown(
     if duckdb_lines:
         lines.append("")
         lines.extend(duckdb_lines)
+
+    downstream_summary_lines = _render_downstream_db_summary(
+        _safe_load_json(EXPORT_DB_DIAG_PATH),
+        _safe_load_json(FREEZE_DB_DIAG_PATH),
+    )
+    if downstream_summary_lines:
+        lines.append("")
+        lines.extend(downstream_summary_lines)
+
+    duckdb_md_lines = _safe_read_markdown(DUCKDB_SUMMARY_PATH)
+    if duckdb_md_lines:
+        lines.append("")
+        lines.append("## DuckDB (from derive-freeze)")
+        lines.append("")
+        lines.extend(duckdb_md_lines)
 
     if mapping_debug_records:
         lines.append("")
