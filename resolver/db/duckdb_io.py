@@ -73,9 +73,11 @@ from resolver.db.conn_shared import (
     get_shared_duckdb_conn,
 )
 from resolver.db.schema_keys import (
+    ACLED_MONTHLY_FATALITIES_KEY_COLUMNS,
     EMDAT_PA_KEY_COLUMNS,
     FACTS_DELTAS_KEY_COLUMNS,
     FACTS_RESOLVED_KEY_COLUMNS,
+    UX_ACLED_MONTHLY_FATALITIES,
     UX_DELTAS,
     UX_RESOLVED,
 )
@@ -94,6 +96,11 @@ SCHEMA_PATH = ROOT / "db" / "schema.sql"
 FACTS_RESOLVED_KEY = FACTS_RESOLVED_KEY_COLUMNS  # Backwards compatibility
 FACTS_DELTAS_KEY = FACTS_DELTAS_KEY_COLUMNS
 TABLE_KEY_SPECS: dict[str, dict[str, object]] = {
+    "acled_monthly_fatalities": {
+        "columns": ACLED_MONTHLY_FATALITIES_KEY_COLUMNS,
+        "primary": "pk_acled_monthly_fatalities",
+        "unique": UX_ACLED_MONTHLY_FATALITIES,
+    },
     "facts_resolved": {
         "columns": FACTS_RESOLVED_KEY_COLUMNS,
         "primary": "pk_facts_resolved_series",
@@ -1397,6 +1404,18 @@ def init_schema(
                 publication_date VARCHAR,
                 source_id VARCHAR,
                 disno_first VARCHAR
+            )
+            """,
+        ),
+        (
+            "acled_monthly_fatalities",
+            """
+            CREATE TABLE IF NOT EXISTS acled_monthly_fatalities (
+                iso3 VARCHAR NOT NULL,
+                month DATE NOT NULL,
+                fatalities BIGINT NOT NULL,
+                source VARCHAR NOT NULL,
+                updated_at TIMESTAMP NOT NULL
             )
             """,
         ),

@@ -8,6 +8,24 @@ search order, fallback behaviour, and how to clean up legacy duplicates lives in
 [`ingestion/config_paths.md`](ingestion/config_paths.md). Refer to it when adding a new connector or migrating an
 existing configuration.
 
+## ACLED monthly fatalities
+
+The ACLED connector now ships with a thin OAuth-aware client that exchanges either a refresh token or username/password for an
+access token and caches it until expiry. Debug logs emit token expiry metadata without exposing the secret values so you can
+verify refresh flows locally without leaking credentials.【F:resolver/ingestion/acled_auth.py†L1-L164】 The live client requests
+5,000-row pages from `https://api.acleddata.com/acled/read`, retries on rate limits and transient 5xx responses, and returns a
+`pandas.DataFrame` where `event_date` is normalised to UTC and `fatalities` is coerced to integers. The companion
+`monthly_fatalities` helper aggregates those events into ISO3/month buckets, annotates the rows with `source="ACLED"`, and logs
+head/tail previews so reviewers can spot-check totals quickly.【F:resolver/ingestion/acled_client.py†L908-L1052】 Running the
+client from the CLI is as simple as:
+
+```bash
+python -c "from resolver.ingestion.acled_client import ACLEDClient; print(ACLEDClient().monthly_fatalities('2024-01-01','2024-02-29').head())"
+```
+
+The printed frame includes `iso3`, `month`, `fatalities`, `source`, and `updated_at` (UTC). Pass `countries=["KEN","ETH"]` to
+restrict the aggregation to a subset of ISO3 codes when debugging region-specific pipelines.
+
 ## EM-DAT (PA)
 
 The EM-DAT integration ships with a small GraphQL client and an offline stub so fast tests never hit the

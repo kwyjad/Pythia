@@ -54,6 +54,25 @@ so monthly totals replace prior values instead of duplicating them. The CLI
 prints the canonical success line `✅ Wrote …` once DuckDB confirms the merge
 completed.
 
+## ACLED monthly fatalities quick write
+
+Use the ACLED aggregation client to pull a short window and upsert it into
+DuckDB:
+
+```bash
+python -m resolver.cli.acled_to_duckdb \
+  --start 2024-01-01 --end 2024-03-31 \
+  --db data/resolver.duckdb
+```
+
+The command reuses the live ACLED client introduced for the ingestion layer and
+writes the grouped output to the `acled_monthly_fatalities` table keyed by
+`(iso3, month)`. Pass `--countries KEN,ETH` to limit the aggregation window or
+`--dry-run` to preview the DataFrame without mutating the database. Re-running
+the command is idempotent: the upsert replaces matching keys instead of
+creating duplicate rows and the success banner preserves the canonical
+`✅ Wrote …` prefix for tests.
+
 ## Write the IDMC flow data
 
 Run the Makefile target to export IDMC flow rows and upsert them into DuckDB:

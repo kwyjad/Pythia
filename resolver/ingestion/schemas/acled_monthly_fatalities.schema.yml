@@ -1,0 +1,17 @@
+version: 1
+name: acled_monthly_fatalities
+description: Monthly ACLED fatalities aggregated by ISO3 country code.
+columns:
+  - name: iso3
+    type: string
+  - name: month
+    type: date
+  - name: fatalities
+    type: integer
+  - name: source
+    type: string
+  - name: updated_at
+    type: timestamp
+primary_key:
+  - iso3
+  - month

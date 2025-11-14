@@ -32,3 +32,16 @@ participants:
   aggregate: "sum"
 publisher: "ACLED"
 source_type: "other"
+
+client:
+  base_url: "https://api.acleddata.com"
+  endpoint: "/acled/read"
+  timeout: 30
+  max_retries: 4
+  page_size: 5000
+  fields:
+    - event_date
+    - iso3
+    - country
+    - fatalities
+  use_stub: false

@@ -464,6 +464,31 @@ entities:
         type: string
         required: true
         description: Lowest EM-DAT disaster identifier contributing to the month bucket.
+  db.acled_monthly_fatalities:
+    kind: database
+    description: Monthly ACLED fatalities aggregated by ISO3.
+    keys: [iso3, month]
+    columns:
+      - name: iso3
+        type: string
+        required: true
+        description: ISO 3166-1 alpha-3 country code.
+      - name: month
+        type: date
+        required: true
+        description: Month bucket in YYYY-MM-01 format.
+      - name: fatalities
+        type: integer
+        required: true
+        description: Total fatalities reported by ACLED for the month window.
+      - name: source
+        type: string
+        required: true
+        description: Constant `ACLED` source tag.
+      - name: updated_at
+        type: timestamp
+        required: true
+        description: UTC timestamp when the aggregation was generated.
   db.snapshots:
     kind: database
     allow_extra_columns: false
