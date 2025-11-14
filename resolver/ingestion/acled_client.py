@@ -69,7 +69,7 @@ CANONICAL_HEADERS = [
     "ingested_at",
 ]
 
-SERIES_SEMANTICS = "incident"
+SERIES_SEMANTICS = "new"
 DOC_TITLE = "ACLED monthly aggregation"
 CONFLICT_METRIC = "fatalities_battle_month"
 

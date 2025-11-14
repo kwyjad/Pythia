@@ -1589,6 +1589,142 @@ DELTAS_DB_NUMERIC = {
 DELTAS_DB_DEFAULTS = {"series_semantics": "new"}
 
 LOGGER = get_logger(__name__)
+
+INGESTION_DIAGNOSTICS_DIR = Path("diagnostics") / "ingestion"
+EXPORT_DB_DIAGNOSTICS_PATH = INGESTION_DIAGNOSTICS_DIR / "export_facts_db.json"
+INGESTION_SUMMARY_PATH = INGESTION_DIAGNOSTICS_DIR / "summary.md"
+
+
+def _column_histogram(
+    frame: "pd.DataFrame | None", column: str
+) -> Dict[str, int]:
+    if frame is None or frame.empty or column not in frame.columns:
+        return {}
+    series = frame[column]
+    try:
+        normalized = series.fillna("").astype(str).str.strip()
+    except Exception:
+        normalized = pd.Series(series).fillna("").astype(str).str.strip()
+    counts = normalized.value_counts(dropna=False).to_dict()
+    histogram: Dict[str, int] = {}
+    for key, value in counts.items():
+        histogram[str(key)] = int(value)
+    return dict(sorted(histogram.items(), key=lambda item: item[0]))
+
+
+def _series_semantics_histogram(frame: "pd.DataFrame | None") -> Dict[str, int]:
+    hist = _column_histogram(frame, "series_semantics")
+    if hist:
+        return hist
+    return _column_histogram(frame, "semantics")
+
+
+def _format_histogram(histogram: Dict[str, int]) -> str:
+    if not histogram:
+        return "(none)"
+    parts: List[str] = []
+    for key in sorted(histogram):
+        label = "(blank)" if key == "" else key
+        parts.append(f"{label}: {histogram[key]}")
+    return ", ".join(parts)
+
+
+def _append_ingestion_summary_block(block: str) -> None:
+    try:
+        INGESTION_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        needs_leading_newline = False
+        try:
+            needs_leading_newline = (
+                INGESTION_SUMMARY_PATH.exists()
+                and INGESTION_SUMMARY_PATH.stat().st_size > 0
+            )
+        except OSError:
+            needs_leading_newline = False
+        with INGESTION_SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            if needs_leading_newline:
+                handle.write("\n\n")
+            handle.write(block)
+            if not block.endswith("\n"):
+                handle.write("\n")
+    except OSError:
+        LOGGER.debug("Could not append ingestion summary", exc_info=True)
+
+
+def _render_export_db_success_markdown(payload: Mapping[str, Any]) -> str:
+    db_url = str(payload.get("db_url") or "")
+    db_path = str(payload.get("db_path") or "")
+    lines = ["## DuckDB — Export Facts write", ""]
+    if db_url:
+        lines.append(f"- **DB URL:** `{db_url}`")
+    else:
+        lines.append("- **DB URL:** (empty)")
+    if db_path:
+        lines.append(f"- **DB path:** `{db_path}`")
+    lines.append(
+        f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_resolved semantics:** "
+        + _format_histogram(payload.get("facts_resolved_semantics", {}))
+    )
+    lines.append(
+        "- **facts_resolved metrics:** "
+        + _format_histogram(payload.get("facts_resolved_metrics", {}))
+    )
+    lines.append(
+        f"- **facts_deltas rows:** {int(payload.get('facts_deltas_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_deltas semantics:** "
+        + _format_histogram(payload.get("facts_deltas_semantics", {}))
+    )
+    lines.append(
+        "- **facts_deltas metrics:** "
+        + _format_histogram(payload.get("facts_deltas_metrics", {}))
+    )
+    return "\n".join(lines)
+
+
+def _render_db_error_markdown(
+    step: str, payload: Mapping[str, Any], exc: Exception
+) -> str:
+    db_url = str(payload.get("db_url") or "")
+    db_path = str(payload.get("db_path") or "")
+    error_type = type(exc).__name__
+    error_message = " ".join(str(exc).split()) or "(empty)"
+    lines = ["## DB Write Diagnostics", "", f"- **Step:** {step}"]
+    if db_url:
+        lines.append(f"- **DB URL:** `{db_url}`")
+    if db_path:
+        lines.append(f"- **DB path:** `{db_path}`")
+    lines.append(f"- **Error type:** `{error_type}`")
+    lines.append(f"- **Error message:** {error_message}")
+    lines.append(
+        f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_resolved semantics:** "
+        + _format_histogram(payload.get("facts_resolved_semantics", {}))
+    )
+    lines.append(
+        "- **facts_resolved metrics:** "
+        + _format_histogram(payload.get("facts_resolved_metrics", {}))
+    )
+    lines.append(
+        f"- **facts_deltas rows:** {int(payload.get('facts_deltas_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_deltas semantics:** "
+        + _format_histogram(payload.get("facts_deltas_semantics", {}))
+    )
+    lines.append(
+        "- **facts_deltas metrics:** "
+        + _format_histogram(payload.get("facts_deltas_metrics", {}))
+    )
+    return "\n".join(lines)
 def _to_month(series: "pd.Series") -> "pd.Series":
     dates = pd.to_datetime(series, errors="coerce")
     formatted = dates.dt.strftime("%Y-%m")
@@ -1927,6 +2063,27 @@ def _maybe_write_to_db(
         LOGGER.debug("DuckDB write skipped: no prepared frames to persist")
         return {}
 
+    resolved_rows = int(len(resolved_prepared)) if resolved_prepared is not None else 0
+    deltas_rows = int(len(deltas_prepared)) if deltas_prepared is not None else 0
+    diagnostics_payload: Dict[str, Any] = {
+        "db_url": canonical_url or candidate,
+        "db_path": canonical_path or "",
+        "facts_resolved_rows": resolved_rows,
+        "facts_deltas_rows": deltas_rows,
+        "facts_resolved_semantics": _series_semantics_histogram(resolved_prepared),
+        "facts_deltas_semantics": _series_semantics_histogram(deltas_prepared),
+        "facts_resolved_metrics": _column_histogram(resolved_prepared, "metric"),
+        "facts_deltas_metrics": _column_histogram(deltas_prepared, "metric"),
+    }
+    try:
+        INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+        with EXPORT_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
+    except OSError:
+        LOGGER.debug("Could not write export DB diagnostics", exc_info=True)
+
+    success_block = _render_export_db_success_markdown(diagnostics_payload)
+
     conn = None
     stats: Dict[str, Dict[str, Any]] = {}
     try:
@@ -1981,9 +2138,12 @@ def _maybe_write_to_db(
             LOGGER.info("DuckDB facts_deltas rows written: %s", written_deltas.rows_delta)
             stats["facts_deltas"] = written_deltas.to_dict()
         LOGGER.info("DuckDB write complete")
+        _append_ingestion_summary_block(success_block)
     except Exception as exc:  # pragma: no cover - non fatal for exporter
         LOGGER.error("DuckDB write skipped: %s", exc, exc_info=True)
         print(f"Warning: DuckDB write skipped ({exc}).", file=sys.stderr)
+        error_block = _render_db_error_markdown("Export Facts", diagnostics_payload, exc)
+        _append_ingestion_summary_block(error_block)
         if fail_on_error:
             raise DuckDBWriteError(
                 f"DuckDB write failed: {exc}", db_url=canonical_url
