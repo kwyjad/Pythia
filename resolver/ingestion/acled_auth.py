@@ -6,21 +6,22 @@ import json
 import logging
 import os
 import time
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-_TOKEN_URL = "https://acleddata.com/oauth/token"
-_HEADERS = {"Content-Type": "application/x-www-form-urlencoded"}
-_CLIENT_ID = "acled"
+import requests
+
+OAUTH_TOKEN_URL = "https://acleddata.com/oauth/token"
+OAUTH_CLIENT_ID = "acled"
 _MIN_TTL = 300  # seconds
 
 _LOG = logging.getLogger("resolver.ingestion.acled.auth")
 
-_cached_token: Optional[str] = None
-_cached_expiry: Optional[int] = None
-_cached_refresh_token: Optional[str] = None
+_CACHE: Dict[str, Optional[str | int]] = {
+    "access_token": None,
+    "refresh_token": None,
+    "expiry": None,
+}
 
 
 def _b64url_decode(value: str) -> bytes:
@@ -59,53 +60,76 @@ def _describe_token(token: Optional[str], expiry: Optional[int]) -> Dict[str, Op
     }
 
 
-def _post(data: Dict[str, str]) -> Dict[str, str]:
-    body = urllib.parse.urlencode(data).encode("utf-8")
-    request = urllib.request.Request(_TOKEN_URL, data=body, headers=_HEADERS, method="POST")
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = response.read().decode("utf-8")
-    return json.loads(payload)
+def _log_token_http(resp: requests.Response, *, flow: str) -> None:
+    try:
+        body = resp.text[:400]
+    except Exception:  # pragma: no cover - defensive logging guard
+        body = "<unable to read body>"
 
-
-def _exchange_refresh(refresh_token: str) -> Dict[str, str]:
-    return _post(
-        {
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-            "client_id": _CLIENT_ID,
-        }
+    _LOG.debug(
+        "ACLED OAuth HTTP response",
+        extra={
+            "flow": flow,
+            "status": resp.status_code,
+            "url": OAUTH_TOKEN_URL,
+            "body_snippet": body,
+        },
     )
 
 
 def _password_grant(username: str, password: str) -> Dict[str, str]:
-    return _post(
-        {
-            "username": username,
-            "password": password,
-            "grant_type": "password",
-            "client_id": _CLIENT_ID,
-        }
+    data = {
+        "username": username,
+        "password": password,
+        "grant_type": "password",
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    resp = requests.post(
+        OAUTH_TOKEN_URL,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
     )
+    _log_token_http(resp, flow="password")
+    if resp.status_code != 200:
+        raise RuntimeError(f"ACLED OAuth password grant failed: status={resp.status_code}")
+    return resp.json()
+
+
+def _refresh_grant(refresh_token: str) -> Dict[str, str]:
+    data = {
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    resp = requests.post(
+        OAUTH_TOKEN_URL,
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+    _log_token_http(resp, flow="refresh")
+    if resp.status_code != 200:
+        raise RuntimeError(f"ACLED OAuth refresh grant failed: status={resp.status_code}")
+    return resp.json()
 
 
 def _set_cache(token: str, refresh_token: Optional[str]) -> None:
-    global _cached_token, _cached_expiry, _cached_refresh_token
-
-    _cached_token = token
-    _cached_expiry = _jwt_exp(token)
+    _CACHE["access_token"] = token
+    _CACHE["expiry"] = _jwt_exp(token)
     if refresh_token:
-        _cached_refresh_token = refresh_token
+        _CACHE["refresh_token"] = refresh_token
 
 
 def _resolve_refresh_token() -> Optional[str]:
-    global _cached_refresh_token
-
-    if _cached_refresh_token:
-        return _cached_refresh_token
+    cached = _CACHE.get("refresh_token")
+    if cached:
+        return cached
     refresh_from_env = os.environ.get("ACLED_REFRESH_TOKEN")
     if refresh_from_env:
-        _cached_refresh_token = refresh_from_env
-    return _cached_refresh_token
+        _CACHE["refresh_token"] = refresh_from_env
+        return refresh_from_env
+    return None
 
 
 def _resolve_password_creds() -> Optional[Dict[str, str]]:
@@ -124,55 +148,57 @@ def _resolve_existing_token() -> Optional[str]:
         token = raw.strip()
         if not token:
             continue
-        expiry = _jwt_exp(token)
-        if expiry is None or _jwt_is_valid(token):
-            if name == "ACLED_TOKEN":
-                os.environ.setdefault("ACLED_ACCESS_TOKEN", token)
-            return token
+        if name == "ACLED_TOKEN":
+            os.environ.setdefault("ACLED_ACCESS_TOKEN", token)
+        return token
     return None
 
 
 def get_access_token() -> str:
     """Return a valid ACLED access token, refreshing credentials when required."""
 
-    global _cached_token, _cached_expiry
-
     now = int(time.time())
-    if _cached_token and _cached_expiry and (_cached_expiry - now) > _MIN_TTL:
+    cached_token = _CACHE.get("access_token")
+    cached_expiry = _CACHE.get("expiry")
+    if cached_token and isinstance(cached_expiry, int) and (cached_expiry - now) > _MIN_TTL:
         _LOG.debug(
             "Using cached ACLED access token",
-            extra=_describe_token(_cached_token, _cached_expiry),
+            extra=_describe_token(cached_token, cached_expiry),
         )
-        return _cached_token
+        return cached_token
 
     existing = _resolve_existing_token()
     if existing:
+        expiry = _jwt_exp(existing)
         _LOG.debug(
             "Using environment-provided ACLED token",
-            extra=_describe_token(existing, _jwt_exp(existing)),
+            extra=_describe_token(existing, expiry),
         )
         _set_cache(existing, os.environ.get("ACLED_REFRESH_TOKEN"))
         return existing
 
     refresh_token = _resolve_refresh_token()
     if refresh_token:
-        _LOG.debug("Attempting ACLED refresh grant", extra={"token_length": len(refresh_token)})
+        _LOG.debug(
+            "Attempting ACLED refresh grant",
+            extra={"token_length": len(refresh_token)},
+        )
         try:
-            tokens = _exchange_refresh(refresh_token)
+            tokens = _refresh_grant(refresh_token)
         except Exception as exc:  # pragma: no cover - network stack errors
             _LOG.debug("ACLED refresh grant failed", extra={"error": str(exc)})
         else:
             access_token = tokens.get("access_token")
             if not access_token:
                 raise RuntimeError("ACLED refresh grant response missing access_token")
-            new_refresh = tokens.get("refresh_token")
-            if new_refresh:
-                os.environ["ACLED_REFRESH_TOKEN"] = new_refresh
+            new_refresh = tokens.get("refresh_token") or refresh_token
             os.environ["ACLED_ACCESS_TOKEN"] = access_token
-            _set_cache(access_token, tokens.get("refresh_token") or refresh_token)
+            os.environ["ACLED_REFRESH_TOKEN"] = new_refresh
+            _set_cache(access_token, new_refresh)
+            expiry = _CACHE.get("expiry") if isinstance(_CACHE.get("expiry"), int) else _jwt_exp(access_token)
             _LOG.debug(
                 "Obtained ACLED access token via refresh",
-                extra=_describe_token(access_token, _cached_expiry),
+                extra=_describe_token(access_token, expiry if isinstance(expiry, int) else None),
             )
             return access_token
 
@@ -183,20 +209,21 @@ def get_access_token() -> str:
         access_token = tokens.get("access_token")
         if not access_token:
             raise RuntimeError("ACLED password grant response missing access_token")
-        new_refresh = tokens.get("refresh_token")
-        if new_refresh:
-            os.environ["ACLED_REFRESH_TOKEN"] = new_refresh
+        refresh = tokens.get("refresh_token")
+        if refresh:
+            os.environ["ACLED_REFRESH_TOKEN"] = refresh
         os.environ["ACLED_ACCESS_TOKEN"] = access_token
-        _set_cache(access_token, new_refresh)
+        _set_cache(access_token, refresh)
+        expiry = _CACHE.get("expiry") if isinstance(_CACHE.get("expiry"), int) else _jwt_exp(access_token)
         _LOG.debug(
             "Obtained ACLED access token via password grant",
-            extra=_describe_token(access_token, _cached_expiry),
+            extra=_describe_token(access_token, expiry if isinstance(expiry, int) else None),
         )
         return access_token
 
     raise RuntimeError(
-        "ACLED authentication failed: provide ACLED_REFRESH_TOKEN or "
-        "ACLED_USERNAME/ACLED_PASSWORD credentials."
+        "ACLED authentication failed: set ACLED_ACCESS_TOKEN/ACLED_TOKEN or "
+        "ACLED_REFRESH_TOKEN or ACLED_USERNAME/ACLED_PASSWORD."
     )
 
 

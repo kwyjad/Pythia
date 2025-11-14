@@ -1,15 +1,10 @@
 enabled: true
-base_url: "https://api.acleddata.com/acled/read"
+base_url: "https://acleddata.com/api/acled/read"
 window_days: 450
 limit: 5000
-auth:
-  type: query
-  params:
-    email: "${ACLED_USERNAME}"
-    key: "${ACLED_ACCESS_KEY}"
 query:
-  event_date_where: "between"
-  format: "json"
+  event_date_where: "BETWEEN"
+  _format: "json"
   limit: 5000
 token: ""
 keys:
@@ -34,8 +29,8 @@ publisher: "ACLED"
 source_type: "other"
 
 client:
-  base_url: "https://api.acleddata.com"
-  endpoint: "/acled/read"
+  base_url: "https://acleddata.com/api/acled/read"
+  endpoint: ""
   timeout: 30
   max_retries: 4
   page_size: 5000

@@ -20,7 +20,6 @@ import yaml
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from . import acled_auth
-from .acled_auth import get_auth_header
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion.utils.io import (
     render_with_context,
@@ -35,6 +34,10 @@ CONFIG = ROOT / "ingestion" / "config" / "acled.yml"
 DIAGNOSTICS_ROOT = ROOT / "diagnostics" / "ingestion"
 ACLED_DIAGNOSTICS = DIAGNOSTICS_ROOT / "acled"
 ACLED_RUN_PATH = DIAGNOSTICS_ROOT / "acled_client" / "acled_client_run.json"
+ACLED_HTTP_DIAG_PATH = ACLED_DIAGNOSTICS / "http_diag.json"
+
+ACLED_API_BASE_URL = "https://acleddata.com/api/acled/read"
+ACLED_DEFAULT_FORMAT = "json"
 
 COUNTRIES = DATA / "countries.csv"
 SHOCKS = DATA / "shocks.csv"
@@ -136,6 +139,29 @@ def _clear_zero_rows_diagnostic() -> None:
         return
     except OSError:
         pass
+
+
+def _clear_http_diagnostic() -> None:
+    try:
+        ACLED_HTTP_DIAG_PATH.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+
+def _write_acled_http_diag(*, status: int, url: str) -> None:
+    try:
+        ACLED_HTTP_DIAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:  # pragma: no cover - diagnostics best effort
+        return
+    if ACLED_HTTP_DIAG_PATH.exists():
+        return
+    payload = {"status": int(status), "url": str(url)}
+    try:
+        ACLED_HTTP_DIAG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:  # pragma: no cover - diagnostics best effort
+        return
 
 
 def _write_zero_rows_diagnostic(meta: Dict[str, Any], reason: str) -> None:
@@ -378,7 +404,7 @@ def _apply_query_auth(params: Dict[str, Any], config: Dict[str, Any]) -> None:
 
 
 def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dict[str, Any]]:
-    base_url = os.getenv("ACLED_BASE", config.get("base_url", "https://api.acleddata.com"))
+    base_url = os.getenv("ACLED_BASE", config.get("base_url", ACLED_API_BASE_URL))
 
     window_days = int(os.getenv("ACLED_WINDOW_DAYS", config.get("window_days", 450)))
     limit = int(os.getenv("ACLED_MAX_LIMIT", config.get("limit", 1000)))
@@ -397,13 +423,11 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
     }
 
     params.update(_resolve_query_params(config))
-    params.setdefault("format", "json")
+    params.setdefault("_format", ACLED_DEFAULT_FORMAT)
     params["event_date"] = f"{start_date:%Y-%m-%d}|{end_date:%Y-%m-%d}"
-    params.setdefault("event_date_where", "between")
+    params.setdefault("event_date_where", "BETWEEN")
     params.setdefault("limit", limit)
     params.setdefault("page", 1)
-
-    _apply_query_auth(params, config)
 
     token_keys = {"access_token", "key", "token", "email", "username", "password"}
     source_url = _build_source_url(base_url, params, token_keys)
@@ -417,11 +441,15 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
         "http_status": None,
     }
 
+    _clear_http_diagnostic()
     records: List[Dict[str, Any]] = []
     session = requests.Session()
-    headers = get_auth_header()
+    access_token = acled_auth.get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
 
     page = 1
+    last_status: Optional[int] = None
+    last_url: Optional[str] = None
     while True:
         if max_pages is not None and page > max_pages:
             dbg(f"max pages reached at page {page}")
@@ -430,12 +458,15 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
         dbg(f"fetching page {page}")
         resp = session.get(base_url, params=params, headers=headers, timeout=60)
         status = resp.status_code
+        last_status = status
+        last_url = str(resp.url)
+        _write_acled_http_diag(status=status, url=str(resp.url))
         diagnostics_meta["http_status"] = status
         LOG.info(
             "ACLED HTTP request",
             extra={
                 "status": status,
-                "base_url": safe_base_url,
+                "url": f"{safe_base_url}?...",
                 "page": page,
                 "window": f"{diagnostics_meta['start']}→{diagnostics_meta['end']}",
                 "params_keys": sorted(params.keys()),
@@ -450,14 +481,11 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
                 "ACLED HTTP error",
                 extra={
                     "status": status,
-                    "base_url": safe_base_url,
+                    "url": f"{safe_base_url}?...",
                     "body_snippet": body_snippet,
                 },
             )
-            raise RuntimeError(
-                f"ACLED request failed with status={status}; "
-                "check ACLED_USERNAME / ACLED_ACCESS_KEY credentials and query window."
-            )
+            raise RuntimeError(f"ACLED read failed: HTTP {status}")
         try:
             payload = resp.json() or {}
         except ValueError as exc:  # pragma: no cover - JSON decode errors
@@ -467,7 +495,7 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
                 body_snippet = "<unreadable response>"
             LOG.error(
                 "ACLED JSON decode error",
-                extra={"status": status, "base_url": safe_base_url, "body_snippet": body_snippet},
+                extra={"status": status, "url": f"{safe_base_url}?...", "body_snippet": body_snippet},
             )
             raise RuntimeError("ACLED payload was not valid JSON") from exc
         if not isinstance(payload, dict):
@@ -495,6 +523,15 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
                 raise RuntimeError("ACLED payload missing expected fields (data/results/count)")
             dbg(f"ACLED connectivity ok; payload keys include: {', '.join(present)}")
         data = payload.get("data") or payload.get("results") or []
+        if payload.get("status") not in (200, "200", None):
+            LOG.error(
+                "ACLED API returned non-200 status in JSON",
+                extra={
+                    "json_status": payload.get("status"),
+                    "url": f"{safe_base_url}?...",
+                },
+            )
+            raise RuntimeError(f"ACLED read failed: JSON status={payload.get('status')}")
         if not isinstance(data, list):
             LOG.error(
                 "ACLED payload unexpected structure",
@@ -506,7 +543,7 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
                 "ACLED returned zero rows",
                 extra={
                     "status": status,
-                    "base_url": safe_base_url,
+                    "url": f"{safe_base_url}?...",
                     "params_keys": sorted(params.keys()),
                     "window": f"{diagnostics_meta['start']}→{diagnostics_meta['end']}",
                 },
@@ -523,7 +560,7 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
         page += 1
 
     diagnostics_meta["rows_fetched"] = len(records)
-    diagnostics_meta["source_url"] = source_url
+    diagnostics_meta["source_url"] = last_url or source_url
     if records:
         _clear_zero_rows_diagnostic()
     else:
@@ -1064,8 +1101,8 @@ class ACLEDClient:
     def __init__(
         self,
         *,
-        base_url: str = "https://api.acleddata.com",
-        endpoint: str = "/acled/read",
+        base_url: str = ACLED_API_BASE_URL,
+        endpoint: str = "",
         timeout: int = 30,
         max_retries: int = 4,
         page_size: int = 5000,
@@ -1074,11 +1111,11 @@ class ACLEDClient:
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         cfg = config or load_config().get("client", {})
-        self.base_url = str(cfg.get("base_url", base_url)).rstrip("/") or base_url.rstrip("/")
-        raw_endpoint = str(cfg.get("endpoint", endpoint))
-        if not raw_endpoint.startswith("/"):
-            raw_endpoint = f"/{raw_endpoint}"
-        self.endpoint = raw_endpoint
+        raw_base = str(cfg.get("base_url", base_url)).strip() or base_url
+        raw_endpoint = str(cfg.get("endpoint", endpoint)).strip()
+        if raw_endpoint:
+            raw_base = f"{raw_base.rstrip('/')}/{raw_endpoint.lstrip('/')}"
+        self.base_url = raw_base.rstrip("/") or ACLED_API_BASE_URL
         self.timeout = int(cfg.get("timeout", timeout))
         self.max_retries = int(cfg.get("max_retries", max_retries))
         self.page_size = int(cfg.get("page_size", page_size))
@@ -1089,18 +1126,38 @@ class ACLEDClient:
             self.use_stub = True
         self.session = session or requests.Session()
         self.logger = logger or LOG
+        self._token = acled_auth.get_access_token()
 
     # ------------------------------------------------------------------
     # Network helpers
     # ------------------------------------------------------------------
-    def _request(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+
+    def _fetch_page(self, params: Dict[str, Any]) -> Dict[str, Any]:
         attempt = 0
-        headers = {"Authorization": f"Bearer {acled_auth.get_access_token()}"}
+        params = dict(params)
+        if "_format" not in params:
+            params["_format"] = ACLED_DEFAULT_FORMAT
+        url = self.base_url
         while True:
             attempt += 1
             start = time.time()
-            response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+            response = self.session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
             elapsed = time.time() - start
+            _write_acled_http_diag(status=response.status_code, url=str(response.url))
+            safe_url = f"{_safe_base_url(url)}?..."
+            self.logger.info(
+                "ACLED HTTP request",
+                extra={
+                    "url": safe_url,
+                    "status": response.status_code,
+                    "params_keys": sorted(params.keys()),
+                },
+            )
             if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
                 try:
@@ -1130,12 +1187,29 @@ class ACLEDClient:
                     response.raise_for_status()
                 time.sleep(wait)
                 continue
+            if response.status_code != 200:
+                snippet = ""
+                try:
+                    snippet = response.text[:500]
+                except Exception:  # pragma: no cover - defensive
+                    snippet = "<unreadable response>"
+                self.logger.error(
+                    "ACLED HTTP error",
+                    extra={"status": response.status_code, "url": safe_url, "body_snippet": snippet},
+                )
+                raise RuntimeError(f"ACLED read failed: HTTP {response.status_code}")
             response.raise_for_status()
             try:
                 payload = response.json()
             except ValueError as exc:  # pragma: no cover - requests already validated status
                 self.logger.debug("ACLED response was not valid JSON", extra={"error": str(exc)})
                 raise RuntimeError("ACLED response was not valid JSON") from exc
+            if payload.get("status") not in (200, "200", None):
+                self.logger.error(
+                    "ACLED API returned non-200 status in JSON",
+                    extra={"json_status": payload.get("status"), "url": safe_url},
+                )
+                raise RuntimeError(f"ACLED read failed: JSON status={payload.get('status')}")
             self.logger.debug(
                 "Fetched ACLED page",
                 extra={
@@ -1169,13 +1243,12 @@ class ACLEDClient:
             countries = [countries]
 
         selected_fields = list(fields or self.fields or self._DEFAULT_FIELDS)
-        url = f"{self.base_url}{self.endpoint}"
         params: Dict[str, Any] = {
             "event_date": f"{start.strftime('%Y-%m-%d')}|{end.strftime('%Y-%m-%d')}",
-            "event_date_where": "between",
+            "event_date_where": "BETWEEN",
             "page": 1,
             "limit": self.page_size,
-            "format": "json",
+            "_format": ACLED_DEFAULT_FORMAT,
             "fields": ",".join(selected_fields),
         }
         if countries:
@@ -1185,7 +1258,7 @@ class ACLEDClient:
         self.logger.debug(
             "Starting ACLED fetch",
             extra={
-                "url": url,
+                "url": self.base_url,
                 "start": start.strftime("%Y-%m-%d"),
                 "end": end.strftime("%Y-%m-%d"),
                 "page_size": self.page_size,
@@ -1198,7 +1271,7 @@ class ACLEDClient:
         page = 1
         while True:
             params["page"] = page
-            payload = self._request(url, params)
+            payload = self._fetch_page(params)
             data = payload.get("data") or payload.get("results") or []
             if not isinstance(data, list):
                 raise RuntimeError("Unexpected ACLED payload structure")

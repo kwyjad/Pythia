@@ -10,14 +10,15 @@ existing configuration.
 
 ## ACLED monthly fatalities
 
-The ACLED connector now ships with a thin OAuth-aware client that exchanges either a refresh token or username/password for an
-access token and caches it until expiry. Debug logs emit token expiry metadata without exposing the secret values so you can
-verify refresh flows locally without leaking credentials.【F:resolver/ingestion/acled_auth.py†L1-L164】 The live client requests
-5,000-row pages from `https://api.acleddata.com/acled/read`, retries on rate limits and transient 5xx responses, and returns a
-`pandas.DataFrame` where `event_date` is normalised to UTC and `fatalities` is coerced to integers. The companion
-`monthly_fatalities` helper aggregates those events into ISO3/month buckets, annotates the rows with `source="ACLED"`, and logs
-head/tail previews so reviewers can spot-check totals quickly.【F:resolver/ingestion/acled_client.py†L908-L1052】 Running the
-client from the CLI is as simple as:
+The ACLED connector uses an OAuth password-or-refresh flow documented by ACLED: it POSTs to
+`https://acleddata.com/oauth/token`, caches the resulting bearer token, and never logs the credential itself—only metadata such
+as expiry—to aid local debugging.【F:resolver/ingestion/acled_auth.py†L1-L167】 The HTTP client calls
+`https://acleddata.com/api/acled/read?_format=json` with the bearer header, retries on 429/5xx responses, and writes the first
+request’s URL/status to `diagnostics/ingestion/acled/http_diag.json` so pipeline summaries can report the last API interaction.
+Successful responses hydrate a `pandas.DataFrame` where `event_date` is normalised to UTC, `fatalities` are coerced to integers,
+and the optional `_format` parameter is enforced; downstream, the `monthly_fatalities` helper groups by ISO3 + month to produce
+staging rows with consistent provenance fields.【F:resolver/ingestion/acled_client.py†L372-L1223】【F:scripts/ci/summarize_connectors.py†L27-L95】
+Running the client from the CLI is as simple as:
 
 ```bash
 python -c "from resolver.ingestion.acled_client import ACLEDClient; print(ACLEDClient().monthly_fatalities('2024-01-01','2024-02-29').head())"
