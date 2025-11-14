@@ -78,6 +78,7 @@ jobs:
       ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      ACLED_ACCESS_KEY: ${{ secrets.ACLED_ACCESS_KEY }}
       DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
       EMDAT_NETWORK: "1"
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}

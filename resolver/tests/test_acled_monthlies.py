@@ -1,5 +1,10 @@
 import datetime as dt
 
+import json
+from pathlib import Path
+
+import pytest
+
 from resolver.ingestion import acled_client
 
 
@@ -109,3 +114,78 @@ def test_acled_monthly_aggregation(monkeypatch):
     uganda_participants = rows_map[("UGA", "CU", "participants", "2023-02")]
     assert uganda_participants["value"] == 200
     assert uganda_participants["unit"] == "persons"
+
+
+def test_fetch_events_raises_on_http_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RESOLVER_START_ISO", "2024-01-01")
+    monkeypatch.setenv("RESOLVER_END_ISO", "2024-01-31")
+    diagnostics_root = tmp_path / "diagnostics" / "ingestion"
+    monkeypatch.setattr(acled_client, "ACLED_DIAGNOSTICS", diagnostics_root / "acled")
+    monkeypatch.setattr(acled_client, "ACLED_RUN_PATH", diagnostics_root / "acled_client" / "acled_client_run.json")
+
+    class StubResponse:
+        status_code = 403
+        headers: dict[str, str] = {}
+        text = "forbidden"
+
+        def json(self) -> dict[str, object]:  # pragma: no cover - defensive
+            return {}
+
+    class StubSession:
+        def get(self, url, params, headers, timeout):  # noqa: D401 - test stub
+            return StubResponse()
+
+    monkeypatch.setattr(acled_client, "get_auth_header", lambda: {})
+    monkeypatch.setattr(acled_client.requests, "Session", lambda: StubSession())
+
+    config = {
+        "query": {},
+        "auth": {"type": "query", "params": {"email": "user@example.com", "key": "test"}},
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        acled_client.fetch_events(config)
+    assert "status=403" in str(excinfo.value)
+
+
+def test_fetch_events_zero_rows_creates_diagnostic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RESOLVER_START_ISO", "2024-01-01")
+    monkeypatch.setenv("RESOLVER_END_ISO", "2024-01-31")
+    diagnostics_root = tmp_path / "diagnostics" / "ingestion"
+    monkeypatch.setattr(acled_client, "ACLED_DIAGNOSTICS", diagnostics_root / "acled")
+    monkeypatch.setattr(acled_client, "ACLED_RUN_PATH", diagnostics_root / "acled_client" / "acled_client_run.json")
+
+    payload = {"data": []}
+
+    class StubResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+        text = json.dumps(payload)
+
+        def json(self) -> dict[str, object]:
+            return payload
+
+    class StubSession:
+        def get(self, url, params, headers, timeout):
+            return StubResponse()
+
+    monkeypatch.setattr(acled_client, "get_auth_header", lambda: {})
+    monkeypatch.setattr(acled_client.requests, "Session", lambda: StubSession())
+
+    config = {
+        "query": {},
+        "auth": {"type": "query", "params": {"email": "user@example.com", "key": "test"}},
+    }
+
+    records, source_url, meta = acled_client.fetch_events(config)
+    assert records == []
+    assert meta["http_status"] == 200
+    assert source_url.startswith("https://api.acleddata.com")
+
+    diag_path = diagnostics_root / "acled" / "zero_rows.json"
+    assert diag_path.is_file(), "expected zero_rows.json diagnostic"
+    diagnostic = json.loads(diag_path.read_text(encoding="utf-8"))
+    assert diagnostic["reason"] == "empty dataframe"
+    assert diagnostic["status"] == 200

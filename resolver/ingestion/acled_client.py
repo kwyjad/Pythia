@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence
 import pandas as pd
 import requests
 import yaml
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from . import acled_auth
 from .acled_auth import get_auth_header
@@ -31,6 +32,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 STAGING = ROOT / "staging"
 CONFIG = ROOT / "ingestion" / "config" / "acled.yml"
+DIAGNOSTICS_ROOT = ROOT / "diagnostics" / "ingestion"
+ACLED_DIAGNOSTICS = DIAGNOSTICS_ROOT / "acled"
+ACLED_RUN_PATH = DIAGNOSTICS_ROOT / "acled_client" / "acled_client_run.json"
 
 COUNTRIES = DATA / "countries.csv"
 SHOCKS = DATA / "shocks.csv"
@@ -110,6 +114,54 @@ def load_registries() -> Tuple[pd.DataFrame, pd.DataFrame]:
     countries = pd.read_csv(COUNTRIES, dtype=str).fillna("")
     shocks = pd.read_csv(SHOCKS, dtype=str).fillna("")
     return countries, shocks
+
+
+def _safe_base_url(url: str) -> str:
+    try:
+        parsed = urlsplit(str(url))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except Exception:
+        return str(url).split("?")[0]
+
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _clear_zero_rows_diagnostic() -> None:
+    try:
+        (ACLED_DIAGNOSTICS / "zero_rows.json").unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+
+def _write_zero_rows_diagnostic(meta: Dict[str, Any], reason: str) -> None:
+    payload = {
+        "status": meta.get("http_status"),
+        "params_keys": sorted(set(meta.get("params_keys", []))),
+        "start": meta.get("start"),
+        "end": meta.get("end"),
+        "reason": reason,
+        "base_url": meta.get("base_url"),
+    }
+    _write_json(ACLED_DIAGNOSTICS / "zero_rows.json", payload)
+
+
+def _write_run_summary(meta: Dict[str, Any], *, rows_fetched: int, rows_normalized: int, rows_written: int) -> None:
+    payload = {
+        "rows_fetched": int(rows_fetched),
+        "rows_normalized": int(rows_normalized),
+        "rows_written": int(rows_written),
+        "http_status": meta.get("http_status"),
+        "base_url": meta.get("base_url"),
+        "source_url": meta.get("source_url"),
+        "window": {"start": meta.get("start"), "end": meta.get("end")},
+        "params_keys": sorted(set(meta.get("params_keys", []))),
+    }
+    _write_json(ACLED_RUN_PATH, payload)
 
 
 def _normalise_month(value: Any) -> Optional[str]:
@@ -325,7 +377,7 @@ def _apply_query_auth(params: Dict[str, Any], config: Dict[str, Any]) -> None:
             params[key] = value
 
 
-def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dict[str, Any]]:
     base_url = os.getenv("ACLED_BASE", config.get("base_url", "https://api.acleddata.com"))
 
     window_days = int(os.getenv("ACLED_WINDOW_DAYS", config.get("window_days", 450)))
@@ -355,6 +407,15 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
 
     token_keys = {"access_token", "key", "token", "email", "username", "password"}
     source_url = _build_source_url(base_url, params, token_keys)
+    safe_base_url = _safe_base_url(base_url)
+
+    diagnostics_meta: Dict[str, Any] = {
+        "base_url": safe_base_url,
+        "params_keys": sorted(params.keys()),
+        "start": f"{start_date:%Y-%m-%d}",
+        "end": f"{end_date:%Y-%m-%d}",
+        "http_status": None,
+    }
 
     records: List[Dict[str, Any]] = []
     session = requests.Session()
@@ -368,26 +429,88 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
         params["page"] = page
         dbg(f"fetching page {page}")
         resp = session.get(base_url, params=params, headers=headers, timeout=60)
-        resp.raise_for_status()
+        status = resp.status_code
+        diagnostics_meta["http_status"] = status
+        LOG.info(
+            "ACLED HTTP request",
+            extra={
+                "status": status,
+                "base_url": safe_base_url,
+                "page": page,
+                "window": f"{diagnostics_meta['start']}→{diagnostics_meta['end']}",
+                "params_keys": sorted(params.keys()),
+            },
+        )
+        if status != 200:
+            try:
+                body_snippet = resp.text[:500]
+            except Exception:  # pragma: no cover - defensive fallback
+                body_snippet = "<unreadable response>"
+            LOG.error(
+                "ACLED HTTP error",
+                extra={
+                    "status": status,
+                    "base_url": safe_base_url,
+                    "body_snippet": body_snippet,
+                },
+            )
+            raise RuntimeError(
+                f"ACLED request failed with status={status}; "
+                "check ACLED_USERNAME / ACLED_ACCESS_KEY credentials and query window."
+            )
         try:
             payload = resp.json() or {}
         except ValueError as exc:  # pragma: no cover - JSON decode errors
-            dbg("ACLED payload was not valid JSON")
+            try:
+                body_snippet = resp.text[:500]
+            except Exception:  # pragma: no cover - defensive
+                body_snippet = "<unreadable response>"
+            LOG.error(
+                "ACLED JSON decode error",
+                extra={"status": status, "base_url": safe_base_url, "body_snippet": body_snippet},
+            )
             raise RuntimeError("ACLED payload was not valid JSON") from exc
         if not isinstance(payload, dict):
-            dbg(f"ACLED payload unexpected type: {type(payload)!r}")
+            LOG.error(
+                "ACLED payload unexpected type",
+                extra={"status": status, "type": type(payload).__name__},
+            )
             raise RuntimeError("ACLED payload missing expected fields (data/results/count)")
         if page == 1:
             expected = {"data", "results", "count"}
             present = sorted(key for key in expected if key in payload)
             if not present:
-                dbg(f"ACLED payload missing expected keys; received: {sorted(payload.keys())}")
+                try:
+                    body_snippet = resp.text[:500]
+                except Exception:  # pragma: no cover - defensive
+                    body_snippet = "<unreadable response>"
+                LOG.error(
+                    "ACLED payload missing expected keys",
+                    extra={
+                        "status": status,
+                        "keys": sorted(payload.keys()),
+                        "body_snippet": body_snippet,
+                    },
+                )
                 raise RuntimeError("ACLED payload missing expected fields (data/results/count)")
             dbg(f"ACLED connectivity ok; payload keys include: {', '.join(present)}")
         data = payload.get("data") or payload.get("results") or []
         if not isinstance(data, list):
+            LOG.error(
+                "ACLED payload unexpected structure",
+                extra={"status": status, "data_type": type(data).__name__},
+            )
             raise RuntimeError("Unexpected ACLED payload structure")
         if not data:
+            LOG.warning(
+                "ACLED returned zero rows",
+                extra={
+                    "status": status,
+                    "base_url": safe_base_url,
+                    "params_keys": sorted(params.keys()),
+                    "window": f"{diagnostics_meta['start']}→{diagnostics_meta['end']}",
+                },
+            )
             break
         records.extend(data)
         dbg(f"page {page} returned {len(data)} rows (total={len(records)})")
@@ -399,7 +522,14 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
             break
         page += 1
 
-    return records, source_url
+    diagnostics_meta["rows_fetched"] = len(records)
+    diagnostics_meta["source_url"] = source_url
+    if records:
+        _clear_zero_rows_diagnostic()
+    else:
+        _write_zero_rows_diagnostic(diagnostics_meta, "empty dataframe")
+
+    return records, source_url, diagnostics_meta
 
 
 def _extract_first(record: MutableMapping[str, Any], keys: Sequence[str]) -> Any:
@@ -874,7 +1004,7 @@ def collect_rows() -> List[Dict[str, Any]]:
         os.environ.setdefault("ACLED_ACCESS_TOKEN", legacy_token)
 
     try:
-        records, source_url = fetch_events(config)
+        records, source_url, diagnostics_meta = fetch_events(config)
     except RuntimeError as exc:
         message = f"ACLED auth failed: {exc}"
         if ingestion_mode == "real":
@@ -884,11 +1014,28 @@ def collect_rows() -> List[Dict[str, Any]]:
             return []
         dbg(message)
         return []
-    if not records:
-        return []
     publication_date = date.today().isoformat()
     ingested_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    return _build_rows(records, config, countries, shocks, source_url, publication_date, ingested_at)
+    rows: List[Dict[str, Any]] = []
+    if records:
+        rows = _build_rows(records, config, countries, shocks, source_url, publication_date, ingested_at)
+    else:
+        rows = []
+
+    if not rows and records:
+        diagnostics_meta["rows_fetched"] = len(records)
+        _write_zero_rows_diagnostic(diagnostics_meta, "normalized dataframe empty")
+
+    _write_run_summary(
+        diagnostics_meta,
+        rows_fetched=len(records),
+        rows_normalized=len(rows),
+        rows_written=len(rows),
+    )
+
+    if not rows:
+        return []
+    return rows
 
 
 def _write_header_only(path: Path) -> None:

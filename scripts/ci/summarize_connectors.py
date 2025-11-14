@@ -30,6 +30,8 @@ MISSING_REPORT_SUMMARY = (
 STAGING_EXTENSIONS = {".csv", ".tsv", ".parquet", ".json", ".jsonl"}
 EXPORT_PREVIEW_COLUMNS = ["iso3", "as_of_date", "ym", "metric", "value", "semantics", "source"]
 IDMC_WHY_ZERO_PATH = Path("diagnostics/ingestion/idmc/why_zero.json")
+ACLED_ZERO_ROWS_PATH = Path("diagnostics/ingestion/acled/zero_rows.json")
+ACLED_RUN_INFO_PATH = Path("diagnostics/ingestion/acled_client/acled_client_run.json")
 
 
 def _normalise_duckdb_path(raw: str) -> str | None:
@@ -849,6 +851,61 @@ def _format_reason_histogram(entries: Sequence[Mapping[str, Any]]) -> str:
     limited.sort(key=lambda item: item[0])
     parts = [f"{reason}={count}" for reason, count in limited[:REASON_HISTOGRAM_LIMIT]]
     return ", ".join(parts)
+
+
+def _render_acled_http_section(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+    acled_entry = next((entry for entry in entries if entry.get("connector_id") == "acled_client"), None)
+    if not acled_entry:
+        return []
+
+    counts = _ensure_dict(acled_entry.get("counts"))
+    http_block = _ensure_dict(acled_entry.get("http"))
+    run_info = _safe_load_json(ACLED_RUN_INFO_PATH) or {}
+    zero_info = _safe_load_json(ACLED_ZERO_ROWS_PATH) or {}
+
+    rows_fetched = _coerce_int(counts.get("fetched"))
+    rows_normalized = _coerce_int(counts.get("normalized"))
+    rows_written = _coerce_int(counts.get("written"))
+
+    http_status = run_info.get("http_status")
+    if http_status in (None, ""):
+        http_status = http_block.get("last_status")
+
+    base_url = run_info.get("base_url") or zero_info.get("base_url")
+    window = _ensure_dict(run_info.get("window")) or _ensure_dict(zero_info)
+    params_keys = run_info.get("params_keys") or zero_info.get("params_keys") or []
+
+    lines = ["## ACLED HTTP diagnostics", ""]
+    lines.append(f"- **Rows fetched:** {rows_fetched}")
+    lines.append(f"- **Rows normalized:** {rows_normalized}")
+    lines.append(f"- **Rows written:** {rows_written}")
+
+    if window:
+        start = window.get("start") or "—"
+        end = window.get("end") or window.get("window_end") or "—"
+        lines.append(f"- **Window:** {start} → {end}")
+
+    if http_status not in (None, ""):
+        lines.append(f"- **Last HTTP status:** {http_status}")
+
+    if base_url:
+        lines.append(f"- **Base URL:** `{base_url}`")
+
+    if params_keys:
+        if isinstance(params_keys, (list, tuple, set)):
+            keys = sorted({str(key) for key in params_keys if str(key).strip()})
+            if keys:
+                lines.append(f"- **Query params:** {', '.join(keys)}")
+
+    zero_reason = zero_info.get("reason") or zero_info.get("zero_rows_reason")
+    if zero_reason:
+        start = zero_info.get("start") or window.get("start") if window else None
+        end = zero_info.get("end") or window.get("end") if window else None
+        window_display = " → ".join(part for part in [start or "—", end or "—"])
+        lines.append(f"- **Zero rows reason:** {zero_reason} (window {window_display})")
+
+    lines.append("")
+    return lines
 
 
 def _render_idmc_why_zero(payload: Mapping[str, Any]) -> List[str]:
@@ -2257,6 +2314,11 @@ def build_markdown(
         else:
             lines.append("- **Status:** export summary unavailable")
 
+    acled_section = _render_acled_http_section(sorted_entries)
+    if acled_section:
+        lines.append("")
+        lines.extend(acled_section)
+
     duckdb_lines = _render_duckdb_section(_ensure_dict(export_summary).get("duckdb"))
     if duckdb_lines:
         lines.append("")
@@ -2266,6 +2328,25 @@ def build_markdown(
         lines.append("")
         lines.append("### Export mapping debug")
         lines.append("")
+        acled_note: str | None = None
+        for record in mapping_debug_records:
+            if not isinstance(record, Mapping):
+                continue
+            file_path = str(record.get("file") or "")
+            if not file_path.endswith("acled.csv"):
+                continue
+            if record.get("matched"):
+                continue
+            reasons = record.get("reasons")
+            if isinstance(reasons, Mapping) and reasons.get("regex_miss"):
+                acled_note = (
+                    "- **ACLED export note:** `resolver/staging/acled.csv` exists but no export mapping rule "
+                    "matched (`regex_miss`). ACLED data is currently **not** contributing to `facts.csv`."
+                )
+                break
+        if acled_note:
+            lines.append(acled_note)
+            lines.append("")
         limit = min(10, len(mapping_debug_records))
         for record in mapping_debug_records[:limit]:
             record_map = dict(record)

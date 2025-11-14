@@ -1,0 +1,8 @@
+{
+  "status": 200,
+  "params_keys": ["event_date", "event_date_where", "format", "limit", "page"],
+  "start": "2024-01-01",
+  "end": "2024-03-31",
+  "reason": "empty dataframe",
+  "base_url": "https://api.acleddata.com/acled/read"
+}
