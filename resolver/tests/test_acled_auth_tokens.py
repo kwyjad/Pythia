@@ -1,4 +1,6 @@
+import base64
 import importlib
+import json
 import os
 
 import resolver.ingestion.acled_auth as acled_auth_module
@@ -19,6 +21,12 @@ def _reload(monkeypatch, **env):
         monkeypatch.setenv(key, value)
     module = importlib.reload(acled_auth_module)
     return module
+
+
+def _build_jwt_with_exp(expiry: int) -> str:
+    header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    return f"{header}.{payload}.signature"
 
 
 def test_get_access_token_accepts_opaque_token(monkeypatch):
@@ -47,7 +55,7 @@ def test_get_access_token_uses_legacy_env_var(monkeypatch):
 def test_invalid_access_token_refreshes_when_possible(monkeypatch):
     module = _reload(
         monkeypatch,
-        ACLED_ACCESS_TOKEN="expired-token",
+        ACLED_ACCESS_TOKEN=_build_jwt_with_exp(0),
         ACLED_REFRESH_TOKEN="refresh-123",
     )
 

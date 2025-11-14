@@ -117,13 +117,18 @@ def _resolve_password_creds() -> Optional[Dict[str, str]]:
 
 
 def _resolve_existing_token() -> Optional[str]:
-    token = os.environ.get("ACLED_ACCESS_TOKEN")
-    if token and _jwt_is_valid(token):
-        return token
-    legacy = os.environ.get("ACLED_TOKEN")
-    if legacy and _jwt_is_valid(legacy):
-        os.environ.setdefault("ACLED_ACCESS_TOKEN", legacy)
-        return legacy
+    for name in ("ACLED_ACCESS_TOKEN", "ACLED_TOKEN"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        token = raw.strip()
+        if not token:
+            continue
+        expiry = _jwt_exp(token)
+        if expiry is None or _jwt_is_valid(token):
+            if name == "ACLED_TOKEN":
+                os.environ.setdefault("ACLED_ACCESS_TOKEN", token)
+            return token
     return None
 
 
