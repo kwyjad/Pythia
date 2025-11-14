@@ -167,3 +167,13 @@ error”, or “Verify DuckDB Counts — error” that include the DB URL, relev
 row counts, and the exception details. The next failing run therefore points to
 the precise step and context that needs attention without digging through the
 workflow logs.
+
+### Backfill diagnostics
+
+The derive-freeze job appends stage markers to the ingestion summary so a
+single artifact reveals how far the workflow progressed. Each major step (facts
+export, DuckDB verification, monthly freeze, and the LLM context build) writes
+start/end banners via `scripts.ci.append_stage_to_summary`. When a step
+terminates early the matching `failed` marker remains in the log alongside the
+structured error block from the underlying CLI, making it obvious which phase
+needs attention in the next retry.

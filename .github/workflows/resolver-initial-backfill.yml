@@ -491,13 +491,25 @@ jobs:
           fi
           mkdir -p resolver/exports/backfill
           mkdir -p diagnostics/ingestion
-          python -m resolver.tools.export_facts \
+          python -m scripts.ci.append_stage_to_summary \
+            --section "Derive-freeze stage: Export canonical facts (start)" \
+            --status start || true
+          if python -m resolver.tools.export_facts \
             --in resolver/staging \
             --out resolver/exports/backfill \
             --config resolver/tools/export_config.yml \
             --write-db 1 \
             --db "${{ env.RESOLVER_DB_URL }}" \
-            --append-summary diagnostics/ingestion/summary.md
+            --append-summary diagnostics/ingestion/summary.md; then
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Export canonical facts (end)" \
+              --status success || true
+          else
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Export canonical facts (failed)" \
+              --status failed || true
+            exit 1
+          fi
 
       - name: Load IDMC facts into DuckDB (auxiliary)
         env:
@@ -541,11 +553,23 @@ jobs:
             ls -la diagnostics/ingestion/export_preview || true
             exit 1
           fi
-          python -m resolver.tools.freeze_snapshot \
+          python -m scripts.ci.append_stage_to_summary \
+            --section "Derive-freeze stage: Freeze snapshot (bulk) (start)" \
+            --status start || true
+          if python -m resolver.tools.freeze_snapshot \
             --facts diagnostics/ingestion/export_preview/facts.csv \
             --month "${BACKFILL_MONTH}" \
             --write-db=1 \
-            --db-url "${{ env.RESOLVER_DUCKDB_URL }}"
+            --db-url "${{ env.RESOLVER_DUCKDB_URL }}"; then
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Freeze snapshot (bulk) (end)" \
+              --status success || true
+          else
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Freeze snapshot (bulk) (failed)" \
+              --status failed || true
+            exit 1
+          fi
 
       - name: Verify DuckDB counts
         env:
@@ -558,9 +582,21 @@ jobs:
             export PYTHONWARNINGS=default
           fi
           DB_PATH="${RESOLVER_DB_URL#duckdb:///}"
-          python scripts/ci/verify_duckdb_counts.py "${DB_PATH}" \
+          python -m scripts.ci.append_stage_to_summary \
+            --section "Derive-freeze stage: Verify DuckDB counts (start)" \
+            --status start || true
+          if python scripts/ci/verify_duckdb_counts.py "${DB_PATH}" \
             --allow-missing \
-            --tables acled_monthly_fatalities facts facts_resolved facts_deltas
+            --tables acled_monthly_fatalities facts facts_resolved facts_deltas; then
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Verify DuckDB counts (end)" \
+              --status success || true
+          else
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Verify DuckDB counts (failed)" \
+              --status failed || true
+            exit 1
+          fi
 
       - name: Derive and freeze monthly snapshots
         env:
@@ -572,7 +608,10 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          python - <<'PY'
+          python -m scripts.ci.append_stage_to_summary \
+            --section "Derive-freeze stage: Freeze snapshots (start)" \
+            --status start || true
+          if python - <<'PY'
           import calendar
           import os
           import subprocess
@@ -674,6 +713,16 @@ jobs:
 
               print("::endgroup::")
           PY
+          then
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Freeze snapshots (end)" \
+              --status success || true
+          else
+            python -m scripts.ci.append_stage_to_summary \
+              --section "Derive-freeze stage: Freeze snapshots (failed)" \
+              --status failed || true
+            exit 1
+          fi
 
       - name: Summarize DuckDB contents (post-freeze)
         run: |
@@ -746,7 +795,19 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          python scripts/ci/build_llm_context.py
+          python -m scripts.ci.append_stage_to_summary \
+            --section "LLM context stage: build bundle (start)" \
+            --status start || true
+          if python scripts/ci/build_llm_context.py; then
+            python -m scripts.ci.append_stage_to_summary \
+              --section "LLM context stage: build bundle (end)" \
+              --status success || true
+          else
+            python -m scripts.ci.append_stage_to_summary \
+              --section "LLM context stage: build bundle (failed)" \
+              --status failed || true
+            exit 1
+          fi
 
       - name: Upload context artifact
         uses: actions/upload-artifact@v4
