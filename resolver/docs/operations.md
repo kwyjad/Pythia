@@ -58,6 +58,13 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
     the matching Parquet provides the same schema for analytics spot checks.
 - After a run completes download the combined artifact (named `resolver-initial-backfill-<run_id>`) and verify the snapshot manifests plus context bundle row counts before handing off to forecasting ops.
 
+### Rerunning the ACLED backfill job
+
+- The workflow now includes an **`acled-backfill`** job that restores the DuckDB created by `ingest`, fetches monthly fatalities from ACLED using the live client, and upserts them into the shared database before downstream freeze steps run.
+- To rerun only this slice, open the latest **Resolver — Initial Backfill** run, choose **Rerun jobs**, and keep only `acled-backfill` checked.
+- For a fresh window, trigger the workflow via **Run workflow** and adjust the `months_back` input; the job recomputes `BACKFILL_START_ISO`/`BACKFILL_END_ISO` and calls `python -m resolver.cli.acled_to_duckdb --start … --end … --db data/resolver_backfill.duckdb` with the repository ACLED credentials.
+- Review the uploaded artifact named `resolver-backfill-acled-<run_id>-<attempt>` for the updated DuckDB plus `diagnostics/acled/` logs; the step summary also embeds a one-table excerpt from `scripts/ci/duckdb_summary.py` so you can confirm row counts without downloading the file.
+
 ## ReliefWeb PDF local runs
 
 The PDF branch can be exercised without network access by enabling the feature flags and relying on mocked text extraction:

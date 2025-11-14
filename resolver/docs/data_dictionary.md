@@ -81,3 +81,12 @@ All records **must** include both **country_name + iso3** and **hazard_label + h
 | publication_date | date | Latest EM-DAT `last_update` (fallback `entry_date`) contributing to the bucket. |
 | source_id | string | Source identifier (`emdat`). |
 | disno_first | string | Lowest EM-DAT `disno` contributing to the aggregate (traceability). |
+
+## Table: acled_monthly_fatalities
+
+Monthly fatalities sourced from ACLED and bucketed by country-month. The table schema and detailed notes live in [`data_dictionary/acled_monthly_fatalities.md`](data_dictionary/acled_monthly_fatalities.md).
+
+- **Source:** ACLED
+- **Primary key:** `iso3`, `month`
+- **Metric:** Fatalities (people)
+- **Granularity:** ISO3 country × month (`YYYY-MM-01`)

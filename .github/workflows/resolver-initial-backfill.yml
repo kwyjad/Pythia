@@ -60,6 +60,7 @@ env:
   PYTHONUNBUFFERED: "1"
   BACKFILL_DB_PATH: data/resolver_backfill.duckdb
   BACKFILL_INGEST_ARTIFACT: resolver-backfill-ingest-${{ github.run_id }}-${{ github.run_attempt }}
+  BACKFILL_ACLED_ARTIFACT: resolver-backfill-acled-${{ github.run_id }}-${{ github.run_attempt }}
   BACKFILL_SNAPSHOT_ARTIFACT: resolver-backfill-snapshots-${{ github.run_id }}-${{ github.run_attempt }}
   BACKFILL_CONTEXT_ARTIFACT: resolver-backfill-context-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -332,10 +333,87 @@ jobs:
           path: diagnostics/all-artifacts-flat.zip
           if-no-files-found: warn
 
+  acled-backfill:
+    name: ACLED monthly fatalities → DuckDB
+    runs-on: ubuntu-latest
+    needs: ingest
+    env:
+      ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
+      ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
+      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c constraints-ci.txt -e '.[db,connectors]'
+
+      - name: Download ingestion bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
+          path: .
+
+      - name: Compute ACLED backfill window
+        env:
+          MONTHS_INPUT: ${{ inputs.months_back }}
+          TIMEZONE: Europe/Istanbul
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.compute_backfill_window
+
+      - name: Run ACLED → DuckDB backfill
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          mkdir -p diagnostics/acled
+          python -m resolver.cli.acled_to_duckdb \
+            --start "${BACKFILL_START_ISO}" \
+            --end "${BACKFILL_END_ISO}" \
+            --db "${BACKFILL_DB_PATH}" \
+            --log-level "${LOG_LEVEL}" \
+            2>&1 | tee diagnostics/acled/acled_to_duckdb.log
+
+      - name: Summarize ACLED DuckDB table
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics/acled
+          python scripts/ci/duckdb_summary.py --db "${BACKFILL_DB_PATH}" --tables "acled_monthly_fatalities" | tee diagnostics/acled/duckdb_summary.md
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat diagnostics/acled/duckdb_summary.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload ACLED artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_ACLED_ARTIFACT }}
+          path: |
+            ${{ env.BACKFILL_DB_PATH }}
+            diagnostics/acled/
+          if-no-files-found: error
+
   derive-freeze:
     name: Derive & freeze snapshots
     runs-on: ubuntu-latest
-    needs: ingest
+    needs:
+      - ingest
+      - acled-backfill
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb
       RESOLVER_DUCKDB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
@@ -363,6 +441,24 @@ jobs:
         with:
           name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
           path: .
+
+      - name: Download ACLED DuckDB artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BACKFILL_ACLED_ARTIFACT }}
+          path: acled-artifacts
+
+      - name: Stage ACLED artifacts
+        run: |
+          set -euo pipefail
+          if [ -f "acled-artifacts/${{ env.BACKFILL_DB_PATH }}" ]; then
+            mkdir -p "$(dirname "${{ env.BACKFILL_DB_PATH }}")"
+            cp "acled-artifacts/${{ env.BACKFILL_DB_PATH }}" "${{ env.BACKFILL_DB_PATH }}"
+          fi
+          if [ -d acled-artifacts/diagnostics/acled ]; then
+            mkdir -p diagnostics/ingestion/acled
+            cp -R acled-artifacts/diagnostics/acled/. diagnostics/ingestion/acled/
+          fi
 
       - name: Derive freeze month env
         run: |

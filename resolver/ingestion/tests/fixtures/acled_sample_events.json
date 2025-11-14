@@ -1,0 +1,26 @@
+[
+  {
+    "event_date": "2024-01-05",
+    "iso3": "KEN",
+    "country": "Kenya",
+    "fatalities": 2
+  },
+  {
+    "event_date": "2024-01-18",
+    "iso3": "KEN",
+    "country": "Kenya",
+    "fatalities": 1
+  },
+  {
+    "event_date": "2024-02-03",
+    "iso3": "ETH",
+    "country": "Ethiopia",
+    "fatalities": 4
+  },
+  {
+    "event_date": "2024-02-21",
+    "iso3": "ETH",
+    "country": "Ethiopia",
+    "fatalities": 6
+  }
+]

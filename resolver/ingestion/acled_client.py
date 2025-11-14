@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import logging
 import os
 import re
-from datetime import date, datetime, timedelta
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
@@ -16,6 +18,7 @@ import requests
 import yaml
 from urllib.parse import urlencode
 
+from . import acled_auth
 from .acled_auth import get_auth_header
 from resolver.ingestion._manifest import ensure_manifest_for_csv
 from resolver.ingestion.utils.io import (
@@ -70,6 +73,7 @@ HAZARD_KEY_TO_CODE = {
 }
 
 DEBUG = os.getenv("RESOLVER_DEBUG", "0") == "1"
+LOG = logging.getLogger("resolver.ingestion.acled.client")
 
 
 def dbg(message: str) -> None:
@@ -903,6 +907,233 @@ def _write_rows(rows: Sequence[MutableMapping[str, Any]], path: Path) -> None:
         for row in rows:
             writer.writerow(row)
     ensure_manifest_for_csv(path)
+
+
+class ACLEDClient:
+    """Thin ACLED API client supporting monthly fatalities aggregation."""
+
+    _DEFAULT_FIELDS = ["event_date", "iso3", "country", "fatalities"]
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://api.acleddata.com",
+        endpoint: str = "/acled/read",
+        timeout: int = 30,
+        max_retries: int = 4,
+        page_size: int = 5000,
+        session: Optional[requests.Session] = None,
+        logger: Optional[logging.Logger] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        cfg = config or load_config().get("client", {})
+        self.base_url = str(cfg.get("base_url", base_url)).rstrip("/") or base_url.rstrip("/")
+        raw_endpoint = str(cfg.get("endpoint", endpoint))
+        if not raw_endpoint.startswith("/"):
+            raw_endpoint = f"/{raw_endpoint}"
+        self.endpoint = raw_endpoint
+        self.timeout = int(cfg.get("timeout", timeout))
+        self.max_retries = int(cfg.get("max_retries", max_retries))
+        self.page_size = int(cfg.get("page_size", page_size))
+        self.fields = cfg.get("fields") or list(self._DEFAULT_FIELDS)
+        self.use_stub = bool(cfg.get("use_stub", False))
+        # Honour global stub toggles if present.
+        if os.getenv("RESOLVER_FORCE_STUBS") == "1" or os.getenv("RESOLVER_INCLUDE_STUBS") == "1":
+            self.use_stub = True
+        self.session = session or requests.Session()
+        self.logger = logger or LOG
+
+    # ------------------------------------------------------------------
+    # Network helpers
+    # ------------------------------------------------------------------
+    def _request(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        attempt = 0
+        headers = {"Authorization": f"Bearer {acled_auth.get_access_token()}"}
+        while True:
+            attempt += 1
+            start = time.time()
+            response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+            elapsed = time.time() - start
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after)
+                except (TypeError, ValueError):
+                    wait = min(60.0, 2 ** attempt)
+                self.logger.debug(
+                    "ACLED rate limited",
+                    extra={"attempt": attempt, "wait_seconds": wait, "status": response.status_code},
+                )
+                if attempt >= self.max_retries:
+                    response.raise_for_status()
+                time.sleep(wait)
+                continue
+            if response.status_code >= 500:
+                wait = min(60.0, 2 ** attempt)
+                self.logger.debug(
+                    "ACLED server error",
+                    extra={
+                        "attempt": attempt,
+                        "status": response.status_code,
+                        "wait_seconds": wait,
+                        "elapsed": round(elapsed, 3),
+                    },
+                )
+                if attempt >= self.max_retries:
+                    response.raise_for_status()
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except ValueError as exc:  # pragma: no cover - requests already validated status
+                self.logger.debug("ACLED response was not valid JSON", extra={"error": str(exc)})
+                raise RuntimeError("ACLED response was not valid JSON") from exc
+            self.logger.debug(
+                "Fetched ACLED page",
+                extra={
+                    "status": response.status_code,
+                    "elapsed": round(elapsed, 3),
+                    "content_length": int(response.headers.get("Content-Length", 0) or 0),
+                },
+            )
+            return payload if isinstance(payload, dict) else {}
+
+    def fetch_events(
+        self,
+        start_date: str | date,
+        end_date: str | date,
+        *,
+        countries: Optional[Sequence[str]] = None,
+        fields: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """Fetch ACLED events within ``start_date`` → ``end_date`` inclusive."""
+
+        if self.use_stub:
+            self.logger.debug("ACLED client in stub mode; returning empty frame")
+            return pd.DataFrame(columns=self._DEFAULT_FIELDS)
+
+        start = pd.to_datetime(start_date, utc=True).normalize()
+        end = pd.to_datetime(end_date, utc=True).normalize()
+        if start > end:
+            start, end = end, start
+
+        if isinstance(countries, str):
+            countries = [countries]
+
+        selected_fields = list(fields or self.fields or self._DEFAULT_FIELDS)
+        url = f"{self.base_url}{self.endpoint}"
+        params: Dict[str, Any] = {
+            "event_date": f"{start.strftime('%Y-%m-%d')}|{end.strftime('%Y-%m-%d')}",
+            "event_date_where": "between",
+            "page": 1,
+            "limit": self.page_size,
+            "format": "json",
+            "fields": ",".join(selected_fields),
+        }
+        if countries:
+            params["iso3"] = ",".join(sorted({c.strip().upper() for c in countries if c}))
+
+        safe_params = {k: v for k, v in params.items() if k not in {"access_token"}}
+        self.logger.debug(
+            "Starting ACLED fetch",
+            extra={
+                "url": url,
+                "start": start.strftime("%Y-%m-%d"),
+                "end": end.strftime("%Y-%m-%d"),
+                "page_size": self.page_size,
+                "countries": params.get("iso3"),
+                "query": safe_params,
+            },
+        )
+
+        records: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            params["page"] = page
+            payload = self._request(url, params)
+            data = payload.get("data") or payload.get("results") or []
+            if not isinstance(data, list):
+                raise RuntimeError("Unexpected ACLED payload structure")
+            if not data:
+                break
+            records.extend(data)
+            self.logger.debug(
+                "Fetched ACLED records",
+                extra={"page": page, "page_rows": len(data), "total_rows": len(records)},
+            )
+            if len(data) < self.page_size:
+                break
+            page += 1
+
+        self.logger.debug(
+            "Completed ACLED fetch",
+            extra={"pages": page, "rows": len(records)},
+        )
+
+        frame = pd.DataFrame(records)
+        if frame.empty:
+            return frame.reindex(columns=selected_fields)
+
+        for column in selected_fields:
+            if column not in frame.columns:
+                frame[column] = pd.NA
+
+        frame = frame.reindex(columns=selected_fields)
+        frame["event_date"] = pd.to_datetime(frame["event_date"], errors="coerce", utc=True).dt.tz_convert(None)
+        frame["iso3"] = frame["iso3"].astype(str).str.strip().str.upper()
+        iso_mask = frame["iso3"].isin({"", "NAN", "NONE", "NULL"})
+        frame.loc[iso_mask, "iso3"] = pd.NA
+        frame["country"] = frame["country"].astype(str).str.strip()
+        frame["fatalities"] = (
+            pd.to_numeric(frame["fatalities"], errors="coerce").fillna(0).astype("int64")
+        )
+        frame = frame.dropna(subset=["event_date", "iso3"])
+        frame = frame.sort_values(["event_date", "iso3"]).reset_index(drop=True)
+        return frame
+
+    def monthly_fatalities(
+        self,
+        start_date: str | date,
+        end_date: str | date,
+        *,
+        countries: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """Aggregate fatalities per ISO3/month bucket."""
+
+        frame = self.fetch_events(start_date, end_date, countries=countries)
+        if frame.empty:
+            result = pd.DataFrame(
+                columns=["iso3", "month", "fatalities", "source", "updated_at"],
+            )
+            return result
+
+        if countries:
+            if isinstance(countries, str):
+                countries = [countries]
+            allowed = {c.strip().upper() for c in countries if c}
+            if allowed:
+                frame = frame[frame["iso3"].isin(allowed)]
+
+        frame["month"] = frame["event_date"].dt.to_period("M").dt.to_timestamp(how="start")
+        grouped = (
+            frame.groupby(["iso3", "month"], as_index=False)["fatalities"].sum().astype({"fatalities": "int64"})
+        )
+        grouped["source"] = "ACLED"
+        grouped["updated_at"] = pd.Timestamp.now(tz=timezone.utc)
+        grouped = grouped.sort_values(["iso3", "month"]).reset_index(drop=True)
+
+        preview_head = grouped.head(3).to_dict("records")
+        preview_tail = grouped.tail(3).to_dict("records") if len(grouped) > 3 else []
+        self.logger.debug(
+            "Grouped to monthly fatalities",
+            extra={
+                "rows": len(grouped),
+                "head": preview_head,
+                "tail": preview_tail,
+            },
+        )
+        return grouped
 
 
 def main() -> bool:
