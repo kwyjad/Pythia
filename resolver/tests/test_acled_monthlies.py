@@ -115,6 +115,9 @@ def test_acled_monthly_aggregation(monkeypatch):
     assert uganda_participants["value"] == 200
     assert uganda_participants["unit"] == "persons"
 
+    semantics = sorted({row["series_semantics"] for row in rows})
+    assert semantics == ["new"]
+
 
 def test_fetch_events_raises_on_http_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)

@@ -28,7 +28,7 @@ import datetime as dt
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 try:
     import pandas as pd
@@ -40,6 +40,11 @@ try:
     from resolver.db import duckdb_io
 except Exception:  # pragma: no cover - optional dependency for db dual-write
     duckdb_io = None
+
+try:
+    from resolver.db.conn_shared import canonicalize_duckdb_target
+except Exception:  # pragma: no cover - optional dependency
+    canonicalize_duckdb_target = None  # type: ignore[assignment]
 
 from resolver.common import get_logger
 from resolver.helpers.series_semantics import normalize_series_semantics
@@ -66,6 +71,143 @@ SUMMARY_PATH = Path("diagnostics") / "summary.md"
 REPO_SUMMARY_PATH = REPO_ROOT / "diagnostics" / "summary.md"
 
 LOGGER = get_logger(__name__)
+
+INGESTION_DIAGNOSTICS_DIR = Path("diagnostics") / "ingestion"
+FREEZE_DB_DIAGNOSTICS_PATH = INGESTION_DIAGNOSTICS_DIR / "freeze_db.json"
+INGESTION_SUMMARY_PATH = INGESTION_DIAGNOSTICS_DIR / "summary.md"
+
+
+def _column_histogram(
+    frame: "pd.DataFrame | None", column: str
+) -> Dict[str, int]:
+    if frame is None or frame.empty or column not in frame.columns:
+        return {}
+    series = frame[column]
+    try:
+        normalized = series.fillna("").astype(str).str.strip()
+    except Exception:
+        normalized = pd.Series(series).fillna("").astype(str).str.strip()
+    counts = normalized.value_counts(dropna=False).to_dict()
+    histogram: Dict[str, int] = {}
+    for key, value in counts.items():
+        histogram[str(key)] = int(value)
+    return dict(sorted(histogram.items(), key=lambda item: item[0]))
+
+
+def _series_semantics_histogram(frame: "pd.DataFrame | None") -> Dict[str, int]:
+    hist = _column_histogram(frame, "series_semantics")
+    if hist:
+        return hist
+    return _column_histogram(frame, "semantics")
+
+
+def _format_histogram(histogram: Mapping[str, int] | Dict[str, int]) -> str:
+    if not histogram:
+        return "(none)"
+    parts: List[str] = []
+    for key in sorted(histogram):
+        label = "(blank)" if key == "" else str(key)
+        parts.append(f"{label}: {int(histogram[key])}")
+    return ", ".join(parts)
+
+
+def _append_ingestion_summary(block: str) -> None:
+    try:
+        INGESTION_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        needs_leading_newline = False
+        try:
+            needs_leading_newline = (
+                INGESTION_SUMMARY_PATH.exists()
+                and INGESTION_SUMMARY_PATH.stat().st_size > 0
+            )
+        except OSError:
+            needs_leading_newline = False
+        with INGESTION_SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            if needs_leading_newline:
+                handle.write("\n\n")
+            handle.write(block)
+            if not block.endswith("\n"):
+                handle.write("\n")
+    except OSError:
+        LOGGER.debug("Could not append freeze ingestion summary", exc_info=True)
+
+
+def _render_freeze_db_success_markdown(payload: Mapping[str, Any]) -> str:
+    db_url = str(payload.get("db_url") or "")
+    db_path = str(payload.get("db_path") or "")
+    lines = ["## Freeze Snapshot — DB diagnostics", ""]
+    if db_url:
+        lines.append(f"- **DB URL:** `{db_url}`")
+    else:
+        lines.append("- **DB URL:** (empty)")
+    if db_path:
+        lines.append(f"- **DB path:** `{db_path}`")
+    lines.append(f"- **Month:** `{payload.get('month', '')}`")
+    lines.append(
+        f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_resolved semantics:** "
+        + _format_histogram(payload.get("facts_resolved_semantics", {}))
+    )
+    lines.append(
+        "- **facts_resolved metrics:** "
+        + _format_histogram(payload.get("facts_resolved_metrics", {}))
+    )
+    lines.append(
+        f"- **facts_deltas rows:** {int(payload.get('facts_deltas_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_deltas semantics:** "
+        + _format_histogram(payload.get("facts_deltas_semantics", {}))
+    )
+    lines.append(
+        "- **facts_deltas metrics:** "
+        + _format_histogram(payload.get("facts_deltas_metrics", {}))
+    )
+    return "\n".join(lines)
+
+
+def _render_db_error_markdown(
+    step: str, payload: Mapping[str, Any], exc: Exception
+) -> str:
+    db_url = str(payload.get("db_url") or "")
+    db_path = str(payload.get("db_path") or "")
+    error_type = type(exc).__name__
+    error_message = " ".join(str(exc).split()) or "(empty)"
+    lines = ["## DB Write Diagnostics", "", f"- **Step:** {step}"]
+    if db_url:
+        lines.append(f"- **DB URL:** `{db_url}`")
+    if db_path:
+        lines.append(f"- **DB path:** `{db_path}`")
+    lines.append(f"- **Error type:** `{error_type}`")
+    lines.append(f"- **Error message:** {error_message}")
+    lines.append(
+        f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_resolved semantics:** "
+        + _format_histogram(payload.get("facts_resolved_semantics", {}))
+    )
+    lines.append(
+        "- **facts_resolved metrics:** "
+        + _format_histogram(payload.get("facts_resolved_metrics", {}))
+    )
+    lines.append(
+        f"- **facts_deltas rows:** {int(payload.get('facts_deltas_rows', 0) or 0)}"
+    )
+    lines.append(
+        "- **facts_deltas semantics:** "
+        + _format_histogram(payload.get("facts_deltas_semantics", {}))
+    )
+    lines.append(
+        "- **facts_deltas metrics:** "
+        + _format_histogram(payload.get("facts_deltas_metrics", {}))
+    )
+    return "\n".join(lines)
 
 
 def _append_to_summary(section_title: str, body_markdown: str) -> None:
@@ -934,9 +1076,31 @@ def _maybe_write_db(
         _append_to_repo_summary(summary_title, msg)
         return
 
+    canonical_path = ""
+    canonical_url = db_url
+    if canonicalize_duckdb_target is not None and db_url:
+        try:
+            canonical_path, canonical_url = canonicalize_duckdb_target(db_url)
+        except Exception:
+            canonical_path = ""
+            canonical_url = db_url
+
+    diagnostics_payload: Dict[str, Any] = {
+        "db_url": canonical_url or db_url or "",
+        "db_path": canonical_path or "",
+        "month": ym,
+        "facts_resolved_rows": 0,
+        "facts_deltas_rows": 0,
+        "facts_resolved_semantics": {},
+        "facts_deltas_semantics": {},
+        "facts_resolved_metrics": {},
+        "facts_deltas_metrics": {},
+    }
+
     conn = None
     deltas_result = None
     deltas_input_rows = 0
+    success_block: Optional[str] = None
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
@@ -984,6 +1148,24 @@ def _maybe_write_db(
         prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
 
         facts_result = None
+
+        diagnostics_payload.update(
+            {
+                "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
+                "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
+                "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
+                "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
+                "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
+                "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
+            }
+        )
+        success_block = _render_freeze_db_success_markdown(diagnostics_payload)
+        try:
+            INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+            with FREEZE_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
+        except OSError:
+            LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
 
         if prepared_resolved is not None and not prepared_resolved.empty:
             LOGGER.debug(
@@ -1061,11 +1243,14 @@ def _maybe_write_db(
         else:
             msg = "No facts_deltas rows available; skipped DB write"
 
+        _append_ingestion_summary(success_block or _render_freeze_db_success_markdown(diagnostics_payload))
         _append_to_summary(summary_title, msg)
         _append_to_repo_summary(summary_title, msg)
 
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
+        error_block = _render_db_error_markdown("Freeze Snapshot", diagnostics_payload, exc)
+        _append_ingestion_summary(error_block)
         _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
         _append_to_repo_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
     finally:
