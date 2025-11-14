@@ -1101,6 +1101,8 @@ def _maybe_write_db(
     deltas_result = None
     deltas_input_rows = 0
     success_block: Optional[str] = None
+    prepared_resolved: "pd.DataFrame | None" = None
+    prepared_deltas: "pd.DataFrame | None" = None
     try:
         conn = duckdb_io.get_db(db_url)
         duckdb_io.init_schema(conn)
@@ -1249,6 +1251,14 @@ def _maybe_write_db(
 
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
+        _append_db_error_to_summary(
+            section=f"Freeze Snapshot — DB write ({ym})",
+            exc=exc,
+            db_url=db_url,
+            month=ym,
+            facts_resolved=prepared_resolved,
+            facts_deltas=prepared_deltas,
+        )
         error_block = _render_db_error_markdown("Freeze Snapshot", diagnostics_payload, exc)
         _append_ingestion_summary(error_block)
         _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
@@ -1259,3 +1269,52 @@ def _maybe_write_db(
                 conn.close()
             except Exception:  # pragma: no cover - best effort cleanup
                 pass
+
+
+def _append_db_error_to_summary(
+    *,
+    section: str,
+    exc: Exception,
+    db_url: str | None,
+    month: str,
+    facts_resolved: "pd.DataFrame | None",
+    facts_deltas: "pd.DataFrame | None",
+) -> None:
+    """Append a freeze snapshot DuckDB error block to diagnostics summary."""
+
+    if not sys.executable:
+        return
+
+    def _safe_len(frame: "pd.DataFrame | None") -> int:
+        try:
+            return int(len(frame)) if frame is not None else 0
+        except Exception:
+            return 0
+
+    context = {
+        "db_url": db_url or "",
+        "exception_class": type(exc).__name__,
+        "facts_resolved_rows": _safe_len(facts_resolved),
+        "facts_deltas_rows": _safe_len(facts_deltas),
+        "month": month,
+    }
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.ci.append_error_to_summary",
+                "--section",
+                section,
+                "--error-type",
+                type(exc).__name__,
+                "--message",
+                str(exc),
+                "--context",
+                json.dumps(context, sort_keys=True),
+            ],
+            check=False,
+        )
+    except Exception:
+        LOGGER.debug("Failed to append freeze snapshot DB error", exc_info=True)

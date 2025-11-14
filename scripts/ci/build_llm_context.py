@@ -6,7 +6,10 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import json
+import os
 import pathlib
+import subprocess
+import sys
 from typing import Any, Dict, List
 
 
@@ -25,7 +28,7 @@ def _load_rows(csv_path: pathlib.Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def main() -> int:
+def _run() -> int:
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     facts_csv = repo_root / "diagnostics" / "ingestion" / "export_preview" / "facts.csv"
 
@@ -69,6 +72,46 @@ def main() -> int:
         pass
 
     return 0
+
+
+def _append_error_to_summary(exc: Exception) -> None:
+    if not sys.executable:
+        return
+
+    context = {
+        "db_url": os.environ.get("RESOLVER_DB_URL", ""),
+        "context_months": os.environ.get("CONTEXT_MONTHS", ""),
+        "exception_class": type(exc).__name__,
+    }
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.ci.append_error_to_summary",
+                "--section",
+                "LLM Context — build error",
+                "--error-type",
+                type(exc).__name__,
+                "--message",
+                str(exc),
+                "--context",
+                json.dumps(context, sort_keys=True),
+            ],
+            check=False,
+        )
+    except Exception:
+        # Ignore helper failures; the original exception will still propagate.
+        pass
+
+
+def main() -> int:
+    try:
+        return _run()
+    except Exception as exc:
+        _append_error_to_summary(exc)
+        raise
 
 
 if __name__ == "__main__":

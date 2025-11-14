@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import json
+
 from resolver.db import duckdb_io
 
 
@@ -127,17 +129,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if _import_duckdb() is None:
         return 0
 
-    print("## DuckDB")
+    print("## DuckDB Diagnostics (duckdb_summary.py)")
     print("")
 
     if not db_path:
-        print("- **Status:** no DuckDB target provided")
+        message = "no DuckDB target provided"
+        print(f"- **Status:** {message}")
+        _print_error_json(message)
         return 0
 
     fs_path = Path(db_path)
     if not fs_path.exists():
         shown = canonical_url or db_path
-        print(f"- **Status:** database not found at `{shown}`")
+        message = f"database not found: {shown}"
+        print(f"- **Status:** {message}")
+        _print_error_json(message)
         return 0
 
     try:
@@ -145,11 +151,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         conn = duckdb_io.get_db(target)
     except Exception as exc:  # pragma: no cover - connection failure
         shown = canonical_url or db_path
-        print(f"- **Status:** failed to open `{shown}`: {exc}")
+        message = f"failed to open {shown}: {exc}"
+        print(f"- **Status:** {message}")
+        _print_error_json(message)
         return 0
 
     try:
-        print(f"- **Database:** `{canonical_url or db_path}`")
+        target_display = canonical_url or db_path
+        print(f"- **Database:** `{target_display}`")
+        tables_list: list[str] = []
+        try:
+            tables_list = [
+                str(row[0])
+                for row in conn.execute("SHOW TABLES").fetchall()
+                if row and row[0]
+            ]
+        except Exception:
+            tables_list = []
+        if tables_list:
+            print(f"- **Existing tables:** {', '.join(sorted(tables_list))}")
+        else:
+            print("- **Existing tables:** (none)")
         rows: list[tuple[str, int]] = []
         for table in _iter_tables(args.tables):
             if not table:
@@ -160,15 +182,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             rows.append((table, int(count)))
 
-        if not rows:
-            print("- **Status:** no matching tables present")
-            return 0
-
         print("")
         print("| table | rows |")
         print("| --- | --- |")
-        for table, count in rows:
-            print(f"| {table} | {count} |")
+        if rows:
+            for table, count in rows:
+                print(f"| {table} | {count} |")
+        else:
+            print("| (none) | 0 |")
 
         breakdown = _collect_breakdown(conn, (table for table, _ in rows))
         if breakdown:
@@ -178,9 +199,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("| --- | --- | --- | --- | --- |")
             for table_name, source, metric, semantics, count in breakdown:
                 print(f"| {table_name} | {source} | {metric} | {semantics} | {count} |")
+        elif rows:
+            print("")
+            print("### Rows by source / metric / semantics")
+            print("| table | source | metric | semantics | count |")
+            print("| --- | --- | --- | --- | --- |")
+            print("| (no breakdown) |  |  |  | 0 |")
     finally:
         duckdb_io.close_db(conn)
     return 0
+
+
+def _print_error_json(message: str) -> None:
+    print("")
+    print("```json")
+    print(json.dumps({"error": message}, sort_keys=True))
+    print("```")
 
 
 if __name__ == "__main__":
