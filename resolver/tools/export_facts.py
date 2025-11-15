@@ -754,10 +754,30 @@ def _ensure_export_contract(df: pd.DataFrame) -> pd.DataFrame:
         df["semantics"] = df["semantics"].fillna(df["series_semantics"])
         df["series_semantics"] = df["series_semantics"].fillna(df["semantics"])
 
-    # 2) ym derivation if missing
+    # 2) ym derivation if missing or blank
     if "ym" not in df.columns:
         _asof = pd.to_datetime(df.get("as_of_date"), errors="coerce")
         df["ym"] = _asof.dt.strftime("%Y-%m")
+    if "ym" in df.columns:
+        df["ym"] = df["ym"].fillna("").astype(str)
+        mask = df["ym"].str.strip().eq("")
+        if mask.any() and "as_of_date" in df.columns:
+            as_of_dates = pd.to_datetime(df["as_of_date"], errors="coerce")
+            fill_mask = mask & as_of_dates.notna()
+            if fill_mask.any():
+                df.loc[fill_mask, "ym"] = (
+                    as_of_dates.dt.strftime("%Y-%m").loc[fill_mask]
+                )
+            mask = df["ym"].str.strip().eq("")
+        if mask.any() and "publication_date" in df.columns:
+            publication_dates = pd.to_datetime(
+                df["publication_date"], errors="coerce"
+            )
+            fill_mask = mask & publication_dates.notna()
+            if fill_mask.any():
+                df.loc[fill_mask, "ym"] = (
+                    publication_dates.dt.strftime("%Y-%m").loc[fill_mask]
+                )
 
     # 3) required base columns
     for col in ["iso3", "as_of_date", "metric", "value", "source"]:
@@ -1837,9 +1857,15 @@ def _prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
     if "ym" not in frame.columns:
         frame["ym"] = ""
     frame["ym"] = frame["ym"].fillna("").astype(str)
-    mask = frame["ym"].str.len() == 0
+    mask = frame["ym"].str.strip().eq("")
     if mask.any() and "as_of" in frame.columns:
         frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "as_of"])
+        mask = frame["ym"].str.strip().eq("")
+    if mask.any() and "as_of_date" in frame.columns:
+        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "as_of_date"])
+        mask = frame["ym"].str.strip().eq("")
+    if mask.any() and "publication_date" in frame.columns:
+        frame.loc[mask, "ym"] = _to_month(frame.loc[mask, "publication_date"])
 
     if "series_semantics" not in frame.columns:
         frame["series_semantics"] = DELTAS_DB_DEFAULTS["series_semantics"]

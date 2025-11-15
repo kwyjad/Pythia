@@ -33,6 +33,19 @@ The DuckDB helper mirrors the contracts exercised by the fast tests:
   canonical facts CSV so `facts_deltas` matches the preview row-for-row. The
   `test_emdat_duckdb_write.test_emdat_export_and_freeze_to_duckdb` fast test verifies this behaviour.
 
+### `ym` handling for flows (`facts_deltas`)
+
+For monthly flows (EM-DAT, ACLED, synthetic tests), the `ym` column is the primary key for DuckDB writes. The exporter and
+freezer normalise it so downstream helpers always receive a `YYYY-MM` string:
+
+- When `ym` is missing, it is derived from `as_of_date` during export finalisation.
+- When `ym` exists but is blank, it is backfilled—first from `as_of_date`, then from `publication_date` if necessary.
+- The DuckDB layer (`duckdb_io.write_snapshot(...)`) therefore continues to enforce its strict `YYYY-MM` contract without
+  needing connector-specific exceptions.
+
+Fast tests covering the freeze → DuckDB path (`test_exporter_dual_writes_to_duckdb`, `test_dual_writes_idempotent`, and
+`test_emdat_export_and_freeze_to_duckdb`) assert this behaviour stays in place.
+
 If DuckDB writes are disabled or the URL is missing, `_maybe_write_db` logs the skip reason and leaves the diagnostics in
 place for downstream verification stages.
 
