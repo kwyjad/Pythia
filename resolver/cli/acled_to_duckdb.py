@@ -15,6 +15,7 @@ from resolver.db import duckdb_io
 from resolver.db.schema_keys import ACLED_MONTHLY_FATALITIES_KEY_COLUMNS
 from resolver.ingestion.acled_client import ACLEDClient
 from resolver.ingestion.utils.iso_normalize import to_iso3
+from scripts.ci import append_error_to_summary
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
@@ -126,7 +127,34 @@ def run(argv: Sequence[str] | None = None) -> int:
     )
 
     client = ACLEDClient()
-    frame = client.monthly_fatalities(args.start, args.end, countries=countries or None)
+    try:
+        frame = client.monthly_fatalities(args.start, args.end, countries=countries or None)
+    except Exception as exc:  # pragma: no cover - error path
+        context = {
+            "start": args.start,
+            "end": args.end,
+            "countries": countries or "<all>",
+            "db_url": duckdb_url,
+            "dry_run": bool(args.dry_run),
+        }
+        LOGGER.error(
+            "acled_to_duckdb.monthly_fatalities_error | start=%s end=%s countries=%s exc=%s",  # noqa: G004
+            args.start,
+            args.end,
+            countries or "<all>",
+            exc,
+            exc_info=True,
+        )
+        try:
+            append_error_to_summary.append_error(
+                "ACLED CLI — monthly_fatalities error",
+                type(exc).__name__,
+                str(exc),
+                context,
+            )
+        except Exception:  # pragma: no cover - diagnostics best effort
+            pass
+        raise
     LOGGER.info("acled_to_duckdb.fetch_done | rows=%s", len(frame))
 
     if frame is None:
@@ -165,6 +193,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         work = work.sort_values(["iso3", "month"]).reset_index(drop=True)
         frame = work
     else:
+        LOGGER.warning(
+            "acled_to_duckdb.fetch_empty | start=%s end=%s countries=%s",  # noqa: G004
+            args.start,
+            args.end,
+            countries or "<all>",
+        )
         frame = frame.copy()
 
     LOGGER.debug(
