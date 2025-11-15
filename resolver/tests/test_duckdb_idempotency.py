@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -116,29 +117,31 @@ def test_dual_writes_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         "source_commit_sha": "abc123",
         "rows": len(facts),
     }
-    facts_out = tmp_path / "facts.parquet"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    facts_csv = tmp_path / "facts.csv"
+    resolved_csv = tmp_path / "facts_resolved.csv"
+    facts.to_csv(facts_csv, index=False)
+    facts.to_csv(resolved_csv, index=False)
 
     freeze_snapshot._maybe_write_db(
-        ym="2024-01",
-        facts_df=facts,
-        validated_facts_df=facts,
-        preview_df=facts,
-        resolved_df=facts,
-        deltas_df=None,
-        manifest=manifest,
-        facts_out=facts_out,
-        deltas_out=None,
+        facts_path=facts_csv,
+        resolved_path=resolved_csv,
+        deltas_path=None,
+        manifest_path=manifest_path,
+        month="2024-01",
+        db_url=f"duckdb:///{db_path}",
+        write_db=True,
     )
     freeze_snapshot._maybe_write_db(
-        ym="2024-01",
-        facts_df=facts,
-        validated_facts_df=facts,
-        preview_df=facts,
-        resolved_df=facts,
-        deltas_df=None,
-        manifest=manifest,
-        facts_out=facts_out,
-        deltas_out=None,
+        facts_path=facts_csv,
+        resolved_path=resolved_csv,
+        deltas_path=None,
+        manifest_path=manifest_path,
+        month="2024-01",
+        db_url=f"duckdb:///{db_path}",
+        write_db=True,
     )
 
     conn = duckdb_io.get_db(str(db_path))

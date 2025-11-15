@@ -979,17 +979,13 @@ def freeze_snapshot(
         json.dump(manifest, f, indent=2)
 
     _maybe_write_db(
-        ym=ym,
-        facts_df=facts_df,
-        validated_facts_df=validated_facts_df,
-        preview_df=preview_df,
-        resolved_df=resolved_df,
-        deltas_df=deltas_df,
-        manifest=manifest,
-        facts_out=resolved_parquet,
-        deltas_out=deltas_parquet_out,
-        write_db=write_db,
+        facts_path=legacy_csv,
+        resolved_path=resolved_csv_out,
+        deltas_path=deltas_csv_out,
+        manifest_path=manifest_out,
+        month=ym,
         db_url=db_url,
+        write_db=write_db,
     )
 
     return SnapshotResult(
@@ -1068,25 +1064,36 @@ if __name__ == "__main__":
     main()
 
 
+
+def _load_frame_for_db(path: Path | None) -> "pd.DataFrame | None":
+    if path is None:
+        return None
+    try:
+        return load_table(path)
+    except FileNotFoundError:
+        LOGGER.warning(
+            "freeze_snapshot: CSV not found for DuckDB write",
+            extra={"path": str(path)},
+        )
+        return None
+
+
 def _maybe_write_db(
     *,
-    ym: str,
-    facts_df: "pd.DataFrame",
-    validated_facts_df: "pd.DataFrame | None",
-    preview_df: "pd.DataFrame | None",
-    resolved_df: "pd.DataFrame | None",
-    deltas_df: "pd.DataFrame | None",
-    manifest: Dict[str, Any],
-    facts_out: Path,
-    deltas_out: Path | None,
-    write_db: Optional[bool] = None,
+    facts_path: Path,
+    resolved_path: Path | None,
+    deltas_path: Path | None,
+    manifest_path: Path | None,
+    month: str,
     db_url: Optional[str] = None,
+    write_db: Optional[bool] = None,
 ) -> None:
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
     if db_url is not None:
         db_url = db_url.strip()
     else:
         db_url = env_url
+
     summary_title = "Freeze snapshot — DB write"
 
     if write_db is None:
@@ -1122,190 +1129,135 @@ def _maybe_write_db(
             canonical_path = ""
             canonical_url = db_url
 
+    facts_df = _load_frame_for_db(facts_path)
+    if facts_df is None:
+        facts_df = pd.DataFrame()
+    resolved_df = _load_frame_for_db(resolved_path)
+    if resolved_df is None or resolved_df.empty:
+        resolved_df = facts_df.copy() if facts_df is not None else None
+    deltas_source = _load_frame_for_db(deltas_path)
+
+    prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
+    prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+    if prepared_deltas is None or prepared_deltas.empty:
+        base_for_deltas = deltas_source
+        if base_for_deltas is None or base_for_deltas.empty:
+            base_for_deltas = resolved_df if resolved_df is not None else facts_df
+        prepared_deltas = _prepare_deltas_frame_for_db(base_for_deltas)
+
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
         "db_path": canonical_path or "",
-        "month": ym,
-        "facts_resolved_rows": 0,
-        "facts_deltas_rows": 0,
-        "facts_resolved_semantics": {},
-        "facts_deltas_semantics": {},
-        "facts_resolved_metrics": {},
-        "facts_deltas_metrics": {},
+        "month": month,
+        "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
+        "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
+        "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
+        "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
+        "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
+        "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
     }
 
+    manifest_payload: Dict[str, Any] | None = None
+    manifest_entries: List[Dict[str, Any]] | None = None
+    if manifest_path and manifest_path.exists():
+        try:
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest_payload, dict):
+                artifacts = manifest_payload.get("artifacts")
+                if isinstance(artifacts, Mapping):
+                    manifest_entries = []
+                    for name, artifact in artifacts.items():
+                        entry: Dict[str, Any] = {"name": str(name)}
+                        if isinstance(artifact, Mapping):
+                            entry.update({k: v for k, v in artifact.items()})
+                            path_value = str(artifact.get("path") or artifact.get("uri") or "").strip()
+                        else:
+                            path_value = str(artifact)
+                        if path_value:
+                            entry["path"] = path_value
+                        if not entry.get("path"):
+                            entry["path"] = f"{month}/{name}"
+                        resolved_rows = manifest_payload.get("resolved_rows")
+                        deltas_rows = manifest_payload.get("deltas_rows")
+                        if "rows" not in entry:
+                            if "resolved" in name and resolved_rows is not None:
+                                entry["rows"] = resolved_rows
+                            elif "deltas" in name and deltas_rows is not None:
+                                entry["rows"] = deltas_rows
+                        manifest_entries.append(entry)
+                elif isinstance(artifacts, list):
+                    manifest_entries = [
+                        dict(item)
+                        for item in artifacts
+                        if isinstance(item, Mapping)
+                    ]
+        except Exception:
+            LOGGER.debug("Could not parse manifest for DuckDB diagnostics", exc_info=True)
+
+    success_block = _render_freeze_db_success_markdown(diagnostics_payload)
+    try:
+        INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+        with FREEZE_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
+    except OSError:
+        LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
+
     conn = None
-    deltas_result = None
-    deltas_input_rows = 0
-    success_block: Optional[str] = None
-    prepared_resolved: "pd.DataFrame | None" = None
-    prepared_deltas: "pd.DataFrame | None" = None
     try:
         conn = duckdb_io.get_db(db_url)
-        duckdb_io.init_schema(conn)
-        resolved_payload = (
-            resolved_df
-            if resolved_df is not None
-            else (
-                validated_facts_df
-                if validated_facts_df is not None and not validated_facts_df.empty
-                else facts_df
+        duckdb_io.write_snapshot(
+            conn,
+            ym=month,
+            facts_resolved=prepared_resolved,
+            facts_deltas=prepared_deltas,
+            manifests=manifest_entries or ([manifest_payload] if manifest_payload else None),
+            meta={
+                **(manifest_payload if isinstance(manifest_payload, Mapping) else {}),
+                "facts_path": str(facts_path),
+                "resolved_path": str(resolved_path or ""),
+                "deltas_path": str(deltas_path or ""),
+            },
+        )
+
+        facts_rows = diagnostics_payload["facts_resolved_rows"]
+        deltas_rows = diagnostics_payload["facts_deltas_rows"]
+        LOGGER.info(
+            "DuckDB snapshot written",
+            extra={
+                "month": month,
+                "facts_resolved_rows": facts_rows,
+                "facts_deltas_rows": deltas_rows,
+                "db_url": canonical_url or db_url,
+            },
+        )
+        msg = (
+            f"Wrote {facts_rows} facts_resolved rows"
+            + (
+                f" and {deltas_rows} facts_deltas rows"
+                if deltas_rows
+                else " and 0 facts_deltas rows"
             )
         )
-        prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
-
-        if deltas_df is not None and not deltas_df.empty:
-            deltas_source = deltas_df.copy()
-        elif preview_df is not None and not preview_df.empty:
-            deltas_source = preview_df.copy()
-        else:
-            base_source = (
-                validated_facts_df
-                if validated_facts_df is not None and not validated_facts_df.empty
-                else facts_df
-            )
-            deltas_source = base_source.copy() if base_source is not None and not base_source.empty else None
-
-        preview_rows = int(len(preview_df)) if preview_df is not None else 0
-
-        deltas_input_rows = int(len(deltas_source)) if deltas_source is not None else 0
-
-        if deltas_source is not None and not deltas_source.empty:
-            for column in ("iso3", "ym", "hazard_code", "metric", "value"):
-                if column not in deltas_source.columns:
-                    deltas_source[column] = 0 if column == "value" else ""
-            deltas_source["value"] = pd.to_numeric(
-                deltas_source["value"], errors="coerce"
-            )
-            semantics_col = deltas_source.get("series_semantics")
-            if semantics_col is None:
-                deltas_source["series_semantics"] = "new"
-            else:
-                semantics = semantics_col.astype(str).str.strip()
-                deltas_source.loc[semantics.eq(""), "series_semantics"] = "new"
-
-        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-
-        facts_result = None
-
-        diagnostics_payload.update(
-            {
-                "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
-                "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
-                "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
-                "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
-                "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
-                "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
-            }
-        )
-        success_block = _render_freeze_db_success_markdown(diagnostics_payload)
-        try:
-            INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
-            with FREEZE_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
-        except OSError:
-            LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
-
-        if prepared_resolved is not None and not prepared_resolved.empty:
-            LOGGER.debug(
-                "DuckDB snapshot write | table=facts_resolved rows=%s", len(prepared_resolved)
-            )
-            facts_result = duckdb_io.upsert_dataframe(
-                conn,
-                "facts_resolved",
-                prepared_resolved,
-                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
-            )
-            LOGGER.info(
-                "DuckDB snapshot facts_resolved rows written: %s",
-                facts_result.rows_delta,
-            )
-        else:
-            LOGGER.debug("DuckDB snapshot facts_resolved skipped: no rows prepared")
-
-        if prepared_deltas is not None and not prepared_deltas.empty:
-            for column in ["as_of", "value_new", "value_stock", "series_semantics"]:
-                if column not in prepared_deltas.columns:
-                    if column == "series_semantics":
-                        prepared_deltas[column] = "new"
-                    elif column == "as_of":
-                        prepared_deltas[column] = ""
-                    else:
-                        prepared_deltas[column] = pd.Series([pd.NA] * len(prepared_deltas))
-            LOGGER.debug(
-                "DuckDB snapshot write | table=facts_deltas rows=%s", len(prepared_deltas)
-            )
-            deltas_result = duckdb_io.upsert_dataframe(
-                conn,
-                "facts_deltas",
-                prepared_deltas,
-                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
-            )
-            LOGGER.info(
-                "DuckDB snapshot facts_deltas rows written: %s",
-                deltas_result.rows_delta,
-            )
-        elif deltas_input_rows:
-            LOGGER.debug("DuckDB snapshot facts_deltas skipped after preparation")
-        else:
-            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no source rows")
-
-        created_at = str(manifest.get("created_at_utc") or dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
-        git_sha = str(manifest.get("source_commit_sha") or os.environ.get("GITHUB_SHA", ""))
-        export_version = str(manifest.get("export_version") or manifest.get("schema_version", ""))
-        try:
-            conn.execute("DELETE FROM snapshots WHERE ym = ?", [ym])
-            conn.execute(
-                "INSERT INTO snapshots (ym, created_at, git_sha, export_version, facts_rows, deltas_rows) VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    ym,
-                    created_at,
-                    git_sha,
-                    export_version,
-                    int(facts_result.rows_written if facts_result else 0),
-                    int(deltas_result.rows_written if deltas_result else 0),
-                ],
-            )
-            LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)
-        except Exception:
-            LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
-        if deltas_result is not None:
-            written = int(deltas_result.rows_delta)
-            input_rows = int(deltas_result.rows_in)
-            msg = (
-                f"Wrote {written} facts_deltas rows (input={input_rows}) from preview rows={preview_rows or input_rows}"
-            )
-        elif deltas_input_rows:
-            msg = (
-                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows}"
-            )
-        else:
-            msg = "No facts_deltas rows available; skipped DB write"
-
-        _append_ingestion_summary(success_block or _render_freeze_db_success_markdown(diagnostics_payload))
+        _append_ingestion_summary(success_block)
         _append_to_summary(summary_title, msg)
         _append_to_repo_summary(summary_title, msg)
-
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
         _append_db_error_to_summary(
-            section=f"Freeze Snapshot — DB write ({ym})",
+            section=f"Freeze Snapshot — DB write ({month})",
             exc=exc,
             db_url=db_url,
-            month=ym,
-            facts_resolved=prepared_resolved,
-            facts_deltas=prepared_deltas,
+            facts_path=facts_path,
+            resolved_path=resolved_path,
+            deltas_path=deltas_path,
+            month=month,
         )
         error_block = _render_db_error_markdown("Freeze Snapshot", diagnostics_payload, exc)
         _append_ingestion_summary(error_block)
         _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
         _append_to_repo_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
     finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:  # pragma: no cover - best effort cleanup
-                pass
+        duckdb_io.close_db(conn)
 
 
 def _append_db_error_to_summary(
@@ -1313,26 +1265,22 @@ def _append_db_error_to_summary(
     section: str,
     exc: Exception,
     db_url: str | None,
+    facts_path: Path,
+    resolved_path: Path | None,
+    deltas_path: Path | None,
     month: str,
-    facts_resolved: "pd.DataFrame | None",
-    facts_deltas: "pd.DataFrame | None",
 ) -> None:
     """Append a freeze snapshot DuckDB error block to diagnostics summary."""
 
     if not sys.executable:
         return
 
-    def _safe_len(frame: "pd.DataFrame | None") -> int:
-        try:
-            return int(len(frame)) if frame is not None else 0
-        except Exception:
-            return 0
-
     context = {
         "db_url": db_url or "",
         "exception_class": type(exc).__name__,
-        "facts_resolved_rows": _safe_len(facts_resolved),
-        "facts_deltas_rows": _safe_len(facts_deltas),
+        "facts_path": str(facts_path),
+        "resolved_path": str(resolved_path or ""),
+        "deltas_path": str(deltas_path or ""),
         "month": month,
     }
 
