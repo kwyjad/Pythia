@@ -1328,17 +1328,51 @@ class ACLEDClient:
             )
             return result
 
+        if "event_date" not in frame.columns:
+            raise RuntimeError("ACLED monthly_fatalities expected an 'event_date' column")
+
+        frame["event_date"] = pd.to_datetime(frame["event_date"], errors="coerce", utc=False)
+        frame = frame.dropna(subset=["event_date"]).copy()
+
+        if frame.empty:
+            result = pd.DataFrame(
+                columns=["iso3", "month", "fatalities", "source", "updated_at"],
+            )
+            return result
+
+        if "iso3" not in frame.columns:
+            raise RuntimeError("ACLED monthly_fatalities expected an 'iso3' column")
+        frame["iso3"] = frame["iso3"].astype(str).str.upper().str.strip()
+        frame = frame[frame["iso3"] != ""].copy()
+
+        if frame.empty:
+            result = pd.DataFrame(
+                columns=["iso3", "month", "fatalities", "source", "updated_at"],
+            )
+            return result
+
+        frame["fatalities"] = (
+            pd.to_numeric(frame.get("fatalities"), errors="coerce").fillna(0)
+        )
+
         if countries:
             if isinstance(countries, str):
                 countries = [countries]
             allowed = {c.strip().upper() for c in countries if c}
             if allowed:
                 frame = frame[frame["iso3"].isin(allowed)]
+                if frame.empty:
+                    result = pd.DataFrame(
+                        columns=["iso3", "month", "fatalities", "source", "updated_at"],
+                    )
+                    return result
 
-        frame["month"] = frame["event_date"].dt.to_period("M").dt.to_timestamp(how="start")
-        grouped = (
-            frame.groupby(["iso3", "month"], as_index=False)["fatalities"].sum().astype({"fatalities": "int64"})
+        frame["month"] = (
+            frame["event_date"].dt.to_period("M").dt.to_timestamp(how="start")
         )
+        grouped = frame.groupby(["iso3", "month"], as_index=False)["fatalities"].sum()
+        grouped["fatalities"] = grouped["fatalities"].fillna(0).astype("int64")
+        grouped["iso3"] = grouped["iso3"].astype(str).str.upper().str.strip()
         grouped["source"] = "ACLED"
         grouped["updated_at"] = pd.Timestamp.now(tz=timezone.utc)
         grouped = grouped.sort_values(["iso3", "month"]).reset_index(drop=True)

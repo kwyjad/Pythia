@@ -17,7 +17,7 @@ as expiry—to aid local debugging.【F:resolver/ingestion/acled_auth.py†L1-L1
 request’s URL/status to `diagnostics/ingestion/acled/http_diag.json` so pipeline summaries can report the last API interaction.
 Successful responses hydrate a `pandas.DataFrame` where `event_date` is normalised to UTC, `fatalities` are coerced to integers,
 and the optional `_format` parameter is enforced; downstream, the `monthly_fatalities` helper groups by ISO3 + month to produce
-staging rows with consistent provenance fields.【F:resolver/ingestion/acled_client.py†L372-L1223】【F:scripts/ci/summarize_connectors.py†L27-L95】
+staging rows with consistent provenance fields.【F:resolver/ingestion/acled_client.py†L1223-L1390】【F:scripts/ci/summarize_connectors.py†L27-L95】
 Running the client from the CLI is as simple as:
 
 ```bash
@@ -26,6 +26,10 @@ python -c "from resolver.ingestion.acled_client import ACLEDClient; print(ACLEDC
 
 The printed frame includes `iso3`, `month`, `fatalities`, `source`, and `updated_at` (UTC). Pass `countries=["KEN","ETH"]` to
 restrict the aggregation to a subset of ISO3 codes when debugging region-specific pipelines.
+
+### Flows vs stocks
+
+Flows such as ACLED fatalities represent per-period totals. They are written to `facts_deltas` with `series_semantics="new"`, meaning each monthly value stands alone rather than representing a change from the previous month. Stocks—including IDP headcounts or people in need—populate `facts_resolved` (and may emit derived deltas when changes are calculated), but they are conceptually distinct from the ACLED-style monthly flows.
 
 ## EM-DAT (PA)
 
