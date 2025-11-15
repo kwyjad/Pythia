@@ -8,6 +8,23 @@ search order, fallback behaviour, and how to clean up legacy duplicates lives in
 [`ingestion/config_paths.md`](ingestion/config_paths.md). Refer to it when adding a new connector or migrating an
 existing configuration.
 
+## Writing monthly snapshots to DuckDB
+
+The `freeze_snapshot.py` tool is responsible for materialising monthly facts into DuckDB once CSV artefacts exist on disk.
+After generating `facts.csv`, `facts_resolved.csv`, and `facts_deltas.csv` for a given month, the freezer invokes the
+internal `_maybe_write_db(...)` helper. This helper:
+
+- Checks whether DuckDB writes are enabled (`--write-db=1` or `RESOLVER_DB_URL` populated).
+- Loads the month’s CSVs into memory and calls `duckdb_io.write_snapshot(...)` to update `facts_resolved`,
+  `facts_deltas`, and the `snapshots` metadata table in one transaction.
+- Emits row counts, series semantics histograms, and the canonical DB path to `diagnostics/ingestion/freeze_db.json`
+  and appends a Markdown block to `diagnostics/ingestion/summary.md`.
+- On failure, prints a clear warning and appends a “Freeze Snapshot — DB write” error section to the summary so CI
+  diagnostics surface the problem without relying on raw stack traces.
+
+If DuckDB writes are disabled or the URL is missing, `_maybe_write_db` logs the skip reason and leaves the diagnostics in
+place for downstream verification stages.
+
 ## ACLED monthly fatalities
 
 The ACLED connector uses an OAuth password-or-refresh flow documented by ACLED: it POSTs to
