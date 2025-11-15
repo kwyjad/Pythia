@@ -1129,27 +1129,68 @@ def _maybe_write_db(
             canonical_path = ""
             canonical_url = db_url
 
+    facts_df = _load_frame_for_db(facts_path)
+    if facts_df is None:
+        facts_df = pd.DataFrame()
     resolved_df = _load_frame_for_db(resolved_path)
     if resolved_df is None or resolved_df.empty:
-        resolved_df = _load_frame_for_db(facts_path)
-    deltas_df = _load_frame_for_db(deltas_path)
+        resolved_df = facts_df.copy() if facts_df is not None else None
+    deltas_source = _load_frame_for_db(deltas_path)
+
+    prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
+    prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+    if prepared_deltas is None or prepared_deltas.empty:
+        base_for_deltas = deltas_source
+        if base_for_deltas is None or base_for_deltas.empty:
+            base_for_deltas = resolved_df if resolved_df is not None else facts_df
+        prepared_deltas = _prepare_deltas_frame_for_db(base_for_deltas)
 
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
         "db_path": canonical_path or "",
         "month": month,
-        "facts_resolved_rows": int(len(resolved_df)) if resolved_df is not None else 0,
-        "facts_deltas_rows": int(len(deltas_df)) if deltas_df is not None else 0,
-        "facts_resolved_semantics": _series_semantics_histogram(resolved_df),
-        "facts_deltas_semantics": _series_semantics_histogram(deltas_df),
-        "facts_resolved_metrics": _column_histogram(resolved_df, "metric"),
-        "facts_deltas_metrics": _column_histogram(deltas_df, "metric"),
+        "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
+        "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
+        "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
+        "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
+        "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
+        "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
     }
 
     manifest_payload: Dict[str, Any] | None = None
+    manifest_entries: List[Dict[str, Any]] | None = None
     if manifest_path and manifest_path.exists():
         try:
             manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest_payload, dict):
+                artifacts = manifest_payload.get("artifacts")
+                if isinstance(artifacts, Mapping):
+                    manifest_entries = []
+                    for name, artifact in artifacts.items():
+                        entry: Dict[str, Any] = {"name": str(name)}
+                        if isinstance(artifact, Mapping):
+                            entry.update({k: v for k, v in artifact.items()})
+                            path_value = str(artifact.get("path") or artifact.get("uri") or "").strip()
+                        else:
+                            path_value = str(artifact)
+                        if path_value:
+                            entry["path"] = path_value
+                        if not entry.get("path"):
+                            entry["path"] = f"{month}/{name}"
+                        resolved_rows = manifest_payload.get("resolved_rows")
+                        deltas_rows = manifest_payload.get("deltas_rows")
+                        if "rows" not in entry:
+                            if "resolved" in name and resolved_rows is not None:
+                                entry["rows"] = resolved_rows
+                            elif "deltas" in name and deltas_rows is not None:
+                                entry["rows"] = deltas_rows
+                        manifest_entries.append(entry)
+                elif isinstance(artifacts, list):
+                    manifest_entries = [
+                        dict(item)
+                        for item in artifacts
+                        if isinstance(item, Mapping)
+                    ]
         except Exception:
             LOGGER.debug("Could not parse manifest for DuckDB diagnostics", exc_info=True)
 
@@ -1167,10 +1208,11 @@ def _maybe_write_db(
         duckdb_io.write_snapshot(
             conn,
             ym=month,
-            facts_resolved=resolved_df,
-            facts_deltas=deltas_df,
-            manifests=[manifest_payload] if manifest_payload else None,
+            facts_resolved=prepared_resolved,
+            facts_deltas=prepared_deltas,
+            manifests=manifest_entries or ([manifest_payload] if manifest_payload else None),
             meta={
+                **(manifest_payload if isinstance(manifest_payload, Mapping) else {}),
                 "facts_path": str(facts_path),
                 "resolved_path": str(resolved_path or ""),
                 "deltas_path": str(deltas_path or ""),
