@@ -76,6 +76,30 @@ INGESTION_DIAGNOSTICS_DIR = Path("diagnostics") / "ingestion"
 FREEZE_DB_DIAGNOSTICS_PATH = INGESTION_DIAGNOSTICS_DIR / "freeze_db.json"
 INGESTION_SUMMARY_PATH = INGESTION_DIAGNOSTICS_DIR / "summary.md"
 
+EM_DAT_METRICS = {
+    "affected",
+    "total_affected",
+    "people_affected",
+    "in_need",
+    "pin",
+    "pa",
+}
+
+
+def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
+    """Return True if the facts file appears to contain EM-DAT PA metrics."""
+
+    try:
+        frame = pd.read_csv(facts_path, dtype=str, nrows=sample_rows).fillna("")
+    except Exception:
+        return False
+
+    if "metric" not in frame.columns:
+        return False
+
+    metrics = {m.strip() for m in frame["metric"].astype(str).tolist()}
+    return bool(metrics & EM_DAT_METRICS)
+
 
 def _column_histogram(
     frame: "pd.DataFrame | None", column: str
@@ -345,6 +369,19 @@ def run_validator(facts_path: Path) -> None:
     if not VALIDATOR.exists():
         print(f"Validator not found at {VALIDATOR}", file=sys.stderr)
         sys.exit(2)
+
+    if not _is_emdat_pa_facts(facts_path):
+        try:
+            _append_to_summary(
+                "Preview validator skipped",
+                (
+                    "Skipped EM-DAT validate_facts for non-EM-DAT metrics in: "
+                    f"`{facts_path}`"
+                ),
+            )
+        except Exception:
+            LOGGER.debug("Failed to append 'validator skipped' note", exc_info=True)
+        return
 
     preview_dir = facts_path.parent
     try:
