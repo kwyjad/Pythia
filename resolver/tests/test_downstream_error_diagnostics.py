@@ -7,12 +7,14 @@ import pandas as pd
 import pytest
 
 from scripts.ci import append_error_to_summary as append_module
+from scripts.ci import append_stage_to_summary as stage_module
 
 
 @pytest.fixture
 def summary_path(tmp_path, monkeypatch):
     target = tmp_path / "diagnostics" / "ingestion" / "summary.md"
     monkeypatch.setattr(append_module, "SUMMARY_PATH", target)
+    monkeypatch.setattr(stage_module, "SUMMARY_PATH", target)
     return target
 
 
@@ -95,3 +97,16 @@ def test_precedence_engine_cli_error_appends(summary_path, monkeypatch):
     text = summary_path.read_text(encoding="utf-8")
     assert "Precedence Engine — CLI error" in text
     assert "nonexistent.csv" in text
+
+
+def test_append_stage_writes_section(summary_path):
+    stage_module.append_stage(
+        "Derive-freeze stage: Export canonical facts (start)",
+        status="start",
+        details="Begin export",
+        context={"month_count": 3},
+    )
+    text = summary_path.read_text(encoding="utf-8")
+    assert "Derive-freeze stage: Export canonical facts" in text
+    assert "**Status:** start" in text
+    assert "month_count" in text
