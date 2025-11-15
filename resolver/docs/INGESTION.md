@@ -59,6 +59,16 @@ canonical facts layout consumed by `freeze_snapshot`. People Affected totals (`p
 facts `ym` and `hazard_code` columns. Aligning the preview with this schema keeps the validator happy and unblocks the
 DuckDB freeze step.
 
+### Validation: EM-DAT vs ACLED
+
+- The monthly snapshot pipeline (`freeze_snapshot.py`) includes a strict validator for **EM-DAT People Affected** data, which
+  checks against the `emdat_pa` schema and fails if required fields or consistency checks are violated.
+- For connectors like **ACLED** that provide **flow metrics** (e.g., events, monthly fatalities), the EM-DAT validator is
+  *not* applied. These facts are still normalized and written into `facts_deltas` with `series_semantics="new"`, but are not
+  required to satisfy EM-DAT-specific schema rules.
+- This allows us to backfill and freeze ACLED monthly flows without being blocked by EM-DAT validation rules that do not
+  apply to ACLED.
+
 Invoke `python -m resolver.cli.resolver_cli emdat-to-duckdb --help` to review the available flags. Two quick-start
 examples:
 
