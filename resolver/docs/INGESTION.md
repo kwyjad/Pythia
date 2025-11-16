@@ -62,6 +62,21 @@ place for downstream verification stages.
   argument is left as `None`, making it easy for CI pipelines to enable DB writes without changing callsites while still
   defaulting to "off" for ad-hoc CLI usage.
 
+### Snapshot parity and EM-DAT flow passthrough
+
+- `freeze_snapshot` now builds the snapshot artefacts (`facts.csv`, `facts.parquet`, and `facts_resolved.*`) directly from the
+  month-filtered preview using the same `_prepare_resolved_for_db(...)` / `_prepare_deltas_for_db(...)` helpers as
+  `export_facts`. The DuckDB tables therefore match the snapshot rows 1:1 when freeze is run without DB writes, satisfying
+  the `test_exporter_dual_writes_to_duckdb` contract.
+- When the preview looks like EM-DAT People Affected flows (all metrics are PA metrics and/or the publisher mentions
+  EM-DAT/CRED), the freezer enforces a passthrough guard: the number of deltas rows prepared must equal the number of
+  preview rows with `series_semantics="new"`. If the counts diverge, the freezer logs a warning and falls back to a
+  straight subset of the preview rows so every flow row is written exactly once, as asserted by
+  `test_emdat_export_and_freeze_to_duckdb`.
+- Two new diagnostics sections (`Freeze snapshot — parity inputs` and `Freeze snapshot — flow passthrough`) record the month,
+  preview row counts, prepared deltas counts, and whether passthrough fired. This makes it easy to confirm parity/flow
+  behaviour in CI logs without opening the parquet files.
+
 ### EM-DAT flows in snapshots
 
 EM-DAT People Affected rows represent monthly flows that must populate `facts_deltas`. The freezer detects EM-DAT PA metrics
