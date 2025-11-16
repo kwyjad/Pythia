@@ -53,23 +53,29 @@ place for downstream verification stages.
 
 - CLI usage (`python -m resolver.tools.freeze_snapshot ...`) is optimised for generating snapshot files. Unless `--write-db=1`
   is passed (or `RESOLVER_WRITE_DB=1` is set explicitly), the CLI **does not** touch DuckDB even when `RESOLVER_DB_URL` is
-  available in the environment. This guarantees that tests calling the CLI without flags never mutate the database.
+  available in the environment. This guarantees that tests calling the CLI without flags never mutate the database and keeps
+  `test_exporter_dual_writes_to_duckdb` focused on the export-time write.
 - Programmatic usage (`freeze_snapshot(..., write_db=True, db_url=...)`) continues to call `duckdb_io.write_snapshot(...)` in
-  a single transaction. Tests and backfill workflows opt into this path when they need DB writes.
-- The `_maybe_write_db(...)` helper also honours the `RESOLVER_WRITE_DB` environment variable when the function-level
-  `write_db` argument is left as `None`, making it easy for CI pipelines to enable DB writes without changing callsites.
+  a single transaction. Tests and backfill workflows opt into this path when they need DB writes by either setting the
+  argument explicitly or exporting `RESOLVER_WRITE_DB=1`.
+- The `_maybe_write_db(...)` helper honours the `RESOLVER_WRITE_DB` environment variable when the function-level `write_db`
+  argument is left as `None`, making it easy for CI pipelines to enable DB writes without changing callsites while still
+  defaulting to "off" for ad-hoc CLI usage.
 
 ### EM-DAT flows in snapshots
 
 EM-DAT People Affected rows represent monthly flows that must populate `facts_deltas`. The freezer detects EM-DAT PA metrics
 (`metric` in `{affected, total_affected, people_affected, in_need, pin, pa}`) and normalises their
-`series_semantics`/`semantics` columns to `"new"` when they are missing or blank. This ensures:
+`series_semantics`/`semantics` columns to `"new"` when they are missing or blank. When an entire frame looks like canonical
+EM-DAT facts (publisher/source fields mention EM-DAT and the expected hazard columns exist) the freezer now reuses the same
+`_prepare_resolved_for_db(...)` / `_prepare_deltas_for_db(...)` helpers as the exporter. This ensures:
 
-- Every EM-DAT preview row reaches DuckDB’s `facts_deltas` table during `freeze_snapshot(..., write_db=True)`.
-- `test_emdat_export_and_freeze_to_duckdb` can assert a 1:1 match between the preview CSV and `facts_deltas`, including the
-  expected `series_semantics="new"` contract.
-- ACLED and other connectors remain unchanged because the normalisation only fires when **all** metrics in the frame are
-  recognised EM-DAT flow metrics.
+- The per-month snapshot (`facts.parquet`, `facts_resolved.csv`) contains the same EM-DAT rows that `export_facts` wrote to
+  DuckDB, preserving the DB ↔ snapshot parity asserted in `test_exporter_dual_writes_to_duckdb`.
+- When `freeze_snapshot(..., write_db=True)` is invoked with the export preview EM-DAT facts, every preview row is written
+  into `facts_deltas` with `series_semantics="new"`, as exercised by `test_emdat_export_and_freeze_to_duckdb`.
+- ACLED and other connectors remain unchanged because the normalisation and exporter-helper reuse only fire when **all**
+  metrics in the frame are recognised EM-DAT flow metrics.
 
 ## ACLED monthly fatalities
 

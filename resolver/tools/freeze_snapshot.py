@@ -85,6 +85,14 @@ EM_DAT_METRICS = {
     "pa",
 }
 EM_DAT_METRICS_LOWER = {metric.lower() for metric in EM_DAT_METRICS}
+EM_DAT_SIGNATURE_COLUMNS = {
+    "hazard_code",
+    "hazard_label",
+    "hazard_class",
+    "publisher",
+    "source_type",
+}
+EM_DAT_PUBLISHER_KEYWORDS = ("EM-DAT", "CRED", "UCLouvain")
 
 TRUTHY_FLAGS = {"1", "true", "yes", "on"}
 FALSY_FLAGS = {"0", "false", "no", "off"}
@@ -135,6 +143,29 @@ def _is_emdat_flow_frame(frame: "pd.DataFrame | None") -> bool:
     if metrics.empty:
         return False
     return metrics.isin(EM_DAT_METRICS_LOWER).all()
+
+
+def _looks_like_emdat_pa_facts(frame: "pd.DataFrame | None") -> bool:
+    if frame is None or frame.empty:
+        return False
+
+    cols = set(frame.columns)
+    if not EM_DAT_SIGNATURE_COLUMNS.issubset(cols):
+        return False
+
+    def _string_series(column: str) -> "pd.Series":
+        if column in frame.columns:
+            return frame[column].fillna("").astype(str)
+        return pd.Series([""] * len(frame), index=frame.index)
+
+    publisher = _string_series("publisher")
+    source_type = _string_series("source_type")
+    combined = publisher.str.cat(source_type, sep=" ", na_rep="")
+    if combined.empty:
+        return False
+
+    keywords = "|".join(keyword.upper() for keyword in EM_DAT_PUBLISHER_KEYWORDS)
+    return combined.str.upper().str.contains(keywords, na=False).any()
 
 
 def _ensure_emdat_flow_semantics(
@@ -906,6 +937,7 @@ def freeze_snapshot(
     facts_df = filter_result.filtered_df
 
     facts_df, emdat_semantics_applied = _ensure_emdat_flow_semantics(facts_df)
+    emdat_preview = _looks_like_emdat_pa_facts(facts_df)
     if emdat_semantics_applied:
         try:
             facts_df.to_csv(filtered_facts_path, index=False)
@@ -997,6 +1029,14 @@ def freeze_snapshot(
         resolved_df = facts_df.copy()
     resolved_df, _ = _ensure_emdat_flow_semantics(resolved_df)
     deltas_df = load_table(deltas_path) if deltas_path else None
+
+    if emdat_preview:
+        prepared_resolved = _prepare_resolved_frame_for_db(facts_df)
+        if prepared_resolved is not None and not prepared_resolved.empty:
+            resolved_df = prepared_resolved
+        prepared_deltas = _prepare_deltas_frame_for_db(facts_df)
+        if prepared_deltas is not None and not prepared_deltas.empty:
+            deltas_df = prepared_deltas
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
