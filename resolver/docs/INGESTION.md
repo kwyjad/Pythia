@@ -96,6 +96,21 @@ python -c "from resolver.ingestion.acled_client import ACLEDClient; print(ACLEDC
 The printed frame includes `iso3`, `month`, `fatalities`, `source`, and `updated_at` (UTC). Pass `countries=["KEN","ETH"]` to
 restrict the aggregation to a subset of ISO3 codes when debugging region-specific pipelines.
 
+### ACLED authentication precedence
+
+The ACLED ingestion client resolves credentials in the following order:
+
+1. `ACLED_ACCESS_TOKEN` (modern opaque bearer token), if set.
+2. `ACLED_TOKEN` (legacy environment variable). When found, it is mirrored into
+   `ACLED_ACCESS_TOKEN` for compatibility with downstream helpers.
+3. `ACLED_REFRESH_TOKEN`, which triggers the OAuth `refresh_token` grant.
+4. `ACLED_USERNAME` and `ACLED_PASSWORD`, which fall back to the OAuth
+   `password` grant.
+
+Fast tests in `resolver/tests/test_acled_auth_tokens.py` assert this
+precedence, ensuring that environment-provided tokens short-circuit the HTTP
+grants, while refresh and password flows still work when no token is supplied.
+
 ### Flows vs stocks
 
 Flows such as ACLED fatalities represent per-period totals. They are written to `facts_deltas` with `series_semantics="new"`, meaning each monthly value stands alone rather than representing a change from the previous month. Stocks—including IDP headcounts or people in need—populate `facts_resolved` (and may emit derived deltas when changes are calculated), but they are conceptually distinct from the ACLED-style monthly flows.
