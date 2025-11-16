@@ -168,6 +168,30 @@ def _looks_like_emdat_pa_facts(frame: "pd.DataFrame | None") -> bool:
     return combined.str.upper().str.contains(keywords, na=False).any()
 
 
+def _count_semantics_rows(
+    frame: "pd.DataFrame | None", semantics: str = "new"
+) -> int:
+    if frame is None or frame.empty:
+        return 0
+    if "series_semantics" not in frame.columns:
+        return 0
+    series = frame["series_semantics"].fillna("").astype(str).str.lower()
+    return int(series.eq(str(semantics).strip().lower()).sum())
+
+
+def _passthrough_emdat_deltas(frame: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if frame is None or frame.empty:
+        return None
+    if "series_semantics" not in frame.columns:
+        return None
+    semantics = frame["series_semantics"].fillna("").astype(str)
+    mask = semantics.str.lower().eq("new")
+    if not mask.any():
+        return None
+    subset = frame.loc[mask].copy()
+    return _prepare_deltas_frame_for_db(subset)
+
+
 def _ensure_emdat_flow_semantics(
     frame: "pd.DataFrame | None",
 ) -> tuple[pd.DataFrame | None, bool]:
@@ -937,7 +961,15 @@ def freeze_snapshot(
     facts_df = filter_result.filtered_df
 
     facts_df, emdat_semantics_applied = _ensure_emdat_flow_semantics(facts_df)
-    emdat_preview = _looks_like_emdat_pa_facts(facts_df)
+    emdat_signature_preview = _looks_like_emdat_pa_facts(facts_df)
+    emdat_metric_preview = _is_emdat_flow_frame(facts_df)
+    emdat_preview = emdat_signature_preview or emdat_metric_preview
+    emdat_reason_bits: List[str] = []
+    if emdat_signature_preview:
+        emdat_reason_bits.append("publisher")
+    if emdat_metric_preview:
+        emdat_reason_bits.append("metric")
+    emdat_preview_reason = ", ".join(emdat_reason_bits) if emdat_reason_bits else "none"
     if emdat_semantics_applied:
         try:
             facts_df.to_csv(filtered_facts_path, index=False)
@@ -1021,22 +1053,64 @@ def freeze_snapshot(
         default_resolved = facts_path.with_name("resolved.csv")
         resolved_path = default_resolved if default_resolved.exists() else None
 
-    resolved_source = resolved_path if resolved_path else filtered_facts_path
-    if resolved_path:
-        resolved_df = load_table(resolved_source)
-        resolved_df = _filter_dataframe_by_month(resolved_df, ym)
-    else:
-        resolved_df = facts_df.copy()
+    resolved_source = filtered_facts_path
+    resolved_df = _prepare_resolved_frame_for_db(facts_df.copy())
+    if resolved_df is None or resolved_df.empty:
+        if resolved_path:
+            resolved_source = resolved_path
+            resolved_df = load_table(resolved_source)
+            resolved_df = _filter_dataframe_by_month(resolved_df, ym)
+        else:
+            resolved_df = facts_df.copy()
     resolved_df, _ = _ensure_emdat_flow_semantics(resolved_df)
-    deltas_df = load_table(deltas_path) if deltas_path else None
 
-    if emdat_preview:
-        prepared_resolved = _prepare_resolved_frame_for_db(facts_df)
-        if prepared_resolved is not None and not prepared_resolved.empty:
-            resolved_df = prepared_resolved
-        prepared_deltas = _prepare_deltas_frame_for_db(facts_df)
-        if prepared_deltas is not None and not prepared_deltas.empty:
-            deltas_df = prepared_deltas
+    deltas_df = _prepare_deltas_frame_for_db(facts_df.copy())
+    if (deltas_df is None or deltas_df.empty) and deltas_path:
+        deltas_df = load_table(deltas_path)
+        deltas_df = _filter_dataframe_by_month(deltas_df, ym)
+        deltas_df = _prepare_deltas_frame_for_db(deltas_df)
+
+    preview_flow_rows = _count_semantics_rows(facts_df)
+    emdat_passthrough_applied = False
+    deltas_prepared_rows = int(len(deltas_df)) if deltas_df is not None else 0
+    if emdat_preview and preview_flow_rows:
+        if deltas_prepared_rows != preview_flow_rows:
+            LOGGER.warning(
+                "EM-DAT preview flow mismatch; forcing passthrough",
+                extra={
+                    "ym": ym,
+                    "preview_flow_rows": preview_flow_rows,
+                    "prepared_deltas_rows": deltas_prepared_rows,
+                },
+            )
+            fallback_deltas = _passthrough_emdat_deltas(facts_df)
+            if fallback_deltas is not None and not fallback_deltas.empty:
+                deltas_df = fallback_deltas
+                deltas_prepared_rows = int(len(deltas_df))
+                emdat_passthrough_applied = True
+
+    parity_lines = [
+        f"- ym: {ym}",
+        f"- facts_for_month rows: {len(facts_df)}",
+        f"- resolved rows prepared: {len(resolved_df)}",
+    ]
+    parity_block = "\n".join(parity_lines)
+    _append_to_summary("Freeze snapshot — parity inputs", parity_block)
+    _append_to_repo_summary("Freeze snapshot — parity inputs", parity_block)
+
+    flow_lines = [
+        f"- ym: {ym}",
+        f"- emdat_preview={str(emdat_preview).lower()} (reason: {emdat_preview_reason})",
+        f"- preview flow rows: {preview_flow_rows}",
+        f"- prepared deltas rows: {deltas_prepared_rows}",
+        f"- passthrough_applied={str(emdat_passthrough_applied).lower()}",
+    ]
+    flow_lines.append(
+        f"- wrote facts_deltas rows: {deltas_prepared_rows if deltas_df is not None else 0}"
+    )
+    flow_block = "\n".join(flow_lines)
+    _append_to_summary("Freeze snapshot — flow passthrough", flow_block)
+    _append_to_repo_summary("Freeze snapshot — flow passthrough", flow_block)
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
