@@ -84,6 +84,31 @@ EM_DAT_METRICS = {
     "pin",
     "pa",
 }
+EM_DAT_METRICS_LOWER = {metric.lower() for metric in EM_DAT_METRICS}
+
+TRUTHY_FLAGS = {"1", "true", "yes", "on"}
+FALSY_FLAGS = {"0", "false", "no", "off"}
+
+
+def _parse_bool_flag(value: Any) -> Optional[bool]:
+    """Return True/False for common CLI/env flag strings."""
+
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in TRUTHY_FLAGS:
+        return True
+    if text in FALSY_FLAGS:
+        return False
+    return None
+
+
+def _env_write_db_flag() -> Optional[bool]:
+    """Return the RESOLVER_WRITE_DB flag value when explicitly set."""
+
+    return _parse_bool_flag(os.environ.get("RESOLVER_WRITE_DB"))
 
 
 def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
@@ -99,6 +124,44 @@ def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
 
     metrics = {m.strip() for m in frame["metric"].astype(str).tolist()}
     return bool(metrics & EM_DAT_METRICS)
+
+
+def _is_emdat_flow_frame(frame: "pd.DataFrame | None") -> bool:
+    if frame is None or frame.empty or "metric" not in frame.columns:
+        return False
+    metrics = (
+        frame["metric"].fillna("").astype(str).str.strip().str.lower()
+    )
+    if metrics.empty:
+        return False
+    return metrics.isin(EM_DAT_METRICS_LOWER).all()
+
+
+def _ensure_emdat_flow_semantics(
+    frame: "pd.DataFrame | None",
+) -> tuple[pd.DataFrame | None, bool]:
+    """Ensure EM-DAT flow rows are marked as series_semantics="new"."""
+
+    if frame is None or frame.empty:
+        return frame, False
+    if not _is_emdat_flow_frame(frame):
+        return frame, False
+
+    working = frame.copy()
+    changed = False
+
+    for column in ("series_semantics", "semantics"):
+        if column not in working.columns:
+            working[column] = ""
+            changed = True
+        series = working[column].fillna("").astype(str)
+        blank_mask = series.str.strip().eq("")
+        if blank_mask.any():
+            working.loc[blank_mask, column] = "new"
+            changed = True
+        working[column] = working[column].fillna("").astype(str)
+
+    return working, changed
 
 
 def _column_histogram(
@@ -842,6 +905,15 @@ def freeze_snapshot(
     filtered_facts_path = filter_result.filtered_path
     facts_df = filter_result.filtered_df
 
+    facts_df, emdat_semantics_applied = _ensure_emdat_flow_semantics(facts_df)
+    if emdat_semantics_applied:
+        try:
+            facts_df.to_csv(filtered_facts_path, index=False)
+        except Exception:
+            LOGGER.debug(
+                "Failed to persist EM-DAT semantics normalization", exc_info=True
+            )
+
     if filter_result.original_rows and filter_result.original_rows != filter_result.filtered_rows:
         LOGGER.info(
             "Snapshot month filter applied: month=%s total_rows=%s filtered_rows=%s",
@@ -923,6 +995,7 @@ def freeze_snapshot(
         resolved_df = _filter_dataframe_by_month(resolved_df, ym)
     else:
         resolved_df = facts_df.copy()
+    resolved_df, _ = _ensure_emdat_flow_semantics(resolved_df)
     deltas_df = load_table(deltas_path) if deltas_path else None
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
@@ -1013,11 +1086,18 @@ def main():
         "--resolved",
         help="Optional path to resolved.csv for DuckDB dual write (defaults to sibling of --facts)",
     )
+    env_cli_default = _env_write_db_flag()
+    default_write_db = None
+    if env_cli_default is not None:
+        default_write_db = "1" if env_cli_default else "0"
     ap.add_argument(
         "--write-db",
-        default=None,
+        default=default_write_db,
         choices=["0", "1"],
-        help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",
+        help=(
+            "Set to 1 or 0 to force-enable or disable DuckDB dual-write "
+            "(defaults to 0 unless RESOLVER_WRITE_DB=1)"
+        ),
     )
     ap.add_argument(
         "--db-url",
@@ -1032,6 +1112,8 @@ def main():
     args = ap.parse_args()
 
     try:
+        write_db_flag = _parse_bool_flag(args.write_db)
+
         result = freeze_snapshot(
             facts=Path(args.facts),
             month=args.month,
@@ -1039,7 +1121,7 @@ def main():
             overwrite=args.overwrite,
             deltas=Path(args.deltas) if args.deltas else None,
             resolved_csv=Path(args.resolved) if args.resolved else None,
-            write_db=None if args.write_db is None else args.write_db == "1",
+            write_db=write_db_flag,
             db_url=args.db or args.db_url,
         )
     except SnapshotError as exc:
@@ -1097,9 +1179,11 @@ def _maybe_write_db(
     summary_title = "Freeze snapshot — DB write"
 
     if write_db is None:
-        allow_write = bool(db_url)
+        env_flag = _env_write_db_flag()
+        allow_write = bool(env_flag) if env_flag is not None else False
     else:
-        allow_write = bool(write_db)
+        parsed_flag = _parse_bool_flag(write_db)
+        allow_write = bool(parsed_flag) if parsed_flag is not None else bool(write_db)
 
     if not allow_write:
         msg = "DuckDB snapshot write skipped: disabled via flag"

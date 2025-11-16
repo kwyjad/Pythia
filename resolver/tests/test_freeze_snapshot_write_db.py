@@ -83,3 +83,35 @@ def test_maybe_write_db_noop_when_write_disabled(tmp_path: Path) -> None:
     )
 
     assert not db_path.exists()
+
+
+def test_maybe_write_db_default_requires_flag_or_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    facts_csv, resolved_csv, deltas_csv, manifest_path = _write_snapshot_inputs(tmp_path)
+    db_path = tmp_path / "default.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    monkeypatch.delenv("RESOLVER_WRITE_DB", raising=False)
+    _maybe_write_db(
+        facts_path=facts_csv,
+        resolved_path=resolved_csv,
+        deltas_path=deltas_csv,
+        manifest_path=manifest_path,
+        month="2025-11",
+        db_url=db_url,
+        write_db=None,
+    )
+    assert not db_path.exists()
+
+    monkeypatch.setenv("RESOLVER_WRITE_DB", "1")
+    _maybe_write_db(
+        facts_path=facts_csv,
+        resolved_path=resolved_csv,
+        deltas_path=deltas_csv,
+        manifest_path=manifest_path,
+        month="2025-11",
+        db_url=db_url,
+        write_db=None,
+    )
+    assert db_path.exists()
