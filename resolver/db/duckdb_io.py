@@ -2464,10 +2464,9 @@ def write_snapshot(
                 "deltas_rows": deltas_rows,
                 "meta": json.dumps(dict(meta or {}), sort_keys=True),
             }
-            _delete_where(conn, "snapshots", "ym = ?", [ym])
             conn.execute(
                 """
-                INSERT INTO snapshots
+                INSERT OR REPLACE INTO snapshots
                 (ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,

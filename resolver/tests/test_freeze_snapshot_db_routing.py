@@ -119,3 +119,61 @@ def test_emdat_flow_override_routes_all_to_deltas(tmp_path: Path, monkeypatch: p
     assert resolved_count == 0
     assert len(deltas_rows) == 4
     assert all(sem == "new" for _, sem in deltas_rows)
+
+
+@pytest.mark.duckdb
+def test_preview_only_routes_rows_to_deltas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("duckdb")
+
+    monkeypatch.chdir(tmp_path)
+
+    rows = [
+        {
+            "iso3": "ZZZ",
+            "ym": "",
+            "hazard_code": "TC",
+            "metric": "affected",
+            "value": 5,
+            "series_semantics": "",
+            "as_of_date": "2024-03-01",
+        },
+        {
+            "iso3": "ZZZ",
+            "ym": "",
+            "hazard_code": "TC",
+            "metric": "in_need",
+            "value": 7,
+            "series_semantics": "new",
+            "as_of_date": "2024-03-01",
+        },
+    ]
+
+    facts_path = tmp_path / "preview_only.csv"
+    pd.DataFrame(rows).to_csv(facts_path, index=False)
+
+    db_path = tmp_path / "preview_only.duckdb"
+    db_url = f"duckdb:///{db_path.as_posix()}"
+
+    freeze_snapshot._maybe_write_db(
+        facts_path=facts_path,
+        resolved_path=None,
+        deltas_path=None,
+        manifest_path=None,
+        month="2024-03",
+        db_url=db_url,
+        write_db=True,
+    )
+
+    conn = duckdb_io.get_db(db_url)
+    try:
+        resolved_count = conn.execute(
+            "SELECT COUNT(*) FROM facts_resolved WHERE ym = '2024-03'"
+        ).fetchone()[0]
+        deltas_count = conn.execute(
+            "SELECT COUNT(*) FROM facts_deltas WHERE ym = '2024-03'"
+        ).fetchone()[0]
+    finally:
+        duckdb_io.close_db(conn)
+
+    assert resolved_count == 0
+    assert deltas_count == len(rows)

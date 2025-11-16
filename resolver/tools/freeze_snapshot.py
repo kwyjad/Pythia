@@ -119,6 +119,13 @@ def _env_write_db_flag() -> Optional[bool]:
     return _parse_bool_flag(os.environ.get("RESOLVER_WRITE_DB"))
 
 
+def _legacy_emdat_override_enabled() -> bool:
+    """Return True when the opt-in EM-DAT override flag is enabled."""
+
+    flag = _parse_bool_flag(os.environ.get("FREEZE_ENABLE_EMDAT_OVERRIDE"))
+    return bool(flag)
+
+
 def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
     """Return True if the facts file appears to contain EM-DAT PA metrics."""
 
@@ -217,6 +224,52 @@ def _passthrough_emdat_deltas(frame: "pd.DataFrame | None") -> "pd.DataFrame | N
     return _prepare_deltas_frame_for_db(subset)
 
 
+def _normalize_preview_for_deltas(
+    frame: "pd.DataFrame | None", month: str
+) -> "pd.DataFrame | None":
+    """Normalize a preview frame so it can be written to facts_deltas 1:1."""
+
+    if frame is None or frame.empty:
+        return frame
+
+    working = frame.copy()
+
+    if "ym" not in working.columns:
+        working["ym"] = ""
+    working["ym"] = working["ym"].fillna("").astype(str).str.strip()
+    mask_missing = working["ym"].eq("")
+    if mask_missing.any() and "as_of_date" in working.columns:
+        derived = pd.to_datetime(
+            working.loc[mask_missing, "as_of_date"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        working.loc[mask_missing, "ym"] = derived.fillna("")
+        mask_missing = working["ym"].fillna("").astype(str).str.strip().eq("")
+    if mask_missing.any() and "publication_date" in working.columns:
+        fallback = pd.to_datetime(
+            working.loc[mask_missing, "publication_date"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        working.loc[mask_missing, "ym"] = fallback.fillna("")
+        mask_missing = working["ym"].fillna("").astype(str).str.strip().eq("")
+    if mask_missing.any():
+        working.loc[mask_missing, "ym"] = month
+
+    if "hazard_code" not in working.columns:
+        working["hazard_code"] = ""
+    else:
+        working["hazard_code"] = working["hazard_code"].fillna("").astype(str)
+
+    if "series_semantics" not in working.columns:
+        working["series_semantics"] = "new"
+    else:
+        semantics = working["series_semantics"].fillna("").astype(str).str.strip()
+        working["series_semantics"] = semantics.mask(semantics.eq(""), "new")
+
+    if "value" in working.columns:
+        working["value"] = pd.to_numeric(working["value"], errors="coerce")
+
+    return working
+
+
 def _ensure_emdat_flow_semantics(
     frame: "pd.DataFrame | None",
 ) -> tuple[pd.DataFrame | None, bool]:
@@ -313,6 +366,9 @@ def _render_freeze_db_success_markdown(payload: Mapping[str, Any]) -> str:
     if db_path:
         lines.append(f"- **DB path:** `{db_path}`")
     lines.append(f"- **Month:** `{payload.get('month', '')}`")
+    routing_mode = str(payload.get("routing_mode") or "").strip()
+    if routing_mode:
+        lines.append(f"- **Routing mode:** `{routing_mode}`")
     lines.append(
         f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
     )
@@ -1335,7 +1391,7 @@ def _maybe_write_db(
         db_url = env_url
 
     summary_title = "Freeze snapshot — DB write"
-    routing_summary_title = "Freeze snapshot — DB routing"
+    routing_summary_title = "Freeze snapshot — DB routing (contract)"
 
     if write_db is None:
         env_flag = _env_write_db_flag()
@@ -1376,34 +1432,36 @@ def _maybe_write_db(
     if facts_df is None:
         facts_df = pd.DataFrame()
     resolved_df = _load_frame_for_db(resolved_path)
-    if resolved_df is None or resolved_df.empty:
-        resolved_df = facts_df.copy() if facts_df is not None else None
     deltas_source = _load_frame_for_db(deltas_path)
 
     preview_rows = int(len(facts_df)) if facts_df is not None else 0
-    routing_mode = "preview_routing"
     prepared_resolved = None
     prepared_deltas = None
+    routing_mode = "unrouted"
+    routing_notes: List[str] = []
 
-    if _is_emdat_preview(facts_df):
-        routing_mode = "emdat_flow_override"
-        forced = facts_df.copy()
-        if "series_semantics" not in forced.columns:
-            forced["series_semantics"] = "new"
-        else:
-            semantics = forced["series_semantics"].fillna("").astype(str).str.strip()
-            forced["series_semantics"] = semantics.mask(semantics.eq(""), "new")
-        prepared_deltas = _prepare_deltas_frame_for_db(forced)
-    else:
-        prepared_resolved = _prepare_resolved_frame_for_db(facts_df)
+    if resolved_df is not None and not resolved_df.empty:
+        routing_mode = "resolved_passthrough"
+        prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
+        if deltas_source is not None and not deltas_source.empty:
+            prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+    elif deltas_source is not None and not deltas_source.empty:
+        routing_mode = "deltas_passthrough"
         prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-
-    if routing_mode != "emdat_flow_override":
-        if prepared_deltas is None or prepared_deltas.empty:
-            base_for_deltas = deltas_source
-            if base_for_deltas is None or base_for_deltas.empty:
-                base_for_deltas = facts_df
-            prepared_deltas = _prepare_deltas_frame_for_db(base_for_deltas)
+    elif preview_rows:
+        routing_mode = "preview_to_deltas"
+        routing_notes.append(
+            "routed preview rows to facts_deltas because no resolved/deltas inputs were provided"
+        )
+        if _legacy_emdat_override_enabled() and _is_emdat_preview(facts_df):
+            routing_mode = "legacy_emdat_override"
+            routing_notes.append(
+                "legacy EM-DAT override enabled via FREEZE_ENABLE_EMDAT_OVERRIDE"
+            )
+        normalized = _normalize_preview_for_deltas(facts_df.copy(), month)
+        prepared_deltas = _prepare_deltas_frame_for_db(normalized)
+    else:
+        routing_notes.append("no frames available for DuckDB write")
 
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
@@ -1417,6 +1475,7 @@ def _maybe_write_db(
         "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
         "routing_mode": routing_mode,
         "preview_rows": preview_rows,
+        "routing_notes": routing_notes,
     }
 
     manifest_payload: Dict[str, Any] | None = None
@@ -1501,6 +1560,12 @@ def _maybe_write_db(
             "resolved": _count_rows_for_month(conn, "facts_resolved", month),
             "deltas": _count_rows_for_month(conn, "facts_deltas", month),
         }
+        notes_values = diagnostics_payload.get("routing_notes") or []
+        notes_text = "; ".join(
+            str(note).strip() for note in notes_values if str(note).strip()
+        )
+        if not notes_text:
+            notes_text = "none"
         routing_lines = [
             f"- Mode: `{routing_mode}`",
             f"- Month: `{month}`",
@@ -1519,6 +1584,7 @@ def _maybe_write_db(
                 f"facts_resolved={_format_optional_count(post_counts['resolved'])}, "
                 f"facts_deltas={_format_optional_count(post_counts['deltas'])}"
             ),
+            f"- Notes: {notes_text}",
         ]
         routing_block = "\n".join(routing_lines)
         _append_to_summary(routing_summary_title, routing_block)

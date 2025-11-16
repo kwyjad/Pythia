@@ -110,5 +110,5 @@ def test_maybe_write_db_snapshot_idempotent(tmp_path: Path) -> None:
         duckdb_io.close_db(conn)
 
     assert facts_rows == len(facts)
-    assert deltas_rows == len(facts)
+    assert deltas_rows == 0
     assert snapshots_rows == 1
