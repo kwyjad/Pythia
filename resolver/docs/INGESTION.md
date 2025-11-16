@@ -14,7 +14,7 @@ The `freeze_snapshot.py` tool is responsible for materialising monthly facts int
 After generating `facts.csv`, `facts_resolved.csv`, and `facts_deltas.csv` for a given month, the freezer invokes the
 internal `_maybe_write_db(...)` helper. This helper:
 
-- Checks whether DuckDB writes are enabled (`--write-db=1` or `RESOLVER_DB_URL` populated).
+- Checks whether DuckDB writes are enabled (`--write-db=1` or `RESOLVER_WRITE_DB=1` alongside a DuckDB URL).
 - Loads the month’s CSVs into memory and calls `duckdb_io.write_snapshot(...)` to update `facts_resolved`,
   `facts_deltas`, and the `snapshots` metadata table in one transaction.
 - Emits row counts, series semantics histograms, and the canonical DB path to `diagnostics/ingestion/freeze_db.json`
@@ -33,8 +33,49 @@ The DuckDB helper mirrors the contracts exercised by the fast tests:
   canonical facts CSV so `facts_deltas` matches the preview row-for-row. The
   `test_emdat_duckdb_write.test_emdat_export_and_freeze_to_duckdb` fast test verifies this behaviour.
 
+### `ym` handling for flows (`facts_deltas`)
+
+For monthly flows (EM-DAT, ACLED, synthetic tests), the `ym` column is the primary key for DuckDB writes. The exporter and
+freezer normalise it so downstream helpers always receive a `YYYY-MM` string:
+
+- When `ym` is missing, it is derived from `as_of_date` during export finalisation.
+- When `ym` exists but is blank, it is backfilled—first from `as_of_date`, then from `publication_date` if necessary.
+- The DuckDB layer (`duckdb_io.write_snapshot(...)`) therefore continues to enforce its strict `YYYY-MM` contract without
+  needing connector-specific exceptions.
+
+Fast tests covering the freeze → DuckDB path (`test_exporter_dual_writes_to_duckdb`, `test_dual_writes_idempotent`, and
+`test_emdat_export_and_freeze_to_duckdb`) assert this behaviour stays in place.
+
 If DuckDB writes are disabled or the URL is missing, `_maybe_write_db` logs the skip reason and leaves the diagnostics in
 place for downstream verification stages.
+
+### Freeze snapshot: CLI vs function behaviour
+
+- CLI usage (`python -m resolver.tools.freeze_snapshot ...`) is optimised for generating snapshot files. Unless `--write-db=1`
+  is passed (or `RESOLVER_WRITE_DB=1` is set explicitly), the CLI **does not** touch DuckDB even when `RESOLVER_DB_URL` is
+  available in the environment. This guarantees that tests calling the CLI without flags never mutate the database and keeps
+  `test_exporter_dual_writes_to_duckdb` focused on the export-time write.
+- Programmatic usage (`freeze_snapshot(..., write_db=True, db_url=...)`) continues to call `duckdb_io.write_snapshot(...)` in
+  a single transaction. Tests and backfill workflows opt into this path when they need DB writes by either setting the
+  argument explicitly or exporting `RESOLVER_WRITE_DB=1`.
+- The `_maybe_write_db(...)` helper honours the `RESOLVER_WRITE_DB` environment variable when the function-level `write_db`
+  argument is left as `None`, making it easy for CI pipelines to enable DB writes without changing callsites while still
+  defaulting to "off" for ad-hoc CLI usage.
+
+### EM-DAT flows in snapshots
+
+EM-DAT People Affected rows represent monthly flows that must populate `facts_deltas`. The freezer detects EM-DAT PA metrics
+(`metric` in `{affected, total_affected, people_affected, in_need, pin, pa}`) and normalises their
+`series_semantics`/`semantics` columns to `"new"` when they are missing or blank. When an entire frame looks like canonical
+EM-DAT facts (publisher/source fields mention EM-DAT and the expected hazard columns exist) the freezer now reuses the same
+`_prepare_resolved_for_db(...)` / `_prepare_deltas_for_db(...)` helpers as the exporter. This ensures:
+
+- The per-month snapshot (`facts.parquet`, `facts_resolved.csv`) contains the same EM-DAT rows that `export_facts` wrote to
+  DuckDB, preserving the DB ↔ snapshot parity asserted in `test_exporter_dual_writes_to_duckdb`.
+- When `freeze_snapshot(..., write_db=True)` is invoked with the export preview EM-DAT facts, every preview row is written
+  into `facts_deltas` with `series_semantics="new"`, as exercised by `test_emdat_export_and_freeze_to_duckdb`.
+- ACLED and other connectors remain unchanged because the normalisation and exporter-helper reuse only fire when **all**
+  metrics in the frame are recognised EM-DAT flow metrics.
 
 ## ACLED monthly fatalities
 
