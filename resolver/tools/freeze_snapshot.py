@@ -168,6 +168,55 @@ def _looks_like_emdat_pa_facts(frame: "pd.DataFrame | None") -> bool:
     return combined.str.upper().str.contains(keywords, na=False).any()
 
 
+def _is_emdat_preview(frame: "pd.DataFrame | None") -> bool:
+    """Return True when the preview facts look like EM-DAT rows."""
+
+    if frame is None or frame.empty:
+        return False
+
+    publisher = frame.get("publisher")
+    if publisher is not None:
+        series = publisher.fillna("").astype(str).str.lower()
+        if series.str.contains("em-dat").any():
+            return True
+        if series.str.contains("cred").any():
+            return True
+        if series.str.contains("uclouvain").any():
+            return True
+
+    metric = frame.get("metric")
+    if metric is not None:
+        metric_series = metric.fillna("").astype(str).str.lower()
+        if metric_series.isin(EM_DAT_METRICS_LOWER).any():
+            return True
+
+    return False
+
+
+def _count_semantics_rows(
+    frame: "pd.DataFrame | None", semantics: str = "new"
+) -> int:
+    if frame is None or frame.empty:
+        return 0
+    if "series_semantics" not in frame.columns:
+        return 0
+    series = frame["series_semantics"].fillna("").astype(str).str.lower()
+    return int(series.eq(str(semantics).strip().lower()).sum())
+
+
+def _passthrough_emdat_deltas(frame: "pd.DataFrame | None") -> "pd.DataFrame | None":
+    if frame is None or frame.empty:
+        return None
+    if "series_semantics" not in frame.columns:
+        return None
+    semantics = frame["series_semantics"].fillna("").astype(str)
+    mask = semantics.str.lower().eq("new")
+    if not mask.any():
+        return None
+    subset = frame.loc[mask].copy()
+    return _prepare_deltas_frame_for_db(subset)
+
+
 def _ensure_emdat_flow_semantics(
     frame: "pd.DataFrame | None",
 ) -> tuple[pd.DataFrame | None, bool]:
@@ -356,6 +405,25 @@ def _append_to_repo_summary(section_title: str, body_markdown: str) -> None:
         LOGGER.error(
             "Failed to append to repo-level summary.md:\n%s", traceback.format_exc()
         )
+
+
+def _count_rows_for_month(conn: Any | None, table: str, month: str) -> Optional[int]:
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE ym = ?", [month]
+        ).fetchone()
+    except Exception:
+        LOGGER.debug("Failed to count rows for %s", table, exc_info=True)
+        return None
+    if not row:
+        return 0
+    return int(row[0])
+
+
+def _format_optional_count(value: Optional[int]) -> str:
+    return str(value) if value is not None else "(n/a)"
 
 
 def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
@@ -937,7 +1005,15 @@ def freeze_snapshot(
     facts_df = filter_result.filtered_df
 
     facts_df, emdat_semantics_applied = _ensure_emdat_flow_semantics(facts_df)
-    emdat_preview = _looks_like_emdat_pa_facts(facts_df)
+    emdat_signature_preview = _looks_like_emdat_pa_facts(facts_df)
+    emdat_metric_preview = _is_emdat_flow_frame(facts_df)
+    emdat_preview = emdat_signature_preview or emdat_metric_preview
+    emdat_reason_bits: List[str] = []
+    if emdat_signature_preview:
+        emdat_reason_bits.append("publisher")
+    if emdat_metric_preview:
+        emdat_reason_bits.append("metric")
+    emdat_preview_reason = ", ".join(emdat_reason_bits) if emdat_reason_bits else "none"
     if emdat_semantics_applied:
         try:
             facts_df.to_csv(filtered_facts_path, index=False)
@@ -1021,22 +1097,64 @@ def freeze_snapshot(
         default_resolved = facts_path.with_name("resolved.csv")
         resolved_path = default_resolved if default_resolved.exists() else None
 
-    resolved_source = resolved_path if resolved_path else filtered_facts_path
-    if resolved_path:
-        resolved_df = load_table(resolved_source)
-        resolved_df = _filter_dataframe_by_month(resolved_df, ym)
-    else:
-        resolved_df = facts_df.copy()
+    resolved_source = filtered_facts_path
+    resolved_df = _prepare_resolved_frame_for_db(facts_df.copy())
+    if resolved_df is None or resolved_df.empty:
+        if resolved_path:
+            resolved_source = resolved_path
+            resolved_df = load_table(resolved_source)
+            resolved_df = _filter_dataframe_by_month(resolved_df, ym)
+        else:
+            resolved_df = facts_df.copy()
     resolved_df, _ = _ensure_emdat_flow_semantics(resolved_df)
-    deltas_df = load_table(deltas_path) if deltas_path else None
 
-    if emdat_preview:
-        prepared_resolved = _prepare_resolved_frame_for_db(facts_df)
-        if prepared_resolved is not None and not prepared_resolved.empty:
-            resolved_df = prepared_resolved
-        prepared_deltas = _prepare_deltas_frame_for_db(facts_df)
-        if prepared_deltas is not None and not prepared_deltas.empty:
-            deltas_df = prepared_deltas
+    deltas_df = _prepare_deltas_frame_for_db(facts_df.copy())
+    if (deltas_df is None or deltas_df.empty) and deltas_path:
+        deltas_df = load_table(deltas_path)
+        deltas_df = _filter_dataframe_by_month(deltas_df, ym)
+        deltas_df = _prepare_deltas_frame_for_db(deltas_df)
+
+    preview_flow_rows = _count_semantics_rows(facts_df)
+    emdat_passthrough_applied = False
+    deltas_prepared_rows = int(len(deltas_df)) if deltas_df is not None else 0
+    if emdat_preview and preview_flow_rows:
+        if deltas_prepared_rows != preview_flow_rows:
+            LOGGER.warning(
+                "EM-DAT preview flow mismatch; forcing passthrough",
+                extra={
+                    "ym": ym,
+                    "preview_flow_rows": preview_flow_rows,
+                    "prepared_deltas_rows": deltas_prepared_rows,
+                },
+            )
+            fallback_deltas = _passthrough_emdat_deltas(facts_df)
+            if fallback_deltas is not None and not fallback_deltas.empty:
+                deltas_df = fallback_deltas
+                deltas_prepared_rows = int(len(deltas_df))
+                emdat_passthrough_applied = True
+
+    parity_lines = [
+        f"- ym: {ym}",
+        f"- facts_for_month rows: {len(facts_df)}",
+        f"- resolved rows prepared: {len(resolved_df)}",
+    ]
+    parity_block = "\n".join(parity_lines)
+    _append_to_summary("Freeze snapshot — parity inputs", parity_block)
+    _append_to_repo_summary("Freeze snapshot — parity inputs", parity_block)
+
+    flow_lines = [
+        f"- ym: {ym}",
+        f"- emdat_preview={str(emdat_preview).lower()} (reason: {emdat_preview_reason})",
+        f"- preview flow rows: {preview_flow_rows}",
+        f"- prepared deltas rows: {deltas_prepared_rows}",
+        f"- passthrough_applied={str(emdat_passthrough_applied).lower()}",
+    ]
+    flow_lines.append(
+        f"- wrote facts_deltas rows: {deltas_prepared_rows if deltas_df is not None else 0}"
+    )
+    flow_block = "\n".join(flow_lines)
+    _append_to_summary("Freeze snapshot — flow passthrough", flow_block)
+    _append_to_repo_summary("Freeze snapshot — flow passthrough", flow_block)
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
@@ -1217,6 +1335,7 @@ def _maybe_write_db(
         db_url = env_url
 
     summary_title = "Freeze snapshot — DB write"
+    routing_summary_title = "Freeze snapshot — DB routing"
 
     if write_db is None:
         env_flag = _env_write_db_flag()
@@ -1261,13 +1380,30 @@ def _maybe_write_db(
         resolved_df = facts_df.copy() if facts_df is not None else None
     deltas_source = _load_frame_for_db(deltas_path)
 
-    prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
-    prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-    if prepared_deltas is None or prepared_deltas.empty:
-        base_for_deltas = deltas_source
-        if base_for_deltas is None or base_for_deltas.empty:
-            base_for_deltas = resolved_df if resolved_df is not None else facts_df
-        prepared_deltas = _prepare_deltas_frame_for_db(base_for_deltas)
+    preview_rows = int(len(facts_df)) if facts_df is not None else 0
+    routing_mode = "preview_routing"
+    prepared_resolved = None
+    prepared_deltas = None
+
+    if _is_emdat_preview(facts_df):
+        routing_mode = "emdat_flow_override"
+        forced = facts_df.copy()
+        if "series_semantics" not in forced.columns:
+            forced["series_semantics"] = "new"
+        else:
+            semantics = forced["series_semantics"].fillna("").astype(str).str.strip()
+            forced["series_semantics"] = semantics.mask(semantics.eq(""), "new")
+        prepared_deltas = _prepare_deltas_frame_for_db(forced)
+    else:
+        prepared_resolved = _prepare_resolved_frame_for_db(facts_df)
+        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+
+    if routing_mode != "emdat_flow_override":
+        if prepared_deltas is None or prepared_deltas.empty:
+            base_for_deltas = deltas_source
+            if base_for_deltas is None or base_for_deltas.empty:
+                base_for_deltas = facts_df
+            prepared_deltas = _prepare_deltas_frame_for_db(base_for_deltas)
 
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
@@ -1279,6 +1415,8 @@ def _maybe_write_db(
         "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
         "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
         "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
+        "routing_mode": routing_mode,
+        "preview_rows": preview_rows,
     }
 
     manifest_payload: Dict[str, Any] | None = None
@@ -1327,8 +1465,13 @@ def _maybe_write_db(
         LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
 
     conn = None
+    pre_counts = {"resolved": None, "deltas": None}
     try:
         conn = duckdb_io.get_db(db_url)
+        pre_counts = {
+            "resolved": _count_rows_for_month(conn, "facts_resolved", month),
+            "deltas": _count_rows_for_month(conn, "facts_deltas", month),
+        }
         duckdb_io.write_snapshot(
             conn,
             ym=month,
@@ -1354,6 +1497,32 @@ def _maybe_write_db(
                 "db_url": canonical_url or db_url,
             },
         )
+        post_counts = {
+            "resolved": _count_rows_for_month(conn, "facts_resolved", month),
+            "deltas": _count_rows_for_month(conn, "facts_deltas", month),
+        }
+        routing_lines = [
+            f"- Mode: `{routing_mode}`",
+            f"- Month: `{month}`",
+            f"- Preview rows: {preview_rows}",
+            f"- Prepared facts_resolved rows: {facts_rows}",
+            f"  - semantics: {_format_histogram(diagnostics_payload['facts_resolved_semantics'])}",
+            f"- Prepared facts_deltas rows: {deltas_rows}",
+            f"  - semantics: {_format_histogram(diagnostics_payload['facts_deltas_semantics'])}",
+            (
+                f"- Pre-write rows at ym={month}: "
+                f"facts_resolved={_format_optional_count(pre_counts['resolved'])}, "
+                f"facts_deltas={_format_optional_count(pre_counts['deltas'])}"
+            ),
+            (
+                f"- Post-write rows at ym={month}: "
+                f"facts_resolved={_format_optional_count(post_counts['resolved'])}, "
+                f"facts_deltas={_format_optional_count(post_counts['deltas'])}"
+            ),
+        ]
+        routing_block = "\n".join(routing_lines)
+        _append_to_summary(routing_summary_title, routing_block)
+        _append_to_repo_summary(routing_summary_title, routing_block)
         msg = (
             f"Wrote {facts_rows} facts_resolved rows"
             + (

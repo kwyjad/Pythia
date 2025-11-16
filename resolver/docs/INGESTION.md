@@ -62,6 +62,21 @@ place for downstream verification stages.
   argument is left as `None`, making it easy for CI pipelines to enable DB writes without changing callsites while still
   defaulting to "off" for ad-hoc CLI usage.
 
+### Snapshot parity and EM-DAT flow passthrough
+
+- `freeze_snapshot` now builds the snapshot artefacts (`facts.csv`, `facts.parquet`, and `facts_resolved.*`) directly from the
+  month-filtered preview using the same `_prepare_resolved_for_db(...)` / `_prepare_deltas_for_db(...)` helpers as
+  `export_facts`. The DuckDB tables therefore match the snapshot rows 1:1 when freeze is run without DB writes, satisfying
+  the `test_exporter_dual_writes_to_duckdb` contract.
+- When the preview looks like EM-DAT People Affected flows (all metrics are PA metrics and/or the publisher mentions
+  EM-DAT/CRED), the freezer enforces a passthrough guard: the number of deltas rows prepared must equal the number of
+  preview rows with `series_semantics="new"`. If the counts diverge, the freezer logs a warning and falls back to a
+  straight subset of the preview rows so every flow row is written exactly once, as asserted by
+  `test_emdat_export_and_freeze_to_duckdb`.
+- Two new diagnostics sections (`Freeze snapshot — parity inputs` and `Freeze snapshot — flow passthrough`) record the month,
+  preview row counts, prepared deltas counts, and whether passthrough fired. This makes it easy to confirm parity/flow
+  behaviour in CI logs without opening the parquet files.
+
 ### EM-DAT flows in snapshots
 
 EM-DAT People Affected rows represent monthly flows that must populate `facts_deltas`. The freezer detects EM-DAT PA metrics
@@ -95,6 +110,21 @@ python -c "from resolver.ingestion.acled_client import ACLEDClient; print(ACLEDC
 
 The printed frame includes `iso3`, `month`, `fatalities`, `source`, and `updated_at` (UTC). Pass `countries=["KEN","ETH"]` to
 restrict the aggregation to a subset of ISO3 codes when debugging region-specific pipelines.
+
+### ACLED authentication precedence
+
+The ACLED ingestion client resolves credentials in the following order:
+
+1. `ACLED_ACCESS_TOKEN` (modern opaque bearer token), if set.
+2. `ACLED_TOKEN` (legacy environment variable). When found, it is mirrored into
+   `ACLED_ACCESS_TOKEN` for compatibility with downstream helpers.
+3. `ACLED_REFRESH_TOKEN`, which triggers the OAuth `refresh_token` grant.
+4. `ACLED_USERNAME` and `ACLED_PASSWORD`, which fall back to the OAuth
+   `password` grant.
+
+Fast tests in `resolver/tests/test_acled_auth_tokens.py` assert this
+precedence, ensuring that environment-provided tokens short-circuit the HTTP
+grants, while refresh and password flows still work when no token is supplied.
 
 ### Flows vs stocks
 
