@@ -119,6 +119,13 @@ def _env_write_db_flag() -> Optional[bool]:
     return _parse_bool_flag(os.environ.get("RESOLVER_WRITE_DB"))
 
 
+def _legacy_emdat_override_enabled() -> bool:
+    """Return True when the opt-in EM-DAT override flag is enabled."""
+
+    flag = _parse_bool_flag(os.environ.get("FREEZE_ENABLE_EMDAT_OVERRIDE"))
+    return bool(flag)
+
+
 def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
     """Return True if the facts file appears to contain EM-DAT PA metrics."""
 
@@ -168,6 +175,31 @@ def _looks_like_emdat_pa_facts(frame: "pd.DataFrame | None") -> bool:
     return combined.str.upper().str.contains(keywords, na=False).any()
 
 
+def _is_emdat_preview(frame: "pd.DataFrame | None") -> bool:
+    """Return True when the preview facts look like EM-DAT rows."""
+
+    if frame is None or frame.empty:
+        return False
+
+    publisher = frame.get("publisher")
+    if publisher is not None:
+        series = publisher.fillna("").astype(str).str.lower()
+        if series.str.contains("em-dat").any():
+            return True
+        if series.str.contains("cred").any():
+            return True
+        if series.str.contains("uclouvain").any():
+            return True
+
+    metric = frame.get("metric")
+    if metric is not None:
+        metric_series = metric.fillna("").astype(str).str.lower()
+        if metric_series.isin(EM_DAT_METRICS_LOWER).any():
+            return True
+
+    return False
+
+
 def _count_semantics_rows(
     frame: "pd.DataFrame | None", semantics: str = "new"
 ) -> int:
@@ -190,6 +222,52 @@ def _passthrough_emdat_deltas(frame: "pd.DataFrame | None") -> "pd.DataFrame | N
         return None
     subset = frame.loc[mask].copy()
     return _prepare_deltas_frame_for_db(subset)
+
+
+def _normalize_preview_for_deltas(
+    frame: "pd.DataFrame | None", month: str
+) -> "pd.DataFrame | None":
+    """Normalize a preview frame so it can be written to facts_deltas 1:1."""
+
+    if frame is None or frame.empty:
+        return frame
+
+    working = frame.copy()
+
+    if "ym" not in working.columns:
+        working["ym"] = ""
+    working["ym"] = working["ym"].fillna("").astype(str).str.strip()
+    mask_missing = working["ym"].eq("")
+    if mask_missing.any() and "as_of_date" in working.columns:
+        derived = pd.to_datetime(
+            working.loc[mask_missing, "as_of_date"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        working.loc[mask_missing, "ym"] = derived.fillna("")
+        mask_missing = working["ym"].fillna("").astype(str).str.strip().eq("")
+    if mask_missing.any() and "publication_date" in working.columns:
+        fallback = pd.to_datetime(
+            working.loc[mask_missing, "publication_date"], errors="coerce"
+        ).dt.strftime("%Y-%m")
+        working.loc[mask_missing, "ym"] = fallback.fillna("")
+        mask_missing = working["ym"].fillna("").astype(str).str.strip().eq("")
+    if mask_missing.any():
+        working.loc[mask_missing, "ym"] = month
+
+    if "hazard_code" not in working.columns:
+        working["hazard_code"] = ""
+    else:
+        working["hazard_code"] = working["hazard_code"].fillna("").astype(str)
+
+    if "series_semantics" not in working.columns:
+        working["series_semantics"] = "new"
+    else:
+        semantics = working["series_semantics"].fillna("").astype(str).str.strip()
+        working["series_semantics"] = semantics.mask(semantics.eq(""), "new")
+
+    if "value" in working.columns:
+        working["value"] = pd.to_numeric(working["value"], errors="coerce")
+
+    return working
 
 
 def _ensure_emdat_flow_semantics(
@@ -288,6 +366,9 @@ def _render_freeze_db_success_markdown(payload: Mapping[str, Any]) -> str:
     if db_path:
         lines.append(f"- **DB path:** `{db_path}`")
     lines.append(f"- **Month:** `{payload.get('month', '')}`")
+    routing_mode = str(payload.get("routing_mode") or "").strip()
+    if routing_mode:
+        lines.append(f"- **Routing mode:** `{routing_mode}`")
     lines.append(
         f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
     )
@@ -380,6 +461,25 @@ def _append_to_repo_summary(section_title: str, body_markdown: str) -> None:
         LOGGER.error(
             "Failed to append to repo-level summary.md:\n%s", traceback.format_exc()
         )
+
+
+def _count_rows_for_month(conn: Any | None, table: str, month: str) -> Optional[int]:
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE ym = ?", [month]
+        ).fetchone()
+    except Exception:
+        LOGGER.debug("Failed to count rows for %s", table, exc_info=True)
+        return None
+    if not row:
+        return 0
+    return int(row[0])
+
+
+def _format_optional_count(value: Optional[int]) -> str:
+    return str(value) if value is not None else "(n/a)"
 
 
 def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
@@ -1291,6 +1391,8 @@ def _maybe_write_db(
         db_url = env_url
 
     summary_title = "Freeze snapshot — DB write"
+    routing_summary_title = "Freeze snapshot — DB routing (contract)"
+    counts_summary_title = "Snapshot DB write — pre/post counts"
 
     if write_db is None:
         env_flag = _env_write_db_flag()
@@ -1331,17 +1433,36 @@ def _maybe_write_db(
     if facts_df is None:
         facts_df = pd.DataFrame()
     resolved_df = _load_frame_for_db(resolved_path)
-    if resolved_df is None or resolved_df.empty:
-        resolved_df = facts_df.copy() if facts_df is not None else None
     deltas_source = _load_frame_for_db(deltas_path)
 
-    prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
-    prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-    if prepared_deltas is None or prepared_deltas.empty:
-        base_for_deltas = deltas_source
-        if base_for_deltas is None or base_for_deltas.empty:
-            base_for_deltas = resolved_df if resolved_df is not None else facts_df
-        prepared_deltas = _prepare_deltas_frame_for_db(base_for_deltas)
+    preview_rows = int(len(facts_df)) if facts_df is not None else 0
+    prepared_resolved = None
+    prepared_deltas = None
+    routing_mode = "unrouted"
+    routing_notes: List[str] = []
+
+    if resolved_df is not None and not resolved_df.empty:
+        routing_mode = "resolved_passthrough"
+        prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
+        if deltas_source is not None and not deltas_source.empty:
+            prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+    elif deltas_source is not None and not deltas_source.empty:
+        routing_mode = "deltas_passthrough"
+        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+    elif preview_rows:
+        routing_mode = "preview_to_deltas"
+        routing_notes.append(
+            "routed preview rows to facts_deltas because no resolved/deltas inputs were provided"
+        )
+        if _legacy_emdat_override_enabled() and _is_emdat_preview(facts_df):
+            routing_mode = "legacy_emdat_override"
+            routing_notes.append(
+                "legacy EM-DAT override enabled via FREEZE_ENABLE_EMDAT_OVERRIDE"
+            )
+        normalized = _normalize_preview_for_deltas(facts_df.copy(), month)
+        prepared_deltas = _prepare_deltas_frame_for_db(normalized)
+    else:
+        routing_notes.append("no frames available for DuckDB write")
 
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
@@ -1353,6 +1474,9 @@ def _maybe_write_db(
         "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
         "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
         "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
+        "routing_mode": routing_mode,
+        "preview_rows": preview_rows,
+        "routing_notes": routing_notes,
     }
 
     manifest_payload: Dict[str, Any] | None = None
@@ -1401,9 +1525,22 @@ def _maybe_write_db(
         LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
 
     conn = None
+    pre_counts = {"resolved": None, "deltas": None}
+    post_counts = {"resolved": None, "deltas": None}
     try:
         conn = duckdb_io.get_db(db_url)
-        duckdb_io.write_snapshot(
+        LOGGER.info(
+            "freeze_snapshot.db_routing",
+            extra={
+                "month": month,
+                "routing_mode": routing_mode,
+                "facts_resolved_rows": diagnostics_payload["facts_resolved_rows"],
+                "facts_deltas_rows": diagnostics_payload["facts_deltas_rows"],
+                "preview_rows": preview_rows,
+                "db_url": canonical_url or db_url or "",
+            },
+        )
+        write_result = duckdb_io.write_snapshot(
             conn,
             ym=month,
             facts_resolved=prepared_resolved,
@@ -1428,6 +1565,79 @@ def _maybe_write_db(
                 "db_url": canonical_url or db_url,
             },
         )
+        if isinstance(write_result, Mapping):
+            pre_counts = (
+                write_result.get("pre_counts")
+                if isinstance(write_result.get("pre_counts"), Mapping)
+                else pre_counts
+            )
+            post_counts = (
+                write_result.get("post_counts")
+                if isinstance(write_result.get("post_counts"), Mapping)
+                else post_counts
+            )
+        if pre_counts["resolved"] is None:
+            pre_counts["resolved"] = _count_rows_for_month(
+                conn, "facts_resolved", month
+            )
+        if pre_counts["deltas"] is None:
+            pre_counts["deltas"] = _count_rows_for_month(conn, "facts_deltas", month)
+        if post_counts["resolved"] is None:
+            post_counts["resolved"] = _count_rows_for_month(
+                conn, "facts_resolved", month
+            )
+        if post_counts["deltas"] is None:
+            post_counts["deltas"] = _count_rows_for_month(conn, "facts_deltas", month)
+        notes_values = diagnostics_payload.get("routing_notes") or []
+        notes_text = "; ".join(
+            str(note).strip() for note in notes_values if str(note).strip()
+        )
+        if not notes_text:
+            notes_text = "none"
+        routing_lines = [
+            f"- Mode: `{routing_mode}`",
+            f"- Month: `{month}`",
+            f"- Preview rows: {preview_rows}",
+            f"- Prepared facts_resolved rows: {facts_rows}",
+            f"  - semantics: {_format_histogram(diagnostics_payload['facts_resolved_semantics'])}",
+            f"- Prepared facts_deltas rows: {deltas_rows}",
+            f"  - semantics: {_format_histogram(diagnostics_payload['facts_deltas_semantics'])}",
+            (
+                f"- Pre-write rows at ym={month}: "
+                f"facts_resolved={_format_optional_count(pre_counts['resolved'])}, "
+                f"facts_deltas={_format_optional_count(pre_counts['deltas'])}"
+            ),
+            (
+                f"- Post-write rows at ym={month}: "
+                f"facts_resolved={_format_optional_count(post_counts['resolved'])}, "
+                f"facts_deltas={_format_optional_count(post_counts['deltas'])}"
+            ),
+            f"- Notes: {notes_text}",
+        ]
+        routing_block = "\n".join(routing_lines)
+        _append_to_summary(routing_summary_title, routing_block)
+        _append_to_repo_summary(routing_summary_title, routing_block)
+        counts_lines = [
+            f"ym: `{month}`",
+            (
+                "pre:   resolved="
+                f"{_format_optional_count(pre_counts['resolved'])}, "
+                f"deltas={_format_optional_count(pre_counts['deltas'])}"
+            ),
+            (
+                f"wrote: resolved={facts_rows}, "
+                f"deltas={deltas_rows}"
+            ),
+            (
+                "post:  resolved="
+                f"{_format_optional_count(post_counts['resolved'])}, "
+                f"deltas={_format_optional_count(post_counts['deltas'])}"
+            ),
+            f"routing: `{routing_mode}`",
+        ]
+        counts_block = "\n".join(counts_lines)
+        _append_to_summary(counts_summary_title, counts_block)
+        _append_to_repo_summary(counts_summary_title, counts_block)
         msg = (
             f"Wrote {facts_rows} facts_resolved rows"
             + (

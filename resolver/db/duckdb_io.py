@@ -2231,7 +2231,7 @@ def write_snapshot(
     facts_deltas: pd.DataFrame | None,
     manifests: Iterable[Mapping[str, object]] | None,
     meta: Mapping[str, object] | None,
-) -> None:
+) -> dict[str, object]:
     """Write a snapshot bundle transactionally into the database."""
 
     init_schema(conn)
@@ -2271,17 +2271,35 @@ def write_snapshot(
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
 
+    def _count_rows(table: str) -> int | None:
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE ym = ?",
+                [ym],
+            ).fetchone()
+        except Exception:  # pragma: no cover - diagnostics only
+            LOGGER.debug("row_count_probe_failed", exc_info=True)
+            return None
+        return int(row[0]) if row else 0
+
+    pre_counts = {
+        "resolved": _count_rows("facts_resolved"),
+        "deltas": _count_rows("facts_deltas"),
+    }
+
     try:
         with _ddl_transaction(conn, "snapshot_write"):
             facts_rows = 0
             deltas_rows = 0
 
-            deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
-            LOGGER.debug(
-                "Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym
-            )
-
+            deleted_resolved = 0
             if facts_resolved is not None and not facts_resolved.empty:
+                deleted_resolved = _delete_where(
+                    conn, "facts_resolved", "ym = ?", [ym]
+                )
+                LOGGER.debug(
+                    "Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym
+                )
                 facts_resolved = _ensure_columns(
                     facts_resolved,
                     FACTS_RESOLVED_KEY_COLUMNS + ["value"],
@@ -2393,14 +2411,6 @@ def write_snapshot(
                     "facts_deltas series_semantics distribution: %s",
                     dict_counts(facts_deltas["series_semantics"]),
                 )
-            else:
-                deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
-                if deleted_deltas:
-                    LOGGER.debug(
-                        "Deleted %s facts_deltas rows for ym=%s (no deltas frame provided)",
-                        deleted_deltas,
-                        ym,
-                    )
             manifest_rows: list[dict] = []
             manifest_created_at = _default_created_at(
                 meta.get("created_at_utc") if meta else None
@@ -2464,10 +2474,9 @@ def write_snapshot(
                 "deltas_rows": deltas_rows,
                 "meta": json.dumps(dict(meta or {}), sort_keys=True),
             }
-            _delete_where(conn, "snapshots", "ym = ?", [ym])
             conn.execute(
                 """
-                INSERT INTO snapshots
+                INSERT OR REPLACE INTO snapshots
                 (ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -2496,6 +2505,22 @@ def write_snapshot(
                 deleted_resolved,
                 deleted_deltas,
             )
+            post_counts = {
+                "resolved": _count_rows("facts_resolved"),
+                "deltas": _count_rows("facts_deltas"),
+            }
+            if diag_enabled():
+                log_json(
+                    DIAG_LOGGER,
+                    "snapshot_db_write_counts",
+                    ym=ym,
+                    pre=pre_counts,
+                    written={
+                        "resolved": int(facts_rows or 0),
+                        "deltas": int(deltas_rows or 0),
+                    },
+                    post=post_counts,
+                )
             if diag_enabled():
                 counts = dump_counts(conn, ym=ym)
                 log_json(
@@ -2513,3 +2538,15 @@ def write_snapshot(
                 error=repr(sys.exc_info()[1]),
             )
         raise
+    return {
+        "written": {
+            "resolved": int(facts_rows or 0),
+            "deltas": int(deltas_rows or 0),
+        },
+        "deleted": {
+            "resolved": int(deleted_resolved or 0),
+            "deltas": int(deleted_deltas or 0),
+        },
+        "pre_counts": pre_counts,
+        "post_counts": post_counts,
+    }
