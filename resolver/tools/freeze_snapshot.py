@@ -1392,6 +1392,7 @@ def _maybe_write_db(
 
     summary_title = "Freeze snapshot — DB write"
     routing_summary_title = "Freeze snapshot — DB routing (contract)"
+    counts_summary_title = "Snapshot DB write — pre/post counts"
 
     if write_db is None:
         env_flag = _env_write_db_flag()
@@ -1525,13 +1526,21 @@ def _maybe_write_db(
 
     conn = None
     pre_counts = {"resolved": None, "deltas": None}
+    post_counts = {"resolved": None, "deltas": None}
     try:
         conn = duckdb_io.get_db(db_url)
-        pre_counts = {
-            "resolved": _count_rows_for_month(conn, "facts_resolved", month),
-            "deltas": _count_rows_for_month(conn, "facts_deltas", month),
-        }
-        duckdb_io.write_snapshot(
+        LOGGER.info(
+            "freeze_snapshot.db_routing",
+            extra={
+                "month": month,
+                "routing_mode": routing_mode,
+                "facts_resolved_rows": diagnostics_payload["facts_resolved_rows"],
+                "facts_deltas_rows": diagnostics_payload["facts_deltas_rows"],
+                "preview_rows": preview_rows,
+                "db_url": canonical_url or db_url or "",
+            },
+        )
+        write_result = duckdb_io.write_snapshot(
             conn,
             ym=month,
             facts_resolved=prepared_resolved,
@@ -1556,10 +1565,29 @@ def _maybe_write_db(
                 "db_url": canonical_url or db_url,
             },
         )
-        post_counts = {
-            "resolved": _count_rows_for_month(conn, "facts_resolved", month),
-            "deltas": _count_rows_for_month(conn, "facts_deltas", month),
-        }
+        if isinstance(write_result, Mapping):
+            pre_counts = (
+                write_result.get("pre_counts")
+                if isinstance(write_result.get("pre_counts"), Mapping)
+                else pre_counts
+            )
+            post_counts = (
+                write_result.get("post_counts")
+                if isinstance(write_result.get("post_counts"), Mapping)
+                else post_counts
+            )
+        if pre_counts["resolved"] is None:
+            pre_counts["resolved"] = _count_rows_for_month(
+                conn, "facts_resolved", month
+            )
+        if pre_counts["deltas"] is None:
+            pre_counts["deltas"] = _count_rows_for_month(conn, "facts_deltas", month)
+        if post_counts["resolved"] is None:
+            post_counts["resolved"] = _count_rows_for_month(
+                conn, "facts_resolved", month
+            )
+        if post_counts["deltas"] is None:
+            post_counts["deltas"] = _count_rows_for_month(conn, "facts_deltas", month)
         notes_values = diagnostics_payload.get("routing_notes") or []
         notes_text = "; ".join(
             str(note).strip() for note in notes_values if str(note).strip()
@@ -1589,6 +1617,27 @@ def _maybe_write_db(
         routing_block = "\n".join(routing_lines)
         _append_to_summary(routing_summary_title, routing_block)
         _append_to_repo_summary(routing_summary_title, routing_block)
+        counts_lines = [
+            f"ym: `{month}`",
+            (
+                "pre:   resolved="
+                f"{_format_optional_count(pre_counts['resolved'])}, "
+                f"deltas={_format_optional_count(pre_counts['deltas'])}"
+            ),
+            (
+                f"wrote: resolved={facts_rows}, "
+                f"deltas={deltas_rows}"
+            ),
+            (
+                "post:  resolved="
+                f"{_format_optional_count(post_counts['resolved'])}, "
+                f"deltas={_format_optional_count(post_counts['deltas'])}"
+            ),
+            f"routing: `{routing_mode}`",
+        ]
+        counts_block = "\n".join(counts_lines)
+        _append_to_summary(counts_summary_title, counts_block)
+        _append_to_repo_summary(counts_summary_title, counts_block)
         msg = (
             f"Wrote {facts_rows} facts_resolved rows"
             + (
