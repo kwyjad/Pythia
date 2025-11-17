@@ -756,6 +756,9 @@ def run_validator(facts_path: Path) -> None:
 def _normalize_facts_for_validation(facts_path: Path) -> None:
     """Normalize semantic fields prior to validation (best effort)."""
 
+    if not _is_emdat_pa_facts(facts_path):
+        return
+
     try:
         frame = pd.read_csv(facts_path, dtype=str).fillna("")
     except Exception:
@@ -1129,8 +1132,28 @@ def freeze_snapshot(
             skip_reason=f"No rows for month {ym} after filtering preview",
         )
 
+    normalizer_applied = False
+    normalizer_reason = "non-emdat facts"
+
+    should_normalize = False
     if filter_result.filtered_rows > 0:
+        should_normalize = _is_emdat_pa_facts(filtered_facts_path)
+        if should_normalize:
+            normalizer_reason = "emdat facts"
+        else:
+            normalizer_reason = "non-emdat facts"
+
+    if should_normalize:
         _normalize_facts_for_validation(filtered_facts_path)
+        normalizer_applied = True
+
+    normalizer_line = (
+        f"applied={str(normalizer_applied).lower()} reason={normalizer_reason}"
+    )
+    _append_to_summary("Freeze snapshot — normalizer", normalizer_line)
+    _append_to_repo_summary("Freeze snapshot — normalizer", normalizer_line)
+
+    if filter_result.filtered_rows > 0:
         run_validator(filtered_facts_path)
         try:
             validated_facts_df = load_table(filtered_facts_path)
@@ -1355,9 +1378,6 @@ def main():
     if result.deltas_csv:
         print(f" - {result.deltas_csv}")
     print(f" - {result.manifest}")
-
-if __name__ == "__main__":
-    main()
 
 
 
@@ -1711,3 +1731,7 @@ def _append_db_error_to_summary(
         )
     except Exception:
         LOGGER.debug("Failed to append freeze snapshot DB error", exc_info=True)
+
+
+if __name__ == "__main__":
+    main()
