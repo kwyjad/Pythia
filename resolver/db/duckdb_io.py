@@ -256,8 +256,11 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
 
     spec = TABLE_KEY_SPECS.get(table, {})
     canonical = list(spec.get("columns", [])) if spec else []
-    if frame is None or frame.empty:
+    if canonical:
         return canonical
+
+    if frame is None or frame.empty:
+        return []
 
     columns = set(frame.columns)
     keys: list[str] = []
@@ -266,13 +269,6 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
         for column in candidates:
             if column in columns and column not in keys:
                 keys.append(column)
-
-    if (
-        table in {"facts_resolved", "facts_deltas"}
-        and "event_id" in columns
-        and _series_has_non_empty(frame, "event_id")
-    ):
-        return ["event_id"]
 
     if table == "facts_resolved":
         if "event_id" in columns and _series_has_non_empty(frame, "event_id"):
@@ -307,8 +303,8 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
         )
         _extend(fallback)
 
-    if not keys and canonical:
-        _extend(canonical)
+    if not keys and spec.get("columns"):
+        _extend(spec.get("columns", []))
 
     return keys
 
@@ -2235,7 +2231,7 @@ def write_snapshot(
     facts_deltas: pd.DataFrame | None,
     manifests: Iterable[Mapping[str, object]] | None,
     meta: Mapping[str, object] | None,
-) -> dict[str, object]:
+) -> None:
     """Write a snapshot bundle transactionally into the database."""
 
     init_schema(conn)
@@ -2274,65 +2270,18 @@ def write_snapshot(
 
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
-    upsert_keys_meta: dict[str, dict[str, object]] = {}
-
-    def _record_upsert_keys(
-        table: str,
-        keys: Sequence[str],
-        prepared_rows: int,
-        rows_written: int,
-    ) -> None:
-        readable_keys = [str(key) for key in keys]
-        upsert_keys_meta[table] = {
-            "keys": readable_keys,
-            "rows": int(rows_written),
-        }
-        LOGGER.info(
-            "duckdb.upsert.keys | table=%s | keys=%s | prepared_rows=%s | rows_written=%s",
-            table,
-            ", ".join(readable_keys) or "(none)",
-            prepared_rows,
-            rows_written,
-        )
-        if diag_enabled():  # pragma: no branch - cheap gate
-            log_json(
-                DIAG_LOGGER,
-                "duckdb_upsert_keys",
-                table=table,
-                keys=readable_keys,
-                prepared_rows=int(prepared_rows),
-                rows=int(rows_written),
-            )
-
-    def _count_rows(table: str) -> int | None:
-        try:
-            row = conn.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE ym = ?",
-                [ym],
-            ).fetchone()
-        except Exception:  # pragma: no cover - diagnostics only
-            LOGGER.debug("row_count_probe_failed", exc_info=True)
-            return None
-        return int(row[0]) if row else 0
-
-    pre_counts = {
-        "resolved": _count_rows("facts_resolved"),
-        "deltas": _count_rows("facts_deltas"),
-    }
 
     try:
         with _ddl_transaction(conn, "snapshot_write"):
             facts_rows = 0
             deltas_rows = 0
 
-            deleted_resolved = 0
+            deleted_resolved = _delete_where(conn, "facts_resolved", "ym = ?", [ym])
+            LOGGER.debug(
+                "Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym
+            )
+
             if facts_resolved is not None and not facts_resolved.empty:
-                deleted_resolved = _delete_where(
-                    conn, "facts_resolved", "ym = ?", [ym]
-                )
-                LOGGER.debug(
-                    "Deleted %s facts_resolved rows for ym=%s", deleted_resolved, ym
-                )
                 facts_resolved = _ensure_columns(
                     facts_resolved,
                     FACTS_RESOLVED_KEY_COLUMNS + ["value"],
@@ -2363,27 +2312,17 @@ def write_snapshot(
                 facts_resolved = _coerce_numeric(
                     facts_resolved, "facts_resolved"
                 )
-                resolved_keys = resolve_upsert_keys("facts_resolved", facts_resolved)
-                if not resolved_keys:
-                    resolved_keys = FACTS_RESOLVED_KEY_COLUMNS
                 facts_resolved = facts_resolved.drop_duplicates(
-                    subset=resolved_keys,
+                    subset=FACTS_RESOLVED_KEY_COLUMNS,
                     keep="last",
                 ).reset_index(drop=True)
                 facts_rows = upsert_dataframe(
                     conn,
                     "facts_resolved",
                     facts_resolved,
-                    keys=resolved_keys,
+                    keys=FACTS_RESOLVED_KEY_COLUMNS,
                 )
-                written_resolved = int(facts_rows or 0)
-                _record_upsert_keys(
-                    "facts_resolved",
-                    resolved_keys,
-                    len(facts_resolved),
-                    written_resolved,
-                )
-                LOGGER.info("facts_resolved rows upserted: %s", written_resolved)
+                LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
                 LOGGER.debug(
                     "facts_resolved series_semantics distribution: %s",
                     dict_counts(facts_resolved["series_semantics"]),
@@ -2439,31 +2378,29 @@ def write_snapshot(
                 facts_deltas = _coerce_numeric(
                     facts_deltas, "facts_deltas"
                 )
-                deltas_keys = resolve_upsert_keys("facts_deltas", facts_deltas)
-                if not deltas_keys:
-                    deltas_keys = FACTS_DELTAS_KEY_COLUMNS
                 facts_deltas = facts_deltas.drop_duplicates(
-                    subset=deltas_keys,
+                    subset=FACTS_DELTAS_KEY_COLUMNS,
                     keep="last",
                 ).reset_index(drop=True)
                 deltas_rows = upsert_dataframe(
                     conn,
                     "facts_deltas",
                     facts_deltas,
-                    keys=deltas_keys,
+                    keys=FACTS_DELTAS_KEY_COLUMNS,
                 )
-                written_deltas = int(deltas_rows or 0)
-                _record_upsert_keys(
-                    "facts_deltas",
-                    deltas_keys,
-                    len(facts_deltas),
-                    written_deltas,
-                )
-                LOGGER.info("facts_deltas rows upserted: %s", written_deltas)
+                LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
                 LOGGER.debug(
                     "facts_deltas series_semantics distribution: %s",
                     dict_counts(facts_deltas["series_semantics"]),
                 )
+            else:
+                deleted_deltas = _delete_where(conn, "facts_deltas", "ym = ?", [ym])
+                if deleted_deltas:
+                    LOGGER.debug(
+                        "Deleted %s facts_deltas rows for ym=%s (no deltas frame provided)",
+                        deleted_deltas,
+                        ym,
+                    )
             manifest_rows: list[dict] = []
             manifest_created_at = _default_created_at(
                 meta.get("created_at_utc") if meta else None
@@ -2527,9 +2464,10 @@ def write_snapshot(
                 "deltas_rows": deltas_rows,
                 "meta": json.dumps(dict(meta or {}), sort_keys=True),
             }
+            _delete_where(conn, "snapshots", "ym = ?", [ym])
             conn.execute(
                 """
-                INSERT OR REPLACE INTO snapshots
+                INSERT INTO snapshots
                 (ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -2558,22 +2496,6 @@ def write_snapshot(
                 deleted_resolved,
                 deleted_deltas,
             )
-            post_counts = {
-                "resolved": _count_rows("facts_resolved"),
-                "deltas": _count_rows("facts_deltas"),
-            }
-            if diag_enabled():
-                log_json(
-                    DIAG_LOGGER,
-                    "snapshot_db_write_counts",
-                    ym=ym,
-                    pre=pre_counts,
-                    written={
-                        "resolved": int(facts_rows or 0),
-                        "deltas": int(deltas_rows or 0),
-                    },
-                    post=post_counts,
-                )
             if diag_enabled():
                 counts = dump_counts(conn, ym=ym)
                 log_json(
@@ -2591,16 +2513,3 @@ def write_snapshot(
                 error=repr(sys.exc_info()[1]),
             )
         raise
-    return {
-        "written": {
-            "resolved": int(facts_rows or 0),
-            "deltas": int(deltas_rows or 0),
-        },
-        "deleted": {
-            "resolved": int(deleted_resolved or 0),
-            "deltas": int(deleted_deltas or 0),
-        },
-        "pre_counts": pre_counts,
-        "post_counts": post_counts,
-        "upsert_keys": upsert_keys_meta,
-    }

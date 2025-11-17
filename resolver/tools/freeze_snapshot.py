@@ -84,52 +84,6 @@ EM_DAT_METRICS = {
     "pin",
     "pa",
 }
-EM_DAT_METRICS_LOWER = {metric.lower() for metric in EM_DAT_METRICS}
-EM_DAT_SIGNATURE_COLUMNS = {
-    "hazard_code",
-    "hazard_label",
-    "hazard_class",
-    "publisher",
-    "source_type",
-}
-EM_DAT_PUBLISHER_KEYWORDS = ("EM-DAT", "CRED", "UCLouvain")
-
-TRUTHY_FLAGS = {"1", "true", "yes", "on"}
-FALSY_FLAGS = {"0", "false", "no", "off"}
-
-
-def _parse_bool_flag(value: Any) -> Optional[bool]:
-    """Return True/False for common CLI/env flag strings."""
-
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return None
-    text = str(value).strip().lower()
-    if text in TRUTHY_FLAGS:
-        return True
-    if text in FALSY_FLAGS:
-        return False
-    return None
-
-
-def _env_write_db_flag() -> Optional[bool]:
-    """Return the RESOLVER_WRITE_DB flag value when explicitly set."""
-
-    return _parse_bool_flag(os.environ.get("RESOLVER_WRITE_DB"))
-
-
-def _freeze_validation_enabled() -> bool:
-    """Return True when the FREEZE_RUN_VALIDATOR flag requests validation."""
-
-    raw = os.environ.get("FREEZE_RUN_VALIDATOR", "")
-    return raw.strip().lower() in TRUTHY_FLAGS
-
-
-def _legacy_emdat_override_enabled() -> bool:
-    """Return True when the opt-in EM-DAT override flag is enabled."""
-
-    return os.environ.get("FREEZE_ENABLE_EMDAT_OVERRIDE", "0").strip() == "1"
 
 
 def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
@@ -145,168 +99,6 @@ def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
 
     metrics = {m.strip() for m in frame["metric"].astype(str).tolist()}
     return bool(metrics & EM_DAT_METRICS)
-
-
-def _is_emdat_flow_frame(frame: "pd.DataFrame | None") -> bool:
-    if frame is None or frame.empty or "metric" not in frame.columns:
-        return False
-    metrics = (
-        frame["metric"].fillna("").astype(str).str.strip().str.lower()
-    )
-    if metrics.empty:
-        return False
-    return metrics.isin(EM_DAT_METRICS_LOWER).all()
-
-
-def _looks_like_emdat_pa_facts(frame: "pd.DataFrame | None") -> bool:
-    if frame is None or frame.empty:
-        return False
-
-    cols = set(frame.columns)
-    if not EM_DAT_SIGNATURE_COLUMNS.issubset(cols):
-        return False
-
-    def _string_series(column: str) -> "pd.Series":
-        if column in frame.columns:
-            return frame[column].fillna("").astype(str)
-        return pd.Series([""] * len(frame), index=frame.index)
-
-    publisher = _string_series("publisher")
-    source_type = _string_series("source_type")
-    combined = publisher.str.cat(source_type, sep=" ", na_rep="")
-    if combined.empty:
-        return False
-
-    keywords = "|".join(keyword.upper() for keyword in EM_DAT_PUBLISHER_KEYWORDS)
-    return combined.str.upper().str.contains(keywords, na=False).any()
-
-
-def _is_emdat_preview(frame: "pd.DataFrame | None") -> bool:
-    """Return True when the preview facts look like EM-DAT rows."""
-
-    if frame is None or frame.empty:
-        return False
-
-    def _normalize_series(name: str) -> "pd.Series | None":
-        if name not in frame.columns:
-            return None
-        return frame[name].fillna("").astype(str)
-
-    publisher = _normalize_series("publisher")
-    if publisher is not None and not publisher.empty:
-        publisher_lc = publisher.str.lower()
-        if publisher_lc.str.contains("cred / uclouvain (em-dat)").any():
-            return True
-
-    loose_fields = [
-        _normalize_series("publisher"),
-        _normalize_series("source"),
-        _normalize_series("doc_title"),
-    ]
-    for series in loose_fields:
-        if series is None or series.empty:
-            continue
-        if series.str.lower().str.contains("em-dat").any():
-            return True
-
-    return False
-
-
-def _count_semantics_rows(
-    frame: "pd.DataFrame | None", semantics: str = "new"
-) -> int:
-    if frame is None or frame.empty:
-        return 0
-    if "series_semantics" not in frame.columns:
-        return 0
-    series = frame["series_semantics"].fillna("").astype(str).str.lower()
-    return int(series.eq(str(semantics).strip().lower()).sum())
-
-
-def _passthrough_emdat_deltas(frame: "pd.DataFrame | None") -> "pd.DataFrame | None":
-    if frame is None or frame.empty:
-        return None
-    if "series_semantics" not in frame.columns:
-        return None
-    semantics = frame["series_semantics"].fillna("").astype(str)
-    mask = semantics.str.lower().eq("new")
-    if not mask.any():
-        return None
-    subset = frame.loc[mask].copy()
-    return _prepare_deltas_frame_for_db(subset)
-
-
-def _normalize_preview_for_deltas(
-    frame: "pd.DataFrame | None", month: str
-) -> "pd.DataFrame | None":
-    """Normalize a preview frame so it can be written to facts_deltas 1:1."""
-
-    if frame is None or frame.empty:
-        return frame
-
-    working = frame.copy()
-
-    if "ym" not in working.columns:
-        working["ym"] = ""
-    working["ym"] = working["ym"].fillna("").astype(str).str.strip()
-    mask_missing = working["ym"].eq("")
-    if mask_missing.any() and "as_of_date" in working.columns:
-        derived = pd.to_datetime(
-            working.loc[mask_missing, "as_of_date"], errors="coerce"
-        ).dt.strftime("%Y-%m")
-        working.loc[mask_missing, "ym"] = derived.fillna("")
-        mask_missing = working["ym"].fillna("").astype(str).str.strip().eq("")
-    if mask_missing.any() and "publication_date" in working.columns:
-        fallback = pd.to_datetime(
-            working.loc[mask_missing, "publication_date"], errors="coerce"
-        ).dt.strftime("%Y-%m")
-        working.loc[mask_missing, "ym"] = fallback.fillna("")
-        mask_missing = working["ym"].fillna("").astype(str).str.strip().eq("")
-    if mask_missing.any():
-        working.loc[mask_missing, "ym"] = month
-
-    if "hazard_code" not in working.columns:
-        working["hazard_code"] = ""
-    else:
-        working["hazard_code"] = working["hazard_code"].fillna("").astype(str)
-
-    if "series_semantics" not in working.columns:
-        working["series_semantics"] = "new"
-    else:
-        semantics = working["series_semantics"].fillna("").astype(str).str.strip()
-        working["series_semantics"] = semantics.mask(semantics.eq(""), "new")
-
-    if "value" in working.columns:
-        working["value"] = pd.to_numeric(working["value"], errors="coerce")
-
-    return working
-
-
-def _ensure_emdat_flow_semantics(
-    frame: "pd.DataFrame | None",
-) -> tuple[pd.DataFrame | None, bool]:
-    """Ensure EM-DAT flow rows are marked as series_semantics="new"."""
-
-    if frame is None or frame.empty:
-        return frame, False
-    if not _is_emdat_flow_frame(frame):
-        return frame, False
-
-    working = frame.copy()
-    changed = False
-
-    for column in ("series_semantics", "semantics"):
-        if column not in working.columns:
-            working[column] = ""
-            changed = True
-        series = working[column].fillna("").astype(str)
-        blank_mask = series.str.strip().eq("")
-        if blank_mask.any():
-            working.loc[blank_mask, column] = "new"
-            changed = True
-        working[column] = working[column].fillna("").astype(str)
-
-    return working, changed
 
 
 def _column_histogram(
@@ -378,9 +170,6 @@ def _render_freeze_db_success_markdown(payload: Mapping[str, Any]) -> str:
     if db_path:
         lines.append(f"- **DB path:** `{db_path}`")
     lines.append(f"- **Month:** `{payload.get('month', '')}`")
-    routing_mode = str(payload.get("routing_mode") or "").strip()
-    if routing_mode:
-        lines.append(f"- **Routing mode:** `{routing_mode}`")
     lines.append(
         f"- **facts_resolved rows:** {int(payload.get('facts_resolved_rows', 0) or 0)}"
     )
@@ -473,25 +262,6 @@ def _append_to_repo_summary(section_title: str, body_markdown: str) -> None:
         LOGGER.error(
             "Failed to append to repo-level summary.md:\n%s", traceback.format_exc()
         )
-
-
-def _count_rows_for_month(conn: Any | None, table: str, month: str) -> Optional[int]:
-    if conn is None:
-        return None
-    try:
-        row = conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE ym = ?", [month]
-        ).fetchone()
-    except Exception:
-        LOGGER.debug("Failed to count rows for %s", table, exc_info=True)
-        return None
-    if not row:
-        return 0
-    return int(row[0])
-
-
-def _format_optional_count(value: Optional[int]) -> str:
-    return str(value) if value is not None else "(n/a)"
 
 
 def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
@@ -767,9 +537,6 @@ def run_validator(facts_path: Path) -> None:
 
 def _normalize_facts_for_validation(facts_path: Path) -> None:
     """Normalize semantic fields prior to validation (best effort)."""
-
-    if not _is_emdat_pa_facts(facts_path):
-        return
 
     try:
         frame = pd.read_csv(facts_path, dtype=str).fillna("")
@@ -1075,24 +842,6 @@ def freeze_snapshot(
     filtered_facts_path = filter_result.filtered_path
     facts_df = filter_result.filtered_df
 
-    facts_df, emdat_semantics_applied = _ensure_emdat_flow_semantics(facts_df)
-    emdat_signature_preview = _looks_like_emdat_pa_facts(facts_df)
-    emdat_metric_preview = _is_emdat_flow_frame(facts_df)
-    emdat_preview = emdat_signature_preview or emdat_metric_preview
-    emdat_reason_bits: List[str] = []
-    if emdat_signature_preview:
-        emdat_reason_bits.append("publisher")
-    if emdat_metric_preview:
-        emdat_reason_bits.append("metric")
-    emdat_preview_reason = ", ".join(emdat_reason_bits) if emdat_reason_bits else "none"
-    if emdat_semantics_applied:
-        try:
-            facts_df.to_csv(filtered_facts_path, index=False)
-        except Exception:
-            LOGGER.debug(
-                "Failed to persist EM-DAT semantics normalization", exc_info=True
-            )
-
     if filter_result.original_rows and filter_result.original_rows != filter_result.filtered_rows:
         LOGGER.info(
             "Snapshot month filter applied: month=%s total_rows=%s filtered_rows=%s",
@@ -1144,53 +893,13 @@ def freeze_snapshot(
             skip_reason=f"No rows for month {ym} after filtering preview",
         )
 
-    normalizer_applied = False
-    normalizer_reason = "non-emdat facts"
-    validation_enabled = _freeze_validation_enabled()
-
-    should_normalize = False
     if filter_result.filtered_rows > 0:
-        should_normalize = _is_emdat_pa_facts(filtered_facts_path)
-        if should_normalize:
-            if validation_enabled:
-                normalizer_reason = "emdat facts"
-            else:
-                normalizer_reason = "emdat facts (validator disabled)"
-        else:
-            normalizer_reason = "non-emdat facts"
-
-    if should_normalize and validation_enabled:
         _normalize_facts_for_validation(filtered_facts_path)
-        normalizer_applied = True
-
-    normalizer_line = (
-        f"applied={str(normalizer_applied).lower()} reason={normalizer_reason}"
-    )
-    _append_to_summary("Freeze snapshot — normalizer", normalizer_line)
-    _append_to_repo_summary("Freeze snapshot — normalizer", normalizer_line)
-
-    validator_section_title = "Freeze Snapshot — validator"
-    validator_block: str
-
-    if filter_result.filtered_rows > 0 and validation_enabled:
         run_validator(filtered_facts_path)
-        validator_lines = [
-            "status: ran",
-            f"rows: {filter_result.filtered_rows}",
-            f"path: `{filtered_facts_path.resolve()}`",
-        ]
-        validator_block = "\n".join(validator_lines)
         try:
             validated_facts_df = load_table(filtered_facts_path)
         except Exception:
             validated_facts_df = None
-    elif filter_result.filtered_rows <= 0:
-        validator_block = f"skipped: no rows for `{ym}`"
-    else:
-        validator_block = "skipped (set FREEZE_RUN_VALIDATOR=1 to enable)"
-
-    _append_to_summary(validator_section_title, validator_block)
-    _append_to_repo_summary(validator_section_title, validator_block)
 
     if deltas:
         deltas_path = Path(deltas)
@@ -1208,64 +917,13 @@ def freeze_snapshot(
         default_resolved = facts_path.with_name("resolved.csv")
         resolved_path = default_resolved if default_resolved.exists() else None
 
-    resolved_source = filtered_facts_path
-    resolved_df = _prepare_resolved_frame_for_db(facts_df.copy())
-    if resolved_df is None or resolved_df.empty:
-        if resolved_path:
-            resolved_source = resolved_path
-            resolved_df = load_table(resolved_source)
-            resolved_df = _filter_dataframe_by_month(resolved_df, ym)
-        else:
-            resolved_df = facts_df.copy()
-    resolved_df, _ = _ensure_emdat_flow_semantics(resolved_df)
-
-    deltas_df = _prepare_deltas_frame_for_db(facts_df.copy())
-    if (deltas_df is None or deltas_df.empty) and deltas_path:
-        deltas_df = load_table(deltas_path)
-        deltas_df = _filter_dataframe_by_month(deltas_df, ym)
-        deltas_df = _prepare_deltas_frame_for_db(deltas_df)
-
-    preview_flow_rows = _count_semantics_rows(facts_df)
-    emdat_passthrough_applied = False
-    deltas_prepared_rows = int(len(deltas_df)) if deltas_df is not None else 0
-    if emdat_preview and preview_flow_rows:
-        if deltas_prepared_rows != preview_flow_rows:
-            LOGGER.warning(
-                "EM-DAT preview flow mismatch; forcing passthrough",
-                extra={
-                    "ym": ym,
-                    "preview_flow_rows": preview_flow_rows,
-                    "prepared_deltas_rows": deltas_prepared_rows,
-                },
-            )
-            fallback_deltas = _passthrough_emdat_deltas(facts_df)
-            if fallback_deltas is not None and not fallback_deltas.empty:
-                deltas_df = fallback_deltas
-                deltas_prepared_rows = int(len(deltas_df))
-                emdat_passthrough_applied = True
-
-    parity_lines = [
-        f"- ym: {ym}",
-        f"- facts_for_month rows: {len(facts_df)}",
-        f"- resolved rows prepared: {len(resolved_df)}",
-    ]
-    parity_block = "\n".join(parity_lines)
-    _append_to_summary("Freeze snapshot — parity inputs", parity_block)
-    _append_to_repo_summary("Freeze snapshot — parity inputs", parity_block)
-
-    flow_lines = [
-        f"- ym: {ym}",
-        f"- emdat_preview={str(emdat_preview).lower()} (reason: {emdat_preview_reason})",
-        f"- preview flow rows: {preview_flow_rows}",
-        f"- prepared deltas rows: {deltas_prepared_rows}",
-        f"- passthrough_applied={str(emdat_passthrough_applied).lower()}",
-    ]
-    flow_lines.append(
-        f"- wrote facts_deltas rows: {deltas_prepared_rows if deltas_df is not None else 0}"
-    )
-    flow_block = "\n".join(flow_lines)
-    _append_to_summary("Freeze snapshot — flow passthrough", flow_block)
-    _append_to_repo_summary("Freeze snapshot — flow passthrough", flow_block)
+    resolved_source = resolved_path if resolved_path else filtered_facts_path
+    if resolved_path:
+        resolved_df = load_table(resolved_source)
+        resolved_df = _filter_dataframe_by_month(resolved_df, ym)
+    else:
+        resolved_df = facts_df.copy()
+    deltas_df = load_table(deltas_path) if deltas_path else None
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
@@ -1321,13 +979,17 @@ def freeze_snapshot(
         json.dump(manifest, f, indent=2)
 
     _maybe_write_db(
-        facts_path=legacy_csv,
-        resolved_path=resolved_csv_out,
-        deltas_path=deltas_csv_out,
-        manifest_path=manifest_out,
-        month=ym,
-        db_url=db_url,
+        ym=ym,
+        facts_df=facts_df,
+        validated_facts_df=validated_facts_df,
+        preview_df=preview_df,
+        resolved_df=resolved_df,
+        deltas_df=deltas_df,
+        manifest=manifest,
+        facts_out=resolved_parquet,
+        deltas_out=deltas_parquet_out,
         write_db=write_db,
+        db_url=db_url,
     )
 
     return SnapshotResult(
@@ -1355,18 +1017,11 @@ def main():
         "--resolved",
         help="Optional path to resolved.csv for DuckDB dual write (defaults to sibling of --facts)",
     )
-    env_cli_default = _env_write_db_flag()
-    default_write_db = None
-    if env_cli_default is not None:
-        default_write_db = "1" if env_cli_default else "0"
     ap.add_argument(
         "--write-db",
-        default=default_write_db,
+        default=None,
         choices=["0", "1"],
-        help=(
-            "Set to 1 or 0 to force-enable or disable DuckDB dual-write "
-            "(defaults to 0 unless RESOLVER_WRITE_DB=1)"
-        ),
+        help="Set to 1 or 0 to force-enable or disable DuckDB dual-write (defaults to auto)",
     )
     ap.add_argument(
         "--db-url",
@@ -1381,8 +1036,6 @@ def main():
     args = ap.parse_args()
 
     try:
-        write_db_flag = _parse_bool_flag(args.write_db)
-
         result = freeze_snapshot(
             facts=Path(args.facts),
             month=args.month,
@@ -1390,7 +1043,7 @@ def main():
             overwrite=args.overwrite,
             deltas=Path(args.deltas) if args.deltas else None,
             resolved_csv=Path(args.resolved) if args.resolved else None,
-            write_db=write_db_flag,
+            write_db=None if args.write_db is None else args.write_db == "1",
             db_url=args.db or args.db_url,
         )
     except SnapshotError as exc:
@@ -1411,48 +1064,35 @@ def main():
         print(f" - {result.deltas_csv}")
     print(f" - {result.manifest}")
 
-
-
-def _load_frame_for_db(path: Path | None) -> "pd.DataFrame | None":
-    if path is None:
-        return None
-    try:
-        return load_table(path)
-    except FileNotFoundError:
-        LOGGER.warning(
-            "freeze_snapshot: CSV not found for DuckDB write",
-            extra={"path": str(path)},
-        )
-        return None
+if __name__ == "__main__":
+    main()
 
 
 def _maybe_write_db(
     *,
-    facts_path: Path,
-    resolved_path: Path | None,
-    deltas_path: Path | None,
-    manifest_path: Path | None,
-    month: str,
-    db_url: Optional[str] = None,
+    ym: str,
+    facts_df: "pd.DataFrame",
+    validated_facts_df: "pd.DataFrame | None",
+    preview_df: "pd.DataFrame | None",
+    resolved_df: "pd.DataFrame | None",
+    deltas_df: "pd.DataFrame | None",
+    manifest: Dict[str, Any],
+    facts_out: Path,
+    deltas_out: Path | None,
     write_db: Optional[bool] = None,
+    db_url: Optional[str] = None,
 ) -> None:
     env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
     if db_url is not None:
         db_url = db_url.strip()
     else:
         db_url = env_url
-
     summary_title = "Freeze snapshot — DB write"
-    routing_summary_title = "Freeze snapshot — DB routing (contract)"
-    counts_summary_title = "Snapshot DB write — pre/post counts"
-    upsert_keys_title = "DuckDB — upsert keys"
 
     if write_db is None:
-        env_flag = _env_write_db_flag()
-        allow_write = bool(env_flag) if env_flag is not None else False
+        allow_write = bool(db_url)
     else:
-        parsed_flag = _parse_bool_flag(write_db)
-        allow_write = bool(parsed_flag) if parsed_flag is not None else bool(write_db)
+        allow_write = bool(write_db)
 
     if not allow_write:
         msg = "DuckDB snapshot write skipped: disabled via flag"
@@ -1482,310 +1122,190 @@ def _maybe_write_db(
             canonical_path = ""
             canonical_url = db_url
 
-    facts_df = _load_frame_for_db(facts_path)
-    if facts_df is None:
-        facts_df = pd.DataFrame()
-    resolved_df = _load_frame_for_db(resolved_path)
-    deltas_source = _load_frame_for_db(deltas_path)
-
-    preview_rows = int(len(facts_df)) if facts_df is not None else 0
-    prepared_resolved = None
-    prepared_deltas = None
-    routing_mode = "unrouted"
-    routing_notes: List[str] = []
-
-    if resolved_df is not None and not resolved_df.empty:
-        routing_mode = "resolved_passthrough"
-        LOGGER.debug(
-            "freeze_snapshot.db_routing: resolved passthrough",
-            extra={
-                "month": month,
-                "resolved_rows": len(resolved_df),
-                "deltas_rows": len(deltas_source) if deltas_source is not None else 0,
-            },
-        )
-        prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
-        if deltas_source is not None and not deltas_source.empty:
-            prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-    elif deltas_source is not None and not deltas_source.empty:
-        routing_mode = "deltas_passthrough"
-        LOGGER.debug(
-            "freeze_snapshot.db_routing: deltas passthrough",
-            extra={
-                "month": month,
-                "deltas_rows": len(deltas_source),
-            },
-        )
-        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-    elif preview_rows:
-        routing_mode = "preview_to_deltas"
-        routing_notes.append(
-            "routed preview rows to facts_deltas because no resolved/deltas inputs were provided"
-        )
-        LOGGER.debug(
-            "freeze_snapshot.db_routing: preview to deltas",
-            extra={
-                "month": month,
-                "preview_rows": preview_rows,
-            },
-        )
-        if _legacy_emdat_override_enabled() and _is_emdat_preview(facts_df):
-            routing_mode = "legacy_emdat_override"
-            routing_notes.append(
-                "legacy EM-DAT override enabled via FREEZE_ENABLE_EMDAT_OVERRIDE"
-            )
-        normalized = _normalize_preview_for_deltas(facts_df.copy(), month)
-        prepared_deltas = _prepare_deltas_frame_for_db(normalized)
-    else:
-        routing_notes.append("no frames available for DuckDB write")
-        LOGGER.debug(
-            "freeze_snapshot.db_routing: no frames available",
-            extra={"month": month},
-        )
-
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
         "db_path": canonical_path or "",
-        "month": month,
-        "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
-        "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
-        "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
-        "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
-        "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
-        "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
-        "routing_mode": routing_mode,
-        "preview_rows": preview_rows,
-        "routing_notes": routing_notes,
+        "month": ym,
+        "facts_resolved_rows": 0,
+        "facts_deltas_rows": 0,
+        "facts_resolved_semantics": {},
+        "facts_deltas_semantics": {},
+        "facts_resolved_metrics": {},
+        "facts_deltas_metrics": {},
     }
 
-    manifest_payload: Dict[str, Any] | None = None
-    manifest_entries: List[Dict[str, Any]] | None = None
-    if manifest_path and manifest_path.exists():
-        try:
-            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if isinstance(manifest_payload, dict):
-                artifacts = manifest_payload.get("artifacts")
-                if isinstance(artifacts, Mapping):
-                    manifest_entries = []
-                    for name, artifact in artifacts.items():
-                        entry: Dict[str, Any] = {"name": str(name)}
-                        if isinstance(artifact, Mapping):
-                            entry.update({k: v for k, v in artifact.items()})
-                            path_value = str(artifact.get("path") or artifact.get("uri") or "").strip()
-                        else:
-                            path_value = str(artifact)
-                        if path_value:
-                            entry["path"] = path_value
-                        if not entry.get("path"):
-                            entry["path"] = f"{month}/{name}"
-                        resolved_rows = manifest_payload.get("resolved_rows")
-                        deltas_rows = manifest_payload.get("deltas_rows")
-                        if "rows" not in entry:
-                            if "resolved" in name and resolved_rows is not None:
-                                entry["rows"] = resolved_rows
-                            elif "deltas" in name and deltas_rows is not None:
-                                entry["rows"] = deltas_rows
-                        manifest_entries.append(entry)
-                elif isinstance(artifacts, list):
-                    manifest_entries = [
-                        dict(item)
-                        for item in artifacts
-                        if isinstance(item, Mapping)
-                    ]
-        except Exception:
-            LOGGER.debug("Could not parse manifest for DuckDB diagnostics", exc_info=True)
-
-    success_block = _render_freeze_db_success_markdown(diagnostics_payload)
-    try:
-        INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
-        with FREEZE_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
-            json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
-    except OSError:
-        LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
-
     conn = None
-    pre_counts = {"resolved": None, "deltas": None}
-    post_counts = {"resolved": None, "deltas": None}
+    deltas_result = None
+    deltas_input_rows = 0
+    success_block: Optional[str] = None
+    prepared_resolved: "pd.DataFrame | None" = None
+    prepared_deltas: "pd.DataFrame | None" = None
     try:
         conn = duckdb_io.get_db(db_url)
-        LOGGER.info(
-            "freeze_snapshot.db_routing",
-            extra={
-                "month": month,
-                "routing_mode": routing_mode,
-                "facts_resolved_rows": diagnostics_payload["facts_resolved_rows"],
-                "facts_deltas_rows": diagnostics_payload["facts_deltas_rows"],
-                "preview_rows": preview_rows,
-                "db_url": canonical_url or db_url or "",
-            },
+        duckdb_io.init_schema(conn)
+        resolved_payload = (
+            resolved_df
+            if resolved_df is not None
+            else (
+                validated_facts_df
+                if validated_facts_df is not None and not validated_facts_df.empty
+                else facts_df
+            )
         )
-        write_result = duckdb_io.write_snapshot(
-            conn,
-            ym=month,
-            facts_resolved=prepared_resolved,
-            facts_deltas=prepared_deltas,
-            manifests=manifest_entries or ([manifest_payload] if manifest_payload else None),
-            meta={
-                **(manifest_payload if isinstance(manifest_payload, Mapping) else {}),
-                "facts_path": str(facts_path),
-                "resolved_path": str(resolved_path or ""),
-                "deltas_path": str(deltas_path or ""),
-            },
-        )
+        prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
 
-        facts_rows = diagnostics_payload["facts_resolved_rows"]
-        deltas_rows = diagnostics_payload["facts_deltas_rows"]
-        LOGGER.info(
-            "DuckDB snapshot written",
-            extra={
-                "month": month,
-                "facts_resolved_rows": facts_rows,
-                "facts_deltas_rows": deltas_rows,
-                "db_url": canonical_url or db_url,
-            },
-        )
-        upsert_keys_payload: Dict[str, Any] = {}
-        if isinstance(write_result, Mapping):
-            pre_counts = (
-                write_result.get("pre_counts")
-                if isinstance(write_result.get("pre_counts"), Mapping)
-                else pre_counts
-            )
-            post_counts = (
-                write_result.get("post_counts")
-                if isinstance(write_result.get("post_counts"), Mapping)
-                else post_counts
-            )
-            raw_upsert = write_result.get("upsert_keys")
-            if isinstance(raw_upsert, Mapping):
-                upsert_keys_payload = {
-                    str(table): value
-                    for table, value in raw_upsert.items()
-                    if isinstance(value, Mapping)
-                }
-        if pre_counts["resolved"] is None:
-            pre_counts["resolved"] = _count_rows_for_month(
-                conn, "facts_resolved", month
-            )
-        if pre_counts["deltas"] is None:
-            pre_counts["deltas"] = _count_rows_for_month(conn, "facts_deltas", month)
-        if post_counts["resolved"] is None:
-            post_counts["resolved"] = _count_rows_for_month(
-                conn, "facts_resolved", month
-            )
-        if post_counts["deltas"] is None:
-            post_counts["deltas"] = _count_rows_for_month(conn, "facts_deltas", month)
-        notes_values = diagnostics_payload.get("routing_notes") or []
-        notes_text = "; ".join(
-            str(note).strip() for note in notes_values if str(note).strip()
-        )
-        if not notes_text:
-            notes_text = "none"
-        db_url_display = canonical_url or db_url or ""
-        db_path_display = canonical_path or ""
-        routing_lines = [
-            f"- DB URL: `{db_url_display}`" if db_url_display else "- DB URL: (empty)"
-        ]
-        if db_path_display:
-            routing_lines.append(f"- DB path: `{db_path_display}`")
+        if deltas_df is not None and not deltas_df.empty:
+            deltas_source = deltas_df.copy()
+        elif preview_df is not None and not preview_df.empty:
+            deltas_source = preview_df.copy()
         else:
-            routing_lines.append("- DB path: (empty)")
-        routing_lines.extend(
-            [
-                f"- Month: `{month}`",
-                f"- Routing mode: `{routing_mode}`",
-                f"- Preview rows: {preview_rows}",
-                f"- Prepared facts_resolved rows: {facts_rows}",
-                f"  - semantics: {_format_histogram(diagnostics_payload['facts_resolved_semantics'])}",
-                f"- Prepared facts_deltas rows: {deltas_rows}",
-                f"  - semantics: {_format_histogram(diagnostics_payload['facts_deltas_semantics'])}",
-                f"- Notes: {notes_text}",
-            ]
+            base_source = (
+                validated_facts_df
+                if validated_facts_df is not None and not validated_facts_df.empty
+                else facts_df
+            )
+            deltas_source = base_source.copy() if base_source is not None and not base_source.empty else None
+
+        preview_rows = int(len(preview_df)) if preview_df is not None else 0
+
+        deltas_input_rows = int(len(deltas_source)) if deltas_source is not None else 0
+
+        if deltas_source is not None and not deltas_source.empty:
+            for column in ("iso3", "ym", "hazard_code", "metric", "value"):
+                if column not in deltas_source.columns:
+                    deltas_source[column] = 0 if column == "value" else ""
+            deltas_source["value"] = pd.to_numeric(
+                deltas_source["value"], errors="coerce"
+            )
+            semantics_col = deltas_source.get("series_semantics")
+            if semantics_col is None:
+                deltas_source["series_semantics"] = "new"
+            else:
+                semantics = semantics_col.astype(str).str.strip()
+                deltas_source.loc[semantics.eq(""), "series_semantics"] = "new"
+
+        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
+
+        facts_result = None
+
+        diagnostics_payload.update(
+            {
+                "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
+                "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
+                "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
+                "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
+                "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
+                "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
+            }
         )
-        routing_block = "\n".join(routing_lines)
-        _append_to_summary(routing_summary_title, routing_block)
-        _append_to_repo_summary(routing_summary_title, routing_block)
-        if upsert_keys_payload:
-            table_lines = ["| table | rows_written | keys |", "| --- | --- | --- |"]
-            for table in sorted(upsert_keys_payload):
-                entry = upsert_keys_payload.get(table) or {}
-                keys = entry.get("keys")
-                if isinstance(keys, (list, tuple)):
-                    keys_text = ", ".join(str(k) for k in keys)
-                else:
-                    keys_text = str(keys or "")
-                rows_value = entry.get("rows")
-                try:
-                    rows_text = str(int(rows_value))
-                except Exception:
-                    rows_text = str(rows_value or 0)
-                table_lines.append(
-                    f"| {table} | {rows_text} | {keys_text or '(none)'} |"
-                )
-            upsert_block = "\n".join(table_lines)
-            _append_to_summary(upsert_keys_title, upsert_block)
-            _append_to_repo_summary(upsert_keys_title, upsert_block)
-        counts_lines = [
-            f"ym: `{month}`",
-            (
-                "pre:   resolved="
-                f"{_format_optional_count(pre_counts['resolved'])}, "
-                f"deltas={_format_optional_count(pre_counts['deltas'])}"
-            ),
-            (
-                f"wrote: resolved={facts_rows}, "
-                f"deltas={deltas_rows}"
-            ),
-            (
-                "post:  resolved="
-                f"{_format_optional_count(post_counts['resolved'])}, "
-                f"deltas={_format_optional_count(post_counts['deltas'])}"
-            ),
-            f"routing: `{routing_mode}`",
-        ]
-        counts_block = "\n".join(counts_lines)
-        _append_to_summary(counts_summary_title, counts_block)
-        _append_to_repo_summary(counts_summary_title, counts_block)
-        db_write_lines = [
-            f"- DB URL: `{db_url_display}`" if db_url_display else "- DB URL: (empty)"
-        ]
-        if db_path_display:
-            db_write_lines.append(f"- DB path: `{db_path_display}`")
+        success_block = _render_freeze_db_success_markdown(diagnostics_payload)
+        try:
+            INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+            with FREEZE_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
+        except OSError:
+            LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
+
+        if prepared_resolved is not None and not prepared_resolved.empty:
+            LOGGER.debug(
+                "DuckDB snapshot write | table=facts_resolved rows=%s", len(prepared_resolved)
+            )
+            facts_result = duckdb_io.upsert_dataframe(
+                conn,
+                "facts_resolved",
+                prepared_resolved,
+                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
+            )
+            LOGGER.info(
+                "DuckDB snapshot facts_resolved rows written: %s",
+                facts_result.rows_delta,
+            )
         else:
-            db_write_lines.append("- DB path: (empty)")
-        db_write_lines.extend(
-            [
-                f"- Month: `{month}`",
-                f"- facts_resolved rows written: {facts_rows}",
-                f"- facts_deltas rows written: {deltas_rows}",
-                f"- Routing mode: `{routing_mode}`",
-                f"- Notes: {notes_text}",
-            ]
-        )
-        db_write_block = "\n".join(db_write_lines)
-        _append_ingestion_summary(success_block)
-        _append_to_summary(summary_title, db_write_block)
-        _append_to_repo_summary(summary_title, db_write_block)
+            LOGGER.debug("DuckDB snapshot facts_resolved skipped: no rows prepared")
+
+        if prepared_deltas is not None and not prepared_deltas.empty:
+            for column in ["as_of", "value_new", "value_stock", "series_semantics"]:
+                if column not in prepared_deltas.columns:
+                    if column == "series_semantics":
+                        prepared_deltas[column] = "new"
+                    elif column == "as_of":
+                        prepared_deltas[column] = ""
+                    else:
+                        prepared_deltas[column] = pd.Series([pd.NA] * len(prepared_deltas))
+            LOGGER.debug(
+                "DuckDB snapshot write | table=facts_deltas rows=%s", len(prepared_deltas)
+            )
+            deltas_result = duckdb_io.upsert_dataframe(
+                conn,
+                "facts_deltas",
+                prepared_deltas,
+                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
+            )
+            LOGGER.info(
+                "DuckDB snapshot facts_deltas rows written: %s",
+                deltas_result.rows_delta,
+            )
+        elif deltas_input_rows:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped after preparation")
+        else:
+            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no source rows")
+
+        created_at = str(manifest.get("created_at_utc") or dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        git_sha = str(manifest.get("source_commit_sha") or os.environ.get("GITHUB_SHA", ""))
+        export_version = str(manifest.get("export_version") or manifest.get("schema_version", ""))
+        try:
+            conn.execute("DELETE FROM snapshots WHERE ym = ?", [ym])
+            conn.execute(
+                "INSERT INTO snapshots (ym, created_at, git_sha, export_version, facts_rows, deltas_rows) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    ym,
+                    created_at,
+                    git_sha,
+                    export_version,
+                    int(facts_result.rows_written if facts_result else 0),
+                    int(deltas_result.rows_written if deltas_result else 0),
+                ],
+            )
+            LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)
+        except Exception:
+            LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
+        if deltas_result is not None:
+            written = int(deltas_result.rows_delta)
+            input_rows = int(deltas_result.rows_in)
+            msg = (
+                f"Wrote {written} facts_deltas rows (input={input_rows}) from preview rows={preview_rows or input_rows}"
+            )
+        elif deltas_input_rows:
+            msg = (
+                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows}"
+            )
+        else:
+            msg = "No facts_deltas rows available; skipped DB write"
+
+        _append_ingestion_summary(success_block or _render_freeze_db_success_markdown(diagnostics_payload))
+        _append_to_summary(summary_title, msg)
+        _append_to_repo_summary(summary_title, msg)
+
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
         _append_db_error_to_summary(
-            section=f"Freeze Snapshot — DB write ({month})",
+            section=f"Freeze Snapshot — DB write ({ym})",
             exc=exc,
-            db_url=canonical_url or db_url,
-            facts_path=facts_path,
-            resolved_path=resolved_path,
-            deltas_path=deltas_path,
-            month=month,
-            routing_mode=routing_mode,
-            resolved_rows=diagnostics_payload["facts_resolved_rows"],
-            deltas_rows=diagnostics_payload["facts_deltas_rows"],
+            db_url=db_url,
+            month=ym,
+            facts_resolved=prepared_resolved,
+            facts_deltas=prepared_deltas,
         )
         error_block = _render_db_error_markdown("Freeze Snapshot", diagnostics_payload, exc)
         _append_ingestion_summary(error_block)
         _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
         _append_to_repo_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
     finally:
-        duckdb_io.close_db(conn)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
 
 
 def _append_db_error_to_summary(
@@ -1793,29 +1313,27 @@ def _append_db_error_to_summary(
     section: str,
     exc: Exception,
     db_url: str | None,
-    facts_path: Path,
-    resolved_path: Path | None,
-    deltas_path: Path | None,
     month: str,
-    routing_mode: str,
-    resolved_rows: int,
-    deltas_rows: int,
+    facts_resolved: "pd.DataFrame | None",
+    facts_deltas: "pd.DataFrame | None",
 ) -> None:
     """Append a freeze snapshot DuckDB error block to diagnostics summary."""
 
     if not sys.executable:
         return
 
+    def _safe_len(frame: "pd.DataFrame | None") -> int:
+        try:
+            return int(len(frame)) if frame is not None else 0
+        except Exception:
+            return 0
+
     context = {
         "db_url": db_url or "",
         "exception_class": type(exc).__name__,
-        "facts_path": str(facts_path),
-        "resolved_path": str(resolved_path or ""),
-        "deltas_path": str(deltas_path or ""),
+        "facts_resolved_rows": _safe_len(facts_resolved),
+        "facts_deltas_rows": _safe_len(facts_deltas),
         "month": month,
-        "routing_mode": routing_mode,
-        "facts_resolved_rows": int(resolved_rows or 0),
-        "facts_deltas_rows": int(deltas_rows or 0),
     }
 
     try:
@@ -1837,7 +1355,3 @@ def _append_db_error_to_summary(
         )
     except Exception:
         LOGGER.debug("Failed to append freeze snapshot DB error", exc_info=True)
-
-
-if __name__ == "__main__":
-    main()

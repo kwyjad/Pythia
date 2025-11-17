@@ -127,10 +127,7 @@ Canonical facts written to DuckDB alongside CSV exports.
 
 ## db.facts_resolved
 
-Resolved precedence outputs stored in DuckDB for querying. Snapshot writes delete
-and rewrite rows for this table only when `facts_resolved` data is provided for
-the month; `facts_deltas` refreshes leave previously written resolved rows
-intact, and the inverse is also true for deltas-only writes.
+Resolved precedence outputs stored in DuckDB for querying.
 
 | Name | Type | Required | Enum/Format | Description |
 | --- | --- | --- | --- | --- |

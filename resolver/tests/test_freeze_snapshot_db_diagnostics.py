@@ -8,6 +8,20 @@ import pytest
 from resolver.tools import freeze_snapshot
 
 
+class _StubResult:
+    def __init__(self, rows_delta: int = 1, rows_written: int = 1, rows_in: int = 1) -> None:
+        self.rows_delta = rows_delta
+        self.rows_written = rows_written
+        self.rows_in = rows_in
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "rows_delta": int(self.rows_delta),
+            "rows_written": int(self.rows_written),
+            "rows_in": int(self.rows_in),
+        }
+
+
 def _make_resolved_df() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -38,30 +52,28 @@ def _make_deltas_df() -> pd.DataFrame:
 
 def _stub_duckdb(monkeypatch: pytest.MonkeyPatch, *, failing: bool = False) -> None:
     class _Conn:
-        pass
+        def close(self):  # noqa: D401 - test stub
+            return None
 
     def get_db(url: str):  # noqa: D401 - test stub
         return _Conn()
 
-    def write_snapshot(
-        _conn,
-        *,
-        ym: str,
-        facts_resolved: pd.DataFrame | None,
-        facts_deltas: pd.DataFrame | None,
-        manifests,
-        meta,
-    ) -> None:  # noqa: D401 - test stub
-        if failing:
+    def init_schema(conn):  # noqa: D401 - test stub
+        return conn
+
+    if failing:
+        def upsert_dataframe(*_args, **_kwargs):  # noqa: D401 - test stub
             raise RuntimeError("freeze boom")
-        assert ym == "2024-01"
-        assert meta["facts_path"].endswith("facts.csv")
-        assert facts_resolved is None or len(facts_resolved) >= 1
+    else:
+        def upsert_dataframe(conn, table, frame, *, keys):  # noqa: D401 - test stub
+            return _StubResult(rows_delta=len(frame), rows_written=len(frame), rows_in=len(frame))
 
     stub = SimpleNamespace(
         get_db=get_db,
-        write_snapshot=write_snapshot,
-        close_db=lambda _conn: None,
+        init_schema=init_schema,
+        upsert_dataframe=upsert_dataframe,
+        FACTS_RESOLVED_KEY_COLUMNS=["iso3", "ym", "metric"],
+        FACTS_DELTAS_KEY_COLUMNS=["iso3", "ym", "metric"],
     )
 
     monkeypatch.setattr(freeze_snapshot, "duckdb_io", stub)
@@ -72,24 +84,16 @@ def test_freeze_snapshot_db_diagnostics_success(tmp_path: Path, monkeypatch: pyt
     monkeypatch.chdir(tmp_path)
     _stub_duckdb(monkeypatch)
 
-    resolved = _make_resolved_df()
-    deltas = _make_deltas_df()
-    facts_csv = tmp_path / "facts.csv"
-    resolved_csv = tmp_path / "resolved.csv"
-    deltas_csv = tmp_path / "deltas.csv"
-    manifest_path = tmp_path / "manifest.json"
-
-    resolved.to_csv(facts_csv, index=False)
-    resolved.to_csv(resolved_csv, index=False)
-    deltas.to_csv(deltas_csv, index=False)
-    manifest_path.write_text(json.dumps({"created_at_utc": "2024-02-01T00:00:00Z"}), encoding="utf-8")
-
     freeze_snapshot._maybe_write_db(
-        facts_path=facts_csv,
-        resolved_path=resolved_csv,
-        deltas_path=deltas_csv,
-        manifest_path=manifest_path,
-        month="2024-01",
+        ym="2024-01",
+        facts_df=_make_resolved_df(),
+        validated_facts_df=None,
+        preview_df=None,
+        resolved_df=_make_resolved_df(),
+        deltas_df=_make_deltas_df(),
+        manifest={"created_at_utc": "2024-02-01T00:00:00Z"},
+        facts_out=tmp_path / "facts.csv",
+        deltas_out=tmp_path / "deltas.csv",
         write_db=True,
         db_url="duckdb:///freeze.duckdb",
     )
@@ -112,24 +116,16 @@ def test_freeze_snapshot_db_diagnostics_error(tmp_path: Path, monkeypatch: pytes
     monkeypatch.chdir(tmp_path)
     _stub_duckdb(monkeypatch, failing=True)
 
-    resolved = _make_resolved_df()
-    deltas = _make_deltas_df()
-    facts_csv = tmp_path / "facts.csv"
-    resolved_csv = tmp_path / "resolved.csv"
-    deltas_csv = tmp_path / "deltas.csv"
-    manifest_path = tmp_path / "manifest.json"
-
-    resolved.to_csv(facts_csv, index=False)
-    resolved.to_csv(resolved_csv, index=False)
-    deltas.to_csv(deltas_csv, index=False)
-    manifest_path.write_text(json.dumps({"created_at_utc": "2024-02-01T00:00:00Z"}), encoding="utf-8")
-
     freeze_snapshot._maybe_write_db(
-        facts_path=facts_csv,
-        resolved_path=resolved_csv,
-        deltas_path=deltas_csv,
-        manifest_path=manifest_path,
-        month="2024-01",
+        ym="2024-01",
+        facts_df=_make_resolved_df(),
+        validated_facts_df=None,
+        preview_df=None,
+        resolved_df=_make_resolved_df(),
+        deltas_df=_make_deltas_df(),
+        manifest={"created_at_utc": "2024-02-01T00:00:00Z"},
+        facts_out=tmp_path / "facts.csv",
+        deltas_out=tmp_path / "deltas.csv",
         write_db=True,
         db_url="duckdb:///freeze.duckdb",
     )

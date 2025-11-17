@@ -141,8 +141,6 @@ def _resolve_password_creds() -> Optional[Dict[str, str]]:
 
 
 def _resolve_existing_token() -> Optional[str]:
-    """Return an existing ACLED access token from the environment, if any."""
-
     for name in ("ACLED_ACCESS_TOKEN", "ACLED_TOKEN"):
         raw = os.environ.get(name)
         if not raw:
@@ -151,7 +149,6 @@ def _resolve_existing_token() -> Optional[str]:
         if not token:
             continue
         if name == "ACLED_TOKEN":
-            # Mirror the legacy env var into the modern name for compatibility.
             os.environ.setdefault("ACLED_ACCESS_TOKEN", token)
         return token
     return None
