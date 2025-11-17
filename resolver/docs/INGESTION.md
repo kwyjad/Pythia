@@ -8,90 +8,6 @@ search order, fallback behaviour, and how to clean up legacy duplicates lives in
 [`ingestion/config_paths.md`](ingestion/config_paths.md). Refer to it when adding a new connector or migrating an
 existing configuration.
 
-## Writing monthly snapshots to DuckDB
-
-The `freeze_snapshot.py` tool is responsible for materialising monthly facts into DuckDB once CSV artefacts exist on disk.
-After generating `facts.csv`, `facts_resolved.csv`, and `facts_deltas.csv` for a given month, the freezer invokes the
-internal `_maybe_write_db(...)` helper. This helper:
-
-- Checks whether DuckDB writes are enabled (`--write-db=1` or `RESOLVER_WRITE_DB=1` alongside a DuckDB URL).
-- Loads the month’s CSVs into memory and calls `duckdb_io.write_snapshot(...)` to update `facts_resolved`,
-  `facts_deltas`, and the `snapshots` metadata table in one transaction.
-- Emits row counts, series semantics histograms, and the canonical DB path to `diagnostics/ingestion/freeze_db.json`
-  and appends a Markdown block to `diagnostics/ingestion/summary.md`.
-- On failure, prints a clear warning and appends a “Freeze Snapshot — DB write” error section to the summary so CI
-  diagnostics surface the problem without relying on raw stack traces.
-
-The DuckDB helper mirrors the contracts exercised by the fast tests:
-
-- **Parity:** After the freeze step runs, the DuckDB `facts_resolved` table must contain the same monthly rows as
-  the snapshot CSV. This behaviour is asserted by `test_exporter_dual_writes_to_duckdb`.
-- **Idempotency:** Running `_maybe_write_db(...)` multiple times for the same month keeps the `snapshots` table at a
-  single row per `ym` and preserves the expected `facts_resolved` counts. The dedicated parity test in
-  `test_freeze_snapshot_write_db_parity.py` and `test_duckdb_idempotency.py::test_dual_writes_idempotent` enforce it.
-- **Flows:** When a deltas CSV is not provided (e.g. EM-DAT preview runs), the helper derives a deltas frame from the
-  canonical facts CSV so `facts_deltas` matches the preview row-for-row. The
-  `test_emdat_duckdb_write.test_emdat_export_and_freeze_to_duckdb` fast test verifies this behaviour.
-
-### `ym` handling for flows (`facts_deltas`)
-
-For monthly flows (EM-DAT, ACLED, synthetic tests), the `ym` column is the primary key for DuckDB writes. The exporter and
-freezer normalise it so downstream helpers always receive a `YYYY-MM` string:
-
-- When `ym` is missing, it is derived from `as_of_date` during export finalisation.
-- When `ym` exists but is blank, it is backfilled—first from `as_of_date`, then from `publication_date` if necessary.
-- The DuckDB layer (`duckdb_io.write_snapshot(...)`) therefore continues to enforce its strict `YYYY-MM` contract without
-  needing connector-specific exceptions.
-
-Fast tests covering the freeze → DuckDB path (`test_exporter_dual_writes_to_duckdb`, `test_dual_writes_idempotent`, and
-`test_emdat_export_and_freeze_to_duckdb`) assert this behaviour stays in place.
-
-If DuckDB writes are disabled or the URL is missing, `_maybe_write_db` logs the skip reason and leaves the diagnostics in
-place for downstream verification stages.
-
-### Freeze snapshot: CLI vs function behaviour
-
-- CLI usage (`python -m resolver.tools.freeze_snapshot ...`) is optimised for generating snapshot files. Unless `--write-db=1`
-  is passed (or `RESOLVER_WRITE_DB=1` is set explicitly), the CLI **does not** touch DuckDB even when `RESOLVER_DB_URL` is
-  available in the environment. This guarantees that tests calling the CLI without flags never mutate the database and keeps
-  `test_exporter_dual_writes_to_duckdb` focused on the export-time write.
-- Programmatic usage (`freeze_snapshot(..., write_db=True, db_url=...)`) continues to call `duckdb_io.write_snapshot(...)` in
-  a single transaction. Tests and backfill workflows opt into this path when they need DB writes by either setting the
-  argument explicitly or exporting `RESOLVER_WRITE_DB=1`.
-- The `_maybe_write_db(...)` helper honours the `RESOLVER_WRITE_DB` environment variable when the function-level `write_db`
-  argument is left as `None`, making it easy for CI pipelines to enable DB writes without changing callsites while still
-  defaulting to "off" for ad-hoc CLI usage.
-
-### Snapshot parity and EM-DAT flow passthrough
-
-- `freeze_snapshot` now builds the snapshot artefacts (`facts.csv`, `facts.parquet`, and `facts_resolved.*`) directly from the
-  month-filtered preview using the same `_prepare_resolved_for_db(...)` / `_prepare_deltas_for_db(...)` helpers as
-  `export_facts`. The DuckDB tables therefore match the snapshot rows 1:1 when freeze is run without DB writes, satisfying
-  the `test_exporter_dual_writes_to_duckdb` contract.
-- When the preview looks like EM-DAT People Affected flows (all metrics are PA metrics and/or the publisher mentions
-  EM-DAT/CRED), the freezer enforces a passthrough guard: the number of deltas rows prepared must equal the number of
-  preview rows with `series_semantics="new"`. If the counts diverge, the freezer logs a warning and falls back to a
-  straight subset of the preview rows so every flow row is written exactly once, as asserted by
-  `test_emdat_export_and_freeze_to_duckdb`.
-- Two new diagnostics sections (`Freeze snapshot — parity inputs` and `Freeze snapshot — flow passthrough`) record the month,
-  preview row counts, prepared deltas counts, and whether passthrough fired. This makes it easy to confirm parity/flow
-  behaviour in CI logs without opening the parquet files.
-
-### EM-DAT flows in snapshots
-
-EM-DAT People Affected rows represent monthly flows that must populate `facts_deltas`. The freezer detects EM-DAT PA metrics
-(`metric` in `{affected, total_affected, people_affected, in_need, pin, pa}`) and normalises their
-`series_semantics`/`semantics` columns to `"new"` when they are missing or blank. When an entire frame looks like canonical
-EM-DAT facts (publisher/source fields mention EM-DAT and the expected hazard columns exist) the freezer now reuses the same
-`_prepare_resolved_for_db(...)` / `_prepare_deltas_for_db(...)` helpers as the exporter. This ensures:
-
-- The per-month snapshot (`facts.parquet`, `facts_resolved.csv`) contains the same EM-DAT rows that `export_facts` wrote to
-  DuckDB, preserving the DB ↔ snapshot parity asserted in `test_exporter_dual_writes_to_duckdb`.
-- When `freeze_snapshot(..., write_db=True)` is invoked with the export preview EM-DAT facts, every preview row is written
-  into `facts_deltas` with `series_semantics="new"`, as exercised by `test_emdat_export_and_freeze_to_duckdb`.
-- ACLED and other connectors remain unchanged because the normalisation and exporter-helper reuse only fire when **all**
-  metrics in the frame are recognised EM-DAT flow metrics.
-
 ## ACLED monthly fatalities
 
 The ACLED connector uses an OAuth password-or-refresh flow documented by ACLED: it POSTs to
@@ -110,21 +26,6 @@ python -c "from resolver.ingestion.acled_client import ACLEDClient; print(ACLEDC
 
 The printed frame includes `iso3`, `month`, `fatalities`, `source`, and `updated_at` (UTC). Pass `countries=["KEN","ETH"]` to
 restrict the aggregation to a subset of ISO3 codes when debugging region-specific pipelines.
-
-### ACLED authentication precedence
-
-The ACLED ingestion client resolves credentials in the following order:
-
-1. `ACLED_ACCESS_TOKEN` (modern opaque bearer token), if set.
-2. `ACLED_TOKEN` (legacy environment variable). When found, it is mirrored into
-   `ACLED_ACCESS_TOKEN` for compatibility with downstream helpers.
-3. `ACLED_REFRESH_TOKEN`, which triggers the OAuth `refresh_token` grant.
-4. `ACLED_USERNAME` and `ACLED_PASSWORD`, which fall back to the OAuth
-   `password` grant.
-
-Fast tests in `resolver/tests/test_acled_auth_tokens.py` assert this
-precedence, ensuring that environment-provided tokens short-circuit the HTTP
-grants, while refresh and password flows still work when no token is supplied.
 
 ### Flows vs stocks
 

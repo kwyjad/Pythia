@@ -616,18 +616,9 @@ for resolver exports. When the variable is present (for example,
 `facts_resolved` (and, when supplied, `facts_deltas`) tables inside DuckDB.
 `resolver/tools/freeze_snapshot.py` then wraps snapshot freezes in a single
 transaction, recording the resolved totals, monthly deltas, manifest metadata,
-and a corresponding `snapshots` row. Snapshot DB writes are non-destructive: the
-writer deletes and rewrites only the tables that are provided for a month, so a
-"deltas-only" refresh leaves any previously-written `facts_resolved` rows
-untouched. Leave `RESOLVER_DB_URL` unset to continue operating in file-only
-mode; all tooling falls back automatically when the variable is absent.
-
-##### Freeze validator opt-in
-
-`resolver/tools/freeze_snapshot.py` skips the facts validator unless the
-`FREEZE_RUN_VALIDATOR` flag is set (truthy strings like `1`, `true`, or `yes`).
-`resolver/cli/snapshot_cli.py` still performs validation before freezing, so CI
-keeps the guardrails while local preview runs can opt out of the extra work.
+and a corresponding `snapshots` row. Leave `RESOLVER_DB_URL` unset to continue
+operating in file-only mode; all tooling falls back automatically when the
+variable is absent.
 
 #### Development tips
 
