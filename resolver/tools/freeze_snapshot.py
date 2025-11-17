@@ -122,8 +122,7 @@ def _env_write_db_flag() -> Optional[bool]:
 def _legacy_emdat_override_enabled() -> bool:
     """Return True when the opt-in EM-DAT override flag is enabled."""
 
-    flag = _parse_bool_flag(os.environ.get("FREEZE_ENABLE_EMDAT_OVERRIDE"))
-    return bool(flag)
+    return os.environ.get("FREEZE_ENABLE_EMDAT_OVERRIDE", "0").strip() == "1"
 
 
 def _is_emdat_pa_facts(facts_path: Path, sample_rows: int = 50) -> bool:
@@ -181,20 +180,26 @@ def _is_emdat_preview(frame: "pd.DataFrame | None") -> bool:
     if frame is None or frame.empty:
         return False
 
-    publisher = frame.get("publisher")
-    if publisher is not None:
-        series = publisher.fillna("").astype(str).str.lower()
-        if series.str.contains("em-dat").any():
-            return True
-        if series.str.contains("cred").any():
-            return True
-        if series.str.contains("uclouvain").any():
+    def _normalize_series(name: str) -> "pd.Series | None":
+        if name not in frame.columns:
+            return None
+        return frame[name].fillna("").astype(str)
+
+    publisher = _normalize_series("publisher")
+    if publisher is not None and not publisher.empty:
+        publisher_lc = publisher.str.lower()
+        if publisher_lc.str.contains("cred / uclouvain (em-dat)").any():
             return True
 
-    metric = frame.get("metric")
-    if metric is not None:
-        metric_series = metric.fillna("").astype(str).str.lower()
-        if metric_series.isin(EM_DAT_METRICS_LOWER).any():
+    loose_fields = [
+        _normalize_series("publisher"),
+        _normalize_series("source"),
+        _normalize_series("doc_title"),
+    ]
+    for series in loose_fields:
+        if series is None or series.empty:
+            continue
+        if series.str.lower().str.contains("em-dat").any():
             return True
 
     return False
@@ -1463,16 +1468,38 @@ def _maybe_write_db(
 
     if resolved_df is not None and not resolved_df.empty:
         routing_mode = "resolved_passthrough"
+        LOGGER.debug(
+            "freeze_snapshot.db_routing: resolved passthrough",
+            extra={
+                "month": month,
+                "resolved_rows": len(resolved_df),
+                "deltas_rows": len(deltas_source) if deltas_source is not None else 0,
+            },
+        )
         prepared_resolved = _prepare_resolved_frame_for_db(resolved_df)
         if deltas_source is not None and not deltas_source.empty:
             prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
     elif deltas_source is not None and not deltas_source.empty:
         routing_mode = "deltas_passthrough"
+        LOGGER.debug(
+            "freeze_snapshot.db_routing: deltas passthrough",
+            extra={
+                "month": month,
+                "deltas_rows": len(deltas_source),
+            },
+        )
         prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
     elif preview_rows:
         routing_mode = "preview_to_deltas"
         routing_notes.append(
             "routed preview rows to facts_deltas because no resolved/deltas inputs were provided"
+        )
+        LOGGER.debug(
+            "freeze_snapshot.db_routing: preview to deltas",
+            extra={
+                "month": month,
+                "preview_rows": preview_rows,
+            },
         )
         if _legacy_emdat_override_enabled() and _is_emdat_preview(facts_df):
             routing_mode = "legacy_emdat_override"
@@ -1483,6 +1510,10 @@ def _maybe_write_db(
         prepared_deltas = _prepare_deltas_frame_for_db(normalized)
     else:
         routing_notes.append("no frames available for DuckDB write")
+        LOGGER.debug(
+            "freeze_snapshot.db_routing: no frames available",
+            extra={"month": month},
+        )
 
     diagnostics_payload: Dict[str, Any] = {
         "db_url": canonical_url or db_url or "",
@@ -1614,26 +1645,27 @@ def _maybe_write_db(
         )
         if not notes_text:
             notes_text = "none"
+        db_url_display = canonical_url or db_url or ""
+        db_path_display = canonical_path or ""
         routing_lines = [
-            f"- Mode: `{routing_mode}`",
-            f"- Month: `{month}`",
-            f"- Preview rows: {preview_rows}",
-            f"- Prepared facts_resolved rows: {facts_rows}",
-            f"  - semantics: {_format_histogram(diagnostics_payload['facts_resolved_semantics'])}",
-            f"- Prepared facts_deltas rows: {deltas_rows}",
-            f"  - semantics: {_format_histogram(diagnostics_payload['facts_deltas_semantics'])}",
-            (
-                f"- Pre-write rows at ym={month}: "
-                f"facts_resolved={_format_optional_count(pre_counts['resolved'])}, "
-                f"facts_deltas={_format_optional_count(pre_counts['deltas'])}"
-            ),
-            (
-                f"- Post-write rows at ym={month}: "
-                f"facts_resolved={_format_optional_count(post_counts['resolved'])}, "
-                f"facts_deltas={_format_optional_count(post_counts['deltas'])}"
-            ),
-            f"- Notes: {notes_text}",
+            f"- DB URL: `{db_url_display}`" if db_url_display else "- DB URL: (empty)"
         ]
+        if db_path_display:
+            routing_lines.append(f"- DB path: `{db_path_display}`")
+        else:
+            routing_lines.append("- DB path: (empty)")
+        routing_lines.extend(
+            [
+                f"- Month: `{month}`",
+                f"- Routing mode: `{routing_mode}`",
+                f"- Preview rows: {preview_rows}",
+                f"- Prepared facts_resolved rows: {facts_rows}",
+                f"  - semantics: {_format_histogram(diagnostics_payload['facts_resolved_semantics'])}",
+                f"- Prepared facts_deltas rows: {deltas_rows}",
+                f"  - semantics: {_format_histogram(diagnostics_payload['facts_deltas_semantics'])}",
+                f"- Notes: {notes_text}",
+            ]
+        )
         routing_block = "\n".join(routing_lines)
         _append_to_summary(routing_summary_title, routing_block)
         _append_to_repo_summary(routing_summary_title, routing_block)
@@ -1658,27 +1690,39 @@ def _maybe_write_db(
         counts_block = "\n".join(counts_lines)
         _append_to_summary(counts_summary_title, counts_block)
         _append_to_repo_summary(counts_summary_title, counts_block)
-        msg = (
-            f"Wrote {facts_rows} facts_resolved rows"
-            + (
-                f" and {deltas_rows} facts_deltas rows"
-                if deltas_rows
-                else " and 0 facts_deltas rows"
-            )
+        db_write_lines = [
+            f"- DB URL: `{db_url_display}`" if db_url_display else "- DB URL: (empty)"
+        ]
+        if db_path_display:
+            db_write_lines.append(f"- DB path: `{db_path_display}`")
+        else:
+            db_write_lines.append("- DB path: (empty)")
+        db_write_lines.extend(
+            [
+                f"- Month: `{month}`",
+                f"- facts_resolved rows written: {facts_rows}",
+                f"- facts_deltas rows written: {deltas_rows}",
+                f"- Routing mode: `{routing_mode}`",
+                f"- Notes: {notes_text}",
+            ]
         )
+        db_write_block = "\n".join(db_write_lines)
         _append_ingestion_summary(success_block)
-        _append_to_summary(summary_title, msg)
-        _append_to_repo_summary(summary_title, msg)
+        _append_to_summary(summary_title, db_write_block)
+        _append_to_repo_summary(summary_title, db_write_block)
     except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
         print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
         _append_db_error_to_summary(
             section=f"Freeze Snapshot — DB write ({month})",
             exc=exc,
-            db_url=db_url,
+            db_url=canonical_url or db_url,
             facts_path=facts_path,
             resolved_path=resolved_path,
             deltas_path=deltas_path,
             month=month,
+            routing_mode=routing_mode,
+            resolved_rows=diagnostics_payload["facts_resolved_rows"],
+            deltas_rows=diagnostics_payload["facts_deltas_rows"],
         )
         error_block = _render_db_error_markdown("Freeze Snapshot", diagnostics_payload, exc)
         _append_ingestion_summary(error_block)
@@ -1697,6 +1741,9 @@ def _append_db_error_to_summary(
     resolved_path: Path | None,
     deltas_path: Path | None,
     month: str,
+    routing_mode: str,
+    resolved_rows: int,
+    deltas_rows: int,
 ) -> None:
     """Append a freeze snapshot DuckDB error block to diagnostics summary."""
 
@@ -1710,6 +1757,9 @@ def _append_db_error_to_summary(
         "resolved_path": str(resolved_path or ""),
         "deltas_path": str(deltas_path or ""),
         "month": month,
+        "routing_mode": routing_mode,
+        "facts_resolved_rows": int(resolved_rows or 0),
+        "facts_deltas_rows": int(deltas_rows or 0),
     }
 
     try:
