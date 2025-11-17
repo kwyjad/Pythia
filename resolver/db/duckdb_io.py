@@ -256,11 +256,8 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
 
     spec = TABLE_KEY_SPECS.get(table, {})
     canonical = list(spec.get("columns", [])) if spec else []
-    if canonical:
-        return canonical
-
     if frame is None or frame.empty:
-        return []
+        return canonical
 
     columns = set(frame.columns)
     keys: list[str] = []
@@ -269,6 +266,13 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
         for column in candidates:
             if column in columns and column not in keys:
                 keys.append(column)
+
+    if (
+        table in {"facts_resolved", "facts_deltas"}
+        and "event_id" in columns
+        and _series_has_non_empty(frame, "event_id")
+    ):
+        return ["event_id"]
 
     if table == "facts_resolved":
         if "event_id" in columns and _series_has_non_empty(frame, "event_id"):
@@ -303,8 +307,8 @@ def resolve_upsert_keys(table: str, frame: pd.DataFrame | None) -> list[str]:
         )
         _extend(fallback)
 
-    if not keys and spec.get("columns"):
-        _extend(spec.get("columns", []))
+    if not keys and canonical:
+        _extend(canonical)
 
     return keys
 
@@ -2270,6 +2274,35 @@ def write_snapshot(
 
     facts_resolved = _normalize_keys_df(facts_resolved, "facts_resolved")
     facts_deltas = _normalize_keys_df(facts_deltas, "facts_deltas")
+    upsert_keys_meta: dict[str, dict[str, object]] = {}
+
+    def _record_upsert_keys(
+        table: str,
+        keys: Sequence[str],
+        prepared_rows: int,
+        rows_written: int,
+    ) -> None:
+        readable_keys = [str(key) for key in keys]
+        upsert_keys_meta[table] = {
+            "keys": readable_keys,
+            "rows": int(rows_written),
+        }
+        LOGGER.info(
+            "duckdb.upsert.keys | table=%s | keys=%s | prepared_rows=%s | rows_written=%s",
+            table,
+            ", ".join(readable_keys) or "(none)",
+            prepared_rows,
+            rows_written,
+        )
+        if diag_enabled():  # pragma: no branch - cheap gate
+            log_json(
+                DIAG_LOGGER,
+                "duckdb_upsert_keys",
+                table=table,
+                keys=readable_keys,
+                prepared_rows=int(prepared_rows),
+                rows=int(rows_written),
+            )
 
     def _count_rows(table: str) -> int | None:
         try:
@@ -2330,17 +2363,27 @@ def write_snapshot(
                 facts_resolved = _coerce_numeric(
                     facts_resolved, "facts_resolved"
                 )
+                resolved_keys = resolve_upsert_keys("facts_resolved", facts_resolved)
+                if not resolved_keys:
+                    resolved_keys = FACTS_RESOLVED_KEY_COLUMNS
                 facts_resolved = facts_resolved.drop_duplicates(
-                    subset=FACTS_RESOLVED_KEY_COLUMNS,
+                    subset=resolved_keys,
                     keep="last",
                 ).reset_index(drop=True)
                 facts_rows = upsert_dataframe(
                     conn,
                     "facts_resolved",
                     facts_resolved,
-                    keys=FACTS_RESOLVED_KEY_COLUMNS,
+                    keys=resolved_keys,
                 )
-                LOGGER.info("facts_resolved rows upserted: %s", facts_rows)
+                written_resolved = int(facts_rows or 0)
+                _record_upsert_keys(
+                    "facts_resolved",
+                    resolved_keys,
+                    len(facts_resolved),
+                    written_resolved,
+                )
+                LOGGER.info("facts_resolved rows upserted: %s", written_resolved)
                 LOGGER.debug(
                     "facts_resolved series_semantics distribution: %s",
                     dict_counts(facts_resolved["series_semantics"]),
@@ -2396,17 +2439,27 @@ def write_snapshot(
                 facts_deltas = _coerce_numeric(
                     facts_deltas, "facts_deltas"
                 )
+                deltas_keys = resolve_upsert_keys("facts_deltas", facts_deltas)
+                if not deltas_keys:
+                    deltas_keys = FACTS_DELTAS_KEY_COLUMNS
                 facts_deltas = facts_deltas.drop_duplicates(
-                    subset=FACTS_DELTAS_KEY_COLUMNS,
+                    subset=deltas_keys,
                     keep="last",
                 ).reset_index(drop=True)
                 deltas_rows = upsert_dataframe(
                     conn,
                     "facts_deltas",
                     facts_deltas,
-                    keys=FACTS_DELTAS_KEY_COLUMNS,
+                    keys=deltas_keys,
                 )
-                LOGGER.info("facts_deltas rows upserted: %s", deltas_rows)
+                written_deltas = int(deltas_rows or 0)
+                _record_upsert_keys(
+                    "facts_deltas",
+                    deltas_keys,
+                    len(facts_deltas),
+                    written_deltas,
+                )
+                LOGGER.info("facts_deltas rows upserted: %s", written_deltas)
                 LOGGER.debug(
                     "facts_deltas series_semantics distribution: %s",
                     dict_counts(facts_deltas["series_semantics"]),
@@ -2549,4 +2602,5 @@ def write_snapshot(
         },
         "pre_counts": pre_counts,
         "post_counts": post_counts,
+        "upsert_keys": upsert_keys_meta,
     }

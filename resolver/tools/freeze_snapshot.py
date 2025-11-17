@@ -119,6 +119,13 @@ def _env_write_db_flag() -> Optional[bool]:
     return _parse_bool_flag(os.environ.get("RESOLVER_WRITE_DB"))
 
 
+def _freeze_validation_enabled() -> bool:
+    """Return True when the FREEZE_RUN_VALIDATOR flag requests validation."""
+
+    raw = os.environ.get("FREEZE_RUN_VALIDATOR", "")
+    return raw.strip().lower() in TRUTHY_FLAGS
+
+
 def _legacy_emdat_override_enabled() -> bool:
     """Return True when the opt-in EM-DAT override flag is enabled."""
 
@@ -1139,16 +1146,20 @@ def freeze_snapshot(
 
     normalizer_applied = False
     normalizer_reason = "non-emdat facts"
+    validation_enabled = _freeze_validation_enabled()
 
     should_normalize = False
     if filter_result.filtered_rows > 0:
         should_normalize = _is_emdat_pa_facts(filtered_facts_path)
         if should_normalize:
-            normalizer_reason = "emdat facts"
+            if validation_enabled:
+                normalizer_reason = "emdat facts"
+            else:
+                normalizer_reason = "emdat facts (validator disabled)"
         else:
             normalizer_reason = "non-emdat facts"
 
-    if should_normalize:
+    if should_normalize and validation_enabled:
         _normalize_facts_for_validation(filtered_facts_path)
         normalizer_applied = True
 
@@ -1158,12 +1169,28 @@ def freeze_snapshot(
     _append_to_summary("Freeze snapshot — normalizer", normalizer_line)
     _append_to_repo_summary("Freeze snapshot — normalizer", normalizer_line)
 
-    if filter_result.filtered_rows > 0:
+    validator_section_title = "Freeze Snapshot — validator"
+    validator_block: str
+
+    if filter_result.filtered_rows > 0 and validation_enabled:
         run_validator(filtered_facts_path)
+        validator_lines = [
+            "status: ran",
+            f"rows: {filter_result.filtered_rows}",
+            f"path: `{filtered_facts_path.resolve()}`",
+        ]
+        validator_block = "\n".join(validator_lines)
         try:
             validated_facts_df = load_table(filtered_facts_path)
         except Exception:
             validated_facts_df = None
+    elif filter_result.filtered_rows <= 0:
+        validator_block = f"skipped: no rows for `{ym}`"
+    else:
+        validator_block = "skipped (set FREEZE_RUN_VALIDATOR=1 to enable)"
+
+    _append_to_summary(validator_section_title, validator_block)
+    _append_to_repo_summary(validator_section_title, validator_block)
 
     if deltas:
         deltas_path = Path(deltas)
@@ -1418,6 +1445,7 @@ def _maybe_write_db(
     summary_title = "Freeze snapshot — DB write"
     routing_summary_title = "Freeze snapshot — DB routing (contract)"
     counts_summary_title = "Snapshot DB write — pre/post counts"
+    upsert_keys_title = "DuckDB — upsert keys"
 
     if write_db is None:
         env_flag = _env_write_db_flag()
@@ -1616,6 +1644,7 @@ def _maybe_write_db(
                 "db_url": canonical_url or db_url,
             },
         )
+        upsert_keys_payload: Dict[str, Any] = {}
         if isinstance(write_result, Mapping):
             pre_counts = (
                 write_result.get("pre_counts")
@@ -1627,6 +1656,13 @@ def _maybe_write_db(
                 if isinstance(write_result.get("post_counts"), Mapping)
                 else post_counts
             )
+            raw_upsert = write_result.get("upsert_keys")
+            if isinstance(raw_upsert, Mapping):
+                upsert_keys_payload = {
+                    str(table): value
+                    for table, value in raw_upsert.items()
+                    if isinstance(value, Mapping)
+                }
         if pre_counts["resolved"] is None:
             pre_counts["resolved"] = _count_rows_for_month(
                 conn, "facts_resolved", month
@@ -1669,6 +1705,26 @@ def _maybe_write_db(
         routing_block = "\n".join(routing_lines)
         _append_to_summary(routing_summary_title, routing_block)
         _append_to_repo_summary(routing_summary_title, routing_block)
+        if upsert_keys_payload:
+            table_lines = ["| table | rows_written | keys |", "| --- | --- | --- |"]
+            for table in sorted(upsert_keys_payload):
+                entry = upsert_keys_payload.get(table) or {}
+                keys = entry.get("keys")
+                if isinstance(keys, (list, tuple)):
+                    keys_text = ", ".join(str(k) for k in keys)
+                else:
+                    keys_text = str(keys or "")
+                rows_value = entry.get("rows")
+                try:
+                    rows_text = str(int(rows_value))
+                except Exception:
+                    rows_text = str(rows_value or 0)
+                table_lines.append(
+                    f"| {table} | {rows_text} | {keys_text or '(none)'} |"
+                )
+            upsert_block = "\n".join(table_lines)
+            _append_to_summary(upsert_keys_title, upsert_block)
+            _append_to_repo_summary(upsert_keys_title, upsert_block)
         counts_lines = [
             f"ym: `{month}`",
             (
