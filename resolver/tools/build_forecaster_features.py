@@ -27,6 +27,7 @@ DEFAULT_SNAPSHOTS = RESOLVER_ROOT / "snapshots"
 DEFAULT_OUTPUT = REPO_ROOT / "data" / "resolver_features.parquet"
 DEFAULT_METRICS = ("in_need", "affected", "displaced")
 SPIKE_ZSCORE_THRESHOLD = 3.0
+SUMMARY_PATH = Path("diagnostics") / "summary.md"
 
 
 class FeatureBuildError(RuntimeError):
@@ -38,6 +39,18 @@ class FeatureInputs:
     resolved: pd.DataFrame
     deltas: pd.DataFrame
     generated_at: dt.datetime
+
+
+def _append_to_summary(section_title: str, body: str) -> None:
+    try:
+        SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SUMMARY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n\n### {section_title}\n\n")
+            handle.write(body)
+            if not body.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        return
 
 
 def _parse_metrics(metrics: Iterable[str] | None) -> Tuple[str, ...]:
@@ -216,9 +229,35 @@ def compute_feature_frame(
     deltas["value_new"] = _coerce_numeric(deltas["value_new"])
 
     key_cols = ["ym", "iso3", "hazard_code", "metric"]
-    merged = deltas.merge(resolved[key_cols + ["as_of_date", "hazard_class", "precedence_tier"]], on=key_cols, how="left")
+    extra_cols = [
+        column
+        for column in ["as_of_date", "as_of", "hazard_class", "precedence_tier"]
+        if column in resolved.columns
+    ]
+    merged = deltas.merge(resolved[key_cols + extra_cols], on=key_cols, how="left")
 
-    merged["as_of_date"] = merged["as_of"].fillna(merged["as_of_date"])
+    fallback_used = False
+    as_of_source = None
+    for candidate in ("as_of", "as_of_x", "as_of_y"):
+        if candidate in merged.columns:
+            as_of_source = candidate
+            break
+    as_of_series = merged[as_of_source] if as_of_source else None
+
+    if "as_of_date" not in merged.columns:
+        merged["as_of_date"] = as_of_series
+        fallback_used = as_of_series is not None
+    else:
+        as_of_date_series = merged["as_of_date"]
+        normalized = as_of_date_series.astype(str).str.strip()
+        missing_mask = as_of_date_series.isna() | normalized.eq("")
+        if as_of_series is not None:
+            merged.loc[missing_mask, "as_of_date"] = as_of_series.loc[missing_mask]
+            if missing_mask.any():
+                fallback_used = True
+        elif missing_mask.any():
+            fallback_used = True
+
     merged["as_of_date"] = pd.to_datetime(merged["as_of_date"], errors="coerce")
 
     generated_at = generated_at or dt.datetime.utcnow()
@@ -282,6 +321,10 @@ def compute_feature_frame(
     output.sort_values(["country_iso3", "hazard_code", "metric", "ym"], inplace=True)
     output.reset_index(drop=True, inplace=True)
 
+    metrics_used = tuple(sorted(metric_scope)) if metric_scope else tuple(DEFAULT_METRICS)
+    output.attrs["as_of_date_fallback_used"] = bool(fallback_used)
+    output.attrs["metrics_used"] = metrics_used
+
     return output
 
 
@@ -307,6 +350,21 @@ def build_features(
         generated_at=inputs.generated_at,
     )
     write_feature_artifacts(frame, output_path)
+    metrics_used = frame.attrs.get("metrics_used")
+    if isinstance(metrics_used, (list, tuple)):
+        metrics_text = ", ".join(str(metric) for metric in metrics_used)
+    elif isinstance(metrics_used, str):
+        metrics_text = metrics_used
+    else:
+        metrics_text = "(unknown)"
+    fallback_used = bool(frame.attrs.get("as_of_date_fallback_used"))
+    summary_lines = [
+        f"- rows: {len(frame)}",
+        f"- metrics: {metrics_text}",
+        f"- as_of_date_fallback_used: {str(fallback_used).lower()}",
+        f"- output: `{output_path}`",
+    ]
+    _append_to_summary("Forecaster features", "\n".join(summary_lines))
     return frame
 
 

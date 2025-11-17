@@ -622,6 +622,13 @@ writer deletes and rewrites only the tables that are provided for a month, so a
 untouched. Leave `RESOLVER_DB_URL` unset to continue operating in file-only
 mode; all tooling falls back automatically when the variable is absent.
 
+##### Freeze validator opt-in
+
+`resolver/tools/freeze_snapshot.py` skips the facts validator unless the
+`FREEZE_RUN_VALIDATOR` flag is set (truthy strings like `1`, `true`, or `yes`).
+`resolver/cli/snapshot_cli.py` still performs validation before freezing, so CI
+keeps the guardrails while local preview runs can opt out of the extra work.
+
 #### Development tips
 
 - Review [resolver/docs/db_upsert_strategy.md](resolver/docs/db_upsert_strategy.md)
