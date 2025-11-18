@@ -1249,7 +1249,7 @@ class ACLEDClient:
             "page": 1,
             "limit": self.page_size,
             "_format": ACLED_DEFAULT_FORMAT,
-            "fields": ",".join(selected_fields),
+            "fields": "|".join(selected_fields),
         }
         if countries:
             params["iso3"] = ",".join(sorted({c.strip().upper() for c in countries if c}))
@@ -1275,6 +1275,14 @@ class ACLEDClient:
             data = payload.get("data") or payload.get("results") or []
             if not isinstance(data, list):
                 raise RuntimeError("Unexpected ACLED payload structure")
+            if page == 1 and not data and "fields" in params:
+                self.logger.debug(
+                    "ACLED empty data with fields set; retrying without fields",
+                    extra={"params_keys": sorted(params.keys())},
+                )
+                params.pop("fields", None)
+                payload = self._fetch_page(params)
+                data = payload.get("data") or payload.get("results") or []
             if not data:
                 break
             records.extend(data)

@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -26,6 +27,10 @@ if not LOGGER.handlers:
 LOGGER.setLevel(logging.INFO)
 
 DEFAULT_DB_PATH = Path("./resolver_data/resolver.duckdb")
+ROOT = Path(__file__).resolve().parents[2]
+ACLED_DIAGNOSTICS_DIR = ROOT / "diagnostics" / "acled"
+ACLED_DUCKDB_SUMMARY_PATH = ACLED_DIAGNOSTICS_DIR / "duckdb_summary.md"
+SUMMARY_HEADER = "### ACLED HTTP summary"
 
 
 def _normalize_db_url_arg(raw: str | None) -> tuple[str, str]:
@@ -71,6 +76,68 @@ def _normalize_iso3(series: pd.Series) -> pd.Series:
         normalized.append(text or pd.NA)
     result = pd.Series(normalized, index=series.index, dtype="string")
     return result
+
+
+def _format_preview_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if pd.isna(value):
+        return ""
+    return str(value)
+
+
+def _build_acled_summary_lines(
+    *,
+    frame: pd.DataFrame,
+    start: str,
+    end: str,
+    page_size: int,
+    fields_mode: str,
+) -> list[str]:
+    rows = [
+        SUMMARY_HEADER,
+        "",
+        f"- Window: {start} → {end}",
+        f"- Page size: {page_size}",
+        f"- Fields parameter: {'pipe (`|`)' if fields_mode == 'pipe' else 'unset'}",
+        f"- Rows: {len(frame)}",
+    ]
+    preview_cols = ["iso3", "month", "fatalities"]
+    if frame.empty or not all(col in frame.columns for col in preview_cols):
+        rows.append("- Preview: (no rows)")
+        return rows
+    preview = frame.loc[:, preview_cols].head(3)
+    if preview.empty:
+        rows.append("- Preview: (no rows)")
+        return rows
+    rows.append("")
+    rows.append("| iso3 | month | fatalities |")
+    rows.append("| --- | --- | --- |")
+    for record in preview.itertuples(index=False):
+        iso3, month, fatalities = record
+        rows.append(
+            f"| {_format_preview_value(iso3)} | {_format_preview_value(month)} | {_format_preview_value(fatalities)} |"
+        )
+    return rows
+
+
+def _append_summary_to_step(lines: list[str]) -> None:
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    text = "\n".join([""] + lines) + "\n"
+    with open(summary_path, "a", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _write_acled_duckdb_summary(lines: list[str]) -> None:
+    ACLED_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(lines).rstrip() + "\n"
+    ACLED_DUCKDB_SUMMARY_PATH.write_text(text, encoding="utf-8")
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -206,6 +273,26 @@ def run(argv: Sequence[str] | None = None) -> int:
         len(frame),
         frame.head(3).to_dict("records") if not frame.empty else [],
     )
+
+    # ``ACLEDClient`` exposes ``page_size``/``fields`` attributes during real runs, but
+    # test stubs may omit them. Guard access so diagnostics never crash the CLI.
+    _page_size = getattr(client, "page_size", None)
+    _fields = getattr(client, "fields", None)
+    try:
+        summary_lines = _build_acled_summary_lines(
+            frame=frame,
+            start=args.start,
+            end=args.end,
+            page_size=int(_page_size) if (_page_size is not None) else 0,
+            fields_mode="pipe" if _fields else "unset",
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics best effort
+        LOGGER.debug(
+            "acled_to_duckdb.summary_build_skipped | reason=%s", exc, exc_info=True
+        )
+        summary_lines = []
+    _write_acled_duckdb_summary(summary_lines)
+    _append_summary_to_step(summary_lines)
 
     if args.dry_run:
         LOGGER.info(
