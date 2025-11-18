@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import sys
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -30,7 +31,17 @@ DEFAULT_DB_PATH = Path("./resolver_data/resolver.duckdb")
 ROOT = Path(__file__).resolve().parents[2]
 ACLED_DIAGNOSTICS_DIR = ROOT / "diagnostics" / "acled"
 ACLED_DUCKDB_SUMMARY_PATH = ACLED_DIAGNOSTICS_DIR / "duckdb_summary.md"
+ACLED_INGESTION_DIAGNOSTICS_DIR = ROOT / "diagnostics" / "ingestion" / "acled"
+ACLED_CLI_FETCH_META_PATH = ACLED_INGESTION_DIAGNOSTICS_DIR / "cli_fetch_meta.json"
+ACLED_HTTP_DIAG_PATH = ACLED_INGESTION_DIAGNOSTICS_DIR / "http_diag.json"
 SUMMARY_HEADER = "### ACLED HTTP summary"
+
+
+def _relpath(path: Path) -> str:
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:  # pragma: no cover - defensive
+        return path.as_posix()
 
 
 def _normalize_db_url_arg(raw: str | None) -> tuple[str, str]:
@@ -97,6 +108,8 @@ def _build_acled_summary_lines(
     end: str,
     page_size: int,
     fields_mode: str,
+    fields_value: str = "",
+    diagnostics_path: str | None = None,
 ) -> list[str]:
     rows = [
         SUMMARY_HEADER,
@@ -104,8 +117,11 @@ def _build_acled_summary_lines(
         f"- Window: {start} → {end}",
         f"- Page size: {page_size}",
         f"- Fields parameter: {'pipe (`|`)' if fields_mode == 'pipe' else 'unset'}",
+        f"- Diagnostics meta: {diagnostics_path or _relpath(ACLED_CLI_FETCH_META_PATH)}",
         f"- Rows: {len(frame)}",
     ]
+    if fields_value:
+        rows.insert(5, f"- Fields value: {fields_value}")
     preview_cols = ["iso3", "month", "fatalities"]
     if frame.empty or not all(col in frame.columns for col in preview_cols):
         rows.append("- Preview: (no rows)")
@@ -138,6 +154,25 @@ def _write_acled_duckdb_summary(lines: list[str]) -> None:
     ACLED_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
     text = "\n".join(lines).rstrip() + "\n"
     ACLED_DUCKDB_SUMMARY_PATH.write_text(text, encoding="utf-8")
+
+
+def _load_cli_fetch_meta() -> dict:
+    try:
+        payload = json.loads(ACLED_CLI_FETCH_META_PATH.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return payload
+    except (OSError, json.JSONDecodeError):  # pragma: no cover - diagnostics best effort
+        return {}
+    return {}
+
+
+def _print_cli_fetch_summary(*, start: str, end: str, rows: int, meta: dict) -> None:
+    fields_param = bool(meta.get("fields_param"))
+    print("ACLED CLI — fetch summary")
+    print(f" start: {start}")
+    print(f" end: {end}")
+    print(f" rows: {rows}")
+    print(f" fields_param: {'true' if fields_param else 'false'}")
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -224,6 +259,14 @@ def run(argv: Sequence[str] | None = None) -> int:
         raise
     LOGGER.info("acled_to_duckdb.fetch_done | rows=%s", len(frame))
 
+    fetch_meta = _load_cli_fetch_meta()
+    _print_cli_fetch_summary(
+        start=args.start,
+        end=args.end,
+        rows=len(frame),
+        meta=fetch_meta,
+    )
+
     if frame is None:
         frame = pd.DataFrame()
 
@@ -277,20 +320,35 @@ def run(argv: Sequence[str] | None = None) -> int:
     # ``ACLEDClient`` exposes ``page_size``/``fields`` attributes during real runs, but
     # test stubs may omit them. Guard access so diagnostics never crash the CLI.
     _page_size = getattr(client, "page_size", None)
-    _fields = getattr(client, "fields", None)
     try:
+        fields_mode = "pipe" if fetch_meta.get("fields_param") else "unset"
+        diagnostics_path = _relpath(ACLED_CLI_FETCH_META_PATH)
         summary_lines = _build_acled_summary_lines(
             frame=frame,
             start=args.start,
             end=args.end,
             page_size=int(_page_size) if (_page_size is not None) else 0,
-            fields_mode="pipe" if _fields else "unset",
+            fields_mode=fields_mode,
+            fields_value=str(fetch_meta.get("fields_value") or ""),
+            diagnostics_path=diagnostics_path,
         )
     except Exception as exc:  # pragma: no cover - diagnostics best effort
         LOGGER.debug(
             "acled_to_duckdb.summary_build_skipped | reason=%s", exc, exc_info=True
         )
         summary_lines = []
+
+    if frame.empty:
+        meta_rel = _relpath(ACLED_CLI_FETCH_META_PATH)
+        http_rel = _relpath(ACLED_HTTP_DIAG_PATH)
+        zero_rows_block = [
+            "",
+            "#### ACLED CLI zero-row diagnostics",
+            "- Rows fetched: 0",
+            f"- Inspect {meta_rel} for request parameters",
+            f"- Inspect {http_rel} for HTTP diagnostics",
+        ]
+        summary_lines.extend(zero_rows_block)
     _write_acled_duckdb_summary(summary_lines)
     _append_summary_to_step(summary_lines)
 

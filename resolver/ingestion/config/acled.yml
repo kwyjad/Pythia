@@ -39,4 +39,5 @@ client:
     - iso3
     - country
     - fatalities
+  # force_fields: false  # set to true only if needed; uses pipe-delimited fields
   use_stub: false
