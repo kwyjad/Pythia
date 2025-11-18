@@ -274,13 +274,23 @@ def run(argv: Sequence[str] | None = None) -> int:
         frame.head(3).to_dict("records") if not frame.empty else [],
     )
 
-    summary_lines = _build_acled_summary_lines(
-        frame=frame,
-        start=args.start,
-        end=args.end,
-        page_size=client.page_size,
-        fields_mode="pipe" if client.fields else "unset",
-    )
+    # ``ACLEDClient`` exposes ``page_size``/``fields`` attributes during real runs, but
+    # test stubs may omit them. Guard access so diagnostics never crash the CLI.
+    _page_size = getattr(client, "page_size", None)
+    _fields = getattr(client, "fields", None)
+    try:
+        summary_lines = _build_acled_summary_lines(
+            frame=frame,
+            start=args.start,
+            end=args.end,
+            page_size=int(_page_size) if (_page_size is not None) else 0,
+            fields_mode="pipe" if _fields else "unset",
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics best effort
+        LOGGER.debug(
+            "acled_to_duckdb.summary_build_skipped | reason=%s", exc, exc_info=True
+        )
+        summary_lines = []
     _write_acled_duckdb_summary(summary_lines)
     _append_summary_to_step(summary_lines)
 
