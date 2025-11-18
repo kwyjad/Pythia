@@ -26,6 +26,7 @@ from resolver.ingestion.utils.io import (
     resolve_ingestion_window,
     resolve_output_path,
 )
+from resolver.ingestion.utils.iso_normalize import to_iso3
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -1309,10 +1310,21 @@ class ACLEDClient:
 
         frame = frame.reindex(columns=selected_fields)
         frame["event_date"] = pd.to_datetime(frame["event_date"], errors="coerce", utc=True).dt.tz_convert(None)
+        original_iso_missing = frame["iso3"].isna()
         frame["iso3"] = frame["iso3"].astype(str).str.strip().str.upper()
-        iso_mask = frame["iso3"].isin({"", "NAN", "NONE", "NULL"})
+        iso_mask = original_iso_missing | frame["iso3"].isin({"", "NAN", "NONE", "NULL"})
         frame.loc[iso_mask, "iso3"] = pd.NA
         frame["country"] = frame["country"].astype(str).str.strip()
+        missing_iso_mask = frame["iso3"].isna()
+        if missing_iso_mask.any():
+            filled_iso = frame.loc[missing_iso_mask, "country"].map(lambda value: to_iso3(value))
+            filled_count = int(filled_iso.notna().sum())
+            frame.loc[missing_iso_mask, "iso3"] = filled_iso
+            if filled_count > 0:
+                self.logger.info(
+                    "ACLED iso3 filled from country",
+                    extra={"filled": filled_count},
+                )
         frame["fatalities"] = (
             pd.to_numeric(frame["fatalities"], errors="coerce").fillna(0).astype("int64")
         )
