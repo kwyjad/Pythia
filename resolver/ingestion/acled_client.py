@@ -1132,8 +1132,6 @@ class ACLEDClient:
         self.max_retries = int(cfg.get("max_retries", max_retries))
         self.page_size = int(cfg.get("page_size", page_size))
         self.fields = cfg.get("fields") or list(self._DEFAULT_FIELDS)
-        force_fields_cfg = bool(cfg.get("force_fields", False))
-        self.force_fields = _env_bool("ACLED_FORCE_FIELDS", force_fields_cfg)
         self.use_stub = bool(cfg.get("use_stub", False))
         # Honour global stub toggles if present.
         if os.getenv("RESOLVER_FORCE_STUBS") == "1" or os.getenv("RESOLVER_INCLUDE_STUBS") == "1":
@@ -1257,17 +1255,15 @@ class ACLEDClient:
             countries = [countries]
 
         selected_fields = list(fields or self.fields or self._DEFAULT_FIELDS)
-        include_fields_param = bool(self.force_fields)
+        fields_text = "|".join(selected_fields)
         params: Dict[str, Any] = {
             "event_date": f"{start.strftime('%Y-%m-%d')}|{end.strftime('%Y-%m-%d')}",
             "event_date_where": "BETWEEN",
             "page": 1,
             "limit": self.page_size,
             "_format": ACLED_DEFAULT_FORMAT,
+            "fields": fields_text,
         }
-        if include_fields_param:
-            fields_text = "|".join(selected_fields)
-            params["fields"] = fields_text
         if countries:
             params["iso3"] = ",".join(sorted({c.strip().upper() for c in countries if c}))
 
@@ -1290,8 +1286,8 @@ class ACLEDClient:
             "end": end.strftime("%Y-%m-%d"),
             "page_size": self.page_size,
             "countries": params.get("iso3"),
-            "fields_param": include_fields_param,
-            "fields_value": params.get("fields", ""),
+            "fields_param": True,
+            "fields_value": fields_text,
             "params_keys": sorted(params.keys()),
         }
         _write_cli_fetch_meta(diagnostics_meta)

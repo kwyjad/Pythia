@@ -36,20 +36,7 @@ def _patch_fetch_page(monkeypatch: pytest.MonkeyPatch, params_store: List[Dict[s
     monkeypatch.setattr(acled_client.ACLEDClient, "_fetch_page", _fake_fetch)
 
 
-def test_fields_omitted_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    params_store: List[Dict[str, Any]] = []
-    _patch_fetch_page(monkeypatch, params_store)
-    client = acled_client.ACLEDClient()
-
-    frame = client.fetch_events("2025-01-01", "2025-01-31")
-
-    assert not frame.empty
-    assert params_store, "fetch should have been invoked"
-    assert "fields" not in params_store[0]
-
-
-def test_fields_forced_uses_pipe_delimiter(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ACLED_FORCE_FIELDS", "1")
+def test_fields_param_pipe_delimited(monkeypatch: pytest.MonkeyPatch) -> None:
     params_store: List[Dict[str, Any]] = []
     _patch_fetch_page(monkeypatch, params_store)
     client = acled_client.ACLEDClient()
