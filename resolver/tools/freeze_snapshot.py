@@ -20,6 +20,7 @@ Notes:
 """
 
 import argparse
+import calendar
 import os
 import sys
 import json
@@ -46,6 +47,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     canonicalize_duckdb_target = None  # type: ignore[assignment]
 
+from resolver.db.schema_keys import (
+    FACTS_DELTAS_KEY_COLUMNS as _SCHEMA_FACTS_DELTAS_KEY_COLUMNS,
+    FACTS_RESOLVED_KEY_COLUMNS as _SCHEMA_FACTS_RESOLVED_KEY_COLUMNS,
+)
+
 from resolver.common import get_logger
 from resolver.helpers.series_semantics import normalize_series_semantics
 from resolver.tools.schema_validate import load_schema
@@ -71,6 +77,9 @@ SUMMARY_PATH = Path("diagnostics") / "summary.md"
 REPO_SUMMARY_PATH = REPO_ROOT / "diagnostics" / "summary.md"
 
 LOGGER = get_logger(__name__)
+
+FACTS_RESOLVED_KEY_COLUMNS = list(_SCHEMA_FACTS_RESOLVED_KEY_COLUMNS)
+FACTS_DELTAS_KEY_COLUMNS = list(_SCHEMA_FACTS_DELTAS_KEY_COLUMNS)
 
 INGESTION_DIAGNOSTICS_DIR = Path("diagnostics") / "ingestion"
 FREEZE_DB_DIAGNOSTICS_PATH = INGESTION_DIAGNOSTICS_DIR / "freeze_db.json"
@@ -270,6 +279,63 @@ def _isoformat_date_strings(series: "pd.Series") -> "pd.Series":
     fallback = series.fillna("").astype(str)
     fallback = fallback.replace({"NaT": "", "<NA>": "", "nan": "", "NaN": ""})
     return iso.where(parsed.notna(), fallback).fillna("").astype(str)
+
+
+@dataclass
+class _DedupeDiagnostics:
+    table: str
+    rows_before: int
+    rows_after: int
+    keys_used: List[str]
+    event_id_included: bool
+
+
+def _dedupe_snapshot_frame(
+    frame: "pd.DataFrame | None", *, table: str, base_keys: List[str]
+) -> tuple["pd.DataFrame | None", Optional[_DedupeDiagnostics]]:
+    if frame is None or frame.empty:
+        return frame, None
+    rows_before = int(len(frame))
+    keys_used = [key for key in base_keys if key in frame.columns]
+    event_id_included = "event_id" in keys_used
+    if "event_id" in frame.columns and not event_id_included:
+        keys_used.append("event_id")
+        event_id_included = True
+    if not keys_used:
+        return frame, _DedupeDiagnostics(
+            table=table,
+            rows_before=rows_before,
+            rows_after=rows_before,
+            keys_used=[],
+            event_id_included=False,
+        )
+    deduped = frame.drop_duplicates(subset=keys_used, keep="last").reset_index(drop=True)
+    diag = _DedupeDiagnostics(
+        table=table,
+        rows_before=rows_before,
+        rows_after=int(len(deduped)),
+        keys_used=keys_used,
+        event_id_included=event_id_included,
+    )
+    return deduped, diag
+
+
+def _append_dedupe_summary(diags: List[_DedupeDiagnostics]) -> None:
+    if not diags:
+        return
+    lines: List[str] = []
+    for diag in diags:
+        lines.append(f"- **Table:** {diag.table}")
+        lines.append(f"  - Rows before: {diag.rows_before}")
+        lines.append(f"  - Rows after: {diag.rows_after}")
+        diff = diag.rows_before - diag.rows_after
+        lines.append(f"  - Rows dropped: {diff}")
+        keys = ", ".join(diag.keys_used)
+        lines.append(f"  - Dedupe keys: {keys}")
+        included = "yes" if diag.event_id_included else "no"
+        lines.append(f"  - event_id included: {included}")
+    body = "\n".join(lines)
+    _append_to_summary("Freeze snapshot — dedupe diagnostics", body)
 
 
 def _fallback_prepare_resolved_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
@@ -567,8 +633,16 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
     else:
         frame["source_type"] = "agency"
 
+    required_preview_cols = ["hazard_code", "hazard_label", "hazard_class", "as_of_date"]
+    auto_added_cols: List[str] = []
+    for column in required_preview_cols:
+        if column not in frame.columns:
+            frame[column] = ""
+            auto_added_cols.append(column)
+
     if "hazard_code" in frame.columns:
         frame["hazard_code"] = frame["hazard_code"].astype(str).str.strip().str.upper()
+        frame["hazard_code"] = frame["hazard_code"].replace({"": "UNK"})
         try:
             shocks = pd.read_csv(SHOCKS_PATH, dtype=str).fillna("")
         except Exception:
@@ -584,6 +658,56 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
                 columns=[c for c in ("hazard_label", "hazard_class") if c in frame.columns]
             )
             frame = frame.merge(shocks, on="hazard_code", how="left")
+
+    frame["hazard_label"] = (
+        frame["hazard_label"].fillna("").astype(str).str.strip().replace({"": "Unknown"})
+    )
+    frame["hazard_class"] = (
+        frame["hazard_class"].fillna("").astype(str).str.strip().replace({"": "unknown"})
+    )
+
+    def _populate_as_of(include_publication: bool = False) -> None:
+        as_of_series = frame["as_of_date"].astype(str).str.strip()
+
+        def _fill_from_series(candidate: "pd.Series | None") -> None:
+            nonlocal as_of_series
+            if candidate is None:
+                return
+            candidate = candidate.reindex(as_of_series.index)
+            as_of_series = as_of_series.astype(object)
+            for idx, value in candidate.items():
+                base_value = str(as_of_series.loc[idx]).strip()
+                candidate_value = str(value).strip()
+                if not base_value and candidate_value:
+                    as_of_series.loc[idx] = candidate_value
+
+        if "as_of" in frame.columns:
+            _fill_from_series(_isoformat_date_strings(frame["as_of"]))
+
+        if "ym" in frame.columns:
+            ym_text = frame["ym"].astype(str).str.strip()
+            parsed = pd.to_datetime(ym_text, format="%Y-%m", errors="coerce")
+            last_day = parsed + pd.offsets.MonthEnd(0)
+            ym_iso_series = pd.Series(
+                [
+                    value.date().isoformat() if pd.notna(value) else ""
+                    for value in last_day
+                ],
+                index=frame.index,
+            )
+            _fill_from_series(ym_iso_series)
+
+        if include_publication and "publication_date" in frame.columns:
+            _fill_from_series(_isoformat_date_strings(frame["publication_date"]))
+
+        missing_as_of = as_of_series.astype(str).str.strip().eq("")
+        if missing_as_of.any():
+            as_of_series = as_of_series.astype(object)
+            as_of_series.loc[missing_as_of] = dt.date.today().isoformat()
+
+        frame["as_of_date"] = as_of_series.astype(str)
+
+    _populate_as_of(include_publication=False)
 
     # Country name enrichment
     if "iso3" in frame.columns:
@@ -652,6 +776,7 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
         return publication.isoformat()
 
     frame["publication_date"] = frame.apply(_clamp_publication, axis=1)
+    _populate_as_of(include_publication=True)
 
     defaults = {
         "publisher": "CRED / UCLouvain (EM-DAT)",
@@ -696,6 +821,23 @@ def _normalize_facts_for_validation(facts_path: Path) -> None:
         frame.to_csv(facts_path, index=False)
     except Exception:
         pass
+
+    try:
+        sample_records = frame.head(3).to_dict(orient="records")
+    except Exception:
+        sample_records = []
+    sample_json = json.dumps(sample_records, indent=2, sort_keys=True)
+    auto_added_display = (
+        ", ".join(sorted(auto_added_cols)) if auto_added_cols else "(none)"
+    )
+    lines = [
+        f"- Auto-added columns: {auto_added_display}",
+        "- Sample (first 3 rows):",
+        "```json",
+        sample_json,
+        "```",
+    ]
+    _append_to_summary("facts_for_month required-column normalization", "\n".join(lines))
 
 def load_table(path: Path) -> pd.DataFrame:
     ext = path.suffix.lower()
@@ -924,6 +1066,24 @@ def freeze_snapshot(
     else:
         resolved_df = facts_df.copy()
     deltas_df = load_table(deltas_path) if deltas_path else None
+
+    dedupe_diags: List[_DedupeDiagnostics] = []
+    resolved_df, resolved_diag = _dedupe_snapshot_frame(
+        resolved_df,
+        table="facts_resolved",
+        base_keys=FACTS_RESOLVED_KEY_COLUMNS,
+    )
+    if resolved_diag:
+        dedupe_diags.append(resolved_diag)
+    if deltas_df is not None:
+        deltas_df, deltas_diag = _dedupe_snapshot_frame(
+            deltas_df,
+            table="facts_deltas",
+            base_keys=FACTS_DELTAS_KEY_COLUMNS,
+        )
+        if deltas_diag:
+            dedupe_diags.append(deltas_diag)
+    _append_dedupe_summary(dedupe_diags)
 
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"

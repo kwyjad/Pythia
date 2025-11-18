@@ -36,6 +36,7 @@ DIAGNOSTICS_ROOT = ROOT / "diagnostics" / "ingestion"
 ACLED_DIAGNOSTICS = DIAGNOSTICS_ROOT / "acled"
 ACLED_RUN_PATH = DIAGNOSTICS_ROOT / "acled_client" / "acled_client_run.json"
 ACLED_HTTP_DIAG_PATH = ACLED_DIAGNOSTICS / "http_diag.json"
+ACLED_CLI_FETCH_META_PATH = ACLED_DIAGNOSTICS / "cli_fetch_meta.json"
 
 ACLED_API_BASE_URL = "https://acleddata.com/api/acled/read"
 ACLED_DEFAULT_FORMAT = "json"
@@ -175,6 +176,16 @@ def _write_zero_rows_diagnostic(meta: Dict[str, Any], reason: str) -> None:
         "base_url": meta.get("base_url"),
     }
     _write_json(ACLED_DIAGNOSTICS / "zero_rows.json", payload)
+
+
+def _write_cli_fetch_meta(payload: Dict[str, Any]) -> None:
+    try:
+        ACLED_CLI_FETCH_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ACLED_CLI_FETCH_META_PATH.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:  # pragma: no cover - diagnostics best effort
+        return
 
 
 def _write_run_summary(meta: Dict[str, Any], *, rows_fetched: int, rows_normalized: int, rows_written: int) -> None:
@@ -1244,13 +1255,14 @@ class ACLEDClient:
             countries = [countries]
 
         selected_fields = list(fields or self.fields or self._DEFAULT_FIELDS)
+        fields_text = "|".join(selected_fields)
         params: Dict[str, Any] = {
             "event_date": f"{start.strftime('%Y-%m-%d')}|{end.strftime('%Y-%m-%d')}",
             "event_date_where": "BETWEEN",
             "page": 1,
             "limit": self.page_size,
             "_format": ACLED_DEFAULT_FORMAT,
-            "fields": "|".join(selected_fields),
+            "fields": fields_text,
         }
         if countries:
             params["iso3"] = ",".join(sorted({c.strip().upper() for c in countries if c}))
@@ -1267,6 +1279,18 @@ class ACLEDClient:
                 "query": safe_params,
             },
         )
+
+        diagnostics_meta = {
+            "base_url": self.base_url,
+            "start": start.strftime("%Y-%m-%d"),
+            "end": end.strftime("%Y-%m-%d"),
+            "page_size": self.page_size,
+            "countries": params.get("iso3"),
+            "fields_param": True,
+            "fields_value": fields_text,
+            "params_keys": sorted(params.keys()),
+        }
+        _write_cli_fetch_meta(diagnostics_meta)
 
         records: List[Dict[str, Any]] = []
         page = 1
@@ -1299,6 +1323,9 @@ class ACLEDClient:
             "Completed ACLED fetch",
             extra={"pages": page, "rows": len(records)},
         )
+
+        diagnostics_meta["result_rows"] = len(records)
+        _write_cli_fetch_meta(diagnostics_meta)
 
         frame = pd.DataFrame(records)
         if frame.empty:

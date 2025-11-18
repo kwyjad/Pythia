@@ -40,7 +40,7 @@ Column order is canonical: `iso3`, `hazard_code`, `ym`, `metric`, `unit`, `value
 
 ## db.acled_monthly_fatalities
 
-Monthly ACLED fatalities aggregated by ISO3. The DuckDB writer mirrors the ACLED window/page metadata into `diagnostics/acled/duckdb_summary.md` alongside the HTTP diagnostic so ingestion and DuckDB summaries stay aligned.
+Monthly ACLED fatalities aggregated by ISO3. The DuckDB writer mirrors the ACLED window/page metadata into `diagnostics/acled/duckdb_summary.md` alongside the HTTP diagnostic so ingestion and DuckDB summaries stay aligned. The ACLED CLI normalises `iso3` values and falls back to `country` names when the upstream response omits the ISO column, ensuring the grouped rows stay populated.
 
 **Keys:** `iso3`, `month`
 
