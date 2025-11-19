@@ -536,7 +536,13 @@ jobs:
             echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
           fi
 
+      - name: Skip EM-DAT freeze for ACLED-only backfill
+        if: ${{ inputs.only_connector == 'acled_client' }}
+        run: |
+          echo "Skipping EM-DAT freeze snapshot + DuckDB verification for ACLED-only backfill."
+
       - name: Derive & Freeze (write DuckDB)
+        if: ${{ inputs.only_connector != 'acled_client' }}
         env:
           RESOLVER_WRITE_DB: "1"
           WRITE_DB: "1"
@@ -572,6 +578,7 @@ jobs:
           fi
 
       - name: Verify DuckDB counts
+        if: ${{ inputs.only_connector != 'acled_client' }}
         env:
           RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
