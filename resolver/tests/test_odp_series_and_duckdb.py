@@ -111,6 +111,8 @@ def test_odp_duckdb_writer_idempotent(tmp_path):
 
     conn = duckdb.connect(db_path)
     try:
+        table_info = conn.execute("PRAGMA table_info('odp_timeseries_raw')").fetchall()
+        assert table_info, "Expected odp_timeseries_raw to exist"
         count = conn.execute("SELECT COUNT(*) FROM odp_timeseries_raw").fetchone()[0]
         assert count == 1
         stored = conn.execute("SELECT value FROM odp_timeseries_raw").fetchone()[0]
@@ -172,6 +174,8 @@ series:
 
     conn = duckdb.connect(db_path)
     try:
+        table_info = conn.execute("PRAGMA table_info('odp_timeseries_raw')").fetchall()
+        assert table_info, "Expected odp_timeseries_raw to exist"
         stored = conn.execute("SELECT source_id, value, ym FROM odp_timeseries_raw").fetchall()
         assert stored == [("refugees_by_origin", 200.0, "2025-01")]
     finally:

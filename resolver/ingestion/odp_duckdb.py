@@ -28,6 +28,34 @@ _CANONICAL_COLUMNS = [
 ]
 
 
+def _ensure_odp_table_exists(conn, table: str = "odp_timeseries_raw") -> None:
+    """Create the ODP table and natural-key index if missing."""
+
+    ddl = f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+        source_id TEXT,
+        iso3 TEXT,
+        origin_iso3 TEXT,
+        admin_name TEXT,
+        ym TEXT,
+        as_of_date DATE,
+        metric TEXT,
+        series_semantics TEXT,
+        value DOUBLE,
+        unit TEXT,
+        extra TEXT
+    );
+    """
+    conn.execute(ddl)
+    conn.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_natural_key
+        ON {table} (source_id, iso3, origin_iso3, admin_name, ym, metric);
+        """
+    )
+    LOGGER.debug("ODP DuckDB writer: ensured table exists", extra={"table": table})
+
+
 def _ensure_canonical_odp_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Return ``frame`` with canonical ODP columns present."""
 
@@ -59,6 +87,7 @@ def write_odp_timeseries(
         return
     conn = duckdb_io.get_db(db_url)
     try:
+        _ensure_odp_table_exists(conn, table=table)
         keys = ["source_id", "iso3", "origin_iso3", "admin_name", "ym", "metric"]
         result = duckdb_io.upsert_dataframe(conn, table, canonical, keys=keys)
         LOGGER.info(
