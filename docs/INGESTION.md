@@ -81,3 +81,21 @@ they are persisted as deltas in DuckDB (`facts_deltas`). Stock files keep
 exporter with `--only-strategy idmc-staging`, the IDMC mappings are applied even
 if the filename regex would otherwise miss, ensuring the staging assets always
 route to the intended tables.
+
+### UNHCR ODP JSON discovery (experimental)
+
+The `resolver.ingestion.odp_discovery` module scans configured UNHCR Operational
+Data Portal pages for links that expose JSON endpoints (hrefs containing
+`_format=json` or visible text mentioning "JSON").
+
+Run it locally with:
+
+```bash
+python -m resolver.ingestion.odp_discovery \
+  --config resolver/ingestion/config/odp.yml \
+  --out diagnostics/ingestion/odp
+```
+
+This writes `diagnostics/ingestion/odp/discovery.json` summarizing each page and
+any discovered JSON links. The discovery step is offline-friendly and does not
+modify databases; later ODP integration work can consume the diagnostics file.
