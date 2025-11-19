@@ -36,6 +36,20 @@ Later (Epic C) we will replace stubs with real API/scraper clients.
 - WFP mVAM — **API connector** (`wfp_mvam_client.py`) → `data/staging/<period>/raw/wfp_mvam.csv`
 - Gov NDMA — stub (`gov_ndma_stub.py`)
 
+### UNHCR ODP JSON → DuckDB pipeline
+
+- `odp_discovery.py` finds JSON widgets linked from ODP HTML pages using a YAML config of
+  page URLs.
+- `odp_series.py` loads the raw widget payloads, matches them against
+  `ingestion/config/odp_normalizers.yml`, and emits a canonical monthly DataFrame with
+  columns `source_id, iso3, origin_iso3, admin_name, ym, as_of_date, metric,
+  series_semantics, value, unit, extra`.
+- `odp_duckdb.py` writes those rows into the DuckDB table `odp_timeseries_raw` via
+  `resolver.db.duckdb_io.upsert_dataframe`.
+- This pipeline is **fully separate** from EM-DAT, the `freeze_snapshot` flow, and the
+  `facts_*` tables. The new table is an auxiliary store that future cards will wire into a
+  dedicated CLI and Resolver workflows.
+
 Each connector:
 - Reads `resolver/data/countries.csv` and `resolver/data/shocks.csv`
 - Produces `data/staging/<period>/raw/<source>.csv` using the exporter’s expected columns
