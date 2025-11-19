@@ -64,3 +64,22 @@ That section includes the canonical database path, the requested date window,
 per-table deltas reported by the writer, a grouped source/metric/semantics
 breakdown for the window, and the latest ingestion log path so reviewers can
 jump straight to the upsert diagnostics without hunting through artifacts.
+
+## ODP auxiliary table
+
+The UNHCR ODP JSON pipeline (`resolver/ingestion/odp_series.py` together with
+`resolver/ingestion/odp_duckdb.py`) writes into a standalone DuckDB table named
+`odp_timeseries_raw`. The table is created on-demand via
+`duckdb_io.upsert_dataframe` with the key `(source_id, iso3, origin_iso3,
+admin_name, ym, metric)` to keep reruns idempotent. Columns include:
+
+```
+source_id, iso3, origin_iso3, admin_name, ym, as_of_date, metric,
+series_semantics, value, unit, extra
+```
+
+`extra` stores a compact JSON blob with discovery metadata (page URL, widget
+label, record identifiers). This table is currently **out-of-band** — it is not
+part of the `facts_*` schema or the monthly snapshot contract yet. Keeping the
+data isolated simplifies auditing and lets future cards wire ODP series into
+Resolver/Forecaster without touching EM-DAT or the snapshot CLI.

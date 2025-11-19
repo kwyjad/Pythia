@@ -194,6 +194,9 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
+          # TODO (UNHCR ODP / Card 4): insert the dedicated ODP JSON → DuckDB CLI here
+          # once it exists so `odp_timeseries_raw` can be populated during the
+          # initial backfill without touching freeze_snapshot or EM-DAT flows.
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
           DTM_ARGS=""
