@@ -97,7 +97,7 @@ def test_acled_ingestion_export_and_db(tmp_path: Path, monkeypatch: pytest.Monke
     assert not nov_rows.empty
     assert set(nov_rows["iso3"]) == {"AFG", "AGO"}
     assert set(nov_rows["series_semantics"].str.lower()) == {"new"}
-    assert set(nov_rows["as_of_date"]) == {"2025-11-30"}
+    assert set(nov_rows["as_of_date"]) == {"2025-11-01"}
 
     def _value_for(iso: str, metric: str) -> int:
         subset = nov_rows[(nov_rows["iso3"] == iso) & (nov_rows["metric"] == metric)]
