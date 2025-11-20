@@ -46,9 +46,21 @@ Later (Epic C) we will replace stubs with real API/scraper clients.
   series_semantics, value, unit, extra`.
 - `odp_duckdb.py` writes those rows into the DuckDB table `odp_timeseries_raw` via
   `resolver.db.duckdb_io.upsert_dataframe`.
-- This pipeline is **fully separate** from EM-DAT, the `freeze_snapshot` flow, and the
-  `facts_*` tables. The new table is an auxiliary store that future cards will wire into a
-  dedicated CLI and Resolver workflows.
+- `resolver/cli/odp_json_to_duckdb.py` is the CLI entry point for the ODP JSON → DuckDB
+  pipeline.
+
+This pipeline is **fully separate** from EM-DAT, the `freeze_snapshot` flow, and the
+`facts_*` tables. The new table is an auxiliary store that only writes to
+`odp_timeseries_raw`.
+
+Run the ODP pipeline end-to-end with:
+
+```bash
+poetry run python -m resolver.cli.odp_json_to_duckdb \
+  --db data/resolver_backfill.duckdb \
+  --config resolver/ingestion/config/odp_json.yml \
+  --normalizers resolver/ingestion/config/odp_normalizers.yml
+```
 
 Each connector:
 - Reads `resolver/data/countries.csv` and `resolver/data/shocks.csv`

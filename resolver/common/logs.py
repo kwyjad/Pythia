@@ -33,6 +33,18 @@ def get_logger(name: str) -> logging.Logger:
     return logger
 
 
+def configure_root_logger(*, level: str | int) -> None:
+    """Configure the root logger with the shared formatter and level."""
+
+    resolved_level = getattr(logging, str(level).upper(), logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(resolved_level)
+    if not any(isinstance(handler, logging.StreamHandler) for handler in root.handlers):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(_FORMAT))
+        root.addHandler(handler)
+
+
 def dict_counts(series: Iterable | None) -> dict[str, int]:
     """Return a stable mapping of value counts for diagnostic logging."""
 

@@ -194,9 +194,6 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          # TODO (UNHCR ODP / Card 4): insert the dedicated ODP JSON → DuckDB CLI here
-          # once it exists so `odp_timeseries_raw` can be populated during the
-          # initial backfill without touching freeze_snapshot or EM-DAT flows.
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
           DTM_ARGS=""
@@ -235,6 +232,21 @@ jobs:
           CONNECTOR_EXIT=0
           python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
           exit ${CONNECTOR_EXIT}
+
+      - name: UNHCR ODP → DuckDB (odp_timeseries_raw)
+        run: |
+          set -euo pipefail
+          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+            set -x
+            export PYTHONDEVMODE=1
+            export PYTHONWARNINGS=default
+          fi
+          python -m resolver.cli.odp_json_to_duckdb \
+            --db "${BACKFILL_DB_PATH}" \
+            --config "resolver/ingestion/config/odp_json.yml" \
+            --normalizers "resolver/ingestion/config/odp_normalizers.yml" \
+            --log-level "${LOG_LEVEL:-INFO}"
+        continue-on-error: true
 
       - name: Ensure diagnostics dirs exist (post-run)
         if: always()
