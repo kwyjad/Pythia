@@ -783,7 +783,7 @@ jobs:
       - ingest
       - derive-freeze
     env:
-      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
       CONTEXT_MONTHS: ${{ needs.ingest.outputs.month_count }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
