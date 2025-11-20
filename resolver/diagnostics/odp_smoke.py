@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from resolver.db import duckdb_io
+from resolver.ingestion import odp_series
 
 
 def _yes_no(value: bool) -> str:
@@ -125,6 +126,7 @@ def build_smoke_summary(
     rows: int | None,
     error: Exception | None,
     traceback_text: str | None,
+    stats: odp_series.OdpPipelineStats | None = None,
 ) -> str:
     config = Path(config_path)
     normalizers = Path(normalizers_path)
@@ -142,10 +144,45 @@ def build_smoke_summary(
             "## Inputs",
             f"- Config path: {config} (exists: {_yes_no(config.exists())})",
             f"- Normalizers path: {normalizers} (exists: {_yes_no(normalizers.exists())})",
+            f"- Config pages: {stats.config_pages if stats is not None else 'unknown'}",
             f"- ODP_JSON_NETWORK: {env_flags['ODP_JSON_NETWORK']}",
             "",
         ]
     )
+
+    lines.extend(
+        [
+            "## Discovery & normalization",
+            f"- Pages discovered: {stats.pages_discovered if stats is not None else 'unknown'}",
+            f"- JSON links found: {stats.json_links_found if stats is not None else 'unknown'}",
+            f"- JSON links matched: {stats.json_links_matched if stats is not None else 'unknown'}",
+            f"- JSON links unmatched: {stats.json_links_unmatched if stats is not None else 'unknown'}",
+            f"- Raw records total: {stats.raw_records_total if stats is not None else 'unknown'}",
+            f"- Normalized rows total: {stats.normalized_rows_total if stats is not None else (rows if rows is not None else 'unknown')}",
+        ]
+    )
+
+    lines.append("- Normalized rows per series:")
+    if stats is not None and stats.normalized_rows_per_series:
+        lines.append("  | source_id | rows |")
+        lines.append("  | --- | --- |")
+        for source_id, count in sorted(stats.normalized_rows_per_series.items()):
+            lines.append(f"  | {source_id} | {count} |")
+    else:
+        lines.append("  - (no normalized rows)")
+
+    lines.append("- Unmatched widget labels:")
+    if stats is not None and stats.unmatched_labels:
+        for label in sorted(stats.unmatched_labels):
+            lines.append(f"  - {label}")
+    else:
+        lines.append("  - (none)")
+
+    if stats is not None and stats.notes:
+        lines.append("- Notes:")
+        for note in sorted(stats.notes):
+            lines.append(f"  - {note}")
+    lines.append("")
 
     lines.extend(
         [

@@ -77,17 +77,20 @@ def write_odp_timeseries(
     db_url: str,
     *,
     table: str = "odp_timeseries_raw",
+    stats: odp_series.OdpPipelineStats | None = None,
 ) -> None:
     """Upsert ``df`` into ``table`` within the DuckDB database at ``db_url``."""
 
     source_frame = df if df is not None else pd.DataFrame(columns=_CANONICAL_COLUMNS)
     canonical = _ensure_canonical_odp_columns(source_frame)
-    if canonical.empty:
-        LOGGER.info("ODP DuckDB writer: no rows to write", extra={"table": table})
-        return
     conn = duckdb_io.get_db(db_url)
     try:
         _ensure_odp_table_exists(conn, table=table)
+        if canonical.empty:
+            LOGGER.info("ODP DuckDB writer: no rows to write", extra={"table": table})
+            if stats is not None:
+                stats.notes.append("duckdb_created_no_rows")
+            return
         keys = ["source_id", "iso3", "origin_iso3", "admin_name", "ym", "metric"]
         result = duckdb_io.upsert_dataframe(conn, table, canonical, keys=keys)
         LOGGER.info(
@@ -112,6 +115,7 @@ def build_and_write_odp_series(
     fetch_html: Callable[[str], str] | None = None,
     fetch_json: Callable[[str], Any] | None = None,
     today: date | None = None,
+    stats: odp_series.OdpPipelineStats | None = None,
 ) -> int:
     """Run discovery → normalization → DuckDB write for ODP series."""
 
@@ -121,8 +125,9 @@ def build_and_write_odp_series(
         fetch_html=fetch_html,
         fetch_json=fetch_json,
         today=today,
+        stats=stats,
     )
-    write_odp_timeseries(frame, db_url)
+    write_odp_timeseries(frame, db_url, stats=stats)
     LOGGER.info(
         "ODP build+write complete",
         extra={"rows": len(frame), "db_url": db_url},

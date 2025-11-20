@@ -10,7 +10,7 @@ from typing import Sequence
 
 from resolver.common.logs import configure_root_logger, get_logger
 from resolver.diagnostics import odp_smoke
-from resolver.ingestion import odp_duckdb
+from resolver.ingestion import odp_duckdb, odp_series
 
 logger = get_logger(__name__)
 
@@ -85,6 +85,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     db_url, db_path = _normalize_db_url_arg(args.db)
     logger.info("ODP DuckDB CLI: using DB %s (url=%s)", db_path, db_url)
 
+    stats = odp_series.OdpPipelineStats()
+
     if args.today:
         try:
             parts = [int(x) for x in args.today.split("-")]
@@ -101,6 +103,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 rows=None,
                 error=pipeline_error,
                 traceback_text=traceback.format_exc(),
+                stats=stats,
             )
             odp_smoke.write_smoke_summary(summary_text, args.summary)
             return exit_code
@@ -118,6 +121,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             fetch_html=None,
             fetch_json=None,
             today=today,
+            stats=stats,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("ODP DuckDB CLI: pipeline failed: %s", exc)
@@ -134,6 +138,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             rows=rows,
             error=pipeline_error,
             traceback_text=traceback.format_exc() if pipeline_error else None,
+            stats=stats,
         )
         odp_smoke.write_smoke_summary(summary_text, args.summary)
     except Exception as exc:  # noqa: BLE001
