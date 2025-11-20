@@ -1231,241 +1231,178 @@ if __name__ == "__main__":
 def _maybe_write_db(
     *,
     ym: str,
-    facts_df: "pd.DataFrame",
-    validated_facts_df: "pd.DataFrame | None",
-    preview_df: "pd.DataFrame | None",
-    resolved_df: "pd.DataFrame | None",
-    deltas_df: "pd.DataFrame | None",
+    facts_df: pd.DataFrame,
+    validated_facts_df: Optional[pd.DataFrame],
+    preview_df: Optional[pd.DataFrame],
+    resolved_df: Optional[pd.DataFrame],
+    deltas_df: Optional[pd.DataFrame],
     manifest: Dict[str, Any],
-    facts_out: Path,
-    deltas_out: Path | None,
-    write_db: Optional[bool] = None,
-    db_url: Optional[str] = None,
+    facts_out: Optional[Path],
+    deltas_out: Optional[Path],
+    write_db: int,
+    db_url: str,
 ) -> None:
-    env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
-    if db_url is not None:
-        db_url = db_url.strip()
-    else:
-        db_url = env_url
-    summary_title = "Freeze snapshot — DB write"
+    """
+    Best-effort DuckDB write + diagnostics for the derive-freeze stage.
 
-    if write_db is None:
-        allow_write = bool(db_url)
-    else:
-        allow_write = bool(write_db)
-
-    if not allow_write:
-        msg = "DuckDB snapshot write skipped: disabled via flag"
-        LOGGER.debug(msg)
-        _append_to_summary(summary_title, msg)
-        _append_to_repo_summary(summary_title, msg)
+    - No-op if write_db is falsy or db_url is blank.
+    - On success:
+        * writes freeze_db.json with basic DB metadata
+        * appends a short “Freeze Snapshot — DB diagnostics” section
+          into diagnostics/ingestion/summary.md.
+    - On failure:
+        * writes freeze_db.json with error details
+        * appends a “Freeze Snapshot — DB diagnostics (FAILED)” section
+        * re-raises the exception so CI still fails.
+    """
+    if not write_db:
+        LOGGER.info("DB write disabled for derive-freeze (write_db=%r).", write_db)
         return
     if not db_url:
-        msg = "DuckDB snapshot write skipped: no RESOLVER_DB_URL provided"
-        LOGGER.debug(msg)
-        _append_to_summary(summary_title, msg)
-        _append_to_repo_summary(summary_title, msg)
-        return
-    if duckdb_io is None:
-        msg = "DuckDB snapshot write skipped: duckdb_io unavailable"
-        LOGGER.debug(msg)
-        _append_to_summary(summary_title, msg)
-        _append_to_repo_summary(summary_title, msg)
+        LOGGER.warning("DB write requested but db_url is empty; skipping DB write.")
         return
 
-    canonical_path = ""
-    canonical_url = db_url
-    if canonicalize_duckdb_target is not None and db_url:
-        try:
-            canonical_path, canonical_url = canonicalize_duckdb_target(db_url)
-        except Exception:
-            canonical_path = ""
-            canonical_url = db_url
+    try:
+        from resolver.db import duckdb_io  # type: ignore
+    except Exception as exc:
+        _write_freeze_db_diagnostics(
+            ym=ym,
+            db_url=db_url,
+            resolved_df=resolved_df,
+            deltas_df=deltas_df,
+            error=str(exc),
+            db_rows=None,
+        )
+        LOGGER.error("DuckDB support not available in this environment: %s", exc)
+        raise
 
-    diagnostics_payload: Dict[str, Any] = {
-        "db_url": canonical_url or db_url or "",
-        "db_path": canonical_path or "",
-        "month": ym,
-        "facts_resolved_rows": 0,
-        "facts_deltas_rows": 0,
-        "facts_resolved_semantics": {},
-        "facts_deltas_semantics": {},
-        "facts_resolved_metrics": {},
-        "facts_deltas_metrics": {},
-    }
+    resolved_count = int(len(resolved_df)) if resolved_df is not None else 0
+    deltas_count = int(len(deltas_df)) if deltas_df is not None else 0
 
     conn = None
-    deltas_result = None
-    deltas_input_rows = 0
-    success_block: Optional[str] = None
-    prepared_resolved: "pd.DataFrame | None" = None
-    prepared_deltas: "pd.DataFrame | None" = None
+    db_rows: Dict[str, int] = {}
     try:
+        LOGGER.info("Opening DuckDB connection for derive-freeze write: %s", db_url)
         conn = duckdb_io.get_db(db_url)
-        duckdb_io.init_schema(conn)
-        resolved_payload = (
-            resolved_df
-            if resolved_df is not None
-            else (
-                validated_facts_df
-                if validated_facts_df is not None and not validated_facts_df.empty
-                else facts_df
-            )
+
+        LOGGER.info(
+            "Writing facts_resolved/facts_deltas to DuckDB for ym=%s "
+            "(resolved=%d, deltas=%d).",
+            ym,
+            resolved_count,
+            deltas_count,
         )
-        prepared_resolved = _prepare_resolved_frame_for_db(resolved_payload)
+        duckdb_io.write_facts_tables(
+            conn,
+            facts_resolved=resolved_df,
+            facts_deltas=deltas_df,
+        )
 
-        if deltas_df is not None and not deltas_df.empty:
-            deltas_source = deltas_df.copy()
-        elif preview_df is not None and not preview_df.empty:
-            deltas_source = preview_df.copy()
-        else:
-            base_source = (
-                validated_facts_df
-                if validated_facts_df is not None and not validated_facts_df.empty
-                else facts_df
-            )
-            deltas_source = base_source.copy() if base_source is not None and not base_source.empty else None
-
-        preview_rows = int(len(preview_df)) if preview_df is not None else 0
-
-        deltas_input_rows = int(len(deltas_source)) if deltas_source is not None else 0
-
-        if deltas_source is not None and not deltas_source.empty:
-            for column in ("iso3", "ym", "hazard_code", "metric", "value"):
-                if column not in deltas_source.columns:
-                    deltas_source[column] = 0 if column == "value" else ""
-            deltas_source["value"] = pd.to_numeric(
-                deltas_source["value"], errors="coerce"
-            )
-            semantics_col = deltas_source.get("series_semantics")
-            if semantics_col is None:
-                deltas_source["series_semantics"] = "new"
-            else:
-                semantics = semantics_col.astype(str).str.strip()
-                deltas_source.loc[semantics.eq(""), "series_semantics"] = "new"
-
-        prepared_deltas = _prepare_deltas_frame_for_db(deltas_source)
-
-        facts_result = None
-
-        diagnostics_payload.update(
-            {
-                "facts_resolved_rows": int(len(prepared_resolved)) if prepared_resolved is not None else 0,
-                "facts_deltas_rows": int(len(prepared_deltas)) if prepared_deltas is not None else 0,
-                "facts_resolved_semantics": _series_semantics_histogram(prepared_resolved),
-                "facts_deltas_semantics": _series_semantics_histogram(prepared_deltas),
-                "facts_resolved_metrics": _column_histogram(prepared_resolved, "metric"),
-                "facts_deltas_metrics": _column_histogram(prepared_deltas, "metric"),
+        try:
+            res_rows = conn.execute(
+                "SELECT COUNT(*) FROM facts_resolved"
+            ).fetchone()[0]
+            del_rows = conn.execute(
+                "SELECT COUNT(*) FROM facts_deltas"
+            ).fetchone()[0]
+            db_rows = {
+                "facts_resolved": int(res_rows),
+                "facts_deltas": int(del_rows),
             }
-        )
-        success_block = _render_freeze_db_success_markdown(diagnostics_payload)
-        try:
-            INGESTION_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
-            with FREEZE_DB_DIAGNOSTICS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(diagnostics_payload, handle, indent=2, sort_keys=True)
-        except OSError:
-            LOGGER.debug("Could not write freeze DB diagnostics", exc_info=True)
+        except Exception as verify_exc:
+            LOGGER.warning(
+                "Failed to verify row counts in DuckDB after write: %s", verify_exc
+            )
 
-        if prepared_resolved is not None and not prepared_resolved.empty:
-            LOGGER.debug(
-                "DuckDB snapshot write | table=facts_resolved rows=%s", len(prepared_resolved)
-            )
-            facts_result = duckdb_io.upsert_dataframe(
-                conn,
-                "facts_resolved",
-                prepared_resolved,
-                keys=duckdb_io.FACTS_RESOLVED_KEY_COLUMNS,
-            )
-            LOGGER.info(
-                "DuckDB snapshot facts_resolved rows written: %s",
-                facts_result.rows_delta,
-            )
-        else:
-            LOGGER.debug("DuckDB snapshot facts_resolved skipped: no rows prepared")
-
-        if prepared_deltas is not None and not prepared_deltas.empty:
-            for column in ["as_of", "value_new", "value_stock", "series_semantics"]:
-                if column not in prepared_deltas.columns:
-                    if column == "series_semantics":
-                        prepared_deltas[column] = "new"
-                    elif column == "as_of":
-                        prepared_deltas[column] = ""
-                    else:
-                        prepared_deltas[column] = pd.Series([pd.NA] * len(prepared_deltas))
-            LOGGER.debug(
-                "DuckDB snapshot write | table=facts_deltas rows=%s", len(prepared_deltas)
-            )
-            deltas_result = duckdb_io.upsert_dataframe(
-                conn,
-                "facts_deltas",
-                prepared_deltas,
-                keys=duckdb_io.FACTS_DELTAS_KEY_COLUMNS,
-            )
-            LOGGER.info(
-                "DuckDB snapshot facts_deltas rows written: %s",
-                deltas_result.rows_delta,
-            )
-        elif deltas_input_rows:
-            LOGGER.debug("DuckDB snapshot facts_deltas skipped after preparation")
-        else:
-            LOGGER.debug("DuckDB snapshot facts_deltas skipped: no source rows")
-
-        created_at = str(manifest.get("created_at_utc") or dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
-        git_sha = str(manifest.get("source_commit_sha") or os.environ.get("GITHUB_SHA", ""))
-        export_version = str(manifest.get("export_version") or manifest.get("schema_version", ""))
-        try:
-            conn.execute("DELETE FROM snapshots WHERE ym = ?", [ym])
-            conn.execute(
-                "INSERT INTO snapshots (ym, created_at, git_sha, export_version, facts_rows, deltas_rows) VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    ym,
-                    created_at,
-                    git_sha,
-                    export_version,
-                    int(facts_result.rows_written if facts_result else 0),
-                    int(deltas_result.rows_written if deltas_result else 0),
-                ],
-            )
-            LOGGER.debug("DuckDB snapshot metadata recorded for ym=%s", ym)
-        except Exception:
-            LOGGER.debug("DuckDB snapshot metadata skipped", exc_info=True)
-        if deltas_result is not None:
-            written = int(deltas_result.rows_delta)
-            input_rows = int(deltas_result.rows_in)
-            msg = (
-                f"Wrote {written} facts_deltas rows (input={input_rows}) from preview rows={preview_rows or input_rows}"
-            )
-        elif deltas_input_rows:
-            msg = (
-                f"DuckDB facts_deltas write skipped after preparation; input_rows={deltas_input_rows}"
-            )
-        else:
-            msg = "No facts_deltas rows available; skipped DB write"
-
-        _append_ingestion_summary(success_block or _render_freeze_db_success_markdown(diagnostics_payload))
-        _append_to_summary(summary_title, msg)
-        _append_to_repo_summary(summary_title, msg)
-
-    except Exception as exc:  # pragma: no cover - dual-write should not block snapshots
-        print(f"Warning: DuckDB snapshot write skipped ({exc}).", file=sys.stderr)
-        _append_db_error_to_summary(
-            section=f"Freeze Snapshot — DB write ({ym})",
-            exc=exc,
+        _write_freeze_db_diagnostics(
+            ym=ym,
             db_url=db_url,
-            month=ym,
-            facts_resolved=prepared_resolved,
-            facts_deltas=prepared_deltas,
+            resolved_df=resolved_df,
+            deltas_df=deltas_df,
+            error=None,
+            db_rows=db_rows or None,
         )
-        error_block = _render_db_error_markdown("Freeze Snapshot", diagnostics_payload, exc)
-        _append_ingestion_summary(error_block)
-        _append_to_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
-        _append_to_repo_summary(summary_title, f"DuckDB snapshot write failed: {exc}")
+        LOGGER.info("DuckDB write for derive-freeze completed successfully.")
+
+    except Exception as exc:
+        _write_freeze_db_diagnostics(
+            ym=ym,
+            db_url=db_url,
+            resolved_df=resolved_df,
+            deltas_df=deltas_df,
+            error=str(exc),
+            db_rows=db_rows or None,
+        )
+        LOGGER.exception("DuckDB write for derive-freeze failed: %s", exc)
+        raise
     finally:
         if conn is not None:
             try:
-                conn.close()
-            except Exception:  # pragma: no cover - best effort cleanup
+                duckdb_io.close_db(conn)
+            except Exception:
                 pass
+
+
+def _write_freeze_db_diagnostics(
+    *,
+    ym: str,
+    db_url: str,
+    resolved_df: Optional[pd.DataFrame],
+    deltas_df: Optional[pd.DataFrame],
+    error: Optional[str],
+    db_rows: Optional[Dict[str, int]],
+) -> None:
+    """
+    Write freeze_db.json and append a short DB diagnostics section
+    into diagnostics/ingestion/summary.md.
+    """
+    diag_dir = Path("diagnostics") / "ingestion"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    payload: Dict[str, Any] = {
+        "ym": ym,
+        "db_url": db_url,
+        "resolved_rows_local": int(len(resolved_df)) if resolved_df is not None else 0,
+        "deltas_rows_local": int(len(deltas_df)) if deltas_df is not None else 0,
+        "db_rows": db_rows,
+        "error": error,
+    }
+
+    freeze_json = diag_dir / "freeze_db.json"
+    try:
+        freeze_json.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except Exception as exc:
+        LOGGER.warning("Could not write freeze_db.json: %s", exc)
+
+    summary_path = diag_dir / "summary.md"
+    try:
+        lines: List[str] = []
+        lines.append("\n\n## Freeze Snapshot — DB diagnostics\n")
+        lines.append(f"- ym: `{ym}`\n")
+        lines.append(f"- db_url: `{db_url}`\n")
+        lines.append(
+            f"- local rows (resolved/deltas): "
+            f"{payload['resolved_rows_local']}/{payload['deltas_rows_local']}\n"
+        )
+        if db_rows:
+            lines.append(
+                f"- DB rows (facts_resolved/facts_deltas): "
+                f"{db_rows.get('facts_resolved','?')}/{db_rows.get('facts_deltas','?')}\n"
+            )
+        if error:
+            lines.append(f"- status: **FAILED** — {error}\n")
+        else:
+            lines.append("- status: **OK**\n")
+
+        summary_path.write_text(
+            (summary_path.read_text(encoding="utf-8") if summary_path.exists() else "")
+            + "".join(lines),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        LOGGER.warning("Could not append DB diagnostics to summary.md: %s", exc)
 
 
 def _append_db_error_to_summary(
