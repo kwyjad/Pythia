@@ -203,6 +203,14 @@ Use `--skip-network` or `IDMC_FORCE_CACHE_ONLY=1` to keep runs deterministic.
 Fixtures remain available under `resolver/ingestion/idmc/fixtures/` for offline
 testing and CI.
 
+In the resolver-initial-backfill workflow, staging and connector diagnostics are
+now cleaned **before** running the DTM and IDMC reachability probes. This keeps
+`diagnostics/ingestion/idmc/probe.json`, `diagnostics/ingestion/idmc/hdx_probe.json`,
+and the HELIX manifest for the current run available for the connector
+summary. The rendered `connector-diagnostics_summary.md` includes the HELIX
+endpoint used, any fallback notes, zero-row reasons, HTTP request counts, and
+probe results alongside the manifest path.
+
 ### Zero-row guardrails & summary integration
 
 - The CLI now pre-creates `resolver/staging/idmc/` and writes a header-only

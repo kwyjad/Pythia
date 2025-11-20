@@ -1069,6 +1069,118 @@ def _render_idmc_why_zero(payload: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _extract_idmc_fallback(
+    manifest: Mapping[str, Any], why_zero: Mapping[str, Any] | None = None
+) -> Mapping[str, Any]:
+    notes_block = _ensure_dict(manifest.get("notes"))
+    zero_rows_block = _ensure_dict(notes_block.get("zero_rows"))
+    candidates = [
+        notes_block.get("fallback"),
+        zero_rows_block.get("fallback"),
+        _ensure_dict(why_zero or {}).get("fallback"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            return candidate
+    return {}
+
+
+def _infer_helix_endpoint(manifest: Mapping[str, Any]) -> str | None:
+    run_block = _ensure_dict(manifest.get("run"))
+    notes_block = _ensure_dict(manifest.get("notes"))
+    http_block = _ensure_dict(manifest.get("http"))
+    helix_block = _ensure_dict(notes_block.get("helix"))
+    helix_endpoint = (
+        run_block.get("helix_endpoint")
+        or helix_block.get("helix_endpoint")
+        or http_block.get("helix_endpoint")
+    )
+    if helix_endpoint:
+        return str(helix_endpoint)
+    endpoints = _ensure_dict(run_block.get("endpoints"))
+    for _, url in endpoints.items():
+        url_text = str(url)
+        lowered = url_text.lower()
+        if "last-180" in lowered or "idus" in lowered or "helix" in lowered:
+            return "idus_last180"
+        if "gidd" in lowered:
+            return "gidd_displacements"
+    return None
+
+
+def _render_idmc_manifest_section(
+    manifest: Mapping[str, Any], *, why_zero: Mapping[str, Any] | None = None
+) -> List[str]:
+    lines = ["## IDMC Run Diagnostics", ""]
+    if not manifest:
+        lines.append("- **diagnostics/ingestion/idmc/manifest.json:** not present")
+        lines.append("")
+        return lines
+
+    run_block = _ensure_dict(manifest.get("run"))
+    http_block = _ensure_dict(manifest.get("http"))
+    normalize_block = _ensure_dict(manifest.get("normalize"))
+    notes_block = _ensure_dict(manifest.get("notes"))
+    helix_endpoint = _infer_helix_endpoint(manifest)
+    network_mode = run_block.get("network_mode") or run_block.get("mode") or "unknown"
+    rows_fetched = _coerce_int(normalize_block.get("rows_fetched"))
+    rows_normalized = _coerce_int(normalize_block.get("rows_normalized"))
+    rows_written = _coerce_int(
+        normalize_block.get("rows_written") or normalize_block.get("rows_staged")
+    )
+    zero_rows_block = _ensure_dict(notes_block.get("zero_rows"))
+    zero_reason = (
+        zero_rows_block.get("notes")
+        or zero_rows_block.get("zero_rows_reason")
+        or _ensure_dict(why_zero or {}).get("zero_rows_reason")
+    )
+
+    lines.append(f"- **Network mode:** {network_mode}")
+    if helix_endpoint:
+        lines.append(f"- **HELIX endpoint:** {helix_endpoint}")
+    lines.append(
+        f"- **Rows (fetched/normalized/written):** {rows_fetched}/{rows_normalized}/{rows_written}"
+    )
+
+    requests_count = _coerce_int(http_block.get("requests"))
+    retries = _coerce_int(http_block.get("retries"))
+    last_status = http_block.get("status_last") or http_block.get("last_status")
+    if any(value is not None for value in (requests_count, retries, last_status)):
+        lines.append(
+            "- **HTTP:** "
+            f"requests={requests_count}, retries={retries}, last_status={last_status or 'n/a'}"
+        )
+        if http_block:
+            lines.append(f"- **Status counts:** {_format_http(http_block)}")
+
+    fallback_block = _extract_idmc_fallback(manifest, why_zero)
+    if fallback_block:
+        used = fallback_block.get("used")
+        parts: List[str] = []
+        if used is not None:
+            parts.append(f"used={'yes' if used else 'no'}")
+        reason_text = fallback_block.get("reason")
+        status_text = fallback_block.get("status") or fallback_block.get("status_code")
+        rows_value = fallback_block.get("rows")
+        resource_url = fallback_block.get("resource_url") or fallback_block.get("package_url")
+        if reason_text:
+            parts.append(f"reason={reason_text}")
+        if status_text is not None:
+            parts.append(f"status={status_text}")
+        if rows_value is not None:
+            parts.append(f"rows={rows_value}")
+        if resource_url:
+            parts.append(f"resource={resource_url}")
+        if parts:
+            lines.append(f"- **Fallback:** {', '.join(parts)}")
+
+    if zero_reason:
+        lines.append(f"- **Zero-rows reason:** {zero_reason}")
+
+    lines.append("")
+    return lines
+
+
 def _truncate_text(value: Any, *, limit: int = 2048) -> str:
     if not isinstance(value, str):
         return str(value)
@@ -2202,7 +2314,9 @@ def _render_hdx_reachability_section(reachability: Mapping[str, Any]) -> List[st
     return lines
 
 
-def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
+def _build_table(
+    entries: Sequence[Mapping[str, Any]], *, idmc_manifest: Mapping[str, Any] | None = None
+) -> List[str]:
     headers = [
         "Connector",
         "Mode",
@@ -2305,6 +2419,25 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 reason_text = f"{status}: missing id_or_path ({invalid_count})"
             else:
                 reason_text = f"{status}: missing id_or_path"
+        if connector_id == "idmc" and idmc_manifest:
+            manifest_normalize = _ensure_dict(idmc_manifest.get("normalize"))
+            manifest_rows_written = manifest_normalize.get("rows_written") or manifest_normalize.get(
+                "rows_staged"
+            )
+            counts_map = dict(counts_map)
+            for source_key, dest_key in (
+                ("rows_fetched", "fetched"),
+                ("rows_normalized", "normalized"),
+            ):
+                if manifest_normalize.get(source_key) is not None:
+                    counts_map[dest_key] = _coerce_int(manifest_normalize.get(source_key))
+            if manifest_rows_written is not None:
+                counts_map["written"] = _coerce_int(manifest_rows_written)
+            manifest_http = _ensure_dict(idmc_manifest.get("http"))
+            if manifest_http:
+                entry["http"] = manifest_http
+            entry["counts"] = counts_map
+
         reason_cell = _format_reason(reason_text)
         status_raw_normalized = (
             str(extras.get("status_raw") or entry.get("status_raw") or status_text)
@@ -2320,7 +2453,7 @@ def _build_table(entries: Sequence[Mapping[str, Any]]) -> List[str]:
                 reason_cell,
                 _format_duration(entry.get("duration_ms", 0)),
                 _format_http(entry.get("http", {})),
-                _format_rows(entry.get("counts", {})),
+                _format_rows(counts_map),
                 kept_cell,
                 dropped_cell,
                 parse_cell,
@@ -2349,9 +2482,31 @@ def build_markdown(
     hdx_reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
+    idmc_manifest: Mapping[str, Any] | None = None,
 ) -> str:
     sorted_entries = sorted(entries, key=lambda item: str(item.get("connector_id", "")))
     export_info = export_summary or {}
+    idmc_manifest_data = _ensure_dict(idmc_manifest or {})
+    for entry in sorted_entries:
+        if entry.get("connector_id") == "idmc" and idmc_manifest_data:
+            manifest_normalize = _ensure_dict(idmc_manifest_data.get("normalize"))
+            manifest_rows_written = manifest_normalize.get("rows_written") or manifest_normalize.get(
+                "rows_staged"
+            )
+            counts_overlay = _ensure_dict(entry.get("counts"))
+            counts_overlay = dict(counts_overlay)
+            for source_key, dest_key in (
+                ("rows_fetched", "fetched"),
+                ("rows_normalized", "normalized"),
+            ):
+                if manifest_normalize.get(source_key) is not None:
+                    counts_overlay[dest_key] = _coerce_int(manifest_normalize.get(source_key))
+            if manifest_rows_written is not None:
+                counts_overlay["written"] = _coerce_int(manifest_rows_written)
+            entry["counts"] = counts_overlay
+            manifest_http = _ensure_dict(idmc_manifest_data.get("http"))
+            if manifest_http:
+                entry["http"] = manifest_http
     for entry in sorted_entries:
         _maybe_backfill_counts(entry, export_info)
     total_fetched = sum(entry.get("counts", {}).get("fetched", 0) for entry in sorted_entries)
@@ -2534,6 +2689,15 @@ def build_markdown(
         lines.extend(_render_idmc_why_zero(idmc_why_zero))
         lines.append("")
 
+    if idmc_manifest_data or idmc_manifest is not None:
+        lines.append("")
+        lines.extend(
+            _render_idmc_manifest_section(
+                idmc_manifest_data,
+                why_zero=idmc_why_zero if isinstance(idmc_why_zero, Mapping) else None,
+            )
+        )
+
     if dtm_entry:
         config_section = _render_config_section(dtm_entry)
         if config_section:
@@ -2571,7 +2735,7 @@ def build_markdown(
 
     lines.append("## Per-Connector Table")
     lines.append("")
-    lines.extend(_build_table(sorted_entries))
+    lines.extend(_build_table(sorted_entries, idmc_manifest=idmc_manifest_data))
     lines.append("")
     if dedupe_notes:
         for connector_id in sorted(dedupe_notes):
@@ -2674,6 +2838,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     idmc_reachability_payload = _safe_load_json(idmc_reachability_path) or {}
     hdx_reachability_path = Path("diagnostics/ingestion/idmc/hdx_probe.json")
     hdx_reachability_payload = _safe_load_json(hdx_reachability_path) or {}
+    idmc_manifest_path = Path("diagnostics/ingestion/idmc/manifest.json")
+    idmc_manifest_payload = _safe_load_json(idmc_manifest_path) or {}
     markdown = build_markdown(
         deduped_entries,
         dedupe_notes=dedupe_notes,
@@ -2682,6 +2848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         hdx_reachability=hdx_reachability_payload,
         export_summary=export_summary,
         mapping_debug=mapping_debug_records,
+        idmc_manifest=idmc_manifest_payload,
     )
     write_markdown(out_path, markdown)
     if args.github_step_summary:
@@ -2698,6 +2865,7 @@ def render_summary_md(
     hdx_reachability: Mapping[str, Any] | None = None,
     export_summary: Mapping[str, Any] | None = None,
     mapping_debug: Sequence[Mapping[str, Any]] | None = None,
+    idmc_manifest: Mapping[str, Any] | None = None,
 ) -> str:
     """Compatibility alias for callers expecting ``render_summary_md``."""
 
@@ -2709,6 +2877,7 @@ def render_summary_md(
         hdx_reachability=hdx_reachability,
         export_summary=export_summary,
         mapping_debug=mapping_debug,
+        idmc_manifest=idmc_manifest,
     )
 
 
