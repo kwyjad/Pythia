@@ -1,0 +1,107 @@
+---
+name: "Resolver — ODP smoke"
+
+on:
+  # Manual trigger only (for now)
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "ODP discovery config (YAML)"
+        required: false
+        default: "resolver/ingestion/config/odp_json.yml"
+      normalizers_path:
+        description: "ODP normalizers config (YAML)"
+        required: false
+        default: "resolver/ingestion/config/odp_normalizers.yml"
+
+jobs:
+  odp-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      ODP_JSON_NETWORK: "1"
+      PIP_CONSTRAINTS: constraints-ci.txt
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c "$PIP_CONSTRAINTS" -e '.[db,ingestion]'
+          if [ -f resolver/requirements.txt ]; then
+            pip install -c "$PIP_CONSTRAINTS" -r resolver/requirements.txt
+          fi
+
+      - name: Run UNHCR ODP → DuckDB smoke
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          DB_PATH="data/odp_smoke.duckdb"
+
+          echo "Running ODP smoke into ${DB_PATH}"
+          python -m resolver.cli.odp_json_to_duckdb \
+            --db "${DB_PATH}" \
+            --config "${{ github.event.inputs.config_path }}" \
+            --normalizers "${{ github.event.inputs.normalizers_path }}" \
+            --log-level INFO
+
+      - name: Summarize ODP DuckDB contents
+        run: |
+          python - << 'PY'
+          import duckdb
+          from pathlib import Path
+
+          db_path = Path("data/odp_smoke.duckdb")
+          if not db_path.exists():
+            raise SystemExit(f"[ODP smoke] DuckDB file not found: {db_path}")
+
+          con = duckdb.connect(str(db_path))
+          try:
+              try:
+                  total_rows = con.execute(
+                      "SELECT COUNT(*) FROM odp_timeseries_raw"
+                  ).fetchone()[0]
+              except Exception as exc:
+                  raise SystemExit(f"[ODP smoke] Failed to query odp_timeseries_raw: {exc}")
+
+              print(f"[ODP smoke] odp_timeseries_raw total rows: {total_rows}")
+
+              if total_rows:
+                  df = con.execute(
+                      """
+                      SELECT
+                        iso3,
+                        metric,
+                        MIN(ym) AS first_ym,
+                        MAX(ym) AS last_ym,
+                        COUNT(*) AS n_rows
+                      FROM odp_timeseries_raw
+                      GROUP BY iso3, metric
+                      ORDER BY iso3, metric
+                      LIMIT 20
+                      """
+                  ).df()
+                  print("[ODP smoke] Top iso3/metric coverage:")
+                  print(df.to_markdown(index=False))
+          finally:
+              con.close()
+          PY
+
+      - name: Upload ODP smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odp-smoke-artifacts
+          path: |
+            data/odp_smoke.duckdb
+            diagnostics/odp_json/**
+          if-no-files-found: ignore
