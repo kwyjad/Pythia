@@ -10,11 +10,12 @@ def test_odp_cli_calls_build_and_write_with_expected_args(tmp_path, monkeypatch)
     called: dict[str, object] = {}
     summary: dict[str, object] = {}
 
-    def fake_build_and_write(*, config_path, normalizers_path, db_url, fetch_html, fetch_json, today):
+    def fake_build_and_write(*, config_path, normalizers_path, db_url, fetch_html, fetch_json, today, stats=None):
         called["config_path"] = config_path
         called["normalizers_path"] = normalizers_path
         called["db_url"] = db_url
         called["today"] = today
+        called["stats"] = stats
         return 42
 
     monkeypatch.setattr(

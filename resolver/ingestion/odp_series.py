@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 import calendar
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
 
 import pandas as pd
 import requests
@@ -53,6 +53,29 @@ class NormalizerSpec:
     admin_name_field: str | None
     required_fields: list[str]
     unit: str
+
+
+@dataclass
+class OdpPipelineStats:
+    """Structured counters for the ODP discovery/normalization pipeline."""
+
+    # Config-level
+    config_pages: int = 0
+
+    # Discovery-level
+    pages_discovered: int = 0
+    json_links_found: int = 0
+
+    # Normalization-level
+    json_links_matched: int = 0
+    json_links_unmatched: int = 0
+    raw_records_total: int = 0
+    normalized_rows_total: int = 0
+    normalized_rows_per_series: Dict[str, int] = field(default_factory=dict)
+
+    # Debugging aids
+    unmatched_labels: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
 def _month_end(value: date) -> date:
@@ -212,16 +235,25 @@ def normalize_endpoint(
     *,
     page_url: str | None = None,
     today: date | None = None,
+    stats: OdpPipelineStats | None = None,
 ) -> pd.DataFrame:
     del today  # reserved for future use
     records = list(iter_records(payload))
+    if stats is not None:
+        stats.raw_records_total += len(records)
     if not records:
         return pd.DataFrame(columns=_CANONICAL_COLUMNS)
     label = getattr(link, "text", None) or getattr(link, "label", "") or ""
     spec = match_spec(label, records[0], specs)
     if not spec:
         LOGGER.debug("ODP endpoint skipped (no spec match)", extra={"label": label, "url": link.href})
+        if stats is not None:
+            stats.json_links_unmatched += 1
+            if label:
+                stats.unmatched_labels.append(label)
         return pd.DataFrame(columns=_CANONICAL_COLUMNS)
+    if stats is not None:
+        stats.json_links_matched += 1
     rows: list[dict[str, Any]] = []
     for record in records:
         value = _record_value(record, spec.value_field)
@@ -267,6 +299,7 @@ def normalize_all(
     specs: Sequence[NormalizerSpec],
     *,
     today: date | None = None,
+    stats: OdpPipelineStats | None = None,
 ) -> pd.DataFrame:
     fetch_fn = fetch_json or _default_fetch_json
     frames: list[pd.DataFrame] = []
@@ -275,6 +308,8 @@ def normalize_all(
     for discovery in discoveries:
         for link in discovery.links:
             total_links += 1
+            if stats is not None:
+                stats.json_links_found += 1
             try:
                 payload = fetch_fn(link.href)
             except Exception as exc:  # pragma: no cover - logging and defensive guard
@@ -282,21 +317,41 @@ def normalize_all(
                     "ODP fetch failed",
                     extra={"url": link.href, "error": str(exc), "page": discovery.page_url},
                 )
+                if stats is not None:
+                    stats.notes.append(f"fetch_failed:{link.href}")
                 continue
-            frame = normalize_endpoint(link, payload, specs, page_url=discovery.page_url, today=today)
+            frame = normalize_endpoint(
+                link,
+                payload,
+                specs,
+                page_url=discovery.page_url,
+                today=today,
+                stats=stats,
+            )
             if frame.empty:
                 continue
             matched_links += 1
             frames.append(frame)
+    if stats is not None:
+        stats.pages_discovered = len(discoveries)
+        stats.json_links_matched = max(stats.json_links_matched, matched_links)
+        stats.json_links_unmatched = max(stats.json_links_unmatched, stats.json_links_found - stats.json_links_matched)
     if not frames:
         LOGGER.info(
             "ODP normalization produced no rows",
             extra={"pages": len(discoveries), "links": total_links, "matched_links": matched_links},
         )
+        if stats is not None:
+            stats.normalized_rows_total = 0
+            stats.normalized_rows_per_series = {}
         return pd.DataFrame(columns=_CANONICAL_COLUMNS)
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.drop_duplicates(subset=_DEDUP_KEYS).reset_index(drop=True)
     combined = _ensure_frame_columns(combined)
+    if stats is not None:
+        stats.normalized_rows_total = int(len(combined))
+        counts = combined["source_id"].fillna("").value_counts().sort_index()
+        stats.normalized_rows_per_series = {k: int(v) for k, v in counts.items()}
     LOGGER.info(
         "ODP normalization summary",
         extra={
@@ -325,19 +380,24 @@ def build_odp_frame(
     fetch_html: Callable[[str], str] | None = None,
     fetch_json: Callable[[str], Any] | None = None,
     today: date | None = None,
+    stats: OdpPipelineStats | None = None,
 ) -> pd.DataFrame:
     config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"ODP discovery config not found: {config_path}")
     with config_path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
+    pages_cfg = config.get("pages") or []
+    if stats is not None:
+        stats.config_pages = len(pages_cfg)
     discoveries = odp_discovery.discover_pages(config, fetch_html=fetch_html)
     specs = load_normalizer_config(normalizers_path)
-    return normalize_all(discoveries, fetch_json, specs, today=today)
+    return normalize_all(discoveries, fetch_json, specs, today=today, stats=stats)
 
 
 __all__ = [
     "NormalizerSpec",
+    "OdpPipelineStats",
     "build_odp_frame",
     "iter_records",
     "load_normalizer_config",
