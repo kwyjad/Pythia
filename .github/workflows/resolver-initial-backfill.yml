@@ -74,7 +74,7 @@ jobs:
       end_iso: ${{ steps.window.outputs.end_iso }}
       month_count: ${{ steps.window.outputs.month_count }}
     env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/{1}', github.workspace, 'data/resolver_backfill.duckdb') }}
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
       ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
@@ -431,8 +431,8 @@ jobs:
       - ingest
       - acled-backfill
     env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/{1}', github.workspace, 'data/resolver_backfill.duckdb') }}
-      RESOLVER_DUCKDB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/{1}', github.workspace, 'data/resolver_backfill.duckdb') }}
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
+      RESOLVER_DUCKDB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
       BACKFILL_MONTHS_CSV: ${{ needs.ingest.outputs.months }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
@@ -783,7 +783,7 @@ jobs:
       - ingest
       - derive-freeze
     env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/{1}', github.workspace, 'data/resolver_backfill.duckdb') }}
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
       CONTEXT_MONTHS: ${{ needs.ingest.outputs.month_count }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
