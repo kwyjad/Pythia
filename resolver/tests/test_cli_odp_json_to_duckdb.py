@@ -8,6 +8,7 @@ from resolver.cli import odp_json_to_duckdb
 def test_odp_cli_calls_build_and_write_with_expected_args(tmp_path, monkeypatch):
     db_path = tmp_path / "cli_odp.duckdb"
     called: dict[str, object] = {}
+    summary: dict[str, object] = {}
 
     def fake_build_and_write(*, config_path, normalizers_path, db_url, fetch_html, fetch_json, today):
         called["config_path"] = config_path
@@ -21,6 +22,19 @@ def test_odp_cli_calls_build_and_write_with_expected_args(tmp_path, monkeypatch)
         fake_build_and_write,
     )
 
+    def fake_build_summary(**kwargs):
+        summary["build"] = kwargs
+        return "summary"
+
+    def fake_write_summary(markdown, path):
+        summary["write"] = (markdown, path)
+        return Path(path)
+
+    monkeypatch.setattr("resolver.diagnostics.odp_smoke.build_smoke_summary", fake_build_summary)
+    monkeypatch.setattr("resolver.diagnostics.odp_smoke.write_smoke_summary", fake_write_summary)
+
+    summary_path = tmp_path / "summary.md"
+
     exit_code = odp_json_to_duckdb.run(
         [
             "--db",
@@ -31,6 +45,8 @@ def test_odp_cli_calls_build_and_write_with_expected_args(tmp_path, monkeypatch)
             "my_norm.yml",
             "--today",
             "2025-01-01",
+            "--summary",
+            str(summary_path),
         ]
     )
 
@@ -40,6 +56,7 @@ def test_odp_cli_calls_build_and_write_with_expected_args(tmp_path, monkeypatch)
     assert called["db_url"]
     assert isinstance(called["db_url"], str)
     assert called["today"].isoformat() == "2025-01-01"
+    assert summary["write"][1] == str(summary_path)
 
 
 def test_odp_cli_invalid_today_returns_error(tmp_path, monkeypatch):
@@ -49,6 +66,13 @@ def test_odp_cli_invalid_today_returns_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "resolver.ingestion.odp_duckdb.build_and_write_odp_series",
         fail_build,
+    )
+
+    monkeypatch.setattr(
+        "resolver.diagnostics.odp_smoke.build_smoke_summary", lambda **_: "summary",
+    )
+    monkeypatch.setattr(
+        "resolver.diagnostics.odp_smoke.write_smoke_summary", lambda markdown, path: Path(path),
     )
 
     exit_code = odp_json_to_duckdb.run(["--db", str(tmp_path / "x.duckdb"), "--today", "not-a-date"])
@@ -63,6 +87,13 @@ def test_odp_cli_propagates_pipeline_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "resolver.ingestion.odp_duckdb.build_and_write_odp_series",
         boom,
+    )
+
+    monkeypatch.setattr(
+        "resolver.diagnostics.odp_smoke.build_smoke_summary", lambda **_: "summary",
+    )
+    monkeypatch.setattr(
+        "resolver.diagnostics.odp_smoke.write_smoke_summary", lambda markdown, path: Path(path),
     )
 
     code = odp_json_to_duckdb.run(["--db", str(tmp_path / "x.duckdb")])

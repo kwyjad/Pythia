@@ -53,14 +53,14 @@ This pipeline is **fully separate** from EM-DAT, the `freeze_snapshot` flow, and
 `facts_*` tables. The new table is an auxiliary store that only writes to
 `odp_timeseries_raw`.
 
-For live end-to-end verification of the UNHCR ODP pipeline (HTML discovery → JSON fetch → normalization → DuckDB), you can trigger the **Resolver — ODP smoke** GitHub Actions workflow. This optional workflow runs the `resolver.cli.odp_json_to_duckdb` CLI with real network access, writes into `data/odp_smoke.duckdb`, then uploads that DB and the `diagnostics/odp_json` directory as artifacts for inspection. It is manual and not part of the main CI.
+For live end-to-end verification of the UNHCR ODP pipeline (HTML discovery → JSON fetch → normalization → DuckDB), you can trigger the **Resolver — ODP smoke** GitHub Actions workflow. This optional workflow runs the `resolver.cli.odp_json_to_duckdb` CLI with real network access, writes into `data/odp_smoke.duckdb`, then uploads that DB and the `diagnostics/odp_json` directory (including `odp_smoke_summary.md`) as artifacts for inspection. It is manual and not part of the main CI.
 
 Run the ODP pipeline end-to-end with:
 
 ```bash
 poetry run python -m resolver.cli.odp_json_to_duckdb \
   --db data/resolver_backfill.duckdb \
-  --config resolver/ingestion/config/odp_json.yml \
+  --config resolver/ingestion/config/unhcr_odp.yml \
   --normalizers resolver/ingestion/config/odp_normalizers.yml
 ```
 
