@@ -131,6 +131,12 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
+      - name: Clean staging & diagnostics
+        run: |
+          set -euo pipefail
+          rm -rf resolver/staging || true
+          rm -rf diagnostics/ingestion || true
+
       - name: Probe DTM reachability
         shell: bash
         run: |
@@ -142,12 +148,6 @@ jobs:
         run: |
           set -euo pipefail
           python -m scripts.ci.probe_idmc_reachability || true
-
-      - name: Clean staging & diagnostics
-        run: |
-          set -euo pipefail
-          rm -rf resolver/staging || true
-          rm -rf diagnostics/ingestion || true
 
       - name: Run IDMC (HELIX single-shot)
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' }}
