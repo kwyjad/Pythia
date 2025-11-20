@@ -243,7 +243,7 @@ jobs:
           fi
           python -m resolver.cli.odp_json_to_duckdb \
             --db "${BACKFILL_DB_PATH}" \
-            --config "resolver/ingestion/config/odp_json.yml" \
+            --config "resolver/ingestion/config/unhcr_odp.yml" \
             --normalizers "resolver/ingestion/config/odp_normalizers.yml" \
             --log-level "${LOG_LEVEL:-INFO}"
         continue-on-error: true

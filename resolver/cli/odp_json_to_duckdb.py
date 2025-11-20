@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import traceback
 from datetime import date
 from pathlib import Path
 from typing import Sequence
 
 from resolver.common.logs import configure_root_logger, get_logger
+from resolver.diagnostics import odp_smoke
 from resolver.ingestion import odp_duckdb
 
 logger = get_logger(__name__)
@@ -44,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default="resolver/ingestion/config/odp_json.yml",
+        default="resolver/ingestion/config/unhcr_odp.yml",
         help="ODP HTML/JSON discovery config (YAML).",
     )
     parser.add_argument(
@@ -65,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional log level override (e.g. DEBUG, INFO).",
     )
+    parser.add_argument(
+        "--summary",
+        default="diagnostics/odp_json/odp_smoke_summary.md",
+        help="Destination path for the smoke summary markdown.",
+    )
     return parser
 
 
@@ -84,10 +91,25 @@ def run(argv: Sequence[str] | None = None) -> int:
             today = date(*parts)
         except Exception as exc:  # noqa: BLE001
             logger.error("Invalid --today value %r: %s", args.today, exc)
-            return 2
+            exit_code = 2
+            pipeline_error = exc
+            summary_text = odp_smoke.build_smoke_summary(
+                config_path=args.config,
+                normalizers_path=args.normalizers,
+                db_path=db_path,
+                diagnostics_dir=Path(args.summary).parent,
+                rows=None,
+                error=pipeline_error,
+                traceback_text=traceback.format_exc(),
+            )
+            odp_smoke.write_smoke_summary(summary_text, args.summary)
+            return exit_code
     else:
         today = None
 
+    exit_code = 0
+    pipeline_error: Exception | None = None
+    rows: int | None = None
     try:
         rows = odp_duckdb.build_and_write_odp_series(
             config_path=args.config,
@@ -99,10 +121,27 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("ODP DuckDB CLI: pipeline failed: %s", exc)
-        return 1
+        pipeline_error = exc
+        exit_code = 1
+    else:
+        logger.info("ODP DuckDB CLI: completed successfully (rows=%s)", rows)
+    try:
+        summary_text = odp_smoke.build_smoke_summary(
+            config_path=args.config,
+            normalizers_path=args.normalizers,
+            db_path=db_path,
+            diagnostics_dir=Path(args.summary).parent,
+            rows=rows,
+            error=pipeline_error,
+            traceback_text=traceback.format_exc() if pipeline_error else None,
+        )
+        odp_smoke.write_smoke_summary(summary_text, args.summary)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to write ODP smoke summary: %s", exc)
 
-    logger.info("ODP DuckDB CLI: completed successfully (rows=%s)", rows)
-    return 0
+    if exit_code == 0:
+        return 0
+    return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> None:

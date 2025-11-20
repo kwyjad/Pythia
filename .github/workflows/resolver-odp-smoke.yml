@@ -8,7 +8,7 @@ on:
       config_path:
         description: "ODP discovery config (YAML)"
         required: false
-        default: "resolver/ingestion/config/odp_json.yml"
+        default: "resolver/ingestion/config/unhcr_odp.yml"
       normalizers_path:
         description: "ODP normalizers config (YAML)"
         required: false
@@ -53,48 +53,6 @@ jobs:
             --config "${{ github.event.inputs.config_path }}" \
             --normalizers "${{ github.event.inputs.normalizers_path }}" \
             --log-level INFO
-
-      - name: Summarize ODP DuckDB contents
-        run: |
-          python - << 'PY'
-          import duckdb
-          from pathlib import Path
-
-          db_path = Path("data/odp_smoke.duckdb")
-          if not db_path.exists():
-            raise SystemExit(f"[ODP smoke] DuckDB file not found: {db_path}")
-
-          con = duckdb.connect(str(db_path))
-          try:
-              try:
-                  total_rows = con.execute(
-                      "SELECT COUNT(*) FROM odp_timeseries_raw"
-                  ).fetchone()[0]
-              except Exception as exc:
-                  raise SystemExit(f"[ODP smoke] Failed to query odp_timeseries_raw: {exc}")
-
-              print(f"[ODP smoke] odp_timeseries_raw total rows: {total_rows}")
-
-              if total_rows:
-                  df = con.execute(
-                      """
-                      SELECT
-                        iso3,
-                        metric,
-                        MIN(ym) AS first_ym,
-                        MAX(ym) AS last_ym,
-                        COUNT(*) AS n_rows
-                      FROM odp_timeseries_raw
-                      GROUP BY iso3, metric
-                      ORDER BY iso3, metric
-                      LIMIT 20
-                      """
-                  ).df()
-                  print("[ODP smoke] Top iso3/metric coverage:")
-                  print(df.to_markdown(index=False))
-          finally:
-              con.close()
-          PY
 
       - name: Upload ODP smoke artifacts
         if: always()
