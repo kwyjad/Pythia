@@ -432,6 +432,7 @@ jobs:
       - acled-backfill
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
+      RESOLVER_DUCKDB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
       BACKFILL_MONTHS_CSV: ${{ needs.ingest.outputs.months }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
@@ -580,7 +581,7 @@ jobs:
             --facts diagnostics/ingestion/export_preview/facts.csv \
             --month "${BACKFILL_MONTH}" \
             --write-db=1 \
-            --db-url "${{ env.RESOLVER_DB_URL }}"; then
+            --db-url "${{ env.RESOLVER_DUCKDB_URL }}"; then
             python -m scripts.ci.append_stage_to_summary \
               --section "Derive-freeze stage: Freeze snapshot (bulk) (end)" \
               --status success || true
