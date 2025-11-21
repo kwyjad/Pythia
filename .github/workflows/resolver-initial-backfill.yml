@@ -83,15 +83,13 @@ jobs:
       EMDAT_NETWORK: "1"
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       EMDAT_SOURCE: "api"  # explicit override (safety)
-      RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
-      RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
       IDMC_REQ_PER_SEC: 0.3
       IDMC_MAX_CONCURRENCY: 1
       IDMC_ALLOW_HDX_FALLBACK: "1"
       IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
-      CONNECTOR_LIST: acled_client,dtm_client,ifrc_go_client,ipc_client,reliefweb_client,unhcr_client,unhcr_odp_client,wfp_mvam_client,who_phe_client,emdat_client
+      CONNECTOR_LIST: dtm_client,emdat_client
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
       EMPTY_POLICY: ${{ inputs.empty_policy }}
@@ -185,7 +183,6 @@ jobs:
           IDMC_HTTP_VERIFY: "true"
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"
-          # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
         shell: bash
         run: |
           set -euo pipefail
@@ -234,6 +231,7 @@ jobs:
           exit ${CONNECTOR_EXIT}
 
       - name: UNHCR ODP → DuckDB (odp_timeseries_raw)
+        if: ${{ false }} # Disabled: connector not in current backfill set (DTM, IDMC, EM-DAT, ACLED only).
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
@@ -621,130 +619,14 @@ jobs:
           fi
 
       - name: Derive and freeze monthly snapshots
+        if: ${{ false }} # Temporarily disabled: snapshot building will move to resolver-snapshot-from-db workflow.
         env:
           MONTHS: ${{ env.BACKFILL_MONTHS_CSV }}
         run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
+          echo "::warning::Freeze snapshot stage is disabled in resolver-initial-backfill; use resolver-snapshot-from-db instead."
           python -m scripts.ci.append_stage_to_summary \
             --section "Derive-freeze stage: Freeze snapshots (start)" \
-            --status start || true
-          if python - <<'PY'
-          import calendar
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          import pandas as pd
-
-          months_env = os.environ.get("MONTHS", "")
-          months = [m.strip() for m in months_env.split(",") if m.strip()]
-          base_csv = Path("resolver/exports/backfill/facts.csv")
-          if not base_csv.exists():
-              raise SystemExit(f"facts.csv missing at {base_csv}")
-
-          backfill_db = os.environ.get("BACKFILL_DB_PATH", "data/resolver_backfill.duckdb")
-          for ym in months:
-              print(f"::group::Deriving {ym}")
-              month_dir = Path("resolver/exports/backfill") / ym
-              month_dir.mkdir(parents=True, exist_ok=True)
-
-              df = pd.read_csv(base_csv)
-              if "as_of_date" in df.columns:
-                  df["as_of_date"] = pd.to_datetime(df["as_of_date"], errors="coerce")
-                  df = df[df["as_of_date"].dt.strftime("%Y-%m") == ym]
-              elif "ym" in df.columns:
-                  df = df[df["ym"].astype(str) == ym]
-
-              if df.empty:
-                  df = df.head(0)
-                  df.to_csv(month_dir / "facts.csv", index=False)
-                  df.to_parquet(month_dir / "facts.parquet", index=False)
-                  print(f"No facts rows for {ym}; skipping snapshot")
-                  print("::endgroup::")
-                  continue
-
-              df.to_csv(month_dir / "facts.csv", index=False)
-              df.to_parquet(month_dir / "facts.parquet", index=False)
-
-              year, month = map(int, ym.split("-"))
-              last_day = calendar.monthrange(year, month)[1]
-              cutoff = f"{year:04d}-{month:02d}-{last_day:02d}"
-
-              subprocess.run(
-                  [
-                      sys.executable,
-                      "-m",
-                      "resolver.tools.precedence_engine",
-                      "--facts",
-                      str(month_dir / "facts.csv"),
-                      "--cutoff",
-                      cutoff,
-                      "--outdir",
-                      str(month_dir),
-                  ],
-                  check=True,
-              )
-
-              resolved_csv = month_dir / "resolved.csv"
-              if not resolved_csv.exists():
-                  print(f"resolved.csv missing for {ym}; skipping")
-                  print("::endgroup::")
-                  continue
-
-              subprocess.run(
-                  [
-                      sys.executable,
-                      "-m",
-                      "resolver.tools.make_deltas",
-                      "--resolved",
-                      str(resolved_csv),
-                      "--out",
-                      str(month_dir / "deltas.csv"),
-                  ],
-                  check=True,
-              )
-
-              subprocess.run(
-                  [
-                      sys.executable,
-                      "-m",
-                      "resolver.tools.freeze_snapshot",
-                      "--facts",
-                      str(month_dir / "facts.csv"),
-                      "--deltas",
-                      str(month_dir / "deltas.csv"),
-                      "--resolved",
-                      str(resolved_csv),
-                      "--month",
-                      ym,
-                      "--outdir",
-                      "resolver/snapshots",
-                      "--write-db",
-                      "1",
-                      "--db",
-                      f"duckdb:///{backfill_db}",
-                  ],
-                  check=True,
-              )
-
-              print("::endgroup::")
-          PY
-          then
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Freeze snapshots (end)" \
-              --status success || true
-          else
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Freeze snapshots (failed)" \
-              --status failed || true
-            exit 1
-          fi
+            --status skipped || true
 
       - name: Summarize DuckDB contents (post-freeze)
         run: |

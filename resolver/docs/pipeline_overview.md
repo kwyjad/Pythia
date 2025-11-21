@@ -43,6 +43,17 @@ The pipeline runs as:
 
 This layered design is intentional: each layer can be tested, debugged, and evolved independently while keeping the monthly “new PIN/PA” objective intact.
 
+### Connectors used in `resolver-initial-backfill`
+
+The manual `resolver-initial-backfill` workflow currently runs only the four connectors that are stable end-to-end:
+
+- **DTM** (IOM DTM)
+- **IDMC** (internal displacement)
+- **EM-DAT**
+- **ACLED**
+
+Other connectors are intentionally excluded from this workflow to avoid destabilising the ingestion run. The backfill writes canonical facts from these four sources into DuckDB for downstream snapshot, dashboard, and forecasting stages.
+
 ## Pipeline stages
 
 - **Connector ingestion**
@@ -57,8 +68,9 @@ This layered design is intentional: each layer can be tested, debugged, and evol
   [`resolver/tools/precedence_engine.py`](../tools/precedence_engine.py) ranks candidates using tier policy, recency, completeness, and overrides. The logic is documented in [Precedence policy](precedence.md) and the governance appendix.
 - **Exports**  
   [`resolver/tools/export_facts.py`](../tools/export_facts.py) consolidates staging inputs into `resolver/exports/facts.csv`, while [`resolver/tools/validate_facts.py`](../tools/validate_facts.py) enforces schema and registry rules before precedence runs.
-- **Snapshots**  
+- **Snapshots**
   The freezer [`resolver/tools/freeze_snapshot.py`](../tools/freeze_snapshot.py) writes immutable monthly bundles (`resolver/snapshots/YYYY-MM`) for downstream analytics, dashboards, and the forecast resolver.
+  A DB-first successor is planned under [`resolver/snapshot`](../snapshot) with CLI orchestration at [`resolver/cli/snapshot_from_db.py`](../cli/snapshot_from_db.py) so monthly snapshots can be built directly from DuckDB.
 
 ## Additional references
 

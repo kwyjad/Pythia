@@ -94,6 +94,7 @@ This convention keeps environment-dependent behaviour in a small, well-defined s
 
 - Workflow: `.github/workflows/resolver-initial-backfill.yml` (manual dispatch only).
 - Launch it from the **Actions** tab by choosing **Resolver — Initial Backfill**, overriding the `months_back` input (default `12`) or `only` connector filter as needed.
+- Note: this workflow currently runs only the DTM, IDMC, EM-DAT, and ACLED connectors. Additional connectors will be re-enabled once their ingestion paths are stable.
 - The `ingest` job runs `resolver/ingestion/run_all_stubs.py --mode real`, wiring connector secrets from the environment. Connectors without credentials stay in header-only mode so the workflow still succeeds.
 - The `derive-freeze` job loops over the computed year-month list, runs `export_facts → precedence_engine → make_deltas`, and freezes each snapshot via `python -m resolver.tools.freeze_snapshot --facts … --month <YYYY-MM> --write-db 1` so DuckDB mirrors remain in sync.
 - The `context` job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` to produce `facts_last12.jsonl` and `facts_last12.parquet`.
