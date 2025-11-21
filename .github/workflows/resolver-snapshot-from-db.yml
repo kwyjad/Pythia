@@ -1,0 +1,64 @@
+---
+name: Resolver — Snapshot from DuckDB (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Optional target month (YYYY-MM)"
+        required: false
+        default: ""
+      db_url:
+        description: "DuckDB URL containing canonical facts"
+        required: false
+        default: "duckdb:///resolver/db/resolver.duckdb"
+      dry_run:
+        description: "Print the stub plan without performing work"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  snapshot-from-db:
+    name: Snapshot from DuckDB (stub)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c constraints-ci.txt -e '.[db]'
+
+      - name: Run snapshot-from-db stub
+        env:
+          SNAPSHOT_MONTH: ${{ inputs.month }}
+          SNAPSHOT_DB_URL: ${{ inputs.db_url }}
+          SNAPSHOT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          echo "::notice::Snapshot-from-DB workflow currently runs a stub plan only."
+          MONTH_ARGS=()
+          if [ -n "${SNAPSHOT_MONTH}" ]; then
+            MONTH_ARGS+=("--month" "${SNAPSHOT_MONTH}")
+          fi
+          DRY_RUN_FLAG=""
+          if [ "${SNAPSHOT_DRY_RUN}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python -m resolver.cli.snapshot_from_db \
+            --db-url "${SNAPSHOT_DB_URL}" \
+            ${DRY_RUN_FLAG} \
+            "${MONTH_ARGS[@]}"
