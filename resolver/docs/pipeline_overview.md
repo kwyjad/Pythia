@@ -21,9 +21,31 @@ flowchart LR
   G --> H[API/UI (future), Analytics, Forecast Resolution]
 ```
 
+## Layer Contracts & Data Flow
+
+Resolver’s goal is to provide country–month–shock-level snapshots of humanitarian impact (PIN/PA), with a focus on **new PIN/PA per month** so month 1 + month 2 + month 3 can be aggregated safely.
+
+The pipeline runs as:
+
+1. **Connectors (staging)**
+   - Fetch and normalise source-specific data (IOM DTM, IDMC, EM-DAT, ACLED, etc.).
+   - Emit staging tables with standard columns (iso3, hazard codes, dates, raw counts).
+2. **Export Facts (canonical facts)**
+   - Map staging into canonical facts: `iso3`, `ym`, `hazard_code` / `hazard_class`, `metric`, `value`, `series_semantics`, `source`.
+   - Write canonical outputs: `facts.csv` for the run and, when DB writes are enabled, `facts_resolved` / `facts_deltas` in DuckDB.
+3. **Freeze Snapshot (per-month snapshots)**
+   - Given canonical facts and a target month (`ym`), filter to that month, normalise required columns, and deduplicate resolved/deltas frames.
+   - Optionally run EM-DAT validators when EM-DAT metrics are present.
+   - Write a snapshot parquet for the month and update DuckDB snapshot metadata.
+4. **Forecaster & APIs (consumers)**
+   - Consult DuckDB and/or snapshot parquet files to obtain resolution-ready facts per country, month, and shock.
+   - Use these as the scoring baseline for forecasting questions and downstream analysis.
+
+This layered design is intentional: each layer can be tested, debugged, and evolved independently while keeping the monthly “new PIN/PA” objective intact.
+
 ## Pipeline stages
 
-- **Connector ingestion**  
+- **Connector ingestion**
   Entry points live under `resolver/ingestion/*_client.py` and are orchestrated by [`resolver/ingestion/run_all_stubs.py`](../ingestion/run_all_stubs.py). Each connector writes a canonical CSV under `resolver/staging/`. The ReliefWeb client also drives the PDF selector when `RELIEFWEB_ENABLE_PDF=1`; see [ReliefWeb PDF](reliefweb_pdf.md).
 - **ReliefWeb PDF branch**  
   [`resolver/ingestion/reliefweb_client.py`](../ingestion/reliefweb_client.py) hydrates report metadata, scores attachments, extracts text via [`resolver/ingestion/_pdf_text.py`](../ingestion/_pdf_text.py), and writes `resolver/staging/reliefweb_pdf.csv` plus manifest entries when the branch is enabled.

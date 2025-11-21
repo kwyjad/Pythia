@@ -5,6 +5,18 @@ What is Forecaster?
 
 Forecaster is an AI forecasting assistant. Its job is to read forecasting questions (like those on Metaculus), gather relevant evidence, and combine the judgments of different models into one final forecast. It is designed to run automatically on GitHub, saving its forecasts and learning from past performance over time.
 
+## Resolver Architecture (High-Level)
+
+Resolver is structured as a database-first pipeline with distinct layers:
+
+- **Connectors**: ingest raw humanitarian data (DTM, IDMC, EM-DAT, ACLED, etc.) into staging tables.
+- **Export Facts**: map staging into a canonical facts schema and (optionally) write to DuckDB.
+- **Freeze Snapshot**: create monthly, resolution-ready snapshots (parquet + DuckDB) per `ym`.
+- **Forecaster/API**: read resolution-ready facts from DuckDB/snapshots to grade questions and power dashboards.
+- **Workflows**: orchestrate end-to-end runs for CI, backfills, and periodic ingestion.
+
+See `resolver/docs/pipeline_overview.md` for the detailed layer contracts and environment conventions.
+
 ## CI guardrails and repo context checks
 
 Our GitHub Actions workflows now include extra safety rails to ensure they always run inside the official [`oughtinc/Pythia`](https://github.com/oughtinc/Pythia) repository:
