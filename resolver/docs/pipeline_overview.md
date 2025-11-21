@@ -43,6 +43,17 @@ The pipeline runs as:
 
 This layered design is intentional: each layer can be tested, debugged, and evolved independently while keeping the monthly “new PIN/PA” objective intact.
 
+### Connectors used in `resolver-initial-backfill`
+
+The manual `resolver-initial-backfill` workflow currently runs only the four connectors that are stable end-to-end:
+
+- **DTM** (IOM DTM)
+- **IDMC** (internal displacement)
+- **EM-DAT**
+- **ACLED**
+
+Other connectors are intentionally excluded from this workflow to avoid destabilising the ingestion run. The backfill writes canonical facts from these four sources into DuckDB for downstream snapshot, dashboard, and forecasting stages.
+
 ## Pipeline stages
 
 - **Connector ingestion**

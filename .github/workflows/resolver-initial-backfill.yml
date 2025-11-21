@@ -83,15 +83,13 @@ jobs:
       EMDAT_NETWORK: "1"
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       EMDAT_SOURCE: "api"  # explicit override (safety)
-      RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
-      RELIEFWEB_USER_AGENT: ${{ secrets.RELIEFWEB_USER_AGENT }}
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
       IDMC_REQ_PER_SEC: 0.3
       IDMC_MAX_CONCURRENCY: 1
       IDMC_ALLOW_HDX_FALLBACK: "1"
       IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
-      CONNECTOR_LIST: acled_client,dtm_client,ifrc_go_client,ipc_client,reliefweb_client,unhcr_client,unhcr_odp_client,wfp_mvam_client,who_phe_client,emdat_client
+      CONNECTOR_LIST: dtm_client,emdat_client
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
       EMPTY_POLICY: ${{ inputs.empty_policy }}
@@ -185,7 +183,6 @@ jobs:
           IDMC_HTTP_VERIFY: "true"
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"
-          # CONNECTOR_LIST: "dtm_client,reliefweb_client,ifrc_go_client"
         shell: bash
         run: |
           set -euo pipefail
@@ -234,6 +231,7 @@ jobs:
           exit ${CONNECTOR_EXIT}
 
       - name: UNHCR ODP → DuckDB (odp_timeseries_raw)
+        if: ${{ false }} # Disabled: connector not in current backfill set (DTM, IDMC, EM-DAT, ACLED only).
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
