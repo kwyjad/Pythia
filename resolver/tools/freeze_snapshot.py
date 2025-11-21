@@ -1178,6 +1178,13 @@ def freeze_snapshot(
     with open(manifest_out, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+    if isinstance(write_db, str):
+        write_db_flag = write_db.strip().lower() in ("1", "true", "yes", "y")
+    elif write_db is None:
+        write_db_flag = False
+    else:
+        write_db_flag = bool(write_db)
+
     _maybe_write_db(
         ym=ym,
         facts_df=facts_df,
@@ -1188,7 +1195,7 @@ def freeze_snapshot(
         manifest=manifest,
         facts_out=resolved_parquet,
         deltas_out=deltas_parquet_out,
-        write_db=write_db,
+        write_db=write_db_flag,
         db_url=db_url,
     )
 
@@ -1240,7 +1247,13 @@ def main():
         env_db_url = os.getenv("RESOLVER_DB_URL", "").strip()
         db_url = args.db or args.db_url or env_db_url or ""
         if raw_write_db is None:
-            write_db_flag = bool(db_url)
+            env_write_db = os.getenv("RESOLVER_WRITE_DB", "").strip().lower()
+            if env_write_db in ("0", "false", "no", "n"):
+                write_db_flag = False
+            elif env_write_db in ("1", "true", "yes", "y"):
+                write_db_flag = True if db_url else False
+            else:
+                write_db_flag = bool(db_url)
         else:
             write_db_flag = raw_write_db == "1"
 
