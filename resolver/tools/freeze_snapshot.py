@@ -243,6 +243,35 @@ def _render_db_error_markdown(
     return "\n".join(lines)
 
 
+def _write_freeze_db_diagnostics(
+    *, payload: Mapping[str, Any], error: Exception | None
+) -> None:
+    """Persist freeze DB diagnostics JSON and append markdown summary.
+
+    Writes the expected freeze_db.json schema (facts_resolved_rows, facts_deltas_rows,
+    semantics, metrics) and appends either the success or error markdown block to the
+    ingestion summary. Best-effort: swallows filesystem errors to avoid masking the
+    calling failure mode.
+    """
+
+    try:
+        FREEZE_DB_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FREEZE_DB_DIAGNOSTICS_PATH.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except Exception:
+        LOGGER.debug("Failed to write freeze_db.json", exc_info=True)
+
+    try:
+        if error is None:
+            block = _render_freeze_db_success_markdown(payload)
+        else:
+            block = _render_db_error_markdown("Freeze Snapshot", payload, error)
+        _append_ingestion_summary(block)
+    except Exception:
+        LOGGER.debug("Failed to append freeze DB diagnostics", exc_info=True)
+
+
 def _append_to_summary(section_title: str, body_markdown: str) -> None:
     """Best-effort append to diagnostics/summary.md without raising on failure."""
 
@@ -1340,37 +1369,13 @@ def _maybe_write_db(
                     keys=list(deltas_keys),
                 )
 
-        try:
-            FREEZE_DB_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            FREEZE_DB_DIAGNOSTICS_PATH.write_text(
-                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-            )
-        except Exception:
-            LOGGER.debug("Failed to write freeze_db.json", exc_info=True)
-
-        try:
-            success_md = _render_freeze_db_success_markdown(payload)
-            _append_ingestion_summary(success_md)
-        except Exception:
-            LOGGER.debug("Failed to append freeze DB success markdown", exc_info=True)
+        _write_freeze_db_diagnostics(payload=payload, error=None)
 
     except Exception as exc:
         payload["error_type"] = type(exc).__name__
         payload["error_message"] = " ".join(str(exc).split())
 
-        try:
-            FREEZE_DB_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            FREEZE_DB_DIAGNOSTICS_PATH.write_text(
-                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-            )
-        except Exception:
-            LOGGER.debug("Failed to write freeze_db.json after error", exc_info=True)
-
-        try:
-            error_md = _render_db_error_markdown("Freeze Snapshot", payload, exc)
-            _append_ingestion_summary(error_md)
-        except Exception:
-            LOGGER.debug("Failed to append DB error diagnostics", exc_info=True)
+        _write_freeze_db_diagnostics(payload=payload, error=exc)
 
         LOGGER.error("Freeze snapshot DB write failed", exc_info=True)
     finally:
