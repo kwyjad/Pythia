@@ -60,10 +60,12 @@ try:
     from resolver.tools.export_facts import (
         _prepare_resolved_for_db as exporter_prepare_resolved_for_db,
         _prepare_deltas_for_db as exporter_prepare_deltas_for_db,
+        prepare_duckdb_tables,
     )
 except Exception:  # pragma: no cover - defensive: fall back to local implementations
     exporter_prepare_resolved_for_db = None  # type: ignore
     exporter_prepare_deltas_for_db = None  # type: ignore
+    prepare_duckdb_tables = None  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[1]      # .../resolver
 REPO_ROOT = ROOT.parent
@@ -1114,6 +1116,15 @@ def freeze_snapshot(
             dedupe_diags.append(deltas_diag)
     _append_dedupe_summary(dedupe_diags)
 
+    resolved_for_db = resolved_df
+    deltas_for_db = deltas_df
+
+    if deltas_for_db is None and callable(prepare_duckdb_tables):  # type: ignore[arg-type]
+        try:
+            resolved_for_db, deltas_for_db = prepare_duckdb_tables(resolved_df)
+        except Exception:
+            LOGGER.debug("prepare_duckdb_tables failed; falling back to existing frames", exc_info=True)
+
     resolved_parquet = out_dir / "facts_resolved.parquet"
     resolved_csv_out = out_dir / "facts_resolved.csv"
     manifest_out = out_dir / "manifest.json"
@@ -1172,8 +1183,8 @@ def freeze_snapshot(
         facts_df=facts_df,
         validated_facts_df=validated_facts_df,
         preview_df=preview_df,
-        resolved_df=resolved_df,
-        deltas_df=deltas_df,
+        resolved_df=resolved_for_db,
+        deltas_df=deltas_for_db,
         manifest=manifest,
         facts_out=resolved_parquet,
         deltas_out=deltas_parquet_out,
@@ -1225,6 +1236,14 @@ def main():
     args = ap.parse_args()
 
     try:
+        raw_write_db = args.write_db
+        env_db_url = os.getenv("RESOLVER_DB_URL", "").strip()
+        db_url = args.db or args.db_url or env_db_url or ""
+        if raw_write_db is None:
+            write_db_flag = bool(db_url)
+        else:
+            write_db_flag = raw_write_db == "1"
+
         result = freeze_snapshot(
             facts=Path(args.facts),
             month=args.month,
@@ -1232,8 +1251,8 @@ def main():
             overwrite=args.overwrite,
             deltas=Path(args.deltas) if args.deltas else None,
             resolved_csv=Path(args.resolved) if args.resolved else None,
-            write_db=None if args.write_db is None else args.write_db == "1",
-            db_url=args.db or args.db_url,
+            write_db=write_db_flag,
+            db_url=db_url,
         )
     except SnapshotError as exc:
         print(str(exc), file=sys.stderr)
