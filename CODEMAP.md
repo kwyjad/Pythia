@@ -30,6 +30,72 @@ flowchart LR
 - [`resolver/db`](resolver/db): DuckDB schema + helpers. [`duckdb_io.py`](resolver/db/duckdb_io.py) initialises the schema, exposes `get_db()`, and writes `facts_resolved`, `facts_deltas`, `snapshots`, and `manifests` tables.
 - [`resolver/docs`](resolver/docs): Extended documentation (pipeline overview, policy, data dictionary, troubleshooting) that complements this codemap for deep dives.
 
+## Resolver Layer Contracts
+
+Resolver is organised into several layers. Each layer has a clear responsibility and should not reach into other layers’ internal concerns.
+
+### 1. Connectors (`resolver/ingestion`)
+
+- **Responsibility**
+  - Fetch raw data from external services (IOM DTM, IDMC, EM-DAT, ACLED, etc.).
+  - Normalise raw responses into staging tables with consistent column names and types.
+  - Attach minimal metadata needed downstream (source name, iso3, hazard/shock identifiers, timestamps).
+- **Must not**
+  - Write directly to the canonical DuckDB schema.
+  - Perform cross-source joins or global deduplication.
+  - Implement forecasting logic or EM-DAT-specific validation rules.
+
+### 2. Export Facts (`resolver/tools/export_facts.py`)
+
+- **Responsibility**
+  - Read connector staging outputs for a given run or backfill window.
+  - Map staging tables into the canonical facts schema (`iso3`, `ym`, `metric`, `value`, `series_semantics`, `source`, etc.).
+  - Emit:
+    - `facts.csv` (canonical CSV for the run),
+    - Optional preview CSVs under `diagnostics/ingestion/export_preview/`,
+    - `facts_resolved` / `facts_deltas` tables in DuckDB when DB write is enabled.
+- **Must not**
+  - Know about EM-DAT-specific validation.
+  - Implement connector-specific network logic.
+  - Perform per-month snapshotting or add rows to the `snapshots` table.
+
+### 3. Freeze Snapshot (`resolver/tools/freeze_snapshot.py`)
+
+- **Responsibility**
+  - Take canonical facts and produce month-scoped snapshots:
+    - Filter rows to a target `ym` (for example `2024-01`).
+    - Normalise required columns (ensure `as_of_date`, `hazard_class`, etc. exist).
+    - Apply frame-level deduplication for `facts_resolved` and `facts_deltas`.
+    - For sources that need it (for example EM-DAT), run additional validators before freezing.
+    - Write:
+      - Snapshot parquet files under `snapshots/<ym>/facts.parquet`.
+      - Month-scoped rows into DuckDB (`facts_resolved` / `facts_deltas`) when DB write is enabled.
+      - A row into the DuckDB `snapshots` table for `ym` with git SHA and created timestamp.
+      - Diagnostics (for example `diagnostics/ingestion/freeze_db.json`, summary sections).
+- **Must not**
+  - Call external HTTP APIs or perform ingestion.
+  - Modify connector staging outputs.
+  - Decide which connectors run; it only operates on the unified canonical facts.
+
+### 4. Forecaster / API Consumers
+
+- **Responsibility**
+  - Treat Resolver as a database-first source of truth.
+  - Query DuckDB (or exported snapshots) for country–month–shock-level PIN/PA such as `month=2025-01`, `iso3=SDN`, `hazard_code=drought`, `metric=new_pin`, `value=50000`.
+  - Use these snapshots as resolution-ready facts to grade forecasting questions and feed Forecaster dashboards or interfaces.
+- **Must not**
+  - Re-implement ingestion or canonical mapping logic.
+  - Write back into Resolver’s canonical tables (read-only consumer).
+
+### 5. Workflows (GitHub Actions, `scripts/ci`)
+
+- **Responsibility**
+  - Orchestrate end-to-end runs for fast CI checks, initial backfill, and periodic runs for specific connectors or windows.
+  - Set environment variables that control DB paths and date windows.
+- **Must not**
+  - Embed connector-specific data transform logic.
+  - Bypass or silently override layer contracts without tests.
+
 ## Entrypoints & Commands
 | Command | Purpose | Key Environment/Inputs |
 | --- | --- | --- |

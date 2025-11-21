@@ -34,6 +34,53 @@ This run book covers the main resolver workflows, including the ReliefWeb PDF br
    The freezer also respects `RESOLVER_DB_URL`; when present it writes the snapshot tables into DuckDB automatically,
    ensuring date columns remain ISO-formatted and the schema is created if missing.
 
+## Environment & Configuration Conventions
+
+Resolver uses a small set of environment variables to control DB access and run modes. These should be interpreted only by CLI entrypoints and workflows, not deep inside business logic, so that tests can override behaviour explicitly.
+
+### Database URL
+
+- `RESOLVER_DB_URL`
+  - DuckDB URL where canonical tables (`facts_resolved`, `facts_deltas`, `snapshots`, etc.) are stored.
+  - Example: `duckdb:///data/resolver.duckdb` or `duckdb:///${GITHUB_WORKSPACE}/data/resolver_backfill.duckdb`.
+  - **Used by:**
+    - CLI tools (for example `export_facts`, `freeze_snapshot`) as the default DB target when `--db-url` is not passed.
+    - CI workflows (fast tests, backfills) to route writes into ephemeral DBs.
+
+### Write Controls
+
+- `RESOLVER_WRITE_DB`
+  - High-level toggle used by CLI entrypoints and workflows to decide whether to write to DuckDB by default.
+  - Typical patterns:
+    - CI fast tests: may set `RESOLVER_WRITE_DB=0` to keep tests lightweight.
+    - Backfill workflows: set `RESOLVER_WRITE_DB=1` with an explicit `RESOLVER_DB_URL`.
+  - Business logic (for example connector modules, export functions) should accept an explicit `write_db` argument rather than reading this env directly.
+
+### Backfill / Window Controls
+
+- `BACKFILL_MONTHS_CSV`
+  - Comma-separated list of `YYYY-MM` months to process in backfill workflows.
+- Other window-related envs (for example `BACKFILL_START`, `BACKFILL_END`, or workflow inputs) should be documented where they are defined in `.github/workflows/resolver-initial-backfill.yml`.
+
+### CLI vs Internal Logic
+
+- **CLI entrypoints** (for example `resolver/cli/...`, `freeze_snapshot.main`, `export_facts.__main__`) are responsible for:
+  - Reading env vars.
+  - Translating them into explicit arguments (`write_db`, `db_url`, date windows).
+  - Passing those arguments into internal functions.
+- **Internal functions** should:
+  - Trust their arguments (`write_db`, `db_url`, `months`) and not re-query env.
+  - Be deterministic given their inputs, which makes them easier to test.
+
+### Logging and diagnostics
+
+- Connectors, export, and freeze layers should use structured logging (for example via the existing logger) to capture:
+  - Source name, counts before/after filters, and semantics histograms.
+  - DB target and write decisions (`write_db` and `db_url`).
+- CI summary scripts (such as `scripts/ci/summarize_connectors.py`) consume these logs and diagnostics.
+
+This convention keeps environment-dependent behaviour in a small, well-defined surface area.
+
 ## Monthly snapshots in CI
 
 - Workflow: `.github/workflows/resolver-monthly.yml` (manual dispatch remains available; `.github/workflows/publish_snapshot.yml` is now a fallback for unusual recoveries).
