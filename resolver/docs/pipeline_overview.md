@@ -1,6 +1,6 @@
 # Resolver Pipeline Overview
 
-This page provides a guided tour of the Resolver data pipeline from the first connector call to the publication of exports and frozen monthly snapshots. It is intended for contributors who need to understand how staging inputs, validation, precedence, and ReliefWeb PDF parsing fit together.
+This page provides a guided tour of the Resolver data pipeline from the first connector call to the publication of exports and (in a follow-on workflow) frozen monthly snapshots. It is intended for contributors who need to understand how staging inputs, validation, precedence, and ReliefWeb PDF parsing fit together.
 
 ```mermaid
 flowchart LR
@@ -33,10 +33,10 @@ The pipeline runs as:
 2. **Export Facts (canonical facts)**
    - Map staging into canonical facts: `iso3`, `ym`, `hazard_code` / `hazard_class`, `metric`, `value`, `series_semantics`, `source`.
    - Write canonical outputs: `facts.csv` for the run and, when DB writes are enabled, `facts_resolved` / `facts_deltas` in DuckDB.
-3. **Freeze Snapshot (per-month snapshots)**
+3. **Freeze Snapshot (per-month snapshots; separate workflow)**
    - Given canonical facts and a target month (`ym`), filter to that month, normalise required columns, and deduplicate resolved/deltas frames.
    - Optionally run EM-DAT validators when EM-DAT metrics are present.
-   - Write a snapshot parquet for the month and update DuckDB snapshot metadata.
+   - Write a snapshot parquet for the month and update DuckDB snapshot metadata. The legacy in-backfill freeze stage is disabled; snapshots will be rebuilt via the DB-first snapshot workflow.
 4. **Forecaster & APIs (consumers)**
    - Consult DuckDB and/or snapshot parquet files to obtain resolution-ready facts per country, month, and shock.
    - Use these as the scoring baseline for forecasting questions and downstream analysis.
@@ -52,7 +52,7 @@ The manual `resolver-initial-backfill` workflow currently runs only the four con
 - **EM-DAT**
 - **ACLED**
 
-Other connectors are intentionally excluded from this workflow to avoid destabilising the ingestion run. The backfill writes canonical facts from these four sources into DuckDB for downstream snapshot, dashboard, and forecasting stages.
+Other connectors are intentionally excluded from this workflow to avoid destabilising the ingestion run. The backfill writes canonical facts from these four sources into DuckDB for downstream snapshot, dashboard, and forecasting stages. Freeze/snapshot generation is intentionally detached from the backfill while the DB-first snapshot builder is rolled out; the GitHub Actions workflow now stops after export-and-DuckDB writes.
 
 ## Pipeline stages
 

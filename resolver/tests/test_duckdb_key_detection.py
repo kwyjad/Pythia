@@ -1,4 +1,6 @@
-import duckdb
+import pytest
+
+duckdb = pytest.importorskip("duckdb")
 
 from resolver.db import duckdb_io as dio
 

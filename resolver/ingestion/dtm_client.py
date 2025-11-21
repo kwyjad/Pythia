@@ -118,6 +118,28 @@ DIAGNOSTICS_ROOT = REPO_ROOT / "diagnostics" / "ingestion"
 DIAGNOSTICS_DIR = DIAGNOSTICS_ROOT  # Back-compat alias expected by older tests
 DTM_DIAGNOSTICS_DIR = DIAGNOSTICS_ROOT / "dtm"
 
+
+def compute_monthly_flows(frame: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    """Convert stock values into non-negative monthly flows.
+
+    This helper mirrors the fast-test contract: it drops the first observation per
+    country/admin bucket, diffs subsequent rows, clips negative deltas to zero, and
+    reports whether any negative flows remain after clipping.
+    """
+
+    if frame.empty:
+        return frame.copy(), False
+
+    sorted_frame = frame.sort_values(
+        ["country_iso3", "admin1", "month_start", "as_of"], kind="mergesort"
+    ).reset_index(drop=True)
+    sorted_frame["value"] = sorted_frame.groupby(["country_iso3", "admin1"])["value"].diff()
+
+    flows = sorted_frame.dropna(subset=["value"]).copy()
+    flows["value"] = flows["value"].clip(lower=0)
+    has_negative = (flows["value"] < 0).any()
+    return flows, has_negative
+
 # Per-subdir directories (monkeypatchable in tests)
 DTM_RAW_DIR = DTM_DIAGNOSTICS_DIR / "raw"
 DTM_METRICS_DIR = DTM_DIAGNOSTICS_DIR / "metrics"
@@ -325,6 +347,44 @@ def _prepare_run_details_payload(
 
     _ensure_normalize_block(extras)
     return base
+
+
+def _discover_all_countries(api: Any) -> List[str]:
+    """Fetch and normalise the full DTM country list.
+
+    This is a lightweight helper used by tests and diagnostics; it does not
+    attempt retries or HTTP logging.
+    """
+
+    try:
+        frame = api.get_all_countries()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        LOG.error("Failed to fetch DTM country list: %s", exc)
+        raise
+
+    if not isinstance(frame, pd.DataFrame):
+        frame = pd.DataFrame(columns=["CountryName"])
+
+    cleaned: List[str] = []
+    for raw in frame.get("CountryName", []):
+        label = str(raw).strip() if raw is not None else ""
+        if not label:
+            continue
+        if label not in cleaned:
+            cleaned.append(label)
+
+    if not cleaned:
+        DISCOVERY_FAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        write_json(
+            DISCOVERY_FAIL_PATH,
+            {"reason": "empty_discovery", "rows": int(frame.shape[0])},
+        )
+        raise RuntimeError(f"Country discovery returned 0 countries (rows={frame.shape[0]})")
+
+    snapshot_frame = pd.DataFrame({"CountryName": cleaned})
+    DISCOVERY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_frame.to_csv(DISCOVERY_SNAPSHOT_PATH, index=False)
+    return cleaned
 
 
 def _write_run_details(payload: Mapping[str, Any]) -> None:
@@ -2849,7 +2909,10 @@ class DTMApiClient:
             iso_candidate = (iso_candidate or "").strip().upper()[:3] or None
 
         if iso_candidate:
-            attempts.append(("iso3", {"CountryISO3": iso_candidate}))
+            iso_payload: Dict[str, Any] = {"CountryISO3": iso_candidate}
+            if trimmed:
+                iso_payload["CountryName"] = trimmed
+            attempts.append(("iso3", iso_payload))
         if trimmed:
             attempts.append(("name", {"CountryName": trimmed}))
         if not attempts:

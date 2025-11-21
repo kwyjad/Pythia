@@ -92,19 +92,15 @@ This convention keeps environment-dependent behaviour in a small, well-defined s
 
 ## Initial backfill workflow
 
-- Workflow: `.github/workflows/resolver-initial-backfill.yml` (manual dispatch only).
-- Launch it from the **Actions** tab by choosing **Resolver — Initial Backfill**, overriding the `months_back` input (default `12`) or `only` connector filter as needed.
+- Workflow: `.github/workflows/resolver-initial-backfill.yml` (manual dispatch plus a scheduled run at `0 0 5 * *`).
+- Launch it from the **Actions** tab by choosing **Resolver — Initial Backfill**, overriding the `months_back` input (default `1`) or `only` connector filter as needed. The scheduled run uses the one-month window so upstream sources have time to publish end-of-month data.
 - Note: this workflow currently runs only the DTM, IDMC, EM-DAT, and ACLED connectors. Additional connectors will be re-enabled once their ingestion paths are stable.
 - The `ingest` job runs `resolver/ingestion/run_all_stubs.py --mode real`, wiring connector secrets from the environment. Connectors without credentials stay in header-only mode so the workflow still succeeds.
-- The `derive-freeze` job loops over the computed year-month list, runs `export_facts → precedence_engine → make_deltas`, and freezes each snapshot via `python -m resolver.tools.freeze_snapshot --facts … --month <YYYY-MM> --write-db 1` so DuckDB mirrors remain in sync.
-- The `context` job calls `python -m resolver.tools.build_llm_context --months 12 --outdir context/` to produce `facts_last12.jsonl` and `facts_last12.parquet`.
+- The `export-duckdb` job restores ACLED diagnostics, exports canonical facts, and writes DuckDB tables. The legacy freeze snapshot stage is disabled in this workflow; snapshots will be produced by the upcoming DB-first snapshot builder.
 - Final artifacts:
-  - `resolver/snapshots/<YYYY-MM>/` with `facts_resolved.*`, optional `facts_deltas.*`, and `manifest.json` per month.
-  - `context/facts_last12.jsonl` and `context/facts_last12.parquet` ready for Forecaster ingestion.
-    Each row covers a `(ym, iso3, hazard_code, metric)` tuple with `unit`, rounded `value`, and `series="new"`.
-    The Forecaster LLM reads the JSONL file directly to hydrate its monthly context embeddings;
-    the matching Parquet provides the same schema for analytics spot checks.
-- After a run completes download the combined artifact (named `resolver-initial-backfill-<run_id>`) and verify the snapshot manifests plus context bundle row counts before handing off to forecasting ops.
+  - `resolver/exports/backfill/` for canonical CSVs generated from the backfill window.
+  - `data/resolver_backfill.duckdb` carrying the ACLED and export writes for downstream inspection.
+  - Context bundles and snapshot archives are no longer built by this workflow while the freeze layer migrates to the DB-first path.
 
 ### Rerunning the ACLED backfill job
 

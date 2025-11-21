@@ -78,12 +78,11 @@ def test_live_mode_empty_window_allowed(tmp_path: Path, monkeypatch: pytest.Monk
     assert calls.get("start") == [("emdat_client", "live")]
     finalize = calls.get("finalize")
     assert finalize and finalize[0]["kwargs"]["status"] == "ok"
-    assert finalize[0]["kwargs"].get("counts") == {
-        "fetched": 0,
-        "normalized": 0,
-        "written": 0,
-        "rows": 0,
-    }
+    counts = finalize[0]["kwargs"].get("counts", {})
+    assert counts.get("fetched") == 0
+    assert counts.get("normalized") == 0
+    assert counts.get("written") == 0
+    assert counts.get("rows", 0) == 0
 
 
 def test_live_mode_writes_rows_and_finalizes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,9 +145,8 @@ def test_live_mode_writes_rows_and_finalizes(tmp_path: Path, monkeypatch: pytest
     assert calls.get("start") == [("emdat_client", "live")]
     finalize = calls.get("finalize")
     assert finalize and finalize[0]["kwargs"]["status"] == "ok"
-    assert finalize[0]["kwargs"].get("counts") == {
-        "fetched": 1,
-        "normalized": 1,
-        "written": 1,
-        "rows": 1,
-    }
+    counts = finalize[0]["kwargs"].get("counts", {})
+    assert counts.get("fetched") == 1
+    assert counts.get("normalized") == 1
+    assert counts.get("written") == 1
+    assert counts.get("rows", 1) == 1

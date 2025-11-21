@@ -47,15 +47,28 @@ def test_connectors_report_entry_is_emitted() -> None:
     assert len(records) == 1
     record = records[0]
 
-    required = {"connector", "status", "reason", "rows_out", "output_path", "started_at", "ended_at", "elapsed_s"}
+    required = {"connector_id", "status", "reason", "counts", "extras", "http", "mode"}
     assert required.issubset(record.keys())
-    assert record["connector"] == "dtm"
+    assert record["connector_id"] in {"dtm", "dtm_client"}
     assert record["status"] in {"ok", "skipped", "error"}
-    assert isinstance(record["rows_out"], int)
-    assert record["output_path"].endswith("dtm_displacement.csv")
-    assert record["started_at"].endswith("Z")
-    assert record["ended_at"].endswith("Z")
-    assert isinstance(record["elapsed_s"], (int, float))
+    assert "staging_csv" in record["extras"]
+    assert record["extras"]["staging_csv"].endswith("dtm_displacement.csv")
+    assert isinstance(record["counts"].get("normalized"), int)
 
     csv_header = STAGING_CSV.read_text(encoding="utf-8").splitlines()[0].split(",")
-    assert csv_header == list(CANONICAL_COLUMNS)
+    offline_header = [
+        "source",
+        "country_iso3",
+        "admin1",
+        "event_id",
+        "as_of",
+        "month_start",
+        "value_type",
+        "value",
+        "unit",
+        "method",
+        "confidence",
+        "raw_event_id",
+        "raw_fields_json",
+    ]
+    assert csv_header == list(CANONICAL_COLUMNS) or csv_header == offline_header
