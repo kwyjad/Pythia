@@ -103,3 +103,19 @@ Resolver exposes two user-facing series:
 When running against DuckDB, Resolver materialises these answers directly from `facts_resolved.value` (stock totals) or `facts_deltas.value_new` (monthly deltas), keyed by the `(iso3, hazard_code, metric, ym)` tuple where `ym` is derived from the Europe/Istanbul cutoff month.
 
 If the requested series has no data, Resolver does **not** fall back to the other series unless the operator explicitly opts in by setting `RESOLVER_ALLOW_SERIES_FALLBACK=1`. Both the CLI and API surface the `series_returned` field so clients can verify which series satisfied the request.
+
+### PA Trend Helper (36-Month History)
+
+For Forecaster prompts and human review, Resolver exposes a lightweight PA trend helper
+under `resolver.snapshot.pa_trends`:
+
+- `get_pa_trend(con, iso3, hazard_code, months=36)`: queries the `facts_snapshot` table
+  and returns up to N months of PA values per (ym, iso3, hazard_code), using a simple
+  mapping of (source, metric) pairs that represent "people affected" (e.g., EM-DAT
+  `affected`, DTM IDP stock, IDMC new displacements).
+
+- `render_pa_trend_markdown(trend, iso3, hazard_code)`: renders the trend as a small
+  Markdown table suitable for embedding in Forecaster prompts.
+
+This helper is purely read-side; it does not modify DB state and can be used from any
+consumer that has read access to the snapshot database.
