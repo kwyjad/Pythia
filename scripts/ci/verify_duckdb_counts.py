@@ -66,22 +66,31 @@ def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
 def _fetch_breakdown(
     con: duckdb.DuckDBPyConnection,
 ) -> Iterable[Tuple[str, str, str, int]]:
+    """Return per-source/metric/semantics counts from ``facts_resolved``.
+
+    DuckDB disallows grouping by an alias that shadows an underlying column name,
+    so we normalise ``source`` to a different alias for grouping and rename it in
+    the outer projection for downstream consumers.
+    """
     return con.execute(
         """
-        WITH normalized AS (
-          SELECT
-            COALESCE(source, '') AS source,
-            COALESCE(metric, '') AS metric,
-            COALESCE(series_semantics, '') AS semantics
-          FROM facts_resolved
-        )
         SELECT
-          source,
+          source_normalized AS source,
           metric,
           semantics,
-          COUNT(*) AS rows
-        FROM normalized
-        GROUP BY source, metric, semantics
+          rows
+        FROM (
+          SELECT
+            COALESCE(source, '') AS source_normalized,
+            COALESCE(metric, '') AS metric,
+            COALESCE(series_semantics, '') AS semantics,
+            COUNT(*) AS rows
+          FROM facts_resolved
+          GROUP BY
+            COALESCE(source, ''),
+            COALESCE(metric, ''),
+            COALESCE(series_semantics, '')
+        )
         ORDER BY rows DESC, source, metric, semantics
         """
     ).fetchall()

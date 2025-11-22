@@ -32,5 +32,11 @@ def test_fetch_breakdown_handles_null_source_and_group_by_alias_safely() -> None
         assert result[("", "idp_displacement_stock_dtm", "stock")] == 1
         assert result[("IOM DTM", "idp_displacement_stock_dtm", "stock")] == 1
         assert result[("emdat", "affected", "new")] == 1
+
+        assert rows == [
+            ("", "idp_displacement_stock_dtm", "stock", 1),
+            ("IOM DTM", "idp_displacement_stock_dtm", "stock", 1),
+            ("emdat", "affected", "new", 1),
+        ]
     finally:
         con.close()
