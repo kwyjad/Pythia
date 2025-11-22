@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+import pandas as pd
+
 from resolver.db import duckdb_io
 
 LOG = logging.getLogger(__name__)
@@ -235,19 +237,16 @@ def build_snapshot_for_month(
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         snapshot_path = snapshot_dir / "facts.parquet"
         LOG.info("Writing snapshot parquet for ym=%s to %s", ym, snapshot_path)
-        conn.execute(
+        snapshot_df = conn.execute(
             """
-            COPY (
-                SELECT *
-                FROM {snapshot}
-                WHERE ym = ?
-                ORDER BY iso3, hazard_code, metric, series_semantics, as_of_date
-            ) TO ? (FORMAT 'parquet');
-            """.format(
-                snapshot=SNAPSHOT_TABLE
-            ),
-            [ym, str(snapshot_path)],
-        )
+            SELECT *
+            FROM {snapshot}
+            WHERE ym = ?
+            ORDER BY iso3, hazard_code, metric, series_semantics, as_of_date
+            """.format(snapshot=SNAPSHOT_TABLE),
+            [ym],
+        ).df()
+        snapshot_df.to_parquet(snapshot_path)
 
     _insert_snapshot_meta(conn, ym, actual_run_id, created_at)
 
