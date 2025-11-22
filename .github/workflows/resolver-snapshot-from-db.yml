@@ -2,25 +2,51 @@
 name: Resolver — Snapshot from DB
 
 on:
-  workflow_dispatch:
-    inputs:
-      months_back:
-        description: "Number of months to snapshot (default 36)"
-        required: false
-        default: "36"
   workflow_run:
     workflows: ["Resolver — Initial Backfill"]
     types:
       - completed
+  workflow_dispatch:
+    inputs:
+      backfill_run_id:
+        description: "GitHub run ID of the Resolver — Initial Backfill run to pull resolver-backfill-db from"
+        required: false
+      months_back:
+        description: "Number of months to snapshot (default 36)"
+        required: false
+        default: "36"
 
 jobs:
   snapshot-from-db:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    env:
-      DB_URL: "duckdb:////home/runner/work/${{ github.repository }}/data/resolver_backfill.duckdb"
 
     steps:
+      - name: Determine backfill run ID and months_back
+        id: meta
+        env:
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_BACKFILL_RUN_ID: ${{ github.event.inputs.backfill_run_id }}
+          INPUT_MONTHS_BACK: ${{ github.event.inputs.months_back }}
+        run: |
+          set -euo pipefail
+          echo "Event name: $GITHUB_EVENT_NAME"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
+            echo "Detected workflow_run event."
+            echo "backfill_run_id=${WORKFLOW_RUN_ID}" >> "$GITHUB_OUTPUT"
+            echo "months_back=36" >> "$GITHUB_OUTPUT"
+          else
+            echo "Detected manual workflow_dispatch."
+            if [ -z "${INPUT_BACKFILL_RUN_ID}" ]; then
+              echo "ERROR: Manual run requires 'backfill_run_id' input."
+              echo "Please provide the run ID of a successful 'Resolver — Initial Backfill' run."
+              exit 1
+            fi
+            echo "backfill_run_id=${INPUT_BACKFILL_RUN_ID}" >> "$GITHUB_OUTPUT"
+            months="${INPUT_MONTHS_BACK}"
+            echo "months_back=${months:-36}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -40,25 +66,63 @@ jobs:
         with:
           name: resolver-backfill-db
           path: data
+          run-id: ${{ steps.meta.outputs.backfill_run_id }}
 
-      - name: Determine months_back
-        id: months
+      - name: Verify downloaded DB file
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.months_back }}" ]; then
-            echo "value=${{ github.event.inputs.months_back }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=36" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          echo "Listing data/ directory:"
+          ls -lh data || true
+          if [ ! -f "data/resolver_backfill.duckdb" ]; then
+            echo "ERROR: data/resolver_backfill.duckdb not found after download."
+            exit 1
           fi
+          echo "Found data/resolver_backfill.duckdb"
 
       - name: Run snapshot-from-DB CLI
         run: |
           set -euo pipefail
+          DB_URL="duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb"
           echo "Using DB_URL=${DB_URL}"
-          echo "Snapshotting last ${{ steps.months.outputs.value }} months"
+          echo "Snapshotting last ${{ steps.meta.outputs.months_back }} months"
           python -m resolver.cli.snapshot_from_db \
             --db-url "${DB_URL}" \
-            --months-back "${{ steps.months.outputs.value }}" \
+            --months-back "${{ steps.meta.outputs.months_back }}" \
             --out-dir "snapshots"
+
+      - name: Print snapshot DB summary
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import duckdb
+          from pathlib import Path
+
+          db_path = Path("data/resolver_backfill.duckdb")
+          print(f"Snapshot DB summary for {db_path}:")
+          con = duckdb.connect(str(db_path))
+
+          def count(table: str) -> None:
+              try:
+                  n = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                  print(f"  {table}: {n} rows")
+              except Exception as exc:
+                  print(f"  {table}: ERROR - {exc}")
+
+          for tbl in [
+              "facts_resolved",
+              "facts_deltas",
+              "acled_monthly_fatalities",
+              "facts_snapshot",
+              "snapshots",
+          ]:
+              count(tbl)
+
+          try:
+              ym_count = con.execute("SELECT COUNT(DISTINCT ym) FROM facts_snapshot").fetchone()[0]
+              print(f"  facts_snapshot distinct ym: {ym_count}")
+          except Exception as exc:
+              print(f"  facts_snapshot distinct ym: ERROR - {exc}")
+          PY
 
       - name: Upload snapshots as artifact
         if: ${{ success() }}
