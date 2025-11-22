@@ -569,7 +569,7 @@ jobs:
             cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
           fi
           if [ -f diagnostics/ingestion/summary.md ]; then
-            { 
+            {
               echo ""
               echo ""
               cat diagnostics/ingestion/duckdb_summary.md
