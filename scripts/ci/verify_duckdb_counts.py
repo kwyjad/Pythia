@@ -68,13 +68,20 @@ def _fetch_breakdown(
 ) -> Iterable[Tuple[str, str, str, int]]:
     return con.execute(
         """
+        WITH normalized AS (
+          SELECT
+            COALESCE(source, '') AS source,
+            COALESCE(metric, '') AS metric,
+            COALESCE(series_semantics, '') AS semantics
+          FROM facts_resolved
+        )
         SELECT
-          COALESCE(source, '') AS source,
-          COALESCE(metric, '') AS metric,
-          COALESCE(series_semantics, '') AS semantics,
+          source,
+          metric,
+          semantics,
           COUNT(*) AS rows
-        FROM facts_resolved
-        GROUP BY 1, 2, 3
+        FROM normalized
+        GROUP BY source, metric, semantics
         ORDER BY rows DESC, source, metric, semantics
         """
     ).fetchall()
