@@ -1,8 +1,3 @@
-"""
-Resolver snapshot builder package.
+from .builder import SnapshotResult, build_snapshot_for_month, build_snapshots
 
-This package will contain DB-based snapshot building logic that operates
-exclusively on canonical facts stored in DuckDB (facts_resolved,
-facts_deltas, snapshots).
-"""
-
+__all__ = ["SnapshotResult", "build_snapshot_for_month", "build_snapshots"]

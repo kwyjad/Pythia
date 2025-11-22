@@ -37,6 +37,10 @@ The pipeline runs as:
    - Given canonical facts and a target month (`ym`), filter to that month, normalise required columns, and deduplicate resolved/deltas frames.
    - Optionally run EM-DAT validators when EM-DAT metrics are present.
    - Write a snapshot parquet for the month and update DuckDB snapshot metadata. The legacy in-backfill freeze stage is disabled; snapshots will be rebuilt via the DB-first snapshot workflow.
+
+> Legacy note: The original `resolver.tools.freeze_snapshot` CLI and its DB write helper (`_maybe_write_db`) are now considered legacy.
+> They are no longer used in ingestion/backfill workflows, which instead rely on the DB-backed snapshot builder (`resolver.snapshot.builder`).
+> Legacy tests that exercise `freeze_snapshot` are marked as such and do not gate CI.
 4. **Forecaster & APIs (consumers)**
    - Consult DuckDB and/or snapshot parquet files to obtain resolution-ready facts per country, month, and shock.
    - Use these as the scoring baseline for forecasting questions and downstream analysis.
@@ -71,6 +75,14 @@ Other connectors are intentionally excluded from this workflow to avoid destabil
 - **Snapshots**
   The freezer [`resolver/tools/freeze_snapshot.py`](../tools/freeze_snapshot.py) writes immutable monthly bundles (`resolver/snapshots/YYYY-MM`) for downstream analytics, dashboards, and the forecast resolver.
   A DB-first successor is planned under [`resolver/snapshot`](../snapshot) with CLI orchestration at [`resolver/cli/snapshot_from_db.py`](../cli/snapshot_from_db.py) so monthly snapshots can be built directly from DuckDB.
+
+### DB-backed snapshot builder (`facts_snapshot`)
+
+In addition to the legacy freezer, the resolver includes a DB-backed snapshot builder under [`resolver.snapshot.builder`](../snapshot/builder.py):
+
+- Reads canonical tables `facts_resolved`, `facts_deltas`, and connector-specific monthly tables (e.g., `acled_monthly_fatalities`).
+- For each target `ym` (for example, `"2025-11"`), writes a unified `facts_snapshot` table plus a `snapshots` metadata table and can export `data/snapshots/<ym>/facts.parquet`.
+- Operates purely from the DuckDB database (see [WRITING_TO_DUCKDB](WRITING_TO_DUCKDB.md)) and is idempotent: reruns replace prior rows for the month instead of appending duplicates.
 
 ## Additional references
 

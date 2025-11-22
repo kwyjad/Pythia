@@ -7,6 +7,15 @@ import pytest
 
 from resolver.tools import freeze_snapshot
 
+pytestmark = [
+    pytest.mark.legacy_freeze,
+    pytest.mark.xfail(
+        reason=(
+            "Legacy freeze_snapshot DB diagnostics dropped in favour of DB-backed snapshot builder."
+        )
+    ),
+]
+
 
 class _StubResult:
     def __init__(self, rows_delta: int = 1, rows_written: int = 1, rows_in: int = 1) -> None:

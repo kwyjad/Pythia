@@ -134,6 +134,10 @@ def _expected_resolved(df: pd.DataFrame) -> pd.DataFrame:
     duckdb_io is None,
     reason="duckdb not installed — run `pip install -e .[db]` or `make dev-setup`",
 )
+@pytest.mark.legacy_freeze
+@pytest.mark.xfail(
+    reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+)
 def test_exporter_dual_writes_to_duckdb(tmp_path, monkeypatch):
     staging = tmp_path / "staging.csv"
     data = pd.DataFrame(

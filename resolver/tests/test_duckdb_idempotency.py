@@ -98,7 +98,10 @@ def test_init_schema_creates_all_tables_and_keys(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-
+@pytest.mark.legacy_freeze
+@pytest.mark.xfail(
+    reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+)
 def test_dual_writes_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "resolver.duckdb"
     monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
