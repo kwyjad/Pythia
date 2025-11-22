@@ -1,13 +1,13 @@
 ---
 name: Resolver — Initial Backfill
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       months_back:
-        description: "Number of months to include (default 12)"
+        description: "Number of months to include (default 1)"
         required: false
-        default: "12"
+        default: "1"
       only_connector:
         description: "Optional connector name for --only (e.g. dtm_client)"
         required: false
@@ -55,6 +55,8 @@ on:
         options:
           - "false"
           - "true"
+  schedule:
+    - cron: "0 0 5 * *"
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -422,16 +424,14 @@ jobs:
             diagnostics/acled/
           if-no-files-found: error
 
-  derive-freeze:
-    name: Derive & freeze snapshots
+  export-duckdb:
+    name: Export canonical facts to DuckDB
     runs-on: ubuntu-latest
     needs:
       - ingest
       - acled-backfill
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
-      RESOLVER_DUCKDB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
-      BACKFILL_MONTHS_CSV: ${{ needs.ingest.outputs.months }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
       - name: Checkout repository
@@ -473,26 +473,6 @@ jobs:
             mkdir -p diagnostics/ingestion/acled
             cp -R acled-artifacts/diagnostics/acled/. diagnostics/ingestion/acled/
           fi
-
-      - name: Derive freeze month env
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-
-          months = os.environ.get("BACKFILL_MONTHS_CSV", "")
-          parts = [part.strip() for part in months.split(",") if part.strip()]
-          if not parts:
-              raise SystemExit("Unable to derive BACKFILL_MONTH from BACKFILL_MONTHS_CSV")
-
-          latest = parts[-1]
-          github_env = os.environ.get("GITHUB_ENV")
-          if not github_env:
-              raise SystemExit("GITHUB_ENV is not set; cannot persist BACKFILL_MONTH")
-
-          with open(github_env, "a", encoding="utf-8") as handle:
-              handle.write(f"BACKFILL_MONTH={latest}\n")
-          PY
 
       - name: Export canonical facts
         run: |
@@ -549,49 +529,7 @@ jobs:
             echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
           fi
 
-      - name: Skip EM-DAT freeze for ACLED-only backfill
-        if: ${{ inputs.only_connector == 'acled_client' }}
-        run: |
-          echo "Skipping EM-DAT freeze snapshot + DuckDB verification for ACLED-only backfill."
-
-      - name: Derive & Freeze (write DuckDB)
-        if: ${{ inputs.only_connector != 'acled_client' }}
-        env:
-          RESOLVER_WRITE_DB: "1"
-          WRITE_DB: "1"
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          facts_path="diagnostics/ingestion/export_preview/facts.csv"
-          if [ ! -f "${facts_path}" ]; then
-            echo "facts.csv not found at ${facts_path}" >&2
-            ls -la diagnostics/ingestion/export_preview || true
-            exit 1
-          fi
-          python -m scripts.ci.append_stage_to_summary \
-            --section "Derive-freeze stage: Freeze snapshot (bulk) (start)" \
-            --status start || true
-          if python -m resolver.tools.freeze_snapshot \
-            --facts diagnostics/ingestion/export_preview/facts.csv \
-            --month "${BACKFILL_MONTH}" \
-            --write-db=1 \
-            --db-url "${{ env.RESOLVER_DUCKDB_URL }}"; then
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Freeze snapshot (bulk) (end)" \
-              --status success || true
-          else
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Freeze snapshot (bulk) (failed)" \
-              --status failed || true
-            exit 1
-          fi
-
       - name: Verify DuckDB counts
-        if: ${{ inputs.only_connector != 'acled_client' }}
         env:
           RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
@@ -618,16 +556,6 @@ jobs:
             exit 1
           fi
 
-      - name: Derive and freeze monthly snapshots
-        if: ${{ false }} # Temporarily disabled: snapshot building will move to resolver-snapshot-from-db workflow.
-        env:
-          MONTHS: ${{ env.BACKFILL_MONTHS_CSV }}
-        run: |
-          echo "::warning::Freeze snapshot stage is disabled in resolver-initial-backfill; use resolver-snapshot-from-db instead."
-          python -m scripts.ci.append_stage_to_summary \
-            --section "Derive-freeze stage: Freeze snapshots (start)" \
-            --status skipped || true
-
       - name: Summarize DuckDB contents (post-freeze)
         run: |
           set -euo pipefail
@@ -648,105 +576,11 @@ jobs:
             } >> diagnostics/ingestion/summary.md
           fi
 
-      - name: Upload snapshots and database
+      - name: Upload exports and database
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
           if-no-files-found: warn
           path: |
-            resolver/snapshots/
             resolver/exports/backfill/
-            ${{ env.BACKFILL_DB_PATH }}
-
-  context:
-    name: Build LLM context bundle
-    runs-on: ubuntu-latest
-    needs:
-      - ingest
-      - derive-freeze
-    env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
-      CONTEXT_MONTHS: ${{ needs.ingest.outputs.month_count }}
-      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip wheel setuptools
-          pip install -e .[db]
-
-      - name: Download snapshots bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
-          path: .
-
-      - name: Build context bundle
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          python -m scripts.ci.append_stage_to_summary \
-            --section "LLM context stage: build bundle (start)" \
-            --status start || true
-          if python scripts/ci/build_llm_context.py; then
-            python -m scripts.ci.append_stage_to_summary \
-              --section "LLM context stage: build bundle (end)" \
-              --status success || true
-          else
-            python -m scripts.ci.append_stage_to_summary \
-              --section "LLM context stage: build bundle (failed)" \
-              --status failed || true
-            exit 1
-          fi
-
-      - name: Upload context artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_CONTEXT_ARTIFACT }}
-          if-no-files-found: warn
-          path: context/
-
-  artifacts:
-    name: Publish combined artifacts
-    runs-on: ubuntu-latest
-    needs:
-      - derive-freeze
-      - context
-    env:
-      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
-    steps:
-      - name: Download snapshots
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
-          path: .
-
-      - name: Download context bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_CONTEXT_ARTIFACT }}
-          path: .
-
-      - name: Upload combined bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolver-initial-backfill-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          path: |
-            resolver/snapshots/
-            context/
             ${{ env.BACKFILL_DB_PATH }}

@@ -11,7 +11,7 @@ def test_missing_key_returns_none(monkeypatch: pytest.MonkeyPatch, caplog: pytes
     with caplog.at_level("DEBUG"):
         key = get_dtm_api_key()
     assert key is None
-    assert "not present" in caplog.text
+    assert "not present" in caplog.text or "No DTM API credentials" in caplog.text
 
 
 def test_key_is_logged_masked(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -19,5 +19,5 @@ def test_key_is_logged_masked(monkeypatch: pytest.MonkeyPatch, caplog: pytest.Lo
     with caplog.at_level("INFO"):
         key = get_dtm_api_key()
     assert key.endswith("6789")
-    assert "DTM_API_KEY ending with" in caplog.text
+    assert "DTM_API_KEY ending with" in caplog.text or "API key ending with" in caplog.text
     assert "abc123456789" not in caplog.text

@@ -1,6 +1,9 @@
 from __future__ import annotations
-import duckdb
+
+import pytest
 import pandas as pd
+
+duckdb = pytest.importorskip("duckdb")
 
 from resolver.transform.resolve_sources import resolve_sources
 

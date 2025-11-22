@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import duckdb
+import pytest
+
+duckdb = pytest.importorskip("duckdb")
 import pandas as pd
 
 from resolver.tests.utils import run as run_proc

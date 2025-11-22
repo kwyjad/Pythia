@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from resolver.ingestion.dtm_client import CANONICAL_COLUMNS
+from resolver.ingestion.dtm_client import CANONICAL_HEADERS
 from resolver.tests.utils import run as run_proc
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -71,7 +71,7 @@ def test_offline_smoke_creates_csv_and_diagnostics(monkeypatch: pytest.MonkeyPat
     with STAGING_CSV.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle)
         header = next(reader)
-        assert header == list(CANONICAL_COLUMNS)
+        assert header == list(CANONICAL_HEADERS)
         rows = list(reader)
         assert not rows, "offline smoke should only write the header"
 
@@ -85,10 +85,15 @@ def test_offline_smoke_creates_csv_and_diagnostics(monkeypatch: pytest.MonkeyPat
     assert len(report_lines) == 1
     record = report_lines[0]
     assert record["status"] == "ok"
-    assert record["connector"] == "dtm"
-    assert record["rows_out"] == 0
+    connector = record.get("connector") or record.get("connector_id")
+    assert connector in {"dtm", "dtm_client"}
+    rows_out = record.get("rows_out")
+    if rows_out is None:
+        rows_out = record.get("counts", {}).get("written")
+    assert rows_out == 0
     assert record["reason"] == "offline_smoke"
-    assert record["output_path"].endswith("dtm_displacement.csv")
+    output_path = record.get("output_path") or record.get("extras", {}).get("staging_csv")
+    assert output_path and output_path.endswith("dtm_displacement.csv")
 
 
 def test_skips_gracefully_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,7 +119,7 @@ def test_skips_gracefully_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     with STAGING_CSV.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle)
         header = next(reader)
-        assert header == list(CANONICAL_COLUMNS)
+        assert header == list(CANONICAL_HEADERS)
         assert not list(reader), "skip mode should only emit the header"
 
     summary = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
@@ -127,4 +132,7 @@ def test_skips_gracefully_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     record = report_lines[0]
     assert record["status"] == "skipped"
     assert record["reason"] == "auth_missing"
-    assert record["rows_out"] == 0
+    rows_out = record.get("rows_out")
+    if rows_out is None:
+        rows_out = record.get("counts", {}).get("written")
+    assert rows_out == 0

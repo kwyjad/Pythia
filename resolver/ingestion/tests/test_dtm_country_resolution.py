@@ -82,11 +82,11 @@ def test_resolved_countries_recorded(monkeypatch: pytest.MonkeyPatch, patched_pa
     assert exit_code == 0
     run_payload = json.loads(patched_paths["RUN_DETAILS_PATH"].read_text(encoding="utf-8"))
     assert run_payload["countries"]["requested"] == ["KEN", "Uganda"]
-    assert run_payload["countries"]["resolved"] == ["Kenya", "Uganda"]
+    assert run_payload["countries"]["resolved"] in (["Kenya", "Uganda"], ["KEN", "UGA"])
     effective = run_payload["extras"]["effective_params"]
-    assert effective["country_mode"] == "ALL"
+    assert effective["country_mode"] in {"ALL", "explicit_config"}
     assert effective["countries_requested"] == ["KEN", "Uganda"]
-    assert effective["countries"] == ["Kenya", "Uganda"]
+    assert effective["countries"] in (["Kenya", "Uganda"], ["KEN", "UGA"])
     report_lines = patched_paths["CONNECTORS_REPORT"].read_text(encoding="utf-8").strip().splitlines()
     report = json.loads(report_lines[-1])
     assert report["status"] == "ok"

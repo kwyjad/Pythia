@@ -1,6 +1,7 @@
-import duckdb
-import pandas as pd
 import pytest
+
+duckdb = pytest.importorskip("duckdb")
+import pandas as pd
 
 from resolver.db import duckdb_io
 

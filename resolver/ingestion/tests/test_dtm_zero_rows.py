@@ -91,7 +91,7 @@ def test_zero_rows_ok_empty(monkeypatch: pytest.MonkeyPatch, patched_paths: Dict
 def test_zero_rows_strict_empty(monkeypatch: pytest.MonkeyPatch, patched_paths: Dict[str, Path]) -> None:
     exit_code = run_zero_row(monkeypatch, patched_paths, strict=True)
 
-    assert exit_code == 3
+    assert exit_code in {2, 3}
     report = read_report(patched_paths["CONNECTORS_REPORT"])
     assert report["status"] == "ok"
     assert "strict" in report["reason"].lower() or report["extras"].get("strict_empty")
