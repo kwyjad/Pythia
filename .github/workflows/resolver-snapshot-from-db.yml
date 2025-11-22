@@ -1,35 +1,28 @@
 ---
-name: Resolver — Snapshot from DuckDB (manual)
+name: Resolver — Snapshot from DB
 
 on:
   workflow_dispatch:
     inputs:
-      month:
-        description: "Optional target month (YYYY-MM)"
+      months_back:
+        description: "Number of months to snapshot (default 36)"
         required: false
-        default: ""
-      db_url:
-        description: "DuckDB URL containing canonical facts"
-        required: false
-        default: "duckdb:///resolver/db/resolver.duckdb"
-      dry_run:
-        description: "Print the stub plan without performing work"
-        required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
+        default: "36"
+  workflow_run:
+    workflows: ["Resolver — Initial Backfill"]
+    types:
+      - completed
 
 jobs:
   snapshot-from-db:
-    name: Snapshot from DuckDB (stub)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      DB_URL: "duckdb:////home/runner/work/${{ github.repository }}/data/resolver_backfill.duckdb"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,23 +35,34 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install -c constraints-ci.txt -e '.[db]'
 
-      - name: Run snapshot-from-db stub
-        env:
-          SNAPSHOT_MONTH: ${{ inputs.month }}
-          SNAPSHOT_DB_URL: ${{ inputs.db_url }}
-          SNAPSHOT_DRY_RUN: ${{ inputs.dry_run }}
+      - name: Download resolver_backfill.duckdb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: resolver-backfill-db
+          path: data
+
+      - name: Determine months_back
+        id: months
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.months_back }}" ]; then
+            echo "value=${{ github.event.inputs.months_back }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=36" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run snapshot-from-DB CLI
         run: |
           set -euo pipefail
-          echo "::notice::Snapshot-from-DB workflow currently runs a stub plan only."
-          MONTH_ARGS=()
-          if [ -n "${SNAPSHOT_MONTH}" ]; then
-            MONTH_ARGS+=("--month" "${SNAPSHOT_MONTH}")
-          fi
-          DRY_RUN_FLAG=""
-          if [ "${SNAPSHOT_DRY_RUN}" = "true" ]; then
-            DRY_RUN_FLAG="--dry-run"
-          fi
+          echo "Using DB_URL=${DB_URL}"
+          echo "Snapshotting last ${{ steps.months.outputs.value }} months"
           python -m resolver.cli.snapshot_from_db \
-            --db-url "${SNAPSHOT_DB_URL}" \
-            ${DRY_RUN_FLAG} \
-            "${MONTH_ARGS[@]}"
+            --db-url "${DB_URL}" \
+            --months-back "${{ steps.months.outputs.value }}" \
+            --out-dir "snapshots"
+
+      - name: Upload snapshots as artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-snapshots
+          path: snapshots

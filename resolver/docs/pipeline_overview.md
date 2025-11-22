@@ -58,6 +58,22 @@ The manual `resolver-initial-backfill` workflow currently runs only the four con
 
 Other connectors are intentionally excluded from this workflow to avoid destabilising the ingestion run. The backfill writes canonical facts from these four sources into DuckDB for downstream snapshot, dashboard, and forecasting stages. Freeze/snapshot generation is intentionally detached from the backfill while the DB-first snapshot builder is rolled out; the GitHub Actions workflow now stops after export-and-DuckDB writes.
 
+## Two-Phase Pipeline: Backfill → Snapshot
+
+Resolver’s production workflows now operate in two phases:
+
+1. **Resolver — Initial Backfill**
+   - Runs the four stable connectors (DTM, IDMC, EM-DAT, ACLED) for a configured window (e.g., last 36 months).
+   - Writes canonical facts into `data/resolver_backfill.duckdb` (including `facts_resolved`, `facts_deltas`, and `acled_monthly_fatalities`).
+   - Uploads the DuckDB file as a `resolver-backfill-db` artifact for downstream use.
+
+2. **Resolver — Snapshot from DB**
+   - Triggered automatically when the backfill workflow completes successfully, or manually via `workflow_dispatch`.
+   - Downloads the `resolver-backfill-db` artifact and runs the DB-backed snapshot builder (`resolver.snapshot.builder.build_monthly_snapshot`) for a configurable number of months (default: 36).
+   - Writes unified snapshot parquet files under `snapshots/<ym>/facts.parquet` and uploads them as a `resolver-snapshots` artifact.
+
+Clients such as Forecaster can then consume the snapshot parquet files or the underlying DuckDB database and use `resolver.snapshot.pa_trends` to derive PA time series for specific countries and hazards.
+
 ## Pipeline stages
 
 - **Connector ingestion**

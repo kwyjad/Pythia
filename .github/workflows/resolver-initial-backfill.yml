@@ -569,12 +569,19 @@ jobs:
             cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
           fi
           if [ -f diagnostics/ingestion/summary.md ]; then
-            {
+            { 
               echo ""
               echo ""
               cat diagnostics/ingestion/duckdb_summary.md
             } >> diagnostics/ingestion/summary.md
           fi
+
+      - name: Upload resolver_backfill.duckdb artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-backfill-db
+          path: data/resolver_backfill.duckdb
 
       - name: Upload exports and database
         uses: actions/upload-artifact@v4

@@ -271,6 +271,29 @@ def build_snapshot_for_month(
     )
 
 
+def build_monthly_snapshot(
+    con,
+    ym: str,
+    *,
+    snapshot_root: Path | str = Path("snapshots"),
+    write_parquet: bool = True,
+    run_id: Optional[str] = None,
+) -> SnapshotResult:
+    """Convenience wrapper to build a single monthly snapshot.
+
+    This delegates to :func:`build_snapshot_for_month` while allowing callers to
+    customise the snapshot output root and run identifier.
+    """
+
+    return build_snapshot_for_month(
+        con,
+        ym=ym,
+        run_id=run_id,
+        snapshot_root=Path(snapshot_root),
+        write_parquet=write_parquet,
+    )
+
+
 def build_snapshots(
     db_url: str,
     months: Iterable[str],
