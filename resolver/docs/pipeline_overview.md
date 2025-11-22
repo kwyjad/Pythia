@@ -72,6 +72,14 @@ Other connectors are intentionally excluded from this workflow to avoid destabil
   The freezer [`resolver/tools/freeze_snapshot.py`](../tools/freeze_snapshot.py) writes immutable monthly bundles (`resolver/snapshots/YYYY-MM`) for downstream analytics, dashboards, and the forecast resolver.
   A DB-first successor is planned under [`resolver/snapshot`](../snapshot) with CLI orchestration at [`resolver/cli/snapshot_from_db.py`](../cli/snapshot_from_db.py) so monthly snapshots can be built directly from DuckDB.
 
+### DB-backed snapshot builder (`facts_snapshot`)
+
+In addition to the legacy freezer, the resolver includes a DB-backed snapshot builder under [`resolver.snapshot.builder`](../snapshot/builder.py):
+
+- Reads canonical tables `facts_resolved`, `facts_deltas`, and connector-specific monthly tables (e.g., `acled_monthly_fatalities`).
+- For each target `ym` (for example, `"2025-11"`), writes a unified `facts_snapshot` table plus a `snapshots` metadata table and can export `data/snapshots/<ym>/facts.parquet`.
+- Operates purely from the DuckDB database (see [WRITING_TO_DUCKDB](WRITING_TO_DUCKDB.md)) and is idempotent: reruns replace prior rows for the month instead of appending duplicates.
+
 ## Additional references
 
 - [Connectors catalog](connectors_catalog.md)
