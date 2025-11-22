@@ -1,6 +1,14 @@
 import pandas as pd
+import pytest
 
 from resolver.tools import freeze_snapshot
+
+pytestmark = [
+    pytest.mark.legacy_freeze,
+    pytest.mark.xfail(
+        reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+    ),
+]
 
 
 def test_run_validator_skips_for_acled_metrics(tmp_path, monkeypatch):

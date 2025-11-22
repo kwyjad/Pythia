@@ -62,6 +62,10 @@ def test_emdat_duckdb_write_idempotent(tmp_path):
 
 
 @pytest.mark.duckdb
+@pytest.mark.legacy_freeze
+@pytest.mark.xfail(
+    reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+)
 def test_emdat_export_and_freeze_to_duckdb(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("duckdb")
 

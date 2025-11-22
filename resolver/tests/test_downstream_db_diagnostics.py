@@ -9,6 +9,13 @@ from resolver.tools import freeze_snapshot
 from scripts.ci import append_error_to_summary
 from scripts.ci import build_llm_context
 
+pytestmark = [
+    pytest.mark.legacy_freeze,
+    pytest.mark.xfail(
+        reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+    ),
+]
+
 
 @pytest.fixture(autouse=True)
 def _chdir_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -37,6 +37,10 @@ The pipeline runs as:
    - Given canonical facts and a target month (`ym`), filter to that month, normalise required columns, and deduplicate resolved/deltas frames.
    - Optionally run EM-DAT validators when EM-DAT metrics are present.
    - Write a snapshot parquet for the month and update DuckDB snapshot metadata. The legacy in-backfill freeze stage is disabled; snapshots will be rebuilt via the DB-first snapshot workflow.
+
+> Legacy note: The original `resolver.tools.freeze_snapshot` CLI and its DB write helper (`_maybe_write_db`) are now considered legacy.
+> They are no longer used in ingestion/backfill workflows, which instead rely on the DB-backed snapshot builder (`resolver.snapshot.builder`).
+> Legacy tests that exercise `freeze_snapshot` are marked as such and do not gate CI.
 4. **Forecaster & APIs (consumers)**
    - Consult DuckDB and/or snapshot parquet files to obtain resolution-ready facts per country, month, and shock.
    - Use these as the scoring baseline for forecasting questions and downstream analysis.

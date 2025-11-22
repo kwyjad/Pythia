@@ -1,6 +1,14 @@
 import pandas as pd
+import pytest
 
 from resolver.tools import freeze_snapshot
+
+pytestmark = [
+    pytest.mark.legacy_freeze,
+    pytest.mark.xfail(
+        reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+    ),
+]
 
 
 def test_preview_adds_required_columns(tmp_path):

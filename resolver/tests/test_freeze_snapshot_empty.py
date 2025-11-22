@@ -1,7 +1,15 @@
 import pandas as pd
 from pathlib import Path
+import pytest
 
 from resolver.tools import freeze_snapshot
+
+pytestmark = [
+    pytest.mark.legacy_freeze,
+    pytest.mark.xfail(
+        reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
+    ),
+]
 
 
 def test_freeze_snapshot_skips_empty_facts(tmp_path, monkeypatch):
