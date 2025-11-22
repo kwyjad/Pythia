@@ -84,9 +84,19 @@ def test_backfill_export_uses_db_flag_and_freeze_is_disabled() -> None:
 
 def test_backfill_schedule_and_months_back_defaults() -> None:
     yaml_data = _load_yaml(WF_BACKFILL)
-    assert yaml_data.get("on", {}).get("workflow_dispatch", {})
-    schedule = yaml_data.get("on", {}).get("schedule", [])
-    assert any(item.get("cron") == "0 0 5 * *" for item in schedule if isinstance(item, dict))
-    inputs = yaml_data.get("on", {}).get("workflow_dispatch", {}).get("inputs", {})
+    on_block = yaml_data.get("on", {})
+    assert on_block, "Expected an 'on' block in resolver-initial-backfill.yml"
+
+    workflow_dispatch = on_block.get("workflow_dispatch", {})
+    assert workflow_dispatch, "Expected 'workflow_dispatch' under 'on' in resolver-initial-backfill.yml"
+
+    inputs = workflow_dispatch.get("inputs", {})
+    assert inputs, "Expected 'inputs' under workflow_dispatch"
+
     months_back = inputs.get("months_back", {})
+    assert months_back, "Expected 'months_back' input definition"
     assert months_back.get("default") == "1"
+
+    schedule = on_block.get("schedule", [])
+    assert schedule, "Expected 'schedule' under 'on'"
+    assert any(item.get("cron") == "0 0 5 * *" for item in schedule if isinstance(item, dict))

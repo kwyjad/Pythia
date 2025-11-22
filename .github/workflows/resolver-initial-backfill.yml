@@ -1,7 +1,7 @@
 ---
 name: Resolver — Initial Backfill
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       months_back:
