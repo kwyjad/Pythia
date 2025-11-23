@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       backfill_run_id:
-        description: "GitHub run ID of the Resolver — Initial Backfill run to pull resolver-backfill-db from"
+        description: "GitHub run ID of the Resolver — Initial Backfill run (for manual snapshot)"
         required: false
       months_back:
         description: "Number of months to snapshot (default 36)"
@@ -24,28 +24,26 @@ jobs:
     steps:
       - name: Determine backfill run ID and months_back
         id: meta
-        env:
-          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
-          INPUT_BACKFILL_RUN_ID: ${{ github.event.inputs.backfill_run_id }}
-          INPUT_MONTHS_BACK: ${{ github.event.inputs.months_back }}
         run: |
           set -euo pipefail
           echo "Event name: $GITHUB_EVENT_NAME"
           if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
-            echo "Detected workflow_run event."
-            echo "backfill_run_id=${WORKFLOW_RUN_ID}" >> "$GITHUB_OUTPUT"
+            echo "Detected workflow_run for Resolver — Initial Backfill."
+            echo "backfill_run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
             echo "months_back=36" >> "$GITHUB_OUTPUT"
           else
             echo "Detected manual workflow_dispatch."
-            if [ -z "${INPUT_BACKFILL_RUN_ID}" ]; then
-              echo "ERROR: Manual run requires 'backfill_run_id' input."
+            if [ -z "${{ github.event.inputs.backfill_run_id }}" ]; then
+              echo "ERROR: Manual snapshot requires 'backfill_run_id' input."
               echo "Please provide the run ID of a successful 'Resolver — Initial Backfill' run."
               exit 1
             fi
-            echo "backfill_run_id=${INPUT_BACKFILL_RUN_ID}" >> "$GITHUB_OUTPUT"
-            months="${INPUT_MONTHS_BACK}"
+            echo "backfill_run_id=${{ github.event.inputs.backfill_run_id }}" >> "$GITHUB_OUTPUT"
+            months="${{ github.event.inputs.months_back }}"
             echo "months_back=${months:-36}" >> "$GITHUB_OUTPUT"
           fi
+          backfill_line=$(grep -E '^backfill_run_id=' "$GITHUB_OUTPUT" || true)
+          echo "Will use ${backfill_line:-backfill_run_id not found in GITHUB_OUTPUT}"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,28 +59,31 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install -c constraints-ci.txt -e '.[db]'
 
-      - name: Download resolver_backfill.duckdb artifact
+      - name: Download resolver_backfill.duckdb artifact from backfill run
         uses: actions/download-artifact@v4
         with:
           name: resolver-backfill-db
           path: data
           run-id: ${{ steps.meta.outputs.backfill_run_id }}
 
-      - name: Verify downloaded DB file
+      - name: "Debug: list data/ after download"
         run: |
           set -euo pipefail
-          echo "Listing data/ directory:"
-          ls -lh data || true
+          echo "After downloading artifact 'resolver-backfill-db':"
+          echo "Contents of data/:"
+          ls -lh data || echo "data/ directory missing"
           if [ ! -f "data/resolver_backfill.duckdb" ]; then
-            echo "ERROR: data/resolver_backfill.duckdb not found after download."
+            echo "ERROR: data/resolver_backfill.duckdb not found."
+            echo "Check that the backfill run uploaded resolver-backfill-db with a file at data/resolver_backfill.duckdb."
             exit 1
           fi
-          echo "Found data/resolver_backfill.duckdb"
+          echo "OK: Found data/resolver_backfill.duckdb"
 
-      - name: Run snapshot-from-DB CLI
+      - name: Run snapshot-from-DB
+        env:
+          DB_URL: "duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb"
         run: |
           set -euo pipefail
-          DB_URL="duckdb:///${{ github.workspace }}/data/resolver_backfill.duckdb"
           echo "Using DB_URL=${DB_URL}"
           echo "Snapshotting last ${{ steps.meta.outputs.months_back }} months"
           python -m resolver.cli.snapshot_from_db \
@@ -90,39 +91,35 @@ jobs:
             --months-back "${{ steps.meta.outputs.months_back }}" \
             --out-dir "snapshots"
 
-      - name: Print snapshot DB summary
+      - name: Print DB & snapshot summary
         run: |
           set -euo pipefail
+          echo "==== Resolver Snapshot DB Summary ===="
           python - << 'PY'
           import duckdb
           from pathlib import Path
 
           db_path = Path("data/resolver_backfill.duckdb")
-          print(f"Snapshot DB summary for {db_path}:")
+          print(f"[SUMMARY] Using DB at: {db_path}")
           con = duckdb.connect(str(db_path))
 
-          def count(table: str) -> None:
+          def show_count(table: str) -> None:
               try:
                   n = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                  print(f"  {table}: {n} rows")
+                  print(f"[SUMMARY] {table}: {n} rows")
               except Exception as exc:
-                  print(f"  {table}: ERROR - {exc}")
+                  print(f"[SUMMARY] {table}: ERROR - {exc}")
 
-          for tbl in [
-              "facts_resolved",
-              "facts_deltas",
-              "acled_monthly_fatalities",
-              "facts_snapshot",
-              "snapshots",
-          ]:
-              count(tbl)
+          for tbl in ("facts_resolved", "facts_deltas", "acled_monthly_fatalities", "facts_snapshot", "snapshots"):
+              show_count(tbl)
 
           try:
               ym_count = con.execute("SELECT COUNT(DISTINCT ym) FROM facts_snapshot").fetchone()[0]
-              print(f"  facts_snapshot distinct ym: {ym_count}")
+              print(f"[SUMMARY] facts_snapshot distinct ym: {ym_count}")
           except Exception as exc:
-              print(f"  facts_snapshot distinct ym: ERROR - {exc}")
+              print(f"[SUMMARY] facts_snapshot distinct ym: ERROR - {exc}")
           PY
+          echo "====================================="
 
       - name: Upload snapshots as artifact
         if: ${{ success() }}
