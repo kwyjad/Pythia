@@ -42,7 +42,8 @@ jobs:
             months="${{ github.event.inputs.months_back }}"
             echo "months_back=${months:-36}" >> "$GITHUB_OUTPUT"
           fi
-          echo "Will use backfill_run_id=$(cat $GITHUB_OUTPUT | grep backfill_run_id || true)"
+          backfill_line=$(grep -E '^backfill_run_id=' "$GITHUB_OUTPUT" || true)
+          echo "Will use ${backfill_line:-backfill_run_id not found in GITHUB_OUTPUT}"
 
       - name: Checkout repository
         uses: actions/checkout@v4
