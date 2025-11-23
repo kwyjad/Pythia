@@ -65,7 +65,7 @@ jobs:
           path: data
           run-id: ${{ steps.meta.outputs.backfill_run_id }}
 
-      - name: Debug: list data/ after download
+      - name: "Debug: list data/ after download"
         run: |
           set -euo pipefail
           echo "After downloading artifact 'resolver-backfill-db':"
