@@ -42,10 +42,12 @@ def to_facts(df_norm: pd.DataFrame) -> pd.DataFrame:
 
     out = df_norm.loc[:, FACTS_COLS].copy()
 
+    # Canonical IDMC facts must always report source="IDMC".
+    out["source"] = "IDMC"
+
     out["iso3"] = out["iso3"].astype(str).str.upper().str.strip()
     out["metric"] = out["metric"].astype(str)
     out["series_semantics"] = out["series_semantics"].astype(str)
-    out["source"] = out["source"].astype(str)
     out["value"] = pd.to_numeric(out["value"], errors="coerce")
 
     out = out.dropna(subset=["iso3", "as_of_date", "metric", "value"])

@@ -350,7 +350,7 @@ distinguish new flows from stock snapshots.
 | metric | enum | Always `new_displacements` |
 | value | integer | Monthly sum of displacement figures |
 | series_semantics | enum | Always `new` for flow exports |
-| source | string | `idmc_idu` for backend rows, `idmc_gidd` when Helix supplied the payload |
+| source | string | Always `IDMC` for canonical facts; upstream labels are not propagated |
 - DuckDB exports treat these monthly flow rows as resolved snapshots: when the
   exporter writes to DuckDB it normalizes the series semantics to `stock` and
   stores them in `facts_resolved` so the connector surfaces a month-end
