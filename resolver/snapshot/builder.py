@@ -94,7 +94,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             metric,
             series_semantics,
             value,
-            source,
+            COALESCE(source, '') AS source,
             as_of_date,
             'facts_resolved' AS provenance_table,
             ?
@@ -119,7 +119,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             metric,
             series_semantics,
             value,
-            source,
+            COALESCE(source, '') AS source,
             as_of_date,
             'facts_deltas' AS provenance_table,
             ?
@@ -136,56 +136,67 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
 
     acled_rows = 0
     try:
-        conn.execute(
-            """
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_name = 'acled_monthly_fatalities'
-            LIMIT 1
-            """
+        has_acled = (
+            conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_name = 'acled_monthly_fatalities'
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
         )
-        has_acled = conn.fetchone() is not None
-    except Exception:
-        has_acled = False
-
-    if has_acled:
-        conn.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS __acled_monthly AS
-            SELECT
-                strftime(month, '%Y-%m') AS ym,
-                iso3,
-                CAST(fatalities AS DOUBLE) AS value,
-                month::DATE AS as_of_date
-            FROM acled_monthly_fatalities
-            WHERE strftime(month, '%Y-%m') = ?
-            """,
-            [ym],
-        )
-        conn.execute(
-            """
-            INSERT INTO {snapshot} (ym, iso3, hazard_code, metric, series_semantics, value, source, as_of_date, provenance_table, run_id)
-            SELECT
+        if has_acled:
+            conn.execute(
+                """
+                CREATE TEMP TABLE IF NOT EXISTS __acled_monthly AS
+                SELECT
+                    strftime(month, '%Y-%m') AS ym,
+                    iso3,
+                    CAST(fatalities AS DOUBLE) AS value,
+                    month::DATE AS as_of_date
+                FROM acled_monthly_fatalities
+                WHERE strftime(month, '%Y-%m') = ?
+                """,
+                [ym],
+            )
+            acled_rows = conn.execute(
+                "SELECT COUNT(*) FROM __acled_monthly"
+            ).fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO {snapshot} (ym, iso3, hazard_code, metric, series_semantics, value, source, as_of_date, provenance_table, run_id)
+                SELECT
+                    ym,
+                    iso3,
+                    'conflict' AS hazard_code,
+                    'fatalities_acled' AS metric,
+                    'new' AS series_semantics,
+                    value,
+                    'ACLED' AS source,
+                    as_of_date,
+                    'acled_monthly_fatalities' AS provenance_table,
+                    ?
+                FROM __acled_monthly
+                """.format(
+                    snapshot=SNAPSHOT_TABLE
+                ),
+                [run_id],
+            )
+            conn.execute("DROP TABLE IF EXISTS __acled_monthly")
+        else:
+            LOG.info(
+                "acled_monthly_fatalities table not found; skipping ACLED snapshot for ym=%s",
                 ym,
-                iso3,
-                'conflict' AS hazard_code,
-                'fatalities_acled' AS metric,
-                'new' AS series_semantics,
-                value,
-                'ACLED' AS source,
-                as_of_date,
-                'acled_monthly_fatalities' AS provenance_table,
-                ?
-            FROM __acled_monthly
-            """.format(
-                snapshot=SNAPSHOT_TABLE
-            ),
-            [run_id],
+            )
+    except Exception as exc:
+        LOG.warning(
+            "Failed to include ACLED monthly fatalities in snapshot for ym=%s: %s",
+            ym,
+            exc,
         )
-        acled_rows = conn.execute(
-            "SELECT COUNT(*) FROM __acled_monthly"
-        ).fetchone()[0]
-        conn.execute("DROP TABLE IF EXISTS __acled_monthly")
+        acled_rows = 0
 
     return int(resolved_rows), int(delta_rows), int(acled_rows)
 
