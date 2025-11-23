@@ -94,7 +94,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             metric,
             series_semantics,
             value,
-            COALESCE(source, '') AS source,
+            COALESCE(source_id, '') AS source,
             as_of_date,
             'facts_resolved' AS provenance_table,
             ?
@@ -119,7 +119,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             metric,
             series_semantics,
             value,
-            COALESCE(source, '') AS source,
+            COALESCE(source_id, '') AS source,
             as_of_date,
             'facts_deltas' AS provenance_table,
             ?

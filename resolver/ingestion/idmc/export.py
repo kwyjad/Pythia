@@ -43,7 +43,11 @@ def build_resolution_ready_facts(normalized: pd.DataFrame) -> pd.DataFrame:
     if normalized.empty:
         return pd.DataFrame(columns=FACT_COLUMNS)
 
-    facts = _ensure_columns(normalized, FACT_COLUMNS)
+    working = normalized.copy()
+    if "source" not in working.columns:
+        working["source"] = "IDMC"
+
+    facts = _ensure_columns(working, FACT_COLUMNS)
 
     # Enforce the public contract: canonical IDMC facts always use source="IDMC"
     # regardless of any upstream labels.
