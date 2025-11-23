@@ -94,11 +94,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stderr.write(
                 f"[snapshot_from_db] Building snapshot for ym={ym} -> {out_dir / ym / 'facts.parquet'}\n"
             )
-            build_monthly_snapshot(
+            result = build_monthly_snapshot(
                 conn,
                 ym=ym,
                 snapshot_root=out_dir,
                 write_parquet=True,
+            )
+            sys.stderr.write(
+                "[snapshot_from_db] ym={ym} rows: resolved={res} deltas={deltas} acled={acled} total={total}\n".format(
+                    ym=result.ym,
+                    res=result.resolved_rows,
+                    deltas=result.delta_rows,
+                    acled=result.acled_rows,
+                    total=result.snapshot_rows,
+                )
             )
     finally:
         duckdb_io.close_db(conn)
