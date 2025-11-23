@@ -620,7 +620,7 @@ jobs:
           name: resolver-backfill-db
           path: data
 
-      - name: Debug: list data/ after download
+      - name: "Debug: list data/ after download"
         run: |
           set -euo pipefail
           echo "After downloading artifact 'resolver-backfill-db':"
