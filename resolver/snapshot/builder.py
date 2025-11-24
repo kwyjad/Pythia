@@ -34,7 +34,7 @@ def _ensure_tables(conn) -> None:
     """Ensure the snapshot tables exist in the DuckDB database."""
 
     conn.execute(
-        f"
+        f"""
         CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
             ym TEXT,
             iso3 TEXT,
@@ -47,16 +47,16 @@ def _ensure_tables(conn) -> None:
             provenance_table TEXT,
             run_id TEXT
         );
-        ""
+        """
     )
     conn.execute(
-        f"
+        f"""
         CREATE TABLE IF NOT EXISTS {SNAPSHOTS_META_TABLE} (
             ym TEXT PRIMARY KEY,
             created_at TIMESTAMP,
             run_id TEXT
         );
-        ""
+        """
     )
 
 
@@ -77,7 +77,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
 
     try:
         res_cursor = conn.execute(
-            f"
+            f"""
             INSERT INTO {SNAPSHOT_TABLE}
             SELECT
                 ym,
@@ -92,7 +92,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 ?
             FROM facts_resolved
             WHERE ym = ?
-            ",
+            """,
             [run_id, ym],
         )
         resolved_rows = res_cursor.rowcount or 0
@@ -102,7 +102,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
 
     try:
         delta_cursor = conn.execute(
-            f"
+            f"""
             INSERT INTO {SNAPSHOT_TABLE}
             SELECT
                 ym,
@@ -117,7 +117,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 ?
             FROM facts_deltas
             WHERE ym = ?
-            ",
+            """,
             [run_id, ym],
         )
         delta_rows = delta_cursor.rowcount or 0
@@ -128,17 +128,17 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
     acled_rows = 0
     try:
         acled_exists_row = conn.execute(
-            ""
+            """
             SELECT 1
             FROM information_schema.tables
             WHERE table_name = 'acled_monthly_fatalities'
             LIMIT 1
-            ""
+            """
         ).fetchone()
         has_acled = acled_exists_row is not None
         if has_acled:
             acled_cursor = conn.execute(
-                f"
+                f"""
                 INSERT INTO {SNAPSHOT_TABLE}
                 SELECT
                     strftime(month, '%Y-%m') AS ym,
@@ -153,7 +153,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                     ?
                 FROM acled_monthly_fatalities
                 WHERE strftime(month, '%Y-%m') = ?
-                ",
+                """,
                 [run_id, ym],
             )
             acled_rows = acled_cursor.rowcount or 0
@@ -225,7 +225,7 @@ def build_snapshot_for_month(
         snapshot_path = snapshot_dir / "facts.parquet"
         LOG.info("Writing snapshot parquet for ym=%s to %s", ym, snapshot_path)
         snapshot_df = conn.execute(
-            f"
+            f"""
             SELECT
                 ym,
                 iso3,
@@ -240,7 +240,7 @@ def build_snapshot_for_month(
             FROM {SNAPSHOT_TABLE}
             WHERE ym = ?
             ORDER BY iso3, hazard_code, metric, series_semantics, as_of_date
-            ",
+            """,
             [ym],
         ).df()
         snapshot_df.to_parquet(snapshot_path)
@@ -272,7 +272,9 @@ def build_snapshots(
     write_parquet: bool = True,
     run_id: Optional[str] = None,
 ) -> List[SnapshotResult]:
-    """Build snapshots for the given list of months against the DuckDB database."""
+    """
+    Build snapshots for the given list of `months` against the DuckDB database at `db_url`.
+    """
 
     try:
         from resolver.db.duckdb_io import canonicalize_duckdb_target  # type: ignore
@@ -297,4 +299,3 @@ def build_snapshots(
         duckdb_io.close_db(conn)
 
     return results
-
