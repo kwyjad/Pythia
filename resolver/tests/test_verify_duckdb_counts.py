@@ -155,3 +155,6 @@ def test_resolver_db_url_used_when_no_cli_path(tmp_path, monkeypatch):
 
     text = summary_file.read_text(encoding="utf-8")
     assert "DuckDB" in text or "rows" in text
+
+    step_text = step_summary.read_text(encoding="utf-8")
+    assert "soft no-arg mode" in step_text
