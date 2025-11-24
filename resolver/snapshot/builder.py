@@ -95,7 +95,19 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             """,
             [run_id, ym],
         )
-        resolved_rows = res_cursor.rowcount or 0
+        resolved_rows = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM {SNAPSHOT_TABLE}
+            WHERE ym = ? AND provenance_table = 'facts_resolved'
+            """,
+            [ym],
+        ).fetchone()[0]
+        LOG.debug(
+            "Snapshot insert stats for ym=%s (facts_resolved): rowcount=%s, counted=%s",
+            ym,
+            res_cursor.rowcount,
+            resolved_rows,
+        )
     except Exception as exc:
         LOG.error("Error inserting facts_resolved for ym=%s: %s", ym, exc)
         raise
@@ -120,7 +132,19 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             """,
             [run_id, ym],
         )
-        delta_rows = delta_cursor.rowcount or 0
+        delta_rows = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM {SNAPSHOT_TABLE}
+            WHERE ym = ? AND provenance_table = 'facts_deltas'
+            """,
+            [ym],
+        ).fetchone()[0]
+        LOG.debug(
+            "Snapshot insert stats for ym=%s (facts_deltas): rowcount=%s, counted=%s",
+            ym,
+            delta_cursor.rowcount,
+            delta_rows,
+        )
     except Exception as exc:
         LOG.error("Error inserting facts_deltas for ym=%s: %s", ym, exc)
         raise
@@ -156,7 +180,19 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 """,
                 [run_id, ym],
             )
-            acled_rows = acled_cursor.rowcount or 0
+            acled_rows = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM {SNAPSHOT_TABLE}
+                WHERE ym = ? AND provenance_table = 'acled_monthly_fatalities'
+                """,
+                [ym],
+            ).fetchone()[0]
+            LOG.debug(
+                "Snapshot insert stats for ym=%s (acled_monthly_fatalities): rowcount=%s, counted=%s",
+                ym,
+                acled_cursor.rowcount,
+                acled_rows,
+            )
     except Exception as exc:
         LOG.warning(
             "Failed to include ACLED monthly fatalities in snapshot for ym=%s: %s",
@@ -165,7 +201,7 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
         )
         acled_rows = 0
 
-    return int(resolved_rows), int(delta_rows), int(acled_rows)
+    return int(max(resolved_rows, 0)), int(max(delta_rows, 0)), int(max(acled_rows, 0))
 
 
 def _insert_snapshot_meta(conn, ym: str, run_id: str, created_at: dt.datetime) -> None:
@@ -263,6 +299,28 @@ def build_snapshot_for_month(
         db_url=db_url,
         created_at=created_at,
         run_id=actual_run_id,
+    )
+
+
+def build_monthly_snapshot(
+    conn,
+    ym: str,
+    run_id: Optional[str] = None,
+    snapshot_root: Path = Path("data") / "snapshots",
+    write_parquet: bool = True,
+) -> SnapshotResult:
+    """
+    Backwards-compatible alias for build_snapshot_for_month.
+
+    Used by resolver.cli.snapshot_from_db and GitHub workflows.
+    """
+
+    return build_snapshot_for_month(
+        conn,
+        ym=ym,
+        run_id=run_id,
+        snapshot_root=snapshot_root,
+        write_parquet=write_parquet,
     )
 
 

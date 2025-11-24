@@ -6,7 +6,7 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
-from resolver.snapshot.builder import build_snapshot_for_month
+from resolver.snapshot.builder import build_monthly_snapshot, build_snapshot_for_month
 
 
 def _setup_minimal_db() -> duckdb.DuckDBPyConnection:
@@ -144,7 +144,35 @@ def test_build_snapshot_for_month_is_idempotent(tmp_path: Path) -> None:
     )
     assert res2.snapshot_rows == 1
     row = con.execute(
-        "SELECT value, run_id FROM facts_snapshot WHERE ym = '2025-10'"
+        "SELECT value, run_id FROM facts_snapshot WHERE ym = '2025-10'",
     ).fetchone()
     assert row[0] == 200.0
     assert row[1] == "run-b"
+
+
+def test_build_monthly_snapshot_alias(tmp_path: Path) -> None:
+    con = _setup_minimal_db()
+    con.execute(
+        """
+        INSERT INTO facts_resolved VALUES
+            ('2025-12', 'UGA', 'displacement',
+             'idp_displacement_stock_dtm', 'stock',
+             42.0, 'IOM DTM', DATE '2025-12-31');
+        """
+    )
+
+    result = build_monthly_snapshot(
+        con,
+        ym="2025-12",
+        run_id="alias-test",
+        snapshot_root=tmp_path,
+        write_parquet=True,
+    )
+
+    assert result.ym == "2025-12"
+    assert result.resolved_rows == 1
+    assert result.delta_rows == 0
+    assert result.acled_rows == 0
+    assert result.snapshot_rows == 1
+    assert result.snapshot_path is not None
+    assert result.snapshot_path.exists()
