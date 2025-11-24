@@ -51,14 +51,20 @@ def _append_error_to_summary(section: str, exc: Exception, context: dict[str, ob
 
 
 def _normalise_db_path(db_url: str) -> str:
-    if db_url.startswith("duckdb:///"):
-        db_url = db_url.replace("duckdb:///", "", 1)
-    if "://" in db_url:
+    parsed = urlparse(db_url)
+
+    if parsed.scheme == "duckdb":
+        if parsed.path:
+            return parsed.path
+        return ":memory:"
+
+    if parsed.scheme:
         return db_url
+
     return os.path.abspath(os.path.expanduser(db_url))
 
 
-def _resolve_db_path(argv_db_path: str | None) -> str:
+def _resolve_db_path(args: argparse.Namespace) -> str:
     """
     Resolve the DuckDB database path/url for verify_duckdb_counts.
 
@@ -68,17 +74,12 @@ def _resolve_db_path(argv_db_path: str | None) -> str:
     3. Historical default of data/resolver.duckdb.
     """
 
-    if argv_db_path:
-        return _normalise_db_path(argv_db_path)
+    if getattr(args, "db_path", None):
+        return _normalise_db_path(args.db_path)
 
-    env_url = os.getenv("RESOLVER_DB_URL") or ""
+    env_url = os.getenv("RESOLVER_DB_URL")
     if env_url:
-        parsed = urlparse(env_url)
-        if parsed.scheme == "duckdb":
-            if parsed.path:
-                return _normalise_db_path(parsed.path)
-            return ":memory:"
-        return env_url
+        return _normalise_db_path(env_url)
 
     return _normalise_db_path("data/resolver.duckdb")
 
@@ -185,6 +186,7 @@ def _write_summary(
     breakdown: Iterable[Tuple[str, str, str, int]],
     table_counts: Sequence[Tuple[str, int]],
     missing_tables: Sequence[str],
+    soft_mode_note: str = "",
 ) -> str:
     COUNTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = [MARKDOWN_HEADER]
@@ -207,6 +209,8 @@ def _write_summary(
         lines.append("| --- | --- | --- | ---: |\n")
         for source, metric, semantics, count in breakdown:
             lines.append(f"| {source} | {metric} | {semantics} | {count} |\n")
+    if soft_mode_note:
+        lines.append(soft_mode_note)
     COUNTS_PATH.write_text("".join(lines), encoding="utf-8")
     return "".join(lines)
 
@@ -230,9 +234,12 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
         description="Verify DuckDB facts_resolved counts and append diagnostics summaries."
     )
     parser.add_argument(
-        "db",
+        "db_path",
         nargs="?",
-        help="Optional DuckDB URL or path override (defaults to RESOLVER_DB_URL).",
+        help=(
+            "Path to DuckDB database (optional; falls back to RESOLVER_DB_URL "
+            "or data/resolver.duckdb)"
+        ),
     )
     parser.add_argument(
         "--tables",
@@ -245,19 +252,26 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Treat missing tables as warnings instead of errors.",
     )
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    raw_argv = list(argv) if argv is not None else []
+    args = parser.parse_args(raw_argv)
 
-    db_path = _resolve_db_path((args.db or "").strip() or None)
+    is_no_arg_invocation = len(raw_argv) == 0
+    effective_allow_missing = bool(args.allow_missing) or is_no_arg_invocation
+
+    db_path = _resolve_db_path(args)
 
     exit_code = 0
+    breakdown: list[Tuple[str, str, str, int]] = []
+    table_counts: list[Tuple[str, int]] = []
+    missing_tables: list[str] = []
+    rows_total = 0
 
     try:
-        con = duckdb.connect(db_path)
+        con = duckdb.connect(db_path, read_only=True)
     except Exception as exc:  # pragma: no cover - missing db
         print(f"Failed to connect to DuckDB at {db_path}: {exc}")
         exit_code = 1
     else:
-        breakdown: list[Tuple[str, str, str, int]] = []
         tables_arg = args.tables or []
         tables: list[str] = []
         seen: set[str] = set()
@@ -275,9 +289,6 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
             tables.insert(0, "facts_resolved")
             seen.add("facts_resolved")
 
-        table_counts: list[Tuple[str, int]] = []
-        missing_tables: list[str] = []
-        rows_total = 0
         try:
             for table in tables:
                 if not _table_exists(con, table):
@@ -299,25 +310,38 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
         finally:
             con.close()
 
-        markdown = _write_summary(
-            db_path, rows_total, breakdown if exit_code == 0 else [], table_counts, missing_tables
-        )
-        _append_to_step_summary(markdown)
-        _append_to_summary(markdown)
-        if exit_code == 0:
-            if missing_tables and not args.allow_missing:
-                for table in missing_tables:
-                    print(f"ERROR: Table '{table}' not found in {db_path}")
-                exit_code = 1
-            elif missing_tables:
-                for table in missing_tables:
-                    print(f"WARNING: Table '{table}' not found in {db_path}")
+    soft_mode_note = (
+        "\n\n> **verify_duckdb_counts:** running in soft no-arg mode "
+        "(missing tables are treated as warnings, not failures)."
+        if is_no_arg_invocation
+        else ""
+    )
+
+    markdown = _write_summary(
+        db_path,
+        rows_total,
+        breakdown if exit_code == 0 else [],
+        table_counts,
+        missing_tables,
+        soft_mode_note,
+    )
+    _append_to_step_summary(markdown)
+    _append_to_summary(markdown)
+
+    if exit_code == 0:
+        if missing_tables and not effective_allow_missing:
+            for table in missing_tables:
+                print(f"ERROR: Table '{table}' not found in {db_path}")
+            exit_code = 1
+        elif missing_tables:
+            for table in missing_tables:
+                print(f"WARNING: Table '{table}' not found in {db_path}")
 
     return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
 
     try:
         exit_code = _main_impl(raw_argv)
@@ -335,9 +359,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         _append_error_to_summary("Verify DuckDB Counts — error", exc, context)
         raise
-
-    if not raw_argv:
-        return 0
 
     return int(exit_code or 0)
 
