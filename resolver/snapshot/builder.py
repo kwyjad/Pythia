@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-import pandas as pd
-
 from resolver.db import duckdb_io
 
 LOG = logging.getLogger(__name__)
@@ -19,7 +17,7 @@ SNAPSHOTS_META_TABLE = "snapshots"
 
 @dataclass
 class SnapshotResult:
-    """Metadata about a single monthly snapshot build."""
+    """Summary of a per-month snapshot operation."""
 
     ym: str
     snapshot_rows: int
@@ -33,12 +31,11 @@ class SnapshotResult:
 
 
 def _ensure_tables(conn) -> None:
-    """
-    Ensure that the snapshot tables exist in the connected DuckDB database.
-    """
+    """Ensure the snapshot tables exist in the DuckDB database."""
+
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS {snapshot} (
+        f"""
+        CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
             ym TEXT,
             iso3 TEXT,
             hazard_code TEXT,
@@ -50,74 +47,38 @@ def _ensure_tables(conn) -> None:
             provenance_table TEXT,
             run_id TEXT
         );
-        """.format(snapshot=SNAPSHOT_TABLE)
+        """
     )
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS {meta} (
+        f"""
+        CREATE TABLE IF NOT EXISTS {SNAPSHOTS_META_TABLE} (
             ym TEXT PRIMARY KEY,
             created_at TIMESTAMP,
             run_id TEXT
         );
-        """.format(meta=SNAPSHOTS_META_TABLE)
+        """
     )
 
 
 def _delete_existing_for_month(conn, ym: str) -> None:
-    """
-    Remove existing snapshot rows and metadata for the given month.
-    This makes the operation idempotent.
-    """
-    conn.execute(
-        "DELETE FROM {snapshot} WHERE ym = ?".format(snapshot=SNAPSHOT_TABLE), [ym]
-    )
-    conn.execute(
-        "DELETE FROM {meta} WHERE ym = ?".format(meta=SNAPSHOTS_META_TABLE), [ym]
-    )
+    """Remove existing snapshot rows/metadata for the given month (idempotent)."""
+
+    conn.execute(f"DELETE FROM {SNAPSHOT_TABLE} WHERE ym = ?", [ym])
+    conn.execute(f"DELETE FROM {SNAPSHOTS_META_TABLE} WHERE ym = ?", [ym])
 
 
 def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int]:
     """
-    Copy rows for the given ym from facts_resolved, facts_deltas, and (if present)
+    Copy rows for the given ym from facts_resolved, facts_deltas, and
     acled_monthly_fatalities into the unified snapshot table.
 
     Returns (resolved_rows_inserted, delta_rows_inserted, acled_rows_inserted).
     """
 
-    def _resolve_source_expression(table_name: str) -> str:
-        """Return a COALESCE expression for the source column in the table.
-
-        Prefers the `source` column when present; if only `source_id` exists, it
-        will be used instead. Falls back to an empty string literal when neither
-        column is available.
-        """
-
-        cols = conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
-        col_names = {row[1] for row in cols}
-        if "source" in col_names:
-            return "COALESCE(source, '')"
-        if "source_id" in col_names:
-            return "COALESCE(source_id, '')"
-        return "''"
-
-    resolved_source_expr = _resolve_source_expression("facts_resolved")
-    delta_source_expr = _resolve_source_expression("facts_deltas")
-
-    conn.execute(
-        """
-        INSERT INTO {snapshot} (ym, iso3, hazard_code, metric, series_semantics, value, source, as_of_date, provenance_table, run_id)
-        SELECT
-            ym,
-            iso3,
-            hazard_code,
-            metric,
-            series_semantics,
-            value,
-            source,
-            as_of_date,
-            provenance_table,
-            run_id
-        FROM (
+    try:
+        res_cursor = conn.execute(
+            f"""
+            INSERT INTO {SNAPSHOT_TABLE}
             SELECT
                 ym,
                 iso3,
@@ -125,38 +86,24 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 metric,
                 series_semantics,
                 value,
-                {resolved_source_expr} AS source,
+                source,
                 as_of_date,
                 'facts_resolved' AS provenance_table,
-                ? AS run_id
+                ?
             FROM facts_resolved
             WHERE ym = ?
-        ) AS resolved_src
-        """.format(
-            snapshot=SNAPSHOT_TABLE,
-            resolved_source_expr=resolved_source_expr,
-        ),
-        [run_id, ym],
-    )
-    resolved_rows = conn.execute(
-        "SELECT COUNT(*) FROM facts_resolved WHERE ym = ?", [ym]
-    ).fetchone()[0]
+            """,
+            [run_id, ym],
+        )
+        resolved_rows = res_cursor.rowcount or 0
+    except Exception as exc:
+        LOG.error("Error inserting facts_resolved for ym=%s: %s", ym, exc)
+        raise
 
-    conn.execute(
-        """
-        INSERT INTO {snapshot} (ym, iso3, hazard_code, metric, series_semantics, value, source, as_of_date, provenance_table, run_id)
-        SELECT
-            ym,
-            iso3,
-            hazard_code,
-            metric,
-            series_semantics,
-            value,
-            source,
-            as_of_date,
-            provenance_table,
-            run_id
-        FROM (
+    try:
+        delta_cursor = conn.execute(
+            f"""
+            INSERT INTO {SNAPSHOT_TABLE}
             SELECT
                 ym,
                 iso3,
@@ -164,92 +111,52 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 metric,
                 series_semantics,
                 value,
-                {delta_source_expr} AS source,
+                source,
                 as_of_date,
                 'facts_deltas' AS provenance_table,
-                ? AS run_id
+                ?
             FROM facts_deltas
             WHERE ym = ?
-        ) AS deltas_src
-        """.format(
-            snapshot=SNAPSHOT_TABLE,
-            delta_source_expr=delta_source_expr,
-        ),
-        [run_id, ym],
-    )
-    delta_rows = conn.execute(
-        "SELECT COUNT(*) FROM facts_deltas WHERE ym = ?", [ym]
-    ).fetchone()[0]
+            """,
+            [run_id, ym],
+        )
+        delta_rows = delta_cursor.rowcount or 0
+    except Exception as exc:
+        LOG.error("Error inserting facts_deltas for ym=%s: %s", ym, exc)
+        raise
 
     acled_rows = 0
     try:
-        has_acled = (
-            conn.execute(
-                """
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_name = 'acled_monthly_fatalities'
-                LIMIT 1
-                """
-            ).fetchone()
-            is not None
-        )
+        acled_exists_row = conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_name = 'acled_monthly_fatalities'
+            LIMIT 1
+            """
+        ).fetchone()
+        has_acled = acled_exists_row is not None
         if has_acled:
-            conn.execute(
-                """
-                CREATE TEMP TABLE IF NOT EXISTS __acled_monthly AS
+            acled_cursor = conn.execute(
+                f"""
+                INSERT INTO {SNAPSHOT_TABLE}
                 SELECT
                     strftime(month, '%Y-%m') AS ym,
                     iso3,
+                    'conflict' AS hazard_code,
+                    'fatalities_acled' AS metric,
+                    'new' AS series_semantics,
                     CAST(fatalities AS DOUBLE) AS value,
-                    month::DATE AS as_of_date
+                    'ACLED' AS source,
+                    month::DATE AS as_of_date,
+                    'acled_monthly_fatalities' AS provenance_table,
+                    ?
                 FROM acled_monthly_fatalities
                 WHERE strftime(month, '%Y-%m') = ?
                 """,
-                [ym],
+                [run_id, ym],
             )
-            acled_rows = conn.execute(
-                "SELECT COUNT(*) FROM __acled_monthly"
-            ).fetchone()[0]
-            conn.execute(
-                """
-                INSERT INTO {snapshot} (ym, iso3, hazard_code, metric, series_semantics, value, source, as_of_date, provenance_table, run_id)
-                SELECT
-                    ym,
-                    iso3,
-                    hazard_code,
-                    metric,
-                    series_semantics,
-                    value,
-                    source,
-                    as_of_date,
-                    provenance_table,
-                    run_id
-                FROM (
-                    SELECT
-                        ym,
-                        iso3,
-                        'conflict' AS hazard_code,
-                        'fatalities_acled' AS metric,
-                        'new' AS series_semantics,
-                        value,
-                        'ACLED' AS source,
-                        as_of_date,
-                        'acled_monthly_fatalities' AS provenance_table,
-                        ? AS run_id
-                    FROM __acled_monthly
-                ) AS acled_src
-                """.format(
-                    snapshot=SNAPSHOT_TABLE
-                ),
-                [run_id],
-            )
-            conn.execute("DROP TABLE IF EXISTS __acled_monthly")
-        else:
-            LOG.info(
-                "acled_monthly_fatalities table not found; skipping ACLED snapshot for ym=%s",
-                ym,
-            )
+            acled_rows = acled_cursor.rowcount or 0
     except Exception as exc:
         LOG.warning(
             "Failed to include ACLED monthly fatalities in snapshot for ym=%s: %s",
@@ -261,13 +168,12 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
     return int(resolved_rows), int(delta_rows), int(acled_rows)
 
 
-def _insert_snapshot_meta(
-    conn, ym: str, run_id: str, created_at: dt.datetime
-) -> None:
+def _insert_snapshot_meta(conn, ym: str, run_id: str, created_at: dt.datetime) -> None:
+    """Insert/update a row in the snapshots metadata table for this month."""
+
+    conn.execute(f"DELETE FROM {SNAPSHOTS_META_TABLE} WHERE ym = ?", [ym])
     conn.execute(
-        "INSERT INTO {meta} (ym, created_at, run_id) VALUES (?, ?, ?)".format(
-            meta=SNAPSHOTS_META_TABLE
-        ),
+        f"INSERT INTO {SNAPSHOTS_META_TABLE} (ym, created_at, run_id) VALUES (?, ?, ?)",
         [ym, created_at, run_id],
     )
 
@@ -280,16 +186,14 @@ def build_snapshot_for_month(
     write_parquet: bool = True,
 ) -> SnapshotResult:
     """
-    Build a unified snapshot for a single month (ym) into the connected DuckDB database.
+    Build a unified snapshot for a single month.
 
-    - Drops any existing snapshot rows for this ym in {snapshot}.
-    - Copies rows for ym from facts_resolved, facts_deltas, and acled_monthly_fatalities.
-    - Optionally writes a Parquet file at snapshot_root/<ym>/facts.parquet.
+    - Drops any existing snapshot rows for `ym`.
+    - Copies rows for `ym` from `facts_resolved`, `facts_deltas`, and, if present,
+      `acled_monthly_fatalities` into `facts_snapshot`.
+    - Optionally writes a Parquet file at `snapshot_root/<ym>/facts.parquet`.
+    """
 
-    This function does not modify any connector logic and is safe to run repeatedly.
-    """.format(
-        snapshot=SNAPSHOT_TABLE
-    )
     created_at = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
     actual_run_id = run_id or str(uuid.uuid4())
 
@@ -297,23 +201,21 @@ def build_snapshot_for_month(
 
     _ensure_tables(conn)
     _delete_existing_for_month(conn, ym)
+
     try:
         resolved_rows, delta_rows, acled_rows = _insert_from_facts_tables(
             conn, ym, actual_run_id
         )
     except Exception as exc:
-        LOG.error("Snapshot insert failed for ym=%s: %s", ym, exc)
-        for tbl in (
-            "facts_resolved",
-            "facts_deltas",
-            "acled_monthly_fatalities",
-        ):
+        for tbl in ("facts_resolved", "facts_deltas", "acled_monthly_fatalities"):
             try:
                 cols = conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
                 LOG.error("Schema for %s: %s", tbl, cols)
             except Exception as exc2:
                 LOG.error("Failed to inspect schema for %s: %s", tbl, exc2)
+        LOG.error("Snapshot insert failed for ym=%s: %s", ym, exc)
         raise
+
     snapshot_rows = resolved_rows + delta_rows + acled_rows
 
     snapshot_path: Optional[Path] = None
@@ -323,25 +225,33 @@ def build_snapshot_for_month(
         snapshot_path = snapshot_dir / "facts.parquet"
         LOG.info("Writing snapshot parquet for ym=%s to %s", ym, snapshot_path)
         snapshot_df = conn.execute(
-            """
-            SELECT *
-            FROM {snapshot}
+            f"""
+            SELECT
+                ym,
+                iso3,
+                hazard_code,
+                metric,
+                series_semantics,
+                value,
+                source,
+                as_of_date,
+                provenance_table,
+                run_id
+            FROM {SNAPSHOT_TABLE}
             WHERE ym = ?
             ORDER BY iso3, hazard_code, metric, series_semantics, as_of_date
-            """.format(snapshot=SNAPSHOT_TABLE),
+            """,
             [ym],
         ).df()
         snapshot_df.to_parquet(snapshot_path)
 
-    _insert_snapshot_meta(conn, ym, actual_run_id, created_at)
-
     db_url = ""
     try:
-        db_path = getattr(conn, "database_name", None)
-        if isinstance(db_path, str):
-            db_url = db_path
+        db_url = getattr(conn, "database_name", "") or ""
     except Exception:
-        pass
+        db_url = ""
+
+    _insert_snapshot_meta(conn, ym, actual_run_id, created_at)
 
     return SnapshotResult(
         ym=ym,
@@ -356,29 +266,6 @@ def build_snapshot_for_month(
     )
 
 
-def build_monthly_snapshot(
-    con,
-    ym: str,
-    *,
-    snapshot_root: Path | str = Path("snapshots"),
-    write_parquet: bool = True,
-    run_id: Optional[str] = None,
-) -> SnapshotResult:
-    """Convenience wrapper to build a single monthly snapshot.
-
-    This delegates to :func:`build_snapshot_for_month` while allowing callers to
-    customise the snapshot output root and run identifier.
-    """
-
-    return build_snapshot_for_month(
-        con,
-        ym=ym,
-        run_id=run_id,
-        snapshot_root=Path(snapshot_root),
-        write_parquet=write_parquet,
-    )
-
-
 def build_snapshots(
     db_url: str,
     months: Iterable[str],
@@ -386,11 +273,9 @@ def build_snapshots(
     run_id: Optional[str] = None,
 ) -> List[SnapshotResult]:
     """
-    Build snapshots for one or more months using the DuckDB database at `db_url`.
-
-    Example:
-        build_snapshots("duckdb:///data/resolver_backfill.duckdb", ["2025-10", "2025-11"])
+    Build snapshots for the given list of `months` against the DuckDB database at `db_url`.
     """
+
     try:
         from resolver.db.duckdb_io import canonicalize_duckdb_target  # type: ignore
 
@@ -411,9 +296,6 @@ def build_snapshots(
             )
             results.append(res)
     finally:
-        try:
-            duckdb_io.close_db(conn)
-        except Exception:
-            pass
+        duckdb_io.close_db(conn)
 
     return results
