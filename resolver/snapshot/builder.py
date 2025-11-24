@@ -304,12 +304,49 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
 
 
 def _insert_snapshot_meta(conn, ym: str, run_id: str, created_at: dt.datetime) -> None:
-    """Insert/update a row in the snapshots metadata table for this month."""
+    """Insert/update a row in the snapshots metadata table for this month.
+
+    This is schema-aware: it inspects the available columns on the snapshots table
+    and only inserts into columns that exist (e.g., canonical schema lacks run_id).
+    """
+
+    cols = _get_table_columns(conn, SNAPSHOTS_META_TABLE)
+    if not cols:
+        LOG.warning(
+            "Snapshot meta table '%s' has no columns; skipping metadata insert for ym=%s",
+            SNAPSHOTS_META_TABLE,
+            ym,
+        )
+        return
 
     conn.execute(f"DELETE FROM {SNAPSHOTS_META_TABLE} WHERE ym = ?", [ym])
+
+    insert_columns: list[str] = []
+    params: list[object] = []
+
+    insert_columns.append("ym")
+    params.append(ym)
+
+    if "created_at" in cols:
+        insert_columns.append("created_at")
+        params.append(created_at)
+
+    if "run_id" in cols:
+        insert_columns.append("run_id")
+        params.append(run_id)
+
+    LOG.debug(
+        "Snapshot meta insert for ym=%s: columns=%s available=%s",
+        ym,
+        insert_columns,
+        sorted(cols),
+    )
+
+    placeholders = ", ".join("?" for _ in insert_columns)
+    col_list = ", ".join(insert_columns)
     conn.execute(
-        f"INSERT INTO {SNAPSHOTS_META_TABLE} (ym, created_at, run_id) VALUES (?, ?, ?)",
-        [ym, created_at, run_id],
+        f"INSERT INTO {SNAPSHOTS_META_TABLE} ({col_list}) VALUES ({placeholders})",
+        params,
     )
 
 

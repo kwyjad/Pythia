@@ -114,6 +114,19 @@ def _setup_canonical_db() -> duckdb.DuckDBPyConnection:
         );
         """
     )
+    con.execute(
+        """
+        CREATE TABLE snapshots (
+            ym TEXT PRIMARY KEY,
+            created_at TIMESTAMP,
+            git_sha TEXT,
+            export_version TEXT,
+            facts_rows INTEGER,
+            deltas_rows INTEGER,
+            meta TEXT
+        );
+        """
+    )
     return con
 
 
@@ -302,3 +315,11 @@ def test_build_snapshot_with_canonical_db_schema(tmp_path: Path) -> None:
     sources = {r[6] for r in rows}
     assert "IOM DTM" in sources or "dtm_admin0" in sources
     assert "IDMC" in sources or "idmc" in sources
+
+    meta_rows = con.execute(
+        "SELECT ym, created_at, git_sha, export_version, facts_rows, deltas_rows, meta "
+        "FROM snapshots WHERE ym = '2025-11'",
+    ).fetchall()
+    assert len(meta_rows) == 1
+    assert meta_rows[0][0] == "2025-11"
+    assert meta_rows[0][1] is not None
