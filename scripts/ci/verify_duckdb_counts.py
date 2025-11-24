@@ -226,7 +226,6 @@ def _append_to_step_summary(markdown: str) -> None:
 
 
 def _main_impl(argv: Sequence[str] | None = None) -> int:
-    original_argv = list(argv) if argv is not None else list(sys.argv[1:])
     parser = argparse.ArgumentParser(
         description="Verify DuckDB facts_resolved counts and append diagnostics summaries."
     )
@@ -314,24 +313,34 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
                 for table in missing_tables:
                     print(f"WARNING: Table '{table}' not found in {db_path}")
 
-    if not original_argv:
-        return 0
-
     return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
+
     try:
-        return _main_impl(argv)
+        exit_code = _main_impl(raw_argv)
+    except SystemExit as exc:
+        code = exc.code
+        try:
+            exit_code = int(code) if code is not None else 0
+        except Exception:
+            exit_code = 1
     except Exception as exc:
         context = {
-            "argv": list(argv) if argv is not None else sys.argv[1:],
+            "argv": raw_argv,
             "exception_class": type(exc).__name__,
             "resolver_db_url": os.environ.get("RESOLVER_DB_URL", ""),
         }
         _append_error_to_summary("Verify DuckDB Counts — error", exc, context)
         raise
 
+    if not raw_argv:
+        return 0
+
+    return int(exit_code or 0)
+
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    raise SystemExit(main())
