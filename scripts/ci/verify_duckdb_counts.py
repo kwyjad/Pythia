@@ -226,6 +226,7 @@ def _append_to_step_summary(markdown: str) -> None:
 
 
 def _main_impl(argv: Sequence[str] | None = None) -> int:
+    original_argv = list(argv) if argv is not None else list(sys.argv[1:])
     parser = argparse.ArgumentParser(
         description="Verify DuckDB facts_resolved counts and append diagnostics summaries."
     )
@@ -249,62 +250,74 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
 
     db_path = _resolve_db_path((args.db or "").strip() or None)
 
+    exit_code = 0
+
     try:
         con = duckdb.connect(db_path)
     except Exception as exc:  # pragma: no cover - missing db
         print(f"Failed to connect to DuckDB at {db_path}: {exc}")
-        return 1
-
-    tables_arg = args.tables or []
-    tables: list[str] = []
-    seen: set[str] = set()
-    for table in tables_arg:
-        cleaned = str(table).strip()
-        if not cleaned:
-            continue
-        if cleaned not in seen:
-            tables.append(cleaned)
-            seen.add(cleaned)
-    if not tables:
-        tables = list(DEFAULT_TABLES)
-        seen = set(tables)
-    if "facts_resolved" not in seen:
-        tables.insert(0, "facts_resolved")
-        seen.add("facts_resolved")
-
-    table_counts: list[Tuple[str, int]] = []
-    missing_tables: list[str] = []
-    rows_total = 0
-    try:
-        for table in tables:
-            if not _table_exists(con, table):
-                missing_tables.append(table)
+        exit_code = 1
+    else:
+        breakdown: list[Tuple[str, str, str, int]] = []
+        tables_arg = args.tables or []
+        tables: list[str] = []
+        seen: set[str] = set()
+        for table in tables_arg:
+            cleaned = str(table).strip()
+            if not cleaned:
                 continue
-            try:
-                count = int(
-                    con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                )
-            except Exception as exc:  # pragma: no cover - query failure
-                print(f"Failed to count rows for {table}: {exc}")
-                return 1
-            table_counts.append((table, count))
-            if table == "facts_resolved":
-                rows_total = count
-        breakdown = _fetch_breakdown(con) if rows_total else []
-    finally:
-        con.close()
+            if cleaned not in seen:
+                tables.append(cleaned)
+                seen.add(cleaned)
+        if not tables:
+            tables = list(DEFAULT_TABLES)
+            seen = set(tables)
+        if "facts_resolved" not in seen:
+            tables.insert(0, "facts_resolved")
+            seen.add("facts_resolved")
 
-    markdown = _write_summary(db_path, rows_total, breakdown, table_counts, missing_tables)
-    _append_to_step_summary(markdown)
-    _append_to_summary(markdown)
-    if missing_tables and not args.allow_missing:
-        for table in missing_tables:
-            print(f"ERROR: Table '{table}' not found in {db_path}")
-        return 1
-    if missing_tables:
-        for table in missing_tables:
-            print(f"WARNING: Table '{table}' not found in {db_path}")
-    return 0
+        table_counts: list[Tuple[str, int]] = []
+        missing_tables: list[str] = []
+        rows_total = 0
+        try:
+            for table in tables:
+                if not _table_exists(con, table):
+                    missing_tables.append(table)
+                    continue
+                try:
+                    count = int(
+                        con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    )
+                except Exception as exc:  # pragma: no cover - query failure
+                    print(f"Failed to count rows for {table}: {exc}")
+                    exit_code = 1
+                    break
+                table_counts.append((table, count))
+                if table == "facts_resolved":
+                    rows_total = count
+            else:
+                breakdown = _fetch_breakdown(con) if rows_total else []
+        finally:
+            con.close()
+
+        markdown = _write_summary(
+            db_path, rows_total, breakdown if exit_code == 0 else [], table_counts, missing_tables
+        )
+        _append_to_step_summary(markdown)
+        _append_to_summary(markdown)
+        if exit_code == 0:
+            if missing_tables and not args.allow_missing:
+                for table in missing_tables:
+                    print(f"ERROR: Table '{table}' not found in {db_path}")
+                exit_code = 1
+            elif missing_tables:
+                for table in missing_tables:
+                    print(f"WARNING: Table '{table}' not found in {db_path}")
+
+    if not original_argv:
+        return 0
+
+    return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
