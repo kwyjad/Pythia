@@ -735,6 +735,20 @@ jobs:
                       print(f"[SUMMARY]   ym={ym}: {count} rows")
           except Exception as exc:
               print(f"[SUMMARY] facts_snapshot rows by ym: ERROR: {exc}")
+
+          try:
+              schema_rows = con.execute("PRAGMA table_info('snapshots')").fetchall()
+              if schema_rows:
+                  print("[SUMMARY] snapshots schema:")
+                  for cid, name, col_type, notnull, default, pk in schema_rows:
+                      print(
+                          f"[SUMMARY]   col={name} type={col_type} notnull={notnull} "
+                          f"default={default} pk={pk}"
+                      )
+              else:
+                  print("[SUMMARY] snapshots schema: (no columns)")
+          except Exception as exc:
+              print(f"[SUMMARY] snapshots schema: ERROR: {exc}")
           PY
 
       - name: Upload snapshots artifact
