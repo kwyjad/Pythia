@@ -84,6 +84,25 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
     Returns (resolved_rows_inserted, delta_rows_inserted, acled_rows_inserted).
     """
 
+    def _resolve_source_expression(table_name: str) -> str:
+        """Return a COALESCE expression for the source column in the table.
+
+        Prefers the `source` column when present; if only `source_id` exists, it
+        will be used instead. Falls back to an empty string literal when neither
+        column is available.
+        """
+
+        cols = conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+        col_names = {row[1] for row in cols}
+        if "source" in col_names:
+            return "COALESCE(source, '')"
+        if "source_id" in col_names:
+            return "COALESCE(source_id, '')"
+        return "''"
+
+    resolved_source_expr = _resolve_source_expression("facts_resolved")
+    delta_source_expr = _resolve_source_expression("facts_deltas")
+
     conn.execute(
         """
         INSERT INTO {snapshot} (ym, iso3, hazard_code, metric, series_semantics, value, source, as_of_date, provenance_table, run_id)
@@ -94,14 +113,28 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             metric,
             series_semantics,
             value,
-            COALESCE(source, '') AS source,
+            source,
             as_of_date,
-            'facts_resolved' AS provenance_table,
-            ?
-        FROM facts_resolved
-        WHERE ym = ?
+            provenance_table,
+            run_id
+        FROM (
+            SELECT
+                ym,
+                iso3,
+                hazard_code,
+                metric,
+                series_semantics,
+                value,
+                {resolved_source_expr} AS source,
+                as_of_date,
+                'facts_resolved' AS provenance_table,
+                ? AS run_id
+            FROM facts_resolved
+            WHERE ym = ?
+        ) AS resolved_src
         """.format(
-            snapshot=SNAPSHOT_TABLE
+            snapshot=SNAPSHOT_TABLE,
+            resolved_source_expr=resolved_source_expr,
         ),
         [run_id, ym],
     )
@@ -119,14 +152,28 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
             metric,
             series_semantics,
             value,
-            COALESCE(source, '') AS source,
+            source,
             as_of_date,
-            'facts_deltas' AS provenance_table,
-            ?
-        FROM facts_deltas
-        WHERE ym = ?
+            provenance_table,
+            run_id
+        FROM (
+            SELECT
+                ym,
+                iso3,
+                hazard_code,
+                metric,
+                series_semantics,
+                value,
+                {delta_source_expr} AS source,
+                as_of_date,
+                'facts_deltas' AS provenance_table,
+                ? AS run_id
+            FROM facts_deltas
+            WHERE ym = ?
+        ) AS deltas_src
         """.format(
-            snapshot=SNAPSHOT_TABLE
+            snapshot=SNAPSHOT_TABLE,
+            delta_source_expr=delta_source_expr,
         ),
         [run_id, ym],
     )
@@ -170,15 +217,28 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 SELECT
                     ym,
                     iso3,
-                    'conflict' AS hazard_code,
-                    'fatalities_acled' AS metric,
-                    'new' AS series_semantics,
+                    hazard_code,
+                    metric,
+                    series_semantics,
                     value,
-                    'ACLED' AS source,
+                    source,
                     as_of_date,
-                    'acled_monthly_fatalities' AS provenance_table,
-                    ?
-                FROM __acled_monthly
+                    provenance_table,
+                    run_id
+                FROM (
+                    SELECT
+                        ym,
+                        iso3,
+                        'conflict' AS hazard_code,
+                        'fatalities_acled' AS metric,
+                        'new' AS series_semantics,
+                        value,
+                        'ACLED' AS source,
+                        as_of_date,
+                        'acled_monthly_fatalities' AS provenance_table,
+                        ? AS run_id
+                    FROM __acled_monthly
+                ) AS acled_src
                 """.format(
                     snapshot=SNAPSHOT_TABLE
                 ),
@@ -243,7 +303,11 @@ def build_snapshot_for_month(
         )
     except Exception as exc:
         LOG.error("Snapshot insert failed for ym=%s: %s", ym, exc)
-        for tbl in ("facts_resolved", "facts_deltas"):
+        for tbl in (
+            "facts_resolved",
+            "facts_deltas",
+            "acled_monthly_fatalities",
+        ):
             try:
                 cols = conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
                 LOG.error("Schema for %s: %s", tbl, cols)
