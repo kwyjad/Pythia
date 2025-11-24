@@ -10,6 +10,7 @@ import pathlib
 import subprocess
 import sys
 from typing import Iterable, Sequence, Tuple
+from urllib.parse import urlparse
 
 try:
     import duckdb
@@ -52,7 +53,34 @@ def _append_error_to_summary(section: str, exc: Exception, context: dict[str, ob
 def _normalise_db_path(db_url: str) -> str:
     if db_url.startswith("duckdb:///"):
         db_url = db_url.replace("duckdb:///", "", 1)
+    if "://" in db_url:
+        return db_url
     return os.path.abspath(os.path.expanduser(db_url))
+
+
+def _resolve_db_path(argv_db_path: str | None) -> str:
+    """
+    Resolve the DuckDB database path/url for verify_duckdb_counts.
+
+    Precedence:
+    1. Explicit CLI positional db_path.
+    2. RESOLVER_DB_URL environment variable (duckdb:// scheme unwrapped to a path).
+    3. Historical default of data/resolver.duckdb.
+    """
+
+    if argv_db_path:
+        return _normalise_db_path(argv_db_path)
+
+    env_url = os.getenv("RESOLVER_DB_URL") or ""
+    if env_url:
+        parsed = urlparse(env_url)
+        if parsed.scheme == "duckdb":
+            if parsed.path:
+                return _normalise_db_path(parsed.path)
+            return ":memory:"
+        return env_url
+
+    return _normalise_db_path("data/resolver.duckdb")
 
 
 def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -219,16 +247,7 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    candidate = (args.db or "").strip()
-    if candidate:
-        db_url = candidate
-    else:
-        env_url = os.environ.get("RESOLVER_DB_URL", "").strip()
-        if not env_url:
-            raise SystemExit("RESOLVER_DB_URL not set")
-        db_url = env_url
-
-    db_path = _normalise_db_path(db_url)
+    db_path = _resolve_db_path((args.db or "").strip() or None)
 
     try:
         con = duckdb.connect(db_path)
