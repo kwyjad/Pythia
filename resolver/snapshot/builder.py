@@ -30,6 +30,20 @@ class SnapshotResult:
     run_id: str
 
 
+def _get_table_columns(conn, table: str) -> set[str]:
+    """Return the set of column names for a DuckDB table (best-effort)."""
+
+    try:
+        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.warning("Failed to inspect schema for %s: %s", table, exc)
+        return set()
+
+    cols = {str(row[1]) for row in rows if len(row) >= 2}
+    LOG.debug("Detected columns for %s: %s", table, sorted(cols))
+    return cols
+
+
 def _ensure_tables(conn) -> None:
     """Ensure the snapshot tables exist in the DuckDB database."""
 
@@ -75,6 +89,47 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
     Returns (resolved_rows_inserted, delta_rows_inserted, acled_rows_inserted).
     """
 
+    resolved_cols = _get_table_columns(conn, "facts_resolved")
+    deltas_cols = _get_table_columns(conn, "facts_deltas")
+
+    # --- facts_resolved mapping ---
+    if "source" in resolved_cols:
+        resolved_source_expr = "source"
+    elif "publisher" in resolved_cols:
+        resolved_source_expr = "publisher"
+    elif "source_name" in resolved_cols:
+        resolved_source_expr = "source_name"
+    elif "source_id" in resolved_cols:
+        resolved_source_expr = "source_id"
+    else:
+        resolved_source_expr = "''"
+
+    if "series_semantics" in resolved_cols:
+        resolved_series_expr = "series_semantics"
+    else:
+        resolved_series_expr = "'stock'"
+
+    if "value" in resolved_cols:
+        resolved_value_expr = "value"
+    else:
+        resolved_value_expr = "COALESCE(value_new, value_stock)"
+
+    if "as_of_date" in resolved_cols:
+        resolved_asof_expr = "CAST(as_of_date AS DATE)"
+    elif "as_of" in resolved_cols:
+        resolved_asof_expr = "CAST(as_of AS DATE)"
+    else:
+        resolved_asof_expr = "CAST(NULL AS DATE)"
+
+    LOG.debug(
+        "facts_resolved mapping for snapshot ym=%s: source=%s, series=%s, value=%s, as_of=%s",
+        ym,
+        resolved_source_expr,
+        resolved_series_expr,
+        resolved_value_expr,
+        resolved_asof_expr,
+    )
+
     try:
         res_cursor = conn.execute(
             f"""
@@ -84,10 +139,10 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 iso3,
                 hazard_code,
                 metric,
-                series_semantics,
-                value,
-                source,
-                as_of_date,
+                {resolved_series_expr} AS series_semantics,
+                {resolved_value_expr} AS value,
+                {resolved_source_expr} AS source,
+                {resolved_asof_expr} AS as_of_date,
                 'facts_resolved' AS provenance_table,
                 ?
             FROM facts_resolved
@@ -112,6 +167,50 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
         LOG.error("Error inserting facts_resolved for ym=%s: %s", ym, exc)
         raise
 
+    # --- facts_deltas mapping ---
+    if "source" in deltas_cols:
+        delta_source_expr = "source"
+    elif "source_name" in deltas_cols:
+        delta_source_expr = "source_name"
+    elif "source_id" in deltas_cols:
+        delta_source_expr = "source_id"
+    else:
+        delta_source_expr = "''"
+
+    if "series_semantics" in deltas_cols:
+        delta_series_expr = "series_semantics"
+    elif "semantics" in deltas_cols:
+        delta_series_expr = "semantics"
+    else:
+        delta_series_expr = "'new'"
+
+    if "value_new" in deltas_cols and "value_stock" in deltas_cols:
+        delta_value_expr = "COALESCE(value_new, value_stock)"
+    elif "value_new" in deltas_cols:
+        delta_value_expr = "value_new"
+    elif "value" in deltas_cols:
+        delta_value_expr = "value"
+    elif "value_stock" in deltas_cols:
+        delta_value_expr = "value_stock"
+    else:
+        delta_value_expr = "0.0"
+
+    if "as_of_date" in deltas_cols:
+        delta_asof_expr = "CAST(as_of_date AS DATE)"
+    elif "as_of" in deltas_cols:
+        delta_asof_expr = "CAST(as_of AS DATE)"
+    else:
+        delta_asof_expr = "CAST(NULL AS DATE)"
+
+    LOG.debug(
+        "facts_deltas mapping for snapshot ym=%s: source=%s, series=%s, value=%s, as_of=%s",
+        ym,
+        delta_source_expr,
+        delta_series_expr,
+        delta_value_expr,
+        delta_asof_expr,
+    )
+
     try:
         delta_cursor = conn.execute(
             f"""
@@ -121,10 +220,10 @@ def _insert_from_facts_tables(conn, ym: str, run_id: str) -> Tuple[int, int, int
                 iso3,
                 hazard_code,
                 metric,
-                series_semantics,
-                value,
-                source,
-                as_of_date,
+                {delta_series_expr} AS series_semantics,
+                {delta_value_expr} AS value,
+                {delta_source_expr} AS source,
+                {delta_asof_expr} AS as_of_date,
                 'facts_deltas' AS provenance_table,
                 ?
             FROM facts_deltas

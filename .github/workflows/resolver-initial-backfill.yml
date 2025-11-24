@@ -724,6 +724,17 @@ jobs:
               print(f"[SUMMARY] facts_snapshot distinct ym: {ym_count}")
           except Exception as exc:
               print(f"[SUMMARY] facts_snapshot: ERROR: {exc}")
+
+          try:
+              rows = con.execute(
+                  "SELECT ym, COUNT(*) FROM facts_snapshot GROUP BY ym ORDER BY ym"
+              ).fetchall()
+              if rows:
+                  print("[SUMMARY] facts_snapshot rows by ym:")
+                  for ym, count in rows:
+                      print(f"[SUMMARY]   ym={ym}: {count} rows")
+          except Exception as exc:
+              print(f"[SUMMARY] facts_snapshot rows by ym: ERROR: {exc}")
           PY
 
       - name: Upload snapshots artifact
