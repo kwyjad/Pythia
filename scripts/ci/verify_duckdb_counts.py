@@ -51,20 +51,14 @@ def _append_error_to_summary(section: str, exc: Exception, context: dict[str, ob
 
 
 def _normalise_db_path(db_url: str) -> str:
-    parsed = urlparse(db_url)
-
-    if parsed.scheme == "duckdb":
-        if parsed.path:
-            return parsed.path
-        return ":memory:"
-
-    if parsed.scheme:
+    if db_url.startswith("duckdb:///"):
+        db_url = db_url.replace("duckdb:///", "", 1)
+    if "://" in db_url:
         return db_url
-
     return os.path.abspath(os.path.expanduser(db_url))
 
 
-def _resolve_db_path(args: argparse.Namespace) -> str:
+def _resolve_db_path(argv_db_path: str | None) -> str:
     """
     Resolve the DuckDB database path/url for verify_duckdb_counts.
 
@@ -74,12 +68,17 @@ def _resolve_db_path(args: argparse.Namespace) -> str:
     3. Historical default of data/resolver.duckdb.
     """
 
-    if getattr(args, "db_path", None):
-        return _normalise_db_path(args.db_path)
+    if argv_db_path:
+        return _normalise_db_path(argv_db_path)
 
-    env_url = os.getenv("RESOLVER_DB_URL")
+    env_url = os.getenv("RESOLVER_DB_URL") or ""
     if env_url:
-        return _normalise_db_path(env_url)
+        parsed = urlparse(env_url)
+        if parsed.scheme == "duckdb":
+            if parsed.path:
+                return _normalise_db_path(parsed.path)
+            return ":memory:"
+        return env_url
 
     return _normalise_db_path("data/resolver.duckdb")
 
@@ -234,7 +233,7 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
         description="Verify DuckDB facts_resolved counts and append diagnostics summaries."
     )
     parser.add_argument(
-        "db_path",
+        "db",
         nargs="?",
         help=(
             "Path to DuckDB database (optional; falls back to RESOLVER_DB_URL "
@@ -258,7 +257,7 @@ def _main_impl(argv: Sequence[str] | None = None) -> int:
     is_no_arg_invocation = len(raw_argv) == 0
     effective_allow_missing = bool(args.allow_missing) or is_no_arg_invocation
 
-    db_path = _resolve_db_path(args)
+    db_path = _resolve_db_path((args.db or "").strip() or None)
 
     exit_code = 0
     breakdown: list[Tuple[str, str, str, int]] = []
@@ -359,6 +358,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         _append_error_to_summary("Verify DuckDB Counts — error", exc, context)
         raise
+
+    if not raw_argv:
+        return 0
 
     return int(exit_code or 0)
 
