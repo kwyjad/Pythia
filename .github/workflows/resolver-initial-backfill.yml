@@ -645,6 +645,44 @@ jobs:
           fi
           echo "DB path is: $(cat "$GITHUB_OUTPUT")"
 
+      - name: Snapshot DB schema (facts tables)
+        env:
+          DB_PATH: ${{ steps.dbpath.outputs.db_path }}
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import os
+          from pathlib import Path
+
+          from resolver.db import duckdb_io
+
+          workspace = Path(os.getcwd())
+          db_path = Path(os.environ.get("DB_PATH", "data/resolver_backfill.duckdb"))
+          full = workspace / db_path
+          print(f"[SCHEMA] Inspecting tables from {full}")
+          con = duckdb_io.get_db(f"duckdb:///{full}")
+          try:
+              for table in ("facts_resolved", "facts_deltas"):
+                  print(f"\n[SCHEMA] {table}")
+                  try:
+                      rows = con.execute(
+                          "PRAGMA table_info(?)", [table]
+                      ).fetchall()
+                  except Exception:
+                      rows = con.execute(
+                          f"PRAGMA table_info('{table}')"
+                      ).fetchall()
+                  if not rows:
+                      print("[SCHEMA] (no columns)")
+                      continue
+                  for cid, name, col_type, notnull, default, pk in rows:
+                      print(
+                          f"[SCHEMA] col={name} type={col_type} notnull={notnull} default={default} pk={pk}"
+                      )
+          finally:
+              duckdb_io.close_db(con)
+          PY
+
       - name: Run snapshot-from-DB
         env:
           DB_PATH: ${{ steps.dbpath.outputs.db_path }}

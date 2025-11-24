@@ -237,9 +237,19 @@ def build_snapshot_for_month(
 
     _ensure_tables(conn)
     _delete_existing_for_month(conn, ym)
-    resolved_rows, delta_rows, acled_rows = _insert_from_facts_tables(
-        conn, ym, actual_run_id
-    )
+    try:
+        resolved_rows, delta_rows, acled_rows = _insert_from_facts_tables(
+            conn, ym, actual_run_id
+        )
+    except Exception as exc:
+        LOG.error("Snapshot insert failed for ym=%s: %s", ym, exc)
+        for tbl in ("facts_resolved", "facts_deltas"):
+            try:
+                cols = conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                LOG.error("Schema for %s: %s", tbl, cols)
+            except Exception as exc2:
+                LOG.error("Failed to inspect schema for %s: %s", tbl, exc2)
+        raise
     snapshot_rows = resolved_rows + delta_rows + acled_rows
 
     snapshot_path: Optional[Path] = None
