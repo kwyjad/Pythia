@@ -79,26 +79,52 @@ country_model = genai.GenerativeModel(
 # --- Main Functions ---
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
-def generate_report_for_country(country):
-    """Generates a risk analysis report for a single country."""
-    logging.info(f"Generating report for: {country}...")
-    try:
-        # Use the .format() method to insert the country name
-        prompt = COUNTRY_ANALYSIS_PROMPT.format(country=country)
-        response = country_model.generate_content(prompt)
-        # Clean up the response text, removing markdown fences
-        clean_text = response.text.strip().replace("```markdown", "").replace("```", "").strip()
-        return clean_text
-    except Exception as e:
-        # Log the full error to help debug
-        logging.error(f"An error occurred while generating report for {country}: {e}", exc_info=True)
-        return None # Return None if an error occurs
+def generate_report_for_country(country: str) -> str | None:
+    """
+    Generate a markdown risk report for a single country using Gemini.
+    Returns the cleaned markdown string or None on failure.
+    """
+    logging.info("Generating report for: %s...", country)
 
-def parse_reports_and_build_table(all_reports_text):
-    """Parse SCENARIO_DATA_BLOCKs into structured rows and build a summary table."""
-    logging.info("Parsing generated reports to build summary table using Python...")
+    # *** CRITICAL FIX ***
+    # Do NOT use str.format(...) on this prompt; it contains JSON with `{}` braces.
+    # Use a plain string replace instead so braces in JSON examples are untouched.
+    prompt = COUNTRY_ANALYSIS_PROMPT.replace("{country}", country)
+    logging.info("Prompt length for %s: %d characters", country, len(prompt))
 
-    json_blocks = re.findall(r'<!-- SCENARIO_DATA_BLOCK: (.*?) -->', all_reports_text, re.DOTALL)
+    # Call Gemini
+    response = country_model.generate_content(prompt)
+    report_text = getattr(response, "text", "") or ""
+    logging.info("Received report for %s: %d characters", country, len(report_text))
+
+    cleaned_text = report_text.strip()
+    if not cleaned_text:
+        logging.warning("Empty report returned for %s after trimming whitespace.", country)
+        return None
+
+    # Strip unexpected ``` fences if present
+    if cleaned_text.startswith("```"):
+        logging.debug("Report for %s starts with a code fence; stripping.", country)
+        cleaned_text = cleaned_text.lstrip("`")
+        cleaned_text = cleaned_text.lstrip("markdown").lstrip()
+    if cleaned_text.endswith("```"):
+        cleaned_text = cleaned_text.rstrip("`").rstrip()
+
+    return cleaned_text
+
+def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict]]:
+    logging.info(
+        "Parsing generated reports to build summary table using Python... total_length=%d",
+        len(all_reports_text),
+    )
+
+    json_blocks = re.findall(
+        r'<!-- SCENARIO_DATA_BLOCK: (.*?) -->',
+        all_reports_text,
+        re.DOTALL,
+    )
+    logging.info("Found %d SCENARIO_DATA_BLOCK comment(s).", len(json_blocks))
+
     if not json_blocks:
         logging.warning("No SCENARIO_DATA_BLOCKs found in the generated reports.")
         fallback = (
@@ -205,6 +231,12 @@ def parse_reports_and_build_table(all_reports_text):
         )
         return fallback, []
 
+    logging.info(
+        "Scenario parsing complete: %d table entries; %d scenarios with iso3 for DB.",
+        len(table_entries),
+        len(scenarios_for_db),
+    )
+
     table_entries.sort(key=lambda x: (x["country"], x["title"]))
     table_header = (
         "| Country | Scenario Title | Hazard | Likely Month | Probability | PIN Best Guess | PA Best Guess |\n"
@@ -237,14 +269,39 @@ def main():
         logging.error("hs_country_list.txt not found. Please create it in the repository root.")
         return
 
-    individual_reports = []
-    for i, country in enumerate(countries):
-        report = generate_report_for_country(country)
+    individual_reports: list[str] = []
+
+    for idx, country in enumerate(countries, start=1):
+        try:
+            report = generate_report_for_country(country)
+        except Exception as e:
+            logging.error(
+                "Failed to generate report for %s after retries: %s",
+                country,
+                e,
+                exc_info=True,
+            )
+            report = None
+
         if report:
             individual_reports.append(report)
-        logging.info(f"Completed {country} ({i+1}/{len(countries)})")
+            logging.info(
+                "Completed %s (%d/%d); report length=%d characters",
+                country,
+                idx,
+                len(countries),
+                len(report),
+            )
+        else:
+            logging.warning(
+                "No report captured for %s (%d/%d).",
+                country,
+                idx,
+                len(countries),
+            )
+
         # Add a delay between API calls to respect rate limits and avoid overload
-        time.sleep(5) 
+        time.sleep(5)
 
     logging.info("All country reports have been generated.")
 
