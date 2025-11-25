@@ -26,17 +26,28 @@ def test_fetch_breakdown_handles_null_source_and_group_by_alias_safely() -> None
             "('emdat', 'affected', 'new');"
         )
 
-        rows: List[Tuple[str, str, str, int]] = _fetch_breakdown(con)
-        result = {(src, metric, semantics): count for src, metric, semantics, count in rows}
+        rows: List[Tuple[str, str, str, str, int]] = list(_fetch_breakdown(con))
+        result = {
+            (table, src, metric, semantics): count
+            for table, src, metric, semantics, count in rows
+        }
 
-        assert result[("", "idp_displacement_stock_dtm", "stock")] == 1
-        assert result[("IOM DTM", "idp_displacement_stock_dtm", "stock")] == 1
-        assert result[("emdat", "affected", "new")] == 1
+        assert result[("facts_resolved", "", "idp_displacement_stock_dtm", "stock")] == 1
+        assert (
+            result[("facts_resolved", "IOM DTM", "idp_displacement_stock_dtm", "stock")] == 1
+        )
+        assert result[("facts_resolved", "emdat", "affected", "new")] == 1
 
         assert rows == [
-            ("", "idp_displacement_stock_dtm", "stock", 1),
-            ("IOM DTM", "idp_displacement_stock_dtm", "stock", 1),
-            ("emdat", "affected", "new", 1),
+            ("facts_resolved", "", "idp_displacement_stock_dtm", "stock", 1),
+            (
+                "facts_resolved",
+                "IOM DTM",
+                "idp_displacement_stock_dtm",
+                "stock",
+                1,
+            ),
+            ("facts_resolved", "emdat", "affected", "new", 1),
         ]
     finally:
         con.close()

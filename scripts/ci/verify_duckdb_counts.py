@@ -72,7 +72,9 @@ def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
     return bool(result)
 
 
-def _fetch_breakdown(con: "duckdb.DuckDBPyConnection") -> Iterable[Tuple[str, str, str, int]]:
+def _fetch_breakdown(
+    con: "duckdb.DuckDBPyConnection",
+) -> Iterable[Tuple[str, str, str, str, int]]:
     """Return a breakdown of rows by (table, source, metric, semantics).
 
     This is schema-aware and supports tables that do not have a ``source``
@@ -157,7 +159,7 @@ def _fetch_breakdown(con: "duckdb.DuckDBPyConnection") -> Iterable[Tuple[str, st
 def _write_summary(
     db_path: str,
     rows_total: int,
-    breakdown: Iterable[Tuple[str, str, str, int]],
+    breakdown: Iterable[Tuple[str, str, str, int] | Tuple[str, str, str, str, int]],
     table_counts: Sequence[Tuple[str, int]],
     missing_tables: Sequence[str],
 ) -> str:
@@ -176,11 +178,17 @@ def _write_summary(
         for table in missing_tables:
             lines.append(f"- {table}\n")
         lines.append("\n")
-    breakdown = list(breakdown)
-    if rows_total and breakdown:
+    breakdown_rows: list[tuple[str, str, str, int]] = []
+    for row in breakdown:
+        if len(row) == 5:
+            _, source, metric, semantics, count = row
+        else:
+            source, metric, semantics, count = row  # type: ignore[misc]
+        breakdown_rows.append((source, metric, semantics, count))
+    if rows_total and breakdown_rows:
         lines.append("| source | metric | semantics | rows |\n")
         lines.append("| --- | --- | --- | ---: |\n")
-        for source, metric, semantics, count in breakdown:
+        for source, metric, semantics, count in breakdown_rows:
             lines.append(f"| {source} | {metric} | {semantics} | {count} |\n")
     COUNTS_PATH.write_text("".join(lines), encoding="utf-8")
     return "".join(lines)
