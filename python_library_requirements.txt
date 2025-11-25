@@ -3,3 +3,4 @@ python-dotenv
 backoff
 duckdb
 pandas
+PyYAML
