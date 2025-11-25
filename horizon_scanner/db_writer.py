@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+from datetime import date
+
 import duckdb
 import pandas as pd
-from datetime import date
 
 from resolver.db.duckdb_io import upsert_dataframe
 from pythia.utils.ids import scenario_id as sid, question_id as qid
@@ -76,6 +78,18 @@ def upsert_hs_payload(
                 "status": "active",
             }
         )
+
+    # Normalize scenario JSON payloads to proper JSON strings for DuckDB
+    for row in scenario_rows:
+        raw = row.get("json", {})
+        # If it's already a string, assume the caller has serialized it.
+        if isinstance(raw, str):
+            continue
+        try:
+            row["json"] = json.dumps(raw, ensure_ascii=False)
+        except TypeError:
+            # If something inside isn't serializable, fall back to an empty object.
+            row["json"] = "{}"
 
     if scenario_rows:
         upsert_dataframe(con, "hs_scenarios", pd.DataFrame(scenario_rows), keys=["scenario_id"])
