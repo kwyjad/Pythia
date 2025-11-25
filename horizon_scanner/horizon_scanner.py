@@ -57,7 +57,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 # Configuration for the Gemini models
 # Use a safety setting to be less restrictive, as the content is professional analysis
 generation_config = {
-    "temperature": 0.2,
+    "temperature": 1.0,
     "top_p": 0.9,
     "top_k": 32,
     "max_output_tokens": 8192,
@@ -72,7 +72,7 @@ safety_settings = [
 # Initialize the generative model for the analysis
 # This uses your preferred model for the complex analysis task
 country_model = genai.GenerativeModel(
-    model_name="gemini-2.5-pro", 
+    model_name="gemini-3-pro-preview",
     generation_config=generation_config,
     safety_settings=safety_settings
 )
