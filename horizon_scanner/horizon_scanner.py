@@ -24,12 +24,9 @@ REPO_ROOT = CURRENT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-try:
-    from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
-    from horizon_scanner.db_writer import upsert_hs_payload
-except ModuleNotFoundError:  # pragma: no cover - fallback for direct execution
-    from hs_prompt import COUNTRY_ANALYSIS_PROMPT
-    from db_writer import upsert_hs_payload
+# Horizon Scanner package imports
+from horizon_scanner.db_writer import upsert_hs_payload
+from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
 
 from resolver.db import duckdb_io
 from pythia.db.init import init as init_db
