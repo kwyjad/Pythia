@@ -26,24 +26,29 @@ def _extract_one_table_for_month(con, table: str, ym: str, out_path: Path) -> bo
         print(f"[simple_snapshot] Table '{table}' does not exist; skipping.")
         return False
 
-    query = f"SELECT * FROM {table} WHERE ym = ?"
-    try:
-        con.execute(query, [ym])
-    except Exception as exc:  # pragma: no cover - defensive
-        print(f"[simple_snapshot] Failed to query {table} for ym={ym}: {exc}")
-        return False
-
+    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        con.execute(
-            "COPY (SELECT * FROM {table} WHERE ym = ?) TO ? (FORMAT PARQUET)".format(
-                table=table
-            ),
-            [ym, str(out_path)],
+
+    copy_sql = f"
+        COPY (
+            SELECT *
+            FROM {table}
+            WHERE ym = '{ym}'
         )
+        TO '{out_path}'
+        (FORMAT PARQUET);
+    "
+    try:
+        con.execute(copy_sql)
     except Exception as exc:  # pragma: no cover - defensive
         print(
-            f"[simple_snapshot] Failed to write Parquet for {table}, ym={ym}, path={out_path}: {exc}"
+            f"[simple_snapshot] Failed to write Parquet for table={table}, ym={ym}, path={out_path}: {exc}"
+        )
+        return False
+
+    if not out_path.exists():
+        print(
+            f"[simple_snapshot] COPY completed but no file at {out_path}; no rows for this month?"
         )
         return False
 
