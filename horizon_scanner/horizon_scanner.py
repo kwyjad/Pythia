@@ -176,11 +176,28 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
         country_name = data.get("country") or data.get("country_name") or "Unknown"
         iso3 = (data.get("iso3") or "").strip().upper()
         for scenario in data.get("scenarios", []):
-            title = scenario.get("title") or scenario.get("name") or ""
+            title = (scenario.get("title") or scenario.get("name") or "").strip()
             hazard_code = (scenario.get("hazard_code") or "").strip().upper()
-            hazard_label = scenario.get("hazard_label") or scenario.get("hazard") or hazard_code
-            likely_window_month = scenario.get("likely_window_month") or ""
-            probability = scenario.get("probability") or scenario.get("probability_of_occurrence") or ""
+            hazard_label = (
+                scenario.get("hazard_label")
+                or scenario.get("hazard")
+                or hazard_code
+            )
+            hazard_label = hazard_label.strip()
+            likely_window_month = (scenario.get("likely_window_month") or "").strip()
+            probability_text = (
+                scenario.get("probability")
+                or scenario.get("probability_of_occurrence")
+                or ""
+            ).strip()
+            prob_pct = 0.0
+            if probability_text:
+                match = re.search(r"(\d+(?:\.\d+)?)", probability_text)
+                if match:
+                    try:
+                        prob_pct = float(match.group(1))
+                    except ValueError:
+                        prob_pct = 0.0
             markdown = scenario.get("markdown") or scenario.get("narrative") or ""
             best_guess_raw = scenario.get("best_guess") or {}
             best_guess = {
@@ -189,11 +206,20 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
             }
 
             scenario_json = dict(scenario)
-            scenario_json.setdefault("title", title)
-            scenario_json.setdefault("hazard_code", hazard_code)
-            scenario_json.setdefault("hazard_label", hazard_label)
-            scenario_json.setdefault("likely_window_month", likely_window_month)
-            scenario_json.setdefault("best_guess", best_guess)
+            scenario_json.update(
+                {
+                    "title": title,
+                    "hazard_code": hazard_code,
+                    "hazard_label": hazard_label,
+                    "likely_window_month": likely_window_month,
+                    "best_guess": best_guess,
+                    "scenario_title": title,
+                    "probability_text": probability_text,
+                    "probability_pct": prob_pct,
+                    "pin_best_guess": best_guess["PIN"],
+                    "pa_best_guess": best_guess["PA"],
+                }
+            )
 
             dedupe_key = (iso3 or country_name, hazard_code, title)
             if dedupe_key in dedupe_keys:
@@ -206,7 +232,7 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
                     "title": title or "N/A",
                     "hazard": hazard_code or hazard_label or "N/A",
                     "likely_month": likely_window_month or "N/A",
-                    "probability": probability or "N/A",
+                    "probability": probability_text or "N/A",
                     "pin": best_guess["PIN"],
                     "pa": best_guess["PA"],
                 }
@@ -230,7 +256,12 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
                     "best_guess": best_guess,
                     "title": title,
                     "markdown": markdown,
-                    "probability": probability,
+                    "probability": probability_text,
+                    "scenario_title": title,
+                    "probability_text": probability_text,
+                    "probability_pct": prob_pct,
+                    "pin_best_guess": best_guess["PIN"],
+                    "pa_best_guess": best_guess["PA"],
                     "json": {**scenario_json, "country": country_name, "iso3": iso3},
                 }
             )
