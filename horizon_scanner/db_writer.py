@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date
 
 import duckdb
@@ -79,20 +80,75 @@ def upsert_hs_payload(
             }
         )
 
-    # Normalize scenario JSON payloads to proper JSON strings for DuckDB
+    # --- Normalize JSON payloads for DuckDB and add diagnostics ---
+
+    # Log counts before upsert
+    logging.info(
+        "Horizon Scanner DB payload prepared: %d scenario_rows, %d question_rows for run_id=%s",
+        len(scenario_rows),
+        len(question_rows),
+        run_meta["run_id"],
+    )
+
+    # Normalize scenario JSON to valid JSON strings (if not already)
     for row in scenario_rows:
         raw = row.get("json", {})
-        # If it's already a string, assume the caller has serialized it.
         if isinstance(raw, str):
+            # Assume caller already provided a JSON string
             continue
         try:
             row["json"] = json.dumps(raw, ensure_ascii=False)
         except TypeError:
-            # If something inside isn't serializable, fall back to an empty object.
+            logging.warning(
+                "Failed to JSON-serialize scenario json for scenario_id=%s; falling back to empty object.",
+                row.get("scenario_id"),
+            )
             row["json"] = "{}"
 
-    if scenario_rows:
-        upsert_dataframe(con, "hs_scenarios", pd.DataFrame(scenario_rows), keys=["scenario_id"])
+    # Normalize question hs_json to valid JSON strings (if not already)
+    for row in question_rows:
+        raw = row.get("hs_json", {})
+        if isinstance(raw, str):
+            # Assume already JSON; if it's a Python repr, DuckDB will complain and our logs will show it.
+            continue
+        try:
+            row["hs_json"] = json.dumps(raw, ensure_ascii=False)
+        except TypeError:
+            logging.warning(
+                "Failed to JSON-serialize hs_json for question_id=%s; falling back to empty object.",
+                row.get("question_id"),
+            )
+            row["hs_json"] = "{}"
+
+    # Extra diagnostics: show one example question payload after normalization
     if question_rows:
-        upsert_dataframe(con, "questions", pd.DataFrame(question_rows), keys=["question_id"])
+        sample = question_rows[0]
+        logging.info(
+            "Example question row before upsert | question_id=%s | iso3=%s | hazard=%s | metric=%s | hs_json_preview=%r",
+            sample.get("question_id"),
+            sample.get("iso3"),
+            sample.get("hazard_code"),
+            sample.get("metric"),
+            (str(sample.get("hs_json"))[:200] + "...")
+            if sample.get("hs_json") is not None
+            else None,
+        )
+
+    # --- Upsert into DuckDB ---
+
+    if scenario_rows:
+        upsert_dataframe(
+            con,
+            "hs_scenarios",
+            pd.DataFrame(scenario_rows),
+            keys=["scenario_id"],
+        )
+    if question_rows:
+        upsert_dataframe(
+            con,
+            "questions",
+            pd.DataFrame(question_rows),
+            keys=["question_id"],
+        )
+
     con.close()
