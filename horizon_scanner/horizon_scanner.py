@@ -14,6 +14,7 @@ import re
 from datetime import datetime, date
 from pathlib import Path
 
+import duckdb
 import backoff
 import google.generativeai as genai
 
@@ -30,6 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for direct execution
     from hs_prompt import COUNTRY_ANALYSIS_PROMPT
     from db_writer import upsert_hs_payload
 
+from resolver.db import duckdb_io
 from pythia.db.init import init as init_db
 from pythia.prompts.registry import load_prompt_spec
 
@@ -57,7 +59,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 # Configuration for the Gemini models
 # Use a safety setting to be less restrictive, as the content is professional analysis
 generation_config = {
-    "temperature": 0.2,
+    "temperature": 1.0,
     "top_p": 0.9,
     "top_k": 32,
     "max_output_tokens": 8192,
@@ -72,7 +74,7 @@ safety_settings = [
 # Initialize the generative model for the analysis
 # This uses your preferred model for the complex analysis task
 country_model = genai.GenerativeModel(
-    model_name="gemini-2.5-pro", 
+    model_name="gemini-3-pro-preview",
     generation_config=generation_config,
     safety_settings=safety_settings
 )
@@ -273,12 +275,98 @@ def main():
         horizon_months=6,
     )
 
+    # --- Diagnostics: list questions written to DuckDB for this run ---
+    questions_md = ""
+    conn = None
+    try:
+        conn = duckdb_io.get_db(db_url)
+        query = """
+            SELECT
+                question_id,
+                iso3,
+                hazard_code,
+                metric,
+                target_month,
+                wording
+            FROM questions
+            WHERE run_id = ?
+            ORDER BY iso3, hazard_code, metric, target_month, question_id
+        """
+        question_rows = conn.execute(query, [run_meta["run_id"]]).fetchall()
+
+        if question_rows:
+            logging.info(
+                "Questions written to DuckDB for run %s (total %d):",
+                run_meta["run_id"],
+                len(question_rows),
+            )
+            for q_id, iso3, hz, metric, target_month, wording in question_rows:
+                logging.info(
+                    "  question_id=%s | iso3=%s | hazard=%s | metric=%s | month=%s | wording=%s",
+                    q_id,
+                    iso3,
+                    hz,
+                    metric,
+                    target_month,
+                    wording,
+                )
+
+            lines = [
+                "## Questions Written to DuckDB",
+                "",
+                f"Total questions written: {len(question_rows)}",
+                "",
+                "| Question ID | ISO3 | Hazard | Metric | Target Month | Wording |",
+                "|---|---|---|---|---|---|",
+            ]
+            for q_id, iso3, hz, metric, target_month, wording in question_rows:
+                safe_wording = (wording or "").replace("|", "\\|")
+                lines.append(
+                    f"| {q_id} | {iso3} | {hz} | {metric} | {target_month} | {safe_wording} |"
+                )
+            questions_md = "\n".join(lines)
+        else:
+            logging.warning(
+                "No questions found in DuckDB for run_id=%s (check scenario parsing and DB write).",
+                run_meta["run_id"],
+            )
+            questions_md = (
+                "## Questions Written to DuckDB\n\n"
+                f"No questions found for run_id `{run_meta['run_id']}`. "
+                "Check scenario parsing and DB write steps.\n"
+            )
+    except duckdb.Error as e:
+        logging.error(
+            "Failed to fetch questions from DuckDB for diagnostics: %s",
+            e,
+            exc_info=True,
+        )
+        questions_md = (
+            "## Questions Written to DuckDB\n\n"
+            "An error occurred while fetching questions for diagnostics. "
+            "See workflow logs for details.\n"
+        )
+    except Exception as e:  # pragma: no cover - unexpected exceptions
+        logging.error(
+            "Unexpected error during question diagnostics: %s",
+            e,
+            exc_info=True,
+        )
+        questions_md = (
+            "## Questions Written to DuckDB\n\n"
+            "An unexpected error occurred while fetching questions for diagnostics. "
+            "See workflow logs for details.\n"
+        )
+    finally:
+        duckdb_io.close_db(conn)
+
     # --- Final Report Assembly ---
     utc_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
     final_report_content = (
         f"# Pythia Horizon Scan Report\n\n"
         f"**Generated on:** {utc_time}\n\n"
         f"## Summary Table\n\n{summary_table}\n\n"
+        f"---\n\n{questions_md}\n\n"
         f"---\n\n# Individual Country Reports\n\n{all_reports_text}"
     )
 

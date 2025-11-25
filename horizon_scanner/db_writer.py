@@ -53,29 +53,29 @@ def upsert_hs_payload(
         )
 
         best = sc.get("best_guess") or {}
-        for metric in ("PIN", "PA"):
-            wording = (
-                f"How many people will be {('in need' if metric == 'PIN' else 'affected')} "
-                f"in {iso3} due to {hz} by {target_month}?"
-            )
-            q_id = qid(iso3, hz, metric, target_month, wording)
-            question_rows.append(
-                {
-                    "question_id": q_id,
-                    "scenario_id": s_id,
-                    "run_id": run_meta["run_id"],
-                    "iso3": iso3,
-                    "country_name": sc.get("country_name", ""),
-                    "hazard_code": hz,
-                    "hazard_label": sc.get("hazard_label", ""),
-                    "metric": metric,
-                    "target_month": target_month,
-                    "wording": wording,
-                    "best_guess_value": float(best.get(metric) or 0),
-                    "hs_json": {"source": "HS", "raw": sc.get("json", {})},
-                    "status": "active",
-                }
-            )
+
+        metric = "PA"
+        wording = (
+            f"How many people will be affected in {iso3} due to {hz} by {target_month}?"
+        )
+        q_id = qid(iso3, hz, metric, target_month, wording)
+        question_rows.append(
+            {
+                "question_id": q_id,
+                "scenario_id": s_id,
+                "run_id": run_meta["run_id"],
+                "iso3": iso3,
+                "country_name": sc.get("country_name", ""),
+                "hazard_code": hz,
+                "hazard_label": sc.get("hazard_label", ""),
+                "metric": metric,
+                "target_month": target_month,
+                "wording": wording,
+                "best_guess_value": float(best.get(metric) or 0),
+                "hs_json": {"source": "HS", "raw": sc.get("json", {})},
+                "status": "active",
+            }
+        )
 
     if scenario_rows:
         upsert_dataframe(con, "hs_scenarios", pd.DataFrame(scenario_rows), keys=["scenario_id"])
