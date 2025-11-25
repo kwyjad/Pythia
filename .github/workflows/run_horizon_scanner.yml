@@ -33,11 +33,21 @@ jobs:
           echo "Top-level listing:"
           ls -la
           echo ""
-          echo ".github/workflows contents:"
-          ls -la .github/workflows || echo "(no .github/workflows directory)"
+          echo "horizon_scanner directory listing:"
+          if [ -d horizon_scanner ]; then
+            ls -la horizon_scanner
+          else
+            echo "✘ MISSING: horizon_scanner directory"
+          fi
           echo ""
           echo "Checking for Horizon Scanner files:"
-          for f in horizon_scanner.py db_writer.py hs_country_list.txt hs_prompt.py python_library_requirements.txt; do
+          for f in \
+            "horizon_scanner/horizon_scanner.py" \
+            "horizon_scanner/db_writer.py" \
+            "horizon_scanner/hs_country_list.txt" \
+            "horizon_scanner/hs_prompt.py" \
+            "python_library_requirements.txt"
+          do
             if [ -f "$f" ]; then
               echo "✔ Found $f"
             else
@@ -46,10 +56,10 @@ jobs:
           done
           echo ""
           if [ -f python_library_requirements.txt ]; then
-            echo "=== python_library_requirements.txt ==="
+            echo "=== python_library_requirements.txt (root) ==="
             cat python_library_requirements.txt
           else
-            echo "WARNING: python_library_requirements.txt is missing; dependency install will fail."
+            echo "WARNING: python_library_requirements.txt is missing in $(pwd); dependency install will fail."
           fi
 
       # Step 4: Install the necessary Python libraries
@@ -79,15 +89,15 @@ jobs:
             echo "GEMINI_API_KEY is set (value hidden)."
           fi
 
-      # Step 6: Run the main Python script
+      # Step 6: Run the main Python script (as a module)
       - name: Run Horizon Scanner
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
-          echo "=== Running horizon_scanner.py ==="
-          python horizon_scanner.py
-          echo "=== horizon_scanner.py completed ==="
+          echo "=== Running horizon_scanner.horizon_scanner as a module ==="
+          python -m horizon_scanner.horizon_scanner
+          echo "=== horizon_scanner.horizon_scanner completed ==="
 
       # Step 7: Diagnostics – DuckDB + report validation
       - name: Diagnostics — DuckDB and Risk_Report.md
@@ -106,41 +116,41 @@ jobs:
           fi
 
           python - << 'PY'
-            import os
+          import os
 
-            print("Python post-run diagnostic script starting...")
+          print("Python post-run diagnostic script starting...")
 
-            db_path = os.path.join("data", "resolver.duckdb")
-            if not os.path.exists(db_path):
-                print(f"WARNING: DuckDB database '{db_path}' does not exist.")
-            else:
-                try:
-                    import duckdb
-                except Exception as e:
-                    print(f"ERROR: duckdb module not available in diagnostic step: {e}")
-                else:
-                    con = duckdb.connect(db_path)
-                    for table in ("hs_runs", "hs_scenarios", "questions"):
-                        try:
-                            cnt = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                            print(f"Table {table}: {cnt} rows")
-                        except Exception as e:
-                            print(f"Could not query table {table}: {e}")
-                    con.close()
+          db_path = os.path.join("data", "resolver.duckdb")
+          if not os.path.exists(db_path):
+              print(f"WARNING: DuckDB database '{db_path}' does not exist.")
+          else:
+              try:
+                  import duckdb
+              except Exception as e:
+                  print(f"ERROR: duckdb module not available in diagnostic step: {e}")
+              else:
+                  con = duckdb.connect(db_path)
+                  for table in ("hs_runs", "hs_scenarios", "questions"):
+                      try:
+                          cnt = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                          print(f"Table {table}: {cnt} rows")
+                      except Exception as e:
+                          print(f"Could not query table {table}: {e}")
+                  con.close()
 
-            report_path = "Risk_Report.md"
-            if os.path.exists(report_path):
-                print(f"'{report_path}' exists. Showing first 40 lines:")
-                try:
-                    with open(report_path, "r", encoding="utf-8") as f:
-                        for i, line in enumerate(f):
-                            if i >= 40:
-                                break
-                            print(line.rstrip("\n"))
-                except Exception as e:
-                    print(f"Failed to read '{report_path}': {e}")
-            else:
-                print(f"WARNING: '{report_path}' not found.")
+          report_path = "Risk_Report.md"
+          if os.path.exists(report_path):
+              print(f"'{report_path}' exists. Showing first 40 lines:")
+              try:
+                  with open(report_path, "r", encoding="utf-8") as f:
+                      for i, line in enumerate(f):
+                          if i >= 40:
+                              break
+                          print(line.rstrip("\n"))
+              except Exception as e:
+                  print(f"Failed to read '{report_path}': {e}")
+          else:
+              print(f"WARNING: '{report_path}' not found.")
           PY
 
       # Step 8: Upload the final report as an artifact

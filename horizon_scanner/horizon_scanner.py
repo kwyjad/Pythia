@@ -226,10 +226,15 @@ def main():
     start_time = datetime.utcnow()
 
     try:
-        logging.info("Reading country list from hs_country_list.txt...")
-        with open("hs_country_list.txt", "r", encoding="utf-8") as f:
-            # **BUG FIX 2**: This now ignores blank lines and lines starting with #
-            countries = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        country_list_path = CURRENT_DIR / "hs_country_list.txt"
+        logging.info("Reading country list from %s...", country_list_path)
+        with open(country_list_path, "r", encoding="utf-8") as f:
+            # Ignore blank lines and lines starting with #
+            countries = [
+                line.strip()
+                for line in f
+                if line.strip() and not line.startswith("#")
+            ]
         logging.info(f"Found {len(countries)} countries to process.")
     except FileNotFoundError:
         logging.error("hs_country_list.txt not found. Please create it in the repository root.")
