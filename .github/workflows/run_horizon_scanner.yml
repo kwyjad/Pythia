@@ -40,7 +40,7 @@ jobs:
       - name: Run Horizon Scanner
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python Rhorizon_scanner.py
+        run: python horizon_scanner.py
 
       # Step 5: Upload the final report as an artifact
       # This makes the report downloadable from the workflow run page
