@@ -287,7 +287,6 @@ def test_verify_duckdb_counts_writes_markdown(monkeypatch, tmp_path):
     con.close()
 
     repo_root = Path(__file__).resolve().parents[2]
-    monkeypatch.syspath_prepend(str(repo_root))
     monkeypatch.chdir(tmp_path)
 
     diagnostics = Path("diagnostics/ingestion")
@@ -297,12 +296,20 @@ def test_verify_duckdb_counts_writes_markdown(monkeypatch, tmp_path):
 
     step_summary = tmp_path / "step-summary.md"
 
-    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step_summary))
 
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(repo_root)
+    )
+
     subprocess.run(
-        [sys.executable, "-m", "scripts.ci.verify_duckdb_counts"],
+        [sys.executable, "-m", "scripts.ci.verify_duckdb_counts", str(db_path)],
         check=True,
+        env=env,
     )
 
     counts_path = diagnostics / "duckdb_counts.md"

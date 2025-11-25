@@ -55,6 +55,15 @@ def _normalise_db_path(db_url: str) -> str:
     return os.path.abspath(os.path.expanduser(db_url))
 
 
+def _get_table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
+    """Return set of column names for the given DuckDB table (best-effort)."""
+    try:
+        rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+    except Exception:
+        return set()
+    return {str(row[1]) for row in rows if len(row) >= 2}
+
+
 def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
     result = con.execute(
         "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
@@ -64,42 +73,93 @@ def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
 
 
 def _fetch_breakdown(
-    con: duckdb.DuckDBPyConnection,
-) -> Iterable[Tuple[str, str, str, int]]:
-    """Return per-source/metric/semantics counts from ``facts_resolved``.
+    con: "duckdb.DuckDBPyConnection",
+) -> Iterable[Tuple[str, str, str, str, int]]:
+    """Return a breakdown of rows by (table, source, metric, semantics).
 
-    DuckDB disallows grouping by an alias that shadows an underlying column name,
-    so we normalise ``source`` to a different alias for grouping and rename it in
-    the outer projection for downstream consumers.
+    This is schema-aware and supports tables that do not have a ``source``
+    column (e.g. ``acled_monthly_fatalities``) by selecting the best available
+    source-like, metric-like, and semantics-like columns.
     """
-    return con.execute(
-        """
-        SELECT
-          source_normalized AS source,
-          metric,
-          semantics,
-          rows
-        FROM (
-          SELECT
-            COALESCE(source, '') AS source_normalized,
-            COALESCE(metric, '') AS metric,
-            COALESCE(series_semantics, '') AS semantics,
-            COUNT(*) AS rows
-          FROM facts_resolved
-          GROUP BY
-            COALESCE(source, ''),
-            COALESCE(metric, ''),
-            COALESCE(series_semantics, '')
+
+    def build_select_for_table(table: str, fixed_source: str | None = None) -> str | None:
+        cols = _get_table_columns(con, table)
+        if not cols:
+            return None
+
+        if fixed_source is not None:
+            source_expr = f"'{fixed_source}'"
+        elif "source" in cols:
+            source_expr = "source"
+        elif "source_id" in cols:
+            source_expr = "source_id"
+        elif "publisher" in cols:
+            source_expr = "publisher"
+        elif "source_name" in cols:
+            source_expr = "source_name"
+        elif "source_type" in cols:
+            source_expr = "source_type"
+        else:
+            source_expr = "''"
+
+        if "metric" in cols:
+            metric_expr = "metric"
+        elif "series" in cols:
+            metric_expr = "series"
+        else:
+            metric_expr = "''"
+
+        if "semantics" in cols:
+            semantics_expr = "semantics"
+        elif "series_semantics" in cols:
+            semantics_expr = "series_semantics"
+        else:
+            semantics_expr = "''"
+
+        return (
+            f"SELECT '{table}' AS table_name, "
+            f"{source_expr} AS source, "
+            f"{metric_expr} AS metric, "
+            f"{semantics_expr} AS semantics "
+            f"FROM {table}"
         )
-        ORDER BY rows DESC, source, metric, semantics
-        """
-    ).fetchall()
+
+    selects: list[str] = []
+
+    acled_sel = build_select_for_table("acled_monthly_fatalities", fixed_source="ACLED")
+    if acled_sel:
+        selects.append(acled_sel)
+
+    for t in ("facts_resolved", "facts_deltas"):
+        sel = build_select_for_table(t)
+        if sel:
+            selects.append(sel)
+
+    if not selects:
+        return []
+
+    union_sql = " UNION ALL ".join(selects)
+    sql = f"""
+    WITH unioned AS (
+        {union_sql}
+    )
+    SELECT
+        table_name AS table,
+        COALESCE(source, '') AS source,
+        COALESCE(metric, '') AS metric,
+        COALESCE(semantics, '') AS semantics,
+        COUNT(*) AS count
+    FROM unioned
+    GROUP BY table_name, source, metric, semantics
+    ORDER BY table_name, source, metric, semantics
+    """
+    return con.execute(sql).fetchall()
 
 
 def _write_summary(
     db_path: str,
     rows_total: int,
-    breakdown: Iterable[Tuple[str, str, str, int]],
+    breakdown: Iterable[Tuple[str, str, str, int] | Tuple[str, str, str, str, int]],
     table_counts: Sequence[Tuple[str, int]],
     missing_tables: Sequence[str],
 ) -> str:
@@ -118,11 +178,17 @@ def _write_summary(
         for table in missing_tables:
             lines.append(f"- {table}\n")
         lines.append("\n")
-    breakdown = list(breakdown)
-    if rows_total and breakdown:
+    breakdown_rows: list[tuple[str, str, str, int]] = []
+    for row in breakdown:
+        if len(row) == 5:
+            _, source, metric, semantics, count = row
+        else:
+            source, metric, semantics, count = row  # type: ignore[misc]
+        breakdown_rows.append((source, metric, semantics, count))
+    if rows_total and breakdown_rows:
         lines.append("| source | metric | semantics | rows |\n")
         lines.append("| --- | --- | --- | ---: |\n")
-        for source, metric, semantics, count in breakdown:
+        for source, metric, semantics, count in breakdown_rows:
             lines.append(f"| {source} | {metric} | {semantics} | {count} |\n")
     COUNTS_PATH.write_text("".join(lines), encoding="utf-8")
     return "".join(lines)
