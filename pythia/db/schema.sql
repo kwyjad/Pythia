@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS hs_scenarios (
   hazard_label TEXT,
   likely_window_month TEXT,              -- YYYY-MM
   markdown TEXT,                         -- full narrative (MD)
+  scenario_title TEXT,                   -- display title
+  probability_text TEXT,                 -- raw probability string
+  probability_pct DOUBLE,                -- numeric probability (e.g., 70.0)
+  pin_best_guess BIGINT,                 -- PIN best guess
+  pa_best_guess BIGINT,                  -- PA best guess
   json JSON,                             -- exact HS JSON block
   created_at TIMESTAMP DEFAULT now()
 );

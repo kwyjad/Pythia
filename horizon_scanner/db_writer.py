@@ -51,6 +51,11 @@ def upsert_hs_payload(
                 "hazard_label": sc.get("hazard_label", ""),
                 "likely_window_month": sc.get("likely_window_month", ""),
                 "markdown": sc.get("markdown", ""),
+                "scenario_title": sc.get("scenario_title") or sc.get("title", ""),
+                "probability_text": sc.get("probability_text", ""),
+                "probability_pct": float(sc.get("probability_pct") or 0.0),
+                "pin_best_guess": int(sc.get("pin_best_guess") or 0),
+                "pa_best_guess": int(sc.get("pa_best_guess") or 0),
                 "json": sc.get("json", {}),
             }
         )
@@ -89,6 +94,17 @@ def upsert_hs_payload(
         len(question_rows),
         run_meta["run_id"],
     )
+
+    if scenario_rows:
+        sample = scenario_rows[0]
+        logging.info(
+            "Example hs_scenarios row before upsert | scenario_id=%s | iso3=%s | hazard=%s | prob_pct=%.1f | pa_best_guess=%d",
+            sample.get("scenario_id"),
+            sample.get("iso3"),
+            sample.get("hazard_code"),
+            sample.get("probability_pct", 0.0),
+            sample.get("pa_best_guess", 0),
+        )
 
     # Normalize scenario JSON to valid JSON strings (if not already)
     for row in scenario_rows:
