@@ -55,6 +55,8 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # Configuration for the Gemini models
 # Use a safety setting to be less restrictive, as the content is professional analysis
+GEMINI_MODEL_NAME = "gemini-3-pro-preview"
+
 generation_config = {
     "temperature": 1.0,
     "top_p": 0.9,
@@ -71,9 +73,15 @@ safety_settings = [
 # Initialize the generative model for the analysis
 # This uses your preferred model for the complex analysis task
 country_model = genai.GenerativeModel(
-    model_name="gemini-3-pro-preview",
+    model_name=GEMINI_MODEL_NAME,
     generation_config=generation_config,
     safety_settings=safety_settings
+)
+
+logging.info(
+    "Configured Gemini model %s for Horizon Scanner (temperature=%.2f).",
+    GEMINI_MODEL_NAME,
+    generation_config.get("temperature", 0.0),
 )
 
 # --- Main Functions ---
@@ -94,6 +102,11 @@ def generate_report_for_country(country: str) -> str | None:
 
     # Call Gemini
     response = country_model.generate_content(prompt)
+    logging.info(
+        "Gemini call succeeded for %s using model %s.",
+        country,
+        GEMINI_MODEL_NAME,
+    )
     report_text = getattr(response, "text", "") or ""
     logging.info("Received report for %s: %d characters", country, len(report_text))
 
