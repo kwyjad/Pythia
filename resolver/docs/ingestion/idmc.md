@@ -256,10 +256,6 @@ shared facts contract documented in `SCHEMAS.md` and include:
 - `series_semantics` (`new`)
 - `source` (`IDMC`)
 
-The canonical `source` value is always `IDMC`; upstream labels from HELIX or HDX
-are intentionally not propagated so downstream consumers have a stable source
-identifier.
-
 Connectors diagnostics echo the export status (enabled/disabled), row counts,
 and output paths under the `export` key.
 
