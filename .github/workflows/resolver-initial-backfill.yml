@@ -591,3 +591,10 @@ jobs:
           path: |
             resolver/exports/backfill/
             ${{ env.BACKFILL_DB_PATH }}
+
+      - name: Simple DuckDB snapshot (facts_resolved/facts_deltas)
+        run: |
+          set -euo pipefail
+          DB_PATH="data/resolver_backfill.duckdb"
+          echo "[simple_snapshot] Running simple snapshot extract against ${DB_PATH}"
+          python -m resolver.cli.simple_snapshot --db "${DB_PATH}"
