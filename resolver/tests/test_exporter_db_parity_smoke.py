@@ -300,18 +300,9 @@ def test_verify_duckdb_counts_writes_markdown(monkeypatch, tmp_path):
     monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step_summary))
 
-    env = os.environ.copy()
-    existing_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        f"{repo_root}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else str(repo_root)
-    )
-
     subprocess.run(
         [sys.executable, "-m", "scripts.ci.verify_duckdb_counts"],
         check=True,
-        env=env,
     )
 
     counts_path = diagnostics / "duckdb_counts.md"

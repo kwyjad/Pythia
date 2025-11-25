@@ -2259,8 +2259,6 @@ def main(argv: list[str] | None = None) -> int:
     write_connectors_line(diagnostics_payload)
 
     if empty_policy == "fail" and total_staged_rows == 0:
-        if reason == "strict-empty-0-rows":
-            raise SystemExit(2)
         raise SystemExit(1)
     if status == "error" and reason not in {"empty-policy-fail", "strict-empty-0-rows"}:
         raise SystemExit(2)

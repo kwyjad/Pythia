@@ -43,15 +43,7 @@ def build_resolution_ready_facts(normalized: pd.DataFrame) -> pd.DataFrame:
     if normalized.empty:
         return pd.DataFrame(columns=FACT_COLUMNS)
 
-    working = normalized.copy()
-    if "source" not in working.columns:
-        working["source"] = "IDMC"
-
-    facts = _ensure_columns(working, FACT_COLUMNS)
-
-    # Enforce the public contract: canonical IDMC facts always use source="IDMC"
-    # regardless of any upstream labels.
-    facts.loc[:, "source"] = "IDMC"
+    facts = _ensure_columns(normalized, FACT_COLUMNS)
 
     # Normalise basic types and guard against malformed values.
     facts["iso3"] = facts["iso3"].astype(str).str.strip().str.upper()
@@ -60,6 +52,7 @@ def build_resolution_ready_facts(normalized: pd.DataFrame) -> pd.DataFrame:
     facts["series_semantics"] = (
         facts["series_semantics"].fillna("").astype(str).str.strip()
     )
+    facts["source"] = facts["source"].fillna("").astype(str).str.strip()
     facts["value"] = pd.to_numeric(facts["value"], errors="coerce")
 
     facts = facts.dropna(subset=["iso3", "as_of_date", "metric", "value"])

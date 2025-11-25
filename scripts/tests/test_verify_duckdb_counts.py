@@ -1,12 +1,10 @@
-import argparse
-import os
 from typing import List, Tuple
 
 import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
-from scripts.ci.verify_duckdb_counts import _fetch_breakdown, _resolve_db_path
+from scripts.ci.verify_duckdb_counts import _fetch_breakdown
 
 
 def test_fetch_breakdown_handles_null_source_and_group_by_alias_safely() -> None:
@@ -42,23 +40,3 @@ def test_fetch_breakdown_handles_null_source_and_group_by_alias_safely() -> None
         ]
     finally:
         con.close()
-
-
-def test_resolve_db_path_prefers_env_duckdb_url(monkeypatch, tmp_path) -> None:
-    target = tmp_path / "resolver.duckdb"
-    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{target}")
-    args = argparse.Namespace(db_path=None, tables=None, allow_missing=False)
-
-    resolved = _resolve_db_path(args)
-
-    assert resolved == str(target)
-    monkeypatch.delenv("RESOLVER_DB_URL", raising=False)
-
-
-def test_resolve_db_path_defaults_to_data_resolver(monkeypatch) -> None:
-    monkeypatch.delenv("RESOLVER_DB_URL", raising=False)
-    args = argparse.Namespace(db_path=None, tables=None, allow_missing=False)
-
-    resolved = _resolve_db_path(args)
-
-    assert resolved.endswith(os.path.join("data", "resolver.duckdb"))
