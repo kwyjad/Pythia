@@ -29,15 +29,16 @@ def _extract_one_table_for_month(con, table: str, ym: str, out_path: Path) -> bo
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    copy_sql = f"
-        COPY (
-            SELECT *
-            FROM {table}
-            WHERE ym = '{ym}'
-        )
-        TO '{out_path}'
-        (FORMAT PARQUET);
-    "
+    # Simple and robust: inline ym and path into the SQL; both come from our own code.
+    copy_sql = f"""
+COPY (
+    SELECT *
+    FROM {table}
+    WHERE ym = '{ym}'
+)
+TO '{out_path}'
+(FORMAT PARQUET);
+"""
     try:
         con.execute(copy_sql)
     except Exception as exc:  # pragma: no cover - defensive
