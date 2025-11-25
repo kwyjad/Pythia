@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -148,9 +149,18 @@ def test_resolver_db_url_used_when_no_cli_path(tmp_path, monkeypatch):
     monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(step_summary))
 
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(repo_root)
+    )
+
     subprocess.run(
         [sys.executable, "-m", "scripts.ci.verify_duckdb_counts"],
         check=True,
+        env=env,
     )
 
     text = summary_file.read_text(encoding="utf-8")
