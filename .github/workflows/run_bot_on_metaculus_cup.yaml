@@ -141,7 +141,7 @@ jobs:
 
       - name: Run Forecaster (Metaculus Cup)
         run: |
-          poetry run python run_forecaster.py --mode tournament --limit 20 --submit --purpose metaculus_cup
+          poetry run python -m forecaster.cli --mode tournament --limit 20 --submit --purpose metaculus_cup
 
       - name: Commit & push forecasts (only if changed)
         run: |

@@ -127,7 +127,7 @@ jobs:
 
       - name: Run Forecaster test set
         run: |
-          poetry run python run_forecaster.py --mode test_questions --limit ${{ inputs.limit }}
+          poetry run python -m forecaster.cli --mode test_questions --limit ${{ inputs.limit }}
 
       - name: Upload artifacts
         if: always()

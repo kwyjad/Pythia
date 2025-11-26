@@ -139,7 +139,7 @@ jobs:
 
       - name: Run Forecaster (AIB Tournament)
         run: |
-          poetry run python run_forecaster.py --mode tournament --limit 20 --submit --purpose fall_aib_2025
+          poetry run python -m forecaster.cli --mode tournament --limit 20 --submit --purpose fall_aib_2025
 
       - name: Commit & push forecasts (only if changed)
         run: |

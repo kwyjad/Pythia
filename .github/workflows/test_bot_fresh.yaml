@@ -108,7 +108,7 @@ jobs:
 
       - name: Run Forecaster (fresh)
         run: |
-          poetry run python run_forecaster.py --mode test_questions --fresh-research --limit 3
+          poetry run python -m forecaster.cli --mode test_questions --fresh-research --limit 3
 
       - name: Upload artifacts
         if: always()

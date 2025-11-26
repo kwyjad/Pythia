@@ -99,7 +99,21 @@ jobs:
           python -m horizon_scanner.horizon_scanner
           echo "=== horizon_scanner.horizon_scanner completed ==="
 
-      # Step 7: Diagnostics – DuckDB + report validation
+      # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
+      - name: Run Forecaster (Pythia mode on HS questions)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
+        run: |
+          set -e
+          echo "=== Running Forecaster in Pythia mode on active HS questions ==="
+          python -m forecaster.cli --mode pythia --limit 200 --purpose hs_pipeline
+          echo "=== Forecaster (Pythia mode) completed ==="
+
+      # Step 8: Diagnostics – DuckDB + report validation
       - name: Diagnostics — DuckDB and Risk_Report.md
         run: |
           set -e
@@ -153,7 +167,7 @@ jobs:
               print(f"WARNING: '{report_path}' not found.")
           PY
 
-      # Step 8: Upload the final report as an artifact
+      # Step 9: Upload the final report as an artifact
       - name: Upload Report Artifact
         uses: actions/upload-artifact@v4
         with:

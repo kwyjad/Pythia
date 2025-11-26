@@ -4,3 +4,6 @@ backoff
 duckdb
 pandas
 PyYAML
+requests
+numpy
+openai
