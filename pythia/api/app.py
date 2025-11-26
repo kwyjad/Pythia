@@ -24,6 +24,26 @@ def start_run(payload: dict = Body(...), _=Depends(require_token)):
     return {"accepted": True, "run_id": run_id}
 
 
+@app.get("/v1/ui_runs/{ui_run_id}")
+def get_ui_run(ui_run_id: str, _=Depends(require_token)):
+    """
+    Return status for a given ui_run_id created by /v1/run.
+
+    Response shape:
+      - found: bool
+      - row: dict | None (full ui_runs row if found)
+    """
+    con = _con()
+    df = con.execute(
+        "SELECT * FROM ui_runs WHERE ui_run_id = ?",
+        [ui_run_id],
+    ).fetchdf()
+    if df.empty:
+        return {"found": False, "row": None}
+    row = df.to_dict(orient="records")[0]
+    return {"found": True, "row": row}
+
+
 @app.get("/v1/questions")
 def list_questions(
     iso3: str | None = Query(None),

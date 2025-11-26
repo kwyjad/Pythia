@@ -13,6 +13,17 @@ CREATE TABLE IF NOT EXISTS hs_runs (
   created_at TIMESTAMP DEFAULT now()
 );
 
+-- UI-triggered pipeline runs (API /v1/run)
+CREATE TABLE IF NOT EXISTS ui_runs (
+  ui_run_id   TEXT PRIMARY KEY,
+  started_at  TIMESTAMP,
+  finished_at TIMESTAMP,
+  countries   JSON,
+  status      TEXT,         -- queued|running|ok|failed
+  error       TEXT,
+  created_at  TIMESTAMP DEFAULT now()
+);
+
 -- HS scenarios (one row per scenario narrative)
 CREATE TABLE IF NOT EXISTS hs_scenarios (
   scenario_id TEXT PRIMARY KEY,
