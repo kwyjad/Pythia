@@ -387,9 +387,7 @@ This creates a closed learning loop so Forecaster improves over time.
 
 Autonomous operation
 
-In GitHub, Forecaster runs on a schedule (for test questions, the tournament, and the Metaculus Cup).
-
-It automatically commits its logs and calibration updates back to the repository, so no human intervention is needed.
+In GitHub, Forecaster can run on a schedule and automatically commit its logs and calibration updates back to the repository, so no human intervention is needed.
 
 The big picture
 
@@ -422,33 +420,19 @@ export METACULUS_TOKEN=your_token_here
 
 Run a single test question (no submit)
 
-poetry run python run_forecaster.py --mode test_questions --limit 1
+poetry run python -m forecaster.cli --mode test_questions --limit 1
 
 Run a single question by post ID (no submit)
 
-poetry run python run_forecaster.py --pid 22427
+poetry run python -m forecaster.cli --pid 22427
 
 Submit (be careful!)
 
-poetry run python run_forecaster.py --mode test_questions --limit 1 --submit
+poetry run python -m forecaster.cli --mode test_questions --limit 1 --submit
 
 Autonomous runs on GitHub
 
-This repo includes workflows for:
-
-test_bot_fresh.yaml (fresh research),
-
-test_bot_cached.yaml (use cache),
-
-run_bot_on_tournament.yaml,
-
-run_bot_on_metaculus_cup.yaml,
-
-> **Note:** Metaculus renames the Cup slug every season. Update the `TOURNAMENT_ID`
-> in `.github/workflows/run_bot_on_metaculus_cup.yaml` to match the current Cup
-> URL (presently `metaculus-cup-fall-2025`).
-
-calibration_refresh.yml (periodic update of calibration weights).
+This repo includes workflows for core Pythia components (resolver, horizon scanner, forecaster CI, and calibration_refresh.yml for periodic calibration weights). Legacy Metaculus tournament workflows have been removed; Pythia now focuses exclusively on the humanitarian forecasting stack.
 
 Add secrets (see below), push the repo, and Actions will:
 
@@ -800,7 +784,7 @@ proxy = http://user:pass@proxy.host:port
 What Forecaster Does (Pipeline)
 
 Select question(s)
-Test set, single PID, tournament, or Metaculus Cup.
+Test set or single PID runs.
 
 Research (research.py)
 Uses AskNews / Serper to pull context. Results are summarized and logged.
@@ -854,7 +838,6 @@ These outputs are committed, so the loop closes autonomously.
 
 Repository Layout (key files)
 forecaster/
-run_forecaster.py # Thin wrapper: calls cli.main()
 cli.py # Orchestrates runs, submission, and final log commit
 research.py # AskNews/Serper search + summarization
 prompts.py # Prompt builders per question type
@@ -932,17 +915,10 @@ Tip: Put non-secret defaults in .env.example and store secrets in GitHub → Set
 Running Modes
 
 Test set (no submit by default):
-poetry run python run_forecaster.py --mode test_questions --limit 4
+poetry run python -m forecaster.cli --mode test_questions --limit 4
 
 Single question by PID:
-poetry run python run_forecaster.py --pid 22427
-
-Tournament / Cup (CI workflows call these internally):
-
-run_bot_on_tournament.yaml
-
-run_bot_on_metaculus_cup.yaml
-Include --submit in those workflows if you want automatic submissions.
+poetry run python -m forecaster.cli --pid 22427
 
 Logging & Files Written
 
@@ -1010,11 +986,11 @@ Weights come from calibration_weights.json, updated by the calibration job.
 
 GitHub Actions (What’s Included)
 
-Fresh test runs vs cached test runs
-
-Tournament and Metaculus Cup runners
+Forecaster CI (test-mode runs)
 
 Calibration refresh (scheduled)
+
+Legacy Metaculus tournament workflows have been removed.
 
 Each workflow:
 
