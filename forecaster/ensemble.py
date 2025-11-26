@@ -47,6 +47,54 @@ def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> Li
         return (np.ones(n) / float(n)).tolist()
     return (v / s).tolist()
 
+def _parse_spd_json(
+    text: str,
+    n_months: int = 6,
+    n_buckets: int = 5,
+) -> Optional[dict]:
+    """
+    Parse an SPD-style JSON object of the form:
+      {"month_1": [...5 numbers...], ..., "month_6": [...5 numbers...]}
+
+    Returns a dict mapping month keys to sanitized lists of length n_buckets,
+    or None if parsing fails.
+    """
+    if not text:
+        return None
+    t = text.strip()
+    # Strip surrounding ``` fences if present
+    t = re.sub(r"^```.*?\n|\n```$", "", t, flags=re.S).strip()
+
+    data = None
+    # First try full text as JSON
+    try:
+        data = json.loads(t)
+    except Exception:
+        # Fallback: find the first JSON-looking object
+        m = re.search(r"\{.*\}", t, flags=re.S)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+
+    if not isinstance(data, dict):
+        return None
+
+    out: dict = {}
+    any_nonzero = False
+    for m_idx in range(1, n_months + 1):
+        key = f"month_{m_idx}"
+        vec_raw = data.get(key, [])
+        vec = sanitize_mcq_vector(vec_raw if isinstance(vec_raw, list) else [], n_options=n_buckets)
+        out[key] = vec
+        if any(abs(float(x)) > 1e-8 for x in vec):
+            any_nonzero = True
+
+    if not any_nonzero:
+        return None
+    return out
+
 def _parse_binary_probability(text: str) -> Optional[float]:
     if not text:
         return None
@@ -161,6 +209,37 @@ async def run_ensemble_numeric(prompt: str, specs: List[ModelSpec]) -> EnsembleR
                 completion_tokens=usage.get("completion_tokens",0),
                 total_tokens=usage.get("total_tokens",0),
                 cost_usd=cost
+            )
+        tasks.append(_one())
+    return EnsembleResult(members=await asyncio.gather(*tasks))
+
+# ---------- SPD (5 buckets × 6 months) ----------
+async def run_ensemble_spd(prompt: str, specs: List[ModelSpec]) -> EnsembleResult:
+    """
+    Run the ensemble for SPD questions.
+    Each member's parsed output is a dict: { "month_1": [..5..], ..., "month_6": [..5..] }.
+    """
+    tasks = []
+    for ms in specs:
+        async def _one(ms=ms):
+            t0 = time.time()
+            text, usage, err = await call_chat_ms(ms, prompt, temperature=0.2)
+            parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
+            ok = parsed is not None
+            if parsed is None:
+                parsed = {}
+            cost = estimate_cost_usd(ms.model_id, usage)
+            return MemberOutput(
+                name=ms.name,
+                ok=ok,
+                parsed=parsed,
+                raw_text=text,
+                error=err,
+                elapsed_ms=int((time.time() - t0) * 1000),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                cost_usd=cost,
             )
         tasks.append(_one())
     return EnsembleResult(members=await asyncio.gather(*tasks))
