@@ -152,3 +152,14 @@ CREATE TABLE IF NOT EXISTS populations (
   population BIGINT,
   PRIMARY KEY (iso3, year)
 );
+
+-- Bucket centroids for SPD expected values
+CREATE TABLE IF NOT EXISTS bucket_centroids (
+  hazard_code TEXT,     -- e.g. 'FLOOD', 'CONFLICT'; NULL/'' = all-hazards if you ever want it
+  metric      TEXT,     -- e.g. 'PA'
+  class_bin   TEXT,     -- must match SPD_CLASS_BINS ('<10k','10k-<50k','50k-<250k','250k-<500k','>=500k')
+  ev          DOUBLE,   -- E[metric | bucket, hazard_code]
+  n_obs       BIGINT,
+  updated_at  TIMESTAMP DEFAULT now(),
+  PRIMARY KEY (hazard_code, metric, class_bin)
+);
