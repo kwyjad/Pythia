@@ -127,10 +127,13 @@ def _log_hs_llm_call(
         return
 
     try:
-        profile = get_current_profile()
+        llm_profile = get_current_profile()
     except Exception:
-        profile = None
-    _ = profile
+        llm_profile = None
+
+    hs_run_id = os.getenv("PYTHIA_HS_RUN_ID")
+    ui_run_id = os.getenv("PYTHIA_UI_RUN_ID")
+    forecaster_run_id = None
 
     from forecaster.research import _rough_token_count
 
@@ -159,6 +162,10 @@ def _log_hs_llm_call(
             cost=cost,
             latency_ms=latency_ms,
             success=bool(report_text.strip()),
+            llm_profile=llm_profile,
+            hs_run_id=hs_run_id,
+            ui_run_id=ui_run_id,
+            forecaster_run_id=forecaster_run_id,
         )
     except Exception:
         pass
@@ -394,6 +401,8 @@ def main(countries: list[str] | None = None):
     """
     logging.info("Starting Pythia Horizon Scanner...")
     start_time = datetime.utcnow()
+    run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
+    os.environ["PYTHIA_HS_RUN_ID"] = run_id
 
     if not countries:
         try:
@@ -476,7 +485,6 @@ def main(countries: list[str] | None = None):
         logging.info("Using app.db_url from config for DuckDB: %s", db_url)
 
     init_db(db_url)
-    run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     run_meta = {
         "run_id": run_id,
         "started_at": start_time.isoformat(),

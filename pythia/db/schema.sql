@@ -140,6 +140,10 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   cost_usd DOUBLE,
   latency_ms INTEGER,
   success BOOLEAN,
+  llm_profile TEXT,                      -- "test" | "prod" (or others if added)
+  hs_run_id TEXT,                        -- fk -> hs_runs.run_id (nullable)
+  ui_run_id TEXT,                        -- fk -> ui_runs.ui_run_id (nullable)
+  forecaster_run_id TEXT,                -- Forecaster CLI run_id (nullable)
   created_at TIMESTAMP DEFAULT now()
 );
 

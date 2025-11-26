@@ -677,9 +677,13 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
         }
 
         try:
-            _ = get_current_profile()
+            llm_profile = get_current_profile()
         except Exception:
-            pass
+            llm_profile = None
+
+        hs_run_id = os.getenv("PYTHIA_HS_RUN_ID")
+        ui_run_id = os.getenv("PYTHIA_UI_RUN_ID")
+        forecaster_run_id = os.getenv("PYTHIA_FORECASTER_RUN_ID")
 
         used_model_id = f"google/{model}"
         cost = estimate_cost_usd(used_model_id, usage)
@@ -698,6 +702,10 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
                     cost=cost,
                     latency_ms=latency_ms,
                     success=bool(composed_text),
+                    llm_profile=llm_profile,
+                    hs_run_id=hs_run_id,
+                    ui_run_id=ui_run_id,
+                    forecaster_run_id=forecaster_run_id,
                 )
             except Exception:
                 pass
