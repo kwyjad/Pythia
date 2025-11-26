@@ -31,6 +31,7 @@ from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
 from resolver.db import duckdb_io
 from pythia.db.init import init as init_db
 from pythia.prompts.registry import load_prompt_spec
+from pythia.config import load as load_cfg
 
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
@@ -293,25 +294,32 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
 
     return table_header + "\n".join(table_rows), scenarios_for_db
 
-def main():
-    """Main function to run the bot."""
+def main(countries: list[str] | None = None):
+    """Main function to run the bot.
+
+    If `countries` is None or empty, fall back to hs_country_list.txt.
+    Otherwise, use the provided list verbatim (treated as country names).
+    """
     logging.info("Starting Pythia Horizon Scanner...")
     start_time = datetime.utcnow()
 
-    try:
-        country_list_path = CURRENT_DIR / "hs_country_list.txt"
-        logging.info("Reading country list from %s...", country_list_path)
-        with open(country_list_path, "r", encoding="utf-8") as f:
-            # Ignore blank lines and lines starting with #
-            countries = [
-                line.strip()
-                for line in f
-                if line.strip() and not line.startswith("#")
-            ]
-        logging.info(f"Found {len(countries)} countries to process.")
-    except FileNotFoundError:
-        logging.error("hs_country_list.txt not found. Please create it in the repository root.")
-        return
+    if not countries:
+        try:
+            country_list_path = CURRENT_DIR / "hs_country_list.txt"
+            logging.info("Reading country list from %s...", country_list_path)
+            with open(country_list_path, "r", encoding="utf-8") as f:
+                # Ignore blank lines and lines starting with #
+                countries = [
+                    line.strip()
+                    for line in f
+                    if line.strip() and not line.startswith("#")
+                ]
+            logging.info("Found %d countries to process (from hs_country_list.txt).", len(countries))
+        except FileNotFoundError:
+            logging.error("hs_country_list.txt not found. Please create it in the repository root, or pass explicit countries.")
+            return
+    else:
+        logging.info("Using %d countries passed in by caller.", len(countries))
 
     individual_reports: list[str] = []
 
@@ -356,9 +364,25 @@ def main():
     summary_table, scenarios = parse_reports_and_build_table(all_reports_text)
 
     # --- Persist structured payloads to DuckDB ---
-    data_dir = REPO_ROOT / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    db_url = f"duckdb:///{data_dir / 'resolver.duckdb'}"
+    try:
+        cfg = load_cfg()
+        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
+        db_url = str(app_cfg.get("db_url", "")).strip()
+    except Exception:
+        db_url = ""
+
+    if not db_url:
+        # Fallback to legacy default if config is missing or incomplete
+        data_dir = REPO_ROOT / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_url = f"duckdb:///{data_dir / 'resolver.duckdb'}"
+        logging.info("No app.db_url found in config; falling back to %s", db_url)
+    else:
+        # Ensure directory exists for configured DuckDB path
+        db_path = db_url.replace("duckdb:///", "")
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        logging.info("Using app.db_url from config for DuckDB: %s", db_url)
+
     init_db(db_url)
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     run_meta = {
