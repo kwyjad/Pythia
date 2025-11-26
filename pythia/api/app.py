@@ -84,15 +84,15 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(
     WITH ev AS (
       SELECT q.iso3, fe.horizon_m,
              SUM(CASE fe.class_bin
-                  WHEN '<5k' THEN fe.p*2500
-                  WHEN '5k-<25k' THEN fe.p*15000
-                  WHEN '25k-<100k' THEN fe.p*62500
-                  WHEN '100k-<500k' THEN fe.p*300000
+                  WHEN '<10k' THEN fe.p*5000
+                  WHEN '10k-<50k' THEN fe.p*25000
+                  WHEN '50k-<250k' THEN fe.p*120000
+                  WHEN '250k-<500k' THEN fe.p*350000
                   WHEN '>=500k' THEN fe.p*700000
                   END) AS ev_pin
       FROM forecasts_ensemble fe
       JOIN questions q ON q.question_id=fe.question_id
-      WHERE q.metric=? AND q.target_month=? 
+      WHERE q.metric=? AND q.target_month=?
       GROUP BY 1,2
     ), pop AS (
       SELECT iso3, MAX_BY(population, year) AS population
