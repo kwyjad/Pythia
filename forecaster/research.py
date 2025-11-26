@@ -49,6 +49,21 @@ from .config import (
 
 from .prompts import build_research_prompt, _CAL_PREFIX
 
+try:
+    from pythia.llm_profiles import get_current_models
+except Exception:
+    get_current_models = None  # type: ignore
+
+if get_current_models is not None:
+    try:
+        _PROFILE_MODELS = get_current_models()
+    except Exception:
+        _PROFILE_MODELS = {}
+else:
+    _PROFILE_MODELS = {}
+
+_GEMINI_MODEL_DEFAULT = _PROFILE_MODELS.get("google") or _GEMINI_MODEL_ENV or "gemini-2.5-pro"
+
 # --- Debug hook: last error message from research step (for human log & CSV) ---
 LAST_RESEARCH_ERROR: str = ""   # set by _grounded_search / _compose_research_via_gemini
 def _set_research_error(msg: str) -> None:
@@ -381,7 +396,7 @@ def _grounded_search(query: str, *, max_results: int = 12, timeout: float = None
     if not api_key:
         _set_research_error("missing GEMINI_API_KEY / GOOGLE_API_KEY")
         return []
-    model = (_GEMINI_MODEL_ENV or "gemini-2.5-pro").strip()
+    model = (_GEMINI_MODEL_DEFAULT or "gemini-2.5-pro").strip()
 
     # System-style guidance + user task. (v1beta allows only 'user' parts; keep both for clarity.)
     sys_instr = (
@@ -586,7 +601,7 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
     Never references undefined 'body'; always returns a body dict.
     """
     api_key = _gemini_api_key()
-    model = (_GEMINI_MODEL_ENV or "gemini-2.5-pro").strip()
+    model = (_GEMINI_MODEL_DEFAULT or "gemini-2.5-pro").strip()
 
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
