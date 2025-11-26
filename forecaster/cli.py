@@ -54,6 +54,34 @@ if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
 
 
+# Hazard codes for which GTMC1 is relevant (adjust as needed for your schema)
+CONFLICT_HAZARD_CODES = {
+    "CONFLICT",
+    "POLITICAL_VIOLENCE",
+    "CIVIL_CONFLICT",
+    "URBAN_CONFLICT",
+}
+
+
+def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Extract Pythia-specific metadata attached by _load_pythia_questions(...).
+
+    Returns a dict with keys:
+      - iso3
+      - hazard_code
+      - metric
+      - target_month
+    Missing fields are normalized to "".
+    """
+    return {
+        "iso3": str(post.get("pythia_iso3") or "").upper(),
+        "hazard_code": str(post.get("pythia_hazard_code") or "").upper(),
+        "metric": str(post.get("pythia_metric") or "").upper(),
+        "target_month": str(post.get("pythia_target_month") or ""),
+    }
+
+
 def _advise_poetry_lock_if_needed():
     # Dev convenience: if Poetry complains about a stale lock, print the fix.
     import os
@@ -109,18 +137,6 @@ try:
 except ImportError as e:
     print(f"[warn] seen_guard not available ({e!r}); continuing without duplicate protection.")
     seen_guard = None
-
-# Robust import for topic_classify: prefer package module; fall back to repo root
-try:
-    from .topic_classify import should_run_gtmc1  # expected location
-except Exception:
-    try:
-        from topic_classify import should_run_gtmc1  # type: ignore
-    except Exception as e:
-        raise ImportError(
-            "Could not import 'topic_classify'. Move topic_classify.py into 'forecaster/' "
-            "or keep it at repo root (this file supports both)."
-        ) from e
 
 from . import GTMC1
 
@@ -295,6 +311,90 @@ def _pythia_db_url_from_config() -> str | None:
         return None
 
 
+def _load_pa_history_block(
+    iso3: str,
+    hazard_code: str,
+    *,
+    months: int = 36,
+) -> tuple[str, Dict[str, Any]]:
+    """
+    Best-effort PA history block for the research bundle.
+
+    Reads up to `months` rows from `facts_resolved` for the given iso3 + hazard_code
+    where metric is PA-like (affected). Returns (markdown_block, meta_dict).
+
+    On any error or if no rows are found, returns ("", {"pa_history_error": "reason"}).
+    """
+    import duckdb
+
+    iso3 = (iso3 or "").upper().strip()
+    hz = (hazard_code or "").upper().strip()
+    if not iso3 or not hz:
+        return "", {"pa_history_error": "missing_iso3_or_hazard"}
+
+    db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+    if not db_url:
+        return "", {"pa_history_error": "missing_db_url"}
+
+    db_path = db_url.replace("duckdb:///", "")
+    try:
+        con = duckdb.connect(db_path, read_only=True)
+    except Exception as exc:
+        return "", {"pa_history_error": f"connect_failed:{exc!r}"}
+
+    try:
+        # NOTE: metric canonicalization: `affected` is the canonical PA metric.
+        # We accept a few synonyms to be robust to partial migrations.
+        sql = """
+            SELECT ym, value
+            FROM facts_resolved
+            WHERE iso3 = ?
+              AND hazard_code = ?
+              AND lower(metric) IN ('affected','people_affected','pa')
+            ORDER BY ym DESC
+            LIMIT ?
+        """
+        rows = con.execute(sql, [iso3, hz, int(months)]).fetchall()
+    except Exception as exc:
+        con.close()
+        return "", {"pa_history_error": f"query_failed:{exc!r}"}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    if not rows:
+        return "", {"pa_history_error": "no_rows"}
+
+    # Oldest → newest for readability
+    rows = list(reversed(rows))
+    lines = [
+        "## Resolver 36-month PA history",
+        "",
+        "| Month (ym) | People affected |",
+        "|---|---|",
+    ]
+    months_list: list[str] = []
+    for ym, value in rows:
+        try:
+            ym_str = str(ym)
+            val = "" if value is None else f"{int(value):,}"
+        except Exception:
+            ym_str = str(ym)
+            val = str(value)
+        months_list.append(ym_str)
+        lines.append(f"| {ym_str} | {val} |")
+
+    block = "\n".join(lines)
+    meta = {
+        "pa_history_error": "",
+        "pa_history_rows": len(rows),
+        "pa_history_months": months_list,
+    }
+    return block, meta
+
+
 def _load_pythia_questions(limit: int) -> List[dict]:
     """
     Load active Horizon Scanner questions from DuckDB and adapt them to the
@@ -384,69 +484,6 @@ def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: int) -> Opt
         return path
     except Exception:
         return None
-
-# --------------------------------------------------------------------------------
-# Robust wrapper for the classifier: supports both sync and async implementations
-# --------------------------------------------------------------------------------
-async def _run_classifier_safe(title: str, description: str, criteria: str, *, slug: str):
-    """
-    Calls should_run_gtmc1(...) whether it's sync or async, and normalizes outputs.
-    Returns (use_gtmc1: bool, cls_info: dict).
-    """
-    import asyncio as _aio
-
-    def _dictify(obj):
-        if isinstance(obj, dict):
-            return obj
-        if isinstance(obj, str):
-            d = _safe_json_load(obj)
-            return d if isinstance(d, dict) else {}
-        return {}
-
-    fallback_info: Dict[str, Any] = {
-        "primary": "",
-        "secondary": "",
-        "is_strategic": False,
-        "strategic_score": 0.0,
-        "source": "",
-        "rationale": "",
-        "cost_usd": 0.0,
-    }
-
-    try:
-        # Handle both async and sync classifier implementations + older signatures
-        if _aio.iscoroutinefunction(should_run_gtmc1):
-            try:
-                res = await should_run_gtmc1(title, description, criteria, slug=slug)
-            except TypeError:
-                res = await should_run_gtmc1(title, description, criteria)
-        else:
-            try:
-                res = should_run_gtmc1(title, description, criteria, slug=slug)
-            except TypeError:
-                res = should_run_gtmc1(title, description, criteria)
-    except Exception:
-        # On any classifier failure, fall back safely
-        return False, fallback_info
-
-    # Normalize shapes:
-    # (a) tuple -> (flag, info)
-    if isinstance(res, tuple) and len(res) == 2:
-        use_flag = bool(res[0])
-        info = _dictify(res[1])
-        return use_flag, info if info else fallback_info
-
-    # (b) dict -> infer flag from field
-    if isinstance(res, dict):
-        return bool(res.get("is_strategic", False)), res if res else fallback_info
-
-    # (c) JSON string -> parse
-    if isinstance(res, str):
-        info = _dictify(res)
-        return bool(info.get("is_strategic", False)), info if info else fallback_info
-
-    # Unknown shape -> safe default
-    return False, fallback_info
 
 # --------------------------------------------------------------------------------
 # Calibration weights loader (optional). You periodically run update_calibration.py
@@ -664,7 +701,9 @@ async def _run_one_question_body(
         options = _get_options_list(q)
         n_options = len(options) if qtype == "multiple_choice" else 0
         discrete_values = _discrete_values(q) if qtype in ("numeric", "discrete") and _is_discrete(q) else []
-    
+
+        pmeta = _extract_pythia_meta(post)
+
         # ------------------ 1) Research step (LLM brief + sources appended) ---------
         t0 = time.time()
         research_text, research_meta = await run_research_async(
@@ -681,21 +720,47 @@ async def _run_one_question_body(
         research_meta = _as_dict(research_meta)
 
         t_research_ms = _ms(t0)
-    
-    
-        # ------------------ 2) Topic/strategic classification (for GTMC1 gate) -----
-        use_gtmc1, cls_info = await _run_classifier_safe(title, description, criteria, slug=f"q{question_id}")
-        cls_info = _must_dict("cls_info", cls_info)
-        class_primary = cls_info.get("primary") or ""
-        class_secondary = cls_info.get("secondary") or ""
-        is_strategic = bool(cls_info.get("is_strategic", False))
-        strategic_score = float(cls_info.get("strategic_score", 0.0) or 0.0)
-        classifier_source = cls_info.get("source") or ""
-        classifier_rationale = cls_info.get("rationale") or ""
-        classifier_cost = float(cls_info.get("cost_usd", 0.0) or 0.0)
-    
-        # ------------------ 3) Optional GTMC1 (binary + strategic) ------------------
-        gtmc1_active = bool(use_gtmc1 and qtype == "binary")
+
+        # Supplement research with PA history when we have iso3 + hazard_code
+        pa_block = ""
+        pa_meta: Dict[str, Any] = {}
+        if pmeta.get("iso3") and pmeta.get("hazard_code"):
+            pa_block, pa_meta = _load_pa_history_block(
+                pmeta["iso3"],
+                pmeta["hazard_code"],
+            )
+            if pa_block:
+                research_text = f"{research_text}\n\n{pa_block}"
+        # Merge PA meta into research_meta under a clear prefix
+        for key, value in pa_meta.items():
+            if key.startswith("pa_history_"):
+                research_meta[key] = value
+            else:
+                research_meta[f"pa_history_{key}"] = value
+
+
+        # ------------------ 2) Hazard-based "classification" (for GTMC1 gate) -----
+        hz_code = pmeta.get("hazard_code", "")
+        is_conflict_hazard = bool(hz_code and hz_code in CONFLICT_HAZARD_CODES)
+
+        # We still publish classifier-like fields to keep CSV schema stable,
+        # but they are now cheap deterministic values.
+        class_primary = hz_code or ""
+        class_secondary = ""
+        is_strategic = is_conflict_hazard
+        strategic_score = 1.0 if is_conflict_hazard else 0.0
+        classifier_source = "hazard_code"
+        classifier_rationale = (
+            "hazard_code in CONFLICT_HAZARD_CODES"
+            if is_conflict_hazard
+            else "non-conflict hazard or missing hazard_code"
+        )
+        classifier_cost = 0.0
+
+        # ------------------ 3) Optional GTMC1 (binary + conflict hazards only) ------
+        # NOTE: for now, GTMC1 still only runs for binary questions. When we
+        # move to SPD questions, we may relax the qtype guard.
+        gtmc1_active = bool(is_conflict_hazard and qtype == "binary")
         actors_table: Optional[List[Dict[str, Any]]] = None
         gtmc1_signal: Dict[str, Any] = {}
         gtmc1_policy_sentence: str = ""
@@ -705,12 +770,15 @@ async def _run_one_question_body(
         gtmc1_raw_dump_path: str = ""
         gtmc1_raw_excerpt: str = ""
         gtmc1_raw_reason: str = ""
-    
+
         if gtmc1_active:
             try:
-                from .config import OPENROUTER_FALLBACK_ID
+                # Use the same async OpenAI client as other calls; model comes from config
+                from .config import OPENAI_API_KEY
+                from .providers import _get_or_client  # async OpenAI client
+
                 client = _get_or_client()
-                if client is None:
+                if client is None or not OPENAI_API_KEY:
                     gtmc1_active = False
                 else:
                     prompt = f"""You are a research analyst preparing inputs for a Bruce Bueno de Mesquita-style
@@ -744,7 +812,7 @@ async def _run_one_question_body(
                     t_gt0 = time.time()
                     async with llm_semaphore:
                         resp = await client.chat.completions.create(
-                            model=OPENROUTER_FALLBACK_ID,
+                            model=os.getenv("GTMC1_MODEL_ID", "gpt-5.1-pro"),
                             messages=[{"role": "user", "content": prompt}],
                             temperature=0.2,
                         )
@@ -801,6 +869,33 @@ async def _run_one_question_body(
             except Exception:
                 gtmc1_active = False
                 t_gtmc1_ms = 0
+
+        # If GTMC1 succeeded, append a short summary to the research bundle
+        if gtmc1_active and gtmc1_signal:
+            try:
+                prob_yes = gtmc1_signal.get("gtmc1_prob") \
+                    or gtmc1_signal.get("prob_yes") \
+                    or gtmc1_signal.get("exceedance_ge_50")
+                coal_rate = gtmc1_signal.get("coalition_rate")
+                disp = gtmc1_signal.get("dispersion")
+
+                lines = [
+                    "## GTMC1 scenario analysis (bargaining model)",
+                    "",
+                    f"- Policy continuum: {gtmc1_policy_sentence or '(not specified)'}",
+                ]
+                if prob_yes is not None:
+                    lines.append(f"- GTMC1-estimated probability of YES-aligned outcome: {float(prob_yes):.2f}")
+                if coal_rate is not None:
+                    lines.append(f"- Coalition formation rate in simulations: {float(coal_rate):.2f}")
+                if disp is not None:
+                    lines.append(f"- Dispersion of actor positions (0–1): {float(disp):.2f}")
+
+                gtmc1_block = "\n".join(lines)
+                research_text = f"{research_text}\n\n{gtmc1_block}"
+            except Exception:
+                # On any formatting error, keep GTMC1 out of the research bundle but don't crash.
+                pass
     
         # ------------------ 4) Build main prompts (WITH research) -------------------
         if qtype == "binary":
@@ -838,6 +933,8 @@ async def _run_one_question_body(
         bmc_summary = _as_dict(bmc_summary)
 
         # ------------------ 7) Diagnostic variants (WITH research) ------------------
+        # NOTE: aggregate_binary now ignores gtmc1_signal; these variants are retained
+        # only for schema continuity and weight-comparison diagnostics.
         if qtype == "binary":
             v_nogtmc1, _ = aggregate_binary(ens_res, None, calib_weights_map)
             v_uniform, _ = aggregate_binary(ens_res, gtmc1_signal if gtmc1_active else None, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
@@ -1185,8 +1282,8 @@ async def _run_one_question_body(
                 md.append(f"- meta_json={_meta_json}")
     
             # If GTMC1 was expected but didn’t apply, say why (best effort).
-            if use_gtmc1 and qtype == "binary" and not gtmc1_active:
-                md.append("- note=GTMC1 gate opened (strategic) but deactivated later (client/JSON/actors<3).")
+            if is_conflict_hazard and qtype == "binary" and not gtmc1_active:
+                md.append("- note=GTMC1 gate opened (conflict hazard) but deactivated later (client/JSON/actors<3).")
             # If we captured raw (on failure), surface it.
             if gtmc1_raw_reason:
                 md.append(f"- raw_reason={gtmc1_raw_reason}")
