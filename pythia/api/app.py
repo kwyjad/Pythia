@@ -120,7 +120,7 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(
       LEFT JOIN bucket_centroids bc
         ON bc.metric = q.metric
        AND bc.class_bin = fe.class_bin
-       AND bc.hazard_code = q.hazard_code
+      AND bc.hazard_code = q.hazard_code
       WHERE q.metric=? AND q.target_month=?
       GROUP BY 1,2
     ), pop AS (
@@ -131,7 +131,44 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(
            ev.ev_pin AS expected_value,
            CASE WHEN ? THEN ev.ev_pin/NULLIF(pop.population,0) ELSE NULL END AS per_capita
     FROM ev LEFT JOIN pop ON ev.iso3=pop.iso3
-    ORDER BY (CASE WHEN ? THEN per_capita ELSE expected_value END) DESC
+      ORDER BY (CASE WHEN ? THEN per_capita ELSE expected_value END) DESC
     """
     df = con.execute(sql, [metric, month, normalize, normalize]).fetchdf()
+    return {"rows": df.to_dict(orient="records")}
+
+
+@app.get("/v1/llm/costs")
+def llm_costs(
+    component: str | None = Query(None),
+    model: str | None = Query(None),
+    since: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=5000),
+    _=Depends(require_token),
+):
+    """
+    Return recent LLM call cost/usage rows from llm_calls.
+
+    Optional filters:
+      - component: "HS" | "Researcher" | "Forecaster" | etc.
+      - model: model_name (exact match)
+      - since: ISO timestamp (created_at >= since)
+    """
+    con = _con()
+    sql = "SELECT * FROM llm_calls WHERE 1=1"
+    params: list = []
+
+    if component:
+        sql += " AND component = ?"
+        params.append(component)
+    if model:
+        sql += " AND model_name = ?"
+        params.append(model)
+    if since:
+        sql += " AND created_at >= ?"
+        params.append(since)
+
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    df = con.execute(sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
