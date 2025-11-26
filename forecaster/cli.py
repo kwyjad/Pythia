@@ -62,6 +62,15 @@ CONFLICT_HAZARD_CODES = {
     "URBAN_CONFLICT",
 }
 
+# SPD buckets for Pythia PA/PIN forecasts (order must match prompts & aggregation)
+SPD_CLASS_BINS = [
+    "<10k",
+    "10k-<50k",
+    "50k-<250k",
+    "250k-<500k",
+    ">=500k",
+]
+
 
 def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
     """
@@ -316,6 +325,100 @@ def _pythia_db_url_from_config() -> str | None:
         return db_url or None
     except Exception:
         return None
+
+
+def _write_spd_ensemble_to_db(
+    question_id: str,
+    run_id: str,
+    spd_main: Dict[str, List[float]],
+    *,
+    aggregator: str = "Bayes_MC",
+    ensemble_version: str = "v1_spd",
+) -> None:
+    """
+    Write the SPD ensemble for a given question into the Pythia DuckDB forecasts_ensemble table.
+
+    Expects spd_main like: {"month_1": [p1..p5], ..., "month_6": [p1..p5]}.
+    """
+    import duckdb
+
+    if not question_id:
+        return
+
+    db_url = _pythia_db_url_from_config()
+    if not db_url:
+        # No Pythia DB configured; silently skip DB write.
+        return
+
+    db_path = db_url.replace("duckdb:///", "")
+    con = duckdb.connect(db_path)
+    try:
+        # Ensure table exists (init_db handles this normally, but be defensive)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS forecasts_ensemble (
+              question_id TEXT,
+              horizon_m INTEGER,
+              class_bin TEXT,
+              p DOUBLE,
+              p_over_threshold DOUBLE,
+              aggregator TEXT,
+              ensemble_version TEXT,
+              created_at TIMESTAMP DEFAULT now(),
+              PRIMARY KEY (question_id, horizon_m, class_bin)
+            )
+            """
+        )
+
+        # Upsert semantics: delete existing rows for this question_id, then insert fresh
+        con.execute(
+            "DELETE FROM forecasts_ensemble WHERE question_id = ?",
+            [question_id],
+        )
+
+        rows: List[tuple] = []
+        for m_idx in range(1, 7):
+            key = f"month_{m_idx}"
+            probs = spd_main.get(key)
+            if not isinstance(probs, list) or len(probs) != len(SPD_CLASS_BINS):
+                continue
+            # Defensive renormalization
+            total = float(sum(float(x) for x in probs))
+            if total <= 0.0:
+                norm = [1.0 / float(len(SPD_CLASS_BINS))] * len(SPD_CLASS_BINS)
+            else:
+                norm = [float(x) / total for x in probs]
+
+            for bin_label, p in zip(SPD_CLASS_BINS, norm):
+                rows.append(
+                    (
+                        question_id,
+                        m_idx,
+                        bin_label,
+                        float(p),
+                        None,             # p_over_threshold (not used yet)
+                        aggregator,
+                        ensemble_version,
+                    )
+                )
+
+        if rows:
+            con.executemany(
+                """
+                INSERT INTO forecasts_ensemble (
+                  question_id,
+                  horizon_m,
+                  class_bin,
+                  p,
+                  p_over_threshold,
+                  aggregator,
+                  ensemble_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+    finally:
+        con.close()
 
 
 def _load_pa_history_block(
@@ -945,6 +1048,21 @@ async def _run_one_question_body(
         else:
             quantiles_main, bmc_summary = aggregate_numeric(ens_res, calib_weights_map)
             final_main = dict(quantiles_main)
+
+        # If this is a Pythia SPD question, write ensemble SPD into DuckDB
+        if qtype == "spd" and isinstance(final_main, dict):
+            # Heuristic: presence of Pythia metadata marks Pythia mode
+            if "pythia_iso3" in post or "pythia_hazard_code" in post:
+                try:
+                    _write_spd_ensemble_to_db(
+                        question_id=str(question_id),
+                        run_id=run_id,
+                        spd_main=final_main,
+                        aggregator="Bayes_MC",
+                        ensemble_version="v1_spd",
+                    )
+                except Exception as exc:
+                    print(f"[warn] Failed to write SPD ensemble to DB for question {question_id}: {exc}")
 
         bmc_summary = _as_dict(bmc_summary)
 
