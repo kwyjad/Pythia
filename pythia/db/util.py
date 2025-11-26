@@ -16,6 +16,11 @@ def write_llm_call(
     cost: float,
     latency_ms: int,
     success: bool,
+    *,
+    llm_profile: str | None = None,
+    hs_run_id: str | None = None,
+    ui_run_id: str | None = None,
+    forecaster_run_id: str | None = None,
 ) -> None:
     """Insert a single LLM call record into the llm_calls table."""
 
@@ -33,8 +38,12 @@ def write_llm_call(
             tokens_out,
             cost_usd,
             latency_ms,
-            success
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            success,
+            llm_profile,
+            hs_run_id,
+            ui_run_id,
+            forecaster_run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             str(uuid.uuid4()),
@@ -47,5 +56,9 @@ def write_llm_call(
             float(cost or 0.0),
             int(latency_ms),
             bool(success),
+            llm_profile,
+            hs_run_id,
+            ui_run_id,
+            forecaster_run_id,
         ],
     )

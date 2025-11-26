@@ -1804,6 +1804,7 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
             return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     run_id = _istamp()
+    os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
     print("----------------------------------------------------------------------------------------")
 
     # --- load helpers from this module scope --------------------------------

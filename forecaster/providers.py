@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover - openai package missing
 
 from pythia.config import load as load_cfg
 from pythia.db.util import write_llm_call
-from pythia.llm_profiles import get_current_models
+from pythia.llm_profiles import get_current_models, get_current_profile
 
 from .config import (
     GEMINI_CALL_TIMEOUT_SEC,
@@ -560,6 +560,15 @@ def _log_llm_call(
 ) -> None:
     if not _DB_PATH:
         return
+
+    try:
+        llm_profile = get_current_profile()
+    except Exception:
+        llm_profile = None
+
+    hs_run_id = os.getenv("PYTHIA_HS_RUN_ID")
+    ui_run_id = os.getenv("PYTHIA_UI_RUN_ID")
+    forecaster_run_id = os.getenv("PYTHIA_FORECASTER_RUN_ID")
     conn = None
     try:
         conn = duckdb.connect(_DB_PATH, read_only=False)
@@ -573,6 +582,10 @@ def _log_llm_call(
             cost=cost,
             latency_ms=latency_ms,
             success=success,
+            llm_profile=llm_profile,
+            hs_run_id=hs_run_id,
+            ui_run_id=ui_run_id,
+            forecaster_run_id=forecaster_run_id,
         )
     except Exception:
         pass

@@ -2,6 +2,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 import logging
+import os
 import subprocess
 import sys
 import uuid
@@ -154,96 +155,105 @@ def _pipeline(ui_run_id: str, countries: list[str]):
     except Exception:
         logging.exception("ui_runs: failed to record start for ui_run_id=%s", ui_run_id)
 
-    # 1) Ensure DuckDB schema exists (idempotent)
-    try:
-        init_db(db_url)
-        logging.info("DuckDB schema initialised via init_db(%s).", db_url)
-    except Exception as e:
-        logging.exception("init_db(%s) failed; aborting pipeline.", db_url)
-        try:
-            _update_ui_run(
-                db_url,
-                ui_run_id,
-                finished_at=datetime.utcnow(),
-                status="failed",
-                error=f"init_db_failed:{e!r}",
-            )
-        except Exception:
-            logging.exception("ui_runs: failed to record init_db failure for %s", ui_run_id)
-        return
+    prev_ui = os.environ.get("PYTHIA_UI_RUN_ID")
+    os.environ["PYTHIA_UI_RUN_ID"] = ui_run_id
 
-    # 2) Run Horizon Scanner to write hs_runs, hs_scenarios, questions
     try:
-        # Horizon Scanner will also call init_db(db_url) internally and respect app.db_url.
-        # If `countries` is empty, we pass None so HS falls back to hs_country_list.txt.
-        hs_countries = countries or None
-        hs_main(hs_countries)
-        logging.info("Horizon Scanner completed in pipeline.")
-    except Exception as e:
-        logging.exception("Horizon Scanner failed inside pipeline; aborting before Forecaster.")
+        # 1) Ensure DuckDB schema exists (idempotent)
         try:
-            _update_ui_run(
-                db_url,
-                ui_run_id,
-                finished_at=datetime.utcnow(),
-                status="failed",
-                error=f"horizon_scanner_failed:{e!r}",
-            )
-        except Exception:
-            logging.exception("ui_runs: failed to record HS failure for %s", ui_run_id)
-        return
+            init_db(db_url)
+            logging.info("DuckDB schema initialised via init_db(%s).", db_url)
+        except Exception as e:
+            logging.exception("init_db(%s) failed; aborting pipeline.", db_url)
+            try:
+                _update_ui_run(
+                    db_url,
+                    ui_run_id,
+                    finished_at=datetime.utcnow(),
+                    status="failed",
+                    error=f"init_db_failed:{e!r}",
+                )
+            except Exception:
+                logging.exception("ui_runs: failed to record init_db failure for %s", ui_run_id)
+            return
 
-    # 3) Run Forecaster in Pythia mode on active questions
-    try:
-        limit = 200  # hard cap for now; can be made configurable via cfg["forecaster"].get("max_questions", 200)
-        cmd = [
-            sys.executable,
-            "-m",
-            "forecaster.cli",
-            "--mode",
-            "pythia",
-            "--limit",
-            str(limit),
-            "--purpose",
-            "ui_pipeline",
-        ]
-        logging.info("Starting Forecaster in Pythia mode: %s", " ".join(cmd))
-        subprocess.run(cmd, check=True)
-        logging.info("Forecaster (Pythia mode) completed successfully in pipeline.")
+        # 2) Run Horizon Scanner to write hs_runs, hs_scenarios, questions
         try:
-            _update_ui_run(
-                db_url,
-                ui_run_id,
-                finished_at=datetime.utcnow(),
-                status="ok",
-                error=None,
-            )
-        except Exception:
-            logging.exception("ui_runs: failed to record success for %s", ui_run_id)
-    except subprocess.CalledProcessError as e:
-        logging.exception("Forecaster subprocess failed in pipeline: %s", e)
+            # Horizon Scanner will also call init_db(db_url) internally and respect app.db_url.
+            # If `countries` is empty, we pass None so HS falls back to hs_country_list.txt.
+            hs_countries = countries or None
+            hs_main(hs_countries)
+            logging.info("Horizon Scanner completed in pipeline.")
+        except Exception as e:
+            logging.exception("Horizon Scanner failed inside pipeline; aborting before Forecaster.")
+            try:
+                _update_ui_run(
+                    db_url,
+                    ui_run_id,
+                    finished_at=datetime.utcnow(),
+                    status="failed",
+                    error=f"horizon_scanner_failed:{e!r}",
+                )
+            except Exception:
+                logging.exception("ui_runs: failed to record HS failure for %s", ui_run_id)
+            return
+
+        # 3) Run Forecaster in Pythia mode on active questions
         try:
-            _update_ui_run(
-                db_url,
-                ui_run_id,
-                finished_at=datetime.utcnow(),
-                status="failed",
-                error=f"forecaster_failed:{e!r}",
-            )
-        except Exception:
-            logging.exception("ui_runs: failed to record Forecaster failure for %s", ui_run_id)
-    except Exception as e:
-        logging.exception("Unexpected error while running Forecaster in pipeline.")
-        try:
-            _update_ui_run(
-                db_url,
-                ui_run_id,
-                finished_at=datetime.utcnow(),
-                status="failed",
-                error=f"forecaster_unexpected_error:{e!r}",
-            )
-        except Exception:
-            logging.exception("ui_runs: failed to record unexpected failure for %s", ui_run_id)
+            limit = 200  # hard cap for now; can be made configurable via cfg["forecaster"].get("max_questions", 200)
+            cmd = [
+                sys.executable,
+                "-m",
+                "forecaster.cli",
+                "--mode",
+                "pythia",
+                "--limit",
+                str(limit),
+                "--purpose",
+                "ui_pipeline",
+            ]
+            logging.info("Starting Forecaster in Pythia mode: %s", " ".join(cmd))
+            subprocess.run(cmd, check=True)
+            logging.info("Forecaster (Pythia mode) completed successfully in pipeline.")
+            try:
+                _update_ui_run(
+                    db_url,
+                    ui_run_id,
+                    finished_at=datetime.utcnow(),
+                    status="ok",
+                    error=None,
+                )
+            except Exception:
+                logging.exception("ui_runs: failed to record success for %s", ui_run_id)
+        except subprocess.CalledProcessError as e:
+            logging.exception("Forecaster subprocess failed in pipeline: %s", e)
+            try:
+                _update_ui_run(
+                    db_url,
+                    ui_run_id,
+                    finished_at=datetime.utcnow(),
+                    status="failed",
+                    error=f"forecaster_failed:{e!r}",
+                )
+            except Exception:
+                logging.exception("ui_runs: failed to record Forecaster failure for %s", ui_run_id)
+        except Exception as e:
+            logging.exception("Unexpected error while running Forecaster in pipeline.")
+            try:
+                _update_ui_run(
+                    db_url,
+                    ui_run_id,
+                    finished_at=datetime.utcnow(),
+                    status="failed",
+                    error=f"forecaster_unexpected_error:{e!r}",
+                )
+            except Exception:
+                logging.exception("ui_runs: failed to record unexpected failure for %s", ui_run_id)
+    finally:
+        if prev_ui is None:
+            os.environ.pop("PYTHIA_UI_RUN_ID", None)
+        else:
+            os.environ["PYTHIA_UI_RUN_ID"] = prev_ui
 
 
 def enqueue_run(countries: list[str]) -> str:
