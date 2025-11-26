@@ -3,7 +3,17 @@ name: Resolver CI — Fast
 
 on:
   push:
+    paths:
+      - "resolver/**"
+      - "scripts/ci/**"
+      - "constraints-ci.txt"
+      - ".github/workflows/resolver-ci-fast.yml"
   pull_request:
+    paths:
+      - "resolver/**"
+      - "scripts/ci/**"
+      - "constraints-ci.txt"
+      - ".github/workflows/resolver-ci-fast.yml"
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *"

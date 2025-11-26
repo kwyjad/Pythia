@@ -25,10 +25,10 @@ forecaster:
   class_bins: ["<5k","5k-<25k","25k-<100k","100k-<500k",">=500k"]
   aggregator: { strategy: "Bayes_MC", version: "1.0.0" }
   providers:
-    openai:   { enabled: true,  model: "gpt-5",           env_key: "OPENAI_API_KEY" }
-    anthropic:{ enabled: true,  model: "claude-4.1-opus", env_key: "ANTHROPIC_API_KEY" }
-    google:   { enabled: true,  model: "gemini-2.5-pro",  env_key: "GEMINI_API_KEY" }
-    xai:      { enabled: true,  model: "grok-4",          env_key: "XAI_API_KEY" }
+    openai:    { enabled: true, model: "gpt-5.1-pro",      env_key: "OPENAI_API_KEY" }
+    anthropic: { enabled: true, model: "claude-opus-4.5",  env_key: "ANTHROPIC_API_KEY" }
+    google:    { enabled: true, model: "gemini-3-pro",     env_key: "GEMINI_API_KEY" }
+    xai:       { enabled: true, model: "grok-4.1",         env_key: "XAI_API_KEY" }
 
 ranking:
   representative_values:
