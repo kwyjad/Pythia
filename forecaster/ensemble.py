@@ -85,16 +85,26 @@ def _parse_spd_json(
         return None
 
     out: dict = {}
-    any_nonzero = False
+    any_nonzero_raw = False
     for m_idx in range(1, n_months + 1):
         key = f"month_{m_idx}"
-        vec_raw = data.get(key, [])
-        vec = sanitize_mcq_vector(vec_raw if isinstance(vec_raw, list) else [], n_options=n_buckets)
-        out[key] = vec
-        if any(abs(float(x)) > 1e-8 for x in vec):
-            any_nonzero = True
+        raw_vec = data.get(key, [])
+        raw_vals: list[float] = []
 
-    if not any_nonzero:
+        if isinstance(raw_vec, list):
+            for x in raw_vec:
+                try:
+                    raw_vals.append(float(x))
+                except Exception:
+                    continue
+
+        if sum(abs(v) for v in raw_vals) > 1e-8:
+            any_nonzero_raw = True
+
+        vec = sanitize_mcq_vector(raw_vec if isinstance(raw_vec, list) else [], n_options=n_buckets)
+        out[key] = vec
+
+    if not any_nonzero_raw:
         if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
             head = t[:200].replace("\n", " ")
             print(f"[spd] parse produced all-zero SPD; treating as failure; head={head!r}")
