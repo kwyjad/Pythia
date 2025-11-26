@@ -32,7 +32,9 @@ from resolver.db import duckdb_io
 from pythia.db.init import init as init_db
 from pythia.prompts.registry import load_prompt_spec
 from pythia.config import load as load_cfg
-from pythia.llm_profiles import get_current_models
+from pythia.llm_profiles import get_current_models, get_current_profile
+from pythia.db.util import write_llm_call
+from forecaster.providers import estimate_cost_usd
 
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
@@ -47,6 +49,22 @@ PROMPT_SPEC = load_prompt_spec(
     COUNTRY_ANALYSIS_PROMPT,
     str(CURRENT_DIR / "hs_prompt.py"),
 )
+
+
+def _hs_db_path() -> str | None:
+    """Return DuckDB file path from app.db_url, or None if missing."""
+    try:
+        cfg = load_cfg()
+        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
+        db_url = str(app_cfg.get("db_url", "")).strip()
+    except Exception:
+        db_url = ""
+    if not db_url:
+        # Fallback to legacy HS default
+        data_dir = REPO_ROOT / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_url = f"duckdb:///{data_dir / 'resolver.duckdb'}"
+    return db_url.replace("duckdb:///", "")
 
 # Load the Gemini API key from GitHub Secrets
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -92,6 +110,64 @@ logging.info(
     generation_config.get("temperature", 0.0),
 )
 
+
+def _log_hs_llm_call(
+    country: str,
+    prompt: str,
+    report_text: str,
+    latency_ms: int,
+) -> None:
+    """
+    Best-effort logging of a single Horizon Scanner Gemini call into llm_calls.
+
+    Uses a rough token estimate if usage metadata is not available.
+    """
+    db_path = _hs_db_path()
+    if not db_path:
+        return
+
+    try:
+        profile = get_current_profile()
+    except Exception:
+        profile = None
+    _ = profile
+
+    from forecaster.research import _rough_token_count
+
+    prompt_tokens = _rough_token_count(prompt)
+    completion_tokens = _rough_token_count(report_text)
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    cost = estimate_cost_usd(GEMINI_MODEL_NAME, usage)
+
+    try:
+        conn = duckdb.connect(db_path)
+    except Exception:
+        return
+
+    try:
+        write_llm_call(
+            conn,
+            component="HS",
+            model=GEMINI_MODEL_NAME,
+            prompt_key=PROMPT_KEY,
+            version=PROMPT_VERSION,
+            usage=usage,
+            cost=cost,
+            latency_ms=latency_ms,
+            success=bool(report_text.strip()),
+        )
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 # --- Main Functions ---
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
@@ -109,13 +185,22 @@ def generate_report_for_country(country: str) -> str | None:
     logging.info("Prompt length for %s: %d characters", country, len(prompt))
 
     # Call Gemini
+    t0 = time.time()
     response = country_model.generate_content(prompt)
+    latency_ms = int((time.time() - t0) * 1000)
+
     logging.info(
-        "Gemini call succeeded for %s using model %s.",
+        "Gemini call succeeded for %s using model %s (latency=%d ms).",
         country,
         GEMINI_MODEL_NAME,
+        latency_ms,
     )
     report_text = getattr(response, "text", "") or ""
+
+    try:
+        _log_hs_llm_call(country, prompt, report_text, latency_ms)
+    except Exception:
+        logging.exception("Failed to log HS LLM call for %s", country)
     logging.info("Received report for %s: %d characters", country, len(report_text))
 
     cleaned_text = report_text.strip()

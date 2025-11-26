@@ -38,6 +38,7 @@ This lets repeated runs avoid hitting the network when nothing changed.
 import os, re, json, time, math, textwrap, asyncio, hashlib, difflib
 from typing import Optional, List, Dict, Any, Tuple
 import requests
+import duckdb
 
 from .config import (
     ist_date, ist_iso,
@@ -48,6 +49,10 @@ from .config import (
 )
 
 from .prompts import build_research_prompt, _CAL_PREFIX
+from pythia.config import load as _load_cfg
+from pythia.db.util import write_llm_call
+from forecaster.providers import estimate_cost_usd
+from pythia.llm_profiles import get_current_profile
 
 try:
     from pythia.llm_profiles import get_current_models
@@ -63,6 +68,19 @@ else:
     _PROFILE_MODELS = {}
 
 _GEMINI_MODEL_DEFAULT = _PROFILE_MODELS.get("google") or _GEMINI_MODEL_ENV or "gemini-2.5-pro"
+
+
+def _research_db_path() -> str | None:
+    """Return DuckDB file path from app.db_url, or None if missing."""
+    try:
+        cfg = _load_cfg()
+        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
+        db_url = str(app_cfg.get("db_url", "")).strip()
+    except Exception:
+        db_url = ""
+    if not db_url:
+        return None
+    return db_url.replace("duckdb:///", "")
 
 # --- Debug hook: last error message from research step (for human log & CSV) ---
 LAST_RESEARCH_ERROR: str = ""   # set by _grounded_search / _compose_research_via_gemini
@@ -599,9 +617,11 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
     """
     Returns (text, used_model_id, usage_dict, request_body).
     Never references undefined 'body'; always returns a body dict.
+    
+    Also logs a best-effort cost/usage row to llm_calls with component="Researcher".
     """
     api_key = _gemini_api_key()
-    model = (_GEMINI_MODEL_DEFAULT or "gemini-2.5-pro").strip()
+    model = (_GEMINI_MODEL_ENV or "gemini-2.5-pro").strip()
 
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
@@ -612,6 +632,7 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
         _set_research_error("no GEMINI_API_KEY (or GOOGLE_API_KEY) for research composition")
         return "", "", {}, body
 
+    t0 = time.time()
     try:
         resp = requests.post(
             _gemini_base_url(model),
@@ -619,6 +640,8 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
             json=body,
             timeout=float(_GEMINI_TIMEOUT),
         )
+        latency_ms = int((time.time() - t0) * 1000)
+
         if resp.status_code != 200:
             try:
                 j = resp.json()
@@ -638,7 +661,53 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
                 t = part.get("text")
                 if isinstance(t, str) and t.strip():
                     texts.append(t)
-        return ("\n".join(texts).strip(), f"google/{model}", {}, body)
+        composed_text = "\n".join(texts).strip()
+
+        usage_meta = data.get("usageMetadata") if isinstance(data, dict) else {}
+        prompt_tokens = usage_meta.get("promptTokenCount", 0)
+        completion_tokens = usage_meta.get("candidatesTokenCount", 0)
+        if not prompt_tokens:
+            prompt_tokens = _rough_token_count(prompt_text)
+        if not completion_tokens:
+            completion_tokens = _rough_token_count(composed_text)
+        usage = {
+            "prompt_tokens": int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+            "total_tokens": int(prompt_tokens or 0) + int(completion_tokens or 0),
+        }
+
+        try:
+            _ = get_current_profile()
+        except Exception:
+            pass
+
+        used_model_id = f"google/{model}"
+        cost = estimate_cost_usd(used_model_id, usage)
+
+        db_path = _research_db_path()
+        if db_path:
+            try:
+                conn = duckdb.connect(db_path)
+                write_llm_call(
+                    conn,
+                    component="Researcher",
+                    model=used_model_id,
+                    prompt_key="forecaster.research",
+                    version="1.0.0",
+                    usage=usage,
+                    cost=cost,
+                    latency_ms=latency_ms,
+                    success=bool(composed_text),
+                )
+            except Exception:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return composed_text, used_model_id, usage, body
 
     except Exception as e:
         _set_research_error(f"compose request error: {e!r}")
@@ -810,12 +879,16 @@ async def run_research_async(
     market_debug = [str(line) for line in market_debug_lines if str(line).strip()]
 
     # --- cost estimation ---
-    prompt_tokens = _rough_token_count(json.dumps(req_body))
-    output_tokens = _rough_token_count(llm_text)
-    # Gemini 2.5 Pro rates (USD per 1K tokens)
-    in_rate = 0.00125
-    out_rate = 0.01
-    research_cost_usd = (prompt_tokens/1000)*in_rate + (output_tokens/1000)*out_rate
+    research_usage = usage or {}
+    if not research_usage:
+        prompt_tokens = _rough_token_count(json.dumps(req_body))
+        completion_tokens = _rough_token_count(llm_text)
+        research_usage = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+    research_cost_usd = estimate_cost_usd(used_llm or "google/gemini-2.5-pro", research_usage)
 
     # 6) Final text for the human log: brief + source list (+ optional pre-filter dump)
     parts = [_CAL_PREFIX + llm_text]
@@ -839,7 +912,7 @@ async def run_research_async(
                 "research_n_kept": int(len(picked)),
                 "research_cached": "0",
                 "research_error": (LAST_RESEARCH_ERROR or ""),
-                "research_usage": usage or {},
+                "research_usage": research_usage or {},
                 "research_cost_usd": round(research_cost_usd, 6),
                 "research_markets_found": markets_found,
                 "research_market_summary": market_section,
@@ -859,7 +932,7 @@ async def run_research_async(
         "research_n_kept": int(len(picked)),
         "research_cached": "0",
         "research_error": (LAST_RESEARCH_ERROR or ""),
-        "research_usage": usage or {},
+        "research_usage": research_usage or {},
         "research_cost_usd": round(research_cost_usd, 6),
         "research_markets_found": markets_found,
         "research_market_summary": market_section,
