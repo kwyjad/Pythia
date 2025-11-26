@@ -38,38 +38,20 @@ def aggregate_binary(
     weights: Optional[Dict[str, float]] = None,
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Bayesian aggregation for binary questions using bayes_mc.
+    Aggregate binary forecasts via a Beta + Monte Carlo layer.
 
-    How it works:
-      1) Collect evidence from each LLM member (probability + weight).
-      2) (Step B) Normalize any GTMC1 input to a clean probability via
-         _extract_gtmc1_prob(...).
-      3) (Step C) If GTMC1 produced a usable probability, add it as one more
-         piece of evidence with its own (tunable) weight.
-      4) Run a Bayesian Monte Carlo update (via bayes_mc) against a weak prior.
-      5) Return the posterior mean as the final probability, along with a
-         serializable summary dict (we strip 'samples' because it's a numpy array).
+    NOTE: `gtmc1_signal` is now **ignored**. GTMC1 is folded into the research bundle
+    and influences the LLM forecasts directly, rather than acting as a separate
+    expert in the BMC layer. We keep the parameter for backwards-compatibility.
     """
 
     evidences: List[BMC.BinaryEvidence] = []
-
-    # --- Step B: normalize GTMC1 input up-front to a simple probability [0,1] ---
-    # This line is the "B" patch you asked about: do it near the top of the function.
-    gtmc1_p = _extract_gtmc1_prob(gtmc1_signal)
 
     # 1) LLM Ensemble Evidence
     for m in ensemble_res.members:
         if m.ok and isinstance(m.parsed, (float, int)):
             w = (weights or {}).get(m.name, 1.0)
             evidences.append(BMC.BinaryEvidence(p=float(m.parsed), w=w))
-
-    # 2) GTMC1 Evidence (Step C)
-    # Previously this block hard-coded a check on "exceedance_ge_50".
-    # Now we rely on the normalized 'gtmc1_p' so any accepted alias works.
-    if gtmc1_p is not None:
-        # NOTE: The GTMC1 weight is tunable. 1.5 is a reasonable default that
-        # gives GTMC1 some influence without overwhelming the ensemble.
-        evidences.append(BMC.BinaryEvidence(p=gtmc1_p, w=1.5))
 
     # Weak prior to let evidence dominate
     prior = BMC.BinaryPrior(alpha=0.1, beta=0.1)
