@@ -53,6 +53,11 @@ _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
 
+try:
+    from pythia.llm_profiles import get_current_models as _get_llm_profile_models
+except Exception:
+    _get_llm_profile_models = None  # type: ignore
+
 
 # Hazard codes for which GTMC1 is relevant (adjust as needed for your schema)
 CONFLICT_HAZARD_CODES = {
@@ -1013,9 +1018,16 @@ async def _run_one_question_body(
     Constraints: All numbers within ranges; 3–8 total actors; valid JSON.
     """
                     t_gt0 = time.time()
+                    profile_models = {}
+                    if _get_llm_profile_models is not None:
+                        try:
+                            profile_models = _get_llm_profile_models()
+                        except Exception:
+                            profile_models = {}
+                    default_gtmc1_model = profile_models.get("openai", "gpt-5.1-pro")
                     async with llm_semaphore:
                         resp = await client.chat.completions.create(
-                            model=os.getenv("GTMC1_MODEL_ID", "gpt-5.1-pro"),
+                            model=os.getenv("GTMC1_MODEL_ID", default_gtmc1_model),
                             messages=[{"role": "user", "content": prompt}],
                             temperature=0.2,
                         )

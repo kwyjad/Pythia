@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - openai package missing
 
 from pythia.config import load as load_cfg
 from pythia.db.util import write_llm_call
+from pythia.llm_profiles import get_current_models
 
 from .config import (
     GEMINI_CALL_TIMEOUT_SEC,
@@ -67,27 +68,27 @@ llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
 _DEFAULT_PROVIDER_CONFIG: Dict[str, Dict[str, Any]] = {
     "openai": {
         "enabled": True,
-        "model": "gpt-5.1-pro",
+        "model": "",
         "env_key": "OPENAI_API_KEY",
-        "display_name": "OpenAI-gpt-5.1-pro",
+        "display_name": "OpenAI",
     },
     "anthropic": {
         "enabled": True,
-        "model": "claude-opus-4.5",
+        "model": "",
         "env_key": "ANTHROPIC_API_KEY",
-        "display_name": "Claude-opus-4.5",
+        "display_name": "Claude",
     },
     "google": {
         "enabled": True,
-        "model": "gemini-3-pro",
+        "model": "",
         "env_key": "GEMINI_API_KEY",
-        "display_name": "Gemini-3-pro",
+        "display_name": "Gemini",
     },
     "xai": {
         "enabled": True,
-        "model": "grok-4.1",
+        "model": "",
         "env_key": "XAI_API_KEY",
-        "display_name": "Grok-4.1",
+        "display_name": "Grok",
     },
 }
 
@@ -109,6 +110,19 @@ def _merge_provider_config() -> Dict[str, Dict[str, Any]]:
         base = merged.setdefault(key, {})
         for ok, ov in override.items():
             base[ok] = ov
+
+    profile_models: Dict[str, str] = {}
+    try:
+        profile_models = get_current_models()
+    except Exception:
+        profile_models = {}
+
+    for provider_name, entry in merged.items():
+        model = str(entry.get("model") or "").strip()
+        if not model and profile_models:
+            profile_model = profile_models.get(provider_name)
+            if profile_model:
+                entry["model"] = profile_model
     return merged
 
 

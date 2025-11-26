@@ -32,6 +32,7 @@ from resolver.db import duckdb_io
 from pythia.db.init import init as init_db
 from pythia.prompts.registry import load_prompt_spec
 from pythia.config import load as load_cfg
+from pythia.llm_profiles import get_current_models
 
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
@@ -56,7 +57,13 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # Configuration for the Gemini models
 # Use a safety setting to be less restrictive, as the content is professional analysis
-GEMINI_MODEL_NAME = "gemini-3-pro-preview"
+_profile_models = {}
+try:
+    _profile_models = get_current_models()
+except Exception:
+    _profile_models = {}
+
+GEMINI_MODEL_NAME = _profile_models.get("google", "gemini-3-pro-preview")
 
 generation_config = {
     "temperature": 1.0,
