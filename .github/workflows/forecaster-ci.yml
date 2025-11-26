@@ -19,15 +19,24 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Debug context (ref, SHA, changed files)
+        env:
+          GITHUB_REF_SAFE: ${{ github.ref }}
+          GITHUB_BASE_REF_SAFE: ${{ github.base_ref }}
+          GITHUB_HEAD_REF_SAFE: ${{ github.head_ref }}
+          GITHUB_SHA_SAFE: ${{ github.sha }}
         run: |
-          echo "Ref: ${{ github.ref }}"
-          echo "Base ref: ${{ github.base_ref }}"
-          echo "Head ref: ${{ github.head_ref }}"
-          echo "SHA: ${{ github.sha }}"
+          echo "Ref: ${GITHUB_REF_SAFE}"
+          echo "Base ref: ${GITHUB_BASE_REF_SAFE}"
+          echo "Head ref: ${GITHUB_HEAD_REF_SAFE}"
+          echo "SHA: ${GITHUB_SHA_SAFE}"
           echo "Changed files (base..head):"
           # This can fail on some PR types; don't fail the job if it does
-          git fetch origin "${{ github.base_ref }}" --depth=1 || true
-          git diff --name-only "origin/${{ github.base_ref }}"...HEAD || true
+          if [ -n "${GITHUB_BASE_REF_SAFE}" ]; then
+            git fetch origin "${GITHUB_BASE_REF_SAFE}" --depth=1 || true
+            git diff --name-only "origin/${GITHUB_BASE_REF_SAFE}"...HEAD || true
+          else
+            echo "No base_ref available (e.g. direct push); skipping git diff."
+          fi
           echo "Repo tree (top-level):"
           ls -R
 
