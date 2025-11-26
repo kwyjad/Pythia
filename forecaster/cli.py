@@ -25,6 +25,8 @@ WHAT THIS FILE DOES (high level, in plain English)
 
 import argparse
 import asyncio
+import importlib
+import importlib.util
 import json
 import os
 import re
@@ -46,6 +48,10 @@ except ModuleNotFoundError:
     )
 
 from pathlib import Path
+
+_PYTHIA_CFG_LOAD = None
+if importlib.util.find_spec("pythia.config") is not None:
+    _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
 
 
 def _advise_poetry_lock_if_needed():
@@ -270,6 +276,98 @@ def _sanitize_markdown_chunks(chunks: List[Any]) -> List[str]:
             # happened, and failing to write the human log is worse.
             continue
     return sanitized
+
+
+def _pythia_db_url_from_config() -> str | None:
+    """
+    Best-effort helper to read the Pythia DuckDB URL from config.
+    Returns a duckdb:/// URL or None.
+    """
+
+    if _PYTHIA_CFG_LOAD is None:
+        return None
+    try:
+        cfg = _PYTHIA_CFG_LOAD()
+        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
+        db_url = str(app_cfg.get("db_url", "")).strip()
+        return db_url or None
+    except Exception:
+        return None
+
+
+def _load_pythia_questions(limit: int) -> List[dict]:
+    """
+    Load active Horizon Scanner questions from DuckDB and adapt them to the
+    Metaculus-style 'post' shape expected by _run_one_question_body.
+
+    For now, we treat each PA question as a numeric question:
+      - q['type'] = 'numeric'
+      - title = wording from Horizon Scanner
+      - description/criteria left blank (research still works with title alone)
+    """
+
+    from datetime import datetime
+
+    from resolver.db import duckdb_io
+
+    max_limit = max(1, int(limit))
+    db_url = _pythia_db_url_from_config() or duckdb_io.DEFAULT_DB_URL
+    conn = duckdb_io.get_db(db_url)
+    try:
+        sql = """
+            SELECT
+                question_id,
+                iso3,
+                hazard_code,
+                metric,
+                target_month,
+                wording,
+                status,
+                run_id
+            FROM questions
+            WHERE status = 'active'
+            ORDER BY iso3, hazard_code, metric, target_month, question_id
+            LIMIT ?
+        """
+        cursor = conn.execute(sql, [max_limit])
+        rows = cursor.fetchall()
+        description = getattr(cursor, "description", []) or []
+    finally:
+        duckdb_io.close_db(conn)
+
+    cols = [c[0] for c in description]
+    posts: List[dict] = []
+    for row in rows:
+        rec = dict(zip(cols, row))
+        qid = rec.get("question_id")
+        iso3 = (rec.get("iso3") or "").upper()
+        hz = (rec.get("hazard_code") or "").upper()
+        metric = rec.get("metric") or "PA"
+        target_month = rec.get("target_month") or ""
+        wording = rec.get("wording") or ""
+
+        question = {
+            "id": qid,
+            "title": wording,
+            "type": "numeric",
+            "possibilities": {"type": "numeric"},
+        }
+
+        post = {
+            "id": qid,
+            "question": question,
+            "description": "",
+            "pythia_iso3": iso3,
+            "pythia_hazard_code": hz,
+            "pythia_metric": metric,
+            "pythia_target_month": target_month,
+            "pythia_status": rec.get("status"),
+            "pythia_hs_run_id": rec.get("run_id"),
+            "created_time_iso": datetime.utcnow().isoformat(),
+        }
+        posts.append(post)
+
+    return posts
 
 def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: int) -> Optional[str]:
     """
@@ -1297,9 +1395,10 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
       - mode="tournament": uses TOURNAMENT_ID from config
       - mode="file": reads local JSON (list of posts, dict with 'results'/'posts',
                      or dict with 'post_ids' to fetch individually)
+      - mode="pythia": reads Horizon Scanner questions from DuckDB
     """
     # --- local imports to keep this function self-contained ---------------
-    import os, json, inspect, importlib
+    import os, json, inspect
     from pathlib import Path
 
     def _istamp():
@@ -1322,8 +1421,11 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
     #   finalize_and_commit()
 
     # --- load questions ------------------------------------------------------
+    posts: List[dict] = []
+    fetch_limit = max(1, limit)
+
     if mode == "tournament":
-        data = list_posts_from_tournament(TOURNAMENT_ID, offset=0, count=max(1, limit))
+        data = list_posts_from_tournament(TOURNAMENT_ID, offset=0, count=fetch_limit)
         posts = data.get("results") or data.get("posts") or []
         print(f"[info] Retrieved {len(posts)} open post(s) from '{TOURNAMENT_ID}'.")
     elif mode == "file":
@@ -1339,7 +1441,6 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
         with qfile.open("r", encoding="utf-8") as f:
             data = json.load(f)
 
-        posts = []
         if isinstance(data, list):
             # list of post objects
             posts = data
@@ -1350,7 +1451,7 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
             post_ids = data.get("post_ids") or data.get("ids") or []
             if post_ids and not posts:
                 fetched = []
-                for pid in post_ids[: max(1, limit)]:
+                for pid in post_ids[:fetch_limit]:
                     try:
                         fetched.append(get_post_details(int(pid)))
                     except Exception as e:
@@ -1360,6 +1461,10 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
             posts = []
 
         print(f"[info] Loaded {len(posts)} post(s) from {qfile.as_posix()}.")
+    elif mode == "pythia":
+        print("[info] Loading Pythia questions from DuckDB...")
+        posts = _load_pythia_questions(fetch_limit)
+        print(f"[info] Loaded {len(posts)} question(s) from DuckDB (Pythia mode).")
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 
@@ -1552,7 +1657,15 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Forecaster runner")
-    p.add_argument("--mode", default="tournament", choices=["tournament", "file"], help="Run mode")
+    p.add_argument(
+        "--mode",
+        default="tournament",
+        choices=["tournament", "file", "pythia"],
+        help=(
+            "Question source: 'tournament' (Metaculus), 'file' (local JSON), "
+            "or 'pythia' (DuckDB questions table)."
+        ),
+    )
     p.add_argument("--limit", type=int, default=20, help="Max posts to fetch/process")
     p.add_argument("--submit", action="store_true", help="Submit forecasts to Metaculus")
     p.add_argument("--purpose", default="ad_hoc", help="String tag recorded in CSV/logs")

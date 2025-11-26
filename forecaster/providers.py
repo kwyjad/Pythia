@@ -67,27 +67,27 @@ llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
 _DEFAULT_PROVIDER_CONFIG: Dict[str, Dict[str, Any]] = {
     "openai": {
         "enabled": True,
-        "model": "gpt-5",
+        "model": "gpt-5.1-pro",
         "env_key": "OPENAI_API_KEY",
-        "display_name": "OpenAI-gpt-5",
+        "display_name": "OpenAI-gpt-5.1-pro",
     },
     "anthropic": {
         "enabled": True,
-        "model": "claude-4.1-opus",
+        "model": "claude-opus-4.5",
         "env_key": "ANTHROPIC_API_KEY",
-        "display_name": "Claude-4.1-opus",
+        "display_name": "Claude-opus-4.5",
     },
     "google": {
         "enabled": True,
-        "model": "gemini-2.5-pro",
+        "model": "gemini-3-pro",
         "env_key": "GEMINI_API_KEY",
-        "display_name": "Gemini-2.5-pro",
+        "display_name": "Gemini-3-pro",
     },
     "xai": {
         "enabled": True,
-        "model": "grok-4",
+        "model": "grok-4.1",
         "env_key": "XAI_API_KEY",
-        "display_name": "Grok-4",
+        "display_name": "Grok-4.1",
     },
 }
 
