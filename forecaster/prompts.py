@@ -154,7 +154,7 @@ Today (Istanbul time): {today}
 """
 
 MCQ_PROMPT = _CAL_PREFIX + """You are a careful probabilistic forecaster. Use the background context AND the research report AND your general knowlodge as an LLM.
-Your task is to assign probabilities to each of the multiple-choice options using Bayesian reasoning. 
+Your task is to assign probabilities to each of the multiple-choice options using Bayesian reasoning.
 Follow these steps clearly in your reasoning before giving your final answer:
 
 1. **Base Rate (Prior) Selection** - Identify an appropriate base rate (prior probability P(H)) for each option.  
@@ -203,6 +203,74 @@ Resolution criteria:
 {criteria}
 
 Today (Istanbul time): {today}
+"""
+
+SPD_PROMPT = _CAL_PREFIX + """
+You are a careful probabilistic forecaster on a humanitarian early warning panel.
+
+Your task is to forecast how many people will be AFFECTED (not just at risk) by a specific
+hazard in a specific country, for each of the next six months.
+
+You will express your beliefs as a SUBJECTIVE PROBABILITY DISTRIBUTION (SPD) over FIVE buckets
+of people affected. For each month, you must distribute 100% probability across these buckets:
+
+- Bucket 1: < 10,000 people affected
+- Bucket 2: 10,000 to < 50,000 people affected
+- Bucket 3: 50,000 to < 250,000 people affected
+- Bucket 4: 250,000 to < 500,000 people affected
+- Bucket 5: >= 500,000 people affected
+
+One of these buckets MUST occur for each month. For each month m, your probabilities
+[p1, p2, p3, p4, p5] must all be between 0 and 1 and sum to approximately 1.0.
+
+Question:
+{title}
+
+Background:
+{background}
+
+Research bundle (recent/contextual information):
+{research}
+
+Resolution criteria (how people affected are counted, if specified):
+{criteria}
+
+Today (Istanbul time): {today}
+
+---
+
+FORECASTING INSTRUCTIONS
+
+1) BASE RATE & HISTORY
+   - Briefly identify any obvious base rates or historical patterns in people affected
+     for this hazard and country (e.g. annual cycles, recent large shocks).
+
+2) EVIDENCE & SCENARIOS
+   - Summarize the most important pieces of evidence from the research bundle and PA history.
+   - Consider best/worst case scenarios and how they would map into the buckets.
+
+3) PRELIMINARY BUCKET PROBABILITIES
+   - For each month 1 to 6, sketch an initial SPD over the five buckets.
+
+4) RED-TEAM YOURSELF
+   - Challenge your own preliminary SPDs: what could you be missing? Are you underweighting
+     tail risks or structural breaks? Adjust if needed.
+
+5) FINAL JSON OUTPUT (IMPORTANT)
+   - At the very end, output ONLY a single JSON object with this exact schema:
+
+   {
+     "month_1": [p1, p2, p3, p4, p5],
+     "month_2": [p1, p2, p3, p4, p5],
+     "month_3": [p1, p2, p3, p4, p5],
+     "month_4": [p1, p2, p3, p4, p5],
+     "month_5": [p1, p2, p3, p4, p5],
+     "month_6": [p1, p2, p3, p4, p5]
+   }
+
+   - Do not include any text before or after the JSON.
+   - Each list must contain exactly five numbers between 0 and 1 inclusive.
+   - For each month, the probabilities must sum to roughly 1.0 (we allow small rounding error).
 """
 
 RESEARCHER_PROMPT = """You are a professional RESEARCHER for a Bayesian forecasting panel.
@@ -293,6 +361,20 @@ def build_mcq_prompt(title: str, options: list[str], background: str, research_t
         background=(background or "N/A"),
         research=(research_text or "N/A"),
         criteria=(criteria or "N/A"),
+        today=ist_date(),
+    )
+
+def build_spd_prompt(
+    title: str,
+    background: str,
+    research_text: str,
+    criteria: str,
+) -> str:
+    return SPD_PROMPT.format(
+        title=title,
+        background=background or "",
+        research=research_text or "",
+        criteria=criteria or "N/A",
         today=ist_date(),
     )
 

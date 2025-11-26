@@ -6,6 +6,9 @@ from typing import List, Tuple, Dict, Optional, Any
 from .ensemble import EnsembleResult, sanitize_mcq_vector, MemberOutput
 from . import bayes_mc as BMC
 
+# Default centroids (v1) for PA buckets (can be moved to config later)
+SPD_BUCKET_CENTROIDS_DEFAULT = [5_000.0, 25_000.0, 120_000.0, 350_000.0, 700_000.0]
+
 def _extract_gtmc1_prob(sig: dict | None) -> float | None:
     """
     Pull a probability-like value out of GTMC1 signal dict.
@@ -99,6 +102,91 @@ def aggregate_mcq(
 
     final_vector = bmc_summary.get("mean", [1.0 / n_options] * n_options)
     return sanitize_mcq_vector(final_vector), bmc_summary
+
+# ---------------- SPD (5 buckets × 6 months) ----------------
+
+def _expected_from_spd(
+    spd_by_month: Dict[str, List[float]],
+    centroids: List[float],
+) -> Dict[str, float]:
+    """
+    Compute expected people affected per month given SPD and bucket centroids.
+    Assumes len(centroids) == number of buckets.
+    """
+    ev: Dict[str, float] = {}
+    v = np.array(centroids, dtype=float)
+    for key, probs in spd_by_month.items():
+        p = np.array(probs, dtype=float)
+        if p.size != v.size:
+            p = np.ones_like(v) / float(v.size)
+        # Ensure normalization
+        s = float(p.sum())
+        if s <= 0.0:
+            p = np.ones_like(v) / float(v.size)
+        else:
+            p = p / s
+        ev[key] = float((p * v).sum())
+    return ev
+
+def aggregate_spd(
+    ensemble_res: EnsembleResult,
+    *,
+    n_months: int = 6,
+    n_buckets: int = 5,
+    weights: Optional[Dict[str, float]] = None,
+    bucket_centroids: Optional[List[float]] = None,
+) -> Tuple[Dict[str, List[float]], Dict[str, float], Dict[str, Any]]:
+    """
+    Aggregate SPD forecasts (5 PA buckets × 6 months) using the MCQ/Dirichlet layer.
+
+    Returns:
+      - spd_mean_by_month: {"month_1": [..5..], ..., "month_6": [..5..]}
+      - expected_by_month: {"month_1": ev1, ..., "month_6": ev6}
+      - summary:          {"month_1": {...Dirichlet stats...}, ...}
+    """
+    # Collect evidence per month
+    per_month: Dict[str, List[BMC.MCQEvidence]] = {f"month_{i}": [] for i in range(1, n_months + 1)}
+
+    for m in ensemble_res.members:
+        if not m.ok or not isinstance(m.parsed, dict):
+            continue
+        w = (weights or {}).get(m.name, 1.0)
+        for m_idx in range(1, n_months + 1):
+            key = f"month_{m_idx}"
+            raw_vec = m.parsed.get(key, [])
+            vec = sanitize_mcq_vector(raw_vec if isinstance(raw_vec, list) else [], n_options=n_buckets)
+            per_month[key].append(BMC.MCQEvidence(probs=vec, w=w))
+
+    spd_mean: Dict[str, List[float]] = {}
+    summary: Dict[str, Any] = {}
+    centroids = bucket_centroids or SPD_BUCKET_CENTROIDS_DEFAULT
+
+    for m_idx in range(1, n_months + 1):
+        key = f"month_{m_idx}"
+        evidences = per_month.get(key) or []
+        if not evidences:
+            # Uniform fallback if no valid evidence
+            vec = [1.0 / float(n_buckets)] * n_buckets
+            spd_mean[key] = vec
+            summary[key] = {"method": "empty_evidence", "mean": vec}
+            continue
+
+        prior = BMC.DirichletPrior(alphas=[0.1] * n_buckets)
+        bmc_summary = BMC.update_mcq_with_mc(prior, evidences)
+        # Drop samples array for serializability
+        bmc_summary.pop("samples", None)
+
+        mean = bmc_summary.get("mean")
+        if isinstance(mean, list) and len(mean) == n_buckets:
+            vec = sanitize_mcq_vector(mean, n_options=n_buckets)
+        else:
+            vec = [1.0 / float(n_buckets)] * n_buckets
+
+        spd_mean[key] = vec
+        summary[key] = bmc_summary
+
+    expected = _expected_from_spd(spd_mean, centroids)
+    return spd_mean, expected, summary
 
 # ---------------- Numeric / Discrete ----------------
 

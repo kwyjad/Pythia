@@ -125,10 +125,17 @@ from .config import (
     TOURNAMENT_ID, AUTH_HEADERS, API_BASE_URL,
     ist_iso, ist_stamp, SUBMIT_PREDICTION, METACULUS_HTTP_TIMEOUT,
 )
-from .prompts import build_binary_prompt, build_numeric_prompt, build_mcq_prompt
+from .prompts import build_binary_prompt, build_numeric_prompt, build_mcq_prompt, build_spd_prompt
 from .providers import DEFAULT_ENSEMBLE, _get_or_client, llm_semaphore
-from .ensemble import EnsembleResult, MemberOutput, run_ensemble_binary, run_ensemble_mcq, run_ensemble_numeric
-from .aggregate import aggregate_binary, aggregate_mcq, aggregate_numeric
+from .ensemble import (
+    EnsembleResult,
+    MemberOutput,
+    run_ensemble_binary,
+    run_ensemble_mcq,
+    run_ensemble_numeric,
+    run_ensemble_spd,
+)
+from .aggregate import aggregate_binary, aggregate_mcq, aggregate_numeric, aggregate_spd
 from .research import run_research_async
 
 # --- Corrected seen_guard import ---
@@ -449,8 +456,8 @@ def _load_pythia_questions(limit: int) -> List[dict]:
         question = {
             "id": qid,
             "title": wording,
-            "type": "numeric",
-            "possibilities": {"type": "numeric"},
+            "type": "spd",
+            "possibilities": {"type": "spd"},
         }
 
         post = {
@@ -701,6 +708,7 @@ async def _run_one_question_body(
         options = _get_options_list(q)
         n_options = len(options) if qtype == "multiple_choice" else 0
         discrete_values = _discrete_values(q) if qtype in ("numeric", "discrete") and _is_discrete(q) else []
+        ev_main: Optional[Dict[str, Any]] = None
 
         pmeta = _extract_pythia_meta(post)
 
@@ -902,6 +910,8 @@ async def _run_one_question_body(
             main_prompt = build_binary_prompt(title, description, research_text, criteria)
         elif qtype == "multiple_choice":
             main_prompt = build_mcq_prompt(title, options, description, research_text, criteria)
+        elif qtype == "spd":
+            main_prompt = build_spd_prompt(title, description, research_text, criteria)
         else:
             main_prompt = build_numeric_prompt(title, str(units or ""), description, research_text, criteria)
     
@@ -911,6 +921,8 @@ async def _run_one_question_body(
             ens_res = await run_ensemble_binary(main_prompt, DEFAULT_ENSEMBLE)
         elif qtype == "multiple_choice":
             ens_res = await run_ensemble_mcq(main_prompt, n_options, DEFAULT_ENSEMBLE)
+        elif qtype == "spd":
+            ens_res = await run_ensemble_spd(main_prompt, DEFAULT_ENSEMBLE)
         else:
             ens_res = await run_ensemble_numeric(main_prompt, DEFAULT_ENSEMBLE)
         t_ensemble_ms = _ms(t0)
@@ -926,6 +938,10 @@ async def _run_one_question_body(
         elif qtype == "multiple_choice":
             vec_main, bmc_summary = aggregate_mcq(ens_res, n_options, calib_weights_map)
             final_main = {options[i]: vec_main[i] for i in range(n_options)} if n_options else {}
+        elif qtype == "spd":
+            spd_main, ev_dict, bmc_summary = aggregate_spd(ens_res, weights=calib_weights_map)
+            final_main = spd_main
+            ev_main = ev_dict
         else:
             quantiles_main, bmc_summary = aggregate_numeric(ens_res, calib_weights_map)
             final_main = dict(quantiles_main)
@@ -946,13 +962,22 @@ async def _run_one_question_body(
             v_uniform = {options[i]: v_uniform_vec[i] for i in range(n_options)} if n_options else {}
             v_simple_vec = _simple_average_mcq(ens_res.members, n_options)
             v_simple = {options[i]: v_simple_vec[i] for i in range(n_options)} if (n_options and v_simple_vec) else {}
+        elif qtype == "spd":
+            v_nogtmc1, ev_nogtmc1, _ = aggregate_spd(ens_res, weights=calib_weights_map)
+            v_uniform, ev_uniform, _ = aggregate_spd(ens_res, weights={m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_simple = v_nogtmc1
         else:
             v_nogtmc1, _ = aggregate_numeric(ens_res, calib_weights_map)
             v_uniform, _ = aggregate_numeric(ens_res, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
             v_simple = _simple_average_numeric(ens_res.members) or {}
     
         # ------------------ 8) Ablation pass: NO RESEARCH ---------------------------
-        if qtype == "binary":
+        if qtype == "spd":
+            # Skip ablation for SPD to avoid doubling LLM cost
+            ab_main = final_main
+            ab_uniform = final_main
+            ab_simple = final_main
+        elif qtype == "binary":
             ab_prompt = build_binary_prompt(title, description, "", criteria)
             ens_res_ab = await run_ensemble_binary(ab_prompt, DEFAULT_ENSEMBLE)
             ab_main, _ = aggregate_binary(ens_res_ab, None, calib_weights_map)
@@ -1087,6 +1112,8 @@ async def _run_one_question_body(
                     row[f"binary_prob__{ms.name}"] = f"{_clip01(float(mo.parsed)):.6f}"
                 elif qtype == "multiple_choice" and isinstance(mo.parsed, list):
                     row[f"mcq_json__{ms.name}"] = mo.parsed
+                elif qtype == "spd" and isinstance(mo.parsed, dict):
+                    row[f"spd_json__{ms.name}"] = mo.parsed
                 elif qtype in ("numeric", "discrete") and isinstance(mo.parsed, dict):
                     p10 = _safe_float(mo.parsed.get("P10"))
                     p50 = _safe_float(mo.parsed.get("P50"))
@@ -1104,6 +1131,10 @@ async def _run_one_question_body(
             row["mcq_json__ensemble"] = final_main
             for j in range(min(15, n_options)):
                 row[f"mcq_{j+1}__ensemble"] = f"{_clip01(float(final_main.get(options[j], 0.0))):.6f}"
+        elif qtype == "spd" and isinstance(final_main, dict):
+            row["spd_json__ensemble"] = final_main
+            if isinstance(ev_main, dict):
+                row["spd_ev_json__ensemble"] = ev_main
         elif qtype in ("numeric", "discrete") and isinstance(final_main, dict):
             for k in ("P10", "P50", "P90"):
                 if k in final_main:
@@ -1115,6 +1146,8 @@ async def _run_one_question_body(
                 row[f"binary_prob__ensemble_{tag}"] = f"{_clip01(val):.6f}"
             elif qtype == "multiple_choice" and isinstance(val, dict):
                 row[f"mcq_json__ensemble_{tag}"] = val
+            elif qtype == "spd" and isinstance(val, dict):
+                row[f"spd_json__ensemble_{tag}"] = val
             elif qtype in ("numeric", "discrete") and isinstance(val, dict):
                 for k in ("P10", "P50", "P90"):
                     if k in val:
@@ -1135,6 +1168,8 @@ async def _run_one_question_body(
             row["mcq_json__ensemble_no_research"] = ab_main
             for j in range(min(15, n_options)):
                 row[f"mcq_{j+1}__ensemble_no_research"] = f"{_clip01(float(ab_main.get(options[j], 0.0))):.6f}"
+        elif qtype == "spd" and isinstance(ab_main, dict):
+            row["spd_json__ensemble_no_research"] = ab_main
         elif qtype in ("numeric", "discrete") and isinstance(ab_main, dict):
             for k in ("P10", "P50", "P90"):
                 if k in ab_main:
@@ -1145,6 +1180,8 @@ async def _run_one_question_body(
                 row[f"binary_prob__ensemble_no_research_{tag}"] = f"{_clip01(val):.6f}"
             elif qtype == "multiple_choice" and isinstance(val, dict):
                 row[f"mcq_json__ensemble_no_research_{tag}"] = val
+            elif qtype == "spd" and isinstance(val, dict):
+                row[f"spd_json__ensemble_no_research_{tag}"] = val
             elif qtype in ("numeric", "discrete") and isinstance(val, dict):
                 for k in ("P10", "P50", "P90"):
                     if k in val:
@@ -1332,6 +1369,13 @@ async def _run_one_question_body(
                         _line += " top3=" + ", ".join([f"{options[i]}:{_clip01(vec[i]):.3f}" for i in idxs])
                     except Exception:
                         pass
+                elif qtype == "spd" and m.ok and isinstance(m.parsed, dict):
+                    try:
+                        m1 = m.parsed.get("month_1")
+                        if isinstance(m1, list) and len(m1) >= 3:
+                            _line += " month_1=" + ", ".join([f"{float(x):.2f}" for x in m1[:3]]) + " …"
+                    except Exception:
+                        pass
                 elif qtype in ("numeric", "discrete") and m.ok and isinstance(m.parsed, dict):
                     p10 = _safe_float(m.parsed.get("P10"))
                     p50 = _safe_float(m.parsed.get("P50"))
@@ -1389,6 +1433,19 @@ async def _run_one_question_body(
                 # show top-3
                 items = sorted(final_main.items(), key=lambda kv: kv[1], reverse=True)[:3]
                 md.append("- final_top3=" + ", ".join([f"{k}:{_clip01(float(v)):.3f}" for k, v in items]))
+            elif qtype == "spd" and isinstance(final_main, dict):
+                md.append("### SPD Forecast (5 buckets × 6 months)")
+                for m_idx in range(1, 7):
+                    key = f"month_{m_idx}"
+                    probs = final_main.get(key)
+                    if not isinstance(probs, list) or len(probs) != 5:
+                        continue
+                    line = " | ".join(f"{float(p):.2f}" for p in probs)
+                    md.append(f"- {key}: {line}")
+                if isinstance(ev_main, dict):
+                    md.append("### Expected people affected (per month)")
+                    for key, val in sorted(ev_main.items()):
+                        md.append(f"- {key}: {float(val):,.0f}")
             elif qtype in ("numeric", "discrete") and isinstance(final_main, dict):
                 _p10 = final_main.get("P10"); _p50 = final_main.get("P50"); _p90 = final_main.get("P90")
                 md.append(f"- final_quantiles: P10={_p10}, P50={_p50}, P90={_p90}")
