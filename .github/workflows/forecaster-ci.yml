@@ -1,0 +1,51 @@
+---
+name: Forecaster CI — SPD
+
+on:
+  pull_request:
+    paths:
+      - "forecaster/**"
+      - "horizon_scanner/**"
+      - "pythia/**"
+      - "python_library_requirements.txt"
+      - ".github/workflows/forecaster-ci.yml"
+
+jobs:
+  forecaster-spd-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Debug context (ref, SHA, changed files)
+        run: |
+          echo "Ref: ${{ github.ref }}"
+          echo "Base ref: ${{ github.base_ref }}"
+          echo "Head ref: ${{ github.head_ref }}"
+          echo "SHA: ${{ github.sha }}"
+          echo "Changed files (base..head):"
+          # This can fail on some PR types; don't fail the job if it does
+          git fetch origin "${{ github.base_ref }}" --depth=1 || true
+          git diff --name-only "origin/${{ github.base_ref }}"...HEAD || true
+          echo "Repo tree (top-level):"
+          ls -R
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (minimal, via python_library_requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+          pip install pytest
+
+      - name: Run Forecaster SPD tests (with debug logging)
+        env:
+          PYTHIA_DEBUG_SPD: "1"
+          PYTHIA_DEBUG_DB: "1"
+        run: |
+          echo "=== Running Forecaster SPD unit tests ==="
+          pytest -vv forecaster/tests/test_spd.py
