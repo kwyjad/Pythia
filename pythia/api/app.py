@@ -83,15 +83,24 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(
     sql = """
     WITH ev AS (
       SELECT q.iso3, fe.horizon_m,
-             SUM(CASE fe.class_bin
-                  WHEN '<10k' THEN fe.p*5000
-                  WHEN '10k-<50k' THEN fe.p*25000
-                  WHEN '50k-<250k' THEN fe.p*120000
-                  WHEN '250k-<500k' THEN fe.p*350000
-                  WHEN '>=500k' THEN fe.p*700000
-                  END) AS ev_pin
+             SUM(
+               fe.p * COALESCE(
+                 bc.ev,
+                 CASE fe.class_bin
+                   WHEN '<10k' THEN 5000
+                   WHEN '10k-<50k' THEN 25000
+                   WHEN '50k-<250k' THEN 120000
+                   WHEN '250k-<500k' THEN 350000
+                   WHEN '>=500k' THEN 700000
+                 END
+               )
+             ) AS ev_pin
       FROM forecasts_ensemble fe
       JOIN questions q ON q.question_id=fe.question_id
+      LEFT JOIN bucket_centroids bc
+        ON bc.metric = q.metric
+       AND bc.class_bin = fe.class_bin
+       AND bc.hazard_code = q.hazard_code
       WHERE q.metric=? AND q.target_month=?
       GROUP BY 1,2
     ), pop AS (

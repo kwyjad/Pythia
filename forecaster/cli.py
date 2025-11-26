@@ -512,6 +512,91 @@ def _load_pa_history_block(
     return block, meta
 
 
+def _load_bucket_centroids(
+    hazard_code: str,
+    metric: str,
+) -> Optional[List[float]]:
+    """
+    Look up data-driven centroids for SPD buckets from `bucket_centroids`.
+
+    Returns a list of floats ordered to match SPD_CLASS_BINS, or None if
+    no centroids are available for this (hazard_code, metric).
+    """
+    try:
+        from resolver.db import duckdb_io
+    except Exception:
+        return None
+
+    hz = (hazard_code or "").upper().strip()
+    mt = (metric or "").upper().strip()
+    if not mt:
+        return None
+
+    db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+    if not db_url:
+        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+            print(f"[forecaster] no db_url while loading bucket centroids for hazard={hz!r}, metric={mt!r}")
+        return None
+
+    con = None
+    try:
+        con = duckdb_io.get_db(db_url)
+    except Exception as exc:
+        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+            print(f"[forecaster] failed to connect to DuckDB for bucket centroids: {exc!r}")
+        return None
+
+    try:
+        try:
+            con.execute("SELECT 1 FROM bucket_centroids LIMIT 1")
+        except Exception:
+            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+                print("[forecaster] bucket_centroids table not found; using default centroids")
+            return None
+
+        rows = con.execute(
+            """
+            SELECT class_bin, ev
+            FROM bucket_centroids
+            WHERE metric = ?
+              AND hazard_code = ?
+            """,
+            [mt, hz],
+        ).fetchall()
+
+        if not rows:
+            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+                print(
+                    f"[forecaster] no bucket_centroids rows for hazard={hz!r}, metric={mt!r}; "
+                    "falling back to defaults"
+                )
+            return None
+
+        by_bin = {cb: float(ev) for (cb, ev) in rows}
+        centroids: List[float] = []
+        for bin_label in SPD_CLASS_BINS:
+            if bin_label not in by_bin:
+                if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+                    print(
+                        f"[forecaster] bucket_centroids missing bin={bin_label!r} "
+                        f"for hazard={hz!r}, metric={mt!r}; using defaults"
+                    )
+                return None
+            centroids.append(by_bin[bin_label])
+
+        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+            print(
+                f"[forecaster] loaded data-driven centroids for hazard={hz!r}, metric={mt!r}: "
+                f"{centroids}"
+            )
+        return centroids
+    finally:
+        try:
+            duckdb_io.close_db(con)
+        except Exception:
+            pass
+
+
 def _load_pythia_questions(limit: int) -> List[dict]:
     """
     Load active Horizon Scanner questions from DuckDB and adapt them to the
@@ -1049,7 +1134,15 @@ async def _run_one_question_body(
             vec_main, bmc_summary = aggregate_mcq(ens_res, n_options, calib_weights_map)
             final_main = {options[i]: vec_main[i] for i in range(n_options)} if n_options else {}
         elif qtype == "spd":
-            spd_main, ev_dict, bmc_summary = aggregate_spd(ens_res, weights=calib_weights_map)
+            bucket_centroids = None
+            if pmeta.get("hazard_code") and pmeta.get("metric"):
+                bucket_centroids = _load_bucket_centroids(pmeta["hazard_code"], pmeta["metric"])
+
+            spd_main, ev_dict, bmc_summary = aggregate_spd(
+                ens_res,
+                weights=calib_weights_map,
+                bucket_centroids=bucket_centroids,
+            )
             final_main = spd_main
             ev_main = ev_dict
         else:
@@ -1088,8 +1181,16 @@ async def _run_one_question_body(
             v_simple_vec = _simple_average_mcq(ens_res.members, n_options)
             v_simple = {options[i]: v_simple_vec[i] for i in range(n_options)} if (n_options and v_simple_vec) else {}
         elif qtype == "spd":
-            v_nogtmc1, ev_nogtmc1, _ = aggregate_spd(ens_res, weights=calib_weights_map)
-            v_uniform, ev_uniform, _ = aggregate_spd(ens_res, weights={m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_nogtmc1, ev_nogtmc1, _ = aggregate_spd(
+                ens_res,
+                weights=calib_weights_map,
+                bucket_centroids=bucket_centroids,
+            )
+            v_uniform, ev_uniform, _ = aggregate_spd(
+                ens_res,
+                weights={m.name: 1.0 for m in DEFAULT_ENSEMBLE},
+                bucket_centroids=bucket_centroids,
+            )
             v_simple = v_nogtmc1
         else:
             v_nogtmc1, _ = aggregate_numeric(ens_res, calib_weights_map)
