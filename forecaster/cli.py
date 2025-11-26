@@ -347,7 +347,9 @@ def _write_spd_ensemble_to_db(
 
     db_url = _pythia_db_url_from_config()
     if not db_url:
-        # No Pythia DB configured; silently skip DB write.
+        # No Pythia DB configured; optionally log for debugging.
+        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+            print(f"[forecaster] skip SPD DB write for question_id={question_id!r}: app.db_url not set")
         return
 
     db_path = db_url.replace("duckdb:///", "")
@@ -403,6 +405,11 @@ def _write_spd_ensemble_to_db(
                 )
 
         if rows:
+            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+                print(
+                    f"[forecaster] writing {len(rows)} SPD rows for question_id={question_id!r} "
+                    f"into {db_path}"
+                )
             con.executemany(
                 """
                 INSERT INTO forecasts_ensemble (

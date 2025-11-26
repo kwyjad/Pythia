@@ -4,7 +4,7 @@ ensemble.py — async per-model calls with robust parsing + usage/cost capture,
 using providers.call_chat_ms(...) which supports OpenRouter, Gemini-direct, Grok-direct.
 """
 
-import asyncio, time, re, json
+import asyncio, time, re, json, os
 from dataclasses import dataclass
 from typing import Any, List, Optional
 import numpy as np
@@ -79,6 +79,9 @@ def _parse_spd_json(
                 data = None
 
     if not isinstance(data, dict):
+        if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
+            head = t[:200].replace("\n", " ")
+            print(f"[spd] parse failed: top-level JSON not dict; head={head!r}")
         return None
 
     out: dict = {}
@@ -92,6 +95,9 @@ def _parse_spd_json(
             any_nonzero = True
 
     if not any_nonzero:
+        if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
+            head = t[:200].replace("\n", " ")
+            print(f"[spd] parse produced all-zero SPD; treating as failure; head={head!r}")
         return None
     return out
 
