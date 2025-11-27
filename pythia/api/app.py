@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Depends, Body, Query
-from typing import Optional
+from fastapi import FastAPI, Depends, Body, Query, HTTPException
+from typing import List, Optional
 import duckdb, pandas as pd
 from pythia.api.auth import require_token
 from pythia.config import load as load_cfg
@@ -697,3 +697,124 @@ def llm_costs(
 
     df = con.execute(sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
+
+
+@app.get("/v1/llm/costs/summary")
+def llm_costs_summary(
+    component: Optional[str] = Query(
+        None, description="Filter by component, e.g. 'HS', 'Researcher', 'Forecaster'"
+    ),
+    model: Optional[str] = Query(None, description="Filter by model_name"),
+    llm_profile: Optional[str] = Query(None, description="Filter by llm_profile, e.g. 'test' or 'prod'"),
+    hs_run_id: Optional[str] = Query(None, description="Filter by HS run id"),
+    ui_run_id: Optional[str] = Query(None, description="Filter by UI run id"),
+    forecaster_run_id: Optional[str] = Query(None, description="Filter by Forecaster run id"),
+    since: Optional[str] = Query(
+        None,
+        description="Filter by created_at >= since (ISO date or datetime string). If omitted, no time filter.",
+    ),
+    group_by: str = Query(
+        "component,model_name,llm_profile",
+        description="Comma-separated list of grouping fields: any of 'component','model_name','llm_profile','hs_run_id','ui_run_id','forecaster_run_id'",
+    ),
+    limit: int = Query(1000, ge=1, le=5000),
+    _=Depends(require_token),
+):
+    """
+    Summarise LLM usage and cost from llm_calls.
+
+    Example:
+      - Group by component,model_name,llm_profile since a given date.
+      - Inspect total cost_usd and tokens per model or per run.
+
+    Returns aggregated metrics per group:
+      - calls
+      - tokens_in
+      - tokens_out
+      - cost_usd
+    """
+    con = _con()
+
+    # Parse and validate group_by
+    allowed_fields = {
+        "component",
+        "model_name",
+        "llm_profile",
+        "hs_run_id",
+        "ui_run_id",
+        "forecaster_run_id",
+    }
+    group_fields: List[str] = [f.strip() for f in group_by.split(",") if f.strip()]
+    if not group_fields:
+        group_fields = ["component", "model_name", "llm_profile"]
+
+    invalid = [f for f in group_fields if f not in allowed_fields]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid group_by fields: {', '.join(invalid)}")
+
+    # Build WHERE clause
+    where_bits = ["1=1"]
+    params: dict = {}
+
+    if component:
+        where_bits.append("component = :component")
+        params["component"] = component
+    if model:
+        where_bits.append("model_name = :model_name")
+        params["model_name"] = model
+    if llm_profile:
+        where_bits.append("llm_profile = :llm_profile")
+        params["llm_profile"] = llm_profile
+    if hs_run_id:
+        where_bits.append("hs_run_id = :hs_run_id")
+        params["hs_run_id"] = hs_run_id
+    if ui_run_id:
+        where_bits.append("ui_run_id = :ui_run_id")
+        params["ui_run_id"] = ui_run_id
+    if forecaster_run_id:
+        where_bits.append("forecaster_run_id = :forecaster_run_id")
+        params["forecaster_run_id"] = forecaster_run_id
+    if since:
+        where_bits.append("created_at >= :since")
+        params["since"] = since
+
+    where_clause = " AND ".join(where_bits)
+
+    # Build SELECT and GROUP BY
+    group_select = ", ".join(group_fields) if group_fields else ""
+    group_by_clause = ""
+    if group_fields:
+        group_by_clause = "GROUP BY " + ", ".join(group_fields)
+
+    select_fields = group_select + (", " if group_select else "")
+    select_fields += """
+        COUNT(*) AS calls,
+        SUM(tokens_in) AS tokens_in,
+        SUM(tokens_out) AS tokens_out,
+        SUM(cost_usd) AS cost_usd
+    """
+
+    sql = f"""
+      SELECT {select_fields}
+      FROM llm_calls
+      WHERE {where_clause}
+      {group_by_clause}
+      ORDER BY cost_usd DESC NULLS LAST
+      LIMIT :limit
+    """
+    params["limit"] = limit
+
+    df = con.execute(sql, params).fetchdf()
+    return {
+        "group_by": group_fields,
+        "filters": {
+            "component": component,
+            "model": model,
+            "llm_profile": llm_profile,
+            "hs_run_id": hs_run_id,
+            "ui_run_id": ui_run_id,
+            "forecaster_run_id": forecaster_run_id,
+            "since": since,
+        },
+        "rows": df.to_dict(orient="records"),
+    }
