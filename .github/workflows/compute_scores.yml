@@ -1,0 +1,36 @@
+---
+name: Pythia — Compute SPD Scores
+
+on:
+  schedule:
+    # 06:30 UTC on the 16th of every month (day after compute_resolutions)
+    - cron: "30 6 16 * *"
+  workflow_dispatch: {}
+
+jobs:
+  compute-scores:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (minimal)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+          pip install duckdb
+
+      - name: Compute SPD scores for PA/FATALITIES
+        env:
+          # Ensure config points to the right DuckDB; adjust if you use a different path
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          echo "=== Running pythia.tools.compute_scores ==="
+          python -m pythia.tools.compute_scores
+          echo "=== compute_scores completed ==="
