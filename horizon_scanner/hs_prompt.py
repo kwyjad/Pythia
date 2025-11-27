@@ -7,33 +7,37 @@ Keeping it here makes the main script cleaner and easier to read.
 # Prompt for generating the individual country risk analysis.
 # The placeholder {country} will be replaced by the script.
 SCENARIO_DATA_INSTRUCTIONS = """
-Between the markers `SCENARIO_DATA_BLOCK` and `END_SCENARIO_DATA_BLOCK`, output a SINGLE JSON object
-that looks like this:
+At the END of your answer, output a machine-readable JSON block for each country
+using the following exact format. For each country, include ONE block:
 
 SCENARIO_DATA_BLOCK
 {
-  "country": "Eritrea",
-  "iso3": "ERI",
+  "country": "<COUNTRY NAME>",
+  "iso3": "<ISO3 CODE>",
   "scenarios": [
     {
-      "title": "...",
-      "hazard_label": "...",
-      "hazard_code": "...",
-      "probability": "NN",          // integer percent as string
-      "likely_window_month": "YYYY-MM",
-      "best_guess": {"PIN": 12345, "PA": 6789},
-      "markdown": "Short narrative..."
-    }
+      "title": "Short descriptive title of the main risk scenario",
+      "hazard_label": "Short label for the hazard (e.g. 'Conflict', 'Flood', 'Drought')",
+      "hazard_code": "STANDARD_HAZARD_CODE",  # e.g. 'FLOOD', 'DROUGHT', 'CONFLICT'
+      "probability": "NN",                    # integer percent as a string, e.g. "60"
+      "likely_window_month": "YYYY-MM",       # the target month of impact
+      "best_guess": {
+        "PIN": 12345,                         # expected people in need (integer)
+        "PA": 6789                            # expected people affected (integer)
+      },
+      "markdown": "Short narrative describing the scenario, impact, and context."
+    },
+    ...
   ]
 }
-END_SCENARIO_DATA_BLOCK
+END_SCENARIO_BLOCK
 
 IMPORTANT:
-- Use **standard JSON** only:
-  - Use `{` and `}` (single braces) for objects.
-  - Do NOT use any doubled braces like `{{` or `}}`.
-- Do NOT wrap the JSON in backticks or code fences (no ```).
+- Use **standard JSON** between SCENARIO_DATA_BLOCK and END_SCENARIO_BLOCK.
+- Do NOT use any doubled braces like `{{` or `}}`.
+- Do NOT wrap the JSON in code fences (no ```).
 - The JSON must be parseable by a strict JSON parser.
+- Use exactly the marker lines 'SCENARIO_DATA_BLOCK' and 'END_SCENARIO_BLOCK' as shown.
 """
 
 COUNTRY_ANALYSIS_PROMPT = (
@@ -94,7 +98,7 @@ Present the final output as a single, fenced markdown code block that begins wit
     * Your entire output for this section must be ONLY a bulleted list of the full, direct URLs of the primary sources used.
     * **The format for each source MUST be:** `- **[Website Name] - [Article Title (if available)]:** [Full, direct URL]`.
     * **CRITICAL RULE: You must not use placeholder text or add any commentary such as "Insert relevant URL here". If you cannot find a specific, valid source, omit that line item, but you must find and list at least five valid sources.**
-7.  **Data Summary Block (Mandatory):** After the Sources section, you must include a hidden HTML comment block containing a machine-readable JSON summary of the scenarios. Follow these instructions:
+7.  **Data Summary Block (Mandatory):** After the Sources section, you must include a machine-readable JSON summary of the scenarios using the exact marker lines shown below. Follow these instructions:
 """
     + SCENARIO_DATA_INSTRUCTIONS
     + """

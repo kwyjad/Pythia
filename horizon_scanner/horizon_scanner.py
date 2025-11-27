@@ -278,15 +278,16 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
         len(all_reports_text),
     )
 
-    json_blocks = re.findall(
-        r'<!-- SCENARIO_DATA_BLOCK: (.*?) -->',
-        all_reports_text,
-        re.DOTALL,
-    )
-    logging.info("Found %d SCENARIO_DATA_BLOCK comment(s).", len(json_blocks))
+    pattern = r"SCENARIO_DATA_BLOCK\s*(\{.*?})\s*END_SCENARIO_BLOCK"
+    json_blocks = re.findall(pattern, all_reports_text, re.DOTALL)
+    logging.info("Found %d SCENARIO_DATA_BLOCK segments.", len(json_blocks))
 
     if not json_blocks:
-        logging.warning("No SCENARIO_DATA_BLOCKs found in the generated reports.")
+        snippet = all_reports_text[:500].replace("\n", " ")
+        logging.warning(
+            "No SCENARIO_DATA_BLOCK segments found in the generated reports. First 500 chars: %r",
+            snippet,
+        )
         fallback = (
             "| Country | Scenario Title | Hazard | Likely Month | Probability | PIN Best Guess | PA Best Guess |\n"
             "|---|---|---|---|---|---|---|\n"
