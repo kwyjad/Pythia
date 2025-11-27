@@ -68,13 +68,25 @@ CONFLICT_HAZARD_CODES = {
 }
 
 # SPD buckets for Pythia PA/PIN forecasts (order must match prompts & aggregation)
-SPD_CLASS_BINS = [
+SPD_CLASS_BINS_PA = [
     "<10k",
     "10k-<50k",
     "50k-<250k",
     "250k-<500k",
     ">=500k",
 ]
+
+# SPD buckets for conflict fatalities forecasts (per month)
+SPD_CLASS_BINS_FATALITIES = [
+    "<5",
+    "5-<25",
+    "25-<100",
+    "100-<500",
+    ">=500",
+]
+
+# Backwards-compatibility alias; PA remains the default bucket scheme
+SPD_CLASS_BINS = SPD_CLASS_BINS_PA
 
 
 def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
@@ -139,7 +151,14 @@ from .config import (
     TOURNAMENT_ID, AUTH_HEADERS, API_BASE_URL,
     ist_iso, ist_stamp, SUBMIT_PREDICTION, METACULUS_HTTP_TIMEOUT,
 )
-from .prompts import build_binary_prompt, build_numeric_prompt, build_mcq_prompt, build_spd_prompt
+from .prompts import (
+    build_binary_prompt,
+    build_numeric_prompt,
+    build_mcq_prompt,
+    build_spd_prompt,
+    build_spd_prompt_fatalities,
+    build_spd_prompt_pa,
+)
 from .providers import DEFAULT_ENSEMBLE, _get_or_client, llm_semaphore
 from .ensemble import (
     EnsembleResult,
@@ -149,7 +168,14 @@ from .ensemble import (
     run_ensemble_numeric,
     run_ensemble_spd,
 )
-from .aggregate import aggregate_binary, aggregate_mcq, aggregate_numeric, aggregate_spd
+from .aggregate import (
+    SPD_BUCKET_CENTROIDS_DEFAULT,
+    SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT,
+    aggregate_binary,
+    aggregate_mcq,
+    aggregate_numeric,
+    aggregate_spd,
+)
 from .research import run_research_async
 
 # --- Corrected seen_guard import ---
@@ -337,6 +363,8 @@ def _write_spd_ensemble_to_db(
     run_id: str,
     spd_main: Dict[str, List[float]],
     *,
+    metric: str,
+    hazard_code: str | None = None,
     aggregator: str = "Bayes_MC",
     ensemble_version: str = "v1_spd",
 ) -> None:
@@ -356,6 +384,14 @@ def _write_spd_ensemble_to_db(
         if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
             print(f"[forecaster] skip SPD DB write for question_id={question_id!r}: app.db_url not set")
         return
+
+    metric_up = (metric or "").upper()
+    hz_up = (hazard_code or "").upper()
+
+    if metric_up == "FATALITIES" and (hz_up.startswith("CONFLICT") or hz_up in CONFLICT_HAZARD_CODES):
+        class_bins = SPD_CLASS_BINS_FATALITIES
+    else:
+        class_bins = SPD_CLASS_BINS_PA
 
     db_path = db_url.replace("duckdb:///", "")
     con = duckdb.connect(db_path)
@@ -387,16 +423,16 @@ def _write_spd_ensemble_to_db(
         for m_idx in range(1, 7):
             key = f"month_{m_idx}"
             probs = spd_main.get(key)
-            if not isinstance(probs, list) or len(probs) != len(SPD_CLASS_BINS):
+            if not isinstance(probs, list) or len(probs) != len(class_bins):
                 continue
             # Defensive renormalization
             total = float(sum(float(x) for x in probs))
             if total <= 0.0:
-                norm = [1.0 / float(len(SPD_CLASS_BINS))] * len(SPD_CLASS_BINS)
+                norm = [1.0 / float(len(class_bins))] * len(class_bins)
             else:
                 norm = [float(x) / total for x in probs]
 
-            for bin_label, p in zip(SPD_CLASS_BINS, norm):
+            for bin_label, p in zip(class_bins, norm):
                 rows.append(
                     (
                         question_id,
@@ -520,12 +556,13 @@ def _load_pa_history_block(
 def _load_bucket_centroids(
     hazard_code: str,
     metric: str,
+    class_bins: Optional[List[str]] = None,
 ) -> Optional[List[float]]:
     """
     Look up data-driven centroids for SPD buckets from `bucket_centroids`.
 
-    Returns a list of floats ordered to match SPD_CLASS_BINS, or None if
-    no centroids are available for this (hazard_code, metric).
+    Returns a list of floats ordered to match class_bins (or SPD_CLASS_BINS_PA),
+    or None if no centroids are available for this (hazard_code, metric).
     """
     try:
         from resolver.db import duckdb_io
@@ -534,6 +571,7 @@ def _load_bucket_centroids(
 
     hz = (hazard_code or "").upper().strip()
     mt = (metric or "").upper().strip()
+    bins = class_bins or SPD_CLASS_BINS_PA
     if not mt:
         return None
 
@@ -579,7 +617,7 @@ def _load_bucket_centroids(
 
         by_bin = {cb: float(ev) for (cb, ev) in rows}
         centroids: List[float] = []
-        for bin_label in SPD_CLASS_BINS:
+        for bin_label in bins:
             if bin_label not in by_bin:
                 if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
                     print(
@@ -911,6 +949,9 @@ async def _run_one_question_body(
         ev_main: Optional[Dict[str, Any]] = None
 
         pmeta = _extract_pythia_meta(post)
+        metric_up = (pmeta.get("metric") or "").upper()
+        hz_code = (pmeta.get("hazard_code") or "").upper()
+        hz_is_conflict = bool(hz_code and (hz_code in CONFLICT_HAZARD_CODES or hz_code.startswith("CONFLICT")))
 
         # ------------------ 1) Research step (LLM brief + sources appended) ---------
         t0 = time.time()
@@ -948,8 +989,7 @@ async def _run_one_question_body(
 
 
         # ------------------ 2) Hazard-based "classification" (for GTMC1 gate) -----
-        hz_code = pmeta.get("hazard_code", "")
-        is_conflict_hazard = bool(hz_code and hz_code in CONFLICT_HAZARD_CODES)
+        is_conflict_hazard = hz_is_conflict
 
         # We still publish classifier-like fields to keep CSV schema stable,
         # but they are now cheap deterministic values.
@@ -1118,7 +1158,10 @@ async def _run_one_question_body(
         elif qtype == "multiple_choice":
             main_prompt = build_mcq_prompt(title, options, description, research_text, criteria)
         elif qtype == "spd":
-            main_prompt = build_spd_prompt(title, description, research_text, criteria)
+            if metric_up == "FATALITIES" and hz_is_conflict:
+                main_prompt = build_spd_prompt_fatalities(title, description, research_text, criteria)
+            else:
+                main_prompt = build_spd_prompt_pa(title, description, research_text, criteria)
         else:
             main_prompt = build_numeric_prompt(title, str(units or ""), description, research_text, criteria)
     
@@ -1146,9 +1189,22 @@ async def _run_one_question_body(
             vec_main, bmc_summary = aggregate_mcq(ens_res, n_options, calib_weights_map)
             final_main = {options[i]: vec_main[i] for i in range(n_options)} if n_options else {}
         elif qtype == "spd":
+            bucket_labels = SPD_CLASS_BINS_PA
+            default_centroids = SPD_BUCKET_CENTROIDS_DEFAULT
+            if metric_up == "FATALITIES" and hz_is_conflict:
+                bucket_labels = SPD_CLASS_BINS_FATALITIES
+                default_centroids = SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT
+
             bucket_centroids = None
             if pmeta.get("hazard_code") and pmeta.get("metric"):
-                bucket_centroids = _load_bucket_centroids(pmeta["hazard_code"], pmeta["metric"])
+                bucket_centroids = _load_bucket_centroids(
+                    pmeta["hazard_code"],
+                    pmeta["metric"],
+                    class_bins=bucket_labels,
+                )
+
+            if bucket_centroids is None:
+                bucket_centroids = default_centroids
 
             spd_main, ev_dict, bmc_summary = aggregate_spd(
                 ens_res,
@@ -1170,6 +1226,8 @@ async def _run_one_question_body(
                         question_id=str(question_id),
                         run_id=run_id,
                         spd_main=final_main,
+                        metric=pmeta.get("metric", ""),
+                        hazard_code=pmeta.get("hazard_code", ""),
                         aggregator="Bayes_MC",
                         ensemble_version="v1_spd",
                     )

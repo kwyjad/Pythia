@@ -103,7 +103,13 @@ def test_write_spd_ensemble_to_db_roundtrip(tmp_path: Path, monkeypatch: pytest.
     spd_main = {f"month_{i}": [1.0 / len(SPD_CLASS_BINS)] * len(SPD_CLASS_BINS) for i in range(1, 7)}
 
     question_id = "q-spd-test"
-    _write_spd_ensemble_to_db(question_id=question_id, run_id="run-test", spd_main=spd_main)
+    _write_spd_ensemble_to_db(
+        question_id=question_id,
+        run_id="run-test",
+        spd_main=spd_main,
+        metric="PA",
+        hazard_code="FL",
+    )
 
     con = duckdb.connect(str(db_path))
     try:

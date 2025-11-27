@@ -205,20 +205,15 @@ Resolution criteria:
 Today (Istanbul time): {today}
 """
 
-SPD_PROMPT = _CAL_PREFIX + """
+SPD_PROMPT_TEMPLATE = _CAL_PREFIX + """
 You are a careful probabilistic forecaster on a humanitarian early warning panel.
 
-Your task is to forecast how many people will be AFFECTED (not just at risk) by a specific
-hazard in a specific country, for each of the next six months.
+Your task is to forecast {quantity_description}.
 
 You will express your beliefs as a SUBJECTIVE PROBABILITY DISTRIBUTION (SPD) over FIVE buckets
-of people affected. For each month, you must distribute 100% probability across these buckets:
+for each month. For each month, you must distribute 100% probability across these buckets:
 
-- Bucket 1: < 10,000 people affected
-- Bucket 2: 10,000 to < 50,000 people affected
-- Bucket 3: 50,000 to < 250,000 people affected
-- Bucket 4: 250,000 to < 500,000 people affected
-- Bucket 5: >= 500,000 people affected
+{bucket_text}
 
 One of these buckets MUST occur for each month. For each month m, your probabilities
 [p1, p2, p3, p4, p5] must all be between 0 and 1 and sum to approximately 1.0.
@@ -232,8 +227,8 @@ Background:
 Research bundle (recent/contextual information):
 {research}
 
-Resolution criteria (how people affected are counted, if specified):
-{criteria}
+Resolution criteria (how this metric will be counted):
+{resolution_text}
 
 Today (Istanbul time): {today}
 
@@ -242,11 +237,11 @@ Today (Istanbul time): {today}
 FORECASTING INSTRUCTIONS
 
 1) BASE RATE & HISTORY
-   - Briefly identify any obvious base rates or historical patterns in people affected
+   - Briefly identify any obvious base rates or historical patterns relevant to this metric
      for this hazard and country (e.g. annual cycles, recent large shocks).
 
 2) EVIDENCE & SCENARIOS
-   - Summarize the most important pieces of evidence from the research bundle and PA history.
+   - Summarize the most important pieces of evidence from the research bundle and history.
    - Consider best/worst case scenarios and how they would map into the buckets.
 
 3) PRELIMINARY BUCKET PROBABILITIES
@@ -271,6 +266,24 @@ FORECASTING INSTRUCTIONS
    - Do not include any text before or after the JSON.
    - Each list must contain exactly five numbers between 0 and 1 inclusive.
    - For each month, the probabilities must sum to roughly 1.0 (we allow small rounding error).
+"""
+
+SPD_BUCKET_TEXT_PA = """
+People affected (PA) buckets (per month, country-level):
+- Bucket 1: < 10,000 people affected (label: "<10k")
+- Bucket 2: 10,000 to < 50,000 people affected (label: "10k-<50k")
+- Bucket 3: 50,000 to < 250,000 people affected (label: "50k-<250k")
+- Bucket 4: 250,000 to < 500,000 people affected (label: "250k-<500k")
+- Bucket 5: >= 500,000 people affected (label: ">=500k")
+"""
+
+SPD_BUCKET_TEXT_FATALITIES = """
+Conflict fatalities buckets (per month, country-level):
+- Bucket 1: 0–4 deaths (label: "<5")
+- Bucket 2: 5–24 deaths (label: "5-<25")
+- Bucket 3: 25–99 deaths (label: "25-<100")
+- Bucket 4: 100–499 deaths (label: "100-<500")
+- Bucket 5: >= 500 deaths (label: ">=500")
 """
 
 RESEARCHER_PROMPT = """You are a professional RESEARCHER for a Bayesian forecasting panel.
@@ -364,19 +377,64 @@ def build_mcq_prompt(title: str, options: list[str], background: str, research_t
         today=ist_date(),
     )
 
+def _format_resolution_text(base_text: str, criteria: str) -> str:
+    extra = (criteria or "N/A").strip() or "N/A"
+    return f"{base_text}\nAdditional resolution notes: {extra}"
+
+
+def build_spd_prompt_pa(
+    title: str,
+    background: str,
+    research_text: str,
+    criteria: str,
+) -> str:
+    resolution_text = _format_resolution_text(
+        "People affected (PA) will be measured using Resolver's canonical PA metric for this hazard and country (IDMC "
+        "displacement where available, with DTM or similar humanitarian estimates as fallback).",
+        criteria,
+    )
+    return SPD_PROMPT_TEMPLATE.format(
+        title=title,
+        background=background or "",
+        research=research_text or "",
+        resolution_text=resolution_text,
+        quantity_description=
+        "how many people will be AFFECTED (not just at risk) by a specific hazard in a specific country, for each of the next six months.",
+        bucket_text=SPD_BUCKET_TEXT_PA,
+        today=ist_date(),
+    )
+
+
+def build_spd_prompt_fatalities(
+    title: str,
+    background: str,
+    research_text: str,
+    criteria: str,
+) -> str:
+    resolution_text = _format_resolution_text(
+        "Fatalities will be measured using ACLED monthly event data for the target country, summing all conflict events "
+        "that meet ACLED's conflict criteria in the target month.",
+        criteria,
+    )
+    return SPD_PROMPT_TEMPLATE.format(
+        title=title,
+        background=background or "",
+        research=research_text or "",
+        resolution_text=resolution_text,
+        quantity_description="how many people will be killed (conflict fatalities) in the country for each of the next six months.",
+        bucket_text=SPD_BUCKET_TEXT_FATALITIES,
+        today=ist_date(),
+    )
+
+
 def build_spd_prompt(
     title: str,
     background: str,
     research_text: str,
     criteria: str,
 ) -> str:
-    return SPD_PROMPT.format(
-        title=title,
-        background=background or "",
-        research=research_text or "",
-        criteria=criteria or "N/A",
-        today=ist_date(),
-    )
+    # Backwards-compatibility: default to PA buckets
+    return build_spd_prompt_pa(title, background, research_text, criteria)
 
 def build_research_prompt(
     title: str,
