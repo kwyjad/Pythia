@@ -180,7 +180,7 @@ def _extract_anchors(title: str, description: str, criteria: str) -> Dict[str, L
     }
 
 # =============================================================================
-# MARKET SNAPSHOTS (Metaculus / Manifold)
+# MARKET SNAPSHOTS (Manifold)
 # =============================================================================
 
 _MARKET_SIMILARITY_THRESHOLD = 0.55
@@ -221,60 +221,6 @@ def _find_numeric_value(obj: Any) -> Optional[float]:
 
 def _format_percent(prob: float) -> str:
     return f"{max(0.0, min(prob, 1.0)) * 100:.1f}%"
-
-def _metaculus_snapshot(query_title: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
-    url = "https://www.metaculus.com/api2/questions/"
-    params = {"search": query_title, "limit": 12, "status": "open"}
-    debug: List[str] = []
-    try:
-        resp = requests.get(url, params=params, timeout=12)
-    except Exception as exc:
-        debug.append(f"Metaculus: request error {exc!r}")
-        return None, debug
-    if resp.status_code != 200:
-        debug.append(f"Metaculus: HTTP {resp.status_code}")
-        return None, debug
-    try:
-        data = resp.json()
-    except Exception as exc:
-        debug.append(f"Metaculus: JSON error {exc!r}")
-        return None, debug
-    best: Tuple[float, Dict[str, Any]] = (0.0, {})
-    for result in data.get("results", []) or []:
-        if (result.get("status") or "").lower() != "open":
-            continue
-        qtype = (result.get("type") or "").lower()
-        if qtype != "binary":
-            continue
-        title = result.get("title") or ""
-        score = _title_similarity(query_title, title)
-        if score > best[0]:
-            best = (score, result)
-    if not best[1]:
-        debug.append("Metaculus: no open binary results in response")
-        return None, debug
-    if best[0] < _MARKET_SIMILARITY_THRESHOLD:
-        best_title = (best[1].get("title") if isinstance(best[1], dict) else "") or "(none)"
-        debug.append(
-            f"Metaculus: best score {best[0]:.2f} below threshold {_MARKET_SIMILARITY_THRESHOLD:.2f} for '{best_title}'"
-        )
-        return None, debug
-    chosen = best[1]
-    prob = _find_numeric_value(chosen.get("community_prediction"))
-    if prob is None:
-        debug.append("Metaculus: match missing community prediction")
-        return None, debug
-    if prob > 1:
-        prob /= 100.0
-    debug.append(
-        f"Metaculus: matched '{(chosen.get('title') or '')[:80]}' (score {best[0]:.2f}, {prob * 100:.1f}%)"
-    )
-    return {
-        "platform": "Metaculus",
-        "title": chosen.get("title") or "",
-        "url": f"https://www.metaculus.com/questions/{chosen.get('id')}/",
-        "prob": prob,
-    }, debug
 
 def _manifold_snapshot(query_title: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     url = "https://api.manifold.markets/v0/search-markets"
@@ -349,15 +295,8 @@ def _manifold_snapshot(query_title: str) -> Tuple[Optional[Dict[str, Any]], List
 def _collect_market_snapshots(query_title: str) -> Tuple[str, Dict[str, bool], List[str]]:
     """Return markdown snippet + meta flags for market matches plus debug info."""
     matches: List[Dict[str, Any]] = []
-    found = {"metaculus": False, "manifold": False}
+    found = {"manifold": False}
     debug_lines: List[str] = []
-
-    m1, dbg1 = _metaculus_snapshot(query_title)
-    if dbg1:
-        debug_lines.extend(dbg1)
-    if m1:
-        matches.append(m1)
-        found["metaculus"] = True
 
     m2, dbg2 = _manifold_snapshot(query_title)
     if dbg2:
@@ -868,14 +807,14 @@ async def run_research_async(
         else:
             llm_text = "No recent external sources found; proceeding with general knowledge and base rates."
 
-    # 5b) Supplement with market snapshots (Metaculus / Manifold)
+    # 5b) Supplement with market snapshots (Manifold)
     try:
         market_section, market_flags, market_debug_lines = await asyncio.to_thread(
             _collect_market_snapshots, title
         )
     except Exception as exc:
         market_section = ""
-        market_flags = {"metaculus": False, "manifold": False}
+        market_flags = {"manifold": False}
         market_debug_lines = [f"Market snapshots: exception {exc!r}"]
     if market_section:
         llm_text = llm_text.rstrip() + "\n\n" + market_section.strip()

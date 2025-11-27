@@ -1,10 +1,10 @@
 from __future__ import annotations
 """
-cli.py — Forecaster runner (unified CSV + ablation support)
+cli.py — Forecaster runner (Pythia-only question sources)
 
 WHAT THIS FILE DOES (high level, in plain English)
 --------------------------------------------------
-- Talks to Metaculus to fetch questions (either your test IDs or a tournament list).
+- Fetches Pythia Horizon Scanner questions (or local test questions).
 - For each question:
   1) Runs the RESEARCH step to build a compact research brief.
   2) Classifies the question (primary/secondary topic + "strategic?" score).
@@ -12,7 +12,6 @@ WHAT THIS FILE DOES (high level, in plain English)
   3) Builds a forecasting prompt and asks each LLM model in your ensemble for a forecast.
   4) Aggregates model outputs with a Bayesian Monte Carlo layer ("BMC"); optionally fuses GTMC1 for binary.
   5) Records *everything* into ONE wide CSV row via io_logs.write_unified_row(...).
-  6) (Optional) Submits the forecast to Metaculus if --submit is used.
 
 - Additionally, it runs an **ablation** pass ("no-research") so you can quantify the
   value of the research component. Those results are logged into dedicated CSV columns.
@@ -36,16 +35,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import inspect
 
 import numpy as np
-
-# Defensive import: guide users if poetry deps aren’t installed locally.
-try:
-    import requests
-except ModuleNotFoundError:
-    raise SystemExit(
-        "Missing dependency 'requests'.\n"
-        "Fix: run `poetry install` (recommended), or `pip install requests`.\n"
-        "If you use VSCode, also pick the Poetry venv as your interpreter."
-    )
 
 from pathlib import Path
 
@@ -147,10 +136,7 @@ def _must_dict(name: str, obj: Any) -> Dict[str, Any]:
 
 
 # ---- Forecaster internals (all relative imports) --------------------------------
-from .config import (
-    TOURNAMENT_ID, AUTH_HEADERS, API_BASE_URL,
-    ist_iso, ist_stamp, SUBMIT_PREDICTION, METACULUS_HTTP_TIMEOUT,
-)
+from .config import ist_iso
 from .prompts import (
     build_binary_prompt,
     build_numeric_prompt,
@@ -808,7 +794,7 @@ def _load_bucket_centroids(
 def _load_pythia_questions(limit: int) -> List[dict]:
     """
     Load active Horizon Scanner questions from DuckDB and adapt them to the
-    Metaculus-style 'post' shape expected by _run_one_question_body.
+    question 'post' shape expected by _run_one_question_body.
 
     For now, we treat each PA question as a numeric question:
       - q['type'] = 'numeric'
@@ -896,13 +882,12 @@ def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: int) -> Opt
         return None
 
 # --------------------------------------------------------------------------------
-# Calibration weights loader (optional). You periodically run update_calibration.py
-# to produce calibration_weights.json, which we use here to weight models per class.
+# Calibration weights loader (optional legacy file fallback).
 # --------------------------------------------------------------------------------
 
 def _load_calibration_weights_file() -> Dict[str, Any]:
-    path = os.getenv("CALIB_WEIGHTS_PATH", "calibration_weights.json")
-    if not os.path.exists(path):
+    path = os.getenv("CALIB_WEIGHTS_PATH", "")
+    if not path or not os.path.exists(path):
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -1060,31 +1045,8 @@ def _choose_weights_for_question(calib: Dict[str, Any], class_primary: str, qtyp
     return ({m: 1.0 for m in model_names}, "uniform")
 
 # --------------------------------------------------------------------------------
-# Metaculus API helpers (GET posts, build payloads, POST forecasts)
+# Shape helpers
 # --------------------------------------------------------------------------------
-
-def list_posts_from_tournament(tournament_id: int | str = TOURNAMENT_ID, offset: int = 0, count: int = 50) -> dict:
-    params = {
-        "limit": count,
-        "offset": offset,
-        "order_by": "-hotness",
-        "forecast_type": ",".join(["binary", "multiple_choice", "numeric", "discrete"]),
-        "tournaments": [tournament_id],
-        "statuses": "open",
-        "include_description": "true",
-    }
-    url = f"{API_BASE_URL}/posts/"
-    r = requests.get(url, params=params, timeout=METACULUS_HTTP_TIMEOUT, **AUTH_HEADERS)
-    if not r.ok:
-        raise RuntimeError(r.text)
-    return json.loads(r.content)
-
-def get_post_details(post_id: int) -> dict:
-    url = f"{API_BASE_URL}/posts/{post_id}/"
-    r = requests.get(url, timeout=METACULUS_HTTP_TIMEOUT, **AUTH_HEADERS)
-    if not r.ok:
-        raise RuntimeError(r.text)
-    return json.loads(r.content)
 
 def _get_possibilities(q: dict) -> dict:
     return (q.get("possibilities") or q.get("range") or {})
@@ -1120,30 +1082,6 @@ def _discrete_values(q: dict) -> List[float]:
     if not values:
         return []
     return [float(v) for v in values]
-
-def _build_payload_for_submission(question_type: str, forecast: Any) -> dict:
-    if question_type == "binary":
-        return {"probability_yes": float(forecast), "probability_yes_per_category": None, "continuous_cdf": None}
-    if question_type == "multiple_choice":
-        if isinstance(forecast, dict):
-            return {"probability_yes": None, "probability_yes_per_category": forecast, "continuous_cdf": None}
-        elif isinstance(forecast, list):
-            return {"probability_yes": None, "probability_yes_per_category": {str(i): float(p) for i, p in enumerate(forecast)}, "continuous_cdf": None}
-        else:
-            raise ValueError("MCQ forecast must be list or dict")
-    return {"probability_yes": None, "probability_yes_per_category": None, "continuous_cdf": forecast}
-
-def post_forecast(question_id: int, payload: dict) -> Tuple[int, Optional[str]]:
-    url = f"{API_BASE_URL}/questions/forecast/"
-    r = requests.post(
-        url,
-        json=[{"question": question_id, **payload}],
-        timeout=METACULUS_HTTP_TIMEOUT,
-        **AUTH_HEADERS,
-    )
-    if r.ok:
-        return r.status_code, None
-    return r.status_code, r.text
 
 # --------------------------------------------------------------------------------
 # Simple, no-BMC fallback aggregators for the diagnostic variant "no_bmc_no_gtmc1"
@@ -1197,7 +1135,6 @@ async def _run_one_question_body(
     *,
     run_id: str,
     purpose: str,
-    submit_ok: bool,
     calib: Dict[str, Any],
     seen_guard_state: Dict[str, Any],
     seen_guard_run_report: Optional[Dict[str, Any]] = None,
@@ -1222,12 +1159,12 @@ async def _run_one_question_body(
         seen_guard_lock_error = str(seen_guard_state.get("lock_error") or "")
         
         title = str(q.get("title") or post.get("title") or "").strip()
-        url = f"https://www.metaculus.com/questions/{question_id}/" if question_id else ""
+        url = str(post.get("question_url") or "")
         qtype = (q.get("type") or "binary").strip()
         description = str(post.get("description") or q.get("description") or "")
         criteria = str(q.get("resolution_criteria") or q.get("fine_print") or q.get("resolution") or "")
         units = q.get("unit") or q.get("units") or ""
-        tournament_id = post.get("tournaments") or q.get("tournaments") or TOURNAMENT_ID
+        tournament_id = post.get("pythia_hs_run_id") or ""
     
         # Options / discrete values
         options = _get_options_list(q)
@@ -1611,49 +1548,7 @@ async def _run_one_question_body(
             ab_uniform, _ = aggregate_numeric(ens_res_ab, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
             ab_simple = _simple_average_numeric(ens_res_ab.members) or {}
     
-        # ------------------ 9) Submission (optional) --------------------------------
-        submit_status_code = ""
-        submit_error = ""
-        explanation_short = ""
-        t_submit_ms = 0
-    
-        if submit_ok and question_id:
-            t_sub0 = time.time()
-            try:
-                if qtype == "binary" and isinstance(final_main, float):
-                    payload = _build_payload_for_submission("binary", _clip01(final_main))
-                    code, err = post_forecast(question_id, payload)
-                    submit_status_code = str(code)
-                    submit_error = "" if err is None else err[:280]
-    
-                elif qtype == "multiple_choice" and isinstance(final_main, dict):
-                    probs = [float(final_main.get(lbl, 0.0)) for lbl in options]
-                    s = sum(probs)
-                    if s <= 0 and options:
-                        probs = [1.0 / len(options)] * len(options)
-                    elif s > 0:
-                        probs = [p / s for p in probs]
-                    label_map = {str(options[i]): float(probs[i]) for i in range(len(options))}
-                    payload = _build_payload_for_submission("multiple_choice", label_map)
-                    code, err = post_forecast(question_id, payload)
-                    submit_status_code = str(code)
-                    submit_error = "" if err is None else err[:280]
-    
-                elif qtype in ("numeric", "discrete") and isinstance(final_main, dict):
-                    pass
-            except Exception as e:
-                submit_status_code = submit_status_code or "EXC"
-                submit_error = (str(e) or "")[:280]
-    
-            # Console confirmation of submit
-            if submit_status_code:
-                if submit_status_code.isdigit() and int(submit_status_code) == 201:
-                    print("Submit: 201 Created ✅")
-                else:
-                    print(f"Submit: {submit_status_code} ❌ {submit_error[:120]}")
-            t_submit_ms = _ms(t_sub0)
-    
-        # ------------------ 10) Build ONE wide CSV row and write it -----------------
+        # ------------------ 9) Build ONE wide CSV row and write it ------------------
         ensure_unified_csv()
     
         row: Dict[str, Any] = {
@@ -1803,7 +1698,7 @@ async def _run_one_question_body(
         _fill_ablation_variant("uniform_weights", ab_uniform)
         _fill_ablation_variant("no_bmc_no_gtmc1", ab_simple if isinstance(ab_simple, dict) else ({"P50": ab_simple} if isinstance(ab_simple, float) else ab_simple))
 
-        # Diagnostics, timings, submission, weights used
+        # Diagnostics, timings, weights used
         gtmc1_signal = _as_dict(gtmc1_signal)
         row.update({
             "gtmc1_active": "1" if gtmc1_active else "0",
@@ -1822,18 +1717,12 @@ async def _run_one_question_body(
             "cdf_steps_clamped": "",
             "cdf_upper_open_adjusted": "",
             "prob_sum_renormalized": "",
-    
+
             "t_research_ms": str(t_research_ms),
             "t_ensemble_ms": str(t_ensemble_ms),
             "t_gtmc1_ms": str(t_gtmc1_ms),
-            "t_submit_ms": str(t_submit_ms),
             "t_total_ms": str(_ms(t_start_total)),
-    
-            "explanation_short": explanation_short,
-            "submit_confirm": "1" if (submit_ok and submit_status_code and submit_status_code.isdigit() and int(submit_status_code) < 400) else "0",
-            "submit_status_code": submit_status_code,
-            "submit_error": submit_error,
-    
+
             "resolved": "",
             "resolved_time_iso": "",
             "resolved_outcome_label": "",
@@ -2109,7 +1998,6 @@ async def run_one_question(
     *,
     run_id: str,
     purpose: str,
-    submit_ok: bool,
     calib: Dict[str, Any],
     seen_guard_run_report: Optional[Dict[str, Any]] = None,
 ) -> None:
@@ -2141,7 +2029,6 @@ async def run_one_question(
             post=post,
             run_id=run_id,
             purpose=purpose,
-            submit_ok=submit_ok,
             calib=calib,
             seen_guard_state=seen_guard_state,
             seen_guard_run_report=seen_guard_run_report,
@@ -2151,17 +2038,15 @@ async def run_one_question(
 
 
 # ==============================================================================
-# Top-level runner (fetch posts, iterate, submit, and commit logs)
+# Top-level runner (fetch posts, iterate, and commit logs)
 # ==============================================================================
 
-async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
+async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = "data/test_questions.json") -> None:
     """
     Fetch a batch of posts and process them one by one.
     Supports:
-      - mode="tournament": uses TOURNAMENT_ID from config
-      - mode="file": reads local JSON (list of posts, dict with 'results'/'posts',
-                     or dict with 'post_ids' to fetch individually)
       - mode="pythia": reads Horizon Scanner questions from DuckDB
+      - mode="test_questions": reads local JSON of test posts
     """
     # --- local imports to keep this function self-contained ---------------
     import os, json, inspect
@@ -2183,7 +2068,6 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
 
     # --- load helpers from this module scope --------------------------------
     # They already exist below in this file; just reference them:
-    #   list_posts_from_tournament(...), get_post_details(...)
     #   ensure_unified_csv(), run_one_question(...), _load_calibration_weights_file()
     #   finalize_and_commit()
 
@@ -2191,17 +2075,8 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
     posts: List[dict] = []
     fetch_limit = max(1, limit)
 
-    if mode == "tournament":
-        data = list_posts_from_tournament(TOURNAMENT_ID, offset=0, count=fetch_limit)
-        posts = data.get("results") or data.get("posts") or []
-        print(f"[info] Retrieved {len(posts)} open post(s) from '{TOURNAMENT_ID}'.")
-    elif mode == "file":
-        qfile_path = (
-            globals().get("QUESTIONS_FILE")
-            or os.getenv("QUESTIONS_FILE")
-            or "data/test_questions.json"
-        )
-        qfile = Path(qfile_path)
+    if mode == "test_questions":
+        qfile = Path(questions_file)
         if not qfile.exists():
             raise FileNotFoundError(f"Questions file not found: {qfile}")
 
@@ -2209,25 +2084,13 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
             data = json.load(f)
 
         if isinstance(data, list):
-            # list of post objects
             posts = data
         elif isinstance(data, dict):
-            # dict with posts or results
             posts = data.get("results") or data.get("posts") or []
-            # NEW: dict with post_ids -> fetch each
-            post_ids = data.get("post_ids") or data.get("ids") or []
-            if post_ids and not posts:
-                fetched = []
-                for pid in post_ids[:fetch_limit]:
-                    try:
-                        fetched.append(get_post_details(int(pid)))
-                    except Exception as e:
-                        print(f"[warn] get_post_details({pid}) failed: {type(e).__name__}: {str(e)[:120]}")
-                posts = fetched
         else:
             posts = []
 
-        print(f"[info] Loaded {len(posts)} post(s) from {qfile.as_posix()}.")
+        print(f"[info] Loaded {len(posts)} test post(s) from {qfile.as_posix()}.")
     elif mode == "pythia":
         print("[info] Loading Pythia questions from DuckDB...")
         posts = _load_pythia_questions(fetch_limit)
@@ -2365,32 +2228,11 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
     for idx, raw_post in enumerate(batch, start=1):
         post = raw_post
         if not isinstance(post, dict):
-            post_id = None
-            if isinstance(post, (int, float)):
-                post_id = int(post)
-            elif isinstance(post, str) and post.strip():
-                try:
-                    post_id = int(float(post))
-                except Exception:
-                    post_id = None
-            if post_id is not None:
-                try:
-                    post = get_post_details(int(post_id))
-                    if not isinstance(post, dict):
-                        raise TypeError("post details response was not a dict")
-                    print(f"[info] Normalized post {post_id} via get_post_details().")
-                except Exception as _fetch_ex:
-                    print(
-                        f"[error] Could not load post details for {post_id}: "
-                        f"{type(_fetch_ex).__name__}: {str(_fetch_ex)[:180]}"
-                    )
-                    continue
-            else:
-                print(
-                    f"[error] Skipping entry #{idx}: unexpected post type "
-                    f"{type(raw_post).__name__}"
-                )
-                continue
+            print(
+                f"[error] Skipping entry #{idx}: unexpected post type "
+                f"{type(raw_post).__name__}"
+            )
+            continue
 
         q = post.get("question") or {}
         qid = q.get("id") or post.get("id") or "?"
@@ -2403,7 +2245,6 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
                 post,
                 run_id=run_id,
                 purpose=purpose,
-                submit_ok=bool(submit),
                 calib=_load_calibration_weights_file(),
                 seen_guard_run_report=seen_guard_run_report,
             )
@@ -2426,18 +2267,17 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Forecaster runner")
     p.add_argument(
         "--mode",
-        default="tournament",
-        choices=["tournament", "file", "pythia"],
+        default="pythia",
+        choices=["pythia", "test_questions"],
         help=(
-            "Question source: 'tournament' (Metaculus), 'file' (local JSON), "
-            "or 'pythia' (DuckDB questions table)."
+            "Question source: 'pythia' (DuckDB questions table) or "
+            "'test_questions' (local JSON)."
         ),
     )
     p.add_argument("--limit", type=int, default=20, help="Max posts to fetch/process")
-    p.add_argument("--submit", action="store_true", help="Submit forecasts to Metaculus")
     p.add_argument("--purpose", default="ad_hoc", help="String tag recorded in CSV/logs")
     p.add_argument("--questions-file", default="data/test_questions.json",
-                   help="When --mode file, path to JSON with {'post_ids': [..]}")
+                   help="When --mode test_questions, path to JSON payload")
     return p.parse_args()
 
 def main() -> None:
@@ -2448,9 +2288,16 @@ def main() -> None:
         pass
     args = _parse_args()
     print("🚀 Forecaster ensemble starting…")
-    print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose} | Submit: {bool(args.submit)}")
+    print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
     try:
-        asyncio.run(run_job(mode=args.mode, limit=args.limit, submit=bool(args.submit), purpose=args.purpose))
+        asyncio.run(
+            run_job(
+                mode=args.mode,
+                limit=args.limit,
+                purpose=args.purpose,
+                questions_file=args.questions_file,
+            )
+        )
     except KeyboardInterrupt:
         print("Interrupted by user.")
     except Exception as e:
