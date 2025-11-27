@@ -223,7 +223,7 @@ DEFAULT_ENSEMBLE: List[ModelSpec] = [spec for spec in _MODEL_SPECS if spec.activ
 # backwards-compatible aliases reused elsewhere in the forecaster package
 _OPENAI_STATE = _PROVIDER_STATES.get("openai", {})
 OPENAI_MODEL_ID = _OPENAI_STATE.get("model", "")
-OPENROUTER_FALLBACK_ID = OPENAI_MODEL_ID  # legacy name kept for topic_classify
+OPENROUTER_FALLBACK_ID = OPENAI_MODEL_ID  # legacy alias for older call-sites
 _GEMINI_STATE = _PROVIDER_STATES.get("google", {})
 GEMINI_MODEL_ID = _GEMINI_STATE.get("model", "")
 _XAI_STATE = _PROVIDER_STATES.get("xai", {})
@@ -328,7 +328,7 @@ def _get_openai_client() -> Optional[OpenAI]:
     return _openai_client_sync
 
 
-def _get_or_client() -> Optional[AsyncOpenAI]:  # legacy name used by topic_classify
+def _get_or_client() -> Optional[AsyncOpenAI]:  # legacy alias
     global _openai_client_async
     if AsyncOpenAI is None or not _OPENAI_API_KEY:
         return None

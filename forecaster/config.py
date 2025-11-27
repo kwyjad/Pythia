@@ -15,7 +15,6 @@ except Exception:
     pass
 
 # --- Toggles and API keys ---
-SUBMIT_PREDICTION = (os.getenv("SUBMIT_PREDICTION", "0") == "1")
 USE_OPENROUTER    = (os.getenv("USE_OPENROUTER", "1") == "1")
 USE_GOOGLE        = (os.getenv("USE_GOOGLE", "1") == "1")
 ENABLE_GROK       = (os.getenv("ENABLE_GROK", "1") == "1")
@@ -25,7 +24,6 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")           # e.g., https://openrou
 GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY")
 XAI_API_KEY     = os.getenv("XAI_API_KEY")
 XAI_BASE_URL    = "https://api.x.ai/v1/chat/completions"
-METACULUS_TOKEN = os.getenv("METACULUS_TOKEN")
 
 ASKNEWS_CLIENT_ID = os.getenv("ASKNEWS_CLIENT_ID")
 ASKNEWS_SECRET    = os.getenv("ASKNEWS_SECRET")
@@ -52,15 +50,9 @@ RESEARCH_TOP_P = float(os.getenv("RESEARCH_TOP_P", "1.00"))
 CONCURRENT_REQUESTS_LIMIT = 5
 DISABLE_RESEARCH_CACHE = os.getenv("PYTHIA_DISABLE_RESEARCH_CACHE", "0").lower() in ("1","true","yes")
 
-# --- Markets & tournament ---
+# --- Markets ---
 ENABLE_MARKET_SNAPSHOT = os.getenv("ENABLE_MARKET_SNAPSHOT", "1").lower() in ("1","true","yes")
 MARKET_SNAPSHOT_MAX_MATCHES = int(os.getenv("MARKET_SNAPSHOT_MAX_MATCHES", 3))
-METACULUS_INCLUDE_RESOLVED  = os.getenv("METACULUS_INCLUDE_RESOLVED", "1").lower() in ("1","true","yes")
-TOURNAMENT_ID = os.getenv("TOURNAMENT_ID", "fall-aib-2025")
-
-API_BASE_URL  = "https://www.metaculus.com/api"
-METACULUS_HTTP_TIMEOUT = float(os.getenv("METACULUS_HTTP_TIMEOUT", "30"))
-AUTH_HEADERS  = {"headers": {"Authorization": f"Token {METACULUS_TOKEN}"}}
 
 TEST_POSTS_FILE = os.getenv("TEST_POSTS_FILE", "data/test_questions.json")
 TEST_POST_IDS_ENV = os.getenv("TEST_POST_IDS", "").strip()
@@ -75,7 +67,7 @@ MCQ_WIDE_CSV       = "forecasts_mcq_wide.csv"
 MAX_MCQ_OPTIONS    = 20
 
 # --- Calibration note path ---
-CALIBRATION_PATH = os.getenv("CALIBRATION_PATH", "data/calibration_advice.txt")
+CALIBRATION_PATH = os.getenv("CALIBRATION_PATH", "")
 
 # --- Time helpers ---
 def ist_stamp(fmt: str = "%Y%m%d-%H%M%S") -> str:

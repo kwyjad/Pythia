@@ -407,32 +407,23 @@ See [CODEMAP.md](CODEMAP.md) for resolver architecture, data flow diagrams, entr
 
 Quick Start
 
-Local run (one question / test mode)
+Local run (Pythia mode)
 
 (Recommended) use Python 3.11 and Poetry
 
 poetry install
 
-Environment variables (see “Configuration” below)
-The only must-have for submission is METACULUS_TOKEN
+Run active Horizon Scanner questions from DuckDB
 
-export METACULUS_TOKEN=your_token_here
+poetry run python -m forecaster.cli --mode pythia --limit 1
 
-Run a single test question (no submit)
+Run local test questions from JSON
 
-poetry run python -m forecaster.cli --mode test_questions --limit 1
-
-Run a single question by post ID (no submit)
-
-poetry run python -m forecaster.cli --pid 22427
-
-Submit (be careful!)
-
-poetry run python -m forecaster.cli --mode test_questions --limit 1 --submit
+poetry run python -m forecaster.cli --mode test_questions --questions-file data/test_questions.json --limit 1
 
 Autonomous runs on GitHub
 
-This repo includes workflows for core Pythia components (resolver, horizon scanner, forecaster CI, and calibration_refresh.yml for periodic calibration weights). Legacy Metaculus tournament workflows have been removed; Pythia now focuses exclusively on the humanitarian forecasting stack.
+This repo includes workflows for core Pythia components (resolver, horizon scanner, forecaster CI, and the Pythia calibration pipeline). Pythia now focuses exclusively on the humanitarian forecasting stack.
 
 Add secrets (see below), push the repo, and Actions will:
 
@@ -440,7 +431,7 @@ run forecasts,
 
 write logs to the repo,
 
-update calibration weights on a schedule,
+compute calibration inside DuckDB,
 
 commit/push changes automatically.
 
@@ -817,10 +808,6 @@ MCQ: Dirichlet update → final probability vector.
 
 Numeric: Mixture from quantiles → final P10/P50/P90.
 
-Submission (cli.py)
-Submits to Metaculus if --submit is set and METACULUS_TOKEN is present.
-Enforces basic constraints (e.g., numeric quantile ordering).
-
 Logging (io_logs.py)
 
 Machine-readable master CSV: configurable (FORECASTS_CSV_PATH, default forecast_logs/forecasts.csv)
@@ -828,13 +815,11 @@ Machine-readable master CSV: configurable (FORECASTS_CSV_PATH, default forecast_
 Human log per run: forecast_logs/runs/<run_id>.md (or .txt)
 In GitHub Actions, logs auto-commit/push unless disabled.
 
-Calibration Loop (update_calibration.py)
-On a schedule (e.g., every 6–24h), reads the forecast CSV, filters resolved questions (and only forecasts made before resolution), computes per-model skill and writes:
+Calibration Loop (compute_calibration_pythia.py)
+Runs after resolutions and scores are written to DuckDB, producing:
 
-calibration_weights.json (used next run to weight models)
-
-data/calibration_advice.txt (human-readable notes)
-These outputs are committed, so the loop closes autonomously.
+- calibration_weights (table) — per-model, per-metric weights used by Forecaster.
+- calibration_advice (table) — human-readable notes attached to research prompts.
 
 Repository Layout (key files)
 forecaster/
@@ -848,7 +833,7 @@ bayes_mc.py # Bayesian Monte Carlo updaters (Binary, MCQ, Numeric)
 GTMC1.py # Game-theoretic Monte Carlo with reproducibility guardrails
 io_logs.py # Canonical logging to forecast_logs/ + auto-commit
 seen_guard.py # Duplicate-protection state & helpers
-update_calibration.py # Builds class-conditional weights from resolutions
+compute_calibration_pythia.py # Writes calibration weights/advice into DuckDB
 init.py # Package export list
 
 forecast_logs/
@@ -857,7 +842,7 @@ runs/ # Human-readable per-run logs (.md or .txt)
 state/ # Optional: duplicate-protection state if SEEN_GUARD_PATH points here
 
 data/
-calibration_advice.txt # Friendly notes from the calibration job (auto-created)
+calibration_advice.txt # Optional legacy calibration advice fallback
 
 gtmc_logs/
 ... # Optional run-by-run GTMC CSVs/metadata (if enabled)
@@ -866,17 +851,13 @@ Configuration
 
 Set these as environment variables (locally or in GitHub Actions). Sensible defaults are used where possible.
 
-Required (for submission)
-
-METACULUS_TOKEN — your Metaculus API token.
-
-Recommended
+Core config
 
 FORECASTS_CSV_PATH # default: forecast_logs/forecasts.csv (you can set it to "forecasts.csv" at repo root)
 
-CALIB_WEIGHTS_PATH=calibration_weights.json
+CALIB_WEIGHTS_PATH # optional legacy JSON fallback; defaults to empty
 
-CALIB_ADVICE_PATH=data/calibration_advice.txt
+CALIB_ADVICE_PATH # optional legacy text fallback; defaults to empty
 
 HUMAN_LOG_EXT=md (or txt)
 
@@ -996,23 +977,11 @@ Each workflow:
 
 Sets the environment (paths, commit behavior),
 
-Runs the bot (and/or update_calibration.py),
+Runs the forecaster and calibration pipeline,
 
-Auto-commits any modified files under:
-
-forecast_logs/,
-
-calibration_weights.json,
-
-data/ (advice),
-
-state/ (duplicate-protection, if enabled),
-
-(optionally) other state you decide to persist.
+Auto-commits any modified files under forecast_logs/ (and optional duplicate-protection state).
 
 Secrets You Must Add (GitHub → Actions)
-
-METACULUS_TOKEN (for submission)
 
 Any LLM / research API keys you plan to use:
 
@@ -1024,7 +993,7 @@ Troubleshooting
 Normal if no new resolutions or no forecasts before the resolution time.
 
 Numeric submission errors (CDF monotonicity etc.).
-The numeric path enforces ordered quantiles (P10 ≤ P50 ≤ P90). If Metaculus still complains, reduce extremely steep distributions (too tiny sigma) or clip the extreme tails. (The current code already guards the common pitfalls.)
+The numeric path enforces ordered quantiles (P10 ≤ P50 ≤ P90).
 
 Logs not committing locally.
 Set COMMIT_LOGS=true and ensure your git remote/branch are correct.
@@ -1034,8 +1003,6 @@ Ensure data/ folder exists and isn’t .gitignore’d.
 
 Duplicate forecasts.
 Make sure SEEN_GUARD_PATH is set to a path inside the repo (e.g., forecast_logs/state/seen_forecasts.jsonl) and that your workflow imports filter_post_ids/assert_not_seen/mark_post_seen successfully (see the compat layer in seen_guard.py above).
-
-Metaculus API call hangs for minutes.
 
 DuckDB connection inconsistencies or transaction errors.
 - Always open databases through `resolver.db.duckdb_io.get_db(...)`. The helper canonicalises both filesystem paths and `duckdb:///` URLs (resolving relative paths against the current working directory and collapsing symlinks) so every caller reaches the same on-disk file and the shared connection cache can be reused.

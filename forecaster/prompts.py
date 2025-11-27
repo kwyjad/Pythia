@@ -1,31 +1,64 @@
 # ANCHOR: prompts (paste whole file)
 from __future__ import annotations
+import importlib
 import os
+from typing import Optional
 from .config import CALIBRATION_PATH, ist_date
+
+_PYTHIA_CFG_LOAD = None
+if importlib.util.find_spec("pythia.config") is not None:
+    _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
+
+
+def _pythia_db_url_from_config() -> Optional[str]:
+    try:
+        if _PYTHIA_CFG_LOAD is None:
+            return None
+        cfg = _PYTHIA_CFG_LOAD()
+        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
+        db_url = str(app_cfg.get("db_url", "")).strip()
+        return db_url or None
+    except Exception:
+        return None
 
 def _load_calibration_note() -> str:
     """
-    Pulls the latest calibration guidance written by update_calibration.py.
-    Strategy:
-      1) Try CALIBRATION_PATH (env or default 'data/calibration_advice.txt').
-      2) If missing, auto-fallback to './calibration_advice.txt' at repo root.
+    Pull the latest calibration guidance from DuckDB (calibration_advice).
     Returns "" if nothing readable is found, so prompts stay valid.
     """
+    txt = ""
     try:
-        with open(CALIBRATION_PATH, "r", encoding="utf-8") as f:
-            txt = f.read().strip()
-            return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
+        from resolver.db import duckdb_io
+
+        db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+        db_url = db_url or duckdb_io.DEFAULT_DB_URL
+        con = duckdb_io.get_db(db_url)
+        try:
+            row = con.execute(
+                """
+                SELECT advice
+                FROM calibration_advice
+                ORDER BY as_of_month DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            duckdb_io.close_db(con)
+        if row and row[0]:
+            txt = str(row[0])
     except Exception:
-        pass
-    try:
-        alt = "calibration_advice.txt"
-        if os.path.exists(alt):
-            with open(alt, "r", encoding="utf-8") as f:
+        txt = ""
+
+    if not txt and CALIBRATION_PATH:
+        try:
+            with open(CALIBRATION_PATH, "r", encoding="utf-8") as f:
                 txt = f.read().strip()
-                return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
-    except Exception:
-        pass
-    return ""
+        except Exception:
+            txt = ""
+
+    if not txt:
+        return ""
+    return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
 
 _CAL_NOTE = _load_calibration_note()
 _CAL_PREFIX = (
