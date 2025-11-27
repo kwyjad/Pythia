@@ -1151,7 +1151,13 @@ async def _run_one_question_body(
         if missing:
             raise RuntimeError(f"question payload missing required keys: {missing}")
 
-        post_id = int((post.get("id") or post.get("post_id") or 0) or 0)
+        # Metaculus posts use integer IDs; Pythia Horizon Scanner posts use hex string IDs.
+        # Try to coerce to int for backwards compatibility, but fall back to 0 so hex IDs don't crash.
+        raw_post_id = post.get("id") or post.get("post_id") or 0
+        try:
+            post_id = int(raw_post_id)
+        except (TypeError, ValueError):
+            post_id = 0
         question_id_raw = q.get("id") or post.get("id") or post.get("post_id") or ""
         question_id = str(question_id_raw)
     
@@ -1991,6 +1997,20 @@ async def _run_one_question_body(
             _cls_t = type(cls_info).__name__
         except Exception:
             _cls_t = "unknown"
+
+        # Extra diagnostics: surface the underlying exception type + message in logs without
+        # altering the raised error type that callers expect.
+        try:
+            _err_t = type(_e).__name__
+            _err_msg = str(_e)[:200]
+            print(
+                f"[error] run_one_question internal failure "
+                f"(post_type={_post_t}, q_type={_q_t}, cls_info_type={_cls_t}): "
+                f"{_err_t}: {_err_msg}"
+            )
+        except Exception:
+            # Never let logging itself crash the handler
+            pass
         raise RuntimeError(f"run_one_question failed (post={_post_t}, q={_q_t}, cls_info={_cls_t})") from _e
 
 
