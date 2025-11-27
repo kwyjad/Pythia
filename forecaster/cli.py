@@ -900,7 +900,7 @@ def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: int) -> Opt
 # to produce calibration_weights.json, which we use here to weight models per class.
 # --------------------------------------------------------------------------------
 
-def _load_calibration_weights() -> Dict[str, Any]:
+def _load_calibration_weights_file() -> Dict[str, Any]:
     path = os.getenv("CALIB_WEIGHTS_PATH", "calibration_weights.json")
     if not os.path.exists(path):
         return {}
@@ -909,6 +909,128 @@ def _load_calibration_weights() -> Dict[str, Any]:
             return json.load(f)
     except Exception:
         return {}
+
+
+def _load_calibration_weights_db(
+    hazard_code: str,
+    metric: str,
+) -> Optional[Dict[str, float]]:
+    try:
+        from resolver.db import duckdb_io
+    except Exception:
+        return None
+
+    hz = (hazard_code or "").upper().strip()
+    mt = (metric or "").upper().strip()
+    if not hz or not mt:
+        return None
+
+    db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+    if not db_url:
+        return None
+
+    conn = None
+    try:
+        conn = duckdb_io.get_db(db_url)
+    except Exception:
+        return None
+
+    try:
+        row = conn.execute(
+            """
+            SELECT as_of_month
+            FROM calibration_weights
+            WHERE hazard_code = ? AND metric = ?
+            ORDER BY as_of_month DESC
+            LIMIT 1
+            """,
+            [hz, mt],
+        ).fetchone()
+        if not row:
+            return None
+        as_of_month = str(row[0])
+
+        rows = conn.execute(
+            """
+            SELECT model_name, weight
+            FROM calibration_weights
+            WHERE hazard_code = ? AND metric = ? AND as_of_month = ?
+            ORDER BY COALESCE(model_name, '')
+            """,
+            [hz, mt, as_of_month],
+        ).fetchall()
+        if not rows:
+            return None
+
+        weights: Dict[str, float] = {}
+        for model_name, weight in rows:
+            if model_name is None:
+                continue
+            weights[str(model_name)] = float(weight)
+        if not weights:
+            return None
+
+        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+            print(
+                "[forecaster] loaded calibration weights for hazard="
+                f"{hz} metric={mt} as_of={as_of_month}: {weights}"
+            )
+        return weights
+    except Exception:
+        return None
+    finally:
+        try:
+            duckdb_io.close_db(conn)
+        except Exception:
+            pass
+
+
+def _load_calibration_advice_db(
+    hazard_code: str,
+    metric: str,
+) -> Optional[str]:
+    try:
+        from resolver.db import duckdb_io
+    except Exception:
+        return None
+
+    hz = (hazard_code or "").upper().strip()
+    mt = (metric or "").upper().strip()
+    if not hz or not mt:
+        return None
+
+    db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+    if not db_url:
+        return None
+
+    conn = None
+    try:
+        conn = duckdb_io.get_db(db_url)
+    except Exception:
+        return None
+
+    try:
+        row = conn.execute(
+            """
+            SELECT advice
+            FROM calibration_advice
+            WHERE hazard_code = ? AND metric = ?
+            ORDER BY as_of_month DESC
+            LIMIT 1
+            """,
+            [hz, mt],
+        ).fetchone()
+        if not row:
+            return None
+        advice = row[0]
+        return str(advice)
+    except Exception:
+        return None
+    finally:
+        try:
+            duckdb_io.close_db(conn)
+        except Exception:
+            pass
 
 def _choose_weights_for_question(calib: Dict[str, Any], class_primary: str, qtype: str) -> Tuple[Dict[str, float], str]:
     model_names = [ms.name for ms in DEFAULT_ENSEMBLE]
@@ -1152,6 +1274,15 @@ async def _run_one_question_body(
             else:
                 research_meta[f"pa_history_{key}"] = value
 
+        calib_advice_text = None
+        if hz_code and metric_up:
+            calib_advice_text = _load_calibration_advice_db(hz_code, metric_up)
+
+        if calib_advice_text:
+            research_text = (
+                f"{research_text}\n\n## Calibration guidance for this hazard/metric\n{calib_advice_text}"
+            )
+
 
         # ------------------ 2) Hazard-based "classification" (for GTMC1 gate) -----
         is_conflict_hazard = hz_is_conflict
@@ -1343,9 +1474,19 @@ async def _run_one_question_body(
         t_ensemble_ms = _ms(t0)
     
         # ------------------ 6) Choose calibration weights & aggregate ---------------
-        calib_weights_map, weights_profile = _choose_weights_for_question(
-            _load_calibration_weights(), class_primary=class_primary, qtype=qtype
-        )
+        calib_weights_map: Dict[str, float] = {}
+        weights_profile = "uniform"
+
+        if qtype == "spd" and hz_code and metric_up:
+            db_weights = _load_calibration_weights_db(hz_code, metric_up)
+            if db_weights:
+                calib_weights_map = db_weights
+                weights_profile = f"db:{hz_code}:{metric_up}"
+
+        if not calib_weights_map:
+            calib_weights_map, weights_profile = _choose_weights_for_question(
+                _load_calibration_weights_file(), class_primary=class_primary, qtype=qtype
+            )
     
         # MAIN aggregation (with optional GTMC1 for binary)
         if qtype == "binary":
@@ -2043,7 +2184,7 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
     # --- load helpers from this module scope --------------------------------
     # They already exist below in this file; just reference them:
     #   list_posts_from_tournament(...), get_post_details(...)
-    #   ensure_unified_csv(), run_one_question(...), _load_calibration_weights()
+    #   ensure_unified_csv(), run_one_question(...), _load_calibration_weights_file()
     #   finalize_and_commit()
 
     # --- load questions ------------------------------------------------------
@@ -2263,7 +2404,7 @@ async def run_job(mode: str, limit: int, submit: bool, purpose: str) -> None:
                 run_id=run_id,
                 purpose=purpose,
                 submit_ok=bool(submit),
-                calib=_load_calibration_weights(),
+                calib=_load_calibration_weights_file(),
                 seen_guard_run_report=seen_guard_run_report,
             )
         except Exception as e:

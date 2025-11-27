@@ -118,15 +118,29 @@ CREATE TABLE IF NOT EXISTS scores (
   created_at TIMESTAMP DEFAULT now()
 );
 
--- Calibration advice
 CREATE TABLE IF NOT EXISTS calibration_advice (
   as_of_month TEXT,                      -- YYYY-MM
-  shock_code TEXT,
-  model_name TEXT,
-  weight DOUBLE,
-  notes TEXT,
+  hazard_code TEXT,
+  metric TEXT,
+  advice TEXT,
   created_at TIMESTAMP DEFAULT now(),
-  PRIMARY KEY (as_of_month, shock_code, model_name)
+  PRIMARY KEY (as_of_month, hazard_code, metric)
+);
+
+-- Model calibration weights for SPD forecasts (per hazard, metric, and as_of_month)
+CREATE TABLE IF NOT EXISTS calibration_weights (
+  as_of_month TEXT,          -- 'YYYY-MM'
+  hazard_code TEXT,          -- e.g. 'FLOOD', 'CONFLICT'
+  metric TEXT,               -- 'PA', 'FATALITIES', etc.
+  model_name TEXT,           -- null for ensemble, or LLM model slug
+  weight DOUBLE,
+  n_questions INTEGER,       -- distinct resolved question concepts used
+  n_samples INTEGER,         -- total (question_id, horizon_m) samples
+  avg_brier DOUBLE,
+  avg_log DOUBLE,
+  avg_crps DOUBLE,
+  created_at TIMESTAMP DEFAULT now(),
+  PRIMARY KEY (as_of_month, hazard_code, metric, model_name)
 );
 
 -- LLM call logs (costs & usage)
