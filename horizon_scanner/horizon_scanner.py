@@ -39,6 +39,7 @@ from forecaster.providers import estimate_cost_usd
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Prompt metadata for registry/auditing
 PROMPT_KEY = "hs.scenario.v1"
@@ -225,6 +226,52 @@ def generate_report_for_country(country: str) -> str | None:
 
     return cleaned_text
 
+
+def _parse_scenario_block(block: str) -> dict | None:
+    """
+    Parse a SCENARIO_DATA_BLOCK JSON string into a Python dict.
+
+    This is defensive against common LLM formatting mistakes:
+      - Double braces: '{{ ... }}' instead of '{ ... }'
+      - Code fences: ```json ... ``` around the JSON
+    """
+    if not block:
+        return None
+
+    raw = block.strip()
+
+    # Strip common code fences like ```json ... ``` or ``` ... ```
+    if raw.startswith("```"):
+        # Remove leading ```... and trailing ``` if present
+        # e.g. ```json\n{...}\n``` -> {...}
+        parts = raw.split("```")
+        # parts[0] is empty, parts[1] might be "json\n{...}", parts[-1] after last fence
+        raw = "\n".join(p for p in parts[1:] if p).strip()
+        # If there's still a leading 'json' or 'JSON' line, drop it
+        if raw.lower().startswith("json"):
+            raw = raw.split("\n", 1)[-1].strip()
+
+    clean = raw
+
+    # Fix classic double-brace pattern: leading/trailing {{ ... }}
+    if clean.startswith("{{") and clean.endswith("}}"):
+        clean = clean[1:-1].strip()
+
+    # As a further guard, replace remaining '{{'/'}}' with '{'/' }'
+    # This is blunt but works for the observed output.
+    if "{{" in clean or "}}" in clean:
+        clean = clean.replace("{{", "{").replace("}}", "}")
+
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError as e:
+        # Log a truncated version of the cleaned payload for debugging
+        snippet = clean[:200].replace("\n", " ")
+        logger.error(
+            "Failed to parse JSON block after cleanup: %r. Error: %s", snippet, e
+        )
+        return None
+
 def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict]]:
     logging.info(
         "Parsing generated reports to build summary table using Python... total_length=%d",
@@ -266,107 +313,34 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
     table_entries = []
     dedupe_keys = set()
 
+    parsed_scenarios: list[dict] = []
+
     for block in json_blocks:
-        try:
-            data = json.loads(block)
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON block: {block}. Error: {e}")
+        data = _parse_scenario_block(block)
+        if not data:
             continue
 
-        country_name = data.get("country") or data.get("country_name") or "Unknown"
+        country_name = data.get("country") or data.get("country_name")
         iso3 = (data.get("iso3") or "").strip().upper()
-        for scenario in data.get("scenarios", []):
-            title = (scenario.get("title") or scenario.get("name") or "").strip()
-            hazard_code = (scenario.get("hazard_code") or "").strip().upper()
-            hazard_label = (
-                scenario.get("hazard_label")
-                or scenario.get("hazard")
-                or hazard_code
-            )
-            hazard_label = hazard_label.strip()
-            likely_window_month = (scenario.get("likely_window_month") or "").strip()
-            probability_text = (
-                scenario.get("probability")
-                or scenario.get("probability_of_occurrence")
-                or ""
-            ).strip()
-            prob_pct = 0.0
-            if probability_text:
-                match = re.search(r"(\d+(?:\.\d+)?)", probability_text)
-                if match:
-                    try:
-                        prob_pct = float(match.group(1))
-                    except ValueError:
-                        prob_pct = 0.0
-            markdown = scenario.get("markdown") or scenario.get("narrative") or ""
-            best_guess_raw = scenario.get("best_guess") or {}
-            best_guess = {
-                "PIN": _parse_int(best_guess_raw.get("PIN")),
-                "PA": _parse_int(best_guess_raw.get("PA")),
-            }
+        scenarios = data.get("scenarios") or []
 
-            scenario_json = dict(scenario)
-            scenario_json.update(
-                {
-                    "title": title,
-                    "hazard_code": hazard_code,
-                    "hazard_label": hazard_label,
-                    "likely_window_month": likely_window_month,
-                    "best_guess": best_guess,
-                    "scenario_title": title,
-                    "probability_text": probability_text,
-                    "probability_pct": prob_pct,
-                    "pin_best_guess": best_guess["PIN"],
-                    "pa_best_guess": best_guess["PA"],
-                }
+        if not country_name or not iso3 or not isinstance(scenarios, list) or not scenarios:
+            logging.warning(
+                "Scenario block for %r has missing fields or empty 'scenarios': %r",
+                country_name,
+                data,
             )
+            continue
 
-            dedupe_key = (iso3 or country_name, hazard_code, title)
-            if dedupe_key in dedupe_keys:
+        for scenario in scenarios:
+            if not isinstance(scenario, dict):
                 continue
-            dedupe_keys.add(dedupe_key)
+            scenario_copy = dict(scenario)
+            scenario_copy.setdefault("country", country_name)
+            scenario_copy.setdefault("iso3", iso3)
+            parsed_scenarios.append(scenario_copy)
 
-            table_entries.append(
-                {
-                    "country": country_name,
-                    "title": title or "N/A",
-                    "hazard": hazard_code or hazard_label or "N/A",
-                    "likely_month": likely_window_month or "N/A",
-                    "probability": probability_text or "N/A",
-                    "pin": best_guess["PIN"],
-                    "pa": best_guess["PA"],
-                }
-            )
-
-            if not iso3:
-                logging.warning(
-                    "Scenario '%s' for %s missing ISO3 code; skipping database persistence.",
-                    title,
-                    country_name,
-                )
-                continue
-
-            scenarios_for_db.append(
-                {
-                    "iso3": iso3,
-                    "country_name": country_name,
-                    "hazard_code": hazard_code,
-                    "hazard_label": hazard_label,
-                    "likely_window_month": likely_window_month,
-                    "best_guess": best_guess,
-                    "title": title,
-                    "markdown": markdown,
-                    "probability": probability_text,
-                    "scenario_title": title,
-                    "probability_text": probability_text,
-                    "probability_pct": prob_pct,
-                    "pin_best_guess": best_guess["PIN"],
-                    "pa_best_guess": best_guess["PA"],
-                    "json": {**scenario_json, "country": country_name, "iso3": iso3},
-                }
-            )
-
-    if not table_entries:
+    if not parsed_scenarios:
         logging.warning("JSON blocks were found, but no valid scenario data could be extracted.")
         fallback = (
             "| Country | Scenario Title | Hazard | Likely Month | Probability | PIN Best Guess | PA Best Guess |\n"
@@ -374,6 +348,99 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
             "| No data extracted | - | - | - | - | - | - |"
         )
         return fallback, []
+
+    for scenario in parsed_scenarios:
+        country_name = scenario.get("country") or scenario.get("country_name") or "Unknown"
+        iso3 = (scenario.get("iso3") or "").strip().upper()
+        title = (scenario.get("title") or scenario.get("name") or "").strip()
+        hazard_code = (scenario.get("hazard_code") or "").strip().upper()
+        hazard_label = (
+            scenario.get("hazard_label")
+            or scenario.get("hazard")
+            or hazard_code
+        )
+        hazard_label = hazard_label.strip()
+        likely_window_month = (scenario.get("likely_window_month") or "").strip()
+        probability_text = (
+            scenario.get("probability")
+            or scenario.get("probability_of_occurrence")
+            or ""
+        ).strip()
+        prob_pct = 0.0
+        if probability_text:
+            match = re.search(r"(\d+(?:\.\d+)?)", probability_text)
+            if match:
+                try:
+                    prob_pct = float(match.group(1))
+                except ValueError:
+                    prob_pct = 0.0
+        markdown = scenario.get("markdown") or scenario.get("narrative") or ""
+        best_guess_raw = scenario.get("best_guess") or {}
+        best_guess = {
+            "PIN": _parse_int(best_guess_raw.get("PIN")),
+            "PA": _parse_int(best_guess_raw.get("PA")),
+        }
+
+        scenario_json = dict(scenario)
+        scenario_json.update(
+            {
+                "title": title,
+                "hazard_code": hazard_code,
+                "hazard_label": hazard_label,
+                "likely_window_month": likely_window_month,
+                "best_guess": best_guess,
+                "scenario_title": title,
+                "probability_text": probability_text,
+                "probability_pct": prob_pct,
+                "pin_best_guess": best_guess["PIN"],
+                "pa_best_guess": best_guess["PA"],
+            }
+        )
+
+        dedupe_key = (iso3 or country_name, hazard_code, title)
+        if dedupe_key in dedupe_keys:
+            continue
+        dedupe_keys.add(dedupe_key)
+
+        table_entries.append(
+            {
+                "country": country_name,
+                "title": title or "N/A",
+                "hazard": hazard_code or hazard_label or "N/A",
+                "likely_month": likely_window_month or "N/A",
+                "probability": probability_text or "N/A",
+                "pin": best_guess["PIN"],
+                "pa": best_guess["PA"],
+            }
+        )
+
+        if not iso3:
+            logging.warning(
+                "Scenario '%s' for %s missing ISO3 code; skipping database persistence.",
+                title,
+                country_name,
+            )
+            continue
+
+        scenarios_for_db.append(
+            {
+                "iso3": iso3,
+                "country_name": country_name,
+                "hazard_code": hazard_code,
+                "hazard_label": hazard_label,
+                "likely_window_month": likely_window_month,
+                "best_guess": best_guess,
+                "title": title,
+                "markdown": markdown,
+                "probability": probability_text,
+                "scenario_title": title,
+                "probability_text": probability_text,
+                "probability_pct": prob_pct,
+                "pin_best_guess": best_guess["PIN"],
+                "pa_best_guess": best_guess["PA"],
+                "json": {**scenario_json, "country": country_name, "iso3": iso3},
+            }
+        )
 
     logging.info(
         "Scenario parsing complete: %d table entries; %d scenarios with iso3 for DB.",

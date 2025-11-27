@@ -6,7 +6,38 @@ Keeping it here makes the main script cleaner and easier to read.
 
 # Prompt for generating the individual country risk analysis.
 # The placeholder {country} will be replaced by the script.
-COUNTRY_ANALYSIS_PROMPT = """
+SCENARIO_DATA_INSTRUCTIONS = """
+Between the markers `SCENARIO_DATA_BLOCK` and `END_SCENARIO_DATA_BLOCK`, output a SINGLE JSON object
+that looks like this:
+
+SCENARIO_DATA_BLOCK
+{
+  "country": "Eritrea",
+  "iso3": "ERI",
+  "scenarios": [
+    {
+      "title": "...",
+      "hazard_label": "...",
+      "hazard_code": "...",
+      "probability": "NN",          // integer percent as string
+      "likely_window_month": "YYYY-MM",
+      "best_guess": {"PIN": 12345, "PA": 6789},
+      "markdown": "Short narrative..."
+    }
+  ]
+}
+END_SCENARIO_DATA_BLOCK
+
+IMPORTANT:
+- Use **standard JSON** only:
+  - Use `{` and `}` (single braces) for objects.
+  - Do NOT use any doubled braces like `{{` or `}}`.
+- Do NOT wrap the JSON in backticks or code fences (no ```).
+- The JSON must be parseable by a strict JSON parser.
+"""
+
+COUNTRY_ANALYSIS_PROMPT = (
+    """
 You are an expert in contextual risk analysis working for UNICEF.
 Your task is to develop a comprehensive political, armed conflict, and natural hazard risk analysis for the country in {country}, with a sole focus on shocks that could occur in the next six months.
 
@@ -23,8 +54,8 @@ Your task is to develop a comprehensive political, armed conflict, and natural h
 - **Natural Hazards**: Focus on cyclonic storms, floods, and drought.
   - Mention any relevant “seasons” in the next six months.
   - State whether current forecasts suggest an average, above average, or below average season.
-- **Armed Conflict**: Focus on potential new inter- or intrastate armed conflicts, or possible escalation of ongoing conflicts. 
-- **Cross-Border Displcement Inflows: Focus on specfic situations in neighbouring countries that have potential to send an inflow of refugees, IDPs, or migrants into the target country. 
+- **Armed Conflict**: Focus on potential new inter- or intrastate armed conflicts, or possible escalation of ongoing conflicts.
+- **Cross-Border Displcement Inflows: Focus on specfic situations in neighbouring countries that have potential to send an inflow of refugees, IDPs, or migrants into the target country.
 
 ### Judicious Use
 - This is a standard template.
@@ -49,7 +80,7 @@ Present the final output as a single, fenced markdown code block that begins wit
 
 1.  **Main Title (H1):** Start with a level 1 Markdown heading (`#`) formatted as: `**[Country Name]: Six-Month Risk Outlook ([Start Month] [Year] - [End Month] [Year])**`.
 2.  **Introduction (H2):** Follow with a level 2 heading (`##`) titled `Introduction`. Write one narrative paragraph summarizing the key findings.
-3.  **Risk Categories (H2):** For each risk area (Political, Armed Conflict, Natural Hazard, Cross-Border Displacement Influx), create a level 2 heading (`##`), e.g., `## Political Risk`. Beneath each heading, write a short narrative paragraph summarizing the general situation for that risk.
+3.  **Risk Categories (H2):** For each risk area (Political, Armed Conflict, Natural Hazard, Cross-Border Displacement Influx),create a level 2 heading (`##`), e.g., `## Political Risk`. Beneath each heading, write a short narrative paragraph summarizingthe general situation for that risk.
 4.  **Scenarios (H3):** Within each risk category, create one or more level 3 headings (`###`) for each distinct scenario. The heading must be formatted as: `### Scenario: [A short, descriptive title]`.
 5.  **Scenario Details:** Beneath each scenario heading, provide:
     * A single narrative paragraph describing the scenario in extensive detail.
@@ -63,11 +94,15 @@ Present the final output as a single, fenced markdown code block that begins wit
     * Your entire output for this section must be ONLY a bulleted list of the full, direct URLs of the primary sources used.
     * **The format for each source MUST be:** `- **[Website Name] - [Article Title (if available)]:** [Full, direct URL]`.
     * **CRITICAL RULE: You must not use placeholder text or add any commentary such as "Insert relevant URL here". If you cannot find a specific, valid source, omit that line item, but you must find and list at least five valid sources.**
-7.  **Data Summary Block (Mandatory):** After the Sources section, you must include a hidden HTML comment block containing a machine-readable JSON summary of the scenarios. It must be valid JSON. The structure MUST be: `<!-- SCENARIO_DATA_BLOCK: {{"country": "[Country Name]", "iso3": "[ISO3]", "scenarios": [{{"title": "[Scenario Title]", "hazard_label": "[Hazard Label]", "hazard_code": "[Hazard Code]", "probability": "[Probability %]", "likely_window_month": "[YYYY-MM]", "best_guess": {{"PIN": [int], "PA": [int]}}, "markdown": "[One-paragraph markdown recap of the scenario]"}}]}} -->`.
+7.  **Data Summary Block (Mandatory):** After the Sources section, you must include a hidden HTML comment block containing a machine-readable JSON summary of the scenarios. Follow these instructions:
+"""
+    + SCENARIO_DATA_INSTRUCTIONS
+    + """
+
     * `"hazard_code"` must be one of `[FL, DR, TC, HW, ACO, ACE, DI, CU, EC, PHE]`. **Do not** use `MULTI` or `OT`.
     * `"likely_window_month"` must be the single most likely `YYYY-MM` within the next six months for the peak impact of the scenario.
     * `"best_guess"` must contain integer point estimates for affected people: `{"PIN": <persons>, "PA": <persons>}`.
     * Keep every scenario strictly single-hazard—never aggregate multiple hazards into one scenario.
 
 """
-
+)
