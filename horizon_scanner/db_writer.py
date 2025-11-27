@@ -63,10 +63,15 @@ def upsert_hs_payload(
         )
 
         best = sc.get("best_guess") or {}
+        raw_json = sc.get("json") or {}
+
+        country_name = sc.get("country_name") or raw_json.get("country") or raw_json.get("country_name") or iso3
+        hazard_label = sc.get("hazard_label") or raw_json.get("hazard_label") or hz
 
         metric = "PA"
+        hazard_label_lower = hazard_label.lower() if isinstance(hazard_label, str) else str(hazard_label).lower()
         wording = (
-            f"How many people will be affected in {iso3} due to {hz} by {target_month}?"
+            f"How many people in {country_name} will be affected by {hazard_label_lower} during {target_month}?"
         )
         q_id = qid(iso3, hz, metric, target_month, wording)
         question_rows.append(
@@ -90,7 +95,7 @@ def upsert_hs_payload(
         if hz_is_conflict:
             metric_f = "FATALITIES"
             wording_f = (
-                f"How many conflict fatalities will occur in {iso3} due to {hz} in {target_month}?"
+                f"How many people in {country_name} will be killed in {hazard_label_lower} incidents during {target_month}?"
             )
             q_id_f = qid(iso3, hz, metric_f, target_month, wording_f)
             question_rows.append(

@@ -503,13 +503,13 @@ def write_human_markdown(*args, **kwargs) -> str:
     #   (run_id, question_id, content)
     #   (question_id, content)  -> implies default/current run_id
     if len(args) >= 1 and isinstance(args[0], str):
-        if len(args) >= 2 and str(args[1]).isdigit():
-            run_id = args[0]
-            question_id = int(args[1])
+        run_id = args[0]
+        if len(args) >= 2:
+            question_id = str(args[1])
             if len(args) >= 3 and isinstance(args[2], str):
                 content = args[2]
-    elif len(args) >= 1 and str(args[0]).isdigit():
-        question_id = int(args[0])
+    elif len(args) >= 1:
+        question_id = str(args[0])
         if len(args) >= 2 and isinstance(args[1], str):
             content = args[1]
 
@@ -517,7 +517,7 @@ def write_human_markdown(*args, **kwargs) -> str:
     if question_id is None:
         qi = kwargs.pop("question_id", None)
         if qi is not None:
-            question_id = int(qi)
+            question_id = str(qi)
     if content is None:
         content = kwargs.pop("content", None)
     if run_id is None:
@@ -540,7 +540,7 @@ def write_human_markdown(*args, **kwargs) -> str:
     md_dir = (paths.runs_dir / rid / "human")
     md_dir.mkdir(parents=True, exist_ok=True)
 
-    md_path = md_dir / f"Q{int(question_id)}.{paths.human_ext}"
+    md_path = md_dir / f"Q{question_id}.{paths.human_ext}"
     md_path.write_text(content, encoding="utf-8")
     return str(md_path)
 
