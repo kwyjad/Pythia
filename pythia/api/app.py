@@ -176,6 +176,163 @@ def get_questions(
     return {"rows": df.to_dict(orient="records")}
 
 
+@app.get("/v1/calibration/weights")
+def get_calibration_weights(
+    hazard_code: Optional[str] = Query(None),
+    metric: Optional[str] = Query(None),
+    as_of_month: Optional[str] = Query(None, description="YYYY-MM; if omitted, use latest"),
+    _=Depends(require_token),
+):
+    """
+    Return calibration weights per model for the given hazard_code/metric/as_of_month.
+
+    If as_of_month is omitted, we use the latest as_of_month in calibration_weights
+    (optionally filtered by hazard_code/metric).
+    """
+    con = _con()
+
+    # Resolve as_of_month if not given
+    params: dict = {}
+    where_bits = []
+
+    if hazard_code:
+        where_bits.append("hazard_code = :hazard_code")
+        params["hazard_code"] = hazard_code.upper()
+    if metric:
+        where_bits.append("metric = :metric")
+        params["metric"] = metric.upper()
+
+    base_where = ""
+    if where_bits:
+        base_where = "WHERE " + " AND ".join(where_bits)
+
+    if not as_of_month:
+        # Pick latest as_of_month given any hazard/metric filters
+        sql_latest = f"""
+          SELECT as_of_month
+          FROM calibration_weights
+          {base_where}
+          ORDER BY as_of_month DESC
+          LIMIT 1
+        """
+        row = con.execute(sql_latest, params).fetchone()
+        if not row:
+            return {"found": False, "as_of_month": None, "rows": []}
+        as_of_month = row[0]
+
+    # Now fetch rows for this as_of_month + filters
+    params["as_of_month"] = as_of_month
+    where_full = ["as_of_month = :as_of_month"]
+    if hazard_code:
+        where_full.append("hazard_code = :hazard_code")
+    if metric:
+        where_full.append("metric = :metric")
+
+    sql = """
+      SELECT
+        as_of_month,
+        hazard_code,
+        metric,
+        model_name,
+        weight,
+        n_questions,
+        n_samples,
+        avg_brier,
+        avg_log,
+        avg_crps,
+        created_at
+      FROM calibration_weights
+    """
+    sql += " WHERE " + " AND ".join(where_full)
+    sql += " ORDER BY hazard_code, metric, model_name"
+
+    df = con.execute(sql, params).fetchdf()
+
+    if df.empty:
+        return {"found": False, "as_of_month": as_of_month, "rows": []}
+
+    # We return rows, plus the resolved as_of_month for convenience
+    return {
+        "found": True,
+        "as_of_month": as_of_month,
+        "rows": df.to_dict(orient="records"),
+    }
+
+
+@app.get("/v1/calibration/advice")
+def get_calibration_advice(
+    hazard_code: Optional[str] = Query(None),
+    metric: Optional[str] = Query(None),
+    as_of_month: Optional[str] = Query(None, description="YYYY-MM; if omitted, use latest"),
+    _=Depends(require_token),
+):
+    """
+    Return calibration advice text per (hazard_code, metric, as_of_month).
+
+    - If hazard_code/metric are omitted, returns advice for all rows at the chosen as_of_month.
+    - If as_of_month is omitted, uses the latest as_of_month present in calibration_advice
+      (optionally filtered by hazard_code/metric).
+    """
+    con = _con()
+
+    params: dict = {}
+    where_bits = []
+
+    if hazard_code:
+        where_bits.append("hazard_code = :hazard_code")
+        params["hazard_code"] = hazard_code.upper()
+    if metric:
+        where_bits.append("metric = :metric")
+        params["metric"] = metric.upper()
+
+    base_where = ""
+    if where_bits:
+        base_where = "WHERE " + " AND ".join(where_bits)
+
+    if not as_of_month:
+        sql_latest = f"""
+          SELECT as_of_month
+          FROM calibration_advice
+          {base_where}
+          ORDER BY as_of_month DESC
+          LIMIT 1
+        """
+        row = con.execute(sql_latest, params).fetchone()
+        if not row:
+            return {"found": False, "as_of_month": None, "rows": []}
+        as_of_month = row[0]
+
+    params["as_of_month"] = as_of_month
+    where_full = ["as_of_month = :as_of_month"]
+    if hazard_code:
+        where_full.append("hazard_code = :hazard_code")
+    if metric:
+        where_full.append("metric = :metric")
+
+    sql = """
+      SELECT
+        as_of_month,
+        hazard_code,
+        metric,
+        advice,
+        created_at
+      FROM calibration_advice
+    """
+    sql += " WHERE " + " AND ".join(where_full)
+    sql += " ORDER BY hazard_code, metric"
+
+    df = con.execute(sql, params).fetchdf()
+
+    if df.empty:
+        return {"found": False, "as_of_month": as_of_month, "rows": []}
+
+    return {
+        "found": True,
+        "as_of_month": as_of_month,
+        "rows": df.to_dict(orient="records"),
+    }
+
+
 @app.get("/v1/forecasts/ensemble")
 def get_forecasts_ensemble(
     iso3: Optional[str] = Query(None),
