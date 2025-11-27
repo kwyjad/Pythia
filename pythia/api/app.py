@@ -485,6 +485,80 @@ def list_resolutions(iso3: str, month: str, metric: str = "PIN", _=Depends(requi
     return {"rows": df.to_dict(orient="records")}
 
 
+@app.get("/v1/risk_index")
+def get_risk_index(
+    metric: str = Query("PA", description="Metric to rank on, e.g. 'PA'"),
+    target_month: str = Query(..., description="Target month 'YYYY-MM'"),
+    horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
+    normalize: bool = Query(True, description="If true, include per-capita ranking"),
+    _=Depends(require_token),
+):
+    """
+    Country-level risk index for a given metric/target_month/horizon.
+
+    For each country (iso3), this sums expected value (centroid-based) across all
+    questions with the given metric and target_month at the specified horizon_m.
+    It then optionally normalises by population.
+
+    Returns:
+      - iso3
+      - expected_value (EV of metric, summed over hazards)
+      - per_capita (EV / population) if normalize=true
+    """
+    con = _con()
+    params = {
+        "metric": metric.upper(),
+        "target_month": target_month,
+        "horizon_m": horizon_m,
+        "normalize": normalize,
+    }
+
+    sql = """
+    WITH ev AS (
+      SELECT q.iso3, fe.horizon_m,
+             SUM(
+               fe.p * COALESCE(
+                 bc.ev,
+                 CASE fe.class_bin
+                   WHEN '<10k' THEN 5000
+                   WHEN '10k-<50k' THEN 25000
+                   WHEN '50k-<250k' THEN 120000
+                   WHEN '250k-<500k' THEN 350000
+                   WHEN '>=500k' THEN 700000
+                 END
+               )
+             ) AS ev_value
+      FROM forecasts_ensemble fe
+      JOIN questions q ON q.question_id = fe.question_id
+      LEFT JOIN bucket_centroids bc
+        ON bc.metric = q.metric
+       AND bc.class_bin = fe.class_bin
+       AND bc.hazard_code = q.hazard_code
+      WHERE UPPER(q.metric) = :metric
+        AND q.target_month = :target_month
+        AND fe.horizon_m = :horizon_m
+      GROUP BY 1,2
+    ), pop AS (
+      SELECT iso3, MAX_BY(population, year) AS population
+      FROM populations GROUP BY 1
+    )
+    SELECT ev.iso3, ev.horizon_m,
+           ev.ev_value AS expected_value,
+           CASE WHEN :normalize THEN ev.ev_value/NULLIF(pop.population,0) ELSE NULL END AS per_capita
+    FROM ev LEFT JOIN pop ON ev.iso3 = pop.iso3
+    ORDER BY (CASE WHEN :normalize THEN per_capita ELSE expected_value END) DESC
+    """
+
+    df = con.execute(sql, params).fetchdf()
+    return {
+        "metric": metric.upper(),
+        "target_month": target_month,
+        "horizon_m": horizon_m,
+        "normalize": normalize,
+        "rows": df.to_dict(orient="records"),
+    }
+
+
 @app.get("/v1/rankings")
 def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(require_token)):
     con = _con()
@@ -523,6 +597,69 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(
     """
     df = con.execute(sql, [metric, month, normalize, normalize]).fetchdf()
     return {"rows": df.to_dict(orient="records")}
+
+
+@app.get("/v1/diagnostics/summary")
+def diagnostics_summary(_=Depends(require_token)):
+    """
+    Return a high-level summary of Pythia's state:
+
+      - question counts by status
+      - number of questions with forecasts (ensemble)
+      - number of questions with resolutions
+      - number of questions with scores
+      - latest HS run (hs_runs)
+      - latest calibration as_of_month (calibration_weights)
+    """
+    con = _con()
+
+    q_counts = con.execute(
+        "SELECT status, COUNT(*) AS n FROM questions GROUP BY status"
+    ).fetchdf().to_dict(orient="records")
+
+    q_with_forecast = con.execute(
+        "SELECT COUNT(DISTINCT question_id) AS n FROM forecasts_ensemble"
+    ).fetchone()[0]
+
+    q_with_resolutions = con.execute(
+        "SELECT COUNT(DISTINCT question_id) AS n FROM resolutions"
+    ).fetchone()[0]
+
+    q_with_scores = con.execute(
+        "SELECT COUNT(DISTINCT question_id) AS n FROM scores"
+    ).fetchone()[0]
+
+    hs_row = con.execute(
+        "SELECT run_id, created_at, meta FROM hs_runs ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    if hs_row:
+        latest_hs = {
+            "run_id": hs_row[0],
+            "created_at": hs_row[1],
+            "meta": hs_row[2],
+        }
+    else:
+        latest_hs = None
+
+    cal_row = con.execute(
+        "SELECT as_of_month, MAX(created_at) FROM calibration_weights GROUP BY as_of_month ORDER BY as_of_month DESC LIMIT 1"
+    ).fetchone()
+    if cal_row:
+        latest_calibration = {
+            "as_of_month": cal_row[0],
+            "created_at": cal_row[1],
+        }
+    else:
+        latest_calibration = None
+
+    return {
+        "questions_by_status": q_counts,
+        "questions_with_forecasts": int(q_with_forecast),
+        "questions_with_resolutions": int(q_with_resolutions),
+        "questions_with_scores": int(q_with_scores),
+        "latest_hs_run": latest_hs,
+        "latest_calibration": latest_calibration,
+    }
 
 
 @app.get("/v1/llm/costs")
