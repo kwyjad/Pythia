@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS questions (
 );
 
 -- Per-model forecasts in 5 bins + optional binary against HS best-guess
+-- Used for both ensemble inputs and per-model SPD storage (one row per bucket).
 CREATE TABLE IF NOT EXISTS forecasts_raw (
   forecast_id TEXT PRIMARY KEY,
   question_id TEXT,
