@@ -11,6 +11,7 @@ from resolver.db.duckdb_io import upsert_dataframe
 from pythia.utils.ids import scenario_id as sid, question_id as qid
 
 ALLOWED = set(["FL", "DR", "TC", "HW", "ACO", "ACE", "DI", "CU", "EC", "PHE"])
+CONFLICT_HAZARDS = {"CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
 
 
 def _to_target_month(today: date, months_ahead: int) -> str:
@@ -35,7 +36,8 @@ def upsert_hs_payload(
     scenario_rows, question_rows = [], []
     for sc in scenarios:
         hz = sc.get("hazard_code", "").strip().upper()
-        if hz not in ALLOWED:
+        hz_is_conflict = hz in CONFLICT_HAZARDS or hz.startswith("CONFLICT")
+        if hz not in ALLOWED and not hz_is_conflict:
             continue
         iso3 = sc["iso3"].upper()
         s_id = sid(iso3, hz, sc.get("title", ""), sc.get("json", {}))
@@ -84,6 +86,30 @@ def upsert_hs_payload(
                 "status": "active",
             }
         )
+
+        if hz_is_conflict:
+            metric_f = "FATALITIES"
+            wording_f = (
+                f"How many conflict fatalities will occur in {iso3} due to {hz} in {target_month}?"
+            )
+            q_id_f = qid(iso3, hz, metric_f, target_month, wording_f)
+            question_rows.append(
+                {
+                    "question_id": q_id_f,
+                    "scenario_id": s_id,
+                    "run_id": run_meta["run_id"],
+                    "iso3": iso3,
+                    "country_name": sc.get("country_name", ""),
+                    "hazard_code": hz,
+                    "hazard_label": sc.get("hazard_label", ""),
+                    "metric": metric_f,
+                    "target_month": target_month,
+                    "wording": wording_f,
+                    "best_guess_value": float(best.get(metric_f) or 0),
+                    "hs_json": {"source": "HS", "raw": sc.get("json", {})},
+                    "status": "active",
+                }
+            )
 
     # --- Normalize JSON payloads for DuckDB and add diagnostics ---
 

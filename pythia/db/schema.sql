@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS questions (
   country_name TEXT,
   hazard_code TEXT,
   hazard_label TEXT,
-  metric TEXT CHECK (metric IN ('PIN','PA')),
+  metric TEXT CHECK (metric IN ('PIN','PA','FATALITIES')),
   target_month TEXT,                     -- YYYY-MM
   wording TEXT,
   best_guess_value DOUBLE,               -- best guess for metric
@@ -171,8 +171,8 @@ CREATE TABLE IF NOT EXISTS populations (
 -- Bucket centroids for SPD expected values
 CREATE TABLE IF NOT EXISTS bucket_centroids (
   hazard_code TEXT,     -- e.g. 'FLOOD', 'CONFLICT'; NULL/'' = all-hazards if you ever want it
-  metric      TEXT,     -- e.g. 'PA'
-  class_bin   TEXT,     -- must match SPD_CLASS_BINS ('<10k','10k-<50k','50k-<250k','250k-<500k','>=500k')
+  metric      TEXT,     -- e.g. 'PA' or 'FATALITIES'
+  class_bin   TEXT,     -- must match the relevant SPD class bins (PA: '<10k'..'>=500k'; conflict fatalities: '<5'..'>=500')
   ev          DOUBLE,   -- E[metric | bucket, hazard_code]
   n_obs       BIGINT,
   updated_at  TIMESTAMP DEFAULT now(),

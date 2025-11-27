@@ -9,6 +9,9 @@ from . import bayes_mc as BMC
 # Default centroids (v1) for PA buckets (can be moved to config later)
 SPD_BUCKET_CENTROIDS_DEFAULT = [5_000.0, 25_000.0, 120_000.0, 350_000.0, 700_000.0]
 
+# Default centroids (v1) for conflict fatalities buckets (per month)
+SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT = [2.0, 14.5, 55.0, 250.0, 750.0]
+
 def _extract_gtmc1_prob(sig: dict | None) -> float | None:
     """
     Pull a probability-like value out of GTMC1 signal dict.
