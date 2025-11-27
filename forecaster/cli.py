@@ -865,7 +865,7 @@ def _load_pythia_questions(limit: int) -> List[dict]:
 
     return posts
 
-def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: int) -> Optional[str]:
+def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: str) -> Optional[str]:
     """
     If PYTHIA_DEBUG_RAW=1, write the raw LLM JSON-ish text we received for the
     GTMC1 actor table to a file in gtmc_logs/ and return the path. Otherwise None.
@@ -1152,7 +1152,8 @@ async def _run_one_question_body(
             raise RuntimeError(f"question payload missing required keys: {missing}")
 
         post_id = int((post.get("id") or post.get("post_id") or 0) or 0)
-        question_id = int((q.get("id") or 0) or 0)
+        question_id_raw = q.get("id") or post.get("id") or post.get("post_id") or ""
+        question_id = str(question_id_raw)
     
         seen_guard_enabled = bool(seen_guard_state.get("enabled", False))
         seen_guard_lock_acquired = seen_guard_state.get("lock_acquired")
@@ -2003,7 +2004,8 @@ async def run_one_question(
 ) -> None:
     post = _must_dict("post", post)
     q = _as_dict(post.get("question"))
-    question_id = int(q.get("id") or post.get("id") or post.get("post_id") or 0)
+    question_id_raw = q.get("id") or post.get("id") or post.get("post_id") or ""
+    question_id = str(question_id_raw)
 
     seen_guard_state: Dict[str, Any] = {
         "enabled": bool(seen_guard),

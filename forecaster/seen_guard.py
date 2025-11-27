@@ -64,13 +64,13 @@ class SeenGuard:
     lock_dir: str = field(default_factory=lambda: _env_str("FORECAST_LOCK_DIR", "forecast_logs/locks"))
     cooldown: timedelta = field(default_factory=lambda: timedelta(hours=_env_int("SEEN_COOLDOWN_HOURS", 24)))
 
-    def _get_qid(self, post: Dict[str, Any]) -> Optional[int]:
+    def _get_qid(self, post: Dict[str, Any]) -> Optional[str]:
         """Safely extracts the question ID from a post object."""
         q = post.get("question", {}) or {}
         qid = q.get("id")
-        return int(qid) if qid is not None else None
+        return str(qid) if qid is not None else None
 
-    def _load_history_from_state_file(self) -> Set[int]:
+    def _load_history_from_state_file(self) -> Set[str]:
         """Loads recently seen question IDs from the JSONL state file."""
         if not os.path.exists(self.state_file_path):
             return set()
@@ -84,14 +84,14 @@ class SeenGuard:
                         data = json.loads(line)
                         timestamp = datetime.fromisoformat(data["timestamp"])
                         if (now_utc - timestamp) < self.cooldown:
-                            seen_qids.add(int(data["question_id"]))
+                            seen_qids.add(str(data["question_id"]))
                     except (json.JSONDecodeError, KeyError, ValueError):
                         continue
         except Exception as e:
             print(f"[seen_guard] Error reading state file {self.state_file_path}: {e!r}", file=sys.stderr)
         return seen_qids
 
-    def _load_history_from_csv(self) -> Set[int]:
+    def _load_history_from_csv(self) -> Set[str]:
         """Loads recently seen question IDs by reading the main forecasts CSV."""
         if not os.path.exists(self.csv_path):
             return set()
@@ -115,14 +115,14 @@ class SeenGuard:
                             timestamp = timestamp.replace(tzinfo=timezone.utc)
 
                         if (now_utc - timestamp) < self.cooldown:
-                            seen_qids.add(int(qid_str))
+                            seen_qids.add(str(qid_str))
                     except (ValueError, KeyError, TypeError):
                         continue
         except Exception as e:
             print(f"[seen_guard] Error reading CSV {self.csv_path}: {e!r}", file=sys.stderr)
         return seen_qids
-        
-    def _get_recently_seen_qids(self) -> Set[int]:
+
+    def _get_recently_seen_qids(self) -> Set[str]:
         """Consolidates seen QIDs from both the state file and the main CSV."""
         from_state = self._load_history_from_state_file()
         from_csv = self._load_history_from_csv()
@@ -151,9 +151,9 @@ class SeenGuard:
         """Appends a record to the state file to mark a question as seen."""
         state_dir = os.path.dirname(self.state_file_path)
         os.makedirs(state_dir, exist_ok=True)
-        
+
         record = {
-            "question_id": int(question_id),
+            "question_id": str(question_id),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         try:
@@ -224,4 +224,4 @@ def filter_unseen_posts(posts: list[dict]) -> list[dict]:
     Compatibility shim expected by older callers.
     Accepts a list of posts (each with an 'id' key), returns only fresh ones.
     """
-    return _GUARD.filter_fresh_posts(posts)
+    return _GUARD.filter_unseen_posts(posts)
