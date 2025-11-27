@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, Body, Query
+from typing import Optional
 import duckdb, pandas as pd
 from pythia.api.auth import require_token
 from pythia.config import load as load_cfg
@@ -10,6 +11,70 @@ app = FastAPI(title="Pythia API", version="1.0.0")
 def _con():
     db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
     return duckdb.connect(db_url, read_only=True)
+
+
+def _latest_questions_view(
+    iso3: Optional[str] = None,
+    hazard_code: Optional[str] = None,
+    metric: Optional[str] = None,
+    target_month: Optional[str] = None,
+    status: Optional[str] = None,
+) -> str:
+    """
+    Returns a SQL string for a 'latest questions' CTE called latest_q, parameterised
+    by filters. The idea:
+
+      - Identify question concepts: (iso3, hazard_code, metric, target_month)
+      - For each concept, pick the question with the latest hs_runs.created_at
+        (i.e. latest HS run).
+      - Join questions q with hs_runs h to get run timestamps.
+
+    NOTE: This helper builds only the CTE string; you still need to bind the same
+    filter parameters to the main query.
+    """
+    # We build filters into both the inner and outer query for simplicity
+    where_bits = []
+    if iso3:
+        where_bits.append("q.iso3 = :iso3")
+    if hazard_code:
+        where_bits.append("q.hazard_code = :hazard_code")
+    if metric:
+        where_bits.append("UPPER(q.metric) = UPPER(:metric)")
+    if target_month:
+        where_bits.append("q.target_month = :target_month")
+    if status:
+        where_bits.append("q.status = :status")
+
+    where_clause = ""
+    if where_bits:
+        where_clause = "WHERE " + " AND ".join(where_bits)
+
+    cte = f"""
+    WITH latest_q AS (
+      SELECT q.*
+      FROM questions q
+      JOIN hs_runs h ON q.run_id = h.run_id
+      JOIN (
+        SELECT
+          iso3,
+          hazard_code,
+          metric,
+          target_month,
+          MAX(h.created_at) AS latest_run
+        FROM questions q
+        JOIN hs_runs h ON q.run_id = h.run_id
+        {where_clause}
+        GROUP BY 1,2,3,4
+      ) x
+      ON q.iso3 = x.iso3
+     AND q.hazard_code = x.hazard_code
+     AND q.metric = x.metric
+     AND q.target_month = x.target_month
+     AND h.created_at = x.latest_run
+      {where_clause}
+    )
+    """
+    return cte
 
 
 @app.get("/v1/health")
@@ -45,40 +110,206 @@ def get_ui_run(ui_run_id: str, _=Depends(require_token)):
 
 
 @app.get("/v1/questions")
-def list_questions(
-    iso3: str | None = Query(None),
-    month: str | None = Query(None),
-    hazard_code: str | None = Query(None),
+def get_questions(
+    iso3: Optional[str] = Query(None),
+    hazard_code: Optional[str] = Query(None),
+    metric: Optional[str] = Query(None),
+    target_month: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    run_id: Optional[str] = Query(None),
+    latest_only: bool = Query(False),
     _=Depends(require_token),
 ):
     con = _con()
-    sql = "SELECT * FROM questions WHERE 1=1"
-    params = []
+    params = {}
     if iso3:
-        sql += " AND iso3=?"
-        params.append(iso3.upper())
-    if month:
-        sql += " AND target_month=?"
-        params.append(month)
+        params["iso3"] = iso3
     if hazard_code:
-        sql += " AND hazard_code=?"
-        params.append(hazard_code.upper())
+        params["hazard_code"] = hazard_code
+    if metric:
+        params["metric"] = metric
+    if target_month:
+        params["target_month"] = target_month
+    if status:
+        params["status"] = status
+    if run_id:
+        params["run_id"] = run_id
+
+    if not latest_only:
+        where_bits = []
+        if iso3:
+            where_bits.append("iso3 = :iso3")
+        if hazard_code:
+            where_bits.append("hazard_code = :hazard_code")
+        if metric:
+            where_bits.append("UPPER(metric) = UPPER(:metric)")
+        if target_month:
+            where_bits.append("target_month = :target_month")
+        if status:
+            where_bits.append("status = :status")
+        if run_id:
+            where_bits.append("run_id = :run_id")
+
+        sql = "SELECT * FROM questions"
+        if where_bits:
+            sql += " WHERE " + " AND ".join(where_bits)
+        sql += " ORDER BY target_month, iso3, hazard_code, metric, run_id"
+        df = con.execute(sql, params).fetchdf()
+        return {"rows": df.to_dict(orient="records")}
+
+    # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
+    cte = _latest_questions_view(
+        iso3=iso3,
+        hazard_code=hazard_code,
+        metric=metric,
+        target_month=target_month,
+        status=status,
+    )
+    sql = cte + """
+    SELECT *
+    FROM latest_q
+    """
+    if run_id:
+        sql += " WHERE run_id = :run_id"
+    sql += " ORDER BY target_month, iso3, hazard_code, metric"
     df = con.execute(sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
 
 
 @app.get("/v1/forecasts/ensemble")
-def list_ensemble(iso3: str, target_month: str, metric: str = "PIN", _=Depends(require_token)):
+def get_forecasts_ensemble(
+    iso3: Optional[str] = Query(None),
+    hazard_code: Optional[str] = Query(None),
+    metric: Optional[str] = Query(None),
+    target_month: Optional[str] = Query(None),
+    horizon_m: Optional[int] = Query(None),
+    latest_only: bool = Query(True),
+    _=Depends(require_token),
+):
     con = _con()
-    qsql = "SELECT question_id FROM questions WHERE iso3=? AND target_month=? AND metric=?"
-    qids = [r[0] for r in con.execute(qsql, [iso3.upper(), target_month, metric]).fetchall()]
-    if not qids:
-        return {"rows": []}
-    inlist = ",".join(["?"] * len(qids))
-    df = con.execute(
-        f"SELECT * FROM forecasts_ensemble WHERE question_id IN ({inlist})",
-        qids,
-    ).fetchdf()
+    params = {}
+    if iso3:
+        params["iso3"] = iso3
+    if hazard_code:
+        params["hazard_code"] = hazard_code
+    if metric:
+        params["metric"] = metric
+    if target_month:
+        params["target_month"] = target_month
+    if horizon_m is not None:
+        params["horizon_m"] = horizon_m
+
+    if latest_only:
+        cte = _latest_questions_view(
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            target_month=target_month,
+            status=None,
+        )
+        sql = cte + """
+        SELECT
+          fe.question_id,
+          q.iso3,
+          q.hazard_code,
+          q.metric,
+          q.target_month,
+          fe.horizon_m,
+          fe.class_bin,
+          fe.p,
+          fe.aggregator,
+          fe.ensemble_version
+        FROM forecasts_ensemble fe
+        JOIN latest_q q ON fe.question_id = q.question_id
+        """
+        where_bits = []
+        if horizon_m is not None:
+            where_bits.append("fe.horizon_m = :horizon_m")
+        if where_bits:
+            sql += " WHERE " + " AND ".join(where_bits)
+        sql += " ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, fe.horizon_m, fe.class_bin"
+        df = con.execute(sql, params).fetchdf()
+        return {"rows": df.to_dict(orient="records")}
+
+    # latest_only=False: historical view (all runs)
+    sql = """
+      SELECT
+        fe.question_id,
+        q.iso3,
+        q.hazard_code,
+        q.metric,
+        q.target_month,
+        q.run_id,
+        fe.horizon_m,
+        fe.class_bin,
+        fe.p,
+        fe.aggregator,
+        fe.ensemble_version
+      FROM forecasts_ensemble fe
+      JOIN questions q ON fe.question_id = q.question_id
+      WHERE 1=1
+    """
+    if iso3:
+        sql += " AND q.iso3 = :iso3"
+    if hazard_code:
+        sql += " AND q.hazard_code = :hazard_code"
+    if metric:
+        sql += " AND UPPER(q.metric) = UPPER(:metric)"
+    if target_month:
+        sql += " AND q.target_month = :target_month"
+    if horizon_m is not None:
+        sql += " AND fe.horizon_m = :horizon_m"
+
+    sql += " ORDER BY q.target_month, q.iso3, q.hazard_code, q.metric, q.run_id, fe.horizon_m, fe.class_bin"
+    df = con.execute(sql, params).fetchdf()
+    return {"rows": df.to_dict(orient="records")}
+
+
+@app.get("/v1/forecasts/history")
+def get_forecasts_history(
+    iso3: str = Query(...),
+    hazard_code: str = Query(...),
+    metric: str = Query(...),
+    target_month: str = Query(...),
+    _=Depends(require_token),
+):
+    """
+    Return all historical ensemble forecasts for a given question concept
+    (iso3, hazard_code, metric, target_month), grouped by HS run.
+
+    Each row includes:
+      - run_id
+      - hs_run_created_at
+      - horizon_m
+      - class_bin
+      - p
+    """
+    con = _con()
+    params = {
+        "iso3": iso3,
+        "hazard_code": hazard_code,
+        "metric": metric,
+        "target_month": target_month,
+    }
+
+    sql = """
+      SELECT
+        q.run_id,
+        h.created_at AS hs_run_created_at,
+        fe.question_id,
+        fe.horizon_m,
+        fe.class_bin,
+        fe.p
+      FROM forecasts_ensemble fe
+      JOIN questions q ON fe.question_id = q.question_id
+      JOIN hs_runs h ON q.run_id = h.run_id
+      WHERE q.iso3 = :iso3
+        AND q.hazard_code = :hazard_code
+        AND UPPER(q.metric) = UPPER(:metric)
+        AND q.target_month = :target_month
+      ORDER BY h.created_at, fe.horizon_m, fe.class_bin
+    """
+    df = con.execute(sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
 
 
