@@ -287,14 +287,14 @@ FORECASTING INSTRUCTIONS
 5) FINAL JSON OUTPUT (IMPORTANT)
    - At the very end, output ONLY a single JSON object with this exact schema:
 
-   {
+   {{
      "month_1": [p1, p2, p3, p4, p5],
      "month_2": [p1, p2, p3, p4, p5],
      "month_3": [p1, p2, p3, p4, p5],
      "month_4": [p1, p2, p3, p4, p5],
      "month_5": [p1, p2, p3, p4, p5],
      "month_6": [p1, p2, p3, p4, p5]
-   }
+   }}
 
    - Do not include any text before or after the JSON.
    - Each list must contain exactly five numbers between 0 and 1 inclusive.

@@ -8,6 +8,7 @@ import pytest
 duckdb = pytest.importorskip("duckdb")
 
 import forecaster.cli as cli  # type: ignore
+import forecaster.prompts as prompts
 from forecaster.ensemble import _parse_spd_json, MemberOutput, EnsembleResult  # type: ignore
 from forecaster.aggregate import aggregate_spd  # type: ignore
 from forecaster.cli import _write_spd_ensemble_to_db, SPD_CLASS_BINS  # type: ignore
@@ -245,3 +246,23 @@ def test_pythia_spd_hex_qid_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> N
         assert row.get("question_type") == "spd"
         # Sanity: we should have at least one per-model SPD JSON field
         assert any(k.startswith("spd_json__") for k in row.keys())
+
+
+def test_spd_prompt_template_allows_literal_json_braces() -> None:
+    """
+    Ensure SPD_PROMPT_TEMPLATE.format(...) works when literal JSON is present.
+
+    This guards against regressions where unescaped braces in the template
+    would cause KeyError('\n     "month_1"') during str.format, and verifies
+    the JSON schema for month_1 is preserved in the rendered prompt.
+    """
+
+    prompt = prompts.build_spd_prompt_pa(
+        title="Test SPD PA question",
+        background="Some background",
+        research_text="Some research",
+        criteria="Some resolution criteria",
+    )
+
+    assert '"month_1": [p1, p2, p3, p4, p5],' in prompt
+    assert "Test SPD PA question" in prompt
