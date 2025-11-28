@@ -7,3 +7,4 @@ PyYAML
 requests
 numpy
 openai
+python-docx
