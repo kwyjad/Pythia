@@ -212,6 +212,17 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 "--purpose",
                 "ui_pipeline",
             ]
+            # Local SPD debugging: export PYTHIA_SPD_HARD_FAIL=1 and optionally
+            # PYTHIA_DEBUG_SPD=1 before running the pipeline to surface full
+            # tracebacks from the Forecaster subprocess.
+            if os.environ.get("PYTHIA_SPD_HARD_FAIL") == "1":
+                logging.info(
+                    "SPD hard-fail mode enabled via PYTHIA_SPD_HARD_FAIL=1 for Forecaster subprocess."
+                )
+            if os.environ.get("PYTHIA_DEBUG_SPD") == "1":
+                logging.info(
+                    "SPD debug logging enabled via PYTHIA_DEBUG_SPD=1 for Forecaster subprocess."
+                )
             logging.info("Starting Forecaster in Pythia mode: %s", " ".join(cmd))
             subprocess.run(cmd, check=True)
             logging.info("Forecaster (Pythia mode) completed successfully in pipeline.")

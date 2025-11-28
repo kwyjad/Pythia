@@ -2043,23 +2043,23 @@ async def _run_one_question_body(
         except Exception:
             _cls_t = "unknown"
 
-        # Extra diagnostics: surface the underlying exception type + message in logs.
-        is_spd = False
         _err_t = type(_e).__name__
         _err_msg = str(_e)[:200]
-        spd_keys = None
 
+        # Detect SPD questions
+        is_spd = False
         try:
-            # Try to detect SPD questions
             poss = (q.get("possibilities") or {}) if isinstance(q, dict) else {}
             qt = (poss.get("type") or (q.get("type") if isinstance(q, dict) else "") or "").lower()
             is_spd = (qt == "spd")
         except Exception:
             is_spd = False
 
-        try:
-            if is_spd:
-                # Try to introspect SPD-related keys from ensemble + final_main
+        spd_keys = None
+        if is_spd:
+            try:
+                from .ensemble import EnsembleResult  # type: ignore
+
                 keys_set = set()
                 ens_obj = locals().get("ens_res")
                 if isinstance(ens_obj, EnsembleResult):
@@ -2070,7 +2070,11 @@ async def _run_one_question_body(
                 if isinstance(final_obj, dict):
                     keys_set.update(final_obj.keys())
                 spd_keys = sorted(list(keys_set)) if keys_set else []
+            except Exception:
+                spd_keys = None
 
+        # Core log message
+        try:
             msg = (
                 f"[error] run_one_question internal failure "
                 f"(post_type={_post_t}, q_type={_q_t}, cls_info_type={_cls_t}): "
@@ -2079,25 +2083,20 @@ async def _run_one_question_body(
             if spd_keys is not None:
                 msg += f" | spd_keys={spd_keys!r}"
             print(msg)
-
-            # Always log full traceback for debugging
             traceback.print_exc()
         except Exception:
-            # Never let logging itself crash the handler
             pass
 
-        # --- SPD soft-fail guard: do NOT raise for SPD + KeyError ---
-        if is_spd and isinstance(_e, KeyError):
-            # This is our safety valve for weird SPD key shapes like '\n     "month_1"'.
-            # We log above and treat this question as a soft failure so fast tests
-            # and batch runs don't crash.
+        # --- SPD soft-fail toggle ---
+        hard_fail = os.getenv("PYTHIA_SPD_HARD_FAIL", "0") == "1"
+
+        if is_spd and isinstance(_e, KeyError) and not hard_fail:
             print(
                 f"[spd] soft-fail KeyError in SPD question; "
                 f"skipping question without raising (post_type={_post_t}, q_type={_q_t})."
             )
             return
 
-        # For all other errors, keep the previous behaviour: raise a RuntimeError
         raise RuntimeError(
             f"run_one_question failed (post={_post_t}, q={_q_t}, cls_info={_cls_t})"
         ) from _e
