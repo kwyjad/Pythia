@@ -1477,12 +1477,12 @@ async def _run_one_question_body(
             except KeyError as exc:
                 # Contain schema/parse bugs like KeyError('\n     "month_1"') and fall back.
                 try:
-                    from .ensemble import EnsembleResult
-
                     raw_keys = set()
-                    if isinstance(ens_res, EnsembleResult):
-                        for _m in ens_res.members:
-                            if isinstance(_m.parsed, dict):
+                    ens_obj = locals().get("ens_res")
+                    # We don't need the exact class; just look for .members
+                    if hasattr(ens_obj, "members"):
+                        for _m in ens_obj.members:
+                            if isinstance(_m, MemberOutput) and isinstance(_m.parsed, dict):
                                 raw_keys.update(str(k) for k in _m.parsed.keys())
                 except Exception:
                     raw_keys = set()
@@ -2058,13 +2058,11 @@ async def _run_one_question_body(
         spd_keys = None
         if is_spd:
             try:
-                from .ensemble import EnsembleResult  # type: ignore
-
                 keys_set = set()
                 ens_obj = locals().get("ens_res")
-                if isinstance(ens_obj, EnsembleResult):
-                    for _m in ens_obj.members:
-                        if isinstance(_m.parsed, dict):
+                if hasattr(ens_obj, "members"):
+                    for _m in getattr(ens_obj, "members", []):
+                        if isinstance(_m, MemberOutput) and isinstance(_m.parsed, dict):
                             keys_set.update(_m.parsed.keys())
                 final_obj = locals().get("final_main")
                 if isinstance(final_obj, dict):
