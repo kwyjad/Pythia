@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import re
+import logging
 import time
 import traceback
 from datetime import datetime
@@ -40,6 +41,8 @@ import numpy as np
 
 from pathlib import Path
 from pythia.db.schema import connect, ensure_schema
+
+LOG = logging.getLogger(__name__)
 
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
@@ -804,6 +807,7 @@ def _load_pythia_questions(limit: int) -> List[dict]:
 
     from datetime import datetime
 
+    import duckdb
     from resolver.db import duckdb_io
 
     max_limit = max(1, int(limit))
@@ -813,19 +817,33 @@ def _load_pythia_questions(limit: int) -> List[dict]:
         sql = """
             SELECT
                 question_id,
+                hs_run_id,
+                scenario_ids_json,
                 iso3,
                 hazard_code,
                 metric,
                 target_month,
+                window_start_date,
+                window_end_date,
                 wording,
                 status,
-                run_id
+                pythia_metadata_json
             FROM questions
             WHERE status = 'active'
             ORDER BY iso3, hazard_code, metric, target_month, question_id
             LIMIT ?
         """
-        cursor = conn.execute(sql, [max_limit])
+        try:
+            cursor = conn.execute(sql, [max_limit])
+        except duckdb.BinderException as exc:
+            LOG.error("BinderException in _load_pythia_questions: %s", exc)
+            LOG.error("SQL attempted in _load_pythia_questions:\n%s", sql.strip())
+            try:
+                cols = conn.execute("PRAGMA table_info('questions');").fetchall()
+                LOG.error("questions table columns: %s", cols)
+            except Exception as debug_exc:
+                LOG.error("Failed to introspect questions table: %s", debug_exc)
+            raise
         rows = cursor.fetchall()
         description = getattr(cursor, "description", []) or []
     finally:
@@ -841,6 +859,10 @@ def _load_pythia_questions(limit: int) -> List[dict]:
         metric = rec.get("metric") or "PA"
         target_month = rec.get("target_month") or ""
         wording = rec.get("wording") or ""
+        hs_run_id = rec.get("hs_run_id")
+
+        scenario_ids = _safe_json_load(rec.get("scenario_ids_json") or "[]") or []
+        pythia_meta = _as_dict(rec.get("pythia_metadata_json") or {})
 
         question = {
             "id": qid,
@@ -858,7 +880,11 @@ def _load_pythia_questions(limit: int) -> List[dict]:
             "pythia_metric": metric,
             "pythia_target_month": target_month,
             "pythia_status": rec.get("status"),
-            "pythia_hs_run_id": rec.get("run_id"),
+            "pythia_hs_run_id": hs_run_id,
+            "pythia_scenario_ids": scenario_ids,
+            "pythia_window_start_date": rec.get("window_start_date"),
+            "pythia_window_end_date": rec.get("window_end_date"),
+            "pythia_metadata": pythia_meta,
             "created_time_iso": datetime.utcnow().isoformat(),
         }
         posts.append(post)
