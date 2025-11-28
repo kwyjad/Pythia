@@ -11,11 +11,13 @@ import time
 import logging
 import json
 import re
+import subprocess
 from datetime import datetime, date
 from pathlib import Path
 
 import backoff
 import google.generativeai as genai
+import duckdb
 
 # Ensure package imports resolve when executed as a script
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -24,13 +26,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 # Horizon Scanner package imports
-from horizon_scanner.db_writer import upsert_hs_payload
+from horizon_scanner.db_writer import (
+    log_hs_country_reports_to_db,
+    log_hs_run_to_db,
+    upsert_hs_payload,
+)
 from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
 
-from resolver.db import duckdb_io
 from pythia.prompts.registry import load_prompt_spec
 from pythia.llm_profiles import get_current_models, get_current_profile
-from pythia.db import ensure_schema, get_db_url, connect
+from pythia.db.schema import ensure_schema, connect
 from pythia.db.util import write_llm_call
 from forecaster.providers import estimate_cost_usd
 
@@ -439,6 +444,86 @@ def parse_reports_and_build_table(all_reports_text: str) -> tuple[str, list[dict
 
     return table_header + "\n".join(table_rows), scenarios_for_db
 
+
+def _get_git_sha(default: str = "") -> str:
+    try:
+        output = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT)
+        )
+        return output.decode().strip()
+    except Exception:
+        return default
+
+
+def _normalize_iso3_list(countries: list[str]) -> list[str]:
+    return [c.strip().upper() for c in countries if c and c.strip()]
+
+
+def _extract_sources(report_text: str) -> list[str]:
+    lines = report_text.splitlines()
+    sources: list[str] = []
+    collecting = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^#+\s*Sources", stripped, flags=re.IGNORECASE):
+            collecting = True
+            continue
+        if collecting:
+            if not stripped:
+                if sources:
+                    break
+                continue
+            if stripped.startswith("-"):
+                sources.append(stripped.lstrip("- ").strip())
+            elif sources:
+                sources[-1] = f"{sources[-1]} {stripped}".strip()
+    return sources
+
+
+def _build_country_reports(
+    countries: list[str],
+    report_records: list[tuple[str, str | None]],
+    scenarios: list[dict],
+) -> dict[str, dict]:
+    name_to_iso3: dict[str, str] = {}
+    for scenario in scenarios:
+        iso3 = (scenario.get("iso3") or "").upper()
+        country_name = (scenario.get("country_name") or "").strip().lower()
+        if iso3 and country_name and country_name not in name_to_iso3:
+            name_to_iso3[country_name] = iso3
+
+    reports_payload: dict[str, dict] = {}
+    for country, report_text in report_records:
+        if not report_text:
+            continue
+
+        iso3 = name_to_iso3.get(country.strip().lower())
+        if not iso3 and len(country.strip()) == 3:
+            iso3 = country.strip().upper()
+        iso3 = iso3 or country.strip().upper()
+
+        if not iso3:
+            logging.warning("Unable to determine ISO3 for country report: %s", country)
+            continue
+
+        reports_payload[iso3] = {
+            "markdown": report_text,
+            "sources": _extract_sources(report_text),
+        }
+
+    # Fallback: if no reports were matched, try using scenario ISO3s
+    if not reports_payload:
+        for scenario in scenarios:
+            iso3 = (scenario.get("iso3") or "").upper()
+            if not iso3 or iso3 in reports_payload:
+                continue
+            reports_payload[iso3] = {
+                "markdown": "",
+                "sources": [],
+            }
+
+    return reports_payload
+
 def main(countries: list[str] | None = None):
     """Main function to run the bot.
 
@@ -447,8 +532,8 @@ def main(countries: list[str] | None = None):
     """
     logging.info("Starting Pythia Horizon Scanner...")
     start_time = datetime.utcnow()
-    run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
-    os.environ["PYTHIA_HS_RUN_ID"] = run_id
+    hs_run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
+    os.environ["PYTHIA_HS_RUN_ID"] = hs_run_id
 
     try:
         ensure_schema()
@@ -475,7 +560,22 @@ def main(countries: list[str] | None = None):
     else:
         logging.info("Using %d countries passed in by caller.", len(countries))
 
+    iso3_list = _normalize_iso3_list(countries)
+    git_sha = _get_git_sha()
+    config_profile = f"{GEMINI_MODEL_NAME}@temp{generation_config.get('temperature', 0.0):.2f}"
+
+    try:
+        log_hs_run_to_db(
+            hs_run_id=hs_run_id,
+            iso3_list=iso3_list,
+            git_sha=git_sha,
+            config_profile=config_profile,
+        )
+    except Exception:
+        logging.exception("Failed to log Horizon Scanner run metadata to DuckDB.")
+
     individual_reports: list[str] = []
+    report_records: list[tuple[str, str | None]] = []
 
     for idx, country in enumerate(countries, start=1):
         try:
@@ -498,6 +598,7 @@ def main(countries: list[str] | None = None):
                 len(countries),
                 len(report),
             )
+            report_records.append((country, report))
         else:
             logging.warning(
                 "No report captured for %s (%d/%d).",
@@ -505,6 +606,7 @@ def main(countries: list[str] | None = None):
                 idx,
                 len(countries),
             )
+            report_records.append((country, None))
 
         # Add a delay between API calls to respect rate limits and avoid overload
         time.sleep(5)
@@ -518,33 +620,25 @@ def main(countries: list[str] | None = None):
     summary_table, scenarios = parse_reports_and_build_table(all_reports_text)
 
     # --- Persist structured payloads to DuckDB ---
-    db_url = get_db_url()
-    db_path = db_url.replace("duckdb:///", "") if db_url.startswith("duckdb:///") else db_url
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    logging.info("Using app.db_url from config for DuckDB: %s", db_url)
-
-    run_meta = {
-        "run_id": run_id,
-        "started_at": start_time.isoformat(),
-        "finished_at": datetime.utcnow().isoformat(),
-        "countries": json.dumps(countries),
-        "prompt_key": PROMPT_SPEC.key,
-        "prompt_version": PROMPT_SPEC.version,
-        "prompt_sha256": PROMPT_SPEC.sha256,
-    }
     upsert_hs_payload(
-        db_url,
-        run_meta,
+        hs_run_id,
         scenarios,
         today=date.today(),
         horizon_months=6,
     )
 
+    country_reports_payload = _build_country_reports(countries, report_records, scenarios)
+    try:
+        log_hs_country_reports_to_db(hs_run_id, country_reports_payload)
+    except Exception:
+        logging.exception("Failed to log HS country reports to DuckDB.")
+
     # --- Diagnostics: list questions written to DuckDB for this run ---
     questions_md = ""
     conn = None
     try:
-        conn = duckdb_io.get_db(db_url)
+        conn = connect()
+        ensure_schema(conn)
         query = """
             SELECT
                 question_id,
@@ -554,15 +648,15 @@ def main(countries: list[str] | None = None):
                 target_month,
                 wording
             FROM questions
-            WHERE run_id = ?
+            WHERE hs_run_id = ?
             ORDER BY iso3, hazard_code, metric, target_month, question_id
         """
-        question_rows = conn.execute(query, [run_meta["run_id"]]).fetchall()
+        question_rows = conn.execute(query, [hs_run_id]).fetchall()
 
         if question_rows:
             logging.info(
                 "Questions written to DuckDB for run %s (total %d):",
-                run_meta["run_id"],
+                hs_run_id,
                 len(question_rows),
             )
             for q_id, iso3, hz, metric, target_month, wording in question_rows:
@@ -593,11 +687,11 @@ def main(countries: list[str] | None = None):
         else:
             logging.warning(
                 "No questions found in DuckDB for run_id=%s (check scenario parsing and DB write).",
-                run_meta["run_id"],
+                hs_run_id,
             )
             questions_md = (
                 "## Questions Written to DuckDB\n\n"
-                f"No questions found for run_id `{run_meta['run_id']}`. "
+                f"No questions found for run_id `{hs_run_id}`. "
                 "Check scenario parsing and DB write steps.\n"
             )
     except duckdb.Error as e:
@@ -623,7 +717,11 @@ def main(countries: list[str] | None = None):
             "See workflow logs for details.\n"
         )
     finally:
-        duckdb_io.close_db(conn)
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
     # --- Final Report Assembly ---
     utc_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
