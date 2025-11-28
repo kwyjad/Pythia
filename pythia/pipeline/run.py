@@ -13,6 +13,10 @@ from pythia.db.init import init as init_db
 from pythia.config import load as load_cfg
 from horizon_scanner.horizon_scanner import main as hs_main
 
+# Local SPD debug example:
+#   PYTHIA_SPD_HARD_FAIL=1 PYTHIA_DEBUG_SPD=1 python -m forecaster.cli \
+#   --mode pythia --limit 2 --purpose hs_pipeline
+
 _pool = ThreadPoolExecutor(max_workers=1)
 
 
@@ -201,6 +205,14 @@ def _pipeline(ui_run_id: str, countries: list[str]):
         # 3) Run Forecaster in Pythia mode on active questions
         try:
             limit = 200  # hard cap for now; can be made configurable via cfg["forecaster"].get("max_questions", 200)
+            spd_hard_fail = os.getenv("PYTHIA_SPD_HARD_FAIL", "0")
+            spd_debug = os.getenv("PYTHIA_DEBUG_SPD", "0")
+            if spd_hard_fail == "1" or spd_debug == "1":
+                logging.info(
+                    "SPD debug flags enabled for Forecaster: PYTHIA_SPD_HARD_FAIL=%s PYTHIA_DEBUG_SPD=%s",
+                    spd_hard_fail,
+                    spd_debug,
+                )
             cmd = [
                 sys.executable,
                 "-m",
