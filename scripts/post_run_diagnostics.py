@@ -61,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    print("Python post-run diagnostic script starting...")
+
     conn = None
     try:
         conn = duckdb_io.get_db(args.db)
