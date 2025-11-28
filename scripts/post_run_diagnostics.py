@@ -24,8 +24,10 @@ def _print_forecast_breakdown(conn) -> None:
         n_raw = conn.execute("SELECT COUNT(*) FROM forecasts_raw").fetchone()[0]
         print(f"Table forecasts_ensemble: {int(n_ens)} rows")
         print(f"Table forecasts_raw: {int(n_raw)} rows")
+        n_run_ids = conn.execute("SELECT COUNT(DISTINCT run_id) FROM forecasts_ensemble").fetchone()[0]
+        print(f"Distinct run_id values in forecasts_ensemble: {int(n_run_ids)}")
     except Exception as exc:  # pragma: no cover - diagnostics only
-        print(f"[warn] Could not inspect forecasts tables: {exc}")
+        print(f"[warn] Could not inspect forecasts tables: {type(exc).__name__}: {exc}")
         return
 
     try:
@@ -39,7 +41,7 @@ def _print_forecast_breakdown(conn) -> None:
             """
         ).fetchall()
     except Exception as exc:  # pragma: no cover - diagnostics only
-        print(f"[warn] Could not summarize forecasts_ensemble: {exc}")
+        print(f"[warn] Could not summarize forecasts_ensemble: {type(exc).__name__}: {exc}")
         return
 
     rows = list(rows)
