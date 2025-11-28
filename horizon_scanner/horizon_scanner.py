@@ -36,7 +36,7 @@ from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
 from horizon_scanner.llm_logging import log_hs_llm_call
 
 from pythia.prompts.registry import load_prompt_spec
-from pythia.llm_profiles import get_current_models
+from pythia.llm_profiles import get_current_models, get_current_profile
 from pythia.db.schema import ensure_schema, connect
 from forecaster.providers import estimate_cost_usd
 
@@ -547,6 +547,10 @@ def main(countries: list[str] | None = None):
     iso3_list = _normalize_iso3_list(countries)
     git_sha = _get_git_sha()
     config_profile = f"{GEMINI_MODEL_NAME}@temp{generation_config.get('temperature', 0.0):.2f}"
+    llm_profile = get_current_profile()
+    is_test_mode = llm_profile.strip().lower() == "test" or os.getenv("PYTHIA_TEST_MODE") == "1"
+    if is_test_mode:
+        config_profile = f"{config_profile}::test"
 
     try:
         log_hs_run_to_db(
@@ -609,6 +613,7 @@ def main(countries: list[str] | None = None):
         scenarios,
         today=date.today(),
         horizon_months=6,
+        is_test_mode=is_test_mode,
     )
 
     country_reports_payload = _build_country_reports(countries, report_records, scenarios)
