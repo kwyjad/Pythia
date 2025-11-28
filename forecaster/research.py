@@ -38,7 +38,6 @@ This lets repeated runs avoid hitting the network when nothing changed.
 import os, re, json, time, math, textwrap, asyncio, hashlib, difflib
 from typing import Optional, List, Dict, Any, Tuple
 import requests
-import duckdb
 
 from .config import (
     ist_date, ist_iso,
@@ -49,10 +48,8 @@ from .config import (
 )
 
 from .prompts import build_research_prompt, _CAL_PREFIX
-from pythia.config import load as _load_cfg
-from pythia.db.util import write_llm_call
 from forecaster.providers import estimate_cost_usd
-from pythia.llm_profiles import get_current_profile
+from forecaster.llm_logging import log_forecaster_llm_call
 
 try:
     from pythia.llm_profiles import get_current_models
@@ -69,18 +66,6 @@ else:
 
 _GEMINI_MODEL_DEFAULT = _PROFILE_MODELS.get("google") or _GEMINI_MODEL_ENV or "gemini-2.5-pro"
 
-
-def _research_db_path() -> str | None:
-    """Return DuckDB file path from app.db_url, or None if missing."""
-    try:
-        cfg = _load_cfg()
-        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
-        db_url = str(app_cfg.get("db_url", "")).strip()
-    except Exception:
-        db_url = ""
-    if not db_url:
-        return None
-    return db_url.replace("duckdb:///", "")
 
 # --- Debug hook: last error message from research step (for human log & CSV) ---
 LAST_RESEARCH_ERROR: str = ""   # set by _grounded_search / _compose_research_via_gemini
@@ -615,45 +600,7 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
             "total_tokens": int(prompt_tokens or 0) + int(completion_tokens or 0),
         }
 
-        try:
-            llm_profile = get_current_profile()
-        except Exception:
-            llm_profile = None
-
-        hs_run_id = os.getenv("PYTHIA_HS_RUN_ID")
-        ui_run_id = os.getenv("PYTHIA_UI_RUN_ID")
-        forecaster_run_id = os.getenv("PYTHIA_FORECASTER_RUN_ID")
-
         used_model_id = f"google/{model}"
-        cost = estimate_cost_usd(used_model_id, usage)
-
-        db_path = _research_db_path()
-        if db_path:
-            try:
-                conn = duckdb.connect(db_path)
-                write_llm_call(
-                    conn,
-                    component="Researcher",
-                    model=used_model_id,
-                    prompt_key="forecaster.research",
-                    version="1.0.0",
-                    usage=usage,
-                    cost=cost,
-                    latency_ms=latency_ms,
-                    success=bool(composed_text),
-                    llm_profile=llm_profile,
-                    hs_run_id=hs_run_id,
-                    ui_run_id=ui_run_id,
-                    forecaster_run_id=forecaster_run_id,
-                )
-            except Exception:
-                pass
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
         return composed_text, used_model_id, usage, body
 
     except Exception as e:
@@ -723,6 +670,9 @@ def _ensure_dict(x) -> dict:
 
 
 async def run_research_async(
+    *,
+    run_id: str,
+    question_id: str,
     title: str,
     description: str,
     criteria: str,
@@ -800,7 +750,34 @@ async def run_research_async(
     )
 
     # 5) LLM compose (Gemini only for research)
-    llm_text, used_llm, usage, req_body = await _compose_research_via_gemini(prompt)
+    req_body: Dict[str, Any] = {}
+    used_llm: str = "google/gemini-2.5-pro"
+
+    async def _call_llm(prompt_text: str, **kwargs) -> tuple[str, Dict[str, Any]]:
+        nonlocal req_body, used_llm
+        text, model_id, usage, body = await _compose_research_via_gemini(prompt_text)
+        req_body = body
+        used_llm = model_id or used_llm
+        usage = usage or {}
+        try:
+            usage = dict(usage)
+            usage["cost_usd"] = estimate_cost_usd(used_llm, usage)
+        except Exception:
+            pass
+        return text, usage
+
+    llm_text, usage = await log_forecaster_llm_call(
+        call_type="research",
+        run_id=run_id,
+        question_id=question_id,
+        model_name=used_llm,
+        provider="google",
+        model_id=used_llm,
+        prompt_text=prompt,
+        low_level_call=_call_llm,
+    )
+    if not used_llm:
+        used_llm = "google/gemini-2.5-pro"
     if not llm_text.strip():
         if picked:
             llm_text = "\n".join([f"- {it.get('title','')} ({it.get('url','')})" for it in picked])

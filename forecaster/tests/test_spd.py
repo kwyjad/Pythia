@@ -165,7 +165,7 @@ def test_pythia_spd_hex_qid_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> N
         base = [1.0] + [0.0] * (n_buckets - 1)
         return {f"month_{i}": base for i in range(1, 7)}
 
-    async def fake_run_ensemble_spd(prompt, ensemble):
+    async def fake_run_ensemble_spd(prompt, ensemble, **_kwargs):
         parsed = _make_spd_parsed()
         m = MemberOutput(
             name="stub_model",
