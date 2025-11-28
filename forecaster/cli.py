@@ -31,6 +31,7 @@ import os
 import re
 import time
 import traceback
+from datetime import datetime
 from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
 import inspect
@@ -38,7 +39,7 @@ import inspect
 import numpy as np
 
 from pathlib import Path
-from pythia.db import ensure_schema
+from pythia.db.schema import connect, ensure_schema
 
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
@@ -348,31 +349,22 @@ def _pythia_db_url_from_config() -> str | None:
 
 
 def _write_spd_ensemble_to_db(
-    question_id: str,
-    run_id: str,
-    spd_main: Dict[str, List[float]],
     *,
+    run_id: str,
+    question_id: str,
+    iso3: str,
+    hazard_code: str,
     metric: str,
-    hazard_code: str | None = None,
-    aggregator: str = "Bayes_MC",
-    ensemble_version: str = "v1_spd",
+    spd_main: Dict[str, List[float]],
+    ev_main: Optional[Dict[str, Any]],
+    weights_profile: str,
 ) -> None:
     """
-    Write the SPD ensemble for a given question into the Pythia DuckDB forecasts_ensemble table.
+    Persist SPD ensemble into forecasts_ensemble.
 
-    Expects spd_main like: {"month_1": [p1..p5], ..., "month_6": [p1..p5]}.
+    spd_main: dict like {"month_1": [p1..p5], ..., "month_6": [p1..p5]}
+    ev_main:  dict like {"month_1": ev_value, ...} (optional)
     """
-    import duckdb
-
-    if not question_id:
-        return
-
-    db_url = _pythia_db_url_from_config()
-    if not db_url:
-        # No Pythia DB configured; optionally log for debugging.
-        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-            print(f"[forecaster] skip SPD DB write for question_id={question_id!r}: app.db_url not set")
-        return
 
     metric_up = (metric or "").upper()
     hz_up = (hazard_code or "").upper()
@@ -386,89 +378,86 @@ def _write_spd_ensemble_to_db(
 
     spd_main = _normalize_spd_keys(spd_main, n_months=6, n_buckets=len(class_bins))
 
-    db_path = db_url.replace("duckdb:///", "")
-    con = duckdb.connect(db_path)
     try:
-        # Ensure table exists (init_db handles this normally, but be defensive)
+        con = connect(read_only=False)
+        ensure_schema(con)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[warn] Failed to open DB for SPD ensemble write (question_id={question_id}): {type(exc).__name__}: {exc}"
+        )
+        return
+
+    now = datetime.utcnow()
+
+    try:
         con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS forecasts_ensemble (
-              question_id TEXT,
-              horizon_m INTEGER,
-              class_bin TEXT,
-              p DOUBLE,
-              p_over_threshold DOUBLE,
-              aggregator TEXT,
-              ensemble_version TEXT,
-              created_at TIMESTAMP DEFAULT now(),
-              PRIMARY KEY (question_id, horizon_m, class_bin)
-            )
-            """
+            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ?;",
+            [run_id, question_id],
         )
 
-        # Upsert semantics: delete existing rows for this question_id, then insert fresh
-        con.execute(
-            "DELETE FROM forecasts_ensemble WHERE question_id = ?",
-            [question_id],
-        )
-
-        rows: List[tuple] = []
-        for m_idx in range(1, 7):
-            key = f"month_{m_idx}"
-            probs = spd_main.get(key)
-            if not isinstance(probs, list) or len(probs) != len(class_bins):
+        for month_idx in range(1, 7):
+            key = f"month_{month_idx}"
+            probs = spd_main.get(key) or []
+            if not isinstance(probs, (list, tuple)):
                 continue
-            # Defensive renormalization
-            total = float(sum(float(x) for x in probs))
-            if total <= 0.0:
-                norm = [1.0 / float(len(class_bins))] * len(class_bins)
-            else:
-                norm = [float(x) / total for x in probs]
+            ev_val = None
+            if ev_main and key in ev_main:
+                try:
+                    ev_val = float(ev_main[key])
+                except Exception:
+                    ev_val = None
 
-            for bin_label, p in zip(class_bins, norm):
-                rows.append(
-                    (
-                        question_id,
-                        m_idx,
-                        bin_label,
-                        float(p),
-                        None,             # p_over_threshold (not used yet)
-                        aggregator,
-                        ensemble_version,
+            for bucket_idx, prob in enumerate(probs, start=1):
+                try:
+                    con.execute(
+                        """
+                        INSERT INTO forecasts_ensemble (
+                            run_id,
+                            question_id,
+                            iso3,
+                            hazard_code,
+                            metric,
+                            month_index,
+                            bucket_index,
+                            probability,
+                            ev_value,
+                            weights_profile,
+                            created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        [
+                            run_id,
+                            question_id,
+                            iso3,
+                            hz_up,
+                            metric_up,
+                            month_idx,
+                            bucket_idx,
+                            float(prob),
+                            ev_val if bucket_idx == 1 else None,
+                            weights_profile,
+                            now,
+                        ],
                     )
-                )
-
-        if rows:
-            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-                print(
-                    f"[forecaster] writing {len(rows)} SPD rows for question_id={question_id!r} "
-                    f"into {db_path}"
-                )
-        con.executemany(
-            """
-            INSERT INTO forecasts_ensemble (
-              question_id,
-              horizon_m,
-                  class_bin,
-                  p,
-                  p_over_threshold,
-                  aggregator,
-                  ensemble_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[warn] Failed to write forecasts_ensemble row for q={question_id} month={month_idx}: {exc}"
+                    )
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def _write_spd_raw_to_db(
-    question_id: str,
-    run_id: str,
-    ens_res: EnsembleResult,
     *,
+    run_id: str,
+    question_id: str,
+    iso3: str,
+    hazard_code: str,
     metric: str,
-    hazard_code: str | None = None,
+    ens_res: EnsembleResult,
 ) -> None:
     """
     Write per-model SPD forecasts into forecasts_raw for this question.
@@ -477,149 +466,85 @@ def _write_spd_raw_to_db(
     on conflict hazards.
     """
 
-    import duckdb
-
-    if not question_id:
-        return
-
-    db_url = _pythia_db_url_from_config()
-    if not db_url:
-        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-            print(f"[forecaster] skip SPD RAW DB write for question_id={question_id!r}: app.db_url not set")
-        return
-
-    db_path = db_url.replace("duckdb:///", "")
     metric_up = (metric or "").upper()
     hz_up = (hazard_code or "").upper()
 
-    # Choose bucket labels based on metric/hazard
     if metric_up == "FATALITIES" and (hz_up.startswith("CONFLICT") or hz_up in CONFLICT_HAZARD_CODES):
         class_bins = SPD_CLASS_BINS_FATALITIES
     else:
         class_bins = SPD_CLASS_BINS_PA
 
-    con = duckdb.connect(db_path)
     try:
-        # Ensure table exists
+        con = connect(read_only=False)
+        ensure_schema(con)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[warn] Failed to open DB for SPD raw write (question_id={question_id}): {type(exc).__name__}: {exc}"
+        )
+        return
+
+    try:
         con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS forecasts_raw (
-              forecast_id TEXT PRIMARY KEY,
-              question_id TEXT,
-              model_name TEXT,
-              model_version TEXT,
-              prompt_key TEXT,
-              prompt_version TEXT,
-              prompt_sha256 TEXT,
-              horizon_m INTEGER,
-              class_bin TEXT,
-              p DOUBLE,
-              threshold_value DOUBLE,
-              p_over_threshold DOUBLE,
-              run_id TEXT,
-              tokens_in INTEGER,
-              tokens_out INTEGER,
-              cost_usd DOUBLE,
-              created_at TIMESTAMP DEFAULT now()
-            )
-            """
+            "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ?;",
+            [run_id, question_id],
         )
 
-        con.execute(
-            "DELETE FROM forecasts_raw WHERE question_id = ?",
-            [question_id],
-        )
-
-        table_cols = {
-            row[1]: row for row in con.execute("PRAGMA table_info('forecasts_raw')").fetchall()
-        }
-        has_forecast_id = "forecast_id" in table_cols
-
-        rows: list[tuple] = []
         for m in ens_res.members:
-            if not m.ok or not isinstance(m.parsed, dict):
-                continue
-            parsed = _normalize_spd_keys(m.parsed, n_months=6, n_buckets=len(class_bins))
-            model_name = m.name
-            for m_idx in range(1, 7):
-                key = f"month_{m_idx}"
-                raw_vec = parsed.get(key, [])
-                # Reuse MCQ sanitiser: ensures length, clipping, normalisation
-                vec = sanitize_mcq_vector(raw_vec if isinstance(raw_vec, list) else [], n_options=len(class_bins))
-                total = float(sum(vec))
-                if total <= 0.0:
-                    vec = [1.0 / float(len(class_bins))] * len(class_bins)
-                else:
-                    vec = [float(x) / total for x in vec]
+            model_name = getattr(m, "name", "")
+            ok = bool(getattr(m, "ok", False))
+            elapsed_ms = getattr(m, "elapsed_ms", 0) or 0
+            cost_usd = getattr(m, "cost_usd", 0.0) or 0.0
+            prompt_tokens = getattr(m, "prompt_tokens", 0) or 0
+            completion_tokens = getattr(m, "completion_tokens", 0) or 0
+            total_tokens = getattr(m, "total_tokens", prompt_tokens + completion_tokens) or 0
 
-                for bin_label, p in zip(class_bins, vec):
-                    forecast_id = f"{question_id}:{run_id}:{model_name}:{m_idx}:{bin_label}"
-                    if has_forecast_id:
-                        rows.append(
-                            (
-                                forecast_id,
+            if not isinstance(getattr(m, "parsed", None), dict):
+                continue
+
+            parsed = _normalize_spd_keys(m.parsed, n_months=6, n_buckets=len(class_bins))
+            for month_idx in range(1, 7):
+                key = f"month_{month_idx}"
+                probs = parsed.get(key) or []
+                if not isinstance(probs, (list, tuple)):
+                    continue
+                for bucket_idx, prob in enumerate(probs, start=1):
+                    try:
+                        con.execute(
+                            """
+                            INSERT INTO forecasts_raw (
+                                run_id,
                                 question_id,
                                 model_name,
-                                None,
-                                None,
-                                None,
-                                None,
-                                m_idx,
-                                bin_label,
-                                float(p),
-                                None,
-                                None,
+                                month_index,
+                                bucket_index,
+                                probability,
+                                ok,
+                                elapsed_ms,
+                                cost_usd,
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            [
                                 run_id,
-                                None,
-                                None,
-                                None,
-                            )
+                                question_id,
+                                model_name,
+                                month_idx,
+                                bucket_idx,
+                                float(prob),
+                                ok,
+                                elapsed_ms,
+                                cost_usd,
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens,
+                            ],
                         )
-                    else:
-                        rows.append((question_id, model_name, m_idx, bin_label, float(p)))
-
-        if rows:
-            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-                print(
-                    f"[forecaster] writing {len(rows)} SPD RAW rows for question_id={question_id!r} into {db_path}"
-                )
-            if has_forecast_id:
-                con.executemany(
-                    """
-                    INSERT OR REPLACE INTO forecasts_raw (
-                      forecast_id,
-                      question_id,
-                      model_name,
-                      model_version,
-                      prompt_key,
-                      prompt_version,
-                      prompt_sha256,
-                      horizon_m,
-                      class_bin,
-                      p,
-                      threshold_value,
-                      p_over_threshold,
-                      run_id,
-                      tokens_in,
-                      tokens_out,
-                      cost_usd
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
-            else:
-                con.executemany(
-                    """
-                    INSERT INTO forecasts_raw (
-                      question_id,
-                      model_name,
-                      horizon_m,
-                      class_bin,
-                      p
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    rows,
-                )
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[warn] Failed to write forecasts_raw row for q={question_id} month={month_idx}: {exc}"
+                        )
     finally:
         try:
             con.close()
@@ -692,6 +617,7 @@ def _load_pa_history_block(
         "|---|---|",
     ]
     months_list: list[str] = []
+    history_detail: list[Dict[str, Any]] = []
     for ym, value in rows:
         try:
             ym_str = str(ym)
@@ -700,6 +626,11 @@ def _load_pa_history_block(
             ym_str = str(ym)
             val = str(value)
         months_list.append(ym_str)
+        try:
+            numeric_val = None if value is None else float(value)
+        except Exception:
+            numeric_val = None
+        history_detail.append({"ym": ym_str, "value": numeric_val})
         lines.append(f"| {ym_str} | {val} |")
 
     block = "\n".join(lines)
@@ -707,6 +638,7 @@ def _load_pa_history_block(
         "pa_history_error": "",
         "pa_history_rows": len(rows),
         "pa_history_months": months_list,
+        "pa_history_rows_detail": history_detail,
     }
     return block, meta
 
@@ -1194,6 +1126,8 @@ async def _run_one_question_body(
         # ------------------ 1) Research step (LLM brief + sources appended) ---------
         t0 = time.time()
         research_text, research_meta = await run_research_async(
+            run_id=run_id,
+            question_id=str(question_id),
             title=title,
             description=description,
             criteria=criteria,
@@ -1224,6 +1158,67 @@ async def _run_one_question_body(
                 research_meta[key] = value
             else:
                 research_meta[f"pa_history_{key}"] = value
+
+        if qtype == "spd" and pmeta.get("iso3") and pmeta.get("hazard_code"):
+            history_rows = []
+            raw_history = pa_meta.get("pa_history_rows_detail")
+            if isinstance(raw_history, list):
+                for item in raw_history:
+                    if not isinstance(item, dict):
+                        continue
+                    history_rows.append(
+                        {
+                            "ym": str(item.get("ym") or ""),
+                            "value": item.get("value"),
+                            "source": str(item.get("source") or ""),
+                        }
+                    )
+
+            snapshot_start = history_rows[0]["ym"] if history_rows else ""
+            snapshot_end = history_rows[-1]["ym"] if history_rows else ""
+            context_extra = {
+                "history_len": len(history_rows),
+                "summary_text": pa_block,
+            }
+
+            try:
+                con = connect(read_only=False)
+                ensure_schema(con)
+                con.execute(
+                    "DELETE FROM question_context WHERE run_id = ? AND question_id = ?;",
+                    [run_id, str(question_id)],
+                )
+                con.execute(
+                    """
+                    INSERT INTO question_context (
+                        run_id,
+                        question_id,
+                        iso3,
+                        hazard_code,
+                        metric,
+                        snapshot_start_month,
+                        snapshot_end_month,
+                        pa_history_json,
+                        context_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    [
+                        run_id,
+                        str(question_id),
+                        pmeta.get("iso3", "").upper(),
+                        pmeta.get("hazard_code", "").upper(),
+                        metric_up,
+                        snapshot_start,
+                        snapshot_end,
+                        json.dumps(history_rows, ensure_ascii=False),
+                        json.dumps(context_extra, ensure_ascii=False),
+                    ],
+                )
+                con.close()
+            except Exception as ctx_exc:  # noqa: BLE001
+                print(
+                    f"[warn] Failed to write question_context for Q{question_id}: {type(ctx_exc).__name__}: {ctx_exc}"
+                )
 
         calib_advice_text = None
         if hz_code and metric_up:
@@ -1419,7 +1414,12 @@ async def _run_one_question_body(
         elif qtype == "multiple_choice":
             ens_res = await run_ensemble_mcq(main_prompt, n_options, DEFAULT_ENSEMBLE)
         elif qtype == "spd":
-            ens_res = await run_ensemble_spd(main_prompt, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_spd(
+                main_prompt,
+                DEFAULT_ENSEMBLE,
+                run_id=run_id,
+                question_id=str(question_id),
+            )
         else:
             ens_res = await run_ensemble_numeric(main_prompt, DEFAULT_ENSEMBLE)
         t_ensemble_ms = _ms(t0)
@@ -1519,23 +1519,25 @@ async def _run_one_question_body(
             if "pythia_iso3" in post or "pythia_hazard_code" in post:
                 try:
                     _write_spd_ensemble_to_db(
-                        question_id=str(question_id),
                         run_id=run_id,
-                        spd_main=final_main,
-                        metric=pmeta.get("metric", ""),
+                        question_id=str(question_id),
+                        iso3=pmeta.get("iso3", ""),
                         hazard_code=pmeta.get("hazard_code", ""),
-                        aggregator="Bayes_MC",
-                        ensemble_version="v1_spd",
+                        metric=pmeta.get("metric", ""),
+                        spd_main=final_main,
+                        ev_main=ev_main,
+                        weights_profile=weights_profile,
                     )
                 except Exception as exc:
                     print(f"[warn] Failed to write SPD ensemble to DB for question {question_id}: {exc}")
                 try:
                     _write_spd_raw_to_db(
-                        question_id=str(question_id),
                         run_id=run_id,
-                        ens_res=ens_res,
-                        metric=pmeta.get("metric", ""),
+                        question_id=str(question_id),
+                        iso3=pmeta.get("iso3", ""),
                         hazard_code=pmeta.get("hazard_code", ""),
+                        metric=pmeta.get("metric", ""),
+                        ens_res=ens_res,
                     )
                 except Exception as exc:
                     print(f"[warn] Failed to write SPD RAW to DB for question {question_id}: {exc}")

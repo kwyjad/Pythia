@@ -10,6 +10,7 @@ from typing import Any, List, Optional
 import numpy as np
 
 from .providers import ModelSpec, llm_semaphore, call_chat_ms, estimate_cost_usd
+from forecaster.llm_logging import log_forecaster_llm_call
 
 @dataclass
 class MemberOutput:
@@ -290,34 +291,69 @@ async def run_ensemble_numeric(prompt: str, specs: List[ModelSpec]) -> EnsembleR
     return EnsembleResult(members=await asyncio.gather(*tasks))
 
 # ---------- SPD (5 buckets × 6 months) ----------
-async def run_ensemble_spd(prompt: str, specs: List[ModelSpec]) -> EnsembleResult:
+async def run_ensemble_spd(
+    prompt: str,
+    specs: List[ModelSpec],
+    *,
+    run_id: str | None = "",
+    question_id: str | None = "",
+) -> EnsembleResult:
     """
     Run the ensemble for SPD questions.
     Each member's parsed output is a dict: { "month_1": [..5..], ..., "month_6": [..5..] }.
     """
+
     tasks = []
     for ms in specs:
         async def _one(ms=ms):
+            parsed_for_log: Optional[dict] = None
+            err_text: str = ""
+
+            async def _call_llm(p: str, **kwargs):
+                nonlocal parsed_for_log, err_text
+                text, usage, err = await call_chat_ms(ms, p, **kwargs)
+                err_text = err or ""
+                usage = usage or {}
+                try:
+                    usage = dict(usage)
+                    usage["cost_usd"] = estimate_cost_usd(ms.model_id, usage)
+                except Exception:
+                    pass
+                parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
+                if parsed is not None:
+                    parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
+                parsed_for_log = parsed
+                return text, usage
+
             t0 = time.time()
-            text, usage, err = await call_chat_ms(ms, prompt, temperature=0.2)
-            parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
-            ok = parsed is not None
-            if parsed is None:
-                parsed = {}
-            else:
-                parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
+            response_text, usage = await log_forecaster_llm_call(
+                call_type="forecast",
+                run_id=run_id or "",
+                question_id=question_id or "",
+                model_name=ms.name,
+                provider=ms.provider,
+                model_id=ms.model_id,
+                prompt_text=prompt,
+                low_level_call=_call_llm,
+                low_level_kwargs={"temperature": 0.2},
+                parsed_json=lambda: parsed_for_log,
+            )
+
+            ok = parsed_for_log is not None
+            parsed = parsed_for_log if parsed_for_log is not None else {}
             cost = estimate_cost_usd(ms.model_id, usage)
             return MemberOutput(
                 name=ms.name,
                 ok=ok,
                 parsed=parsed,
-                raw_text=text,
-                error=err,
+                raw_text=response_text,
+                error=err_text if err_text else ("parse_error" if not ok else ""),
                 elapsed_ms=int((time.time() - t0) * 1000),
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 total_tokens=usage.get("total_tokens", 0),
                 cost_usd=cost,
             )
+
         tasks.append(_one())
     return EnsembleResult(members=await asyncio.gather(*tasks))
