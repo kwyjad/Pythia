@@ -9,7 +9,122 @@ from typing import Iterable
 from pythia.db.schema import connect, ensure_schema
 from pythia.utils.ids import scenario_id as sid, question_id as qid
 
-ALLOWED = set(["FL", "DR", "TC", "HW", "ACO", "ACE", "DI", "CU", "EC", "PHE"])
+HAZARD_CONFIG = {
+    "FL": {
+        "label": "Flood",
+        "class": "Natural",
+        "metric_default": "PA",
+        "question_type": "emdat_pa",
+        "question_template": (
+            "How many people will be affected by riverine or flash flooding "
+            "in {country_name} between {start_date} and {end_date}, as reported by EM-DAT?"
+        ),
+        "resolution_source": "EM-DAT",
+    },
+    "DR": {
+        "label": "Drought",
+        "class": "Natural",
+        "metric_default": "PA",
+        "question_type": "emdat_pa",
+        "question_template": (
+            "How many people will be affected by drought in {country_name} "
+            "between {start_date} and {end_date}, as reported by EM-DAT?"
+        ),
+        "resolution_source": "EM-DAT",
+    },
+    "TC": {
+        "label": "Tropical Cyclone",
+        "class": "Natural",
+        "metric_default": "PA",
+        "question_type": "emdat_pa",
+        "question_template": (
+            "How many people will be affected by tropical cyclones in {country_name} "
+            "between {start_date} and {end_date}, as reported by EM-DAT?"
+        ),
+        "resolution_source": "EM-DAT",
+    },
+    "HW": {
+        "label": "Heat Wave",
+        "class": "Natural",
+        "metric_default": "PA",
+        "question_type": "emdat_pa",
+        "question_template": (
+            "How many people will be affected by heat waves in {country_name} "
+            "between {start_date} and {end_date}, as reported by EM-DAT?"
+        ),
+        "resolution_source": "EM-DAT",
+    },
+    "ACO": {
+        "label": "Armed Conflict Onset",
+        "class": "Conflict",
+        "question_types": ["acled_fatalities", "conflict_displacement"],
+    },
+    "ACE": {
+        "label": "Armed Conflict Escalation",
+        "class": "Conflict",
+        "question_types": ["acled_fatalities", "conflict_displacement"],
+    },
+    "CU": {
+        "label": "Civil Unrest",
+        "class": "Conflict/Social",
+        "question_types": ["unrest_displacement"],
+    },
+    "DI": {
+        "label": "Displacement Influx",
+        "class": "Displacement",
+        "question_types": ["influx_displacement"],
+    },
+    "EC": {
+        "label": "Economic Crisis",
+        "class": "Economic",
+        "blocked": True,
+    },
+    "PHE": {
+        "label": "Public Health Emergency",
+        "class": "Health",
+        "blocked": True,
+    },
+    "MULTI": {
+        "label": "Multi-driver Food Insecurity / Complex",
+        "class": "Multi/Complex",
+        "blocked": True,
+    },
+}
+
+for _alias in ["CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"]:
+    HAZARD_CONFIG.setdefault(
+        _alias,
+        {
+            "label": "Armed Conflict",
+            "class": "Conflict",
+            "question_types": ["acled_fatalities", "conflict_displacement"],
+        },
+    )
+
+DISPLACEMENT_TEMPLATES = {
+    "acled_fatalities": (
+        "How many battle-related fatalities will ACLED record in {country_name} "
+        "between {start_date} and {end_date}?"
+    ),
+    "conflict_displacement": (
+        "How many people will be internally displaced by armed conflict in {country_name} "
+        "between {start_date} and {end_date}, as recorded by the Internal Displacement "
+        "Monitoring Center (IDMC) with the IOM Displacement Tracking Matrix (DTM) as back-up?"
+    ),
+    "unrest_displacement": (
+        "How many people will be internally displaced by political unrest in {country_name} "
+        "between {start_date} and {end_date}, as recorded by the Internal Displacement "
+        "Monitoring Center (IDMC) with the IOM Displacement Tracking Matrix (DTM) as back-up?"
+    ),
+    "influx_displacement": (
+        "How many people from a neighbouring country will enter {country_name} between {start_date} "
+        "and {end_date} because of armed conflict or other political violence, as recorded by the "
+        "Internal Displacement Monitoring Center (IDMC) with the IOM Displacement Tracking Matrix (DTM) as back-up?"
+    ),
+}
+
+BLOCKED_HAZARDS = {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
+ALLOWED = set(HAZARD_CONFIG.keys())
 CONFLICT_HAZARDS = {"CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
 
 
@@ -66,6 +181,192 @@ def _compute_forecast_window(today: date, target_month: str) -> tuple[date, date
 def _stable_hash(payload: dict) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _build_question_row(
+    *,
+    hs_run_id: str,
+    scenario: dict,
+    scenario_ids: list[str],
+    iso3: str,
+    hazard_code: str,
+    hazard_cfg: dict,
+    metric: str,
+    wording: str,
+    target_month: str,
+    opening_date: date,
+    closing_date: date,
+    question_type: str | None,
+    resolution_source: str | None,
+    is_test_mode: bool,
+) -> dict:
+    hazard_label = hazard_cfg.get("label") or scenario.get("hazard_label") or hazard_code
+    hazard_class = hazard_cfg.get("class") or ""
+
+    best_guess = scenario.get("best_guess") or {}
+    best_guess_value = float(best_guess.get(metric) or 0)
+
+    question_id = qid(iso3, hazard_code, metric, target_month, wording)
+
+    meta = {
+        "source": "HS",
+        "purpose": "hs_pipeline",
+        "hazard_code": hazard_code,
+        "hazard_label": hazard_label,
+        "hazard_class": hazard_class,
+        "question_type": question_type,
+        "resolution_source": resolution_source,
+        "hs_likely_month": scenario.get("likely_window_month", ""),
+        "hs_probability_pct": float(scenario.get("probability_pct") or 0.0),
+        "hs_run_id": hs_run_id,
+        "scenario_ids": scenario_ids,
+        "window_start": opening_date.isoformat(),
+        "window_end": closing_date.isoformat(),
+    }
+
+    if is_test_mode:
+        meta["test_mode"] = True
+        meta["run_profile"] = "test"
+
+    hs_json_raw = {"source": "HS", "raw": scenario.get("json", {})}
+    if is_test_mode and isinstance(hs_json_raw.get("raw"), dict):
+        hs_json_raw["raw"] = {**hs_json_raw["raw"], "test_mode": True}
+
+    return {
+        "question_id": question_id,
+        "scenario_ids": scenario_ids,
+        "hs_run_id": hs_run_id,
+        "iso3": iso3,
+        "hazard_code": hazard_code,
+        "hazard_label": hazard_label,
+        "metric": metric,
+        "target_month": target_month,
+        "window_start_date": opening_date,
+        "window_end_date": closing_date,
+        "wording": wording,
+        "best_guess_value": best_guess_value,
+        "hs_json": hs_json_raw,
+        "pythia_metadata": meta,
+        "status": "active",
+    }
+
+
+def _build_questions_for_scenario(
+    *,
+    hs_run_id: str,
+    scenario: dict,
+    target_month: str,
+    opening_date: date,
+    closing_date: date,
+    opening_str: str,
+    closing_str: str,
+    is_test_mode: bool,
+) -> list[dict]:
+    hazard_code = (scenario.get("hazard_code") or "").upper()
+    cfg = HAZARD_CONFIG.get(hazard_code, {})
+
+    if cfg.get("blocked"):
+        logging.info("[hs] Blocking question for hazard=%s (no resolution yet).", hazard_code)
+        return []
+
+    country_name = scenario.get("country_name") or scenario.get("iso3") or ""
+    iso3 = (scenario.get("iso3") or "").upper()
+    scenario_id = scenario.get("scenario_id")
+    questions: list[dict] = []
+
+    if not cfg:
+        hazard_label = scenario.get("hazard_label") or hazard_code
+        hazard_label_lower = hazard_label.lower() if isinstance(hazard_label, str) else str(hazard_label).lower()
+        fallback_wording = (
+            f"How many people in {country_name} will be affected by {hazard_label_lower} "
+            f"between {opening_str} and {closing_str}?"
+        )
+        questions.append(
+            _build_question_row(
+                hs_run_id=hs_run_id,
+                scenario=scenario,
+                scenario_ids=[scenario_id],
+                iso3=iso3,
+                hazard_code=hazard_code,
+                hazard_cfg={"label": hazard_label, "class": ""},
+                metric="PA",
+                wording=fallback_wording,
+                target_month=target_month,
+                opening_date=opening_date,
+                closing_date=closing_date,
+                question_type="legacy_pa",
+                resolution_source=None,
+                is_test_mode=is_test_mode,
+            )
+        )
+        return questions
+
+    if "question_template" in cfg:
+        wording = cfg["question_template"].format(
+            country_name=country_name,
+            start_date=opening_str,
+            end_date=closing_str,
+        )
+        metric = cfg.get("metric_default", "PA")
+        resolution_source = cfg.get("resolution_source")
+        questions.append(
+            _build_question_row(
+                hs_run_id=hs_run_id,
+                scenario=scenario,
+                scenario_ids=[scenario_id],
+                iso3=iso3,
+                hazard_code=hazard_code,
+                hazard_cfg=cfg,
+                metric=metric,
+                wording=wording,
+                target_month=target_month,
+                opening_date=opening_date,
+                closing_date=closing_date,
+                question_type=cfg.get("question_type"),
+                resolution_source=resolution_source,
+                is_test_mode=is_test_mode,
+            )
+        )
+        return questions
+
+    for question_type in cfg.get("question_types", []):
+        template = DISPLACEMENT_TEMPLATES.get(question_type)
+        if not template:
+            continue
+
+        wording = template.format(
+            country_name=country_name,
+            start_date=opening_str,
+            end_date=closing_str,
+        )
+
+        if question_type == "acled_fatalities":
+            metric = "FATALITIES"
+            resolution_source = "ACLED"
+        else:
+            metric = "PA"
+            resolution_source = "IDMC/DTM"
+
+        questions.append(
+            _build_question_row(
+                hs_run_id=hs_run_id,
+                scenario=scenario,
+                scenario_ids=[scenario_id],
+                iso3=iso3,
+                hazard_code=hazard_code,
+                hazard_cfg=cfg,
+                metric=metric,
+                wording=wording,
+                target_month=target_month,
+                opening_date=opening_date,
+                closing_date=closing_date,
+                question_type=question_type,
+                resolution_source=resolution_source,
+                is_test_mode=is_test_mode,
+            )
+        )
+
+    return questions
 
 
 def log_hs_run_to_db(
@@ -242,6 +543,7 @@ def upsert_hs_payload(
     *,
     today: date,
     horizon_months: int,
+    is_test_mode: bool = False,
 ):
     # Compute common target month and forecast window for this HS run
     target_month = _to_target_month(today, horizon_months)
@@ -258,98 +560,43 @@ def upsert_hs_payload(
         iso3 = sc["iso3"].upper()
         s_id = sid(iso3, hz, sc.get("title", ""), sc.get("json", {}))
 
-        scenario_rows.append(
-            {
-                "scenario_id": s_id,
-                "hs_run_id": hs_run_id,
-                "iso3": iso3,
-                "country_name": sc.get("country_name", ""),
-                "hazard_code": hz,
-                "hazard_label": sc.get("hazard_label", ""),
-                "likely_month": sc.get("likely_window_month", ""),
-                "markdown": sc.get("markdown", ""),
-                "scenario_title": sc.get("scenario_title") or sc.get("title", ""),
-                "probability_text": sc.get("probability_text", ""),
-                "probability_pct": float(sc.get("probability_pct") or 0.0),
-                "pin_best_guess": int(sc.get("pin_best_guess") or 0),
-                "pa_best_guess": int(sc.get("pa_best_guess") or 0),
-                "json": sc.get("json", {}),
-            }
-        )
-
-        best = sc.get("best_guess") or {}
         raw_json = sc.get("json") or {}
+        if is_test_mode and isinstance(raw_json, dict):
+            raw_json = {**raw_json, "test_mode": True}
 
-        country_name = sc.get("country_name") or raw_json.get("country") or raw_json.get("country_name") or iso3
-        hazard_label = sc.get("hazard_label") or raw_json.get("hazard_label") or hz
+        scenario_payload = {
+            "scenario_id": s_id,
+            "hs_run_id": hs_run_id,
+            "iso3": iso3,
+            "country_name": sc.get("country_name", ""),
+            "hazard_code": hz,
+            "hazard_label": sc.get("hazard_label", ""),
+            "likely_month": sc.get("likely_window_month", ""),
+            "likely_window_month": sc.get("likely_window_month", ""),
+            "markdown": sc.get("markdown", ""),
+            "scenario_title": sc.get("scenario_title") or sc.get("title", ""),
+            "probability_text": sc.get("probability_text", ""),
+            "probability_pct": float(sc.get("probability_pct") or 0.0),
+            "pin_best_guess": int(sc.get("pin_best_guess") or 0),
+            "pa_best_guess": int(sc.get("pa_best_guess") or 0),
+            "best_guess": sc.get("best_guess") or {},
+            "json": raw_json,
+        }
 
-        metric = "PA"
-        hazard_label_lower = hazard_label.lower() if isinstance(hazard_label, str) else str(hazard_label).lower()
-        wording = (
-            f"How many people in {country_name} will be affected by {hazard_label_lower} "
-            f"between {opening_str} and {closing_str}?"
-        )
-        q_id = qid(iso3, hz, metric, target_month, wording)
-        question_rows.append(
-            {
-                "question_id": q_id,
-                "scenario_ids": [s_id],
-                "hs_run_id": hs_run_id,
-                "iso3": iso3,
-                "country_name": sc.get("country_name", ""),
-                "hazard_code": hz,
-                "hazard_label": sc.get("hazard_label", ""),
-                "metric": metric,
-                "target_month": target_month,
-                "window_start_date": opening_date,
-                "window_end_date": closing_date,
-                "wording": wording,
-                "best_guess_value": float(best.get(metric) or 0),
-                "hs_json": {"source": "HS", "raw": sc.get("json", {})},
-                "pythia_metadata": {
-                    "source": "HS",
-                    "purpose": "hs_pipeline",
-                    "hazard_label": hazard_label,
-                    "hs_likely_month": sc.get("likely_window_month", ""),
-                    "hs_probability_pct": float(sc.get("probability_pct") or 0.0),
-                },
-                "status": "active",
-            }
-        )
+        scenario_rows.append(scenario_payload)
 
-        if hz_is_conflict:
-            metric_f = "FATALITIES"
-            wording_f = (
-                f"How many people in {country_name} will be killed in {hazard_label_lower} incidents "
-                f"between {opening_str} and {closing_str}?"
+        question_rows.extend(
+            _build_questions_for_scenario(
+                hs_run_id=hs_run_id,
+                scenario=scenario_payload,
+                target_month=target_month,
+                opening_date=opening_date,
+                closing_date=closing_date,
+                opening_str=opening_str,
+                closing_str=closing_str,
+                is_test_mode=is_test_mode,
             )
-            q_id_f = qid(iso3, hz, metric_f, target_month, wording_f)
-            question_rows.append(
-                {
-                    "question_id": q_id_f,
-                    "scenario_ids": [s_id],
-                    "hs_run_id": hs_run_id,
-                    "iso3": iso3,
-                    "country_name": sc.get("country_name", ""),
-                    "hazard_code": hz,
-                    "hazard_label": sc.get("hazard_label", ""),
-                    "metric": metric_f,
-                    "target_month": target_month,
-                    "window_start_date": opening_date,
-                    "window_end_date": closing_date,
-                    "wording": wording_f,
-                    "best_guess_value": float(best.get(metric_f) or 0),
-                    "hs_json": {"source": "HS", "raw": sc.get("json", {})},
-                    "pythia_metadata": {
-                        "source": "HS",
-                        "purpose": "hs_pipeline",
-                        "hazard_label": hazard_label,
-                        "hs_likely_month": sc.get("likely_window_month", ""),
-                        "hs_probability_pct": float(sc.get("probability_pct") or 0.0),
-                    },
-                    "status": "active",
-                }
-            )
+        )
 
     # --- Normalize JSON payloads for DuckDB and add diagnostics ---
 
