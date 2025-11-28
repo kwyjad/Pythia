@@ -1461,16 +1461,52 @@ async def _run_one_question_body(
             if bucket_centroids is None:
                 bucket_centroids = default_centroids
 
-            spd_main, ev_dict, bmc_summary = aggregate_spd(
-                ens_res,
-                weights=calib_weights_map,
-                bucket_centroids=bucket_centroids,
-            )
-            from .ensemble import _normalize_spd_keys  # local import to avoid cycles
+            try:
+                # Normal SPD aggregation path
+                spd_main, ev_dict, bmc_summary = aggregate_spd(
+                    ens_res,
+                    weights=calib_weights_map,
+                    bucket_centroids=bucket_centroids,
+                )
+                from .ensemble import _normalize_spd_keys  # local import to avoid cycles
 
-            spd_main = _normalize_spd_keys(spd_main, n_months=6, n_buckets=len(bucket_labels))
-            final_main = spd_main
-            ev_main = ev_dict
+                spd_main = _normalize_spd_keys(spd_main, n_months=6, n_buckets=len(bucket_labels))
+                final_main = spd_main
+                ev_main = ev_dict
+            except KeyError as exc:
+                # Contain schema/parse bugs like KeyError('\n     "month_1"') and fall back.
+                try:
+                    from .ensemble import EnsembleResult
+
+                    raw_keys = set()
+                    if isinstance(ens_res, EnsembleResult):
+                        for _m in ens_res.members:
+                            if isinstance(_m.parsed, dict):
+                                raw_keys.update(str(k) for k in _m.parsed.keys())
+                except Exception:
+                    raw_keys = set()
+
+                offending = str(exc)
+                print(
+                    f"[spd] KeyError during SPD aggregation for question_id={question_id!r}: {offending!r}. "
+                    f"raw_spd_keys={sorted(raw_keys)!r}. Falling back to uniform SPD across 6 months."
+                )
+
+                # Build a conservative uniform SPD: all buckets equal for all 6 months.
+                n_buckets = len(bucket_labels)
+                uniform_vec = [1.0 / float(n_buckets)] * n_buckets
+                spd_main = {f"month_{i}": list(uniform_vec) for i in range(1, 7)}
+
+                # No meaningful expected values if aggregation failed; keep it empty.
+                ev_main = {}
+
+                # Tag BMC summary so we can see this in CSV / logs.
+                bmc_summary = {
+                    "method": "spd_keyerror_fallback",
+                    "error": offending,
+                }
+
+                final_main = spd_main
         else:
             quantiles_main, bmc_summary = aggregate_numeric(ens_res, calib_weights_map)
             final_main = dict(quantiles_main)
