@@ -380,6 +380,10 @@ def _write_spd_ensemble_to_db(
     else:
         class_bins = SPD_CLASS_BINS_PA
 
+    from .ensemble import _normalize_spd_keys  # local import to avoid cycles
+
+    spd_main = _normalize_spd_keys(spd_main, n_months=6, n_buckets=len(class_bins))
+
     db_path = db_url.replace("duckdb:///", "")
     con = duckdb.connect(db_path)
     try:
@@ -533,10 +537,11 @@ def _write_spd_raw_to_db(
         for m in ens_res.members:
             if not m.ok or not isinstance(m.parsed, dict):
                 continue
+            parsed = _normalize_spd_keys(m.parsed, n_months=6, n_buckets=len(class_bins))
             model_name = m.name
             for m_idx in range(1, 7):
                 key = f"month_{m_idx}"
-                raw_vec = m.parsed.get(key, [])
+                raw_vec = parsed.get(key, [])
                 # Reuse MCQ sanitiser: ensures length, clipping, normalisation
                 vec = sanitize_mcq_vector(raw_vec if isinstance(raw_vec, list) else [], n_options=len(class_bins))
                 total = float(sum(vec))
@@ -1461,6 +1466,9 @@ async def _run_one_question_body(
                 weights=calib_weights_map,
                 bucket_centroids=bucket_centroids,
             )
+            from .ensemble import _normalize_spd_keys  # local import to avoid cycles
+
+            spd_main = _normalize_spd_keys(spd_main, n_months=6, n_buckets=len(bucket_labels))
             final_main = spd_main
             ev_main = ev_dict
         else:
@@ -2003,11 +2011,38 @@ async def _run_one_question_body(
         try:
             _err_t = type(_e).__name__
             _err_msg = str(_e)[:200]
-            print(
+            is_spd = False
+            try:
+                poss = (q.get("possibilities") or {})
+                qt = (poss.get("type") or q.get("type") or "").lower()
+                is_spd = qt == "spd"
+            except Exception:
+                is_spd = False
+
+            spd_keys = None
+            if is_spd:
+                try:
+                    keys_set = set()
+                    ens_obj = locals().get("ens_res")
+                    if isinstance(ens_obj, EnsembleResult):
+                        for _m in ens_obj.members:
+                            if isinstance(_m.parsed, dict):
+                                keys_set.update(_m.parsed.keys())
+                    final_obj = locals().get("final_main")
+                    if isinstance(final_obj, dict):
+                        keys_set.update(final_obj.keys())
+                    spd_keys = sorted(list(keys_set)) if keys_set else []
+                except Exception:
+                    spd_keys = None
+
+            msg = (
                 f"[error] run_one_question internal failure "
                 f"(post_type={_post_t}, q_type={_q_t}, cls_info_type={_cls_t}): "
                 f"{_err_t}: {_err_msg}"
             )
+            if spd_keys is not None:
+                msg += f" | spd_keys={spd_keys!r}"
+            print(msg)
         except Exception:
             # Never let logging itself crash the handler
             pass

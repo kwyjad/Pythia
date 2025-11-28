@@ -47,6 +47,66 @@ def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> Li
         return (np.ones(n) / float(n)).tolist()
     return (v / s).tolist()
 
+
+def _normalize_spd_keys(
+    data: dict,
+    *,
+    n_months: int = 6,
+    n_buckets: int = 5,
+) -> dict:
+    """
+    Normalize SPD dict keys to canonical 'month_1'..'month_n'.
+
+    Accepts dicts that might have weird keys like '\n     "month_1"',
+    'Month 1', or 'month-1'. Unrecognized keys are ignored. Missing months
+    are filled with uniform distributions across buckets.
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    month_map: dict[str, list[float]] = {}
+    for raw_key, raw_vec in data.items():
+        if not isinstance(raw_key, str):
+            continue
+        k = raw_key.strip()
+        if k.startswith("\"") and k.endswith("\"") and len(k) > 2:
+            k = k[1:-1]
+        kl = k.lower()
+
+        clean_key = None
+        for i in range(1, n_months + 1):
+            canonical = f"month_{i}"
+            if kl == canonical:
+                clean_key = canonical
+                break
+            if kl.replace(" ", "_") == canonical:
+                clean_key = canonical
+                break
+            if kl.replace("-", "_") == canonical:
+                clean_key = canonical
+                break
+        if clean_key is None:
+            continue
+
+        if isinstance(raw_vec, list):
+            month_map[clean_key] = raw_vec
+
+    out: dict[str, list[float]] = {}
+    for i in range(1, n_months + 1):
+        key = f"month_{i}"
+        raw_vec = month_map.get(key, [])
+        vec = sanitize_mcq_vector(raw_vec if isinstance(raw_vec, list) else [], n_options=n_buckets)
+        out[key] = vec
+
+    if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
+        try:
+            raw_keys = sorted(list(data.keys()))
+        except Exception:
+            raw_keys = ["<unprintable>"]
+        print(f"[spd] normalize keys: raw_keys={raw_keys!r} -> canonical_keys={sorted(out.keys())!r}")
+
+    return out
+
 def _parse_spd_json(
     text: str,
     n_months: int = 6,
@@ -109,7 +169,7 @@ def _parse_spd_json(
             head = t[:200].replace("\n", " ")
             print(f"[spd] parse produced all-zero SPD; treating as failure; head={head!r}")
         return None
-    return out
+    return _normalize_spd_keys(out, n_months=n_months, n_buckets=n_buckets)
 
 def _parse_binary_probability(text: str) -> Optional[float]:
     if not text:
@@ -244,6 +304,8 @@ async def run_ensemble_spd(prompt: str, specs: List[ModelSpec]) -> EnsembleResul
             ok = parsed is not None
             if parsed is None:
                 parsed = {}
+            else:
+                parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
             cost = estimate_cost_usd(ms.model_id, usage)
             return MemberOutput(
                 name=ms.name,
