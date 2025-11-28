@@ -12,6 +12,7 @@ import duckdb
 
 from horizon_scanner.horizon_scanner import main as hs_main
 from pythia.db import ensure_schema, get_db_url
+from pythia.tools.calibration_loop import maybe_run_calibration
 
 _pool = ThreadPoolExecutor(max_workers=1)
 
@@ -227,6 +228,22 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 )
             except Exception:
                 logging.exception("ui_runs: failed to record success for %s", ui_run_id)
+
+            # Auto-calibration is a best-effort, non-fatal step that may skip if
+            # eligibility criteria (e.g., resolved question count) are not met.
+            try:
+                logging.info(
+                    "Auto-calibration: checking eligibility for db_url=%s after ui_run_id=%s",
+                    db_url,
+                    ui_run_id,
+                )
+                maybe_run_calibration(db_url=db_url)
+                logging.info("Auto-calibration: completed (or skipped) successfully.")
+            except Exception:
+                logging.exception(
+                    "Auto-calibration: failed after ui_run_id=%s; leaving status=ok.",
+                    ui_run_id,
+                )
         except subprocess.CalledProcessError as e:
             logging.exception("Forecaster subprocess failed in pipeline: %s", e)
             try:
