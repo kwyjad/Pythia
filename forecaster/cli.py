@@ -155,6 +155,7 @@ from .providers import DEFAULT_ENSEMBLE, _get_or_client, llm_semaphore
 from .ensemble import (
     EnsembleResult,
     MemberOutput,
+    _normalize_spd_keys,
     run_ensemble_binary,
     run_ensemble_mcq,
     run_ensemble_numeric,

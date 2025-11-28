@@ -3,9 +3,10 @@ from __future__ import annotations
 """Quick, stable post-run diagnostics for Pythia pipeline outputs."""
 
 import argparse
+import os
 from typing import Iterable
 
-from resolver.db import duckdb_io
+import duckdb
 
 DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
 
@@ -65,11 +66,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Python post-run diagnostic script starting...")
 
-    conn = None
+    db_arg = args.db
+    db_path = db_arg[len("duckdb:///") :] if db_arg.startswith("duckdb:///") else db_arg
+    if not os.path.exists(db_path):
+        print(f"[warn] DuckDB database not found at {db_path}")
+        return 0
+
     try:
-        conn = duckdb_io.get_db(args.db)
+        conn = duckdb.connect(db_path, read_only=True)
     except Exception as exc:  # pragma: no cover - diagnostics only
-        print(f"[warn] Could not open DuckDB at {args.db}: {type(exc).__name__}: {exc}")
+        print(f"[warn] Could not open DuckDB at {db_path}: {type(exc).__name__}: {exc}")
         return 0
 
     try:
@@ -78,7 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         _print_count(conn, "questions")
         _print_forecast_breakdown(conn)
     finally:
-        duckdb_io.close_db(conn)
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     return 0
 

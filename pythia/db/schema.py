@@ -224,6 +224,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "ev_value": "DOUBLE",
                 "weights_profile": "TEXT",
                 "created_at": "TIMESTAMP",
+                "horizon_m": "INTEGER",
+                "class_bin": "TEXT",
+                "p": "DOUBLE",
             },
         )
 
