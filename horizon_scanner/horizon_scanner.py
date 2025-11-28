@@ -14,7 +14,6 @@ import re
 from datetime import datetime, date
 from pathlib import Path
 
-import duckdb
 import backoff
 import google.generativeai as genai
 
@@ -29,10 +28,9 @@ from horizon_scanner.db_writer import upsert_hs_payload
 from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
 
 from resolver.db import duckdb_io
-from pythia.db.init import init as init_db
 from pythia.prompts.registry import load_prompt_spec
-from pythia.config import load as load_cfg
 from pythia.llm_profiles import get_current_models, get_current_profile
+from pythia.db import ensure_schema, get_db_url, connect
 from pythia.db.util import write_llm_call
 from forecaster.providers import estimate_cost_usd
 
@@ -50,22 +48,6 @@ PROMPT_SPEC = load_prompt_spec(
     COUNTRY_ANALYSIS_PROMPT,
     str(CURRENT_DIR / "hs_prompt.py"),
 )
-
-
-def _hs_db_path() -> str | None:
-    """Return DuckDB file path from app.db_url, or None if missing."""
-    try:
-        cfg = load_cfg()
-        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
-        db_url = str(app_cfg.get("db_url", "")).strip()
-    except Exception:
-        db_url = ""
-    if not db_url:
-        # Fallback to legacy HS default
-        data_dir = REPO_ROOT / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        db_url = f"duckdb:///{data_dir / 'resolver.duckdb'}"
-    return db_url.replace("duckdb:///", "")
 
 # Load the Gemini API key from GitHub Secrets
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -123,10 +105,6 @@ def _log_hs_llm_call(
 
     Uses a rough token estimate if usage metadata is not available.
     """
-    db_path = _hs_db_path()
-    if not db_path:
-        return
-
     try:
         llm_profile = get_current_profile()
     except Exception:
@@ -148,7 +126,7 @@ def _log_hs_llm_call(
     cost = estimate_cost_usd(GEMINI_MODEL_NAME, usage)
 
     try:
-        conn = duckdb.connect(db_path)
+        conn = connect()
     except Exception:
         return
 
@@ -472,6 +450,13 @@ def main(countries: list[str] | None = None):
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
 
+    try:
+        ensure_schema()
+        logging.info("DuckDB schema ensured via ensure_schema().")
+    except Exception:
+        logging.exception("Failed to ensure DuckDB schema; aborting Horizon Scanner run.")
+        return
+
     if not countries:
         try:
             country_list_path = CURRENT_DIR / "hs_country_list.txt"
@@ -533,26 +518,11 @@ def main(countries: list[str] | None = None):
     summary_table, scenarios = parse_reports_and_build_table(all_reports_text)
 
     # --- Persist structured payloads to DuckDB ---
-    try:
-        cfg = load_cfg()
-        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
-        db_url = str(app_cfg.get("db_url", "")).strip()
-    except Exception:
-        db_url = ""
+    db_url = get_db_url()
+    db_path = db_url.replace("duckdb:///", "") if db_url.startswith("duckdb:///") else db_url
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    logging.info("Using app.db_url from config for DuckDB: %s", db_url)
 
-    if not db_url:
-        # Fallback to legacy default if config is missing or incomplete
-        data_dir = REPO_ROOT / "data"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        db_url = f"duckdb:///{data_dir / 'resolver.duckdb'}"
-        logging.info("No app.db_url found in config; falling back to %s", db_url)
-    else:
-        # Ensure directory exists for configured DuckDB path
-        db_path = db_url.replace("duckdb:///", "")
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        logging.info("Using app.db_url from config for DuckDB: %s", db_url)
-
-    init_db(db_url)
     run_meta = {
         "run_id": run_id,
         "started_at": start_time.isoformat(),

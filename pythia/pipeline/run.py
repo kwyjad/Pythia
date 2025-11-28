@@ -6,12 +6,12 @@ import os
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 
 import duckdb
 
-from pythia.db.init import init as init_db
-from pythia.config import load as load_cfg
 from horizon_scanner.horizon_scanner import main as hs_main
+from pythia.db import ensure_schema, get_db_url
 
 _pool = ThreadPoolExecutor(max_workers=1)
 
@@ -111,35 +111,26 @@ def _update_ui_run(
 
 def _pipeline(ui_run_id: str, countries: list[str]):
     """
-    End-to-end Pythia pipeline for a UI/API-triggered run.
+     End-to-end Pythia pipeline for a UI/API-triggered run.
 
-    Steps:
-      1) Ensure DuckDB schema exists (init_db).
-      2) Insert a ui_runs row with status 'running'.
-      3) Run Horizon Scanner to write scenarios + questions into DuckDB.
-         - If `countries` is empty, HS falls back to hs_country_list.txt.
-         - If non-empty, HS uses the provided list as country names.
-      4) Run Forecaster in Pythia mode to generate SPD ensemble forecasts
-         for all active questions in the `questions` table and write them
-         into `forecasts_ensemble`.
-      5) Update ui_runs.status to 'ok' or 'failed' with error message.
+     Steps:
+       1) Ensure DuckDB schema exists.
+       2) Insert a ui_runs row with status 'running'.
+       3) Run Horizon Scanner to write scenarios + questions into DuckDB.
+          - If `countries` is empty, HS falls back to hs_country_list.txt.
+          - If non-empty, HS uses the provided list as country names.
+       4) Run Forecaster in Pythia mode to generate SPD ensemble forecasts
+          for all active questions in the `questions` table and write them
+          into `forecasts_ensemble`.
+       5) Update ui_runs.status to 'ok' or 'failed' with error message.
 
     NOTE: This runs inside a ThreadPoolExecutor worker; any expensive I/O
     (Gemini, LLM calls) happens off the main API thread.
     """
-    try:
-        cfg = load_cfg()
-        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
-        db_url = str(app_cfg.get("db_url", "")).strip()
-    except Exception:
-        db_url = ""
-
-    if not db_url:
-        # Fallback consistent with Horizon Scanner's default
-        db_url = "duckdb:///data/resolver.duckdb"
-        logging.warning("app.db_url missing from config; falling back to %s", db_url)
-    else:
-        logging.info("Using app.db_url from config in pipeline: %s", db_url)
+    db_url = get_db_url()
+    db_path = db_url.replace("duckdb:///", "") if db_url.startswith("duckdb:///") else db_url
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    logging.info("Using DuckDB at %s for pipeline run.", db_url)
 
     # Initial ui_runs row: queued/running
     try:
@@ -161,25 +152,25 @@ def _pipeline(ui_run_id: str, countries: list[str]):
     try:
         # 1) Ensure DuckDB schema exists (idempotent)
         try:
-            init_db(db_url)
-            logging.info("DuckDB schema initialised via init_db(%s).", db_url)
+            ensure_schema()
+            logging.info("DuckDB schema ensured via ensure_schema().")
         except Exception as e:
-            logging.exception("init_db(%s) failed; aborting pipeline.", db_url)
+            logging.exception("ensure_schema() failed; aborting pipeline.")
             try:
                 _update_ui_run(
                     db_url,
                     ui_run_id,
                     finished_at=datetime.utcnow(),
                     status="failed",
-                    error=f"init_db_failed:{e!r}",
+                    error=f"ensure_schema_failed:{e!r}",
                 )
             except Exception:
-                logging.exception("ui_runs: failed to record init_db failure for %s", ui_run_id)
+                logging.exception("ui_runs: failed to record ensure_schema failure for %s", ui_run_id)
             return
 
         # 2) Run Horizon Scanner to write hs_runs, hs_scenarios, questions
         try:
-            # Horizon Scanner will also call init_db(db_url) internally and respect app.db_url.
+            # Horizon Scanner will also call ensure_schema() internally and respect app.db_url.
             # If `countries` is empty, we pass None so HS falls back to hs_country_list.txt.
             hs_countries = countries or None
             hs_main(hs_countries)
