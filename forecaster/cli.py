@@ -352,12 +352,12 @@ def _write_spd_ensemble_to_db(
     *,
     run_id: str,
     question_id: str,
-    iso3: str,
-    hazard_code: str,
-    metric: str,
     spd_main: Dict[str, List[float]],
-    ev_main: Optional[Dict[str, Any]],
-    weights_profile: str,
+    metric: str,
+    hazard_code: str,
+    iso3: str = "",
+    ev_main: Optional[Dict[str, Any]] = None,
+    weights_profile: str = "",
 ) -> None:
     """
     Persist SPD ensemble into forecasts_ensemble.
