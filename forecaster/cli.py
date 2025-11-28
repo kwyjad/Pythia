@@ -331,21 +331,44 @@ def _sanitize_markdown_chunks(chunks: List[Any]) -> List[str]:
     return sanitized
 
 
-def _pythia_db_url_from_config() -> str | None:
+def _pythia_db_url_from_config() -> str:
     """
-    Best-effort helper to read the Pythia DuckDB URL from config.
-    Returns a duckdb:/// URL or None.
+    Best-effort helper to read the Pythia DuckDB URL from config or env.
+
+    Priority:
+      1. pythia.db.schema.get_db_url (if available)
+      2. app.db_url from pythia.config
+      3. PYTHIA_DB_URL environment variable
+      4. default duckdb:///data/resolver.duckdb
+
+    This helper is intentionally kept for backward compatibility with tests
+    that monkeypatch it to point to a temporary DuckDB file.
     """
 
-    if _PYTHIA_CFG_LOAD is None:
-        return None
     try:
-        cfg = _PYTHIA_CFG_LOAD()
-        app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
-        db_url = str(app_cfg.get("db_url", "")).strip()
-        return db_url or None
+        from pythia.db.schema import get_db_url
+
+        url = get_db_url()
+        if url:
+            return url
     except Exception:
-        return None
+        pass
+
+    if _PYTHIA_CFG_LOAD is not None:
+        try:
+            cfg = _PYTHIA_CFG_LOAD()
+            app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
+            db_url = str(app_cfg.get("db_url", "")).strip()
+            if db_url:
+                return db_url
+        except Exception:
+            pass
+
+    env_url = os.getenv("PYTHIA_DB_URL", "").strip()
+    if env_url:
+        return env_url
+
+    return "duckdb:///data/resolver.duckdb"
 
 
 def _write_spd_ensemble_to_db(
@@ -379,8 +402,18 @@ def _write_spd_ensemble_to_db(
     spd_main = _normalize_spd_keys(spd_main, n_months=6, n_buckets=len(class_bins))
 
     try:
-        con = connect(read_only=False)
-        ensure_schema(con)
+        import duckdb
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[warn] duckdb is required to write SPD ensemble (question_id={question_id}): {type(exc).__name__}: {exc}"
+        )
+        return
+
+    db_url = _pythia_db_url_from_config()
+    db_path = db_url[len("duckdb:///") :] if db_url.startswith("duckdb:///") else db_url
+
+    try:
+        con = duckdb.connect(db_path)
     except Exception as exc:  # noqa: BLE001
         print(
             f"[warn] Failed to open DB for SPD ensemble write (question_id={question_id}): {type(exc).__name__}: {exc}"
@@ -391,8 +424,29 @@ def _write_spd_ensemble_to_db(
 
     try:
         con.execute(
-            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ?;",
-            [run_id, question_id],
+            """
+            CREATE TABLE IF NOT EXISTS forecasts_ensemble (
+                horizon_m INTEGER,
+                class_bin VARCHAR,
+                p DOUBLE,
+                run_id TEXT,
+                question_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                month_index INTEGER,
+                bucket_index INTEGER,
+                probability DOUBLE,
+                ev_value DOUBLE,
+                weights_profile TEXT,
+                created_at TIMESTAMP
+            );
+            """
+        )
+
+        con.execute(
+            "DELETE FROM forecasts_ensemble WHERE question_id = ? AND run_id = ?;",
+            [question_id, run_id],
         )
 
         for month_idx in range(1, 7):
@@ -408,10 +462,14 @@ def _write_spd_ensemble_to_db(
                     ev_val = None
 
             for bucket_idx, prob in enumerate(probs, start=1):
+                class_bin = class_bins[bucket_idx - 1] if 0 <= bucket_idx - 1 < len(class_bins) else str(bucket_idx)
                 try:
                     con.execute(
                         """
                         INSERT INTO forecasts_ensemble (
+                            horizon_m,
+                            class_bin,
+                            p,
                             run_id,
                             question_id,
                             iso3,
@@ -423,9 +481,12 @@ def _write_spd_ensemble_to_db(
                             ev_value,
                             weights_profile,
                             created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         [
+                            month_idx,
+                            class_bin,
+                            float(prob),
                             run_id,
                             question_id,
                             iso3,
@@ -434,7 +495,7 @@ def _write_spd_ensemble_to_db(
                             month_idx,
                             bucket_idx,
                             float(prob),
-                            ev_val if bucket_idx == 1 else None,
+                            ev_val if ev_val is not None and bucket_idx == 1 else None,
                             weights_profile,
                             now,
                         ],
