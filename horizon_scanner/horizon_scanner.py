@@ -14,6 +14,7 @@ import re
 import subprocess
 from datetime import datetime, date
 from pathlib import Path
+from typing import Any, Dict
 
 import backoff
 import google.generativeai as genai
@@ -32,11 +33,11 @@ from horizon_scanner.db_writer import (
     upsert_hs_payload,
 )
 from horizon_scanner.hs_prompt import COUNTRY_ANALYSIS_PROMPT
+from horizon_scanner.llm_logging import log_hs_llm_call
 
 from pythia.prompts.registry import load_prompt_spec
-from pythia.llm_profiles import get_current_models, get_current_profile
+from pythia.llm_profiles import get_current_models
 from pythia.db.schema import ensure_schema, connect
-from pythia.db.util import write_llm_call
 from forecaster.providers import estimate_cost_usd
 
 # --- Configuration ---
@@ -99,65 +100,52 @@ logging.info(
 )
 
 
-def _log_hs_llm_call(
-    country: str,
-    prompt: str,
-    report_text: str,
-    latency_ms: int,
-) -> None:
-    """
-    Best-effort logging of a single Horizon Scanner Gemini call into llm_calls.
+def _call_gemini_llm(prompt_text: str, **kwargs: Any) -> tuple[str, Dict[str, Any]]:
+    response = country_model.generate_content(prompt_text, **kwargs)
+    response_text = getattr(response, "text", "") or ""
 
-    Uses a rough token estimate if usage metadata is not available.
-    """
-    try:
-        llm_profile = get_current_profile()
-    except Exception:
-        llm_profile = None
+    usage_metadata = getattr(response, "usage_metadata", None)
+    usage: Dict[str, Any] = {}
+    if usage_metadata:
+        usage = {
+            "prompt_tokens": getattr(usage_metadata, "prompt_token_count", 0) or 0,
+            "completion_tokens": getattr(
+                usage_metadata, "candidates_token_count", 0
+            )
+            or 0,
+            "total_tokens": getattr(usage_metadata, "total_token_count", 0) or 0,
+        }
 
-    hs_run_id = os.getenv("PYTHIA_HS_RUN_ID")
-    ui_run_id = os.getenv("PYTHIA_UI_RUN_ID")
-    forecaster_run_id = None
+    if not usage or not any(usage.values()):
+        from forecaster.research import _rough_token_count
 
-    from forecaster.research import _rough_token_count
-
-    prompt_tokens = _rough_token_count(prompt)
-    completion_tokens = _rough_token_count(report_text)
-    usage = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }
-    cost = estimate_cost_usd(GEMINI_MODEL_NAME, usage)
-
-    try:
-        conn = connect()
-    except Exception:
-        return
-
-    try:
-        write_llm_call(
-            conn,
-            component="HS",
-            model=GEMINI_MODEL_NAME,
-            prompt_key=PROMPT_KEY,
-            version=PROMPT_VERSION,
-            usage=usage,
-            cost=cost,
-            latency_ms=latency_ms,
-            success=bool(report_text.strip()),
-            llm_profile=llm_profile,
-            hs_run_id=hs_run_id,
-            ui_run_id=ui_run_id,
-            forecaster_run_id=forecaster_run_id,
+        prompt_tokens = _rough_token_count(prompt_text)
+        completion_tokens = _rough_token_count(response_text)
+        usage.update(
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
         )
-    except Exception:
-        pass
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+
+    usage["cost_usd"] = estimate_cost_usd(GEMINI_MODEL_NAME, usage)
+    return response_text, usage
+
+
+def _call_hs_llm_for_country(*, hs_run_id: str, prompt: str) -> str:
+    return log_hs_llm_call(
+        hs_run_id=hs_run_id,
+        call_type="hs_generation",
+        model_name=GEMINI_MODEL_NAME,
+        provider="google",
+        model_id=GEMINI_MODEL_NAME,
+        prompt_text=prompt,
+        low_level_call=_call_gemini_llm,
+        low_level_kwargs={},
+        run_id=None,
+        question_id=None,
+    )
 
 # --- Main Functions ---
 
@@ -175,9 +163,11 @@ def generate_report_for_country(country: str) -> str | None:
     prompt = COUNTRY_ANALYSIS_PROMPT.replace("{country}", country)
     logging.info("Prompt length for %s: %d characters", country, len(prompt))
 
+    hs_run_id = os.getenv("PYTHIA_HS_RUN_ID", "")
+
     # Call Gemini
     t0 = time.time()
-    response = country_model.generate_content(prompt)
+    report_text = _call_hs_llm_for_country(hs_run_id=hs_run_id, prompt=prompt)
     latency_ms = int((time.time() - t0) * 1000)
 
     logging.info(
@@ -186,12 +176,6 @@ def generate_report_for_country(country: str) -> str | None:
         GEMINI_MODEL_NAME,
         latency_ms,
     )
-    report_text = getattr(response, "text", "") or ""
-
-    try:
-        _log_hs_llm_call(country, prompt, report_text, latency_ms)
-    except Exception:
-        logging.exception("Failed to log HS LLM call for %s", country)
     logging.info("Received report for %s: %d characters", country, len(report_text))
 
     cleaned_text = report_text.strip()
