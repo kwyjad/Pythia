@@ -38,6 +38,7 @@ import inspect
 import numpy as np
 
 from pathlib import Path
+from pythia.db import ensure_schema
 
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
@@ -2398,6 +2399,7 @@ def main() -> None:
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
     try:
+        ensure_schema()
         asyncio.run(
             run_job(
                 mode=args.mode,
