@@ -68,12 +68,12 @@ _GEMINI_MODEL_DEFAULT = _PROFILE_MODELS.get("google") or _GEMINI_MODEL_ENV or "g
 
 
 def _select_gemini_model() -> str:
+    if _GEMINI_MODEL_DEFAULT:
+        return str(_GEMINI_MODEL_DEFAULT).strip()
     if _GEMINI_MODEL_ENV:
         return str(_GEMINI_MODEL_ENV).strip()
     if _PROFILE_MODELS.get("google"):
         return str(_PROFILE_MODELS.get("google") or "").strip()
-    if _GEMINI_MODEL_DEFAULT:
-        return str(_GEMINI_MODEL_DEFAULT).strip()
     return "gemini-2.5-pro"
 
 
@@ -547,15 +547,23 @@ def _rank_and_filter_items(items: List[Dict[str, Any]], anchors: Dict[str, List[
 # COMPOSE THE RESEARCH BRIEF (Gemini only for research)
 # =============================================================================
 
-async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict, dict]:
+async def _compose_research_via_gemini(prompt_text: str, *, model: str | None = None) -> tuple[str, str, dict, dict, str]:
     """
-    Returns (text, used_model_id, usage_dict, request_body).
+    Returns (text, used_model_id, usage_dict, request_body, resolved_model).
     Never references undefined 'body'; always returns a body dict.
     
     Also logs a best-effort cost/usage row to llm_calls with component="Researcher".
     """
     api_key = _gemini_api_key()
-    model = _select_gemini_model()
+    if model is None:
+        if _GEMINI_MODEL_DEFAULT:
+            model = _GEMINI_MODEL_DEFAULT
+        elif _GEMINI_MODEL_ENV:
+            model = _GEMINI_MODEL_ENV.strip()
+        else:
+            model = "gemini-2.5-pro"
+    model = str(model).strip()
+    used_llm = f"google/{model}"
 
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
@@ -564,7 +572,7 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
 
     if not api_key:
         _set_research_error("no GEMINI_API_KEY (or GOOGLE_API_KEY) for research composition")
-        return "", "", {}, body
+        return "", used_llm, {}, body, model
 
     t0 = time.time()
     try:
@@ -583,7 +591,7 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
             except Exception:
                 msg = (resp.text or "")[:200]
             _set_research_error(f"compose HTTP {resp.status_code}: {msg}")
-            return "", "", {}, body
+            return "", used_llm, {}, body, model
 
         data = resp.json()
         texts = []
@@ -610,12 +618,11 @@ async def _compose_research_via_gemini(prompt_text: str) -> tuple[str, str, dict
             "total_tokens": int(prompt_tokens or 0) + int(completion_tokens or 0),
         }
 
-        used_model_id = f"google/{model}"
-        return composed_text, used_model_id, usage, body
+        return composed_text, used_llm, usage, body, model
 
     except Exception as e:
         _set_research_error(f"compose request error: {e!r}")
-        return "", "", {}, body
+        return "", used_llm, {}, body, model
 
 # =============================================================================
 # UTIL: format sources for prompt/log
@@ -761,13 +768,17 @@ async def run_research_async(
 
     # 5) LLM compose (Gemini only for research)
     req_body: Dict[str, Any] = {}
-    used_llm: str = f"google/{_select_gemini_model()}"
+    research_model = _select_gemini_model()
+    used_llm: str = f"google/{research_model}"
 
     async def _call_llm(prompt_text: str, **kwargs) -> tuple[str, Dict[str, Any]]:
-        nonlocal req_body, used_llm
-        text, model_id, usage, body = await _compose_research_via_gemini(prompt_text)
+        nonlocal req_body, used_llm, research_model
+        text, model_id, usage, body, resolved_model = await _compose_research_via_gemini(
+            prompt_text, model=research_model
+        )
         req_body = body
         used_llm = model_id or used_llm
+        research_model = resolved_model or research_model
         usage = usage or {}
         try:
             usage = dict(usage)
@@ -782,12 +793,12 @@ async def run_research_async(
         question_id=question_id,
         model_name=used_llm,
         provider="google",
-        model_id=used_llm,
+        model_id=research_model,
         prompt_text=prompt,
         low_level_call=_call_llm,
     )
     if not used_llm:
-        used_llm = f"google/{_select_gemini_model()}"
+        used_llm = f"google/{research_model}"
     if not llm_text.strip():
         if picked:
             llm_text = "\n".join([f"- {it.get('title','')} ({it.get('url','')})" for it in picked])
@@ -822,7 +833,7 @@ async def run_research_async(
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         }
-    research_cost_usd = estimate_cost_usd(used_llm or f"google/{_select_gemini_model()}", research_usage)
+    research_cost_usd = estimate_cost_usd(used_llm or f"google/{research_model}", research_usage)
 
     # 6) Final text for the human log: brief + source list (+ optional pre-filter dump)
     parts = [_CAL_PREFIX + llm_text]
@@ -839,7 +850,8 @@ async def run_research_async(
         cache_blob = json.dumps({
             "final_text": final_text,
             "meta": {
-                "research_llm": used_llm or f"google/{_select_gemini_model()}",
+                "research_llm": used_llm or f"google/{research_model}",
+                "research_model_id": research_model,
                 "research_source": source_tag,
                 "research_query": query_used,
                 "research_n_raw": int(len(raw_items)),
@@ -859,7 +871,8 @@ async def run_research_async(
 
     # 8) meta (mirror cached structure)
     meta = {
-        "research_llm": used_llm or f"google/{_select_gemini_model()}",
+        "research_llm": used_llm or f"google/{research_model}",
+        "research_model_id": research_model,
         "research_source": source_tag,
         "research_query": query_used,
         "research_n_raw": int(len(raw_items)),
