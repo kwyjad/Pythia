@@ -56,7 +56,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p data
-          
+
           echo "Downloading pythia-resolver-db for run $BACKFILL_RUN_ID ..."
           gh run download "$BACKFILL_RUN_ID" -n pythia-resolver-db --dir data
 
