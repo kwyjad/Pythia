@@ -21,7 +21,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: resolver-pipeline-monthly
+  group: pythia-resolver-db
   cancel-in-progress: false
 
 jobs:
@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 75
     env:
       PYTHONUNBUFFERED: "1"
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       RESOLVER_INGESTION_MODE: real
       RESOLVER_INCLUDE_STUBS: "0"
       RESOLVER_FAIL_ON_STUB_ERROR: "0"
@@ -110,8 +111,21 @@ jobs:
           set -euo pipefail
           rm -rf resolver/staging resolver/exports context
           rm -rf "resolver/snapshots/${SNAPSHOT_TARGET_YM}"
-          rm -f data/resolver.duckdb
           mkdir -p resolver/logs/ingestion .ci/diagnostics .ci/exitcodes data
+
+      - name: Download canonical resolver DB
+        uses: actions/download-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data
+        continue-on-error: true
+
+      - name: Check canonical DB presence
+        run: |
+          ls -R data || true
+          if [ ! -f data/resolver.duckdb ]; then
+            echo "WARNING: data/resolver.duckdb not found; this monthly run will create a new DB."
+          fi
 
       - name: Configure connector skips
         run: |
@@ -248,7 +262,7 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          SNAPSHOT_CMD="python -m resolver.cli.snapshot_cli make-monthly --ym \"${SNAPSHOT_TARGET_YM}\" --staging resolver/staging --exports-dir \"resolver/exports/${SNAPSHOT_TARGET_YM}\" --outdir resolver/snapshots --write-db 1 --db-url data/resolver.duckdb --overwrite"
+          SNAPSHOT_CMD="python -m resolver.cli.snapshot_cli make-monthly --ym \"${SNAPSHOT_TARGET_YM}\" --staging resolver/staging --exports-dir \"resolver/exports/${SNAPSHOT_TARGET_YM}\" --outdir resolver/snapshots --write-db 1 --db-url ${RESOLVER_DB_URL} --overwrite"
           scripts/ci/run_and_capture.sh snapshot "$SNAPSHOT_CMD"
 
       - name: Build LLM context bundle
@@ -284,6 +298,13 @@ jobs:
           path: |
             .ci/diagnostics
             .ci/exitcodes
+
+      - name: Upload canonical resolver DB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
 
       - name: Publish GitHub release
         env:
