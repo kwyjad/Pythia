@@ -349,6 +349,23 @@ async def run_ensemble_spd(
 
             usage = usage or {}
 
+            try:
+                parsed = parsed_for_log if isinstance(parsed_for_log, dict) else _parse_spd_json(
+                    response_text, n_months=6, n_buckets=5
+                )
+                if parsed is not None:
+                    parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
+                ok = isinstance(parsed, dict) and bool(parsed)
+                if not ok:
+                    parsed = {} if not isinstance(parsed, dict) else parsed or {}
+            except Exception as exc:
+                parsed = {}
+                ok = False
+                if not err_text:
+                    err_text = f"{type(exc).__name__}: {exc}"
+
+            err_field = err_text if err_text else ("" if ok else "parse_error")
+
             elapsed_ms = int((usage.get("elapsed_ms") or 0))
             if elapsed_ms <= 0:
                 elapsed_ms = int((time.time() - t0) * 1000)
@@ -362,19 +379,6 @@ async def run_ensemble_spd(
                     cost = float(estimate_cost_usd(ms.model_id, usage))
                 except Exception:
                     cost = 0.0
-
-            try:
-                parsed = parsed_for_log if isinstance(parsed_for_log, dict) else None
-                ok = bool(parsed)
-                if parsed is None:
-                    parsed = {}
-            except Exception as exc:
-                parsed = {}
-                ok = False
-                if not err_text:
-                    err_text = f"{type(exc).__name__}: {exc}"
-
-            err_field = err_text if err_text else ("" if ok else "parse_error")
             return MemberOutput(
                 name=ms.name,
                 ok=ok,
