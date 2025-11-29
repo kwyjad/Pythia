@@ -313,16 +313,24 @@ async def run_ensemble_spd(
                 nonlocal parsed_for_log, err_text
                 text, usage, err = await call_chat_ms(ms, p, **kwargs)
                 err_text = err or ""
-                usage = usage or {}
                 try:
-                    usage = dict(usage)
+                    usage = dict(usage or {})
+                except Exception:
+                    usage = {}
+                try:
                     usage["cost_usd"] = estimate_cost_usd(ms.model_id, usage)
                 except Exception:
                     pass
-                parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
-                if parsed is not None:
-                    parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
-                parsed_for_log = parsed
+
+                try:
+                    parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
+                    if parsed is not None:
+                        parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
+                    parsed_for_log = parsed
+                except Exception as exc:
+                    parsed_for_log = None
+                    if not err_text:
+                        err_text = f"{type(exc).__name__}: {exc}"
                 return text, usage
 
             t0 = time.time()
@@ -339,19 +347,44 @@ async def run_ensemble_spd(
                 parsed_json=lambda: parsed_for_log,
             )
 
-            ok = parsed_for_log is not None
-            parsed = parsed_for_log if parsed_for_log is not None else {}
-            cost = estimate_cost_usd(ms.model_id, usage)
+            usage = usage or {}
+
+            elapsed_ms = int((usage.get("elapsed_ms") or 0))
+            if elapsed_ms <= 0:
+                elapsed_ms = int((time.time() - t0) * 1000)
+
+            prompt_tokens = int((usage.get("prompt_tokens") or 0))
+            completion_tokens = int((usage.get("completion_tokens") or 0))
+            total_tokens = int((usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0))
+            cost = float((usage.get("cost_usd") or 0.0))
+            if cost == 0.0:
+                try:
+                    cost = float(estimate_cost_usd(ms.model_id, usage))
+                except Exception:
+                    cost = 0.0
+
+            try:
+                parsed = parsed_for_log if isinstance(parsed_for_log, dict) else None
+                ok = bool(parsed)
+                if parsed is None:
+                    parsed = {}
+            except Exception as exc:
+                parsed = {}
+                ok = False
+                if not err_text:
+                    err_text = f"{type(exc).__name__}: {exc}"
+
+            err_field = err_text if err_text else ("" if ok else "parse_error")
             return MemberOutput(
                 name=ms.name,
                 ok=ok,
                 parsed=parsed,
                 raw_text=response_text,
-                error=err_text if err_text else ("parse_error" if not ok else ""),
-                elapsed_ms=int((time.time() - t0) * 1000),
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                total_tokens=usage.get("total_tokens", 0),
+                error=err_field,
+                elapsed_ms=elapsed_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 cost_usd=cost,
             )
 
