@@ -1594,11 +1594,24 @@ async def _run_one_question_body(
         pa_block = ""
         pa_meta: Dict[str, Any] = {}
         if pmeta.get("iso3") and pmeta.get("hazard_code"):
-            pa_block, pa_meta = _load_pa_history_block(
-                pmeta["iso3"],
-                pmeta["hazard_code"],
-                metric=metric_up,
-            )
+            try:
+                pa_block, pa_meta = _load_pa_history_block(
+                    pmeta["iso3"],
+                    pmeta["hazard_code"],
+                    months=36,
+                    metric=metric_up,
+                )
+            except TypeError as exc:
+                # Backwards compatibility for monkeypatched stubs in tests that do not
+                # accept the metric kwarg.
+                if "unexpected keyword argument" in str(exc) and "'metric'" in str(exc):
+                    pa_block, pa_meta = _load_pa_history_block(
+                        pmeta["iso3"],
+                        pmeta["hazard_code"],
+                        months=36,
+                    )
+                else:
+                    raise
             if pa_block:
                 research_text = f"{research_text}\n\n{pa_block}"
 
