@@ -232,13 +232,9 @@ def _pipeline(ui_run_id: str, countries: list[str]):
             # Auto-calibration is a best-effort, non-fatal step that may skip if
             # eligibility criteria (e.g., resolved question count) are not met.
             try:
-                logging.info(
-                    "Auto-calibration: checking eligibility for db_url=%s after ui_run_id=%s",
-                    db_url,
-                    ui_run_id,
-                )
+                logging.info("Auto-calibration: checking for eligible groups...")
                 maybe_run_calibration(db_url=db_url)
-                logging.info("Auto-calibration: completed (or skipped) successfully.")
+                logging.info("Auto-calibration: completed (see calibration logs above).")
             except Exception:
                 logging.exception(
                     "Auto-calibration: failed after ui_run_id=%s; leaving status=ok.",
