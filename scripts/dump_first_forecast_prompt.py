@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import duckdb
 from resolver.db import duckdb_io
 
 try:
@@ -303,16 +304,22 @@ def _load_bucket_centroids(con, hazard_code: str, metric: str) -> List[float]:
 
     hz = (hazard_code or "").upper()
     m = (metric or "").upper()
-    rows = con.execute(
-        """
-        SELECT bucket_index, centroid
-        FROM bucket_centroids
-        WHERE upper(hazard_code) = ?
-          AND upper(metric) = ?
-        ORDER BY bucket_index
-        """,
-        [hz, m],
-    ).fetchall()
+
+    try:
+        rows = con.execute(
+            """
+            SELECT bucket_index, centroid
+            FROM bucket_centroids
+            WHERE upper(hazard_code) = ?
+              AND upper(metric) = ?
+            ORDER BY bucket_index
+            """,
+            [hz, m],
+        ).fetchall()
+    except duckdb.CatalogException:
+        return []
+    except Exception:
+        return []
 
     if not rows:
         return []
