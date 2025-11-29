@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from resolver.db import duckdb_io
 
@@ -52,8 +52,36 @@ def _get_latest_forecast_run_id(con) -> Optional[str]:
     return row[0] if row else None
 
 
-def _get_first_forecast_call_for_run(con, run_id: str) -> Optional[Dict[str, Any]]:
-    """Return the first forecast call (chronologically) for a given run_id."""
+def _get_question_types_for_run(con, run_id: str) -> Dict[Tuple[str, str], str]:
+    """Map (hazard_code, metric) to one representative question_id for the run."""
+
+    rows = con.execute(
+        """
+        SELECT DISTINCT
+            q.hazard_code,
+            q.metric,
+            q.question_id
+        FROM forecasts_ensemble fe
+        JOIN questions q
+          ON fe.question_id = q.question_id
+        WHERE fe.run_id = ?
+        ORDER BY q.hazard_code, q.metric, q.question_id
+        """,
+        [run_id],
+    ).fetchall()
+
+    mapping: Dict[Tuple[str, str], str] = {}
+    for hz, metric, qid in rows:
+        key = ((hz or "").upper(), (metric or "").upper())
+        if key not in mapping:
+            mapping[key] = str(qid)
+    return mapping
+
+
+def _get_first_forecast_call_for_question(
+    con, run_id: str, question_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return the first forecast call (chronologically) for a given question in a run."""
 
     cols = [
         "call_id",
@@ -87,11 +115,12 @@ def _get_first_forecast_call_for_run(con, run_id: str) -> Optional[Dict[str, Any
                timestamp
         FROM llm_calls
         WHERE run_id = ?
+          AND question_id = ?
           AND call_type = 'forecast'
         ORDER BY timestamp
         LIMIT 1
         """,
-        [run_id],
+        [run_id, question_id],
     ).fetchone()
 
     if not row:
@@ -266,121 +295,150 @@ def main() -> None:
             return
         print(f"[info] Using latest forecast run_id={run_id}")
 
-        fc = _get_first_forecast_call_for_run(con, run_id)
-        if not fc:
-            _write_placeholder(f"[warn] No forecast calls for run_id={run_id}; nothing to dump.")
+        qtype_map = _get_question_types_for_run(con, run_id)
+        if not qtype_map:
+            _write_placeholder(f"[warn] No forecast entries linked to questions for run_id={run_id}.")
             return
 
-        question_id = str(fc["question_id"])
-        research_calls = _get_research_calls_for_question(con, run_id, question_id)
-        qmeta = _get_question_metadata(con, question_id)
-        qctx = _get_question_context(con, run_id, question_id)
+        lines: List[str] = []
+
+        lines.append("# Pythia Forecast Prompts Debug (by question type)")
+        lines.append("")
+        lines.append(f"- **run_id:** `{run_id}`")
+        type_labels = [f"{hz}/{metric}" for hz, metric in sorted(qtype_map.keys())]
+        lines.append(f"- **question types covered:** {', '.join(type_labels)}")
+        lines.append("")
+
+        for hz_metric in sorted(qtype_map.keys()):
+            hz, metric = hz_metric
+            question_id = qtype_map[hz_metric]
+            lines.append(f"## Type: {hz}/{metric} — question_id `{question_id}`")
+            lines.append("")
+
+            fc = _get_first_forecast_call_for_question(con, run_id, question_id)
+            research_calls = _get_research_calls_for_question(con, run_id, question_id)
+            qmeta = _get_question_metadata(con, question_id)
+            qctx = _get_question_context(con, run_id, question_id)
+
+            if not fc:
+                lines.append(f"_No forecast calls found for question `{question_id}` in this run._")
+                lines.append("")
+                continue
+
+            lines.append("### Run / Question")
+            lines.append("")
+            lines.append(f"- **run_id:** `{run_id}`")
+            lines.append(f"- **question_id:** `{question_id}`")
+            lines.append(
+                f"- **model:** `{fc['provider']}/{fc['model_id']}` (`{fc['model_name']}`)"
+            )
+
+            if qmeta:
+                lines.append(f"- **iso3:** `{(qmeta.get('iso3') or '').upper()}`")
+                lines.append(f"- **hazard_code:** `{qmeta.get('hazard_code') or ''}`")
+                lines.append(f"- **metric:** `{qmeta.get('metric') or ''}`")
+                lines.append(f"- **target_month:** `{qmeta.get('target_month') or ''}`")
+                ws = qmeta.get("window_start_date") or ""
+                we = qmeta.get("window_end_date") or ""
+                if ws or we:
+                    lines.append(f"- **window:** `{ws}` → `{we}`")
+                if qmeta.get("wording"):
+                    lines.append("")
+                    lines.append("#### Question wording")
+                    lines.append("")
+                    lines.append(str(qmeta["wording"]))
+
+            lines.append("")
+            lines.append("### Research Calls")
+            lines.append("")
+
+            if research_calls:
+                for idx, rc in enumerate(research_calls, start=1):
+                    lines.append(f"#### Research call {idx}")
+                    lines.append("")
+                    lines.append(
+                        f"- **model:** `{rc['provider']}/{rc['model_id']}` (`{rc['model_name']}`)"
+                    )
+                    lines.append(f"- **usage:** {_fmt_tokens_and_cost(rc)}")
+                    lines.append("")
+                    lines.append("##### Research prompt (truncated)")
+                    lines.append("")
+                    lines.append("```text")
+                    lines.append(_truncate(rc.get("prompt_text") or "", 2000))
+                    lines.append("```")
+                    lines.append("")
+                    lines.append("##### Research response (truncated)")
+                    lines.append("")
+                    lines.append("```text")
+                    lines.append(_truncate(rc.get("response_text") or "", 2000))
+                    lines.append("```")
+                    lines.append("")
+            else:
+                lines.append("_No research calls recorded for this question/run._")
+                lines.append("")
+
+            lines.append("### Resolver 36-month Snapshot")
+            lines.append("")
+
+            if qctx:
+                lines.append(
+                    f"- **snapshot:** `{qctx.get('snapshot_start_month','')}` → "
+                    f"`{qctx.get('snapshot_end_month','')}`"
+                )
+                history = qctx.get("pa_history") or []
+                if history:
+                    lines.append("")
+                    lines.append("| Month | PA | Source |")
+                    lines.append("|---|---:|---|")
+                    for h in sorted(history, key=lambda item: str(item.get("ym") or "")):
+                        ym = h.get("ym") or ""
+                        val = h.get("value") or ""
+                        source = h.get("source") or ""
+                        lines.append(f"| {ym} | {val} | {source} |")
+                    lines.append("")
+                else:
+                    lines.append("_No PA history found._")
+                    lines.append("")
+
+                ctx_extra = qctx.get("context") or {}
+                fatality_history = ctx_extra.get("fatalities_history") if isinstance(ctx_extra, dict) else []
+                if fatality_history:
+                    lines.append("#### Fatalities history (Resolver)")
+                    lines.append("")
+                    lines.append("| Month | Fatalities | Source |")
+                    lines.append("|---|---:|---|")
+                    for h in sorted(fatality_history, key=lambda item: str(item.get("ym") or "")):
+                        ym = h.get("ym") or ""
+                        val = h.get("value") or ""
+                        source = h.get("source") or ""
+                        lines.append(f"| {ym} | {val} | {source} |")
+                    lines.append("")
+
+                if ctx_extra:
+                    lines.append("#### Resolver context JSON")
+                    lines.append("")
+                    lines.append("```json")
+                    try:
+                        lines.append(json.dumps(ctx_extra, indent=2, ensure_ascii=False))
+                    except Exception:
+                        lines.append(str(ctx_extra))
+                    lines.append("```")
+                    lines.append("")
+            else:
+                lines.append("_No Resolver context found for this question/run._")
+                lines.append("")
+
+            lines.append("### Forecast Prompt Text (Full)")
+            lines.append("")
+            lines.append("```text")
+            lines.append(fc.get("prompt_text") or "")
+            lines.append("```")
+            lines.append("")
+
+        OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
+        print(f"[info] Wrote forecast prompt markdown to {OUT_PATH}")
     finally:
         duckdb_io.close_db(con)
-
-    lines: List[str] = []
-
-    lines.append("# Pythia Forecast Prompt Debug")
-    lines.append("")
-    lines.append("## Run / Question")
-    lines.append("")
-    lines.append(f"- **run_id:** `{run_id}`")
-    lines.append(f"- **question_id:** `{question_id}`")
-    lines.append(
-        f"- **model:** `{fc['provider']}/{fc['model_id']}` (`{fc['model_name']}`)"
-    )
-
-    if qmeta:
-        lines.append(f"- **iso3:** `{(qmeta.get('iso3') or '').upper()}`")
-        lines.append(f"- **hazard_code:** `{qmeta.get('hazard_code') or ''}`")
-        lines.append(f"- **metric:** `{qmeta.get('metric') or ''}`")
-        lines.append(f"- **target_month:** `{qmeta.get('target_month') or ''}`")
-        ws = qmeta.get("window_start_date") or ""
-        we = qmeta.get("window_end_date") or ""
-        if ws or we:
-            lines.append(f"- **window:** `{ws}` → `{we}`")
-        if qmeta.get("wording"):
-            lines.append("")
-            lines.append("### Question wording")
-            lines.append("")
-            lines.append(str(qmeta["wording"]))
-
-    lines.append("")
-    lines.append("## Research Calls")
-    lines.append("")
-
-    if research_calls:
-        for idx, rc in enumerate(research_calls, start=1):
-            lines.append(f"### Research call {idx}")
-            lines.append("")
-            lines.append(
-                f"- **model:** `{rc['provider']}/{rc['model_id']}` (`{rc['model_name']}`)"
-            )
-            lines.append(f"- **usage:** {_fmt_tokens_and_cost(rc)}")
-            lines.append("")
-            lines.append("#### Research prompt (truncated)")
-            lines.append("")
-            lines.append("```text")
-            lines.append(_truncate(rc.get("prompt_text") or "", 2000))
-            lines.append("```")
-            lines.append("")
-            lines.append("#### Research response (truncated)")
-            lines.append("")
-            lines.append("```text")
-            lines.append(_truncate(rc.get("response_text") or "", 2000))
-            lines.append("```")
-            lines.append("")
-    else:
-        lines.append("_No research calls recorded for this question/run._")
-        lines.append("")
-
-    lines.append("## Resolver 36-month Snapshot")
-    lines.append("")
-
-    if qctx:
-        lines.append(
-            f"- **snapshot:** `{qctx.get('snapshot_start_month','')}` → "
-            f"`{qctx.get('snapshot_end_month','')}`"
-        )
-        history = qctx.get("pa_history") or []
-        if history:
-            lines.append("")
-            lines.append("| Month | PA | Source |")
-            lines.append("|---|---:|---|")
-            for h in sorted(history, key=lambda item: str(item.get("ym") or "")):
-                ym = h.get("ym") or ""
-                val = h.get("value") or ""
-                source = h.get("source") or ""
-                lines.append(f"| {ym} | {val} | {source} |")
-            lines.append("")
-        else:
-            lines.append("_No PA history found._")
-            lines.append("")
-
-        ctx_extra = qctx.get("context") or {}
-        if ctx_extra:
-            lines.append("### Resolver context JSON")
-            lines.append("")
-            lines.append("```json")
-            try:
-                lines.append(json.dumps(ctx_extra, indent=2, ensure_ascii=False))
-            except Exception:
-                lines.append(str(ctx_extra))
-            lines.append("```")
-            lines.append("")
-    else:
-        lines.append("_No Resolver context found for this question/run._")
-        lines.append("")
-
-    lines.append("## Forecast Prompt Text (Full)")
-    lines.append("")
-    lines.append("```text")
-    lines.append(fc.get("prompt_text") or "")
-    lines.append("```")
-    lines.append("")
-
-    OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
-    print(f"[info] Wrote first forecast prompt markdown to {OUT_PATH}")
 
 
 if __name__ == "__main__":
