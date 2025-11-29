@@ -24,18 +24,63 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Download canonical resolver DB
-        uses: actions/download-artifact@v4
-        with:
-          name: pythia-resolver-db
-          path: data
-        continue-on-error: true
-
-      - name: Check canonical DB presence
+      - name: Install gh CLI
         run: |
-          ls -R data || true
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Authenticate gh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+
+      - name: Find latest successful Resolver — Initial Backfill run
+        id: find_backfill_run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID=$(gh run list \
+            --workflow "Resolver — Initial Backfill" \
+            --branch main \
+            --status success \
+            --json databaseId \
+            --limit 1 \
+            --jq '.[0].databaseId' || true)
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful backfill run found; HS will run with a fresh DB."
+          else
+            echo "Latest backfill run ID: $RUN_ID"
+            echo "BACKFILL_RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download canonical resolver DB (from latest backfill)
+        if: env.BACKFILL_RUN_ID != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+
+          echo "Downloading pythia-resolver-db from run $BACKFILL_RUN_ID ..."
+          gh run download "$BACKFILL_RUN_ID" -n pythia-resolver-db --dir data
+
+          echo "Downloaded artifacts:"
+          ls -R data
+
+          # Canonical layout: data/pythia-resolver-db/resolver.duckdb
+          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+            cp data/pythia-resolver-db/resolver.duckdb data/resolver.duckdb
+          else
+            FILE_PATH=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+            if [ -n "$FILE_PATH" ]; then
+              cp "$FILE_PATH" data/resolver.duckdb
+            fi
+          fi
+
           if [ ! -f data/resolver.duckdb ]; then
-            echo "WARNING: data/resolver.duckdb not found; HS will run on a fresh DB."
+            echo "WARNING: resolver.duckdb not found in pythia-resolver-db; HS will run on a fresh DB."
+          else
+            echo "Using canonical DB at data/resolver.duckdb"
           fi
 
       # Step 2: Set up Python

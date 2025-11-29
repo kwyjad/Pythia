@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       backfill_run_id:
-        description: "Run ID of the Resolver backfill workflow (the run that produced resolver_backfill.duckdb)"
+        description: "Run ID of the Resolver backfill workflow (the run that produced pythia-resolver-db/resolver.duckdb)"
         required: true
         type: string
 
@@ -51,33 +51,31 @@ jobs:
             echo "Using dispatch input backfill_run_id=${DISPATCH_RUN_ID}"
           fi
 
-      - name: Download resolver_backfill.duckdb artifact from backfill run
+      - name: Download canonical resolver DB from backfill run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p data
-          # Download all artifacts for the specified run into data/
-          echo "Downloading artifacts for run $BACKFILL_RUN_ID ..."
-          gh run download "$BACKFILL_RUN_ID" --dir data
+          
+          echo "Downloading pythia-resolver-db for run $BACKFILL_RUN_ID ..."
+          gh run download "$BACKFILL_RUN_ID" -n pythia-resolver-db --dir data
 
-          echo "Downloaded artifacts into data/:"
+          echo "Artifacts downloaded under data/:"
           ls -R data
 
-          # If your artifact is a single file named resolver_backfill.duckdb in data/,
-          # rename it to data/resolver.duckdb.
-          # If it ends up inside a subdirectory, adjust the mv accordingly.
-          if [ -f data/resolver_backfill.duckdb ]; then
-            mv data/resolver_backfill.duckdb data/resolver.duckdb
+          # Canonical layout: data/pythia-resolver-db/resolver.duckdb
+          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+            cp data/pythia-resolver-db/resolver.duckdb data/resolver.duckdb
           else
-            # Try to find it under subdirectories
-            FILE_PATH=$(find data -maxdepth 3 -type f -name "resolver_backfill.duckdb" | head -n 1 || true)
+            # Fallback: search any resolver.duckdb
+            FILE_PATH=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
             if [ -n "$FILE_PATH" ]; then
-              mv "$FILE_PATH" data/resolver.duckdb
+              cp "$FILE_PATH" data/resolver.duckdb
             fi
           fi
 
           if [ ! -f data/resolver.duckdb ]; then
-            echo "resolver_backfill.duckdb not found in artifacts; please adjust the mv logic."
+            echo "ERROR: resolver.duckdb not found in pythia-resolver-db for run $BACKFILL_RUN_ID"
             ls -R data
             exit 1
           fi
