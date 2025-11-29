@@ -702,64 +702,59 @@ def _count_spd_rows(run_id: str, question_id: str) -> tuple[int, int]:
             pass
 
 
-def _load_pa_history_block(
+def _load_emdat_pa_history(
     iso3: str,
     hazard_code: str,
     *,
     months: int = 36,
 ) -> tuple[str, Dict[str, Any]]:
-    """
-    Best-effort PA history block for the research bundle.
+    """Return EM-DAT PA history for the iso3 + hazard combination."""
 
-    Reads up to `months` rows from `facts_resolved` for the given iso3 + hazard_code
-    where metric is PA-like (affected). Returns (markdown_block, meta_dict).
-
-    On any error or if no rows are found, returns ("", {"pa_history_error": "reason"}).
-    """
     import duckdb
 
-    iso3 = (iso3 or "").upper().strip()
-    hz = (hazard_code or "").upper().strip()
-    hz_query = HZ_QUERY_MAP.get(hz, hz)
-    if not iso3 or not hz:
-        return "", {"pa_history_error": "missing_iso3_or_hazard", "error": "missing_iso3_or_hazard"}
+    iso3_norm = (iso3 or "").upper().strip()
+    hz_norm = (hazard_code or "").upper().strip()
+    if not iso3_norm or not hz_norm:
+        return "", {
+            "error": "missing_iso3_or_hazard",
+            "history_rows_detail": [],
+        }
+
+    shock_map = {
+        "FL": "flood",
+        "DR": "drought",
+        "TC": "tropical_cyclone",
+        "HW": "heat_wave",
+    }
+    shock_type = shock_map.get(hz_norm, hz_norm.lower())
 
     db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
     if not db_url:
-        return "", {"pa_history_error": "missing_db_url", "error": "missing_db_url"}
+        return "", {"error": "missing_db_url", "history_rows_detail": []}
 
     db_path = db_url.replace("duckdb:///", "")
     try:
         con = duckdb.connect(db_path, read_only=True)
-    except Exception as exc:
-        return "", {"pa_history_error": f"connect_failed:{exc!r}", "error": "connect_failed"}
+    except Exception as exc:  # noqa: BLE001
+        return "", {"error": f"connect_failed:{exc!r}", "history_rows_detail": []}
 
     try:
-        has_source = False
-        try:
-            info_rows = con.execute("PRAGMA table_info('facts_resolved')").fetchall()
-            for _, _, name, _, _, _ in info_rows:
-                if str(name).lower() == "source_id":
-                    has_source = True
-                    break
-        except Exception:
-            has_source = False
-        # NOTE: metric canonicalization: `affected` is the canonical PA metric.
-        # We accept a few synonyms to be robust to partial migrations.
-        base_sql = """
-            SELECT ym, value{source_col}
-            FROM facts_resolved
+        rows = con.execute(
+            """
+            SELECT ym, pa, COALESCE(source_id, 'EM-DAT')
+            FROM emdat_pa
             WHERE iso3 = ?
-              AND hazard_code = ?
-              AND lower(metric) IN ('affected','people_affected','pa')
+              AND lower(shock_type) = ?
             ORDER BY ym DESC
             LIMIT ?
-        """
-        sql = base_sql.format(source_col=", source_id" if has_source else "")
-        rows = con.execute(sql, [iso3, hz_query, int(months)]).fetchall()
-    except Exception as exc:
-        con.close()
-        return "", {"pa_history_error": f"query_failed:{exc!r}", "error": "query_failed"}
+            """,
+            [iso3_norm, shock_type, int(months)],
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            con.close()
+        finally:
+            return "", {"error": "query_error", "history_rows_detail": []}
     finally:
         try:
             con.close()
@@ -767,104 +762,124 @@ def _load_pa_history_block(
             pass
 
     if not rows:
-        return "", {"pa_history_error": "no_rows", "error": "no_rows"}
+        return "", {"error": "no_rows", "history_rows_detail": []}
 
-    # Oldest → newest for readability
-    rows = list(reversed(rows))
-    lines = [
-        "## Resolver 36-month PA history",
+    history: list[Dict[str, Any]] = []
+    for ym, pa_val, source_id in rows:
+        ym_str = str(ym)
+        try:
+            numeric_val = None if pa_val is None else float(pa_val)
+        except Exception:
+            numeric_val = None
+        history.append({"ym": ym_str, "value": numeric_val, "source": str(source_id or "EM-DAT")})
+
+    table_lines: list[str] = [
+        "## Resolver 36-month PA history (EM-DAT)",
         "",
         "| Month (ym) | People affected | Source |",
         "|---|---|---|",
     ]
-    months_list: list[str] = []
-    history_detail: list[Dict[str, Any]] = []
-    for row in rows:
-        if len(row) == 3:
-            ym, value, source_id = row
-        else:
-            ym, value = row
-            source_id = ""
+    for ym, pa_val, source_id in reversed(rows):
+        ym_str = str(ym)
         try:
-            ym_str = str(ym)
-            val = "" if value is None else f"{int(value):,}"
+            val_fmt = "" if pa_val is None else f"{int(pa_val):,}"
         except Exception:
-            ym_str = str(ym)
-            val = str(value)
-        months_list.append(ym_str)
-        try:
-            numeric_val = None if value is None else float(value)
-        except Exception:
-            numeric_val = None
-        history_detail.append({"ym": ym_str, "value": numeric_val, "source": str(source_id or "")})
-        lines.append(f"| {ym_str} | {val} | {source_id} |")
+            val_fmt = str(pa_val)
+        table_lines.append(f"| {ym_str} | {val_fmt} | {source_id or 'EM-DAT'} |")
 
-    block = "\n".join(lines)
+    block = "\n".join(table_lines)
     meta = {
-        "pa_history_error": "",
         "error": "",
-        "pa_history_rows": len(rows),
-        "pa_history_months": months_list,
-        "pa_history_rows_detail": history_detail,
+        "history_rows_detail": history,
         "summary_text": block,
+        "pa_history_error": "",
+        "pa_history_rows_detail": history,
+        "pa_history_rows": len(history),
+        "pa_history_months": [item["ym"] for item in history],
     }
     return block, meta
 
 
-def _load_fatalities_history_block(
+def _load_idmc_pa_history(
     iso3: str,
     hazard_code: str,
     *,
     months: int = 36,
 ) -> tuple[str, Dict[str, Any]]:
-    """
-    Best-effort fatalities history block for ACLED-style questions.
+    """Return IDMC/DTM displacement history for the iso3 + hazard combination."""
 
-    Reads up to `months` rows from `facts_resolved` for the given iso3 + hazard_code
-    where metric is fatalities-like. Returns (markdown_block, meta_dict).
-    """
     import duckdb
 
-    iso3 = (iso3 or "").upper().strip()
-    hz = (hazard_code or "").upper().strip()
-    hz_query = HZ_QUERY_MAP.get(hz, hz)
-    if not iso3 or not hz:
-        return "", {"error": "missing_iso3_or_hazard", "fatalities_history_rows_detail": []}
+    iso3_norm = (iso3 or "").upper().strip()
+    hz_norm = (hazard_code or "").upper().strip()
+    if not iso3_norm or not hz_norm:
+        return "", {
+            "error": "missing_iso3_or_hazard",
+            "history_rows_detail": [],
+        }
+
+    category_map = {
+        "ACO": "conflict",
+        "ACE": "conflict",
+        "CU": "conflict",
+        "DI": "disaster",
+    }
+    category = category_map.get(hz_norm, hz_norm.lower())
 
     db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
     if not db_url:
-        return "", {"error": "missing_db_url", "fatalities_history_rows_detail": []}
+        return "", {"error": "missing_db_url", "history_rows_detail": []}
 
     db_path = db_url.replace("duckdb:///", "")
     try:
         con = duckdb.connect(db_path, read_only=True)
-    except Exception as exc:
-        return "", {"error": f"connect_failed:{exc!r}", "fatalities_history_rows_detail": []}
+    except Exception as exc:  # noqa: BLE001
+        return "", {"error": f"connect_failed:{exc!r}", "history_rows_detail": []}
 
     try:
-        has_source = False
+        columns = con.execute("PRAGMA table_info('idmc_pa')").fetchall()
+        if not columns:
+            raise RuntimeError("table_missing")
+        col_names = {str(col[1]).lower() for col in columns}
+        ym_col = "ym" if "ym" in col_names else None
+        value_col = None
+        for candidate in ("pa", "value", "new_displacements"):
+            if candidate in col_names:
+                value_col = candidate
+                break
+        source_col = "source_id" if "source_id" in col_names else ("source" if "source" in col_names else None)
+        category_col = None
+        for candidate in ("category", "cause", "displacement_type", "shock_type"):
+            if candidate in col_names:
+                category_col = candidate
+                break
+
+        if not ym_col or not value_col:
+            raise RuntimeError("missing_columns")
+
+        filters = ["iso3 = ?"]
+        params: list[Any] = [iso3_norm]
+        if category_col and category:
+            filters.append(f"lower({category_col}) = ?")
+            params.append(category)
+
+        sql = (
+            "SELECT {ym_col}, {value_col}{source_col} "
+            "FROM idmc_pa WHERE "
+            + " AND ".join(filters)
+            + " ORDER BY {ym_col} DESC LIMIT ?"
+        ).format(
+            ym_col=ym_col,
+            value_col=value_col,
+            source_col=", " + source_col if source_col else "",
+        )
+        params.append(int(months))
+        rows = con.execute(sql, params).fetchall()
+    except Exception:  # noqa: BLE001
         try:
-            info_rows = con.execute("PRAGMA table_info('facts_resolved')").fetchall()
-            for _, _, name, _, _, _ in info_rows:
-                if str(name).lower() == "source_id":
-                    has_source = True
-                    break
-        except Exception:
-            has_source = False
-        base_sql = """
-            SELECT ym, value{source_col}
-            FROM facts_resolved
-            WHERE iso3 = ?
-              AND hazard_code = ?
-              AND lower(metric) IN ('fatalities', 'battle_fatalities')
-            ORDER BY ym DESC
-            LIMIT ?
-        """
-        sql = base_sql.format(source_col=", source_id" if has_source else "")
-        rows = con.execute(sql, [iso3, hz_query, int(months)]).fetchall()
-    except Exception as exc:
-        con.close()
-        return "", {"error": f"query_failed:{exc!r}", "fatalities_history_rows_detail": []}
+            con.close()
+        finally:
+            return "", {"error": "query_error", "history_rows_detail": []}
     finally:
         try:
             con.close()
@@ -872,49 +887,177 @@ def _load_fatalities_history_block(
             pass
 
     if not rows:
-        return "", {"error": "no_rows", "fatalities_history_rows_detail": []}
+        return "", {"error": "no_rows", "history_rows_detail": []}
 
-    rows = list(reversed(rows))
     history: list[Dict[str, Any]] = []
-    lines = [
-        "### ACLED conflict fatalities — 36-month history (Resolver)",
-        "",
-    ]
-
     for row in rows:
         if len(row) == 3:
-            ym, value, source_id = row
+            ym_val, value, source_id = row
         else:
-            ym, value = row
+            ym_val, value = row
             source_id = ""
-        ym_str = str(ym)
+        ym_str = str(ym_val)
         try:
-            numeric_val = float(value or 0)
+            numeric_val = None if value is None else float(value)
+        except Exception:
+            numeric_val = None
+        source_label = str(source_id or "IDMC/DTM")
+        history.append({"ym": ym_str, "value": numeric_val, "source": source_label})
+
+    table_lines: list[str] = [
+        "## Resolver 36-month displacement history (IDMC/DTM)",
+        "",
+        "| Month (ym) | People affected | Source |",
+        "|---|---|---|",
+    ]
+
+    for row in reversed(rows):
+        if len(row) == 3:
+            ym_val, value, source_id = row
+        else:
+            ym_val, value = row
+            source_id = ""
+        ym_str = str(ym_val)
+        try:
+            val_fmt = "" if value is None else f"{int(value):,}"
+        except Exception:
+            val_fmt = str(value)
+        source_label = str(source_id or "IDMC/DTM")
+        table_lines.append(f"| {ym_str} | {val_fmt} | {source_label} |")
+
+    block = "\n".join(table_lines)
+    meta = {
+        "error": "",
+        "history_rows_detail": history,
+        "summary_text": block,
+        "pa_history_error": "",
+        "pa_history_rows_detail": history,
+        "pa_history_rows": len(history),
+        "pa_history_months": [item["ym"] for item in history],
+    }
+    return block, meta
+
+
+def _load_acled_fatalities_history(
+    iso3: str,
+    *,
+    months: int = 36,
+) -> tuple[str, Dict[str, Any]]:
+    """Return ACLED fatalities history for the iso3."""
+
+    import duckdb
+
+    iso3_norm = (iso3 or "").upper().strip()
+    if not iso3_norm:
+        return "", {"error": "missing_iso3_or_hazard", "history_rows_detail": []}
+
+    db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+    if not db_url:
+        return "", {"error": "missing_db_url", "history_rows_detail": []}
+
+    db_path = db_url.replace("duckdb:///", "")
+    try:
+        con = duckdb.connect(db_path, read_only=True)
+    except Exception as exc:  # noqa: BLE001
+        return "", {"error": f"connect_failed:{exc!r}", "history_rows_detail": []}
+
+    try:
+        rows = con.execute(
+            """
+            SELECT month, fatalities, source
+            FROM acled_monthly_fatalities
+            WHERE iso3 = ?
+            ORDER BY month DESC
+            LIMIT ?
+            """,
+            [iso3_norm, int(months)],
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        try:
+            con.close()
+        finally:
+            return "", {"error": "query_error", "history_rows_detail": []}
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+    if not rows:
+        return "", {"error": "no_rows", "history_rows_detail": []}
+
+    history: list[Dict[str, Any]] = []
+    for month_val, fatalities, source in rows:
+        try:
+            ym_str = datetime.fromisoformat(str(month_val)).strftime("%Y-%m")
+        except Exception:
+            ym_str = str(month_val)
+        try:
+            numeric_val = float(fatalities or 0)
         except Exception:
             numeric_val = 0.0
-        history.append({"ym": ym_str, "value": numeric_val, "source": str(source_id or "")})
+        history.append({"ym": ym_str, "value": numeric_val, "source": str(source or "ACLED")})
 
-    min_v = min((h["value"] for h in history), default=0)
-    max_v = max((h["value"] for h in history), default=0)
-    summary_lines = [
-        f"- Months available: {len(history)}",
-        f"- Min monthly fatalities: {min_v:.0f}",
-        f"- Max monthly fatalities: {max_v:.0f}",
+    lines: list[str] = [
+        "## Resolver 36-month conflict fatalities (ACLED)",
         "",
         "| Month (ym) | Fatalities | Source |",
         "|---|---:|---|",
     ]
+
+    for month_val, fatalities, source in reversed(rows):
+        try:
+            ym_str = datetime.fromisoformat(str(month_val)).strftime("%Y-%m")
+        except Exception:
+            ym_str = str(month_val)
+        try:
+            numeric_val = float(fatalities or 0)
+        except Exception:
+            numeric_val = 0.0
+        lines.append(f"| {ym_str} | {numeric_val:.0f} | {source or 'ACLED'} |")
+
+    min_v = min((h["value"] for h in history), default=0)
+    max_v = max((h["value"] for h in history), default=0)
+    summary_lines = [
+        "",
+        f"- Months available: {len(history)}",
+        f"- Min monthly fatalities: {min_v:.0f}",
+        f"- Max monthly fatalities: {max_v:.0f}",
+    ]
     lines.extend(summary_lines)
-    for item in history:
-        lines.append(f"| {item['ym']} | {item['value']:.0f} | {item.get('source', '')} |")
 
     block = "\n".join(lines)
     meta = {
         "error": "",
-        "fatalities_history_rows_detail": history,
+        "history_rows_detail": history,
         "summary_text": block,
+        "pa_history_error": "",
+        "pa_history_rows_detail": history,
+        "pa_history_rows": len(history),
+        "pa_history_months": [item["ym"] for item in history],
     }
     return block, meta
+
+
+def _load_pa_history_block(
+    iso3: str,
+    hazard_code: str,
+    *,
+    metric: str,
+    months: int = 36,
+) -> tuple[str, Dict[str, Any]]:
+    """Load source-specific history for PA or fatality questions."""
+
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+
+    if m == "FATALITIES":
+        return _load_acled_fatalities_history(iso3, months=months)
+
+    if m == "PA" and hz in {"ACO", "ACE", "CU", "DI"}:
+        return _load_idmc_pa_history(iso3, hazard_code, months=months)
+
+    return _load_emdat_pa_history(iso3, hazard_code, months=months)
 
 
 def _load_bucket_centroids(
@@ -1450,23 +1593,27 @@ async def _run_one_question_body(
         # Supplement research with PA history when we have iso3 + hazard_code
         pa_block = ""
         pa_meta: Dict[str, Any] = {}
-        fatalities_block = ""
-        fatalities_meta: Dict[str, Any] = {}
         if pmeta.get("iso3") and pmeta.get("hazard_code"):
-            pa_block, pa_meta = _load_pa_history_block(
-                pmeta["iso3"],
-                pmeta["hazard_code"],
-            )
-            if pa_block:
-                research_text = f"{research_text}\n\n{pa_block}"
-
-            if metric_up == "FATALITIES":
-                fatalities_block, fatalities_meta = _load_fatalities_history_block(
+            try:
+                pa_block, pa_meta = _load_pa_history_block(
                     pmeta["iso3"],
                     pmeta["hazard_code"],
+                    months=36,
+                    metric=metric_up,
                 )
-                if fatalities_block:
-                    research_text = f"{research_text}\n\n{fatalities_block}"
+            except TypeError as exc:
+                # Backwards compatibility for monkeypatched stubs in tests that do not
+                # accept the metric kwarg.
+                if "unexpected keyword argument" in str(exc) and "'metric'" in str(exc):
+                    pa_block, pa_meta = _load_pa_history_block(
+                        pmeta["iso3"],
+                        pmeta["hazard_code"],
+                        months=36,
+                    )
+                else:
+                    raise
+            if pa_block:
+                research_text = f"{research_text}\n\n{pa_block}"
 
         # Merge PA meta into research_meta under a clear prefix
         for key, value in pa_meta.items():
@@ -1475,47 +1622,31 @@ async def _run_one_question_body(
             else:
                 research_meta[f"pa_history_{key}"] = value
 
-        if fatalities_meta:
-            for key, value in fatalities_meta.items():
-                research_meta[f"fatalities_history_{key}"] = value
-
         # Research text notes for missing history
+        history_rows = pa_meta.get("history_rows_detail") or pa_meta.get("pa_history_rows_detail") or []
+        history_len = len(history_rows)
         pa_error_code = pa_meta.get("error") or pa_meta.get("pa_history_error") or ""
-        if not pa_block and pa_error_code in {"no_rows", "missing_db_url", "query_failed", "connect_failed", "missing_iso3_or_hazard"}:
+        if history_len == 0 or pa_error_code:
             research_text = (
                 f"{research_text}\n\n"
-                "**Resolver history note:** No 36-month PA history found in Resolver for "
-                f"{pmeta.get('iso3','')}/{pmeta.get('hazard_code','')}. "
-                "Keep your prior heavily anchored to the historical base rate and be explicit about this in your reasoning."
-            )
-
-        fatality_error_code = fatalities_meta.get("error") if fatalities_meta else ""
-        if metric_up == "FATALITIES" and not fatalities_block and fatality_error_code in {"no_rows", "missing_db_url", "query_failed", "connect_failed", "missing_iso3_or_hazard"}:
-            research_text = (
-                f"{research_text}\n\n"
-                "**Resolver history note:** No 36-month conflict fatalities history found in Resolver. "
-                "State this explicitly when reasoning about expected fatalities."
+                "**Resolver history note:** No 36-month history was found in Resolver for "
+                f"{pmeta.get('iso3','')}/{pmeta.get('hazard_code','')} ({metric_up}). Keep your prior heavily anchored to the "
+                "base rate and make this explicit in your reasoning."
             )
 
         if os.getenv("PYTHIA_DEBUG_DB", "0") == "1" and pmeta.get("iso3") and pmeta.get("hazard_code"):
             print(
-                f"[pa_history] iso3={pmeta.get('iso3')} hazard_code={pmeta.get('hazard_code')} "
-                f"error={pa_error_code} rows={len(pa_meta.get('pa_history_rows_detail') or [])}"
+                f"[history_debug] iso3={pmeta.get('iso3')} hz={pmeta.get('hazard_code')} "
+                f"metric={metric_up} error={pa_error_code} n_rows={history_len}"
             )
-            if metric_up == "FATALITIES":
-                print(
-                    f"[fatalities_history] iso3={pmeta.get('iso3')} hazard_code={pmeta.get('hazard_code')} "
-                    f"error={fatality_error_code} rows={len(fatalities_meta.get('fatalities_history_rows_detail') or [])}"
-                )
 
         if qtype == "spd" and pmeta.get("iso3") and pmeta.get("hazard_code"):
-            history_rows: list[Dict[str, Any]] = []
-            raw_history = pa_meta.get("pa_history_rows_detail")
-            if isinstance(raw_history, list):
-                for item in raw_history:
+            history_rows_out: list[Dict[str, Any]] = []
+            if isinstance(history_rows, list):
+                for item in history_rows:
                     if not isinstance(item, dict):
                         continue
-                    history_rows.append(
+                    history_rows_out.append(
                         {
                             "ym": str(item.get("ym") or ""),
                             "value": item.get("value"),
@@ -1523,35 +1654,13 @@ async def _run_one_question_body(
                         }
                     )
 
-            fatality_history_rows: list[Dict[str, Any]] = []
-            raw_fatality_history = fatalities_meta.get("fatalities_history_rows_detail") if fatalities_meta else []
-            if isinstance(raw_fatality_history, list):
-                for item in raw_fatality_history:
-                    if not isinstance(item, dict):
-                        continue
-                    fatality_history_rows.append(
-                        {
-                            "ym": str(item.get("ym") or ""),
-                            "value": item.get("value"),
-                            "source": str(item.get("source") or ""),
-                        }
-                    )
-
-            snapshot_start = ""
-            snapshot_end = ""
-            if history_rows:
-                snapshot_start = history_rows[0]["ym"]
-                snapshot_end = history_rows[-1]["ym"]
-            elif fatality_history_rows:
-                snapshot_start = fatality_history_rows[0]["ym"]
-                snapshot_end = fatality_history_rows[-1]["ym"]
+            snapshot_start = history_rows_out[-1]["ym"] if history_rows_out else ""
+            snapshot_end = history_rows_out[0]["ym"] if history_rows_out else ""
 
             context_extra = {
-                "history_len": len(history_rows),
-                "summary_text": pa_block,
-                "fatalities_history_len": len(fatality_history_rows),
-                "fatalities_summary_text": fatalities_block,
-                "fatalities_history": fatality_history_rows,
+                "history_len": len(history_rows_out),
+                "summary_text": pa_meta.get("summary_text") or "",
+                "error": pa_error_code,
             }
 
             try:
@@ -1583,7 +1692,7 @@ async def _run_one_question_body(
                         metric_up,
                         snapshot_start,
                         snapshot_end,
-                        json.dumps(history_rows, ensure_ascii=False),
+                        json.dumps(history_rows_out, ensure_ascii=False),
                         json.dumps(context_extra, ensure_ascii=False),
                     ],
                 )
