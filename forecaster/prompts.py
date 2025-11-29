@@ -2,7 +2,8 @@
 from __future__ import annotations
 import importlib
 import os
-from typing import Optional
+from datetime import date
+from typing import Any, Dict, Optional
 from .config import CALIBRATION_PATH, ist_date
 
 _PYTHIA_CFG_LOAD = None
@@ -66,6 +67,112 @@ _CAL_PREFIX = (
     + (_CAL_NOTE if _CAL_NOTE else "(none available yet)")
     + "\n— end calibration —\n\n"
 )
+
+
+def build_scoring_resolution_block(
+    *,
+    hazard_code: str,
+    metric: str,
+    resolution_source: Optional[str] = None,
+) -> str:
+    """
+    Build a short, LLM-friendly 'SCORING & RESOLUTION' block.
+
+    Uses hazard_code + metric + optional resolution_source to explain:
+      - What "affected" means for this question.
+      - Which source is used (EM-DAT, IDMC/DTM, ACLED).
+      - That we use Brier scores on the SPD buckets.
+
+    This is inserted early in the SPD prompt.
+    """
+
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+    src = (resolution_source or "").upper()
+
+    if m == "PA" and (hz in {"ACO", "ACE", "CU", "DI"} or "IDMC" in src or "DTM" in src):
+        meaning = (
+            "“affected” means people who are internally displaced (IDPs), "
+            "as recorded by the Internal Displacement Monitoring Centre (IDMC), "
+            "with IOM Displacement Tracking Matrix (DTM) as a fallback source."
+        )
+        source_label = "IDMC/DTM displacement"
+    elif m == "FATALITIES" or "ACLED" in src:
+        meaning = (
+            "“affected” means battle-related fatalities, as recorded by ACLED "
+            "(armed conflict event data)."
+        )
+        source_label = "ACLED conflict fatalities"
+    else:
+        meaning = (
+            "“affected” means people affected by the hazard as EM-DAT defines "
+            "and records them for this hazard and country."
+        )
+        source_label = "EM-DAT people affected"
+
+    lines = []
+    lines.append("SCORING & RESOLUTION")
+    lines.append("")
+    lines.append(
+        "- All forecasts will be resolved using Resolver's canonical metric for this "
+        "hazard and country, and scored using **Brier scores** on your SPD buckets."
+    )
+    lines.append("- For this question:")
+    lines.append(f"  - {meaning}")
+    lines.append(f"  - Source for resolution: {source_label}.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_time_horizon_block(
+    *,
+    window_start_date: Optional[date],
+    window_end_date: Optional[date],
+    month_labels: Optional[Dict[int, str]] = None,
+    hazard_code: str,
+    metric: str,
+    resolution_source: Optional[str] = None,
+) -> str:
+    """
+    Build a 'TIME HORIZON & RESOLUTION' block explaining:
+      - The calendar window (start/end dates),
+      - How month_1..month_6 map to calendar months,
+      - That we resolve per-month, not just over the entire window.
+
+    month_labels: optional mapping {1: "December 2025", ..., 6: "May 2026"}.
+    """
+
+    _ = hazard_code, metric, resolution_source  # quiet unused-parameter linting
+
+    ws = window_start_date.isoformat() if window_start_date else ""
+    we = window_end_date.isoformat() if window_end_date else ""
+
+    lines: list[str] = []
+    lines.append("TIME HORIZON & RESOLUTION")
+    lines.append("")
+    if ws or we:
+        lines.append(f"- This question covers the period from **{ws}** to **{we}**.")
+    else:
+        lines.append("- This question covers a six-month period (month_1 to month_6).")
+
+    lines.append("- For scoring, we treat each month separately:")
+    if month_labels:
+        for idx in range(1, 7):
+            label = month_labels.get(idx) or f"month_{idx}"
+            lines.append(f"  - `month_{idx}` = {label}")
+    else:
+        lines.append("  - `month_1` = first calendar month in the forecast window.")
+        lines.append("  - `month_2` = second calendar month in the forecast window.")
+        lines.append("  - …")
+        lines.append("  - `month_6` = sixth calendar month in the forecast window.")
+
+    lines.append(
+        "- For each month `m`, Resolver will compute a single monthly value for the "
+        "relevant metric from the underlying source (EM-DAT / IDMC/DTM / ACLED), and "
+        "your SPD for that month will be scored against that monthly value."
+    )
+    lines.append("")
+    return "\n".join(lines)
 
 # -------------------------------------------------------------------------------------
 # FULL PROMPTS
@@ -239,12 +346,21 @@ Today (Istanbul time): {today}
 """
 
 SPD_PROMPT_TEMPLATE = _CAL_PREFIX + """
+{scoring_block}
+{time_horizon_block}
 You are a careful probabilistic forecaster on a humanitarian early warning panel.
 
 Your task is to forecast {quantity_description}.
 
 You will express your beliefs as a SUBJECTIVE PROBABILITY DISTRIBUTION (SPD) over FIVE buckets
-for each month. For each month, you must distribute 100% probability across these buckets:
+for each month.
+
+SPD (Subjective Probability Distribution) means:
+- You approximate your posterior belief about the monthly value using a small number of discrete buckets.
+- Your probabilities over the buckets should reflect the relative plausibility of each range after
+  considering the historical base rate and the evidence in the research bundle.
+
+For each month, distribute 100% probability across these buckets:
 
 {bucket_text}
 
@@ -252,7 +368,7 @@ One of these buckets MUST occur for each month. For each month m, your probabili
 [p1, p2, p3, p4, p5] must all be between 0 and 1 and sum to approximately 1.0.
 
 Question:
-{title}
+{question}
 
 Background:
 {background}
@@ -267,24 +383,31 @@ Today (Istanbul time): {today}
 
 ---
 
-FORECASTING INSTRUCTIONS
+FORECASTING INSTRUCTIONS (Bayesian SPD)
 
-1) BASE RATE & HISTORY
-   - Briefly identify any obvious base rates or historical patterns relevant to this metric
-     for this hazard and country (e.g. annual cycles, recent large shocks).
+1) Prior / base rates
+   - Start from a prior SPD over the buckets based on historical data and relevant reference classes
+     (for this hazard and country).
+   - Make your prior explicit in your own thinking: which bucket would you expect *before* reading the evidence?
 
-2) EVIDENCE & SCENARIOS
-   - Summarize the most important pieces of evidence from the research bundle and history.
-   - Consider best/worst case scenarios and how they would map into the buckets.
+2) Evidence & likelihood
+   - Use the research bundle and history to identify the most important pieces of evidence.
+   - For each bucket, ask: “If the true value were in this bucket, how likely is this evidence?”
+   - Note which buckets the evidence pushes up or down.
 
-3) PRELIMINARY BUCKET PROBABILITIES
-   - For each month 1 to 6, sketch an initial SPD over the five buckets.
+3) Posterior SPD sketch
+   - Combine your prior and the evidence qualitatively to sketch a posterior SPD for each month.
+   - Check that your SPD:
+     - is not implausibly sharp (overconfident), and
+     - is not completely flat (ignoring structure).
 
-4) RED-TEAM YOURSELF
-   - Challenge your own preliminary SPDs: what could you be missing? Are you underweighting
-     tail risks or structural breaks? Adjust if needed.
+4) Red-team your forecast
+   - Challenge your own forecast:
+     - What scenarios might you be underweighting (e.g. rare breakdown of state control, extreme hazard)?
+     - Are you systematically underweighting tail risks?
+   - Adjust your SPD if needed to reflect realistic but low-probability extreme scenarios.
 
-5) FINAL JSON OUTPUT (IMPORTANT)
+5) Final JSON output (IMPORTANT)
    - At the very end, output ONLY a single JSON object with this exact schema:
 
    {{
@@ -416,58 +539,157 @@ def _format_resolution_text(base_text: str, criteria: str) -> str:
 
 
 def build_spd_prompt_pa(
-    title: str,
+    *,
+    question_title: str,
+    iso3: str,
+    hazard_code: str,
+    hazard_label: str,
+    metric: str,
     background: str,
     research_text: str,
+    resolution_source: Optional[str],
+    window_start_date: Optional[date],
+    window_end_date: Optional[date],
+    month_labels: Optional[Dict[int, str]],
+    today: date,
     criteria: str,
 ) -> str:
-    resolution_text = _format_resolution_text(
-        "People affected (PA) will be measured using Resolver's canonical PA metric for this hazard and country (IDMC "
-        "displacement where available, with DTM or similar humanitarian estimates as fallback).",
-        criteria,
+    hz_up = (hazard_code or "").upper()
+    metric_up = (metric or "").upper()
+
+    is_displacement = metric_up == "PA" and (
+        hz_up in {"ACO", "ACE", "CU", "DI"} or (resolution_source or "").upper() in {"IDMC", "DTM"}
     )
+    if is_displacement:
+        resolution_text = _format_resolution_text(
+            "People affected (PA) will be measured as internally displaced people (IDPs), using IDMC displacement estimates for this hazard and country, with IOM DTM or comparable humanitarian estimates as fallback.",
+            criteria,
+        )
+        quantity_description = (
+            f"Monthly people internally displaced (IDPs) in {iso3} due to {hazard_label.lower()} as recorded by IDMC/DTM."
+        )
+    else:
+        resolution_text = _format_resolution_text(
+            "People affected (PA) will be measured using Resolver's canonical PA metric for this natural hazard and country, based primarily on EM-DAT data.",
+            criteria,
+        )
+        quantity_description = (
+            f"Monthly people affected (PA) in {iso3} by {hazard_label} as recorded by EM-DAT (including both directly and indirectly affected people)."
+        )
+
+    scoring_block = build_scoring_resolution_block(
+        hazard_code=hazard_code,
+        metric=metric,
+        resolution_source=resolution_source,
+    )
+    time_horizon_block = build_time_horizon_block(
+        window_start_date=window_start_date,
+        window_end_date=window_end_date,
+        month_labels=month_labels,
+        hazard_code=hazard_code,
+        metric=metric,
+        resolution_source=resolution_source,
+    )
+
+    today_str = today.isoformat() if isinstance(today, date) else ist_date()
+
     return SPD_PROMPT_TEMPLATE.format(
-        title=title,
+        scoring_block=scoring_block,
+        time_horizon_block=time_horizon_block,
+        question=question_title,
         background=background or "",
         research=research_text or "",
         resolution_text=resolution_text,
-        quantity_description=
-        "how many people will be AFFECTED (not just at risk) by a specific hazard in a specific country, for each of the next six months.",
+        quantity_description=quantity_description,
         bucket_text=SPD_BUCKET_TEXT_PA,
-        today=ist_date(),
+        today=today_str,
     )
 
 
 def build_spd_prompt_fatalities(
-    title: str,
+    *,
+    question_title: str,
+    iso3: str,
+    hazard_code: str,
+    hazard_label: str,
+    metric: str,
     background: str,
     research_text: str,
+    resolution_source: Optional[str],
+    window_start_date: Optional[date],
+    window_end_date: Optional[date],
+    month_labels: Optional[Dict[int, str]],
+    today: date,
     criteria: str,
 ) -> str:
     resolution_text = _format_resolution_text(
-        "Fatalities will be measured using ACLED monthly event data for the target country, summing all conflict events "
-        "that meet ACLED's conflict criteria in the target month.",
+        "Fatalities will be measured as battle-related deaths recorded by ACLED for this country and hazard code.",
         criteria,
     )
+    quantity_description = (
+        f"Monthly battle-related fatalities in {iso3} associated with armed conflict events, as recorded by ACLED."
+    )
+
+    scoring_block = build_scoring_resolution_block(
+        hazard_code=hazard_code,
+        metric=metric,
+        resolution_source=resolution_source,
+    )
+    time_horizon_block = build_time_horizon_block(
+        window_start_date=window_start_date,
+        window_end_date=window_end_date,
+        month_labels=month_labels,
+        hazard_code=hazard_code,
+        metric=metric,
+        resolution_source=resolution_source,
+    )
+
+    today_str = today.isoformat() if isinstance(today, date) else ist_date()
+
     return SPD_PROMPT_TEMPLATE.format(
-        title=title,
+        scoring_block=scoring_block,
+        time_horizon_block=time_horizon_block,
+        question=question_title,
         background=background or "",
         research=research_text or "",
         resolution_text=resolution_text,
-        quantity_description="how many people will be killed (conflict fatalities) in the country for each of the next six months.",
+        quantity_description=quantity_description,
         bucket_text=SPD_BUCKET_TEXT_FATALITIES,
-        today=ist_date(),
+        today=today_str,
     )
 
 
 def build_spd_prompt(
-    title: str,
+    *,
+    question_title: str,
     background: str,
     research_text: str,
     criteria: str,
+    iso3: str = "",
+    hazard_code: str = "",
+    hazard_label: str = "",
+    metric: str = "PA",
+    resolution_source: Optional[str] = None,
+    window_start_date: Optional[date] = None,
+    window_end_date: Optional[date] = None,
+    month_labels: Optional[Dict[int, str]] = None,
+    today: Optional[date] = None,
 ) -> str:
-    # Backwards-compatibility: default to PA buckets
-    return build_spd_prompt_pa(title, background, research_text, criteria)
+    return build_spd_prompt_pa(
+        question_title=question_title,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        hazard_label=hazard_label or hazard_code,
+        metric=metric,
+        background=background,
+        research_text=research_text,
+        resolution_source=resolution_source,
+        window_start_date=window_start_date,
+        window_end_date=window_end_date,
+        month_labels=month_labels,
+        today=today or date.today(),
+        criteria=criteria,
+    )
 
 def build_research_prompt(
     title: str,
