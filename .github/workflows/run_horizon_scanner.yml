@@ -3,6 +3,10 @@
 
 name: Generate Risk Report
 
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
 # --- Triggers ---
 on:
   # Manual run from the Actions tab
@@ -12,11 +16,27 @@ on:
 jobs:
   build-report:
     runs-on: ubuntu-latest
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
 
     steps:
       # Step 1: Check out the repository's code
       - name: Check out code
         uses: actions/checkout@v4
+
+      - name: Download canonical resolver DB
+        uses: actions/download-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data
+        continue-on-error: true
+
+      - name: Check canonical DB presence
+        run: |
+          ls -R data || true
+          if [ ! -f data/resolver.duckdb ]; then
+            echo "WARNING: data/resolver.duckdb not found; HS will run on a fresh DB."
+          fi
 
       # Step 2: Set up Python
       - name: Set up Python 3.10
@@ -164,3 +184,10 @@ jobs:
         with:
           name: first-forecast-prompt
           path: debug_first_forecast_prompt.md
+
+      - name: Upload canonical resolver DB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb

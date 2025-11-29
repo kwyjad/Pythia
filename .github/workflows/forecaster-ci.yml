@@ -1,6 +1,10 @@
 ---
 name: Forecaster CI — SPD
 
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
 on:
   pull_request:
     paths:
@@ -13,10 +17,26 @@ on:
 jobs:
   forecaster-spd-tests:
     runs-on: ubuntu-latest
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download canonical resolver DB
+        uses: actions/download-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data
+        continue-on-error: true
+
+      - name: Check canonical DB presence
+        run: |
+          ls -R data || true
+          if [ ! -f data/resolver.duckdb ]; then
+            echo "WARNING: data/resolver.duckdb not found; Forecaster will run on a fresh DB."
+          fi
 
       - name: Debug context (ref, SHA, changed files)
         env:
@@ -58,3 +78,10 @@ jobs:
         run: |
           echo "=== Running Forecaster SPD unit tests ==="
           pytest -vv forecaster/tests/test_spd.py
+
+      - name: Upload canonical resolver DB
+        if: success() && hashFiles('data/resolver.duckdb') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
