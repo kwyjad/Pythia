@@ -144,6 +144,16 @@ def build_time_horizon_block(
 
     _ = hazard_code, metric, resolution_source  # quiet unused-parameter linting
 
+    src = (resolution_source or "").upper()
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+    if "ACLED" in src or m == "FATALITIES":
+        source_label = "ACLED"
+    elif m == "PA" and (hz in {"ACO", "ACE", "CU", "DI"} or "IDMC" in src or "DTM" in src):
+        source_label = "IDMC/DTM"
+    else:
+        source_label = "EM-DAT"
+
     ws = window_start_date.isoformat() if window_start_date else ""
     we = window_end_date.isoformat() if window_end_date else ""
 
@@ -168,7 +178,7 @@ def build_time_horizon_block(
 
     lines.append(
         "- For each month `m`, Resolver will compute a single monthly value for the "
-        "relevant metric from the underlying source (EM-DAT / IDMC/DTM / ACLED), and "
+        f"relevant metric from the underlying source ({source_label}), and "
         "your SPD for that month will be scored against that monthly value."
     )
     lines.append("")
@@ -538,6 +548,52 @@ def _format_resolution_text(base_text: str, criteria: str) -> str:
     return f"{base_text}\nAdditional resolution notes: {extra}"
 
 
+def build_resolution_text_and_quantity_description(
+    *,
+    iso3: str,
+    hazard_code: str,
+    hazard_label: str,
+    metric: str,
+    resolution_source: Optional[str],
+) -> tuple[str, str]:
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+    src = (resolution_source or "").upper()
+
+    if m == "FATALITIES" or "ACLED" in src:
+        resolution_text = (
+            "Fatalities will be measured as battle-related deaths recorded by ACLED "
+            "for this country and hazard code."
+        )
+        quantity_description = (
+            f"Monthly battle-related fatalities in {iso3} associated with {hazard_label} "
+            "events, as recorded by ACLED."
+        )
+        return resolution_text, quantity_description
+
+    if m == "PA" and (hz in {"ACO", "ACE", "CU", "DI"} or "IDMC" in src or "DTM" in src):
+        resolution_text = (
+            "People affected (PA) will be measured as internally displaced people (IDPs), "
+            "using IDMC displacement estimates for this hazard and country, with IOM DTM "
+            "or comparable humanitarian estimates as fallback."
+        )
+        quantity_description = (
+            f"Monthly internally displaced people (IDPs) in {iso3} due to {hazard_label.lower()}, "
+            "as recorded by IDMC and DTM."
+        )
+        return resolution_text, quantity_description
+
+    resolution_text = (
+        "People affected (PA) will be measured using Resolver's canonical PA metric for "
+        "this natural hazard and country, based primarily on EM-DAT data."
+    )
+    quantity_description = (
+        f"Monthly people affected (PA) in {iso3} by {hazard_label} as recorded by EM-DAT "
+        "(including both directly and indirectly affected people)."
+    )
+    return resolution_text, quantity_description
+
+
 def build_spd_prompt_pa(
     *,
     question_title: str,
@@ -554,28 +610,14 @@ def build_spd_prompt_pa(
     today: date,
     criteria: str,
 ) -> str:
-    hz_up = (hazard_code or "").upper()
-    metric_up = (metric or "").upper()
-
-    is_displacement = metric_up == "PA" and (
-        hz_up in {"ACO", "ACE", "CU", "DI"} or (resolution_source or "").upper() in {"IDMC", "DTM"}
+    resolution_text_base, quantity_description = build_resolution_text_and_quantity_description(
+        iso3=iso3,
+        hazard_code=hazard_code,
+        hazard_label=hazard_label,
+        metric=metric,
+        resolution_source=resolution_source,
     )
-    if is_displacement:
-        resolution_text = _format_resolution_text(
-            "People affected (PA) will be measured as internally displaced people (IDPs), using IDMC displacement estimates for this hazard and country, with IOM DTM or comparable humanitarian estimates as fallback.",
-            criteria,
-        )
-        quantity_description = (
-            f"Monthly people internally displaced (IDPs) in {iso3} due to {hazard_label.lower()} as recorded by IDMC/DTM."
-        )
-    else:
-        resolution_text = _format_resolution_text(
-            "People affected (PA) will be measured using Resolver's canonical PA metric for this natural hazard and country, based primarily on EM-DAT data.",
-            criteria,
-        )
-        quantity_description = (
-            f"Monthly people affected (PA) in {iso3} by {hazard_label} as recorded by EM-DAT (including both directly and indirectly affected people)."
-        )
+    resolution_text = _format_resolution_text(resolution_text_base, criteria)
 
     scoring_block = build_scoring_resolution_block(
         hazard_code=hazard_code,
@@ -622,13 +664,14 @@ def build_spd_prompt_fatalities(
     today: date,
     criteria: str,
 ) -> str:
-    resolution_text = _format_resolution_text(
-        "Fatalities will be measured as battle-related deaths recorded by ACLED for this country and hazard code.",
-        criteria,
+    resolution_text_base, quantity_description = build_resolution_text_and_quantity_description(
+        iso3=iso3,
+        hazard_code=hazard_code,
+        hazard_label=hazard_label,
+        metric=metric,
+        resolution_source=resolution_source,
     )
-    quantity_description = (
-        f"Monthly battle-related fatalities in {iso3} associated with armed conflict events, as recorded by ACLED."
-    )
+    resolution_text = _format_resolution_text(resolution_text_base, criteria)
 
     scoring_block = build_scoring_resolution_block(
         hazard_code=hazard_code,
