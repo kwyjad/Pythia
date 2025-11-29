@@ -32,6 +32,7 @@ import re
 import logging
 import time
 import traceback
+from dataclasses import dataclass, field
 from datetime import datetime
 from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,6 +44,22 @@ from pathlib import Path
 from pythia.db.schema import connect, ensure_schema
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass
+class QuestionRunSummary:
+    question_id: str
+    iso3: str
+    hazard_code: str
+    metric: str
+    month_count: int = 0
+    buckets_per_month: int = 0
+    ensemble_rows: int = 0
+    raw_rows: int = 0
+    ev_min: Optional[float] = None
+    ev_max: Optional[float] = None
+    models: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    error: Optional[str] = None
 
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
@@ -617,6 +634,35 @@ def _write_spd_raw_to_db(
             pass
 
 
+def _count_spd_rows(run_id: str, question_id: str) -> tuple[int, int]:
+    """Return (ensemble_rows, raw_rows) counts for the SPD question in DuckDB."""
+
+    try:
+        con = connect(read_only=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] failed to count SPD rows for {question_id}: {type(exc).__name__}: {exc}")
+        return 0, 0
+
+    try:
+        ens_n = con.execute(
+            "SELECT COUNT(*) FROM forecasts_ensemble WHERE run_id = ? AND question_id = ?",
+            [run_id, question_id],
+        ).fetchone()[0]
+        raw_n = con.execute(
+            "SELECT COUNT(*) FROM forecasts_raw WHERE run_id = ? AND question_id = ?",
+            [run_id, question_id],
+        ).fetchone()[0]
+        return int(ens_n or 0), int(raw_n or 0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] failed to count SPD rows for {question_id}: {type(exc).__name__}: {exc}")
+        return 0, 0
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
 def _load_pa_history_block(
     iso3: str,
     hazard_code: str,
@@ -1165,6 +1211,7 @@ async def _run_one_question_body(
     calib: Dict[str, Any],
     seen_guard_state: Dict[str, Any],
     seen_guard_run_report: Optional[Dict[str, Any]] = None,
+    summary: Optional[QuestionRunSummary] = None,
 ) -> None:
     t_start_total = time.time()
     _post_original = post
@@ -1601,6 +1648,25 @@ async def _run_one_question_body(
             quantiles_main, bmc_summary = aggregate_numeric(ens_res, calib_weights_map)
             final_main = dict(quantiles_main)
 
+        if summary is not None and qtype == "spd" and isinstance(final_main, dict):
+            summary.month_count = len([k for k in final_main.keys() if str(k).startswith("month_")])
+            first_month_vec = next(iter(final_main.values()), [])
+            if isinstance(first_month_vec, list):
+                summary.buckets_per_month = len(first_month_vec)
+            if isinstance(ev_main, dict) and ev_main:
+                ev_vals = [float(v) for v in ev_main.values() if v is not None]
+                if ev_vals:
+                    summary.ev_min = min(ev_vals)
+                    summary.ev_max = max(ev_vals)
+            if isinstance(ens_res, EnsembleResult):
+                for m in ens_res.members:
+                    summary.models[m.name] = {
+                        "ok": 1.0 if m.ok else 0.0,
+                        "elapsed_ms": float(getattr(m, "elapsed_ms", 0) or 0),
+                        "cost_usd": float(getattr(m, "cost_usd", 0.0) or 0.0),
+                        "total_tokens": float(getattr(m, "total_tokens", 0) or 0),
+                    }
+
         # If this is a Pythia SPD question, write ensemble SPD into DuckDB
         if qtype == "spd" and isinstance(final_main, dict):
             # Heuristic: presence of Pythia metadata marks Pythia mode
@@ -1629,6 +1695,11 @@ async def _run_one_question_body(
                     )
                 except Exception as exc:
                     print(f"[warn] Failed to write SPD RAW to DB for question {question_id}: {exc}")
+
+                if summary is not None:
+                    ens_n, raw_n = _count_spd_rows(run_id, str(question_id))
+                    summary.ensemble_rows = ens_n
+                    summary.raw_rows = raw_n
 
         bmc_summary = _as_dict(bmc_summary)
 
@@ -2124,6 +2195,8 @@ async def _run_one_question_body(
     
     
     except Exception as _e:
+        if summary is not None:
+            summary.error = f"{type(_e).__name__}: {str(_e)[:200]}"
         _post_t = type(_post_original).__name__
         try:
             _q_t = type(q).__name__
@@ -2198,6 +2271,7 @@ async def run_one_question(
     purpose: str,
     calib: Dict[str, Any],
     seen_guard_run_report: Optional[Dict[str, Any]] = None,
+    summary: Optional[QuestionRunSummary] = None,
 ) -> None:
     post = _must_dict("post", post)
     q = _as_dict(post.get("question"))
@@ -2231,6 +2305,7 @@ async def run_one_question(
             calib=calib,
             seen_guard_state=seen_guard_state,
             seen_guard_run_report=seen_guard_run_report,
+            summary=summary,
         )
     finally:
         lock_stack.close()
@@ -2264,6 +2339,9 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
     run_id = _istamp()
     os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
     print("----------------------------------------------------------------------------------------")
+
+    run_summaries: List[QuestionRunSummary] = []
+    hs_run_ids: set[str] = set()
 
     # --- load helpers from this module scope --------------------------------
     # They already exist below in this file; just reference them:
@@ -2421,6 +2499,11 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
             print("[logs] finalize_and_commit: done")
         except Exception as e:
             print(f"[warn] finalize_and_commit failed: {type(e).__name__}: {str(e)[:180]}")
+        if os.getenv("PYTHIA_LOG_SUMMARY", "1") == "1":
+            print("----------------------------------------------------------------------------------------")
+            print("[summary] Forecaster Pythia run summary:")
+            print(f"[summary] run_id={run_id} | hs_run_ids=none")
+            print(f"[summary] Questions processed: {len(run_summaries)}")
         return
 
     batch = posts[: max(1, limit)]
@@ -2436,6 +2519,16 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
         q = post.get("question") or {}
         qid = q.get("id") or post.get("id") or "?"
         title = (q.get("title") or post.get("title") or "").strip()
+        pmeta = _extract_pythia_meta(post)
+        summary = QuestionRunSummary(
+            question_id=str(qid),
+            iso3=pmeta.get("iso3", ""),
+            hazard_code=pmeta.get("hazard_code", ""),
+            metric=(pmeta.get("metric") or "").upper(),
+        )
+        hs_run_id = str(post.get("pythia_hs_run_id") or "").strip()
+        if hs_run_id:
+            hs_run_ids.add(hs_run_id)
         print("")
         print("----------------------------------------------------------------------------------------")
         print(f"[{idx}/{len(batch)}] ❓ {title}  (QID: {qid})")
@@ -2446,9 +2539,14 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
                 purpose=purpose,
                 calib=_load_calibration_weights_file(),
                 seen_guard_run_report=seen_guard_run_report,
+                summary=summary,
             )
         except Exception as e:
             print(f"[error] run_one_question failed for QID {qid}: {type(e).__name__}: {str(e)[:200]}")
+            if summary is not None and not summary.error:
+                summary.error = f"{type(e).__name__}: {str(e)[:200]}"
+        finally:
+            run_summaries.append(summary)
 
     # Commit logs to git if configured
     try:
@@ -2456,6 +2554,33 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
         print("[logs] finalize_and_commit: done")
     except Exception as e:
         print(f"[warn] finalize_and_commit failed: {type(e).__name__}: {str(e)[:180]}")
+
+    if os.getenv("PYTHIA_LOG_SUMMARY", "1") == "1":
+        print("----------------------------------------------------------------------------------------")
+        print("[summary] Forecaster Pythia run summary:")
+        hs_ids = ", ".join(sorted(hs_run_ids)) if hs_run_ids else "none"
+        print(f"[summary] run_id={run_id} | hs_run_ids={hs_ids}")
+        print(f"[summary] Questions processed: {len(run_summaries)}")
+        for s in sorted(run_summaries, key=lambda _s: _s.question_id):
+            status = "OK" if not s.error else f"ERROR: {s.error}"
+            model_strs = []
+            for name, stats in sorted(s.models.items()):
+                model_strs.append(
+                    f"{name}(ok={int(stats.get('ok', 0))}, tokens={int(stats.get('total_tokens', 0))}, "
+                    f"cost=${float(stats.get('cost_usd', 0.0)):.4f})"
+                )
+            models_joined = "; ".join(model_strs) if model_strs else "none"
+
+            ev_span = ""
+            if s.ev_min is not None and s.ev_max is not None:
+                ev_span = f" EV[{s.ev_min:,.0f}–{s.ev_max:,.0f}]"
+
+            print(
+                f"[summary] Q {s.question_id} | {s.iso3}/{s.hazard_code}/{s.metric} | "
+                f"months={s.month_count}x{s.buckets_per_month} | "
+                f"ens_rows={s.ensemble_rows} raw_rows={s.raw_rows}{ev_span} | "
+                f"models: {models_joined} | {status}"
+            )
 
 
 # ==============================================================================

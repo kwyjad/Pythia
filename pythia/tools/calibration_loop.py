@@ -49,8 +49,7 @@ def maybe_run_calibration(
             return
 
         LOGGER.info(
-            "Auto-calibration: %d eligible hazard/metric groups (as_of_month=%s): %s",
-            len(eligible),
+            "Auto-calibration: eligible groups (as_of_month=%s): %s",
             as_of_month,
             ", ".join(
                 f"{hazard_code}/{metric} (n={n_questions})"
@@ -61,6 +60,6 @@ def maybe_run_calibration(
         duckdb_io.close_db(conn)
 
     LOGGER.info(
-        "Auto-calibration: running compute_calibration_pythia(as_of=%s)", as_of.isoformat()
+        "Auto-calibration: invoking compute_calibration_pythia(as_of=%s)", as_of.isoformat()
     )
     compute_calibration_pythia(db_url=db_url or duckdb_io.DEFAULT_DB_URL, as_of=as_of)
