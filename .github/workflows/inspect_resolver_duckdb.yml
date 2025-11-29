@@ -1,7 +1,12 @@
 name: Inspect Resolver DuckDB
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      backfill_run_id:
+        description: "Run ID of the Resolver backfill workflow (the run that produced resolver_backfill.duckdb)"
+        required: true
+        type: string
 
 jobs:
   inspect-resolver-db:
@@ -16,24 +21,61 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install duckdb
+      - name: Install duckdb and gh
         run: |
           python -m pip install --upgrade pip
           python -m pip install duckdb
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Authenticate gh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+
+      - name: Download resolver_backfill.duckdb artifact from backfill run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+          # Download all artifacts for the specified run into data/
+          gh run download ${{ inputs.backfill_run_id }} --dir data
+
+          echo "Downloaded artifacts into data/:"
+          ls -R data
+
+          # If your artifact is a single file named resolver_backfill.duckdb in data/,
+          # rename it to data/resolver.duckdb.
+          # If it ends up inside a subdirectory, adjust the mv accordingly.
+          if [ -f data/resolver_backfill.duckdb ]; then
+            mv data/resolver_backfill.duckdb data/resolver.duckdb
+          else
+            # Try to find it under subdirectories
+            FILE_PATH=$(find data -maxdepth 2 -type f -name "resolver_backfill.duckdb" | head -n 1 || true)
+            if [ -n "$FILE_PATH" ]; then
+              mv "$FILE_PATH" data/resolver.duckdb
+            fi
+          fi
+
+          if [ ! -f data/resolver.duckdb ]; then
+            echo "resolver_backfill.duckdb not found in artifacts; please adjust the mv logic."
+            ls -R data
+            exit 1
+          fi
 
       - name: Inspect data/resolver.duckdb
         run: |
           python - << 'EOF'
-          import duckdb
-          import os
+          import duckdb, os
           from pathlib import Path
 
           db_path = 'data/resolver.duckdb'
           out_path = Path('resolver_inspect.md')
 
           lines = []
-          lines.append(f"# Resolver DuckDB Inspection")
+          lines.append("# Resolver DuckDB Inspection")
           lines.append("")
+
           if not os.path.exists(db_path):
               lines.append(f"_Database not found at `{db_path}`_")
           else:
@@ -95,7 +137,7 @@ jobs:
 
               con.close()
 
-          out_path.write_text("\n".join(lines), encoding="utf-8")
+          out_path.write_text("\n".join(lines), encoding='utf-8')
           print(f"Wrote {out_path}")
           EOF
 
