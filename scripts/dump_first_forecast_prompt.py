@@ -257,6 +257,74 @@ def _get_question_context(con, run_id: str, question_id: str) -> Dict[str, Any]:
     return d
 
 
+def _load_spd_from_forecasts_ensemble(
+    con, run_id: str, question_id: str
+) -> Tuple[Dict[int, List[float]], Dict[int, float]]:
+    """
+    Load the ensemble SPD and EV per month from forecasts_ensemble.
+
+    Returns:
+      ensemble_probs: {month_index: [p1..p5]}
+      ensemble_ev: {month_index: ev_value}
+    """
+
+    rows = con.execute(
+        """
+        SELECT month_index, bucket_index, probability, ev_value
+        FROM forecasts_ensemble
+        WHERE run_id = ? AND question_id = ?
+        ORDER BY month_index, bucket_index
+        """,
+        [run_id, question_id],
+    ).fetchall()
+
+    ensemble_probs: Dict[int, List[float]] = {}
+    ensemble_ev: Dict[int, float] = {}
+
+    for month_idx, bucket_idx, p, ev_val in rows:
+        m = int(month_idx)
+        b = int(bucket_idx)
+        probs = ensemble_probs.setdefault(m, [0.0] * 5)
+        if 1 <= b <= 5:
+            probs[b - 1] = float(p or 0.0)
+
+        if ev_val is not None and m not in ensemble_ev:
+            ensemble_ev[m] = float(ev_val)
+
+    return ensemble_probs, ensemble_ev
+
+
+def _load_bucket_centroids(con, hazard_code: str, metric: str) -> List[float]:
+    """
+    Load bucket centroids for this hazard/metric from bucket_centroids.
+
+    Returns a list [c1..c5], or [] if none found.
+    """
+
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+    rows = con.execute(
+        """
+        SELECT bucket_index, centroid
+        FROM bucket_centroids
+        WHERE upper(hazard_code) = ?
+          AND upper(metric) = ?
+        ORDER BY bucket_index
+        """,
+        [hz, m],
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    centroids = [0.0] * 5
+    for bucket_idx, centroid in rows:
+        b = int(bucket_idx)
+        if 1 <= b <= 5:
+            centroids[b - 1] = float(centroid or 0.0)
+    return centroids
+
+
 def _fmt_tokens_and_cost(row: Dict[str, Any]) -> str:
     pt = int(row.get("prompt_tokens") or 0)
     ct = int(row.get("completion_tokens") or 0)
@@ -319,6 +387,10 @@ def main() -> None:
             research_calls = _get_research_calls_for_question(con, run_id, question_id)
             qmeta = _get_question_metadata(con, question_id)
             qctx = _get_question_context(con, run_id, question_id)
+            ensemble_probs, ensemble_ev = _load_spd_from_forecasts_ensemble(
+                con, run_id, question_id
+            )
+            centroids = _load_bucket_centroids(con, qmeta.get("hazard_code"), qmeta.get("metric"))
 
             if not fc:
                 lines.append(f"_No forecast calls found for question `{question_id}` in this run._")
@@ -423,9 +495,56 @@ def main() -> None:
                     except Exception:
                         lines.append(str(ctx_extra))
                     lines.append("```")
-                    lines.append("")
+                lines.append("")
             else:
                 lines.append("_No Resolver context found for this question/run._")
+                lines.append("")
+
+            lines.append("## SPD Ensemble (from forecasts_ensemble)")
+            lines.append("")
+
+            if ensemble_probs:
+                header = "| Month | B1 p | B2 p | B3 p | B4 p | B5 p | EV (db) |"
+                if centroids:
+                    header += " EV (spd×centroids) |"
+                lines.append(header)
+                if centroids:
+                    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+                else:
+                    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+
+                for month_idx in sorted(ensemble_probs.keys()):
+                    probs = ensemble_probs[month_idx]
+                    ev_db = ensemble_ev.get(month_idx)
+                    row = [f"{month_idx}"]
+                    for p in probs:
+                        row.append(f"{p:.3f}")
+
+                    if ev_db is not None:
+                        row.append(f"{ev_db:,.0f}")
+                    else:
+                        row.append("")
+
+                    if centroids:
+                        ev_calc = sum(p * c for p, c in zip(probs, centroids))
+                        row.append(f"{ev_calc:,.0f}")
+
+                    lines.append("| " + " | ".join(row) + " |")
+                lines.append("")
+            else:
+                lines.append("_No forecasts_ensemble rows found for this question/run._")
+                lines.append("")
+
+            if centroids:
+                lines.append("### Bucket centroids (from bucket_centroids)")
+                lines.append("")
+                lines.append("| Bucket | Centroid |")
+                lines.append("|---:|---:|")
+                for idx, c in enumerate(centroids, start=1):
+                    lines.append(f"| {idx} | {c:,.0f} |")
+                lines.append("")
+            else:
+                lines.append("_No bucket_centroids found for this hazard/metric._")
                 lines.append("")
 
             lines.append("### Forecast Prompt Text (Full)")
