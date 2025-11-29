@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -258,9 +259,18 @@ def test_spd_prompt_template_allows_literal_json_braces() -> None:
     """
 
     prompt = prompts.build_spd_prompt_pa(
-        title="Test SPD PA question",
+        question_title="Test SPD PA question",
+        iso3="USA",
+        hazard_code="FL",
+        hazard_label="Flood",
+        metric="PA",
         background="Some background",
         research_text="Some research",
+        resolution_source="EMDAT",
+        window_start_date=None,
+        window_end_date=None,
+        month_labels=None,
+        today=date.today(),
         criteria="Some resolution criteria",
     )
 

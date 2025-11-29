@@ -33,7 +33,7 @@ import logging
 import time
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
 import inspect
@@ -156,6 +156,31 @@ def _must_dict(name: str, obj: Any) -> Dict[str, Any]:
         # Keep this very explicit so CI logs are helpful and not a vague AttributeError
         raise RuntimeError(f"{name} is not a dict after coercion (type={type(obj).__name__})")
     return d
+
+
+def _coerce_date(val: Any) -> Optional[date]:
+    if isinstance(val, date):
+        return val
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val).date()
+        except Exception:
+            return None
+    return None
+
+
+def _build_month_labels(start_date: Optional[date], horizon_months: int = 6) -> Dict[int, str]:
+    labels: Dict[int, str] = {}
+    if not isinstance(start_date, date):
+        return labels
+    y, m = start_date.year, start_date.month
+    for idx in range(1, horizon_months + 1):
+        labels[idx] = date(y, m, 1).strftime("%B %Y")
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return labels
 
 
 # ---- Forecaster internals (all relative imports) --------------------------------
@@ -1254,9 +1279,16 @@ async def _run_one_question_body(
         ev_main: Optional[Dict[str, Any]] = None
 
         pmeta = _extract_pythia_meta(post)
+        pythia_meta_full = _as_dict(post.get("pythia_metadata") or {})
         metric_up = (pmeta.get("metric") or "").upper()
         hz_code = (pmeta.get("hazard_code") or "").upper()
         hz_is_conflict = bool(hz_code and (hz_code in CONFLICT_HAZARD_CODES or hz_code.startswith("CONFLICT")))
+        resolution_source = str(pythia_meta_full.get("resolution_source") or "")
+        hazard_label = str(pythia_meta_full.get("hazard_label") or hz_code)
+        window_start_date = _coerce_date(post.get("pythia_window_start_date"))
+        window_end_date = _coerce_date(post.get("pythia_window_end_date"))
+        month_labels = _build_month_labels(window_start_date, horizon_months=6)
+        today_date = date.today()
 
         # ------------------ 1) Research step (LLM brief + sources appended) ---------
         t0 = time.time()
@@ -1536,9 +1568,37 @@ async def _run_one_question_body(
             main_prompt = build_mcq_prompt(title, options, description, research_text, criteria)
         elif qtype == "spd":
             if metric_up == "FATALITIES" and hz_is_conflict:
-                main_prompt = build_spd_prompt_fatalities(title, description, research_text, criteria)
+                main_prompt = build_spd_prompt_fatalities(
+                    question_title=title,
+                    iso3=pmeta.get("iso3", ""),
+                    hazard_code=hz_code,
+                    hazard_label=hazard_label,
+                    metric=metric_up,
+                    background=description,
+                    research_text=research_text,
+                    resolution_source=resolution_source,
+                    window_start_date=window_start_date,
+                    window_end_date=window_end_date,
+                    month_labels=month_labels,
+                    today=today_date,
+                    criteria=criteria,
+                )
             else:
-                main_prompt = build_spd_prompt_pa(title, description, research_text, criteria)
+                main_prompt = build_spd_prompt_pa(
+                    question_title=title,
+                    iso3=pmeta.get("iso3", ""),
+                    hazard_code=hz_code,
+                    hazard_label=hazard_label,
+                    metric=metric_up,
+                    background=description,
+                    research_text=research_text,
+                    resolution_source=resolution_source,
+                    window_start_date=window_start_date,
+                    window_end_date=window_end_date,
+                    month_labels=month_labels,
+                    today=today_date,
+                    criteria=criteria,
+                )
         else:
             main_prompt = build_numeric_prompt(title, str(units or ""), description, research_text, criteria)
     
