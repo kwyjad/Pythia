@@ -60,7 +60,7 @@ name: Resolver — Initial Backfill
 
 env:
   PYTHONUNBUFFERED: "1"
-  BACKFILL_DB_PATH: data/resolver_backfill.duckdb
+  BACKFILL_DB_PATH: data/resolver.duckdb
   BACKFILL_INGEST_ARTIFACT: resolver-backfill-ingest-${{ github.run_id }}-${{ github.run_attempt }}
   BACKFILL_ACLED_ARTIFACT: resolver-backfill-acled-${{ github.run_id }}-${{ github.run_attempt }}
   BACKFILL_SNAPSHOT_ARTIFACT: resolver-backfill-snapshots-${{ github.run_id }}-${{ github.run_attempt }}
@@ -76,7 +76,7 @@ jobs:
       end_iso: ${{ steps.window.outputs.end_iso }}
       month_count: ${{ steps.window.outputs.month_count }}
     env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
@@ -130,6 +130,11 @@ jobs:
             export PYTHONWARNINGS=default
           fi
           python -m scripts.ci.compute_backfill_window
+
+      - name: Remove any existing resolver.duckdb (initial backfill)
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb
 
       - name: Clean staging & diagnostics
         run: |
@@ -431,7 +436,7 @@ jobs:
       - ingest
       - acled-backfill
     env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver_backfill.duckdb', github.workspace) }}
+      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
     steps:
       - name: Checkout repository
@@ -581,7 +586,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: resolver-backfill-db
-          path: data/resolver_backfill.duckdb
+          path: ${{ env.BACKFILL_DB_PATH }}
 
       - name: Upload exports and database
         uses: actions/upload-artifact@v4
@@ -595,6 +600,13 @@ jobs:
       - name: Simple DuckDB snapshot (facts_resolved/facts_deltas)
         run: |
           set -euo pipefail
-          DB_PATH="data/resolver_backfill.duckdb"
+          DB_PATH="${BACKFILL_DB_PATH}"
           echo "[simple_snapshot] Running simple snapshot extract against ${DB_PATH}"
           python -m resolver.cli.simple_snapshot --db "${DB_PATH}"
+
+      - name: Upload canonical resolver DB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
