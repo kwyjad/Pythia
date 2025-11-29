@@ -8,6 +8,10 @@ on:
         required: true
         type: string
 
+  workflow_run:
+    workflows: ["Resolver — Initial Backfill"]
+    types: [completed]
+
 jobs:
   inspect-resolver-db:
     runs-on: ubuntu-latest
@@ -33,13 +37,28 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh auth status
 
+      - name: Determine backfill run ID
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_RUN_ID: ${{ inputs.backfill_run_id }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            echo "BACKFILL_RUN_ID=${WORKFLOW_RUN_ID}" >> "$GITHUB_ENV"
+            echo "Using workflow_run.id=${WORKFLOW_RUN_ID}"
+          else
+            echo "BACKFILL_RUN_ID=${DISPATCH_RUN_ID}" >> "$GITHUB_ENV"
+            echo "Using dispatch input backfill_run_id=${DISPATCH_RUN_ID}"
+          fi
+
       - name: Download resolver_backfill.duckdb artifact from backfill run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p data
           # Download all artifacts for the specified run into data/
-          gh run download ${{ inputs.backfill_run_id }} --dir data
+          echo "Downloading artifacts for run $BACKFILL_RUN_ID ..."
+          gh run download "$BACKFILL_RUN_ID" --dir data
 
           echo "Downloaded artifacts into data/:"
           ls -R data
@@ -51,7 +70,7 @@ jobs:
             mv data/resolver_backfill.duckdb data/resolver.duckdb
           else
             # Try to find it under subdirectories
-            FILE_PATH=$(find data -maxdepth 2 -type f -name "resolver_backfill.duckdb" | head -n 1 || true)
+            FILE_PATH=$(find data -maxdepth 3 -type f -name "resolver_backfill.duckdb" | head -n 1 || true)
             if [ -n "$FILE_PATH" ]; then
               mv "$FILE_PATH" data/resolver.duckdb
             fi
