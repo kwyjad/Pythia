@@ -110,6 +110,9 @@ context/
 # === Pythia run artifacts ===
 .env
 
+# Local context pack archive
+context_pack.zip
+
 # Resolver pipeline outputs
 resolver/logs/
 resolver/staging/
@@ -156,3 +159,6 @@ ${RESOLVER_DATA_DIR}/
 !resolver/diagnostics/ingestion/__init__.py
 !resolver/diagnostics/ingestion/summarize_connectors.py
 !resolver/diagnostics/
+
+# Local dev container / workspace artifacts
+workspaces/
