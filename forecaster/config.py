@@ -14,40 +14,7 @@ try:
 except Exception:
     pass
 
-# --- Toggles and API keys ---
-USE_OPENROUTER    = (os.getenv("USE_OPENROUTER", "1") == "1")
-USE_GOOGLE        = (os.getenv("USE_GOOGLE", "1") == "1")
-ENABLE_GROK       = (os.getenv("ENABLE_GROK", "1") == "1")
-
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")           # e.g., https://openrouter.ai/api/v1
-GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY")
-XAI_API_KEY     = os.getenv("XAI_API_KEY")
-XAI_BASE_URL    = "https://api.x.ai/v1/chat/completions"
-
-ASKNEWS_CLIENT_ID = os.getenv("ASKNEWS_CLIENT_ID")
-ASKNEWS_SECRET    = os.getenv("ASKNEWS_SECRET")
-
-# --- Models & timeouts ---
-OPENROUTER_GPT5_ID        = os.getenv("OPENROUTER_GPT5_ID", "openai/gpt-4o")
-OPENROUTER_GPT5_THINK_ID  = os.getenv("OPENROUTER_GPT5_THINK_ID", "openai/gpt-4o")
-OPENROUTER_FALLBACK_ID    = os.getenv("OPENROUTER_FALLBACK_ID", "openai/gpt-4o")
-OPENROUTER_CLAUDE37_ID    = os.getenv("OPENROUTER_CLAUDE37_ID", "anthropic/claude-3.7-sonnet")
-GEMINI_MODEL              = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-XAI_GROK_ID               = os.getenv("XAI_GROK_ID", "grok-4")
-
-GPT5_CALL_TIMEOUT_SEC   = float(os.getenv("GPT5_CALL_TIMEOUT_SEC", 300))
-GEMINI_CALL_TIMEOUT_SEC = float(os.getenv("GEMINI_CALL_TIMEOUT_SEC", 300))
-GROK_CALL_TIMEOUT_SEC   = float(os.getenv("GROK_CALL_TIMEOUT_SEC", 300))
-
-# --- Decoding knobs (separate for research vs. forecasting) ---
-FORECAST_TEMP = float(os.getenv("FORECAST_TEMP", "0.00"))
-RESEARCH_TEMP = float(os.getenv("RESEARCH_TEMP", "0.20"))
-FORECAST_TOP_P = float(os.getenv("FORECAST_TOP_P", "0.20"))
-RESEARCH_TOP_P = float(os.getenv("RESEARCH_TOP_P", "1.00"))
-
-# --- Concurrency & cache ---
-CONCURRENT_REQUESTS_LIMIT = 5
+# --- Cache toggles ---
 DISABLE_RESEARCH_CACHE = os.getenv("PYTHIA_DISABLE_RESEARCH_CACHE", "0").lower() in ("1","true","yes")
 
 # --- Markets ---
@@ -83,7 +50,6 @@ def ist_date(fmt: str = "%Y-%m-%d") -> str:
     return datetime.now(IST_TZ).strftime(fmt)
 
 # --- Cache helpers (JSON) ---
-import os, json
 def cache_path(kind: str, slug: str) -> str:
     os.makedirs(CACHE_DIR, exist_ok=True)
     return os.path.join(CACHE_DIR, f"{kind}__{slug}.json")

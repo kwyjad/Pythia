@@ -38,7 +38,7 @@ from horizon_scanner.llm_logging import log_hs_llm_call
 from pythia.prompts.registry import load_prompt_spec
 from pythia.llm_profiles import get_current_models, get_current_profile
 from pythia.db.schema import ensure_schema, connect
-from forecaster.providers import estimate_cost_usd
+from forecaster.providers import GEMINI_MODEL_ID, estimate_cost_usd
 
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
@@ -70,10 +70,34 @@ try:
 except Exception:
     _profile_models = {}
 
-GEMINI_MODEL_NAME = _profile_models.get("google", "gemini-3-pro-preview")
+
+def _resolve_hs_model() -> str:
+    if GEMINI_MODEL_ID:
+        return GEMINI_MODEL_ID
+    profile_model = _profile_models.get("google")
+    if profile_model:
+        return str(profile_model)
+    return "google/gemini-2.5-flash-lite"
+
+
+def _resolve_hs_temperature() -> float:
+    try:
+        return float(os.getenv("HS_GEMINI_TEMP", "1.0"))
+    except Exception:
+        return 1.0
+
+
+GEMINI_MODEL_NAME = _resolve_hs_model()
+HS_TEMPERATURE = _resolve_hs_temperature()
+
+
+def _google_model_name_for_api(model_id: str) -> str:
+    if model_id.startswith("google/"):
+        return model_id.split("/", 1)[1]
+    return model_id
 
 generation_config = {
-    "temperature": 1.0,
+    "temperature": HS_TEMPERATURE,
     "top_p": 0.9,
     "top_k": 32,
     "max_output_tokens": 8192,
@@ -88,7 +112,7 @@ safety_settings = [
 # Initialize the generative model for the analysis
 # This uses your preferred model for the complex analysis task
 country_model = genai.GenerativeModel(
-    model_name=GEMINI_MODEL_NAME,
+    model_name=_google_model_name_for_api(GEMINI_MODEL_NAME),
     generation_config=generation_config,
     safety_settings=safety_settings
 )
