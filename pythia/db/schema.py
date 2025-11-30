@@ -72,6 +72,38 @@ def _ensure_table_and_columns(
             continue
 
 
+def _seed_pa_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure wildcard PA centroids exist in bucket_centroids."""
+
+    rows = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM bucket_centroids
+        WHERE upper(metric) = 'PA' AND hazard_code = '*'
+        """
+    ).fetchone()
+
+    if rows and (rows[0] or 0) >= 5:
+        return
+
+    con.execute(
+        """
+        DELETE FROM bucket_centroids
+        WHERE upper(metric) = 'PA' AND hazard_code = '*'
+        """
+    )
+
+    centroids = [0.0, 30_000.0, 150_000.0, 375_000.0, 1_000_000.0]
+    for idx, centroid in enumerate(centroids, start=1):
+        con.execute(
+            """
+            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+            VALUES (?, ?, ?, ?)
+            """,
+            ["*", "PA", idx, centroid],
+        )
+
+
 def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
     """
     Ensure all Pythia-related tables exist in DuckDB.
@@ -293,6 +325,34 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "context_json": "TEXT",
             },
         )
+
+        _ensure_table_and_columns(
+            con,
+            "bucket_centroids",
+            """
+            CREATE TABLE IF NOT EXISTS bucket_centroids (
+                hazard_code TEXT,
+                metric TEXT,
+                bucket_index INTEGER,
+                centroid DOUBLE
+            );
+            """,
+            {
+                "hazard_code": "TEXT",
+                "metric": "TEXT",
+                "bucket_index": "INTEGER",
+                "centroid": "DOUBLE",
+            },
+        )
+
+        con.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_bucket_centroids
+            ON bucket_centroids (hazard_code, metric, bucket_index)
+            """
+        )
+
+        _seed_pa_bucket_centroids(con)
 
         _ensure_table_and_columns(
             con,

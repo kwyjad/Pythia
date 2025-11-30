@@ -11,6 +11,7 @@ import numpy as np
 
 from .providers import ModelSpec, llm_semaphore, call_chat_ms, estimate_cost_usd
 from forecaster.llm_logging import log_forecaster_llm_call
+from resolver.db import duckdb_io
 
 @dataclass
 class MemberOutput:
@@ -28,6 +29,15 @@ class MemberOutput:
 @dataclass
 class EnsembleResult:
     members: List[MemberOutput]
+
+# PA bucket centroids: conditional expected PA given each bucket, in people
+SPD_BUCKET_CENTROIDS_PA: list[float] = [
+    0.0,  # Bucket 1: <10k (treated as no major emergency)
+    30_000.0,  # Bucket 2: 10k–<50k
+    150_000.0,  # Bucket 3: 50k–<250k
+    375_000.0,  # Bucket 4: 250k–<500k
+    1_000_000.0,  # Bucket 5: >=500k
+]
 
 # ---------- helpers ----------
 def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> List[float]:
@@ -171,6 +181,80 @@ def _parse_spd_json(
             print(f"[spd] parse produced all-zero SPD; treating as failure; head={head!r}")
         return None
     return _normalize_spd_keys(out, n_months=n_months, n_buckets=n_buckets)
+
+
+def _load_bucket_centroids_db(
+    hazard_code: str,
+    metric: str,
+    class_bins: List[str] | List[int],
+) -> List[float] | None:
+    """
+    Load bucket centroids for a hazard/metric from DuckDB.
+
+    Prefers hazard-specific entries, then wildcard ('*'), and returns a list of
+    centroids matching the provided class_bins. Returns None if no complete set
+    is available.
+    """
+
+    hz = (hazard_code or "").upper()
+    mt = (metric or "").upper()
+    if not mt or not class_bins:
+        return None
+
+    con = None
+    try:
+        con = duckdb_io.get_db(duckdb_io.DEFAULT_DB_URL)
+    except Exception:
+        return None
+
+    try:
+        rows = con.execute(
+            """
+            SELECT bucket_index, centroid
+            FROM bucket_centroids
+            WHERE upper(metric) = ?
+              AND upper(hazard_code) = ?
+            ORDER BY bucket_index
+            """,
+            [mt, hz],
+        ).fetchall()
+
+        if not rows:
+            rows = con.execute(
+                """
+                SELECT bucket_index, centroid
+                FROM bucket_centroids
+                WHERE upper(metric) = ?
+                  AND hazard_code = '*'
+                ORDER BY bucket_index
+                """,
+                [mt],
+            ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        if con is not None:
+            duckdb_io.close_db(con)
+
+    if not rows:
+        return None
+
+    n_bins = len(class_bins)
+    centroids: List[float] = [0.0] * n_bins
+    found: set[int] = set()
+    for bucket_idx, centroid in rows:
+        try:
+            b = int(bucket_idx)
+        except Exception:
+            continue
+        if 1 <= b <= n_bins:
+            centroids[b - 1] = float(centroid or 0.0)
+            found.add(b)
+
+    if len(found) != n_bins:
+        return None
+
+    return centroids
 
 def _parse_binary_probability(text: str) -> Optional[float]:
     if not text:
