@@ -3,7 +3,7 @@ name: Pythia — Compute Calibration Weights & Advice
 
 on:
   workflow_run:
-    workflows: ["Resolver — Initial Backfill"]
+    workflows: ["Pythia — Compute SPD Scores"]
     types: [completed]
 
   # Optional manual trigger
