@@ -26,8 +26,7 @@ Key outputs in meta (all strings/numbers safe to write to CSV):
 Environment variables used (minimal set):
   GEMINI_API_KEY   (preferred)  — your Google Generative Language API key
   GOOGLE_API_KEY   (fallback)   — used if GEMINI_API_KEY is not set
-  GEMINI_MODEL                  — default "gemini-2.5-pro"
-  RESEARCH_TEMP                 — default 0.20 (see config.py)
+  RESEARCH_TEMP                 — default 0.20 (env override)
   RESEARCH_LOG_ALL_CANDIDATES   — "1" to also print pre-filter candidates into the log
   RESEARCH_REQUIRE_YEAR_IF_PRESENT — "1" require a year match when the question contains years
 
@@ -39,13 +38,8 @@ import os, re, json, time, math, textwrap, asyncio, hashlib, difflib
 from typing import Optional, List, Dict, Any, Tuple
 import requests
 
-from .config import (
-    ist_date, ist_iso,
-    RESEARCH_TEMP,
-    read_cache, write_cache,
-    GEMINI_CALL_TIMEOUT_SEC as _GEMINI_TIMEOUT,
-    GEMINI_MODEL as _GEMINI_MODEL_ENV,
-)
+from .config import ist_date, ist_iso, read_cache, write_cache
+from .providers import GEMINI_MODEL_ID
 
 from .prompts import build_research_prompt, _CAL_PREFIX
 from forecaster.providers import estimate_cost_usd
@@ -64,17 +58,27 @@ if get_current_models is not None:
 else:
     _PROFILE_MODELS = {}
 
-_GEMINI_MODEL_DEFAULT = _PROFILE_MODELS.get("google") or _GEMINI_MODEL_ENV or "gemini-2.5-pro"
+
+def _load_research_timeout(default: float = 300.0) -> float:
+    try:
+        return max(1.0, float(os.getenv("GEMINI_CALL_TIMEOUT_SEC", str(default))))
+    except Exception:
+        return default
+
+
+RESEARCH_TEMP = float(os.getenv("RESEARCH_TEMP", "0.20") or 0.20)
+_GEMINI_TIMEOUT = _load_research_timeout()
 
 
 def _select_gemini_model() -> str:
-    if _GEMINI_MODEL_DEFAULT:
-        return str(_GEMINI_MODEL_DEFAULT).strip()
-    if _GEMINI_MODEL_ENV:
-        return str(_GEMINI_MODEL_ENV).strip()
-    if _PROFILE_MODELS.get("google"):
-        return str(_PROFILE_MODELS.get("google") or "").strip()
-    return "gemini-2.5-pro"
+    # Prefer the configured Gemini model from providers (profile-aware).
+    if GEMINI_MODEL_ID:
+        return GEMINI_MODEL_ID
+    profile_model = _PROFILE_MODELS.get("google")
+    if profile_model:
+        return str(profile_model).strip()
+    # Fallback, if needed:
+    return "google/gemini-2.5-flash-lite"
 
 
 # --- Debug hook: last error message from research step (for human log & CSV) ---
@@ -333,7 +337,8 @@ def _collect_market_snapshots(query_title: str) -> Tuple[str, Dict[str, bool], L
 
 def _gemini_base_url(model: str) -> str:
     # REST endpoint for generateContent in v1beta
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    model_id = model.split("/", 1)[1] if model.startswith("google/") else model
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
 
 def _gemini_api_key() -> str:
     # Prefer GEMINI_API_KEY; fallback to GOOGLE_API_KEY for convenience.
@@ -556,14 +561,9 @@ async def _compose_research_via_gemini(prompt_text: str, *, model: str | None = 
     """
     api_key = _gemini_api_key()
     if model is None:
-        if _GEMINI_MODEL_DEFAULT:
-            model = _GEMINI_MODEL_DEFAULT
-        elif _GEMINI_MODEL_ENV:
-            model = _GEMINI_MODEL_ENV.strip()
-        else:
-            model = "gemini-2.5-pro"
+        model = _select_gemini_model()
     model = str(model).strip()
-    used_llm = f"google/{model}"
+    used_llm = model
 
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
@@ -769,7 +769,7 @@ async def run_research_async(
     # 5) LLM compose (Gemini only for research)
     req_body: Dict[str, Any] = {}
     research_model = _select_gemini_model()
-    used_llm: str = f"google/{research_model}"
+    used_llm: str = research_model
 
     async def _call_llm(prompt_text: str, **kwargs) -> tuple[str, Dict[str, Any]]:
         nonlocal req_body, used_llm, research_model
@@ -798,7 +798,7 @@ async def run_research_async(
         low_level_call=_call_llm,
     )
     if not used_llm:
-        used_llm = f"google/{research_model}"
+        used_llm = research_model
     if not llm_text.strip():
         if picked:
             llm_text = "\n".join([f"- {it.get('title','')} ({it.get('url','')})" for it in picked])
@@ -833,7 +833,7 @@ async def run_research_async(
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
         }
-    research_cost_usd = estimate_cost_usd(used_llm or f"google/{research_model}", research_usage)
+    research_cost_usd = estimate_cost_usd(used_llm or research_model, research_usage)
 
     # 6) Final text for the human log: brief + source list (+ optional pre-filter dump)
     parts = [_CAL_PREFIX + llm_text]
@@ -850,7 +850,7 @@ async def run_research_async(
         cache_blob = json.dumps({
             "final_text": final_text,
             "meta": {
-                "research_llm": used_llm or f"google/{research_model}",
+                "research_llm": used_llm or research_model,
                 "research_model_id": research_model,
                 "research_source": source_tag,
                 "research_query": query_used,
@@ -871,7 +871,7 @@ async def run_research_async(
 
     # 8) meta (mirror cached structure)
     meta = {
-        "research_llm": used_llm or f"google/{research_model}",
+        "research_llm": used_llm or research_model,
         "research_model_id": research_model,
         "research_source": source_tag,
         "research_query": query_used,

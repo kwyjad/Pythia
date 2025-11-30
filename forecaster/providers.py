@@ -29,11 +29,11 @@ from pythia.config import load as load_cfg
 from pythia.db.util import write_llm_call
 from pythia.llm_profiles import get_current_models, get_current_profile
 
-from .config import (
-    GEMINI_CALL_TIMEOUT_SEC,
-    GPT5_CALL_TIMEOUT_SEC,
-    GROK_CALL_TIMEOUT_SEC,
-)
+
+# Default timeouts (seconds); can be overridden via env
+GPT5_CALL_TIMEOUT_SEC = float(os.getenv("GPT5_CALL_TIMEOUT_SEC", "300"))
+GEMINI_CALL_TIMEOUT_SEC = float(os.getenv("GEMINI_CALL_TIMEOUT_SEC", "300"))
+GROK_CALL_TIMEOUT_SEC = float(os.getenv("GROK_CALL_TIMEOUT_SEC", "300"))
 
 
 # ---------------------------------------------------------------------------
