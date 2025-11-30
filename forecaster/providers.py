@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import duckdb
+import httpx
 import requests
 
 from pythia.config import load as load_cfg
@@ -237,6 +238,18 @@ _XAI_TIMEOUT = _resolve_timeout("XAI_CALL_TIMEOUT_SEC", GROK_CALL_TIMEOUT_SEC, 6
 
 _ANTHROPIC_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
 _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "2048") or 2048)
+
+
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_or_client() -> httpx.AsyncClient:
+    """Return a shared async HTTP client for provider calls."""
+
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=30.0)
+    return _http_client
 
 
 # ---------------------------------------------------------------------------
