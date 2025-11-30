@@ -17,6 +17,21 @@ if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
 
+def _table_exists(conn, name: str) -> bool:
+    try:
+        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
+        return True
+    except Exception:
+        return False
+
+
+def _row_count(conn, name: str) -> int:
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
+    except Exception:
+        return 0
+
+
 MIN_QUESTIONS = 20
 HALF_LIFE_MONTHS = 12.0
 TEMP_SOFTMAX = 0.1
@@ -69,6 +84,7 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
       JOIN resolutions r
         ON r.question_id = s.question_id
        AND r.observed_month = q.target_month
+      JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
       WHERE q.target_month <= ?
     """
     rows = conn.execute(sql, [as_of_month]).fetchall()
@@ -249,6 +265,16 @@ def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> Non
             )
             """
         )
+
+        # Early exit if scores table doesn't exist or is empty
+        if not _table_exists(conn, "scores"):
+            LOGGER.info("compute_calibration_pythia: scores table not found; nothing to do.")
+            return
+
+        s_count = _row_count(conn, "scores")
+        if s_count == 0:
+            LOGGER.info("compute_calibration_pythia: scores table is empty; nothing to do.")
+            return
 
         samples = _load_samples(conn, as_of_month)
         groups = _group_by_hazard_metric(samples)

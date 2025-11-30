@@ -23,6 +23,21 @@ SPD_CLASS_BINS_FATALITIES = ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
 EPS = 1e-9
 
 
+def _table_exists(conn, name: str) -> bool:
+    try:
+        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
+        return True
+    except Exception:
+        return False
+
+
+def _row_count(conn, name: str) -> int:
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
+    except Exception:
+        return 0
+
+
 def _get_db_url_from_config() -> str:
     cfg = load_cfg()
     app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
@@ -163,6 +178,16 @@ def compute_scores(db_url: str) -> None:
             """
         )
 
+        # Early exit if resolutions table doesn't exist or is empty
+        if not _table_exists(conn, "resolutions"):
+            LOGGER.info("compute_scores: resolutions table not found; nothing to do.")
+            return
+
+        r_count = _row_count(conn, "resolutions")
+        if r_count == 0:
+            LOGGER.info("compute_scores: resolutions table is empty; nothing to do.")
+            return
+
         q_sql = """
           SELECT
             q.question_id,
@@ -175,6 +200,7 @@ def compute_scores(db_url: str) -> None:
           JOIN resolutions r
             ON q.question_id = r.question_id
            AND q.target_month = r.observed_month
+          JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
           WHERE upper(q.metric) IN ('PA','FATALITIES')
           ORDER BY q.question_id
         """

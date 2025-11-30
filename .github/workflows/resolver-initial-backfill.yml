@@ -11,7 +11,7 @@ name: Resolver — Initial Backfill
       reset_db:
         description: "Delete existing resolver.duckdb and rebuild from scratch?"
         required: false
-        default: "true"
+        default: "false"
       only_connector:
         description: "Optional connector name for --only (e.g. dtm_client)"
         required: false
