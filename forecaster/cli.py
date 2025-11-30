@@ -228,11 +228,11 @@ from .ensemble import (
     run_ensemble_numeric,
     run_ensemble_spd,
     SPD_BUCKET_CENTROIDS_PA,
+    SPD_BUCKET_CENTROIDS_FATALITIES,
     sanitize_mcq_vector,
 )
 from .aggregate import (
     SPD_BUCKET_CENTROIDS_DEFAULT,
-    SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT,
     aggregate_binary,
     aggregate_mcq,
     aggregate_numeric,
@@ -1865,11 +1865,15 @@ async def _run_one_question_body(
             final_main = {options[i]: vec_main[i] for i in range(n_options)} if n_options else {}
         elif qtype == "spd":
             bucket_labels = SPD_CLASS_BINS_PA
-            default_centroids = SPD_BUCKET_CENTROIDS_PA
-            if metric_up == "FATALITIES" and hz_is_conflict:
+            if metric_up == "FATALITIES":
                 bucket_labels = SPD_CLASS_BINS_FATALITIES
-                default_centroids = SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT
-            elif metric_up != "PA":
+
+            metric_up_local = (metric_up or "").upper()
+            if metric_up_local == "PA":
+                default_centroids = SPD_BUCKET_CENTROIDS_PA
+            elif metric_up_local == "FATALITIES":
+                default_centroids = SPD_BUCKET_CENTROIDS_FATALITIES
+            else:
                 default_centroids = SPD_BUCKET_CENTROIDS_DEFAULT
 
             bucket_centroids = None

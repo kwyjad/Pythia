@@ -39,6 +39,15 @@ SPD_BUCKET_CENTROIDS_PA: list[float] = [
     1_000_000.0,  # Bucket 5: >=500k
 ]
 
+# Fatalities bucket centroids: expected deaths conditional on each bucket
+SPD_BUCKET_CENTROIDS_FATALITIES: list[float] = [
+    0.0,  # Bucket 1: <10
+    30.0,  # Bucket 2: 10–<50
+    150.0,  # Bucket 3: 50–<250
+    625.0,  # Bucket 4: 250–<1000
+    2_000.0,  # Bucket 5: >=1000
+]
+
 # ---------- helpers ----------
 def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> List[float]:
     try:
