@@ -865,6 +865,11 @@ def _load_idmc_pa_history(
             [iso3, months],
         ).fetchall()
     except Exception as exc:
+        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
+            print(
+                f"[idmc_history] query error for iso3={iso3} hz={hazard_code}: "
+                f"{type(exc).__name__}: {str(exc)[:200]}"
+            )
         con.close()
         return "", {
             "error": f"idmc_query_error:{type(exc).__name__}",
