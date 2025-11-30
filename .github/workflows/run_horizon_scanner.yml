@@ -69,11 +69,18 @@ jobs:
 
           # Canonical layout: data/pythia-resolver-db/resolver.duckdb
           if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-            cp data/pythia-resolver-db/resolver.duckdb data/resolver.duckdb
+            SRC="data/pythia-resolver-db/resolver.duckdb"
           else
-            FILE_PATH=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-            if [ -n "$FILE_PATH" ]; then
-              cp "$FILE_PATH" data/resolver.duckdb
+            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+          fi
+
+          if [ -n "$SRC" ]; then
+            echo "Found resolver DB at $SRC"
+            # Only copy if SRC != canonical path
+            if [ "$SRC" != "data/resolver.duckdb" ]; then
+              cp "$SRC" data/resolver.duckdb
+            else
+              echo "DB already at canonical path data/resolver.duckdb; no copy needed."
             fi
           fi
 
