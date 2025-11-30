@@ -15,6 +15,21 @@ if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
 
+def _table_exists(conn, name: str) -> bool:
+    try:
+        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
+        return True
+    except Exception:
+        return False
+
+
+def _row_count(conn, name: str) -> int:
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
+    except Exception:
+        return 0
+
+
 def _get_db_url_from_config() -> str:
     cfg = load_cfg()
     app_cfg = cfg.get("app", {}) if isinstance(cfg, dict) else {}
@@ -172,6 +187,16 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             """
         )
 
+        # Early exit if questions table doesn't exist or is empty
+        if not _table_exists(conn, "questions"):
+            LOGGER.info("compute_resolutions: questions table not found; nothing to do.")
+            return
+
+        q_count = _row_count(conn, "questions")
+        if q_count == 0:
+            LOGGER.info("compute_resolutions: questions table is empty; nothing to do.")
+            return
+
         query_sql = (
             """
             SELECT
@@ -181,7 +206,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
               upper(q.metric) AS metric,
               q.target_month
             FROM questions q
-            JOIN hs_runs h ON q.run_id = h.run_id
+            JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
             WHERE q.status IN ('active','resolved')
               AND q.target_month <= ?
               AND upper(q.metric) IN ('PA','FATALITIES')
