@@ -10,7 +10,7 @@ from typing import Any, List, Optional
 import numpy as np
 
 from .providers import ModelSpec, llm_semaphore, call_chat_ms, estimate_cost_usd
-from forecaster.llm_logging import log_forecaster_llm_call
+from .llm_logging import log_forecaster_llm_call
 from resolver.db import duckdb_io
 
 @dataclass
@@ -407,97 +407,85 @@ async def run_ensemble_spd(
     prompt: str,
     specs: List[ModelSpec],
     *,
-    run_id: str | None = "",
-    question_id: str | None = "",
+    run_id: str,
+    question_id: str,
+    hs_run_id: str | None = None,
 ) -> EnsembleResult:
     """
     Run the ensemble for SPD questions.
-    Each member's parsed output is a dict: { "month_1": [..5..], ..., "month_6": [..5..] }.
-    """
 
+    Each member's parsed output is a dict:
+      { "month_1": [...5...], ..., "month_6": [...5...] }.
+    """
     tasks = []
+
     for ms in specs:
         async def _one(ms=ms):
-            parsed_for_log: Optional[dict] = None
-            err_text: str = ""
-
-            async def _call_llm(p: str, **kwargs):
-                nonlocal parsed_for_log, err_text
-                text, usage, err = await call_chat_ms(ms, p, **kwargs)
-                err_text = err or ""
-                try:
+            # Low-level async call: wraps call_chat_ms(ms, prompt, temperature=0.2)
+            async def _low_level_call(prompt_text: str, **kwargs):
+                text, usage, err = await call_chat_ms(
+                    ms,
+                    prompt_text,
+                    temperature=kwargs.get("temperature", 0.2),
+                )
+                # Attach provider error text into usage so we can surface it downstream
+                if err:
                     usage = dict(usage or {})
-                except Exception:
-                    usage = {}
-                try:
-                    usage["cost_usd"] = estimate_cost_usd(ms.model_id, usage)
-                except Exception:
-                    pass
-
-                try:
-                    parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
-                    if parsed is not None:
-                        parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
-                    parsed_for_log = parsed
-                except Exception as exc:
-                    parsed_for_log = None
-                    if not err_text:
-                        err_text = f"{type(exc).__name__}: {exc}"
+                    usage.setdefault("error_text", err)
                 return text, usage
 
-            t0 = time.time()
-            response_text, usage = await log_forecaster_llm_call(
+            # Log the forecast call and get (text, usage) back
+            text, usage = await log_forecaster_llm_call(
                 call_type="forecast",
-                run_id=run_id or "",
-                question_id=question_id or "",
+                run_id=run_id,
+                question_id=str(question_id),
                 model_name=ms.name,
                 provider=ms.provider,
                 model_id=ms.model_id,
                 prompt_text=prompt,
-                low_level_call=_call_llm,
+                low_level_call=_low_level_call,
                 low_level_kwargs={"temperature": 0.2},
-                parsed_json=lambda: parsed_for_log,
+                hs_run_id=hs_run_id,
+                parsed_json=None,  # we could add SPD here later if desired
             )
 
-            usage = usage or {}
-
-            try:
-                parsed = parsed_for_log if isinstance(parsed_for_log, dict) else _parse_spd_json(
-                    response_text, n_months=6, n_buckets=5
-                )
-                if parsed is not None:
-                    parsed = _normalize_spd_keys(parsed, n_months=6, n_buckets=5)
-                ok = isinstance(parsed, dict) and bool(parsed)
-                if not ok:
-                    parsed = {} if not isinstance(parsed, dict) else parsed or {}
-            except Exception as exc:
+            # Parse SPD JSON
+            parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
+            ok = parsed is not None
+            if parsed is None:
                 parsed = {}
-                ok = False
-                if not err_text:
-                    err_text = f"{type(exc).__name__}: {exc}"
 
-            err_field = err_text if err_text else ("" if ok else "parse_error")
+            # Compute/attach cost if not present
+            try:
+                usage = dict(usage or {})
+            except Exception:
+                usage = {}
+            if "cost_usd" not in usage:
+                usage["cost_usd"] = estimate_cost_usd(ms.model_id, usage)
 
-            elapsed_ms = int((usage.get("elapsed_ms") or 0))
-            if elapsed_ms <= 0:
-                elapsed_ms = int((time.time() - t0) * 1000)
+            elapsed_ms = int(usage.get("elapsed_ms", 0) or 0)
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            total_tokens = int(
+                usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+            )
+            cost_usd = float(usage.get("cost_usd", 0.0) or 0.0)
+            err_text = usage.get("error_text", "")
 
-            prompt_tokens = int((usage.get("prompt_tokens") or 0))
-            completion_tokens = int((usage.get("completion_tokens") or 0))
-            total_tokens = int((usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0))
-            cost = float((usage.get("cost_usd") or 0.0))
             return MemberOutput(
                 name=ms.name,
                 ok=ok,
                 parsed=parsed,
-                raw_text=response_text,
-                error=err_field,
+                raw_text=text,
                 elapsed_ms=elapsed_ms,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
-                cost_usd=cost,
+                cost_usd=cost_usd,
+                error=err_text,
             )
 
         tasks.append(_one())
-    return EnsembleResult(members=await asyncio.gather(*tasks))
+
+    members = await asyncio.gather(*tasks)
+    return EnsembleResult(members=members)
