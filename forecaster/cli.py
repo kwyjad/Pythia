@@ -2079,7 +2079,7 @@ async def _run_one_question_body(
             "git_sha": os.getenv("GIT_SHA", ""),
             "config_profile": "default",
             "weights_profile": "class_calibration",
-            "openrouter_models_json": [
+            "llm_models_json": [
                 {"name": ms.name, "provider": ms.provider, "model_id": ms.model_id, "weight": ms.weight}
                 for ms in DEFAULT_ENSEMBLE
             ],

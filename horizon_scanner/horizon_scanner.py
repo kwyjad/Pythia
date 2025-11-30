@@ -16,8 +16,8 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict
 
+import asyncio
 import backoff
-import google.generativeai as genai
 import duckdb
 
 # Ensure package imports resolve when executed as a script
@@ -38,7 +38,7 @@ from horizon_scanner.llm_logging import log_hs_llm_call
 from pythia.prompts.registry import load_prompt_spec
 from pythia.llm_profiles import get_current_models, get_current_profile
 from pythia.db.schema import ensure_schema, connect
-from forecaster.providers import GEMINI_MODEL_ID, estimate_cost_usd
+from forecaster.providers import GEMINI_MODEL_ID, ModelSpec, call_chat_ms, estimate_cost_usd
 
 # --- Configuration ---
 # Set up basic logging to see progress in the GitHub Actions console
@@ -55,13 +55,6 @@ PROMPT_SPEC = load_prompt_spec(
     str(CURRENT_DIR / "hs_prompt.py"),
 )
 
-# Load the Gemini API key from GitHub Secrets
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY secret not found. Please add it to your repository secrets.")
-
-genai.configure(api_key=GEMINI_API_KEY)
-
 # Configuration for the Gemini models
 # Use a safety setting to be less restrictive, as the content is professional analysis
 _profile_models = {}
@@ -77,7 +70,7 @@ def _resolve_hs_model() -> str:
     profile_model = _profile_models.get("google")
     if profile_model:
         return str(profile_model)
-    return "google/gemini-2.5-flash-lite"
+    return "gemini-2.5-flash-lite"
 
 
 def _resolve_hs_temperature() -> float:
@@ -89,62 +82,41 @@ def _resolve_hs_temperature() -> float:
 
 GEMINI_MODEL_NAME = _resolve_hs_model()
 HS_TEMPERATURE = _resolve_hs_temperature()
-
-
-def _google_model_name_for_api(model_id: str) -> str:
-    if model_id.startswith("google/"):
-        return model_id.split("/", 1)[1]
-    return model_id
-
-generation_config = {
-    "temperature": HS_TEMPERATURE,
-    "top_p": 0.9,
-    "top_k": 32,
-    "max_output_tokens": 8192,
-}
-safety_settings = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-]
-
-# Initialize the generative model for the analysis
-# This uses your preferred model for the complex analysis task
-country_model = genai.GenerativeModel(
-    model_name=_google_model_name_for_api(GEMINI_MODEL_NAME),
-    generation_config=generation_config,
-    safety_settings=safety_settings
-)
-
 logging.info(
     "Configured Gemini model %s for Horizon Scanner (temperature=%.2f).",
     GEMINI_MODEL_NAME,
-    generation_config.get("temperature", 0.0),
+    HS_TEMPERATURE,
 )
 
 
 def _call_gemini_llm(prompt_text: str, **kwargs: Any) -> tuple[str, Dict[str, Any]]:
-    response = country_model.generate_content(prompt_text, **kwargs)
-    response_text = getattr(response, "text", "") or ""
+    del kwargs
 
-    usage_metadata = getattr(response, "usage_metadata", None)
-    usage: Dict[str, Any] = {}
-    if usage_metadata:
-        usage = {
-            "prompt_tokens": getattr(usage_metadata, "prompt_token_count", 0) or 0,
-            "completion_tokens": getattr(
-                usage_metadata, "candidates_token_count", 0
-            )
-            or 0,
-            "total_tokens": getattr(usage_metadata, "total_token_count", 0) or 0,
-        }
+    async def _call() -> tuple[str, Dict[str, Any], str]:
+        spec = ModelSpec(
+            name="Gemini",
+            provider="google",
+            model_id=GEMINI_MODEL_NAME,
+            active=bool(GEMINI_MODEL_NAME),
+        )
+        return await call_chat_ms(
+            spec,
+            prompt_text,
+            temperature=HS_TEMPERATURE,
+            prompt_key="hs.scenario.v1",
+            prompt_version=PROMPT_VERSION,
+            component="HorizonScanner",
+        )
+
+    text, usage, error = asyncio.run(_call())
+    if error:
+        raise RuntimeError(error)
 
     if not usage or not any(usage.values()):
         from forecaster.research import _rough_token_count
 
         prompt_tokens = _rough_token_count(prompt_text)
-        completion_tokens = _rough_token_count(response_text)
+        completion_tokens = _rough_token_count(text)
         usage.update(
             {
                 "prompt_tokens": prompt_tokens,
@@ -154,7 +126,7 @@ def _call_gemini_llm(prompt_text: str, **kwargs: Any) -> tuple[str, Dict[str, An
         )
 
     usage["cost_usd"] = estimate_cost_usd(GEMINI_MODEL_NAME, usage)
-    return response_text, usage
+    return text, usage
 
 
 def _call_hs_llm_for_country(*, hs_run_id: str, prompt: str) -> str:
