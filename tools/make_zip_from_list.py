@@ -29,26 +29,14 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
-    "resolver/cli/idmc_to_duckdb.py",
-    "resolver/ingestion/idmc/export.py",
-    "resolver/ingestion/idmc/exporter.py",
-    "resolver/ingestion/idmc/normalize.py",
-    "resolver/ingestion/idmc/config.py",
-    "resolver/ingestion/idmc/staging.py",
-    "resolver/db/duckdb_io.py",
-    "resolver/db/conn_shared.py",
-    "resolver/db/schema_keys.py",
-    "resolver/db/runtime_flags.py",
-    "resolver/tests/test_idmc_duckdb_write.py",
-    "resolver/tests/utils/runtime_fixtures.py",
-    "resolver/config/idmc.yml",
-    "resolver/config/series_semantics.yml",
-    "resolver/common/series_semantics.py",
-    "resolver/helpers/series_semantics.py",
-    "resolver/docs/WRITING_TO_DUCKDB.md",
-    "resolver/docs/db_upsert_strategy.md",
-    "resolver/docs/DUCKDB.md",
-    "SCHEMAS.md",
+    ".github/workflows/resolver-monthly.yml",
+    ".github/workflows/resolver-snapshot-from-db.yml",
+    ".github/workflows/forecaster-ci.yml",
+    ".github/workflows/run_horizon_scanner.yml",
+    "pythia/config.yaml",
+    "pythia/db/schema.py",
+    "pythia/pipeline/run.py",
+    "scripts/ci/compute_backfill_window.py",
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
