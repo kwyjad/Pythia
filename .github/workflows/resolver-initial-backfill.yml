@@ -5,9 +5,13 @@ name: Resolver — Initial Backfill
   workflow_dispatch:
     inputs:
       months_back:
-        description: "Number of months to include (default 1)"
+        description: "Number of months to backfill"
+        required: true
+        default: "3"
+      reset_db:
+        description: "Delete existing resolver.duckdb and rebuild from scratch?"
         required: false
-        default: "1"
+        default: "true"
       only_connector:
         description: "Optional connector name for --only (e.g. dtm_client)"
         required: false
@@ -56,7 +60,8 @@ name: Resolver — Initial Backfill
           - "false"
           - "true"
   schedule:
-    - cron: "0 0 5 * *"
+    # Run at 03:00 UTC on the 15th of each month
+    - cron: "0 3 15 * *"
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -120,7 +125,7 @@ jobs:
       - name: Compute backfill window
         id: window
         env:
-          MONTHS_INPUT: ${{ inputs.months_back }}
+          MONTHS_INPUT: ${{ inputs.months_back || '3' }}
           TIMEZONE: Europe/Istanbul
         run: |
           set -euo pipefail
@@ -131,7 +136,50 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
-      - name: Remove any existing resolver.duckdb (initial backfill)
+      - name: Download canonical resolver DB for incremental runs
+        if: github.event_name != 'workflow_dispatch' || inputs.reset_db != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+          # Find latest successful backfill run (this same workflow)
+          RUN_ID=$(gh run list \
+            --workflow "Resolver — Initial Backfill" \
+            --branch main \
+            --status success \
+            --json databaseId \
+            --limit 1 \
+            --jq '.[0].databaseId' || true)
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No prior successful backfill run found; this run will create a new DB from scratch."
+          else
+            echo "Downloading pythia-resolver-db from run $RUN_ID"
+            gh run download "$RUN_ID" -n pythia-resolver-db --dir data
+            echo "Artifacts under data/:"
+            ls -R data
+
+            # Canonical DB may be at data/resolver.duckdb or inside a subdir
+            if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+              SRC="data/pythia-resolver-db/resolver.duckdb"
+            else
+              SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+            fi
+
+            if [ -n "$SRC" ]; then
+              echo "Found resolver DB at $SRC"
+              if [ "$SRC" != "data/resolver.duckdb" ]; then
+                cp "$SRC" data/resolver.duckdb
+              else
+                echo "DB already at canonical path data/resolver.duckdb; no copy needed."
+              fi
+            else
+              echo "WARNING: resolver.duckdb not found in pythia-resolver-db; incremental run will create a new DB."
+            fi
+          fi
+
+      - name: Remove any existing resolver.duckdb (reset mode only)
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_db == 'true'
         run: |
           set -euo pipefail
           rm -f data/resolver.duckdb
