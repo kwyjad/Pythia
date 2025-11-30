@@ -31,8 +31,8 @@ def get_current_models() -> Dict[str, str]:
     Return the current profile's model IDs per provider.
 
     Example:
-      {"openai": "openai/gpt-5.1", "google": "google/gemini-3-pro-preview",
-       "anthropic": "anthropic/claude-opus-4-5-20251101", "xai": "xai/grok-4-0709"}
+      {"openai": "gpt-5.1", "google": "gemini-3-pro-preview",
+       "anthropic": "claude-opus-4-5-20251101", "xai": "grok-4-0709"}
     """
 
     cfg = load_cfg()

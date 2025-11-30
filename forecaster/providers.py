@@ -17,13 +17,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import duckdb
+import httpx
 import requests
-
-try:  # pragma: no cover - defensive import for environments without openai
-    from openai import AsyncOpenAI, OpenAI
-except Exception:  # pragma: no cover - openai package missing
-    AsyncOpenAI = None  # type: ignore
-    OpenAI = None  # type: ignore
 
 from pythia.config import load as load_cfg
 from pythia.db.util import write_llm_call
@@ -223,7 +218,6 @@ DEFAULT_ENSEMBLE: List[ModelSpec] = [spec for spec in _MODEL_SPECS if spec.activ
 # backwards-compatible aliases reused elsewhere in the forecaster package
 _OPENAI_STATE = _PROVIDER_STATES.get("openai", {})
 OPENAI_MODEL_ID = _OPENAI_STATE.get("model", "")
-OPENROUTER_FALLBACK_ID = OPENAI_MODEL_ID  # legacy alias for older call-sites
 _GEMINI_STATE = _PROVIDER_STATES.get("google", {})
 GEMINI_MODEL_ID = _GEMINI_STATE.get("model", "")
 _XAI_STATE = _PROVIDER_STATES.get("xai", {})
@@ -234,8 +228,8 @@ _ANTHROPIC_API_KEY = _PROVIDER_STATES.get("anthropic", {}).get("api_key", "")
 _GEMINI_API_KEY = _GEMINI_STATE.get("api_key", "")
 _XAI_API_KEY = _XAI_STATE.get("api_key", "")
 
-_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip() or None
-_XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1/chat/completions").strip()
+_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
+_XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").strip()
 
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
@@ -246,6 +240,18 @@ _ANTHROPIC_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
 _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "2048") or 2048)
 
 
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_or_client() -> httpx.AsyncClient:
+    """Return a shared async HTTP client for provider calls."""
+
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=30.0)
+    return _http_client
+
+
 # ---------------------------------------------------------------------------
 # Usage / cost helpers
 # ---------------------------------------------------------------------------
@@ -254,16 +260,16 @@ _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "2048") or 
 # entries so we can estimate costs directly from provider usage metadata.
 MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = {
     # Budget / testing models
-    "openai/gpt-5-nano": (0.00005, 0.00040),
-    "google/gemini-2.5-flash-lite": (0.00015, 0.00350),
-    "anthropic/claude-haiku-4-5-20251001": (0.00100, 0.00500),
-    "xai/grok-4-1-fast-reasoning": (0.00030, 0.00050),
+    "gpt-5-nano": (0.00005, 0.00040),
+    "gemini-2.5-flash-lite": (0.00015, 0.00350),
+    "claude-haiku-4-5-20251001": (0.00100, 0.00500),
+    "grok-4-1-fast-reasoning": (0.00030, 0.00050),
 
     # Production / frontier models
-    "openai/gpt-5.1": (0.00125, 0.01000),
-    "google/gemini-3-pro-preview": (0.00200, 0.01200),
-    "anthropic/claude-opus-4-5-20251101": (0.00500, 0.02500),
-    "xai/grok-4-0709": (0.00300, 0.01500),
+    "gpt-5.1": (0.00125, 0.01000),
+    "gemini-3-pro-preview": (0.00200, 0.01200),
+    "claude-opus-4-5-20251101": (0.00500, 0.02500),
+    "grok-4-0709": (0.00300, 0.01500),
 }
 
 _MODEL_PRICES: Optional[Dict[str, Dict[str, float]]] = None
@@ -357,39 +363,6 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Provider client helpers
-# ---------------------------------------------------------------------------
-
-_openai_client_sync: Optional[OpenAI] = None
-_openai_client_async: Optional[AsyncOpenAI] = None
-
-
-def _get_openai_client() -> Optional[OpenAI]:
-    global _openai_client_sync
-    if OpenAI is None or not _OPENAI_API_KEY:
-        return None
-    if _openai_client_sync is None:
-        _openai_client_sync = OpenAI(api_key=_OPENAI_API_KEY, base_url=_OPENAI_BASE_URL, timeout=_OPENAI_TIMEOUT)
-    return _openai_client_sync
-
-
-def _get_or_client() -> Optional[AsyncOpenAI]:  # legacy alias
-    global _openai_client_async
-    if AsyncOpenAI is None or not _OPENAI_API_KEY:
-        return None
-    if _openai_client_async is None:
-        try:
-            _openai_client_async = AsyncOpenAI(
-                api_key=_OPENAI_API_KEY,
-                base_url=_OPENAI_BASE_URL,
-                timeout=_OPENAI_TIMEOUT,
-            )
-        except Exception:  # pragma: no cover - defensive, we just disable async usage
-            return None
-    return _openai_client_async
-
-
-# ---------------------------------------------------------------------------
 # Provider calls
 # ---------------------------------------------------------------------------
 
@@ -397,20 +370,46 @@ def _get_or_client() -> Optional[AsyncOpenAI]:  # legacy alias
 def call_openai(prompt: str, model: str, temperature: float) -> ProviderResult:
     if not _OPENAI_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing OPENAI_API_KEY")
-    client = _get_openai_client()
-    if client is None:
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error="openai client unavailable")
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
+        resp = requests.post(
+            f"{_OPENAI_BASE_URL.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {_OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": float(temperature),
+            },
+            timeout=_OPENAI_TIMEOUT,
         )
-        text = (resp.choices[0].message.content or "").strip()
-        usage = usage_to_dict(getattr(resp, "usage", None))
-        return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
     except Exception as exc:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"OpenAI error: {exc}")
+
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+
+    if not resp.ok:
+        message = ""
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                message = str(err.get("message", ""))
+            elif isinstance(err, str):
+                message = err
+        if not message:
+            message = resp.text[:400]
+        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"OpenAI HTTP {resp.status_code}: {message}")
+
+    text = ""
+    if isinstance(payload, dict):
+        choices = payload.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+            if isinstance(message, dict):
+                text = str(message.get("content", "")).strip()
+    usage = usage_to_dict(payload.get("usage") if isinstance(payload, dict) else {})
+    return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
 def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResult:
@@ -471,9 +470,10 @@ def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResul
 def call_google(prompt: str, model: str, temperature: float) -> ProviderResult:
     if not _GEMINI_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing GEMINI_API_KEY")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={_GEMINI_API_KEY}"
+    api_model = model.split("/", 1)[-1] if "/" in model else model
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={_GEMINI_API_KEY}"
     body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": float(temperature)},
     }
     try:
@@ -519,7 +519,7 @@ def call_xai(prompt: str, model: str, temperature: float) -> ProviderResult:
     headers = {"Authorization": f"Bearer {_XAI_API_KEY}", "Content-Type": "application/json"}
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": float(temperature)}
     try:
-        resp = requests.post(_XAI_BASE_URL, headers=headers, json=body, timeout=XAI_TIMEOUT)
+        resp = requests.post(f"{_XAI_BASE_URL.rstrip('/')}/chat/completions", headers=headers, json=body, timeout=_XAI_TIMEOUT)
     except Exception as exc:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"xAI request error: {exc}")
 

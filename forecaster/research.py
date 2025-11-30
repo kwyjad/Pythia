@@ -14,7 +14,7 @@ What this module does (unchanged surface):
 - Returns (final_text, meta). `final_text` is what your human log prints; `meta` feeds CSV.
 
 Key outputs in meta (all strings/numbers safe to write to CSV):
-  research_llm        -> "google/gemini-2.5-pro"
+  research_llm        -> "gemini-2.5-pro"
   research_source     -> "GoogleGrounding" | "cache" | "none"
   research_query      -> the compact query we sent to Grounding
   research_n_raw      -> number of candidates returned by Grounding (pre-filter)
@@ -39,7 +39,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import requests
 
 from .config import ist_date, ist_iso, read_cache, write_cache
-from .providers import GEMINI_MODEL_ID
+from .providers import GEMINI_MODEL_ID, ModelSpec, call_chat_ms
 
 from .prompts import build_research_prompt, _CAL_PREFIX
 from forecaster.providers import estimate_cost_usd
@@ -78,7 +78,7 @@ def _select_gemini_model() -> str:
     if profile_model:
         return str(profile_model).strip()
     # Fallback, if needed:
-    return "google/gemini-2.5-flash-lite"
+    return "gemini-2.5-flash-lite"
 
 
 # --- Debug hook: last error message from research step (for human log & CSV) ---
@@ -337,7 +337,7 @@ def _collect_market_snapshots(query_title: str) -> Tuple[str, Dict[str, bool], L
 
 def _gemini_base_url(model: str) -> str:
     # REST endpoint for generateContent in v1beta
-    model_id = model.split("/", 1)[1] if model.startswith("google/") else model
+    model_id = model.split("/", 1)[1] if "/" in model else model
     return f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
 
 def _gemini_api_key() -> str:
@@ -559,67 +559,39 @@ async def _compose_research_via_gemini(prompt_text: str, *, model: str | None = 
     
     Also logs a best-effort cost/usage row to llm_calls with component="Researcher".
     """
-    api_key = _gemini_api_key()
     if model is None:
         model = _select_gemini_model()
     model = str(model).strip()
     used_llm = model
 
     body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
+        "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {"temperature": float(RESEARCH_TEMP), "maxOutputTokens": 5000},
     }
 
-    if not api_key:
-        _set_research_error("no GEMINI_API_KEY (or GOOGLE_API_KEY) for research composition")
-        return "", used_llm, {}, body, model
+    spec = ModelSpec(name="Gemini", provider="google", model_id=model, active=bool(model))
 
-    t0 = time.time()
     try:
-        resp = requests.post(
-            _gemini_base_url(model),
-            params={"key": api_key},
-            json=body,
-            timeout=float(_GEMINI_TIMEOUT),
+        text, usage, error = await call_chat_ms(
+            spec,
+            prompt_text,
+            temperature=float(RESEARCH_TEMP),
+            prompt_key="research.compose",
+            prompt_version="1.0.0",
+            component="Researcher",
         )
-        latency_ms = int((time.time() - t0) * 1000)
-
-        if resp.status_code != 200:
-            try:
-                j = resp.json()
-                msg = (j.get("error", {}) or {}).get("message", "")
-            except Exception:
-                msg = (resp.text or "")[:200]
-            _set_research_error(f"compose HTTP {resp.status_code}: {msg}")
+        if error:
+            _set_research_error(error)
             return "", used_llm, {}, body, model
-
-        data = resp.json()
-        texts = []
-        for cand in (data.get("candidates") or []):
-            content = cand.get("content")
-            if not isinstance(content, dict):
-                continue
-            for part in (content.get("parts") or []):
-                t = part.get("text")
-                if isinstance(t, str) and t.strip():
-                    texts.append(t)
-        composed_text = "\n".join(texts).strip()
-
-        usage_meta = data.get("usageMetadata") if isinstance(data, dict) else {}
-        prompt_tokens = usage_meta.get("promptTokenCount", 0)
-        completion_tokens = usage_meta.get("candidatesTokenCount", 0)
-        if not prompt_tokens:
-            prompt_tokens = _rough_token_count(prompt_text)
-        if not completion_tokens:
-            completion_tokens = _rough_token_count(composed_text)
-        usage = {
-            "prompt_tokens": int(prompt_tokens or 0),
-            "completion_tokens": int(completion_tokens or 0),
-            "total_tokens": int(prompt_tokens or 0) + int(completion_tokens or 0),
-        }
-
-        return composed_text, used_llm, usage, body, model
-
+        if not usage:
+            usage = {}
+        if not usage.get("prompt_tokens"):
+            usage["prompt_tokens"] = _rough_token_count(prompt_text)
+        if not usage.get("completion_tokens"):
+            usage["completion_tokens"] = _rough_token_count(text)
+        if not usage.get("total_tokens"):
+            usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+        return text, used_llm, usage, body, model
     except Exception as e:
         _set_research_error(f"compose request error: {e!r}")
         return "", used_llm, {}, body, model
