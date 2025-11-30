@@ -141,27 +141,46 @@ def _parse_spd_json(
     """
     if not text:
         return None
-    t = text.strip()
-    # Strip surrounding ``` fences if present
-    t = re.sub(r"^```.*?\n|\n```$", "", t, flags=re.S).strip()
 
-    data = None
-    # First try full text as JSON
-    try:
-        data = json.loads(t)
-    except Exception:
-        # Fallback: find the first JSON-looking object
-        m = re.search(r"\{.*\}", t, flags=re.S)
-        if m:
-            try:
-                data = json.loads(m.group(0))
-            except Exception:
-                data = None
+    orig = text.strip()
+    candidates: List[str] = []
+
+    # 1) If the whole thing looks like pure JSON, try it first.
+    if orig.startswith("{") and orig.endswith("}"):
+        candidates.append(orig)
+
+    # 2) Extract any ```json ... ``` or ``` ... ``` fenced blocks.
+    fences = re.findall(r"```(?:json)?\s*([\s\S]*?)```", orig, flags=re.I)
+    for block in fences:
+        block = block.strip()
+        if block.startswith("{") and block.endswith("}"):
+            candidates.append(block)
+
+    # 3) As a fallback, look for JSON-looking objects and try the last ones first.
+    all_objs = list(re.finditer(r"\{[\s\S]*?\}", orig))
+    for m in reversed(all_objs):
+        block = m.group(0).strip()
+        if len(block) >= 2:
+            candidates.append(block)
+
+    tried = set()
+    data: Optional[dict] = None
+    for cand in candidates:
+        if cand in tried:
+            continue
+        tried.add(cand)
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            data = obj
+            break
 
     if not isinstance(data, dict):
         if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
-            head = t[:200].replace("\n", " ")
-            print(f"[spd] parse failed: top-level JSON not dict; head={head!r}")
+            head = orig[:200].replace("\n", " ")
+            print(f"[spd] parse failed: no dict JSON found; head={head!r}")
         return None
 
     out: dict = {}
@@ -186,7 +205,7 @@ def _parse_spd_json(
 
     if not any_nonzero_raw:
         if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
-            head = t[:200].replace("\n", " ")
+            head = orig[:200].replace("\n", " ")
             print(f"[spd] parse produced all-zero SPD; treating as failure; head={head!r}")
         return None
     return _normalize_spd_keys(out, n_months=n_months, n_buckets=n_buckets)
