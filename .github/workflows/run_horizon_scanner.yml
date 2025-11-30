@@ -237,6 +237,15 @@ jobs:
           name: first-forecast-prompt
           path: debug_first_forecast_prompt.md
 
+      - name: Dump forecast run debug
+        run: python -m scripts.dump_forecast_run_debug
+
+      - name: Upload forecast run debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-run-debug
+          path: forecast_run_debug.md
+
       - name: Upload canonical resolver DB
         if: success()
         uses: actions/upload-artifact@v4

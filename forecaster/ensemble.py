@@ -467,11 +467,6 @@ async def run_ensemble_spd(
             completion_tokens = int((usage.get("completion_tokens") or 0))
             total_tokens = int((usage.get("total_tokens") or (prompt_tokens + completion_tokens) or 0))
             cost = float((usage.get("cost_usd") or 0.0))
-            if cost == 0.0:
-                try:
-                    cost = float(estimate_cost_usd(ms.model_id, usage))
-                except Exception:
-                    cost = 0.0
             return MemberOutput(
                 name=ms.name,
                 ok=ok,
