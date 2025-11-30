@@ -2,14 +2,22 @@
 name: Pythia — Compute Calibration Weights & Advice
 
 on:
-  schedule:
-    # 07:00 UTC on the 17th of every month (day after compute_scores)
-    - cron: "0 7 17 * *"
+  workflow_run:
+    workflows: ["Resolver — Initial Backfill"]
+    types: [completed]
+
+  # Optional manual trigger
   workflow_dispatch: {}
+
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
 
 jobs:
   compute-calibration:
     runs-on: ubuntu-latest
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
 
     steps:
       - name: Checkout repository
@@ -26,10 +34,47 @@ jobs:
           pip install -r python_library_requirements.txt
           pip install duckdb
 
+      - name: Download canonical resolver DB for this backfill
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+          RUN_ID=${{ github.event.workflow_run.id }}
+          echo "Downloading pythia-resolver-db from backfill run $RUN_ID"
+          gh run download "$RUN_ID" -n pythia-resolver-db --dir data
+
+          echo "Artifacts under data/:"
+          ls -R data
+
+          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+            SRC="data/pythia-resolver-db/resolver.duckdb"
+          else
+            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+          fi
+
+          if [ -n "$SRC" ]; then
+            echo "Found resolver DB at $SRC"
+            if [ "$SRC" != "data/resolver.duckdb" ]; then
+              cp "$SRC" data/resolver.duckdb
+            else
+              echo "DB already at canonical path data/resolver.duckdb; no copy needed."
+            fi
+          else
+            echo "ERROR: resolver.duckdb not found in pythia-resolver-db for run $RUN_ID"
+            exit 1
+          fi
+
       - name: Compute calibration weights/advice from scores
         env:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"
         run: |
           echo "=== Running pythia.tools.compute_calibration_pythia ==="
-          python -m pythia.tools.compute_calibration_pythia
+          python -m pythia.tools.compute_calibration_pythia --db-url "${RESOLVER_DB_URL}"
           echo "=== compute_calibration_pythia completed ==="
+
+      - name: Upload canonical resolver DB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
