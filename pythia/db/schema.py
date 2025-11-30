@@ -104,6 +104,38 @@ def _seed_pa_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
         )
 
 
+def _seed_fatalities_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure wildcard fatalities centroids exist in bucket_centroids."""
+
+    rows = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM bucket_centroids
+        WHERE upper(metric) = 'FATALITIES' AND hazard_code = '*'
+        """
+    ).fetchone()
+
+    if rows and (rows[0] or 0) >= 5:
+        return
+
+    con.execute(
+        """
+        DELETE FROM bucket_centroids
+        WHERE upper(metric) = 'FATALITIES' AND hazard_code = '*'
+        """
+    )
+
+    centroids = [0.0, 30.0, 150.0, 625.0, 2_000.0]
+    for idx, centroid in enumerate(centroids, start=1):
+        con.execute(
+            """
+            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+            VALUES (?, ?, ?, ?)
+            """,
+            ["*", "FATALITIES", idx, centroid],
+        )
+
+
 def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
     """
     Ensure all Pythia-related tables exist in DuckDB.
@@ -353,6 +385,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         )
 
         _seed_pa_bucket_centroids(con)
+        _seed_fatalities_bucket_centroids(con)
 
         _ensure_table_and_columns(
             con,
