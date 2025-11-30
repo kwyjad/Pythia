@@ -542,7 +542,7 @@ def main(countries: list[str] | None = None):
 
     iso3_list = _normalize_iso3_list(countries)
     git_sha = _get_git_sha()
-    config_profile = f"{GEMINI_MODEL_NAME}@temp{generation_config.get('temperature', 0.0):.2f}"
+    config_profile = f"{GEMINI_MODEL_NAME}@temp{HS_TEMPERATURE:.2f}"
     llm_profile = get_current_profile()
     is_test_mode = llm_profile.strip().lower() == "test" or os.getenv("PYTHIA_TEST_MODE") == "1"
     if is_test_mode:
