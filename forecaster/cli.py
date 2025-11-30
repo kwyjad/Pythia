@@ -1837,6 +1837,7 @@ async def _run_one_question_body(
                 DEFAULT_ENSEMBLE,
                 run_id=run_id,
                 question_id=str(question_id),
+                hs_run_id=hs_run_id,
             )
         else:
             ens_res = await run_ensemble_numeric(main_prompt, DEFAULT_ENSEMBLE)
