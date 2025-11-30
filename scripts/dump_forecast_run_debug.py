@@ -273,12 +273,10 @@ def main():
                 lines.append("")
                 if llm and llm.get("response_text"):
                     raw = (llm["response_text"] or "").strip()
-                    lines.append("**Truncated response:**")
+                    lines.append("**Full model response:**")
                     lines.append("")
                     lines.append("```md")
-                    lines.append(raw[:2000])
-                    if len(raw) > 2000:
-                        lines.append("\n[... truncated ...]")
+                    lines.append(raw)
                     lines.append("```")
                     lines.append("")
             lines.append("---")
