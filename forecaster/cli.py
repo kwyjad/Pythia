@@ -1444,11 +1444,22 @@ async def _run_one_question_body(
             post_id = 0
         question_id_raw = q.get("id") or post.get("id") or post.get("post_id") or ""
         question_id = str(question_id_raw)
-    
+
+        # Derive hs_run_id for this question, if available
+        try:
+            hs_run_id = (
+                post.get("hs_run_id")
+                or post.get("pythia_hs_run_id")
+                or q.get("hs_run_id")
+                or None
+            )
+        except Exception:
+            hs_run_id = None
+
         seen_guard_enabled = bool(seen_guard_state.get("enabled", False))
         seen_guard_lock_acquired = seen_guard_state.get("lock_acquired")
         seen_guard_lock_error = str(seen_guard_state.get("lock_error") or "")
-        
+
         title = str(q.get("title") or post.get("title") or "").strip()
         url = str(post.get("question_url") or "")
         qtype = (q.get("type") or "binary").strip()
