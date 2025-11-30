@@ -115,6 +115,15 @@ HZ_QUERY_MAP = {
     "DI": "DISPLACEMENT",
 }
 
+EMDAT_SHOCK_MAP = {
+    "FL": "flood",
+    "DR": "drought",
+    "TC": "tropical_cyclone",
+    "HW": "heat_wave",
+}
+
+IDMC_HZ_MAP = {"ACO", "ACE", "CU", "DI"}
+
 
 def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
     """
@@ -719,24 +728,18 @@ def _load_emdat_pa_history(
     months: int = 36,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Load a 36-month EM-DAT People Affected (PA) history for natural hazards.
+    Load a 36-month EM-DAT 'people affected' history for a given ISO3 +
+    Pythia hazard code.
 
-    Uses db.emdat_pa, which has:
-      - iso3 (string)
-      - ym (YYYY-MM string)
-      - shock_type (string: 'drought', 'tropical_cyclone', 'flood')
-      - pa (integer)
-      - source_id = 'emdat'
+    Uses facts_deltas where:
+      - source = 'emdat'
+      - metric = 'affected'
+      - semantics = 'new' (monthly flows)
+      - hazard_code matches the EM-DAT shock_type for this Pythia hazard.
     """
 
     hz = (hazard_code or "").upper()
-    shock_map = {
-        "FL": "flood",
-        "DR": "drought",
-        "TC": "tropical_cyclone",
-        "HW": "heat_wave",
-    }
-    shock_type = shock_map.get(hz)
+    shock_type = EMDAT_SHOCK_MAP.get(hz)
 
     try:
         con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
@@ -750,10 +753,13 @@ def _load_emdat_pa_history(
 
         rows = con.execute(
             """
-            SELECT ym, pa, source_id
-            FROM emdat_pa
+            SELECT ym, value, hazard_code, source
+            FROM facts_deltas
             WHERE iso3 = ?
-              AND lower(shock_type) = ?
+              AND lower(source) = 'emdat'
+              AND lower(metric) = 'affected'
+              AND lower(semantics) = 'new'
+              AND lower(hazard_code) = ?
             ORDER BY ym DESC
             LIMIT ?
             """,
@@ -762,7 +768,7 @@ def _load_emdat_pa_history(
     except Exception as exc:
         con.close()
         return "", {
-            "error": f"query_error:{type(exc).__name__}",
+            "error": f"emdat_query_error:{type(exc).__name__}",
             "history_rows_detail": [],
             "summary_text": "",
         }
@@ -774,10 +780,17 @@ def _load_emdat_pa_history(
 
     history: List[Dict[str, Any]] = []
     values: List[float] = []
-    for ym, pa_val, source_id in rows:
+    for ym, val, hz_code, src in rows:
         ym_str = str(ym)
-        v = float(pa_val or 0)
-        history.append({"ym": ym_str, "value": v, "source": source_id or "emdat"})
+        v = float(val or 0)
+        history.append(
+            {
+                "ym": ym_str,
+                "value": v,
+                "source": src or "emdat",
+                "hazard_code": hz_code,
+            }
+        )
         values.append(v)
 
     values_rev = list(reversed(values))
@@ -804,18 +817,19 @@ def _load_idmc_pa_history(
     months: int = 36,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Load a 36-month IDMC/DTM displacement PA history for conflict/displacement
-    questions, using db.facts_resolved with metric='displaced'.
+    Load a 36-month IDMC/DTM displacement history for conflict/displacement
+    questions.
+
+    Combines:
+      - flows from facts_deltas (new_displacements, idp_displacement_new_dtm),
+      - stocks from facts_resolved (idp_displacement_stock_dtm).
+
+    We group by ym and sum flows; stocks are carried as-is per ym.
     """
 
     hz = (hazard_code or "").upper()
-    hz_map = {
-        "ACO": "conflict",
-        "ACE": "conflict",
-        "CU": "conflict",
-        "DI": "displacement",
-    }
-    hz_query = hz_map.get(hz, "displacement")
+    if hz not in IDMC_HZ_MAP:
+        return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 
     try:
         con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
@@ -823,47 +837,86 @@ def _load_idmc_pa_history(
         return "", {"error": "missing_db", "history_rows_detail": [], "summary_text": ""}
 
     try:
-        rows = con.execute(
+        flow_rows = con.execute(
             """
-            SELECT ym, value, source_type
-            FROM facts_resolved
+            SELECT ym, SUM(value) AS flow_value
+            FROM facts_deltas
             WHERE iso3 = ?
-              AND lower(hazard_code) = ?
-              AND lower(metric) = 'displaced'
+              AND lower(semantics) = 'new'
+              AND lower(metric) IN ('new_displacements', 'idp_displacement_new_dtm')
+            GROUP BY ym
             ORDER BY ym DESC
             LIMIT ?
             """,
-            [iso3, hz_query, months],
+            [iso3, months],
+        ).fetchall()
+
+        stock_rows = con.execute(
+            """
+            SELECT ym, value AS stock_value
+            FROM facts_resolved
+            WHERE iso3 = ?
+              AND lower(metric) = 'idp_displacement_stock_dtm'
+            ORDER BY ym DESC
+            LIMIT ?
+            """,
+            [iso3, months],
         ).fetchall()
     except Exception as exc:
         con.close()
         return "", {
-            "error": f"query_error:{type(exc).__name__}",
+            "error": f"idmc_query_error:{type(exc).__name__}",
             "history_rows_detail": [],
             "summary_text": "",
         }
 
     con.close()
 
-    if not rows:
+    if not flow_rows and not stock_rows:
         return "", {"error": "no_rows", "history_rows_detail": [], "summary_text": ""}
 
-    history: List[Dict[str, Any]] = []
-    values: List[float] = []
-    for ym, val, source_type in rows:
+    by_ym: Dict[str, Dict[str, float]] = {}
+    for ym, flow_val in flow_rows:
         ym_str = str(ym)
-        v = float(val or 0)
-        history.append({"ym": ym_str, "value": v, "source": source_type or "idmc/dtm"})
-        values.append(v)
+        d = by_ym.setdefault(ym_str, {})
+        d["flow"] = d.get("flow", 0.0) + float(flow_val or 0)
 
-    values_rev = list(reversed(values))
-    summary_lines = [
-        "### IDMC/DTM displacement — 36-month history (Resolver)",
-        "",
-        f"- Months available: {len(history)}",
-        f"- Min monthly displaced: {min(values_rev):,.0f}",
-        f"- Max monthly displaced: {max(values_rev):,.0f}",
-    ]
+    for ym, stock_val in stock_rows:
+        ym_str = str(ym)
+        d = by_ym.setdefault(ym_str, {})
+        d["stock"] = float(stock_val or 0)
+
+    history: List[Dict[str, Any]] = []
+    flow_values: List[float] = []
+    stock_values: List[float] = []
+
+    for ym_str in sorted(by_ym.keys(), reverse=True):
+        d = by_ym[ym_str]
+        flow_v = d.get("flow", 0.0)
+        stock_v = d.get("stock", 0.0)
+        history.append(
+            {
+                "ym": ym_str,
+                "value_flow": flow_v,
+                "value_stock": stock_v,
+                "source": "idmc/dtm",
+            }
+        )
+        if flow_v:
+            flow_values.append(flow_v)
+        if stock_v:
+            stock_values.append(stock_v)
+
+    summary_lines = ["### IDMC/DTM displacement — 36-month history (Resolver)", ""]
+    summary_lines.append(f"- Months available: {len(history)}")
+    if flow_values:
+        summary_lines.append(
+            f"- Flow (new displacements) min={min(flow_values):,.0f}, max={max(flow_values):,.0f}"
+        )
+    if stock_values:
+        summary_lines.append(
+            f"- Stock (IDPs, DTM) min={min(stock_values):,.0f}, max={max(stock_values):,.0f}"
+        )
     summary = "\n".join(summary_lines)
 
     return summary, {
@@ -987,10 +1040,13 @@ def _load_pa_history_block(
     if m == "FATALITIES":
         return _load_acled_fatalities_history(iso3, months=months)
 
-    if m == "PA" and hz in {"ACO", "ACE", "CU", "DI"}:
+    if m == "PA" and hz in IDMC_HZ_MAP:
         return _load_idmc_pa_history(iso3, hazard_code, months=months)
 
-    return _load_emdat_pa_history(iso3, hazard_code, months=months)
+    if m == "PA" and hz in EMDAT_SHOCK_MAP:
+        return _load_emdat_pa_history(iso3, hazard_code, months=months)
+
+    return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 
 
 def _load_bucket_centroids(
