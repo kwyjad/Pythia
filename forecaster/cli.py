@@ -222,10 +222,12 @@ from .ensemble import (
     EnsembleResult,
     MemberOutput,
     _normalize_spd_keys,
+    _load_bucket_centroids_db,
     run_ensemble_binary,
     run_ensemble_mcq,
     run_ensemble_numeric,
     run_ensemble_spd,
+    SPD_BUCKET_CENTROIDS_PA,
     sanitize_mcq_vector,
 )
 from .aggregate import (
@@ -1049,93 +1051,6 @@ def _load_pa_history_block(
     return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 
 
-def _load_bucket_centroids(
-    hazard_code: str,
-    metric: str,
-    class_bins: Optional[List[str]] = None,
-) -> Optional[List[float]]:
-    """
-    Look up data-driven centroids for SPD buckets from `bucket_centroids`.
-
-    Returns a list of floats ordered to match class_bins (or SPD_CLASS_BINS_PA),
-    or None if no centroids are available for this (hazard_code, metric).
-    """
-    try:
-        from resolver.db import duckdb_io
-    except Exception:
-        return None
-
-    hz = (hazard_code or "").upper().strip()
-    mt = (metric or "").upper().strip()
-    bins = class_bins or SPD_CLASS_BINS_PA
-    if not mt:
-        return None
-
-    db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
-    if not db_url:
-        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-            print(f"[forecaster] no db_url while loading bucket centroids for hazard={hz!r}, metric={mt!r}")
-        return None
-
-    con = None
-    try:
-        con = duckdb_io.get_db(db_url)
-    except Exception as exc:
-        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-            print(f"[forecaster] failed to connect to DuckDB for bucket centroids: {exc!r}")
-        return None
-
-    try:
-        try:
-            con.execute("SELECT 1 FROM bucket_centroids LIMIT 1")
-        except Exception:
-            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-                print("[forecaster] bucket_centroids table not found; using default centroids")
-            return None
-
-        rows = con.execute(
-            """
-            SELECT class_bin, ev
-            FROM bucket_centroids
-            WHERE metric = ?
-              AND hazard_code = ?
-            """,
-            [mt, hz],
-        ).fetchall()
-
-        if not rows:
-            if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-                print(
-                    f"[forecaster] no bucket_centroids rows for hazard={hz!r}, metric={mt!r}; "
-                    "falling back to defaults"
-                )
-            return None
-
-        by_bin = {cb: float(ev) for (cb, ev) in rows}
-        centroids: List[float] = []
-        for bin_label in bins:
-            if bin_label not in by_bin:
-                if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-                    print(
-                        f"[forecaster] bucket_centroids missing bin={bin_label!r} "
-                        f"for hazard={hz!r}, metric={mt!r}; using defaults"
-                    )
-                return None
-            centroids.append(by_bin[bin_label])
-
-        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-            print(
-                f"[forecaster] loaded data-driven centroids for hazard={hz!r}, metric={mt!r}: "
-                f"{centroids}"
-            )
-        return centroids
-    finally:
-        try:
-            duckdb_io.close_db(con)
-        except Exception:
-            pass
-
-
 def _load_pythia_questions(limit: int) -> List[dict]:
     """
     Load active Horizon Scanner questions from DuckDB and adapt them to the
@@ -1950,16 +1865,18 @@ async def _run_one_question_body(
             final_main = {options[i]: vec_main[i] for i in range(n_options)} if n_options else {}
         elif qtype == "spd":
             bucket_labels = SPD_CLASS_BINS_PA
-            default_centroids = SPD_BUCKET_CENTROIDS_DEFAULT
+            default_centroids = SPD_BUCKET_CENTROIDS_PA
             if metric_up == "FATALITIES" and hz_is_conflict:
                 bucket_labels = SPD_CLASS_BINS_FATALITIES
                 default_centroids = SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT
+            elif metric_up != "PA":
+                default_centroids = SPD_BUCKET_CENTROIDS_DEFAULT
 
             bucket_centroids = None
             if pmeta.get("hazard_code") and pmeta.get("metric"):
-                bucket_centroids = _load_bucket_centroids(
-                    pmeta["hazard_code"],
-                    pmeta["metric"],
+                bucket_centroids = _load_bucket_centroids_db(
+                    hazard_code=pmeta["hazard_code"],
+                    metric=pmeta["metric"],
                     class_bins=bucket_labels,
                 )
 
