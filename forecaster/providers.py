@@ -250,6 +250,22 @@ _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "2048") or 
 # Usage / cost helpers
 # ---------------------------------------------------------------------------
 
+# Cost per 1,000 tokens for known models (USD). Keys should match ModelSpec.model_id
+# entries so we can estimate costs directly from provider usage metadata.
+MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = {
+    # Budget / testing models
+    "openai/gpt-5-nano": (0.00005, 0.00040),
+    "google/gemini-2.5-flash-lite": (0.00015, 0.00350),
+    "anthropic/claude-haiku-4-5-20251001": (0.00100, 0.00500),
+    "xai/grok-4-1-fast-reasoning": (0.00030, 0.00050),
+
+    # Production / frontier models
+    "openai/gpt-5.1": (0.00125, 0.01000),
+    "google/gemini-3-pro-preview": (0.00200, 0.01200),
+    "anthropic/claude-opus-4-5-20251101": (0.00500, 0.02500),
+    "xai/grok-4-0709": (0.00300, 0.01500),
+}
+
 _MODEL_PRICES: Optional[Dict[str, Dict[str, float]]] = None
 
 
@@ -291,24 +307,53 @@ def usage_to_dict(usage_obj: Any) -> Dict[str, int]:
 
 
 def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
-    prices = _load_model_prices()
     if not usage or not isinstance(usage, dict):
         return 0.0
-    price_entry = (
-        prices.get(model_id)
-        or prices.get(model_id.replace("/", "-"))
-        or prices.get(model_id.split("/", 1)[-1])
-        or {}
-    )
-    try:
-        prompt_rate = float(price_entry.get("prompt", 0.0))
-        completion_rate = float(price_entry.get("completion", 0.0))
-        return (
-            (usage.get("prompt_tokens", 0) / 1000.0) * prompt_rate
-            + (usage.get("completion_tokens", 0) / 1000.0) * completion_rate
+
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+
+    def _resolve_price_tuple(mid: str) -> Optional[tuple[float, float]]:
+        if not mid:
+            return None
+        prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1K.get(mid)
+        if not prices:
+            alt_ids = [mid.replace("/", "-"), mid.split("/", 1)[-1]]
+            for alt in alt_ids:
+                if alt in MODEL_PRICES_PER_1K:
+                    prices = MODEL_PRICES_PER_1K[alt]
+                    break
+        if prices:
+            return float(prices[0]), float(prices[1])
+
+        # Fallback to JSON overrides if provided via MODEL_COSTS_JSON
+        dynamic_prices = _load_model_prices()
+        price_entry = (
+            dynamic_prices.get(mid)
+            or dynamic_prices.get(mid.replace("/", "-"))
+            or dynamic_prices.get(mid.split("/", 1)[-1])
+            or {}
         )
-    except Exception:
+        try:
+            prompt_rate = float(price_entry.get("prompt", 0.0))
+            completion_rate = float(price_entry.get("completion", 0.0))
+            return prompt_rate, completion_rate
+        except Exception:
+            return None
+
+    price_tuple = _resolve_price_tuple(model_id)
+    if not price_tuple:
         return 0.0
+
+    input_cost_per_1k, output_cost_per_1k = price_tuple
+
+    if prompt_tokens or completion_tokens:
+        input_cost = (prompt_tokens / 1000.0) * input_cost_per_1k
+        output_cost = (completion_tokens / 1000.0) * output_cost_per_1k
+        return float(input_cost + output_cost)
+
+    return float((total_tokens / 1000.0) * input_cost_per_1k)
 
 
 # ---------------------------------------------------------------------------
