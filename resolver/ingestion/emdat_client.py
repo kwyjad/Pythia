@@ -884,6 +884,12 @@ def _default_iso(cfg: Mapping[str, Any]) -> list[str]:
 
 
 def _default_year_bounds(cfg: Mapping[str, Any]) -> tuple[int, int]:
+    """Return (from_year, to_year) using current year as a fallback.
+
+    ``default_to_year`` may be ``None`` in the YAML config; in that case we
+    intentionally fall back to the current calendar year so callers always get
+    a closed range.
+    """
     current_year = date.today().year
     default_from = _coerce_int(cfg.get("default_from_year"), current_year)
     default_to = _coerce_int(cfg.get("default_to_year"), current_year)

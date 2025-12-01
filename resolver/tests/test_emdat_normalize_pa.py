@@ -1,10 +1,9 @@
 from __future__ import annotations
-
-import pandas as pd
-
 from resolver.ingestion import emdat_stub
 from resolver.ingestion.emdat_normalize import normalize_emdat_pa
 from resolver.ingestion.utils.hazard_map import CLASSIF_TO_SHOCK
+
+import pandas as pd
 
 
 def _derive_iso(row: dict[str, object]) -> str | None:
@@ -113,18 +112,26 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
         shock = CLASSIF_TO_SHOCK.get(classif_key)
         if not shock:
             continue
-        year_value = pd.to_numeric(record.get("start_year"), errors="coerce")
-        if pd.isna(year_value):
+        start_year = pd.to_numeric(record.get("start_year"), errors="coerce")
+        if pd.isna(start_year):
             continue
-        month_value = pd.to_numeric(record.get("start_month"), errors="coerce")
-        if pd.isna(month_value) and shock in {"flood", "tropical_cyclone"}:
-            month_value = pd.to_numeric(record.get("end_month"), errors="coerce")
-        if pd.isna(month_value):
+        start_month = pd.to_numeric(record.get("start_month"), errors="coerce")
+        end_year = pd.to_numeric(record.get("end_year"), errors="coerce")
+        end_month = pd.to_numeric(record.get("end_month"), errors="coerce")
+
+        if pd.isna(start_month) and shock in {"flood", "tropical_cyclone"}:
+            start_month = end_month
+
+        if pd.isna(start_month):
             continue
-        month_int = int(month_value)
-        if month_int < 1 or month_int > 12:
-            continue
-        ym = f"{int(year_value):04d}-{month_int:02d}"
+
+        start_year_int = int(start_year)
+        start_month_int = int(start_month)
+        end_year_int = start_year_int if pd.isna(end_year) else int(end_year)
+        end_month_int = start_month_int if pd.isna(end_month) else int(end_month)
+        if (end_year_int, end_month_int) < (start_year_int, start_month_int):
+            end_year_int, end_month_int = start_year_int, start_month_int
+
         value = _parse_int(record.get("total_affected"))
         if value is None:
             value = 0
@@ -132,8 +139,17 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
                 value += _parse_int(record.get(column)) or 0
         if value <= 0:
             continue
-        key = (iso3, ym, shock)
-        expected_totals[key] = expected_totals.get(key, 0) + int(value)
+
+        y, m = start_year_int, start_month_int
+        while (y < end_year_int) or (y == end_year_int and m <= end_month_int):
+            ym = f"{y:04d}-{m:02d}"
+            key = (iso3, ym, shock)
+            expected_totals[key] = expected_totals.get(key, 0) + int(value)
+            if m == 12:
+                y += 1
+                m = 1
+            else:
+                m += 1
 
     actual_totals = {
         (row.iso3, row.ym, row.shock_type): int(row.pa)
@@ -180,3 +196,134 @@ def test_emdat_normalize_pa_groups_and_sums() -> None:
     assert stats["kept_rows"] > 0
     assert stats["drop_counts"]["missing_month"] >= 1
     assert stats["fallback_counts"]["used_end_month"] >= 1
+
+
+def test_emdat_normalize_sticky_multi_month() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "disno": "2024-0001-ETH",
+                "classif_key": "nat-hyd-flo-riv",
+                "iso": "ETH",
+                "country": "Ethiopia",
+                "start_year": 2024,
+                "start_month": 1,
+                "end_year": 2024,
+                "end_month": 2,
+                "total_affected": 100000,
+                "entry_date": "2024-03-01",
+                "last_update": "2024-03-10",
+            }
+        ]
+    )
+
+    normalized = normalize_emdat_pa(df, info={"timestamp": "2024-03-15T00:00:00Z"})
+
+    assert set(normalized["ym"]) == {"2024-01", "2024-02"}
+    assert all(normalized["pa"] == 100000)
+
+
+def test_emdat_normalize_flood_end_month_only() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "disno": "2024-0002-ETH",
+                "classif_key": "nat-hyd-flo-fla",
+                "iso": "ETH",
+                "country": "Ethiopia",
+                "start_year": 2024,
+                "start_month": pd.NA,
+                "end_year": 2024,
+                "end_month": 5,
+                "total_affected": 50000,
+                "entry_date": "2024-06-01",
+                "last_update": "2024-06-05",
+            }
+        ]
+    )
+
+    normalized = normalize_emdat_pa(df, info={"timestamp": "2024-06-10T00:00:00Z"})
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["ym"] == "2024-05"
+    assert int(row["pa"]) == 50000
+
+
+def test_emdat_normalize_single_month_no_end() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "disno": "2024-0003-ETH",
+                "classif_key": "nat-hyd-flo-riv",
+                "iso": "ETH",
+                "country": "Ethiopia",
+                "start_year": 2024,
+                "start_month": 7,
+                "end_year": pd.NA,
+                "end_month": pd.NA,
+                "total_affected": 123,
+                "entry_date": "2024-07-15",
+                "last_update": "2024-07-16",
+            }
+        ]
+    )
+
+    normalized = normalize_emdat_pa(df, info={"timestamp": "2024-07-20T00:00:00Z"})
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["ym"] == "2024-07"
+    assert int(row["pa"]) == 123
+
+
+def test_emdat_normalize_diagnostics_includes_expanded_rows() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "disno": "2024-0004-ETH",
+                "classif_key": "nat-hyd-flo-riv",
+                "iso": "ETH",
+                "country": "Ethiopia",
+                "start_year": 2024,
+                "start_month": 1,
+                "end_year": 2024,
+                "end_month": 2,
+                "total_affected": 10,
+                "entry_date": "2024-02-01",
+                "last_update": "2024-02-02",
+            },
+            {
+                "disno": "2024-0005-ETH",
+                "classif_key": "nat-met-sto-tro",
+                "iso": "ETH",
+                "country": "Ethiopia",
+                "start_year": 2024,
+                "start_month": 3,
+                "end_year": pd.NA,
+                "end_month": pd.NA,
+                "total_affected": 5,
+                "entry_date": "2024-03-01",
+                "last_update": "2024-03-02",
+            },
+        ]
+    )
+
+    normalized = normalize_emdat_pa(df, info={"timestamp": "2024-03-10T00:00:00Z"})
+
+    stats = normalized.attrs.get("normalize_stats")
+    assert stats is not None
+    for key in (
+        "raw_rows",
+        "kept_rows",
+        "dropped_rows",
+        "drop_counts",
+        "dropped_sample",
+        "fallback_counts",
+        "expanded_rows",
+        "month_buckets",
+    ):
+        assert key in stats
+
+    assert stats["expanded_rows"] >= stats["kept_rows"]
+    assert stats["month_buckets"] == len(normalized)

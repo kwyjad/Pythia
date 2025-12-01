@@ -1,5 +1,6 @@
 import csv
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -308,3 +309,18 @@ def test_build_effective_params_iso_handling(monkeypatch: pytest.MonkeyPatch) ->
     assert params_with_iso["filters"]["include_hist"] is True
     assert params_with_iso["iso_values"] == ["IDN", "PHL"]
     assert params_with_iso["source_override"] == "api"
+
+
+def test_default_year_bounds_uses_current_year(monkeypatch: pytest.MonkeyPatch) -> None:
+    today = date(2024, 6, 1)
+    monkeypatch.setattr(emdat_client, "date", type("_D", (), {"today": staticmethod(lambda: today)})())
+
+    cfg = {"default_from_year": 2022, "default_to_year": None}
+    from_year, to_year = emdat_client._default_year_bounds(cfg)
+    assert from_year == 2022
+    assert to_year == 2024
+
+    cfg_missing_to = {"default_from_year": 2022}
+    from_year_missing, to_year_missing = emdat_client._default_year_bounds(cfg_missing_to)
+    assert from_year_missing == 2022
+    assert to_year_missing == 2024
