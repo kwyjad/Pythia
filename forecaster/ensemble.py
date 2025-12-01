@@ -41,6 +41,10 @@ SPD_BUCKET_CENTROIDS_PA: list[float] = [
     700_000.0,  # Bucket 5: >=500k
 ]
 
+# Backwards-compatible alias used by debug tools and any generic callers.
+# "Default" SPD centroids are PA-style centroids aligned with SPD_BUCKET_TEXT_PA.
+SPD_BUCKET_CENTROIDS_DEFAULT: list[float] = SPD_BUCKET_CENTROIDS_PA
+
 # Fatalities bucket centroids: expected deaths conditional on each bucket.
 # Bucket 1 centroid is 0.0 to reflect heavy mass on zero within the "<5" range.
 SPD_BUCKET_CENTROIDS_FATALITIES: list[float] = [
