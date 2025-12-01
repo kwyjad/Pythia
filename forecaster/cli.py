@@ -1498,6 +1498,9 @@ async def _run_one_question_body(
         n_options = len(options) if qtype == "multiple_choice" else 0
         discrete_values = _discrete_values(q) if qtype in ("numeric", "discrete") and _is_discrete(q) else []
         ev_main: Optional[Dict[str, Any]] = None
+        spd_bucket_labels_used: Optional[List[str]] = None
+        spd_bucket_centroids_used: Optional[List[float]] = None
+        spd_centroid_source = ""
 
         pmeta = _extract_pythia_meta(post)
         pythia_meta_full = _as_dict(post.get("pythia_metadata") or {})
@@ -1924,21 +1927,32 @@ async def _run_one_question_body(
             metric_up_local = (metric_up or "").upper()
             if metric_up_local == "PA":
                 default_centroids = SPD_BUCKET_CENTROIDS_PA
+                default_source_label = "default_pa"
             elif metric_up_local == "FATALITIES":
                 default_centroids = SPD_BUCKET_CENTROIDS_FATALITIES
+                default_source_label = "default_fatalities"
             else:
                 default_centroids = SPD_BUCKET_CENTROIDS_DEFAULT
+                default_source_label = "default_generic"
 
-            bucket_centroids = None
+            bucket_centroids_db = None
+            centroid_source = default_source_label
             if pmeta.get("hazard_code") and pmeta.get("metric"):
-                bucket_centroids = _load_bucket_centroids_db(
+                bucket_centroids_db = _load_bucket_centroids_db(
                     hazard_code=pmeta["hazard_code"],
                     metric=pmeta["metric"],
                     class_bins=bucket_labels,
                 )
 
-            if bucket_centroids is None:
+            if bucket_centroids_db is not None:
+                bucket_centroids = bucket_centroids_db
+                centroid_source = "db"
+            else:
                 bucket_centroids = default_centroids
+
+            spd_bucket_labels_used = list(bucket_labels)
+            spd_bucket_centroids_used = list(bucket_centroids)
+            spd_centroid_source = centroid_source
 
             try:
                 # Normal SPD aggregation path
@@ -2153,7 +2167,15 @@ async def _run_one_question_body(
             "options_json": options if qtype == "multiple_choice" else "",
             "discrete_values_json": discrete_values if (qtype in ("numeric", "discrete") and discrete_values) else "",
         }
-    
+
+        if qtype == "spd":
+            if spd_bucket_labels_used is not None:
+                row["spd_bucket_labels"] = spd_bucket_labels_used
+            if spd_bucket_centroids_used is not None:
+                row["spd_bucket_centroids"] = spd_bucket_centroids_used
+            if spd_centroid_source:
+                row["spd_centroid_source"] = spd_centroid_source
+
         row["seen_guard_triggered"] = (
             "1"
             if seen_guard_enabled and bool(seen_guard_lock_acquired)

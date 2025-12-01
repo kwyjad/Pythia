@@ -4,6 +4,13 @@ import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from forecaster.cli import SPD_CLASS_BINS_FATALITIES, SPD_CLASS_BINS_PA
+from forecaster.ensemble import (
+    SPD_BUCKET_CENTROIDS_DEFAULT,
+    SPD_BUCKET_CENTROIDS_FATALITIES,
+    SPD_BUCKET_CENTROIDS_PA,
+    _load_bucket_centroids_db,
+)
 from resolver.db import duckdb_io
 
 DB_URL = os.environ.get("RESOLVER_DB_URL", duckdb_io.DEFAULT_DB_URL)
@@ -193,6 +200,27 @@ def _load_llm_calls(con, run_id: str, question_id: str):
     return calls
 
 
+def _resolve_spd_bucket_config(hazard_code: str, metric: str) -> tuple[list[str], list[float], str]:
+    metric_up = (metric or "").upper()
+    labels = SPD_CLASS_BINS_FATALITIES if metric_up == "FATALITIES" else SPD_CLASS_BINS_PA
+
+    if metric_up == "PA":
+        default_centroids = SPD_BUCKET_CENTROIDS_PA
+        default_source_label = "default_pa"
+    elif metric_up == "FATALITIES":
+        default_centroids = SPD_BUCKET_CENTROIDS_FATALITIES
+        default_source_label = "default_fatalities"
+    else:
+        default_centroids = SPD_BUCKET_CENTROIDS_DEFAULT
+        default_source_label = "default_generic"
+
+    bucket_centroids_db = _load_bucket_centroids_db(hazard_code or "", metric_up, labels)
+    if bucket_centroids_db is not None:
+        return list(labels), list(bucket_centroids_db), "db"
+
+    return list(labels), list(default_centroids), default_source_label
+
+
 def main():
     con = _connect()
 
@@ -245,6 +273,18 @@ def main():
                 ev_val = ensemble_ev.get(m)
                 row = [str(m)] + [f"{p:.3f}" for p in probs] + [f"{ev_val:,.0f}" if ev_val is not None else ""]
                 lines.append("| " + " | ".join(row) + " |")
+            lines.append("")
+
+            labels, centroids, centroid_source = _resolve_spd_bucket_config(hz or "", metric or "")
+            lines.append("**SPD bucket configuration**")
+            if labels:
+                labels_str = ", ".join(str(x) for x in labels)
+                lines.append(f"- Bucket labels: [{labels_str}]")
+            if centroids:
+                centroids_str = ", ".join(f"{float(x):g}" for x in centroids)
+                lines.append(f"- Centroids used (for EV): [{centroids_str}]")
+            if centroid_source:
+                lines.append(f"- Centroid source: `{centroid_source}`")
             lines.append("")
 
             lines.append("### Per-model SPD & LLM metadata")
