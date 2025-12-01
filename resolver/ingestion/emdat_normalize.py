@@ -217,6 +217,8 @@ def normalize_emdat_pa(
         stats_payload = {
             "raw_rows": 0,
             "kept_rows": 0,
+            "expanded_rows": 0,
+            "month_buckets": 0,
             "dropped_rows": 0,
             "drop_counts": {
                 "missing_iso": 0,
@@ -285,9 +287,14 @@ def normalize_emdat_pa(
         working.get("end_month", pd.Series(pd.NA, index=working.index)),
         errors="coerce",
     )
+    end_year_series = pd.to_numeric(
+        working.get("end_year", pd.Series(pd.NA, index=working.index)),
+        errors="coerce",
+    )
     working["start_year"] = year_series.astype("Int64")
     working["start_month"] = month_series.astype("Int64")
     working["end_month"] = end_month_series.astype("Int64")
+    working["end_year"] = end_year_series.astype("Int64")
 
     for column in ("start_month", "end_month"):
         series = working[column]
@@ -346,12 +353,6 @@ def normalize_emdat_pa(
     working = working.loc[~unmapped_mask].copy()
     flood_row_count = int((working["shock_type"] == "flood").sum())
 
-    working["ym"] = (
-        working["start_year"].astype(int).astype(str)
-        + "-"
-        + working["start_month"].astype(int).map(lambda value: f"{value:02d}")
-    )
-
     def _resolve_pa(row: pd.Series) -> int | None:
         total = _parse_int(row.get("total_affected"))
         if total is None:
@@ -392,7 +393,50 @@ def normalize_emdat_pa(
     as_of_date = _resolve_as_of(info)
     kept_rows = len(working)
 
-    grouped = working.groupby(["iso3", "ym", "shock_type"], dropna=False, as_index=False).agg(
+    expanded_records: list[dict[str, Any]] = []
+    for _, row in working.iterrows():
+        sy = row.get("start_year")
+        sm = row.get("start_month")
+        if pd.isna(sy) or pd.isna(sm):
+            continue
+        sy = int(sy)
+        sm = int(sm)
+
+        ey = row.get("end_year")
+        em = row.get("end_month")
+
+        if pd.isna(ey) or pd.isna(em):
+            ey, em = sy, sm
+        else:
+            ey = int(ey)
+            em = int(em)
+            if (ey, em) < (sy, sm):
+                ey, em = sy, sm
+
+        y, m = sy, sm
+        while (y < ey) or (y == ey and m <= em):
+            record = row.to_dict()
+            record["ym"] = f"{y:04d}-{m:02d}"
+            expanded_records.append(record)
+
+            if m == 12:
+                y += 1
+                m = 1
+            else:
+                m += 1
+
+    if expanded_records:
+        expanded = pd.DataFrame.from_records(expanded_records)
+    else:
+        expanded = working.assign(
+            ym=working["start_year"].astype(int).astype(str)
+            + "-"
+            + working["start_month"].astype(int).map(lambda value: f"{value:02d}")
+        )
+
+    expanded_rows = len(expanded)
+
+    grouped = expanded.groupby(["iso3", "ym", "shock_type"], dropna=False, as_index=False).agg(
         pa=("total_affected", "sum"),
         publication_date=(
             "publication_date",
@@ -501,6 +545,8 @@ def normalize_emdat_pa(
     diagnostics_payload = {
         "raw_rows": int(raw_rows),
         "kept_rows": int(kept_rows),
+        "expanded_rows": int(expanded_rows),
+        "month_buckets": int(len(grouped)),
         "dropped_rows": int(raw_rows - kept_rows),
         "drop_counts": drop_counts_payload,
         "dropped_sample": dropped_sample,
@@ -512,8 +558,10 @@ def normalize_emdat_pa(
     _write_normalize_diagnostics(diagnostics_payload)
 
     LOG.debug(
-        "emdat.normalize.grouped|rows_in=%s|rows_out=%s|flood_rows=%s",
+        "emdat.normalize.grouped|rows_in=%s|events_kept=%s|expanded_rows=%s|rows_out=%s|flood_rows=%s",
         raw_rows,
+        kept_rows,
+        expanded_rows,
         len(grouped),
         flood_row_count,
     )

@@ -95,8 +95,8 @@ def test_backfill_schedule_and_months_back_defaults() -> None:
 
     months_back = inputs.get("months_back", {})
     assert months_back, "Expected 'months_back' input definition"
-    assert months_back.get("default") == "1"
+    assert months_back.get("default") == "3"
 
     schedule = on_block.get("schedule", [])
     assert schedule, "Expected 'schedule' under 'on'"
-    assert any(item.get("cron") == "0 0 5 * *" for item in schedule if isinstance(item, dict))
+    assert any(item.get("cron") == "0 3 15 * *" for item in schedule if isinstance(item, dict))

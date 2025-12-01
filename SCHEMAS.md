@@ -63,7 +63,7 @@ EM-DAT People Affected monthly aggregates written by the EM-DAT CLI.
 | as_of_date | string | yes |  | Data currency date sourced from EM-DAT metadata. |
 | disno_first | string | yes |  | Lowest EM-DAT disaster identifier contributing to the month bucket. |
 | iso3 | string | yes |  | ISO 3166-1 alpha-3 country code. |
-| pa | integer | yes |  | People affected (EM-DAT Total Affected) aggregated to the month. |
+| pa | integer | yes |  | People affected (EM-DAT Total Affected) aggregated to the month. Editorial assumption: totals are counted in each overlapping month for multi-month events (no prorating). |
 | publication_date | string | yes |  | Latest EM-DAT publication/update contributing to the bucket. |
 | shock_type | string | yes |  | Resolver shock type (\`drought\`, \`tropical_cyclone\`, \`flood\`). |
 | source_id | string | yes |  | Source identifier (\`emdat\`). |
