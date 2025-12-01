@@ -1502,10 +1502,26 @@ async def _run_one_question_body(
         pmeta = _extract_pythia_meta(post)
         pythia_meta_full = _as_dict(post.get("pythia_metadata") or {})
         metric_up = (pmeta.get("metric") or "").upper()
+
         hz_code = (pmeta.get("hazard_code") or "").upper()
-        hz_is_conflict = bool(hz_code and (hz_code in CONFLICT_HAZARD_CODES or hz_code.startswith("CONFLICT")))
+        hz_query = HZ_QUERY_MAP.get(hz_code, hz_code)
+
         resolution_source = str(pythia_meta_full.get("resolution_source") or "")
         hazard_label = str(pythia_meta_full.get("hazard_label") or hz_code)
+
+        # Treat hazards mapped to CONFLICT (e.g., ACO, ACE, CU) as conflict, plus
+        # anything in the legacy CONFLICT_HAZARD_CODES set.
+        hz_is_conflict = bool(
+            hz_query
+            and (
+                hz_query in CONFLICT_HAZARD_CODES
+                or hz_query.startswith("CONFLICT")
+            )
+        )
+
+        # Safety net: if this question is resolved using ACLED, treat as conflict.
+        if not hz_is_conflict and "ACLED" in resolution_source.upper():
+            hz_is_conflict = True
         window_start_date = _coerce_date(post.get("pythia_window_start_date"))
         window_end_date = _coerce_date(post.get("pythia_window_end_date"))
         month_labels = _build_month_labels(window_start_date, horizon_months=6)

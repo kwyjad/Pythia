@@ -6,11 +6,14 @@ from typing import List, Tuple, Dict, Optional, Any
 from .ensemble import EnsembleResult, sanitize_mcq_vector, MemberOutput
 from . import bayes_mc as BMC
 
-# Default centroids (v1) for PA buckets (can be moved to config later)
-SPD_BUCKET_CENTROIDS_DEFAULT = [5_000.0, 25_000.0, 120_000.0, 350_000.0, 700_000.0]
+# Default centroids for PA buckets (can be moved to config later). Bucket 1
+# centroid is 0.0 because there is no explicit "0" bucket and much of the
+# probability mass here will be on zero.
+SPD_BUCKET_CENTROIDS_DEFAULT = [0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0]
 
-# Default centroids (v1) for conflict fatalities buckets (per month)
-SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT = [0.0, 30.0, 150.0, 625.0, 2_000.0]
+# Default centroids for conflict fatalities buckets (per month), aligned with
+# SPD_BUCKET_TEXT_FATALITIES.
+SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT = [0.0, 15.0, 62.0, 300.0, 700.0]
 
 def _extract_gtmc1_prob(sig: dict | None) -> float | None:
     """
