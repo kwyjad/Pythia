@@ -443,6 +443,7 @@ jobs:
           python -m scripts.ci.compute_backfill_window
 
       - name: Run ACLED → DuckDB backfill
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled' }}
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
