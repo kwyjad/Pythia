@@ -733,15 +733,12 @@ def _load_emdat_pa_history(
     Load a 36-month EM-DAT 'people affected' history for a given ISO3 +
     Pythia hazard code.
 
-    Uses facts_deltas where:
-      - source = 'emdat'
-      - metric = 'affected'
-      - semantics = 'new' (monthly flows)
-      - hazard_code matches the EM-DAT shock_type for this Pythia hazard.
+    Uses the emdat_pa table as the single source of truth for monthly PA
+    values.
     """
 
     hz = (hazard_code or "").upper()
-    shock_type = EMDAT_SHOCK_MAP.get(hz)
+    shock_type = EMDAT_SHOCK_MAP.get(hz, hz.lower())
 
     try:
         con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
@@ -749,23 +746,16 @@ def _load_emdat_pa_history(
         return "", {"error": "missing_db", "history_rows_detail": [], "summary_text": ""}
 
     try:
-        if not shock_type:
-            con.close()
-            return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
-
         rows = con.execute(
             """
-            SELECT ym, value, hazard_code, source
-            FROM facts_deltas
+            SELECT ym, pa, shock_type, COALESCE(source_id, '') AS source_id
+            FROM emdat_pa
             WHERE iso3 = ?
-              AND lower(source) = 'emdat'
-              AND lower(metric) = 'affected'
-              AND lower(semantics) = 'new'
-              AND lower(hazard_code) = ?
+              AND lower(shock_type) = ?
             ORDER BY ym DESC
             LIMIT ?
             """,
-            [iso3, shock_type, months],
+            [iso3, shock_type.lower(), months],
         ).fetchall()
     except Exception as exc:
         con.close()
@@ -778,31 +768,38 @@ def _load_emdat_pa_history(
     con.close()
 
     if not rows:
-        return "", {"error": "no_rows", "history_rows_detail": [], "summary_text": ""}
+        return "", {"error": "no_history", "history_rows_detail": [], "summary_text": ""}
 
     history: List[Dict[str, Any]] = []
     values: List[float] = []
-    for ym, val, hz_code, src in rows:
+    for ym, pa_val, shock_type_val, source_id in rows:
         ym_str = str(ym)
-        v = float(val or 0)
+        v = float(pa_val or 0.0)
         history.append(
             {
                 "ym": ym_str,
                 "value": v,
-                "source": src or "emdat",
-                "hazard_code": hz_code,
+                "source": "EM-DAT",
+                "shock_type": shock_type_val,
+                "source_id": source_id,
             }
         )
         values.append(v)
 
-    values_rev = list(reversed(values))
-    summary_lines = [
+    history_for_table = list(reversed(history))
+
+    summary_lines: List[str] = [
         "### EM-DAT people affected — 36-month history (Resolver)",
         "",
         f"- Months available: {len(history)}",
-        f"- Min monthly PA: {min(values_rev):,.0f}",
-        f"- Max monthly PA: {max(values_rev):,.0f}",
+        f"- Min monthly PA: {min(values):,.0f}",
+        f"- Max monthly PA: {max(values):,.0f}",
     ]
+    summary_lines.append("")
+    summary_lines.append("| Month | People affected |")
+    summary_lines.append("|-------|-----------------|")
+    for row in history_for_table:
+        summary_lines.append(f"| {row['ym']} | {row['value']:,.0f} |")
     summary = "\n".join(summary_lines)
 
     return summary, {
@@ -841,10 +838,15 @@ def _load_idmc_pa_history(
     try:
         flow_rows = con.execute(
             """
-            SELECT ym, SUM(value) AS flow_value
+            SELECT
+                ym,
+                SUM(CASE WHEN lower(metric) = 'new_displacements'
+                         THEN COALESCE(value_new, 0) ELSE 0 END) AS idmc_flow,
+                SUM(CASE WHEN lower(metric) = 'idp_displacement_new_dtm'
+                         THEN COALESCE(value_new, 0) ELSE 0 END) AS dtm_flow
             FROM facts_deltas
             WHERE iso3 = ?
-              AND lower(semantics) = 'new'
+              AND lower(series_semantics) = 'new'
               AND lower(metric) IN ('new_displacements', 'idp_displacement_new_dtm')
             GROUP BY ym
             ORDER BY ym DESC
@@ -865,11 +867,6 @@ def _load_idmc_pa_history(
             [iso3, months],
         ).fetchall()
     except Exception as exc:
-        if os.getenv("PYTHIA_DEBUG_DB", "0") == "1":
-            print(
-                f"[idmc_history] query error for iso3={iso3} hz={hazard_code}: "
-                f"{type(exc).__name__}: {str(exc)[:200]}"
-            )
         con.close()
         return "", {
             "error": f"idmc_query_error:{type(exc).__name__}",
@@ -877,52 +874,75 @@ def _load_idmc_pa_history(
             "summary_text": "",
         }
 
-    con.close()
-
     if not flow_rows and not stock_rows:
-        return "", {"error": "no_rows", "history_rows_detail": [], "summary_text": ""}
+        con.close()
+        return "", {"error": "no_history", "history_rows_detail": [], "summary_text": ""}
 
-    by_ym: Dict[str, Dict[str, float]] = {}
-    for ym, flow_val in flow_rows:
-        ym_str = str(ym)
-        d = by_ym.setdefault(ym_str, {})
-        d["flow"] = d.get("flow", 0.0) + float(flow_val or 0)
-
-    for ym, stock_val in stock_rows:
-        ym_str = str(ym)
-        d = by_ym.setdefault(ym_str, {})
-        d["stock"] = float(stock_val or 0)
+    stock_by_ym = {str(ym): float(stock or 0.0) for ym, stock in stock_rows}
 
     history: List[Dict[str, Any]] = []
-    flow_values: List[float] = []
+    chosen_flow_values: List[float] = []
     stock_values: List[float] = []
 
-    for ym_str in sorted(by_ym.keys(), reverse=True):
-        d = by_ym[ym_str]
-        flow_v = d.get("flow", 0.0)
-        stock_v = d.get("stock", 0.0)
+    for ym, idmc_flow, dtm_flow in flow_rows:
+        ym_str = str(ym)
+        idmc_v = float(idmc_flow or 0.0)
+        dtm_v = float(dtm_flow or 0.0)
+        if idmc_v:
+            chosen = idmc_v
+            source = "IDMC"
+        elif dtm_v:
+            chosen = dtm_v
+            source = "DTM"
+        else:
+            chosen = 0.0
+            source = ""
+
+        stock_v = stock_by_ym.get(ym_str, 0.0)
+
         history.append(
             {
                 "ym": ym_str,
-                "value_flow": flow_v,
+                "value": chosen,
+                "value_flow": chosen,
                 "value_stock": stock_v,
-                "source": "idmc/dtm",
+                "source": source or "IDMC/DTM",
+                "flow_idmc": idmc_v,
+                "flow_dtm": dtm_v,
             }
         )
-        if flow_v:
-            flow_values.append(flow_v)
-        if stock_v:
-            stock_values.append(stock_v)
+        chosen_flow_values.append(chosen)
+        stock_values.append(stock_v)
 
-    summary_lines = ["### IDMC/DTM displacement — 36-month history (Resolver)", ""]
-    summary_lines.append(f"- Months available: {len(history)}")
-    if flow_values:
+    con.close()
+
+    if not history and not stock_values:
+        return "", {"error": "no_history", "history_rows_detail": [], "summary_text": ""}
+
+    history_for_table = list(reversed(history))
+
+    summary_lines: List[str] = [
+        "### IDMC/DTM displacement — 36-month history (Resolver)",
+        "",
+        f"- Months available: {len(history)}",
+    ]
+    if chosen_flow_values:
         summary_lines.append(
-            f"- Flow (new displacements) min={min(flow_values):,.0f}, max={max(flow_values):,.0f}"
+            f"- Flow (new displacements) min={min(chosen_flow_values):,.0f}, max={max(chosen_flow_values):,.0f}"
         )
     if stock_values:
         summary_lines.append(
             f"- Stock (IDPs, DTM) min={min(stock_values):,.0f}, max={max(stock_values):,.0f}"
+        )
+    summary_lines.append(
+        "- Source selection: IDMC is used when available for a given month; DTM is used only when IDMC is missing."
+    )
+    summary_lines.append("")
+    summary_lines.append("| Month | Flow (people displaced) | Stock (IDPs, DTM) | Source |")
+    summary_lines.append("|-------|--------------------------|-------------------|--------|")
+    for row in history_for_table:
+        summary_lines.append(
+            f"| {row['ym']} | {row['value_flow']:,.0f} | {row['value_stock']:,.0f} | {row['source']} |"
         )
     summary = "\n".join(summary_lines)
 
