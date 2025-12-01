@@ -30,22 +30,25 @@ class MemberOutput:
 class EnsembleResult:
     members: List[MemberOutput]
 
-# PA bucket centroids: conditional expected PA given each bucket, in people
+# PA bucket centroids: conditional expected PA given each bucket, in people.
+# Bucket 1 centroid is 0.0 because there is no explicit "0" bucket and much of
+# the probability mass in this bucket will be on zero.
 SPD_BUCKET_CENTROIDS_PA: list[float] = [
     0.0,  # Bucket 1: <10k (treated as no major emergency)
     30_000.0,  # Bucket 2: 10k–<50k
     150_000.0,  # Bucket 3: 50k–<250k
     375_000.0,  # Bucket 4: 250k–<500k
-    1_000_000.0,  # Bucket 5: >=500k
+    700_000.0,  # Bucket 5: >=500k
 ]
 
-# Fatalities bucket centroids: expected deaths conditional on each bucket
+# Fatalities bucket centroids: expected deaths conditional on each bucket.
+# Bucket 1 centroid is 0.0 to reflect heavy mass on zero within the "<5" range.
 SPD_BUCKET_CENTROIDS_FATALITIES: list[float] = [
-    0.0,  # Bucket 1: <10
-    30.0,  # Bucket 2: 10–<50
-    150.0,  # Bucket 3: 50–<250
-    625.0,  # Bucket 4: 250–<1000
-    2_000.0,  # Bucket 5: >=1000
+    0.0,  # Bucket 1: <5
+    15.0,  # Bucket 2: 5–<25
+    62.0,  # Bucket 3: 25–<100
+    300.0,  # Bucket 4: 100–<500
+    700.0,  # Bucket 5: >=500
 ]
 
 # ---------- helpers ----------
