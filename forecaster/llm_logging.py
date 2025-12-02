@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from pythia.db.schema import connect, ensure_schema
+from forecaster.providers import estimate_cost_usd
 
 LlmCallFn = Callable[..., Tuple[str, Dict[str, Any]]]
 
@@ -75,13 +76,36 @@ async def log_forecaster_llm_call(
     total_tokens = int(_safe_get(usage, "total_tokens", prompt_tokens + completion_tokens))
     cost_usd = float(_safe_get(usage, "cost_usd", 0.0))
 
+    if cost_usd <= 0.0:
+        cost_usd = float(
+            estimate_cost_usd(
+                model_id,
+                {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+            )
+        )
+
     usage = {
         "elapsed_ms": elapsed_ms,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
-        **{k: v for k, v in usage.items() if k not in {"elapsed_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"}},
+        **{
+            k: v
+            for k, v in usage.items()
+            if k
+            not in {
+                "elapsed_ms",
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "cost_usd",
+            }
+        },
     }
 
     call_id = f"fc_{run_id}_{question_id}_{int(time.time() * 1000)}"

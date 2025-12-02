@@ -261,15 +261,23 @@ def _get_or_client() -> httpx.AsyncClient:
 MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = {
     # Budget / testing models
     "gpt-5-nano": (0.00005, 0.00040),
-    "gemini-2.5-flash-lite": (0.00015, 0.00350),
+    "openai/gpt-5-nano": (0.00005, 0.00040),
+    "gemini-2.5-flash-lite": (0.00005, 0.00015),
+    "google/gemini-2.5-flash-lite": (0.00005, 0.00015),
     "claude-haiku-4-5-20251001": (0.00100, 0.00500),
+    "anthropic/claude-haiku-4-5-20251001": (0.00100, 0.00500),
     "grok-4-1-fast-reasoning": (0.00030, 0.00050),
+    "xai/grok-4-1-fast-reasoning": (0.00030, 0.00050),
 
     # Production / frontier models
     "gpt-5.1": (0.00125, 0.01000),
+    "openai/gpt-5.1": (0.00125, 0.01000),
     "gemini-3-pro-preview": (0.00200, 0.01200),
+    "google/gemini-3-pro-preview": (0.00200, 0.01200),
     "claude-opus-4-5-20251101": (0.00500, 0.02500),
+    "anthropic/claude-opus-4-5-20251101": (0.00500, 0.02500),
     "grok-4-0709": (0.00300, 0.01500),
+    "xai/grok-4-0709": (0.00300, 0.01500),
 }
 
 _MODEL_PRICES: Optional[Dict[str, Dict[str, float]]] = None
@@ -323,9 +331,13 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
     def _resolve_price_tuple(mid: str) -> Optional[tuple[float, float]]:
         if not mid:
             return None
-        prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1K.get(mid)
+        original = str(mid).strip()
+        if not original:
+            return None
+        normalized = original.lower()
+        prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1K.get(normalized)
         if not prices:
-            alt_ids = [mid.replace("/", "-"), mid.split("/", 1)[-1]]
+            alt_ids = [normalized.replace("/", "-"), normalized.split("/", 1)[-1]]
             for alt in alt_ids:
                 if alt in MODEL_PRICES_PER_1K:
                     prices = MODEL_PRICES_PER_1K[alt]
@@ -336,9 +348,10 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
         # Fallback to JSON overrides if provided via MODEL_COSTS_JSON
         dynamic_prices = _load_model_prices()
         price_entry = (
-            dynamic_prices.get(mid)
-            or dynamic_prices.get(mid.replace("/", "-"))
-            or dynamic_prices.get(mid.split("/", 1)[-1])
+            dynamic_prices.get(normalized)
+            or dynamic_prices.get(original)
+            or dynamic_prices.get(normalized.replace("/", "-"))
+            or dynamic_prices.get(normalized.split("/", 1)[-1])
             or {}
         )
         try:
