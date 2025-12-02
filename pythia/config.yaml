@@ -22,7 +22,7 @@ researcher:
 llm:
   # Active profile for all LLM-using components: "test" (cheap) or "prod" (frontier).
   # Can be overridden by the PYTHIA_LLM_PROFILE env var.
-  profile: "test"
+  profile: "prod"
 
   profiles:
     test:

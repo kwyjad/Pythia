@@ -174,7 +174,6 @@ jobs:
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Run Forecaster (Pythia mode on HS questions)
         env:
-          PYTHIA_LLM_PROFILE: "test"
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

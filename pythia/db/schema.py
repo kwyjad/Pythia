@@ -9,6 +9,9 @@ from duckdb import CatalogException
 
 from pythia.config import load as load_config
 
+PA_CENTROIDS: tuple[float, ...] = (0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0)
+FATALITIES_CENTROIDS: tuple[float, ...] = (0.0, 15.0, 62.0, 300.0, 700.0)
+
 PYTHIA_DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
 
 
@@ -93,14 +96,13 @@ def _seed_pa_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
 
-    centroids = [0.0, 30_000.0, 150_000.0, 375_000.0, 1_000_000.0]
-    for idx, centroid in enumerate(centroids, start=1):
+    for idx, centroid in enumerate(PA_CENTROIDS, start=1):
         con.execute(
             """
             INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
             VALUES (?, ?, ?, ?)
             """,
-            ["*", "PA", idx, centroid],
+            ["*", "PA", idx, float(centroid)],
         )
 
 
@@ -125,14 +127,13 @@ def _seed_fatalities_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
 
-    centroids = [0.0, 30.0, 150.0, 625.0, 2_000.0]
-    for idx, centroid in enumerate(centroids, start=1):
+    for idx, centroid in enumerate(FATALITIES_CENTROIDS, start=1):
         con.execute(
             """
             INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
             VALUES (?, ?, ?, ?)
             """,
-            ["*", "FATALITIES", idx, centroid],
+            ["*", "FATALITIES", idx, float(centroid)],
         )
 
 

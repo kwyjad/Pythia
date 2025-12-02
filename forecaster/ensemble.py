@@ -11,7 +11,7 @@ import numpy as np
 
 from .providers import ModelSpec, llm_semaphore, call_chat_ms, estimate_cost_usd
 from .llm_logging import log_forecaster_llm_call
-from resolver.db import duckdb_io
+from pythia.db.schema import connect as pythia_connect
 
 @dataclass
 class MemberOutput:
@@ -238,7 +238,7 @@ def _load_bucket_centroids_db(
 
     con = None
     try:
-        con = duckdb_io.get_db(duckdb_io.DEFAULT_DB_URL)
+        con = pythia_connect(read_only=True)
     except Exception:
         return None
 
@@ -269,7 +269,7 @@ def _load_bucket_centroids_db(
         rows = []
     finally:
         if con is not None:
-            duckdb_io.close_db(con)
+            con.close()
 
     if not rows:
         return None
