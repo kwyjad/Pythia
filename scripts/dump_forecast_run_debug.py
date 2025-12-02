@@ -234,12 +234,16 @@ def main():
         if not mapping:
             print(f"[warn] No questions found for run_id={run_id}.")
             return
+    finally:
+        duckdb_io.close_db(con)
 
-        lines: List[str] = []
-        lines.append(f"# Pythia Forecast Run Debug (run_id={run_id})")
-        lines.append("")
+    lines: List[str] = []
+    lines.append(f"# Pythia Forecast Run Debug (run_id={run_id})")
+    lines.append("")
 
-        for (hz, metric), question_id in sorted(mapping.items()):
+    for (hz, metric), question_id in sorted(mapping.items()):
+        con = _connect()
+        try:
             qmeta = _load_question_meta(con, question_id)
             ensemble_spd, ensemble_ev = _load_ensemble_spd(con, run_id, question_id)
             model_spd = _load_model_spd_and_usage(con, run_id, question_id)
@@ -321,11 +325,11 @@ def main():
                     lines.append("")
             lines.append("---")
             lines.append("")
+        finally:
+            duckdb_io.close_db(con)
 
-        OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
-        print(f"[info] Wrote {OUT_PATH}")
-    finally:
-        duckdb_io.close_db(con)
+    OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[info] Wrote {OUT_PATH}")
 
 
 if __name__ == "__main__":
