@@ -148,14 +148,14 @@ jobs:
               summarize(
                   """
                   SELECT
-                      COALESCE(source, '') AS source,
+                      COALESCE(source, '') AS src,
                       COALESCE(metric, '') AS metric,
                       COALESCE(hazard_code, '') AS hazard_code,
                       COALESCE(iso3, '') AS iso3,
                       COUNT(*) AS n_rows
                   FROM facts_deltas
-                  GROUP BY source, metric, hazard_code, iso3
-                  ORDER BY source, metric, hazard_code, iso3
+                  GROUP BY src, metric, hazard_code, iso3
+                  ORDER BY src, metric, hazard_code, iso3
                   """,
                   "## facts_deltas row counts by source / metric / hazard_code / iso3",
                   ["source", "metric", "hazard_code", "iso3", "n_rows"],
