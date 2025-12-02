@@ -89,8 +89,10 @@ jobs:
       - name: Inspect data/resolver.duckdb
         run: |
           python - << 'EOF'
-          import duckdb, os
+          import os
           from pathlib import Path
+
+          from resolver.db import duckdb_io
 
           db_path = 'data/resolver.duckdb'
           out_path = Path('resolver_inspect.md')
@@ -102,7 +104,7 @@ jobs:
           if not os.path.exists(db_path):
               lines.append(f"_Database not found at `{db_path}`_")
           else:
-              con = duckdb.connect(db_path, read_only=True)
+              con = duckdb_io.get_db(f"duckdb:///{db_path}")
 
               lines.append("## Tables")
               tables = con.execute("""
@@ -116,6 +118,98 @@ jobs:
                   lines.append(tbl)
               lines.append("```")
               lines.append("")
+
+              lines.append("# Resolver DB Coverage Summary")
+              lines.append("")
+
+              def summarize(query: str, header: str, columns: list[str]):
+                  lines.append(header)
+                  lines.append("")
+                  lines.append("| " + " | ".join(columns) + " |")
+                  lines.append("|" + "---|" * len(columns))
+                  try:
+                      rows = con.execute(query).fetchall()
+                      for row in rows:
+                          lines.append("| " + " | ".join(str(x) for x in row) + " |")
+                  except Exception as e:
+                      lines.append(f"_Error executing summary: {type(e).__name__}: {e}_")
+                  lines.append("")
+
+              summarize(
+                  """
+                  SELECT
+                      COALESCE(source, '') AS source,
+                      COALESCE(metric, '') AS metric,
+                      COALESCE(hazard_code, '') AS hazard_code,
+                      COALESCE(iso3, '') AS iso3,
+                      COUNT(*) AS n_rows
+                  FROM facts_deltas
+                  GROUP BY source, metric, hazard_code, iso3
+                  ORDER BY source, metric, hazard_code, iso3
+                  """,
+                  "## facts_deltas row counts by source / metric / hazard_code / iso3",
+                  ["source", "metric", "hazard_code", "iso3", "n_rows"],
+              )
+
+              summarize(
+                  """
+                  SELECT
+                      COALESCE(iso3, '') AS iso3,
+                      COALESCE(shock_type, '') AS shock_type,
+                      COUNT(*) AS n_rows
+                  FROM emdat_pa
+                  GROUP BY iso3, shock_type
+                  ORDER BY iso3, shock_type
+                  """,
+                  "## emdat_pa row counts by iso3 / shock_type",
+                  ["iso3", "shock_type", "n_rows"],
+              )
+
+              summarize(
+                  """
+                  SELECT
+                      COALESCE(iso3, '') AS iso3,
+                      COUNT(*) AS n_rows
+                  FROM acled_monthly_fatalities
+                  GROUP BY iso3
+                  ORDER BY iso3
+                  """,
+                  "## acled_monthly_fatalities row counts by iso3",
+                  ["iso3", "n_rows"],
+              )
+
+              summarize(
+                  """
+                  SELECT
+                      COALESCE(iso3, '') AS iso3,
+                      COALESCE(hazard_code, '') AS hazard_code,
+                      COALESCE(metric, '') AS metric,
+                      COUNT(*) AS n_questions
+                  FROM questions
+                  GROUP BY iso3, hazard_code, metric
+                  ORDER BY iso3, hazard_code, metric
+                  """,
+                  "## questions by iso3 / hazard_code / metric",
+                  ["iso3", "hazard_code", "metric", "n_questions"],
+              )
+
+              summarize(
+                  """
+                  SELECT
+                      COALESCE(q.iso3, '') AS iso3,
+                      COALESCE(f.hazard_code, '') AS hazard_code,
+                      COALESCE(f.metric, '') AS metric,
+                      COUNT(DISTINCT f.question_id) AS n_questions,
+                      COUNT(*) AS n_rows
+                  FROM forecasts_ensemble AS f
+                  LEFT JOIN questions AS q
+                    ON q.question_id = f.question_id
+                  GROUP BY iso3, hazard_code, metric
+                  ORDER BY iso3, hazard_code, metric
+                  """,
+                  "## forecasts_ensemble by iso3 / hazard_code / metric",
+                  ["iso3", "hazard_code", "metric", "n_questions", "n_rows"],
+              )
 
               def dump_table_schema_and_sample(table_name: str, limit: int = 10):
                   lines.append(f"## {table_name} schema & sample")
@@ -158,7 +252,7 @@ jobs:
               ]:
                   dump_table_schema_and_sample(tbl, limit=10)
 
-              con.close()
+              duckdb_io.close_db(con)
 
           out_path.write_text("\n".join(lines), encoding='utf-8')
           print(f"Wrote {out_path}")
