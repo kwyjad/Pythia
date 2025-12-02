@@ -92,19 +92,29 @@ jobs:
           import os
           from pathlib import Path
 
-          from resolver.db import duckdb_io
+          import duckdb
 
-          db_path = 'data/resolver.duckdb'
           out_path = Path('resolver_inspect.md')
 
           lines = []
           lines.append("# Resolver DuckDB Inspection")
           lines.append("")
 
-          if not os.path.exists(db_path):
+          # Resolve DB path from RESOLVER_DB_URL if present, else fall back to data/resolver.duckdb
+          db_url = os.getenv("RESOLVER_DB_URL", "duckdb:///data/resolver.duckdb")
+
+          if db_url.startswith("duckdb:///"):
+              db_path = db_url[len("duckdb:///"):]
+          else:
+              db_path = db_url
+
+          db_path = Path(db_path)
+
+          if not db_path.exists():
               lines.append(f"_Database not found at `{db_path}`_")
           else:
-              con = duckdb_io.get_db(f"duckdb:///{db_path}")
+              print(f"[inspect] Connecting to {db_path}")
+              con = duckdb.connect(str(db_path), read_only=True)
 
               lines.append("## Tables")
               tables = con.execute("""
@@ -252,7 +262,7 @@ jobs:
               ]:
                   dump_table_schema_and_sample(tbl, limit=10)
 
-              duckdb_io.close_db(con)
+              con.close()
 
           out_path.write_text("\n".join(lines), encoding='utf-8')
           print(f"Wrote {out_path}")
