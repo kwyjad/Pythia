@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -239,8 +240,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             logger.error("HS triage LLM returned empty response for %s", iso3)
             return
 
+        raw = text.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```json\s*|\s*```$", "", raw, flags=re.S).strip()
+
         try:
-            triage = json.loads(text)
+            triage = json.loads(raw)
         except json.JSONDecodeError as exc:
             debug_dir = Path("debug/hs_triage_raw")
             debug_dir.mkdir(parents=True, exist_ok=True)

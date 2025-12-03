@@ -182,17 +182,13 @@ jobs:
           python -m horizon_scanner.horizon_scanner
           echo "=== horizon_scanner.horizon_scanner completed ==="
 
-      - name: Import questions into resolver.duckdb from test_questions.json
+      - name: Create questions from latest HS triage run
         env:
           PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
         run: |
           set -e
-          if [ -f data/test_questions.json ]; then
-            echo "Importing questions from data/test_questions.json into DuckDB..."
-            python -m scripts.import_questions_from_json --db duckdb:///data/resolver.duckdb --path data/test_questions.json
-          else
-            echo "WARNING: data/test_questions.json not found; questions table will remain empty."
-          fi
+          echo "Creating questions from hs_triage into resolver.duckdb..."
+          python -m scripts.create_questions_from_triage --db duckdb:///data/resolver.duckdb
 
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Run Forecaster (Pythia mode on HS questions)
