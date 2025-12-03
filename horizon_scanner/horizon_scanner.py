@@ -104,174 +104,59 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
     """Summarize Resolver history per hazard to ground triage."""
 
     con = pythia_connect(read_only=True)
+    features: Dict[str, Any] = {"iso3": iso3}
 
-    def _summarize(values: list[float], source: str, default_note: str, short_ok: bool = True) -> Dict[str, Any]:
-        if not values:
-            return {
-                "source": source,
-                "history_length": 0,
-                "recent_mean": None,
-                "recent_max": None,
-                "recent_trend": "uncertain",
-                "data_quality": "low",
-                "notes": default_note,
-            }
-        history_length = len(values)
-        last_6 = values[-6:]
-        trend = "uncertain"
-        if len(last_6) >= 2:
-            if last_6[-1] > last_6[0]:
-                trend = "up"
-            elif last_6[-1] < last_6[0]:
-                trend = "down"
-            else:
-                trend = "flat"
-        quality = "high" if history_length >= 24 else "medium" if short_ok else "low"
-        return {
-            "source": source,
-            "history_length": history_length,
-            "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
-            "recent_max": float(max(last_6)) if last_6 else None,
-            "recent_trend": trend,
-            "data_quality": quality,
-            "notes": default_note,
-        }
-
-    def _fallback_summary(source: str, exc: Exception | None, note_prefix: str, short_ok: bool = True) -> Dict[str, Any]:
-        note = f"{note_prefix}: {type(exc).__name__}" if exc else note_prefix
-        return _summarize([], source, note, short_ok=short_ok)
-
-    def _query_values(
-        query_template: str, params: list[Any], order_columns: tuple[str, ...]
-    ) -> tuple[list[Any], Exception | None]:
-        last_exc: Exception | None = None
-        for order_col in order_columns:
-            try:
-                rows = con.execute(query_template.format(order_col=order_col), params).fetchall()
-                values = [r[0] for r in rows if r and r[0] is not None]
-                return values, None
-            except Exception as exc:  # pragma: no cover - defensive guard for schema drift
-                last_exc = exc
-                logger.warning("Resolver feature query failed for %s using %s: %s", iso3, order_col, exc)
-        return [], last_exc
-
+    # Conflict/fatalities base-rate features
     try:
-        conflict_values, conflict_exc = _query_values(
+        rows = con.execute(
             """
-            SELECT fatalities
+            SELECT month, fatalities
             FROM acled_monthly_fatalities
             WHERE iso3 = ?
-            ORDER BY {order_col}
+            ORDER BY month
             """,
             [iso3],
-            ("month", "ym"),
-        )
-        conflict_summary = (
-            _fallback_summary(
-                "ACLED",
-                conflict_exc,
-                "Resolver conflict features unavailable",
-                short_ok=False,
-            )
-            if conflict_exc
-            else _summarize(
-                conflict_values,
-                "ACLED",
-                "ACLED coverage is relatively strong for conflict fatalities.",
-            )
-        )
+        ).fetchall()
+        values = [int(r[1]) for r in rows]
+        n = len(values)
+        if n:
+            recent = values[-min(6, n) :]
+            features["conflict"] = {
+                "source": "ACLED",
+                "history_length": n,
+                "recent_mean": sum(recent) / len(recent),
+                "recent_max": max(recent),
+                "trend": "up"
+                if n >= 2 and recent[-1] > recent[0]
+                else "down"
+                if n >= 2 and recent[-1] < recent[0]
+                else "flat",
+                "data_quality": "high",
+                "notes": "ACLED coverage is relatively strong.",
+            }
+        else:
+            features["conflict"] = {
+                "source": "ACLED",
+                "history_length": 0,
+                "data_quality": "low",
+                "notes": "No ACLED history for this country.",
+            }
+    except Exception as exc:  # pragma: no cover - defensive fallback for schema drift
+        logging.warning("Resolver conflict features failed for %s: %s", iso3, exc)
+        features["conflict"] = {
+            "source": "ACLED",
+            "history_length": 0,
+            "data_quality": "unknown",
+            "notes": f"Resolver conflict features unavailable: {type(exc).__name__}",
+        }
 
-        idmc_values, idmc_exc = _query_values(
-            """
-            SELECT value
-            FROM facts_deltas
-            WHERE iso3 = ? AND metric = 'idp_displacement_stock_idmc'
-            ORDER BY {order_col}
-            """,
-            [iso3],
-            ("month", "ym"),
-        )
-        idmc_summary = (
-            _fallback_summary(
-                "IDMC",
-                idmc_exc,
-                "Resolver displacement features unavailable",
-                short_ok=False,
-            )
-            if idmc_exc
-            else _summarize(
-                idmc_values,
-                "IDMC",
-                "IDMC history is short; treat as a weak prior.",
-                short_ok=bool(len(idmc_values) >= 12),
-            )
-        )
+    # TODO: similar minimalist blocks for IDMC, EM-DAT if you want them
+    # For now, return at least the conflict bundle, plus a stub:
+    features.setdefault("displacement", {"notes": "Not implemented"})
+    features.setdefault("natural_hazards", {"notes": "Not implemented"})
 
-        emdat_summaries: Dict[str, Dict[str, Any]] = {}
-        for hz, shock in EMDAT_SHOCK_MAP.items():
-            values, emdat_exc = _query_values(
-                """
-                SELECT pa
-                FROM emdat_pa
-                WHERE iso3 = ? AND shock_type = ?
-                ORDER BY {order_col}
-                """,
-                [iso3, shock],
-                ("month", "ym"),
-            )
-            emdat_summaries[hz] = (
-                _fallback_summary(
-                    "none",
-                    emdat_exc,
-                    "EM-DAT series unavailable for this hazard",
-                    short_ok=False,
-                )
-                if emdat_exc
-                else _summarize(
-                    values,
-                    "EM-DAT" if values else "none",
-                    "EM-DAT coverage can be patchy; smaller events may be missing." if values else "No reliable EM-DAT series for this hazard.",
-                    short_ok=bool(values),
-                )
-            )
-
-        conflict_codes = {"ACO", "ACE", "CU", "CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
-        features: Dict[str, Any] = {}
-        for code, cfg in HAZARD_CONFIG.items():
-            if code in BLOCKED_HAZARDS:
-                continue
-            up = code.upper()
-            if up in conflict_codes:
-                features[code] = conflict_summary | {"metric": "fatalities"}
-            elif up == "DI":
-                features[code] = {
-                    "source": "none",
-                    "history_length": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "recent_trend": "uncertain",
-                    "data_quality": "low",
-                    "notes": "No resolver base rate for displacement inflow; rely on HS + research.",
-                }
-            elif up in {"FL", "DR", "TC", "HW"}:
-                features[code] = emdat_summaries.get(
-                    up,
-                    {
-                        "source": "none",
-                        "history_length": 0,
-                        "recent_mean": None,
-                        "recent_max": None,
-                        "recent_trend": "uncertain",
-                        "data_quality": "low",
-                        "notes": "No EM-DAT series available.",
-                    },
-                ) | {"metric": "affected"}
-            else:
-                features[code] = idmc_summary | {"metric": "displacement"}
-
-        return dict(sorted(features.items()))
-    finally:
-        con.close()
+    con.close()
+    return features
 
 
 def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
@@ -332,33 +217,55 @@ async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str]:
 
 
 def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
-    logger.info("Running HS triage for %s (%s)", country_name, iso3)
-    hazard_catalog = _build_hazard_catalog()
-    resolver_features = _build_resolver_features_for_country(iso3)
+    con = pythia_connect(read_only=False)
+    try:
+        logger.info("Running HS triage for %s (%s)", country_name, iso3)
+        resolver_features = _build_resolver_features_for_country(iso3)
+        hazard_catalog = _build_hazard_catalog()
+        prompt = build_hs_triage_prompt(
+            country_name=country_name,
+            iso3=iso3,
+            hazard_catalog=hazard_catalog,
+            resolver_features=resolver_features,
+            model_info={},
+        )
 
-    prompt = build_hs_triage_prompt(
-        country_name=country_name,
-        iso3=iso3,
-        hazard_catalog=hazard_catalog,
-        resolver_features=resolver_features,
-        model_info={},
-    )
+        text, usage, error = asyncio.run(_call_hs_model(prompt))
+        if error:
+            logger.error("HS triage model error for %s: %s", iso3, error)
+            return
 
-    text, usage, error = asyncio.run(_call_hs_model(prompt))
-    if error:
-        raise RuntimeError(error)
+        if not text or not text.strip():
+            logger.error("HS triage LLM returned empty response for %s", iso3)
+            return
 
-    triage = json.loads(text)
-    _write_hs_triage(run_id, iso3, triage)
+        try:
+            triage = json.loads(text)
+        except json.JSONDecodeError as exc:
+            debug_dir = Path("debug/hs_triage_raw")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = debug_dir / f"{run_id}__{iso3}.txt"
+            raw_path.write_text(text, encoding="utf-8")
+            logger.error(
+                "HS triage JSON decode failed for %s: %s (raw saved to %s)",
+                iso3,
+                exc,
+                raw_path,
+            )
+            return
 
-    cost = usage.get("cost_usd") or estimate_cost_usd(_resolve_hs_model(), usage)
-    logger.info(
-        "HS triage completed for %s (%s): tokens=%s cost_usd=%.4f",
-        country_name,
-        iso3,
-        usage.get("total_tokens"),
-        cost or 0.0,
-    )
+        _write_hs_triage(run_id, iso3, triage)
+
+        cost = usage.get("cost_usd") or estimate_cost_usd(_resolve_hs_model(), usage)
+        logger.info(
+            "HS triage completed for %s (%s): tokens=%s cost_usd=%.4f",
+            country_name,
+            iso3,
+            usage.get("total_tokens"),
+            cost or 0.0,
+        )
+    finally:
+        con.close()
 
 
 def _load_country_list(provided: list[str] | None) -> list[Tuple[str, str]]:
