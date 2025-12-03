@@ -137,57 +137,102 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
             "notes": default_note,
         }
 
+    def _fallback_summary(source: str, exc: Exception | None, note_prefix: str, short_ok: bool = True) -> Dict[str, Any]:
+        note = f"{note_prefix}: {type(exc).__name__}" if exc else note_prefix
+        return _summarize([], source, note, short_ok=short_ok)
+
+    def _query_values(
+        query_template: str, params: list[Any], order_columns: tuple[str, ...]
+    ) -> tuple[list[Any], Exception | None]:
+        last_exc: Exception | None = None
+        for order_col in order_columns:
+            try:
+                rows = con.execute(query_template.format(order_col=order_col), params).fetchall()
+                values = [r[0] for r in rows if r and r[0] is not None]
+                return values, None
+            except Exception as exc:  # pragma: no cover - defensive guard for schema drift
+                last_exc = exc
+                logger.warning("Resolver feature query failed for %s using %s: %s", iso3, order_col, exc)
+        return [], last_exc
+
     try:
-        conflict_rows = con.execute(
+        conflict_values, conflict_exc = _query_values(
             """
             SELECT fatalities
             FROM acled_monthly_fatalities
             WHERE iso3 = ?
-            ORDER BY ym
+            ORDER BY {order_col}
             """,
             [iso3],
-        ).fetchall()
-        conflict_values = [r[0] for r in conflict_rows if r and r[0] is not None]
-        conflict_summary = _summarize(
-            conflict_values,
-            "ACLED",
-            "ACLED coverage is relatively strong for conflict fatalities.",
+            ("month", "ym"),
+        )
+        conflict_summary = (
+            _fallback_summary(
+                "ACLED",
+                conflict_exc,
+                "Resolver conflict features unavailable",
+                short_ok=False,
+            )
+            if conflict_exc
+            else _summarize(
+                conflict_values,
+                "ACLED",
+                "ACLED coverage is relatively strong for conflict fatalities.",
+            )
         )
 
-        idmc_rows = con.execute(
+        idmc_values, idmc_exc = _query_values(
             """
             SELECT value
             FROM facts_deltas
             WHERE iso3 = ? AND metric = 'idp_displacement_stock_idmc'
-            ORDER BY ym
+            ORDER BY {order_col}
             """,
             [iso3],
-        ).fetchall()
-        idmc_values = [r[0] for r in idmc_rows if r and r[0] is not None]
-        idmc_summary = _summarize(
-            idmc_values,
-            "IDMC",
-            "IDMC history is short; treat as a weak prior.",
-            short_ok=bool(len(idmc_values) >= 12),
+            ("month", "ym"),
+        )
+        idmc_summary = (
+            _fallback_summary(
+                "IDMC",
+                idmc_exc,
+                "Resolver displacement features unavailable",
+                short_ok=False,
+            )
+            if idmc_exc
+            else _summarize(
+                idmc_values,
+                "IDMC",
+                "IDMC history is short; treat as a weak prior.",
+                short_ok=bool(len(idmc_values) >= 12),
+            )
         )
 
         emdat_summaries: Dict[str, Dict[str, Any]] = {}
         for hz, shock in EMDAT_SHOCK_MAP.items():
-            rows = con.execute(
+            values, emdat_exc = _query_values(
                 """
                 SELECT pa
                 FROM emdat_pa
                 WHERE iso3 = ? AND shock_type = ?
-                ORDER BY ym
+                ORDER BY {order_col}
                 """,
                 [iso3, shock],
-            ).fetchall()
-            values = [r[0] for r in rows if r and r[0] is not None]
-            emdat_summaries[hz] = _summarize(
-                values,
-                "EM-DAT" if values else "none",
-                "EM-DAT coverage can be patchy; smaller events may be missing." if values else "No reliable EM-DAT series for this hazard.",
-                short_ok=bool(values),
+                ("month", "ym"),
+            )
+            emdat_summaries[hz] = (
+                _fallback_summary(
+                    "none",
+                    emdat_exc,
+                    "EM-DAT series unavailable for this hazard",
+                    short_ok=False,
+                )
+                if emdat_exc
+                else _summarize(
+                    values,
+                    "EM-DAT" if values else "none",
+                    "EM-DAT coverage can be patchy; smaller events may be missing." if values else "No reliable EM-DAT series for this hazard.",
+                    short_ok=bool(values),
+                )
             )
 
         conflict_codes = {"ACO", "ACE", "CU", "CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
@@ -209,15 +254,18 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
                     "notes": "No resolver base rate for displacement inflow; rely on HS + research.",
                 }
             elif up in {"FL", "DR", "TC", "HW"}:
-                features[code] = emdat_summaries.get(up, {
-                    "source": "none",
-                    "history_length": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "recent_trend": "uncertain",
-                    "data_quality": "low",
-                    "notes": "No EM-DAT series available.",
-                }) | {"metric": "affected"}
+                features[code] = emdat_summaries.get(
+                    up,
+                    {
+                        "source": "none",
+                        "history_length": 0,
+                        "recent_mean": None,
+                        "recent_max": None,
+                        "recent_trend": "uncertain",
+                        "data_quality": "low",
+                        "notes": "No EM-DAT series available.",
+                    },
+                ) | {"metric": "affected"}
             else:
                 features[code] = idmc_summary | {"metric": "displacement"}
 

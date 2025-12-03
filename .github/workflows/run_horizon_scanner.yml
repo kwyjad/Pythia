@@ -34,12 +34,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh auth status
 
-      - name: Find latest successful Resolver — Initial Backfill run
-        id: find_backfill_run
+      - name: Select resolver DB artifact
+        id: select_resolver_db
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RUN_ID=$(gh run list \
+          PIPELINE_RUN_ID=$(gh run list \
+            --workflow "${{ github.workflow }}" \
+            --branch main \
+            --status success \
+            --json databaseId \
+            --limit 1 \
+            --jq '.[0].databaseId' || true)
+
+          BACKFILL_RUN_ID=$(gh run list \
             --workflow "Resolver — Initial Backfill" \
             --branch main \
             --status success \
@@ -47,22 +55,25 @@ jobs:
             --limit 1 \
             --jq '.[0].databaseId' || true)
 
-          if [ -z "$RUN_ID" ]; then
-            echo "No successful backfill run found; HS will run with a fresh DB."
+          if [ -n "$PIPELINE_RUN_ID" ]; then
+            echo "Using DB from latest pipeline run: $PIPELINE_RUN_ID"
+            echo "DB_RUN_ID=$PIPELINE_RUN_ID" >> "$GITHUB_ENV"
+          elif [ -n "$BACKFILL_RUN_ID" ]; then
+            echo "No pipeline DB found; falling back to backfill run: $BACKFILL_RUN_ID"
+            echo "DB_RUN_ID=$BACKFILL_RUN_ID" >> "$GITHUB_ENV"
           else
-            echo "Latest backfill run ID: $RUN_ID"
-            echo "BACKFILL_RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+            echo "No existing DB artifacts found; HS will run on a fresh DB."
           fi
 
-      - name: Download canonical resolver DB (from latest backfill)
-        if: env.BACKFILL_RUN_ID != ''
+      - name: Download canonical resolver DB
+        if: env.DB_RUN_ID != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p data
 
-          echo "Downloading pythia-resolver-db from run $BACKFILL_RUN_ID ..."
-          gh run download "$BACKFILL_RUN_ID" -n pythia-resolver-db --dir data
+          echo "Downloading pythia-resolver-db from run $DB_RUN_ID ..."
+          gh run download "$DB_RUN_ID" -n pythia-resolver-db --dir data
 
           echo "Downloaded artifacts:"
           ls -R data
@@ -170,6 +181,18 @@ jobs:
           echo "=== Running horizon_scanner.horizon_scanner as a module ==="
           python -m horizon_scanner.horizon_scanner
           echo "=== horizon_scanner.horizon_scanner completed ==="
+
+      - name: Import questions into resolver.duckdb from test_questions.json
+        env:
+          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+        run: |
+          set -e
+          if [ -f data/test_questions.json ]; then
+            echo "Importing questions from data/test_questions.json into DuckDB..."
+            python -m scripts.import_questions_from_json --db duckdb:///data/resolver.duckdb --path data/test_questions.json
+          else
+            echo "WARNING: data/test_questions.json not found; questions table will remain empty."
+          fi
 
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Run Forecaster (Pythia mode on HS questions)
