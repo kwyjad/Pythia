@@ -1401,9 +1401,9 @@ def _load_research_json(run_id: str, question_id: str) -> Optional[Dict[str, Any
 
 
 def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
-    iso3 = (question_row.get("iso3") if isinstance(question_row, dict) else question_row["iso3"]) or ""
-    hazard_code = (question_row.get("hazard_code") if isinstance(question_row, dict) else question_row["hazard_code"]) or ""
-    hs_run_id = (question_row.get("hs_run_id") if isinstance(question_row, dict) else question_row["hs_run_id"]) or run_id
+    iso3 = (question_row.get("iso3") or "").upper()
+    hazard_code = (question_row.get("hazard_code") or "").upper()
+    hs_run_id = question_row.get("hs_run_id") or run_id
     triage = load_hs_triage_entry(hs_run_id, iso3, hazard_code)
     if not triage:
         return True
@@ -1548,7 +1548,7 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
             "hazard_code": hz,
             "metric": metric,
             "resolution_source": resolution_source,
-            "target_months": question_row.get("target_month") if isinstance(question_row, dict) else question_row["target_month"],
+            "target_months": question_row.get("target_month"),
         },
         history_summary=history_summary,
         hs_triage_entry=hs_entry,
@@ -3390,7 +3390,18 @@ def main() -> None:
         ensure_schema()
         con = connect(read_only=True)
         try:
-            questions = con.execute(
+            cols = [
+                "question_id",
+                "hs_run_id",
+                "iso3",
+                "hazard_code",
+                "metric",
+                "target_month",
+                "window_start_date",
+                "window_end_date",
+                "wording",
+            ]
+            raw_rows = con.execute(
                 """
                 SELECT question_id, hs_run_id, iso3, hazard_code, metric, target_month,
                        window_start_date, window_end_date, wording
@@ -3401,6 +3412,7 @@ def main() -> None:
                 """,
                 [args.limit],
             ).fetchall()
+            questions = [dict(zip(cols, row)) for row in raw_rows]
         finally:
             con.close()
 
