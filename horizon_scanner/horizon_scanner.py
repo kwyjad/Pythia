@@ -241,11 +241,23 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             return
 
         raw = text.strip()
-        if raw.startswith("```"):
-            raw = re.sub(r"^```json\s*|\s*```$", "", raw, flags=re.S).strip()
+        fence_match = re.search(r"```json\s*(.*?)\s*```", raw, flags=re.S)
+        if not fence_match:
+            debug_dir = Path("debug/hs_triage_raw")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = debug_dir / f"{run_id}__{iso3}.txt"
+            raw_path.write_text(text, encoding="utf-8")
+            logger.error(
+                "HS triage response missing JSON fences for %s; raw saved to %s",
+                iso3,
+                raw_path,
+            )
+            return
+
+        payload = fence_match.group(1).strip()
 
         try:
-            triage = json.loads(raw)
+            triage = json.loads(payload)
         except json.JSONDecodeError as exc:
             debug_dir = Path("debug/hs_triage_raw")
             debug_dir.mkdir(parents=True, exist_ok=True)

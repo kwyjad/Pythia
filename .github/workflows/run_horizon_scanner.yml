@@ -190,6 +190,14 @@ jobs:
           echo "Creating questions from hs_triage into resolver.duckdb..."
           python -m scripts.create_questions_from_triage --db duckdb:///data/resolver.duckdb
 
+      - name: Create demo questions in resolver.duckdb
+        run: |
+          set -e
+          echo "Creating demo questions in DuckDB..."
+          python -m scripts.create_demo_questions --db duckdb:///data/resolver.duckdb
+        env:
+          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Run Forecaster (Pythia mode on HS questions)
         env:
