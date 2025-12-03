@@ -66,6 +66,21 @@ def main() -> None:
     try:
         inserted = 0
         for q in DEMO_QUESTIONS:
+            qid = q["question_id"]
+            iso3 = q["iso3"]
+            hz = q["hazard_code"]
+            metric = q["metric"]
+            target_month = q["target_month"]
+            window_start = q["window_start_date"]
+            window_end = q["window_end_date"]
+            wording = q["wording"]
+
+            # delete any existing question with this id so we can reinsert cleanly
+            con.execute(
+                "DELETE FROM questions WHERE question_id = ?",
+                [qid],
+            )
+
             con.execute(
                 """
                 INSERT INTO questions (
@@ -74,17 +89,16 @@ def main() -> None:
                     wording, status
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
-                ON CONFLICT(question_id) DO NOTHING
                 """,
                 [
-                    q["question_id"],
-                    q["iso3"],
-                    q["hazard_code"],
-                    q["metric"],
-                    q["target_month"],
-                    q["window_start_date"],
-                    q["window_end_date"],
-                    q["wording"],
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    target_month,
+                    window_start,
+                    window_end,
+                    wording,
                 ],
             )
             inserted += 1
