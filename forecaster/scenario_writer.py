@@ -165,9 +165,12 @@ def run_scenarios_for_run(run_id: str) -> None:
                 LOG.warning("No SPD summary for %s %s %s; skipping scenarios", iso3, hz, metric)
                 continue
 
-            hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz) if hs_run_id else {}
+            hs_entry: Dict[str, Any] = {}
+            if hs_run_id:
+                hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+
             rationale = _load_forecaster_rationale(con, run_id, iso3, hz, metric)
-            scenario_stub = hs_entry.get("scenario_stub", "") if hs_entry else ""
+            scenario_stub = hs_entry.get("scenario_stub", "")
 
             prompt = build_scenario_prompt(
                 iso3=iso3,
