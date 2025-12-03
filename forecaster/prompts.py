@@ -4,6 +4,7 @@ import importlib
 import os
 from datetime import date
 from typing import Any, Dict, Optional
+import json
 from .config import CALIBRATION_PATH, ist_date
 
 _PYTHIA_CFG_LOAD = None
@@ -752,4 +753,128 @@ def build_research_prompt(
         criteria=(criteria or "N/A"),
         today=today,
         sources=sources_text,
+    )
+
+
+def build_research_prompt_v2(
+    question: Dict[str, Any],
+    hs_triage_entry: Dict[str, Any],
+    resolver_features: Dict[str, Any],
+    model_info: Dict[str, Any] | None = None,
+) -> str:
+    """Structured research prompt for Researcher v2."""
+
+    iso3 = question.get("iso3", "")
+    hazard = question.get("hazard_code", "")
+    metric = question.get("metric", "")
+    resolution_source = question.get("resolution_source", "")
+    model_info = model_info or {}
+
+    return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{json.dumps(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{json.dumps(hs_triage_entry, indent=2)}\n```\n\nModel/data notes:\n```json\n{json.dumps(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n\nYour tasks:\n\n1. Summarise the base rate of {metric} for this hazard/country using:\n   * Resolver history (with its caveats),\n   * high-quality external analytical sources (UN, ACAPS, etc.),\n   * your own knowledge of the country context.\n2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {{\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {{\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    }},\n    \"external_support\": {{\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }}\n  }},\n  \"update_signals\": [\n    {{\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6}}\n  ],\n  \"regime_shift_signals\": [\n    {{\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3}}\n  ],\n  \"data_gaps\": [\"...\"]\n}}\n```\n\nDo not include any text outside the JSON.\n"""
+
+
+def build_spd_prompt_v2(
+    question: Dict[str, Any],
+    history_summary: Dict[str, Any],
+    hs_triage_entry: Dict[str, Any],
+    research_json: Dict[str, Any],
+) -> str:
+    """Assemble the SPD v2 forecasting prompt with structured context."""
+
+    base_rate_note = ""
+    if (history_summary.get("source") or "").lower() == "none":
+        base_rate_note = (
+            "- Resolver does not currently provide a base-rate series for this hazard; treat the base rate as unknown and lean on HS triage + research.\n"
+        )
+
+    return (
+        "You are a probabilistic forecaster. Produce a six-month SPD for the question below.\n\n"
+        "Question metadata:\n"
+        "```json\n"
+        f"{json.dumps(question, indent=2)}\n"
+        "```\n\n"
+        "Resolver history summary (Resolver is one imperfect source; ACLED strong, IDMC short, EM-DAT patchy):\n"
+        "```json\n"
+        f"{json.dumps(history_summary, indent=2)}\n"
+        "```\n\n"
+        "HS triage output:\n"
+        "```json\n"
+        f"{json.dumps(hs_triage_entry, indent=2)}\n"
+        "```\n\n"
+        "Research evidence:\n"
+        "```json\n"
+        f"{json.dumps(research_json, indent=2)}\n"
+        "```\n\n"
+        "Instructions:\n"
+        "- Provide a five-bucket SPD for each of the next 6 months using the bucket labels in the question metadata.\n"
+        "- Use the history summary as one signal; do not over-trust it if short or missing.\n"
+        f"{base_rate_note}"
+        "- If Resolver history is missing (`source` = \"none\"), rely on HS + research to shape the base rate.\n"
+        "- Return a single JSON object only.\n\n"
+        "Return a JSON object with both probabilities and a short rationale:\n"
+        "```json\n"
+        "{\n"
+        '  "spds": {\n'
+        '    "YYYY-MM": {"buckets": ["<5","5-<25","25-<100","100-<500",">=500"], "probs": [0.7,0.2,0.07,0.02,0.01]},\n'
+        '    "YYYY-MM+1": {"buckets": ["<5","5-<25","25-<100","100-<500",">=500"], "probs": [0.7,0.2,0.07,0.02,0.01]}\n'
+        "  },\n"
+        '  "human_explanation": "3–4 sentences explaining the drivers and uncertainties."\n'
+        "}\n"
+        "```\n"
+        "Do not include any text outside the JSON.\n"
+    )
+
+
+def build_scenario_prompt(
+    iso3: str,
+    hazard_code: str,
+    metric: str,
+    spd_summary: Dict[str, Any],
+    hs_triage_entry: Dict[str, Any],
+    scenario_stub: str,
+    forecaster_rationale: str,
+) -> str:
+    """Prompt the Scenario Writer to draft short scenarios from ensemble outputs."""
+
+    scenario_text = scenario_stub or ""
+    rationale_text = forecaster_rationale or ""
+
+    return (
+        f"You are a humanitarian scenario writer.\n\n"
+        f"You are given a probabilistic forecast for {iso3}, hazard {hazard_code}, metric {metric}. "
+        "The forecast is over 5 buckets and represents recorded impact in the resolution dataset "
+        "(e.g. ACLED/EM-DAT/IDMC).\n\n"
+        "Ensemble SPD summary:\n"
+        "```json\n"
+        f"{json.dumps(spd_summary, indent=2)}\n"
+        "```\n\n"
+        "HS triage and drivers:\n"
+        "```json\n"
+        f"{json.dumps(hs_triage_entry, indent=2)}\n"
+        "```\n\n"
+        "Optional HS scenario stub:\n"
+        f"\"\"\"{scenario_text}\"\"\"\n\n"
+        "Forecaster rationale:\n"
+        f"\"\"\"{rationale_text}\"\"\"\n\n"
+        "Your tasks:\n\n"
+        "1. Write a short scenario (3–4 sentences) assuming the forecast's most likely bucket (bucket_max) occurs.\n"
+        "2. If there is a different bucket with probability >= 0.05 (bucket_alt), write a second short "
+        "scenario (3–4 sentences) assuming that alternative higher-impact bucket occurs.\n"
+        "3. If there is no such alternative bucket, only write the primary scenario.\n\n"
+        "Each scenario should:\n\n"
+        "* Describe the situation and context vs. today.\n"
+        "* Highlight key humanitarian needs by sector (high level; no numbers).\n"
+        "* Highlight operational challenges for humanitarian actors (access, funding, politics).\n\n"
+        "Return a JSON object:\n\n"
+        "```json\n"
+        "{\n"
+        '  "primary": {\n'
+        '    "bucket_label": "...",\n'
+        '    "probability": 0.0,\n'
+        '    "text": "..."\n'
+        "  },\n"
+        '  "alternative": null\n'
+        "}\n"
+        "```\n\n"
+        "No extra keys. No text outside the JSON.\n"
     )

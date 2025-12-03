@@ -37,14 +37,19 @@ from datetime import date, datetime
 from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
 import inspect
+import concurrent.futures
 
 import duckdb
 import numpy as np
 
 from pathlib import Path
 from pythia.db.schema import connect, ensure_schema
+from forecaster.hs_utils import load_hs_triage_entry
 
 LOG = logging.getLogger(__name__)
+
+MAX_RESEARCH_WORKERS = int(os.getenv("FORECASTER_RESEARCH_MAX_WORKERS", "6"))
+MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "4"))
 
 
 @dataclass
@@ -125,6 +130,174 @@ EMDAT_SHOCK_MAP = {
 IDMC_HZ_MAP = {"ACO", "ACE", "CU", "DI"}
 
 
+def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
+    return EMDAT_SHOCK_MAP.get(hazard_code.upper(), "")
+
+
+def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
+    """Build Resolver history summary per hazard/metric rules."""
+
+    con = connect(read_only=True)
+    try:
+        hz = (hazard_code or "").upper()
+        m = (metric or "").upper()
+
+        if m == "FATALITIES":
+            rows = con.execute(
+                """
+                SELECT ym, fatalities
+                FROM acled_monthly_fatalities
+                WHERE iso3 = ?
+                ORDER BY ym
+                """,
+                [iso3],
+            ).fetchall()
+            values = [r[1] for r in rows if r and r[1] is not None]
+            history_length = len(values)
+            last_6 = values[-6:]
+            trend = "uncertain"
+            if len(last_6) >= 2:
+                if last_6[-1] > last_6[0]:
+                    trend = "up"
+                elif last_6[-1] < last_6[0]:
+                    trend = "down"
+                else:
+                    trend = "flat"
+            return {
+                "source": "ACLED",
+                "history_length_months": history_length,
+                "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
+                "recent_max": float(max(last_6)) if last_6 else None,
+                "trend": trend,
+                "last_6m_values": [{"ym": rows[-len(last_6) + i][0], "value": v} for i, v in enumerate(last_6)] if last_6 else [],
+                "data_quality": "high" if history_length >= 24 else "medium",
+                "notes": "ACLED coverage is relatively strong for this hazard.",
+            }
+
+        if m == "PA" and hz in {"ACO", "ACE", "CU"}:
+            rows = con.execute(
+                """
+                SELECT ym, value
+                FROM facts_deltas
+                WHERE iso3 = ?
+                  AND metric = 'idp_displacement_stock_idmc'
+                ORDER BY ym
+                """,
+                [iso3],
+            ).fetchall()
+            values = [r[1] for r in rows if r and r[1] is not None]
+            history_length = len(values)
+            last_6 = values[-6:]
+            trend = "uncertain"
+            if len(last_6) >= 2:
+                if last_6[-1] > last_6[0]:
+                    trend = "up"
+                elif last_6[-1] < last_6[0]:
+                    trend = "down"
+                else:
+                    trend = "flat"
+            return {
+                "source": "IDMC",
+                "history_length_months": history_length,
+                "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
+                "recent_max": float(max(last_6)) if last_6 else None,
+                "trend": trend,
+                "last_6m_values": [{"ym": rows[-len(last_6) + i][0], "value": v} for i, v in enumerate(last_6)] if last_6 else [],
+                "data_quality": "medium" if history_length < 24 else "high",
+                "notes": "IDMC history is short; treat as a weak prior.",
+            }
+
+        if m == "PA" and hz in {"FL", "DR", "TC", "HW"}:
+            shock = _map_hazard_to_emdat_shock(hazard_code)
+            rows = con.execute(
+                """
+                SELECT ym, pa
+                FROM emdat_pa
+                WHERE iso3 = ?
+                  AND shock_type = ?
+                ORDER BY ym
+                """,
+                [iso3, shock],
+            ).fetchall()
+            if not rows:
+                return {
+                    "source": "none",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": (
+                        "No reliable historical Resolver series for this hazard/country; EM-DAT often "
+                        "captures only larger disasters and may be missing events."
+                    ),
+                }
+            values = [r[1] for r in rows if r and r[1] is not None]
+            last_6 = values[-6:]
+            trend = "uncertain"
+            if len(last_6) >= 2:
+                if last_6[-1] > last_6[0]:
+                    trend = "up"
+                elif last_6[-1] < last_6[0]:
+                    trend = "down"
+                else:
+                    trend = "flat"
+            return {
+                "source": "EMDAT",
+                "history_length_months": len(values),
+                "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
+                "recent_max": float(max(last_6)) if last_6 else None,
+                "trend": trend,
+                "last_6m_values": [{"ym": rows[-len(last_6) + i][0], "value": v} for i, v in enumerate(last_6)] if last_6 else [],
+                "data_quality": "medium" if len(values) < 24 else "high",
+                "notes": "EM-DAT series available for this hazard; may miss smaller events.",
+            }
+
+        if hz == "DI" and m == "PA":
+            return {
+                "source": "none",
+                "history_length_months": 0,
+                "recent_mean": None,
+                "recent_max": None,
+                "trend": "uncertain",
+                "last_6m_values": [],
+                "data_quality": "low",
+                "notes": (
+                    "Resolver does not currently provide a suitable base-rate series for displacement inflow; "
+                    "treat the base rate as unknown and lean on HS + research."
+                ),
+            }
+
+        return {
+            "source": "none",
+            "history_length_months": 0,
+            "recent_mean": None,
+            "recent_max": None,
+            "trend": "uncertain",
+            "last_6m_values": [],
+            "data_quality": "low",
+            "notes": "No usable Resolver history for this hazard/metric.",
+        }
+    finally:
+        con.close()
+
+
+def _infer_resolution_source(hazard_code: str, metric: str) -> str:
+    hz = (hazard_code or "").upper()
+    mt = (metric or "").upper()
+
+    if mt == "FATALITIES":
+        return "ACLED"
+    if mt == "PA" and hz in {"ACO", "ACE", "CU"}:
+        return "IDMC"
+    if mt == "PA" and hz in {"DR", "FL", "TC", "HW"}:
+        return "EM-DAT"
+    if mt == "PA" and hz == "DI":
+        return "NONE"
+    return "UNKNOWN"
+
+
 def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
     """
     Extract Pythia-specific metadata attached by _load_pythia_questions(...).
@@ -151,6 +324,36 @@ def _advise_poetry_lock_if_needed():
         return  # CI already handles regeneration
     # Lightweight hint only; we don't try to run Poetry here.
     os.environ.setdefault("PYTHIA_LOCK_HINT_SHOWN", "0")
+
+
+def _record_no_forecast(run_id: str, question_id: str, iso3: str, hazard_code: str, metric: str, reason: str) -> None:
+    """Persist a no-forecast outcome with an explanation."""
+
+    con = connect(read_only=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO forecasts_raw (
+              run_id, question_id, model_name, month_index, bucket_index,
+              probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
+              total_tokens, status, spd_json, human_explanation
+            ) VALUES (?, ?, 'ensemble', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'no_forecast', NULL, ?)
+            """,
+            [run_id, question_id, reason],
+        )
+
+        con.execute(
+            """
+            INSERT INTO forecasts_ensemble (
+              run_id, question_id, iso3, hazard_code, metric,
+              month_index, bucket_index, probability, ev_value, weights_profile, created_at,
+              status, human_explanation
+            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'ensemble', CURRENT_TIMESTAMP, 'no_forecast', ?)
+            """,
+            [run_id, question_id, iso3, hazard_code, metric, reason],
+        )
+    finally:
+        con.close()
 
 
 def _safe_json_load(s: str):
@@ -216,8 +419,11 @@ from .prompts import (
     build_spd_prompt,
     build_spd_prompt_fatalities,
     build_spd_prompt_pa,
+    build_research_prompt_v2,
+    build_spd_prompt_v2,
 )
-from .providers import DEFAULT_ENSEMBLE, _get_or_client, llm_semaphore
+from .scenario_writer import run_scenarios_for_run
+from .providers import DEFAULT_ENSEMBLE, GEMINI_MODEL_ID, ModelSpec, _get_or_client, llm_semaphore
 from .ensemble import (
     EnsembleResult,
     MemberOutput,
@@ -1172,6 +1378,209 @@ def _load_pythia_questions(limit: int) -> List[dict]:
         posts.append(post)
 
     return posts
+
+
+def _load_research_json(run_id: str, question_id: str) -> Optional[Dict[str, Any]]:
+    con = connect(read_only=True)
+    try:
+        row = con.execute(
+            """
+            SELECT research_json
+            FROM question_research
+            WHERE run_id = ? AND question_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [run_id, question_id],
+        ).fetchone()
+        if not row:
+            return None
+        return json.loads(row[0])
+    finally:
+        con.close()
+
+
+def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
+    iso3 = (question_row.get("iso3") if isinstance(question_row, dict) else question_row["iso3"]) or ""
+    hazard_code = (question_row.get("hazard_code") if isinstance(question_row, dict) else question_row["hazard_code"]) or ""
+    hs_run_id = (question_row.get("hs_run_id") if isinstance(question_row, dict) else question_row["hs_run_id"]) or run_id
+    triage = load_hs_triage_entry(hs_run_id, iso3, hazard_code)
+    if not triage:
+        return True
+    return bool(triage.get("need_full_spd", False))
+
+
+async def _call_research_model(prompt_text: str) -> tuple[str, Dict[str, Any], str]:
+    ms = ModelSpec(name="Gemini", provider="google", model_id=GEMINI_MODEL_ID, active=True)
+    return await call_chat_ms(ms, prompt_text, temperature=0.3, prompt_key="research.v2", prompt_version="1.0.0", component="Researcher")
+
+
+async def _call_spd_model(prompt_text: str) -> tuple[str, Dict[str, Any], str]:
+    ms = ModelSpec(name="Gemini", provider="google", model_id=GEMINI_MODEL_ID, active=True)
+    return await call_chat_ms(ms, prompt_text, temperature=0.2, prompt_key="spd.v2", prompt_version="1.0.0", component="Forecaster")
+
+
+def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
+    qid = question_row["question_id"]
+    iso3 = question_row["iso3"]
+    hz = question_row["hazard_code"]
+    metric = question_row["metric"]
+
+    resolution_source = _infer_resolution_source(hz, metric)
+
+    hs_run_id = question_row["hs_run_id"] or run_id
+    hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+    history_summary = _build_history_summary(iso3, hz, metric)
+
+    prompt = build_research_prompt_v2(
+        question={
+            "question_id": qid,
+            "iso3": iso3,
+            "hazard_code": hz,
+            "metric": metric,
+            "resolution_source": resolution_source,
+        },
+        hs_triage_entry=hs_entry,
+        resolver_features=history_summary,
+        model_info={},
+    )
+
+    text, usage, error = asyncio.run(_call_research_model(prompt))
+    if error:
+        raise RuntimeError(error)
+
+    research = json.loads(text)
+    con = connect(read_only=False)
+    try:
+        con.execute(
+            """
+            INSERT INTO question_research
+              (run_id, question_id, iso3, hazard_code, metric, research_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [run_id, qid, iso3, hz, metric, json.dumps(research)],
+        )
+    finally:
+        con.close()
+
+
+def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, Any], human_explanation: str, usage: Dict[str, Any]) -> None:
+    qid = question_row["question_id"]
+    iso3 = question_row["iso3"]
+    hz = question_row["hazard_code"]
+    metric = question_row["metric"]
+    bucket_labels = SPD_CLASS_BINS_FATALITIES if metric.upper() == "FATALITIES" else SPD_CLASS_BINS_PA
+
+    con = connect(read_only=False)
+    try:
+        for month_idx, (month_label, payload) in enumerate(sorted(spds.items()), start=1):
+            probs = payload.get("probs") if isinstance(payload, dict) else None
+            if not probs:
+                continue
+            for bucket_index, prob in enumerate(list(probs)[: len(bucket_labels)]):
+                con.execute(
+                    """
+                    INSERT INTO forecasts_raw (
+                        run_id, question_id, model_name, month_index, bucket_index,
+                        probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
+                        total_tokens, status, spd_json, human_explanation
+                    ) VALUES (?, ?, 'ensemble', ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?)
+                    """,
+                    [
+                        run_id,
+                        qid,
+                        month_idx,
+                        bucket_index,
+                        float(prob),
+                        usage.get("elapsed_ms"),
+                        usage.get("cost_usd"),
+                        usage.get("prompt_tokens"),
+                        usage.get("completion_tokens"),
+                        usage.get("total_tokens"),
+                        json.dumps(spds),
+                        human_explanation,
+                    ],
+                )
+                con.execute(
+                    """
+                    INSERT INTO forecasts_ensemble (
+                        run_id, question_id, iso3, hazard_code, metric,
+                        month_index, bucket_index, probability, ev_value, weights_profile, created_at,
+                        status, human_explanation
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?)
+                    """,
+                    [
+                        run_id,
+                        qid,
+                        iso3,
+                        hz,
+                        metric,
+                        month_idx,
+                        bucket_index,
+                        float(prob),
+                        human_explanation,
+                    ],
+                )
+    finally:
+        con.close()
+
+
+def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
+    qid = question_row["question_id"]
+    iso3 = question_row["iso3"]
+    hz = question_row["hazard_code"]
+    metric = question_row["metric"]
+
+    resolution_source = _infer_resolution_source(hz, metric)
+
+    hs_run_id = question_row["hs_run_id"] or run_id
+    hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+    history_summary = _build_history_summary(iso3, hz, metric)
+    research_json = _load_research_json(run_id, qid)
+    if not research_json:
+        _record_no_forecast(run_id, qid, iso3, hz, metric, "missing research_json")
+        return
+
+    prompt = build_spd_prompt_v2(
+        question={
+            "question_id": qid,
+            "iso3": iso3,
+            "hazard_code": hz,
+            "metric": metric,
+            "resolution_source": resolution_source,
+            "target_months": question_row.get("target_month") if isinstance(question_row, dict) else question_row["target_month"],
+        },
+        history_summary=history_summary,
+        hs_triage_entry=hs_entry,
+        research_json=research_json,
+    )
+
+    try:
+        text, usage, error = asyncio.run(_call_spd_model(prompt))
+    except Exception as exc:
+        _record_no_forecast(run_id, qid, iso3, hz, metric, f"timeout or error: {exc}")
+        return
+
+    if error:
+        _record_no_forecast(run_id, qid, iso3, hz, metric, error)
+        return
+
+    try:
+        spd_obj = json.loads(text)
+    except json.JSONDecodeError as exc:
+        _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad JSON: {exc}")
+        return
+
+    if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
+        _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+        return
+
+    spds = spd_obj.get("spds") or {}
+    if not spds:
+        _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
+        return
+
+    _write_spd_outputs(run_id, question_row, spds, spd_obj.get("human_explanation") or "", usage or {})
 
 def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: str) -> Optional[str]:
     """
@@ -2972,21 +3381,56 @@ def main() -> None:
     try:
         _advise_poetry_lock_if_needed()
     except Exception:
-        # Never block the run because of the hint
         pass
     args = _parse_args()
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
-    try:
+
+    def _run_v2_pipeline():
         ensure_schema()
-        asyncio.run(
-            run_job(
-                mode=args.mode,
-                limit=args.limit,
-                purpose=args.purpose,
-                questions_file=args.questions_file,
-            )
-        )
+        con = connect(read_only=True)
+        try:
+            questions = con.execute(
+                """
+                SELECT question_id, hs_run_id, iso3, hazard_code, metric, target_month,
+                       window_start_date, window_end_date, wording
+                FROM questions
+                WHERE status = 'active'
+                ORDER BY iso3, hazard_code, metric, target_month, question_id
+                LIMIT ?
+                """,
+                [args.limit],
+            ).fetchall()
+        finally:
+            con.close()
+
+        run_id = f"fc_{int(time.time())}"
+        print(f"[v2] run_id={run_id} | questions={len(questions)}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_RESEARCH_WORKERS) as pool:
+            futures = [pool.submit(_run_research_for_question, run_id, q) for q in questions]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    fut.result()
+                except Exception:
+                    LOG.exception("Researcher v2 failed for a question")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_SPD_WORKERS) as pool:
+            futures = [
+                pool.submit(_run_spd_for_question, run_id, q)
+                for q in questions
+                if _question_needs_spd(run_id, q)
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    fut.result()
+                except Exception:
+                    LOG.exception("SPD v2 failed for a question")
+
+        run_scenarios_for_run(run_id)
+
+    try:
+        _run_v2_pipeline()
     except KeyboardInterrupt:
         print("Interrupted by user.")
     except Exception as e:
