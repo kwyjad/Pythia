@@ -88,29 +88,30 @@ def _load_question_meta(con, question_id: str) -> dict:
 def _load_ensemble_spd(con, run_id: str, question_id: str):
     rows = con.execute(
         """
-        SELECT month_idx, bucket_index, probability, ev_value
+        SELECT month_index, bucket_index, probability
         FROM forecasts_ensemble
         WHERE run_id = ?
           AND question_id = ?
           AND status = 'ok'
-          AND month_idx IS NOT NULL
-        ORDER BY month_idx, bucket_index
+          AND month_index IS NOT NULL
+        ORDER BY month_index, bucket_index
         """,
         [run_id, question_id],
     ).fetchall()
 
     spd: Dict[int, List[float]] = {}
-    ev: Dict[int, float] = {}
-    for month_idx, bucket_idx, prob, ev_val in rows:
-        if month_idx is None:
+    ev: Dict[int, float] = {}  # EV intentionally left empty for now
+
+    for month_index, bucket_idx, prob in rows:
+        if month_index is None:
             continue
-        m = int(month_idx)
+        m = int(month_index)
         b = int(bucket_idx)
         probs = spd.setdefault(m, [0.0] * 5)
         if 1 <= b <= 5:
             probs[b - 1] = float(prob or 0.0)
-        if ev_val is not None and m not in ev:
-            ev[m] = float(ev_val)
+
+    # EVs will simply be blank (no entry) in the markdown; that's OK
     return spd, ev
 
 
