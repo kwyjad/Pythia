@@ -88,10 +88,13 @@ def _load_question_meta(con, question_id: str) -> dict:
 def _load_ensemble_spd(con, run_id: str, question_id: str):
     rows = con.execute(
         """
-        SELECT month_index, bucket_index, probability, ev_value
+        SELECT month_idx, bucket_index, probability, ev_value
         FROM forecasts_ensemble
-        WHERE run_id = ? AND question_id = ?
-        ORDER BY month_index, bucket_index
+        WHERE run_id = ?
+          AND question_id = ?
+          AND status = 'ok'
+          AND month_idx IS NOT NULL
+        ORDER BY month_idx, bucket_index
         """,
         [run_id, question_id],
     ).fetchall()
@@ -99,6 +102,8 @@ def _load_ensemble_spd(con, run_id: str, question_id: str):
     spd: Dict[int, List[float]] = {}
     ev: Dict[int, float] = {}
     for month_idx, bucket_idx, prob, ev_val in rows:
+        if month_idx is None:
+            continue
         m = int(month_idx)
         b = int(bucket_idx)
         probs = spd.setdefault(m, [0.0] * 5)
@@ -253,78 +258,98 @@ def main():
             wording = qmeta.get("wording", "")
             window = f"{qmeta.get('window_start_date','')} → {qmeta.get('window_end_date','')}"
 
-            lines.append(f"## Type: {hz}/{metric} — question_id `{question_id}`")
-            lines.append("")
-            lines.append("### Question")
-            lines.append("")
-            lines.append(f"- ISO3: `{iso3}`")
-            lines.append(f"- Hazard: `{hz}`")
-            lines.append(f"- Metric: `{metric}`")
-            lines.append(f"- Window: `{window}`")
-            lines.append("")
-            if wording:
-                lines.append("**Wording:**")
-                lines.append("")
-                lines.append(str(wording))
-                lines.append("")
+            question_lines: List[str] = []
 
-            lines.append("### Ensemble SPD & EV")
-            lines.append("")
-            lines.append("| Month | B1 p | B2 p | B3 p | B4 p | B5 p | EV |")
-            lines.append("|---|---:|---:|---:|---:|---:|---:|")
-            for m in sorted(ensemble_spd.keys()):
-                probs = ensemble_spd[m]
-                ev_val = ensemble_ev.get(m)
-                row = [str(m)] + [f"{p:.3f}" for p in probs] + [f"{ev_val:,.0f}" if ev_val is not None else ""]
-                lines.append("| " + " | ".join(row) + " |")
-            lines.append("")
+            question_lines.append(f"## Type: {hz}/{metric} — question_id `{question_id}`")
+            question_lines.append("")
+            question_lines.append("### Question")
+            question_lines.append("")
+            question_lines.append(f"- ISO3: `{iso3}`")
+            question_lines.append(f"- Hazard: `{hz}`")
+            question_lines.append(f"- Metric: `{metric}`")
+            question_lines.append(f"- Window: `{window}`")
+            question_lines.append("")
+            if wording:
+                question_lines.append("**Wording:**")
+                question_lines.append("")
+                question_lines.append(str(wording))
+                question_lines.append("")
+
+            if not ensemble_spd:
+                nf_rows = con.execute(
+                    """
+                    SELECT COUNT(*) FROM forecasts_ensemble
+                    WHERE run_id = ? AND question_id = ? AND status = 'no_forecast'
+                    """,
+                    [run_id, question_id],
+                ).fetchone()
+                if nf_rows and nf_rows[0] > 0:
+                    question_lines.append("### Ensemble SPD & EV")
+                    question_lines.append("")
+                    question_lines.append("_No forecast generated for this question (status = `no_forecast`)._")
+                    question_lines.append("")
+                else:
+                    continue
+            else:
+                question_lines.append("### Ensemble SPD & EV")
+                question_lines.append("")
+                question_lines.append("| Month | B1 p | B2 p | B3 p | B4 p | B5 p | EV |")
+                question_lines.append("|---|---:|---:|---:|---:|---:|---:|")
+                for m in sorted(ensemble_spd.keys()):
+                    probs = ensemble_spd[m]
+                    ev_val = ensemble_ev.get(m)
+                    row = [str(m)] + [f"{p:.3f}" for p in probs] + [f"{ev_val:,.0f}" if ev_val is not None else ""]
+                    question_lines.append("| " + " | ".join(row) + " |")
+                question_lines.append("")
 
             labels, centroids, centroid_source = _resolve_spd_bucket_config(hz or "", metric or "")
-            lines.append("**SPD bucket configuration**")
+            question_lines.append("**SPD bucket configuration**")
             if labels:
                 labels_str = ", ".join(str(x) for x in labels)
-                lines.append(f"- Bucket labels: [{labels_str}]")
+                question_lines.append(f"- Bucket labels: [{labels_str}]")
             if centroids:
                 centroids_str = ", ".join(f"{float(x):g}" for x in centroids)
-                lines.append(f"- Centroids used (for EV): [{centroids_str}]")
+                question_lines.append(f"- Centroids used (for EV): [{centroids_str}]")
             if centroid_source:
-                lines.append(f"- Centroid source: `{centroid_source}`")
-            lines.append("")
+                question_lines.append(f"- Centroid source: `{centroid_source}`")
+            question_lines.append("")
 
-            lines.append("### Per-model SPD & LLM metadata")
-            lines.append("")
+            question_lines.append("### Per-model SPD & LLM metadata")
+            question_lines.append("")
             for model_name in sorted(model_spd.keys()):
                 entry = model_spd[model_name]
                 spd = entry["spd"]
                 llm = llm_calls.get(model_name, {})
-                lines.append(f"#### Model: {model_name}")
-                lines.append("")
-                lines.append(
+                question_lines.append(f"#### Model: {model_name}")
+                question_lines.append("")
+                question_lines.append(
                     f"- ok={int(entry['ok'])}, elapsed_ms={entry['elapsed_ms']}, "
                     f"tokens={entry['total_tokens']}, cost=${entry['cost_usd']:.6f}"
                 )
                 if llm:
-                    lines.append(f"- provider={llm.get('provider')} model_id={llm.get('model_id')}")
+                    question_lines.append(f"- provider={llm.get('provider')} model_id={llm.get('model_id')}")
                 if llm and llm.get("error_text"):
-                    lines.append(f"- error: {llm['error_text']}")
-                lines.append("")
-                lines.append("| Month | B1 p | B2 p | B3 p | B4 p | B5 p |")
-                lines.append("|---|---:|---:|---:|---:|---:|")
+                    question_lines.append(f"- error: {llm['error_text']}")
+                question_lines.append("")
+                question_lines.append("| Month | B1 p | B2 p | B3 p | B4 p | B5 p |")
+                question_lines.append("|---|---:|---:|---:|---:|---:|")
                 for m in sorted(spd.keys()):
                     probs = spd[m]
                     row = [str(m)] + [f"{p:.3f}" for p in probs]
-                    lines.append("| " + " | ".join(row) + " |")
-                lines.append("")
+                    question_lines.append("| " + " | ".join(row) + " |")
+                question_lines.append("")
                 if llm and llm.get("response_text"):
                     raw = (llm["response_text"] or "").strip()
-                    lines.append("**Full model response:**")
-                    lines.append("")
-                    lines.append("```md")
-                    lines.append(raw)
-                    lines.append("```")
-                    lines.append("")
-            lines.append("---")
-            lines.append("")
+                    question_lines.append("**Full model response:**")
+                    question_lines.append("")
+                    question_lines.append("```md")
+                    question_lines.append(raw)
+                    question_lines.append("```")
+                    question_lines.append("")
+            question_lines.append("---")
+            question_lines.append("")
+
+            lines.extend(question_lines)
         finally:
             duckdb_io.close_db(con)
 
