@@ -131,7 +131,16 @@ IDMC_HZ_MAP = {"ACO", "ACE", "CU", "DI"}
 
 
 def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
-    return EMDAT_SHOCK_MAP.get(hazard_code.upper(), "")
+    hz = hazard_code.upper()
+    if hz == "FL":
+        return "flood"
+    if hz == "DR":
+        return "drought"
+    if hz == "TC":
+        return "tropical_cyclone"
+    if hz == "HW":
+        return "heat_wave"
+    return hz.lower()
 
 
 def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
@@ -143,82 +152,166 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
         m = (metric or "").upper()
 
         if m == "FATALITIES":
-            rows = con.execute(
-                """
-                SELECT ym, fatalities
-                FROM acled_monthly_fatalities
-                WHERE iso3 = ?
-                ORDER BY ym
-                """,
-                [iso3],
-            ).fetchall()
-            values = [r[1] for r in rows if r and r[1] is not None]
-            history_length = len(values)
-            last_6 = values[-6:]
+            try:
+                rows = con.execute(
+                    """
+                    SELECT month, fatalities
+                    FROM acled_monthly_fatalities
+                    WHERE iso3 = ?
+                    ORDER BY month
+                    """,
+                    [iso3],
+                ).fetchall()
+            except Exception as exc:
+                logging.warning(
+                    "ACLED history query failed for %s: %s", iso3, exc
+                )
+                return {
+                    "source": "ACLED",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": f"ACLED history unavailable: {type(exc).__name__}",
+                }
+
+            if not rows:
+                return {
+                    "source": "ACLED",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": "No ACLED history for this country/hazard.",
+                }
+
+            vals = [int(r[1]) for r in rows]
+            n = len(vals)
+            recent = vals[-min(n, 6):]
             trend = "uncertain"
-            if len(last_6) >= 2:
-                if last_6[-1] > last_6[0]:
+            if len(recent) >= 2:
+                if recent[-1] > recent[0]:
                     trend = "up"
-                elif last_6[-1] < last_6[0]:
+                elif recent[-1] < recent[0]:
                     trend = "down"
                 else:
                     trend = "flat"
+
             return {
                 "source": "ACLED",
-                "history_length_months": history_length,
-                "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
-                "recent_max": float(max(last_6)) if last_6 else None,
+                "history_length_months": n,
+                "recent_mean": sum(recent) / len(recent),
+                "recent_max": max(recent),
                 "trend": trend,
-                "last_6m_values": [{"ym": rows[-len(last_6) + i][0], "value": v} for i, v in enumerate(last_6)] if last_6 else [],
-                "data_quality": "high" if history_length >= 24 else "medium",
-                "notes": "ACLED coverage is relatively strong for this hazard.",
+                "last_6m_values": [
+                    {"ym": rows[i][0], "value": vals[i]}
+                    for i in range(max(0, n - 6), n)
+                ],
+                "data_quality": "high",
+                "notes": "ACLED coverage is relatively strong for this country/hazard.",
             }
 
-        if m == "PA" and hz in {"ACO", "ACE", "CU"}:
-            rows = con.execute(
-                """
-                SELECT ym, value
-                FROM facts_deltas
-                WHERE iso3 = ?
-                  AND metric = 'idp_displacement_stock_idmc'
-                ORDER BY ym
-                """,
-                [iso3],
-            ).fetchall()
-            values = [r[1] for r in rows if r and r[1] is not None]
-            history_length = len(values)
-            last_6 = values[-6:]
+        if m == "PA" and hz in {"ACO", "ACE", "CU", "DI"}:
+            try:
+                rows = con.execute(
+                    """
+                    SELECT ym, value_stock
+                    FROM facts_deltas
+                    WHERE iso3 = ?
+                      AND metric = 'idp_displacement_stock_idmc'
+                    ORDER BY ym
+                    """,
+                    [iso3],
+                ).fetchall()
+            except Exception as exc:
+                logging.warning(
+                    "IDMC history query failed for %s: %s", iso3, exc
+                )
+                return {
+                    "source": "IDMC",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": f"IDMC history unavailable: {type(exc).__name__}",
+                }
+
+            if not rows:
+                return {
+                    "source": "IDMC",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": "No IDMC history for this country/hazard.",
+                }
+
+            vals = [float(r[1]) for r in rows]
+            n = len(vals)
+            recent = vals[-min(n, 6):]
             trend = "uncertain"
-            if len(last_6) >= 2:
-                if last_6[-1] > last_6[0]:
+            if len(recent) >= 2:
+                if recent[-1] > recent[0]:
                     trend = "up"
-                elif last_6[-1] < last_6[0]:
+                elif recent[-1] < recent[0]:
                     trend = "down"
                 else:
                     trend = "flat"
+
+            data_quality = "medium" if n < 24 else "high"
+
             return {
                 "source": "IDMC",
-                "history_length_months": history_length,
-                "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
-                "recent_max": float(max(last_6)) if last_6 else None,
+                "history_length_months": n,
+                "recent_mean": sum(recent) / len(recent),
+                "recent_max": max(recent),
                 "trend": trend,
-                "last_6m_values": [{"ym": rows[-len(last_6) + i][0], "value": v} for i, v in enumerate(last_6)] if last_6 else [],
-                "data_quality": "medium" if history_length < 24 else "high",
-                "notes": "IDMC history is short; treat as a weak prior.",
+                "last_6m_values": [
+                    {"ym": rows[i][0], "value": vals[i]}
+                    for i in range(max(0, n - 6), n)
+                ],
+                "data_quality": data_quality,
+                "notes": "IDMC history is short; treat it as a weak prior."
+                if n < 24
+                else "IDMC history reasonably long for this country/hazard.",
             }
 
         if m == "PA" and hz in {"FL", "DR", "TC", "HW"}:
             shock = _map_hazard_to_emdat_shock(hazard_code)
-            rows = con.execute(
-                """
-                SELECT ym, pa
-                FROM emdat_pa
-                WHERE iso3 = ?
-                  AND shock_type = ?
-                ORDER BY ym
-                """,
-                [iso3, shock],
-            ).fetchall()
+            try:
+                rows = con.execute(
+                    """
+                    SELECT ym, value
+                    FROM emdat_pa
+                    WHERE iso3 = ?
+                      AND shock_type = ?
+                    ORDER BY ym
+                    """,
+                    [iso3, shock],
+                ).fetchall()
+            except Exception as exc:
+                logging.warning(
+                    "EM-DAT history query failed for %s/%s: %s", iso3, shock, exc
+                )
+                return {
+                    "source": "EM-DAT",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": f"EM-DAT history unavailable: {type(exc).__name__}",
+                }
+
             if not rows:
                 return {
                     "source": "none",
@@ -228,30 +321,33 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                     "trend": "uncertain",
                     "last_6m_values": [],
                     "data_quality": "low",
-                    "notes": (
-                        "No reliable historical Resolver series for this hazard/country; EM-DAT often "
-                        "captures only larger disasters and may be missing events."
-                    ),
+                    "notes": "No reliable EM-DAT history for this country/hazard; treat base rate as unknown.",
                 }
-            values = [r[1] for r in rows if r and r[1] is not None]
-            last_6 = values[-6:]
+
+            vals = [float(r[1]) for r in rows]
+            n = len(vals)
+            recent = vals[-min(n, 6):]
             trend = "uncertain"
-            if len(last_6) >= 2:
-                if last_6[-1] > last_6[0]:
+            if len(recent) >= 2:
+                if recent[-1] > recent[0]:
                     trend = "up"
-                elif last_6[-1] < last_6[0]:
+                elif recent[-1] < recent[0]:
                     trend = "down"
                 else:
                     trend = "flat"
+
             return {
-                "source": "EMDAT",
-                "history_length_months": len(values),
-                "recent_mean": float(sum(last_6) / len(last_6)) if last_6 else None,
-                "recent_max": float(max(last_6)) if last_6 else None,
+                "source": "EM-DAT",
+                "history_length_months": n,
+                "recent_mean": sum(recent) / len(recent),
+                "recent_max": max(recent),
                 "trend": trend,
-                "last_6m_values": [{"ym": rows[-len(last_6) + i][0], "value": v} for i, v in enumerate(last_6)] if last_6 else [],
-                "data_quality": "medium" if len(values) < 24 else "high",
-                "notes": "EM-DAT series available for this hazard; may miss smaller events.",
+                "last_6m_values": [
+                    {"ym": rows[i][0], "value": vals[i]}
+                    for i in range(max(0, n - 6), n)
+                ],
+                "data_quality": "medium",
+                "notes": "EM-DAT often only records large disasters; treat as a noisy base-rate signal.",
             }
 
         if hz == "DI" and m == "PA":
