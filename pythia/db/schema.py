@@ -75,6 +75,66 @@ def _ensure_table_and_columns(
             continue
 
 
+def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the hs_triage table exists for HS v2 triage outputs."""
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hs_triage (
+            run_id TEXT NOT NULL,
+            iso3 TEXT NOT NULL,
+            hazard_code TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            triage_score DOUBLE NOT NULL,
+            need_full_spd BOOLEAN NOT NULL,
+            drivers_json TEXT,
+            regime_shifts_json TEXT,
+            data_quality_json TEXT,
+            scenario_stub TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+
+def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the question_research table exists for Researcher v2 outputs."""
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS question_research (
+            run_id TEXT NOT NULL,
+            question_id TEXT NOT NULL,
+            iso3 TEXT NOT NULL,
+            hazard_code TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            research_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+
+def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the scenarios table exists for Scenario Writer outputs."""
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scenarios (
+            run_id TEXT NOT NULL,
+            iso3 TEXT NOT NULL,
+            hazard_code TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            scenario_type TEXT NOT NULL,
+            bucket_label TEXT NOT NULL,
+            probability DOUBLE NOT NULL,
+            text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+
+
 def _seed_pa_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure wildcard PA centroids exist in bucket_centroids."""
 
@@ -274,7 +334,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 probability DOUBLE,
                 ev_value DOUBLE,
                 weights_profile TEXT,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                status TEXT,
+                human_explanation TEXT
             );
             """,
             {
@@ -292,6 +354,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "horizon_m": "INTEGER",
                 "class_bin": "TEXT",
                 "p": "DOUBLE",
+                "status": "TEXT",
+                "human_explanation": "TEXT",
             },
         )
 
@@ -311,7 +375,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 cost_usd DOUBLE,
                 prompt_tokens INTEGER,
                 completion_tokens INTEGER,
-                total_tokens INTEGER
+                total_tokens INTEGER,
+                status TEXT,
+                spd_json TEXT,
+                human_explanation TEXT
             );
             """,
             {
@@ -327,6 +394,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "prompt_tokens": "INTEGER",
                 "completion_tokens": "INTEGER",
                 "total_tokens": "INTEGER",
+                "status": "TEXT",
+                "spd_json": "TEXT",
+                "human_explanation": "TEXT",
             },
         )
 
@@ -568,6 +638,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "notes": "TEXT",
             },
         )
+
+        _ensure_hs_triage_table(con)
+        _ensure_question_research_table(con)
+        _ensure_scenarios_table(con)
     finally:
         if own_con and con is not None:
             con.close()

@@ -1,7 +1,7 @@
 ---
-# This workflow runs the Pythia Horizon Scanner and generates a risk report.
+# This workflow runs the Pythia Horizon Scanner triage stage.
 
-name: Generate Risk Report
+name: Horizon Scanner Triage
 
 concurrency:
   group: pythia-resolver-db
@@ -185,8 +185,8 @@ jobs:
           python -m forecaster.cli --mode pythia --limit 200 --purpose hs_pipeline
           echo "=== Forecaster (Pythia mode) completed ==="
 
-      # Step 8: Diagnostics – DuckDB + report validation
-      - name: Diagnostics — DuckDB and Risk_Report.md
+      # Step 8: Diagnostics – DuckDB validation
+      - name: Diagnostics — DuckDB
         run: |
           set -e
           echo "=== Post-run diagnostics ==="
@@ -202,31 +202,6 @@ jobs:
           fi
 
           python scripts/post_run_diagnostics.py --db duckdb:///data/resolver.duckdb
-
-          python - << 'PY'
-          import os
-
-          report_path = "Risk_Report.md"
-          if os.path.exists(report_path):
-              print(f"'{report_path}' exists. Showing first 40 lines:")
-              try:
-                  with open(report_path, "r", encoding="utf-8") as f:
-                      for i, line in enumerate(f):
-                          if i >= 40:
-                              break
-                          print(line.rstrip("\n"))
-              except Exception as e:
-                  print(f"Failed to read '{report_path}': {e}")
-          else:
-              print(f"WARNING: '{report_path}' not found.")
-          PY
-
-      # Step 9: Upload the final report as an artifact
-      - name: Upload Report Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Risk-Analysis-Report
-          path: Risk_Report.md
 
       - name: Dump first forecast prompt
         run: python -m scripts.dump_first_forecast_prompt

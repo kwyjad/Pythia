@@ -146,19 +146,19 @@ jobs:
                   lines.append("")
 
               try:
-                  rows = con.execute(
-                      """
-                      SELECT
-                          COALESCE(source, '') AS src,
-                          COALESCE(metric, '') AS metric,
-                          COALESCE(hazard_code, '') AS hazard_code,
-                          COALESCE(iso3, '') AS iso3,
-                          COUNT(*) AS n_rows
-                      FROM facts_deltas
-                      GROUP BY src, metric, hazard_code, iso3
-                      ORDER BY src, metric, hazard_code, iso3
-                      """
-                  ).fetchall()
+                    rows = con.execute(
+                        """
+                        SELECT
+                            COALESCE(source, '') AS src,
+                            COALESCE(metric, '') AS metric,
+                            COALESCE(hazard_code, '') AS hazard_code,
+                            COALESCE(iso3, '') AS iso3,
+                            COUNT(*) AS n_rows
+                        FROM facts_deltas
+                        GROUP BY 1, 2, 3, 4
+                        ORDER BY 1, 2, 3, 4
+                        """
+                    ).fetchall()
                   lines.append("## facts_deltas row counts by source / metric / hazard_code / iso3")
                   lines.append("")
                   lines.append("| source | metric | hazard_code | iso3 | n_rows |")
@@ -215,19 +215,19 @@ jobs:
               try:
                   rows = con.execute(
                       """
-                      SELECT
-                          COALESCE(q.iso3, '') AS iso3,
-                          COALESCE(f.hazard_code, '') AS hazard_code,
-                          COALESCE(f.metric, '') AS metric,
-                          COUNT(DISTINCT f.question_id) AS n_questions,
-                          COUNT(*) AS n_rows
-                      FROM forecasts_ensemble AS f
-                      LEFT JOIN questions AS q
-                        ON q.question_id = f.question_id
-                      GROUP BY iso3, hazard_code, metric
-                      ORDER BY iso3, hazard_code, metric
-                      """
-                  ).fetchall()
+                        SELECT
+                            COALESCE(q.iso3, '') AS iso3,
+                            COALESCE(f.hazard_code, '') AS hazard_code,
+                            COALESCE(f.metric, '') AS metric,
+                            COUNT(DISTINCT f.question_id) AS n_questions,
+                            COUNT(*) AS n_rows
+                        FROM forecasts_ensemble AS f
+                        LEFT JOIN questions AS q
+                          ON q.question_id = f.question_id
+                        GROUP BY q.iso3, f.hazard_code, f.metric
+                        ORDER BY q.iso3, f.hazard_code, f.metric
+                        """
+                    ).fetchall()
                   lines.append("## forecasts_ensemble by iso3 / hazard_code / metric")
                   lines.append("")
                   lines.append("| iso3 | hazard_code | metric | n_questions | n_rows |")

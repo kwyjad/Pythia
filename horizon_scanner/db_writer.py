@@ -112,7 +112,7 @@ DISPLACEMENT_TEMPLATES = {
         "Monitoring Center (IDMC) with the IOM Displacement Tracking Matrix (DTM) as back-up?"
     ),
     "unrest_displacement": (
-        "How many people will be internally displaced by political unrest in {country_name} "
+        "How many people will be internally displaced by civil unrest in {country_name} "
         "between {start_date} and {end_date}, as recorded by the Internal Displacement "
         "Monitoring Center (IDMC) with the IOM Displacement Tracking Matrix (DTM) as back-up?"
     ),
