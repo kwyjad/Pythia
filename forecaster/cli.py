@@ -1816,18 +1816,18 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
             _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
             return
 
-    spds = spd_obj.get("spds") or {}
-    if not spds:
-        _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
-        return
+        spds = spd_obj.get("spds") or {}
+        if not spds:
+            _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
+            return
 
-    _write_spd_outputs(
-        run_id,
-        question_row,
-        spd_obj,
-        resolution_source=resolution_source,
-        usage=usage or {},
-    )
+        _write_spd_outputs(
+            run_id,
+            question_row,
+            spd_obj,
+            resolution_source=resolution_source,
+            usage=usage or {},
+        )
 
     except Exception:
         LOG.exception("SPD v2 failed for question_id=%s", qid)
