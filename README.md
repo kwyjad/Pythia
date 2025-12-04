@@ -425,6 +425,15 @@ Autonomous runs on GitHub
 
 This repo includes workflows for core Pythia components (resolver, horizon scanner, forecaster CI, and the Pythia calibration pipeline). Pythia now focuses exclusively on the humanitarian forecasting stack.
 
+### Pythia DuckDB configuration
+
+- Pythia uses a DuckDB database for forecasts and diagnostics. The connection URL is resolved in this order:
+  1. `PYTHIA_DB_URL` environment variable (highest precedence)
+  2. `app.db_url` from `pythia/config.yaml`
+  3. A built-in default (`duckdb:///data/resolver.duckdb`)
+
+  This means that CI and local runs can safely override the database path by setting `PYTHIA_DB_URL` without editing the config file.
+
 Add secrets (see below), push the repo, and Actions will:
 
 run forecasts,

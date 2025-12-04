@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -14,9 +15,17 @@ FATALITIES_CENTROIDS: tuple[float, ...] = (0.0, 15.0, 62.0, 300.0, 700.0)
 
 PYTHIA_DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
 
+logger = logging.getLogger(__name__)
+
 
 def get_db_url() -> str:
-    """Return the DuckDB URL Pythia should use."""
+    """Return the DuckDB URL Pythia should use.
+
+    Precedence:
+    1. PYTHIA_DB_URL environment variable
+    2. app.db_url from config
+    3. PYTHIA_DEFAULT_DB_URL fallback
+    """
 
     try:
         cfg = load_config() or {}
@@ -24,7 +33,23 @@ def get_db_url() -> str:
         cfg = {}
 
     app_cfg = cfg.get("app") or {}
-    return app_cfg.get("db_url") or os.getenv("PYTHIA_DB_URL") or PYTHIA_DEFAULT_DB_URL
+    cfg_url = app_cfg.get("db_url")
+    env_url = os.getenv("PYTHIA_DB_URL")
+
+    if env_url:
+        if env_url != cfg_url:
+            logger.debug(
+                "Using PYTHIA_DB_URL override for DuckDB (env wins over config): %s",
+                env_url,
+            )
+        return env_url
+
+    if cfg_url:
+        logger.debug("Using DuckDB URL from config: %s", cfg_url)
+        return cfg_url
+
+    logger.debug("Using PYTHIA default DuckDB URL: %s", PYTHIA_DEFAULT_DB_URL)
+    return PYTHIA_DEFAULT_DB_URL
 
 
 def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
@@ -42,6 +67,7 @@ def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
         if parent:
             parent.mkdir(parents=True, exist_ok=True)
 
+    logger.debug("Connecting to DuckDB at %s (read_only=%s)", db_path, read_only)
     return duckdb.connect(db_path, read_only=read_only)
 
 
