@@ -146,19 +146,19 @@ jobs:
                   lines.append("")
 
               try:
-                    rows = con.execute(
-                        """
-                        SELECT
-                            COALESCE(source, '') AS src,
-                            COALESCE(metric, '') AS metric,
-                            COALESCE(hazard_code, '') AS hazard_code,
-                            COALESCE(iso3, '') AS iso3,
-                            COUNT(*) AS n_rows
-                        FROM facts_deltas
-                        GROUP BY 1, 2, 3, 4
-                        ORDER BY 1, 2, 3, 4
-                        """
-                    ).fetchall()
+                  rows = con.execute(
+                      """
+                      SELECT
+                          COALESCE(source, '') AS src,
+                          COALESCE(metric, '') AS metric,
+                          COALESCE(hazard_code, '') AS hazard_code,
+                          COALESCE(iso3, '') AS iso3,
+                          COUNT(*) AS n_rows
+                      FROM facts_deltas
+                      GROUP BY 1, 2, 3, 4
+                      ORDER BY 1, 2, 3, 4
+                      """
+                  ).fetchall()
                   lines.append("## facts_deltas row counts by source / metric / hazard_code / iso3")
                   lines.append("")
                   lines.append("| source | metric | hazard_code | iso3 | n_rows |")

@@ -51,6 +51,45 @@ MAX_RESEARCH_WORKERS = int(os.getenv("FORECASTER_RESEARCH_MAX_WORKERS", "6"))
 MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "4"))
 
 
+def _safe_json_loads(text: str) -> Any:
+    """
+    Best-effort JSON loader for LLM responses.
+
+    - Strips ``` / ```json fences if present.
+    - Tries to parse the whole string.
+    - If that fails, tries the first {...} block.
+    Raises json.JSONDecodeError if all attempts fail.
+    """
+    if text is None:
+        raise json.JSONDecodeError("Empty text", "", 0)
+
+    s = str(text).strip()
+
+    # Strip simple markdown fences (``` or ```json)
+    if s.startswith("```"):
+        lines = s.splitlines()
+        # Drop opening fence
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        # Drop closing fence if present
+        if lines and lines[-1].lstrip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+
+    # First attempt: whole string
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        # Second attempt: first {...} block
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = s[start : end + 1]
+            return json.loads(candidate)
+        # Re-raise original error
+        raise
+
+
 def _json_dumps_for_db(obj: Any, **kwargs: Any) -> str:
     """
     JSON-encode helper for DB payloads that may contain non-JSON-native
@@ -1630,7 +1669,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             return
 
         try:
-            research = json.loads(text)
+            research = _safe_json_loads(text)
         except json.JSONDecodeError as exc:
             raw_dir = Path("debug/research_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1800,7 +1839,7 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
             return
 
         try:
-            spd_obj = json.loads(text)
+            spd_obj = _safe_json_loads(text)
         except json.JSONDecodeError as exc:
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)

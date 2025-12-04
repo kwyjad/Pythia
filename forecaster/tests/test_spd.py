@@ -18,6 +18,14 @@ from forecaster.providers import ModelSpec
 from pythia.db import schema as db_schema
 
 
+def test_safe_json_loads_handles_code_fence() -> None:
+    fenced = """```json
+    {"a": 1, "b": [2, 3]}
+    ```"""
+    obj = cli._safe_json_loads(fenced)
+    assert obj == {"a": 1, "b": [2, 3]}
+
+
 def test_call_research_model_uses_positional_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
