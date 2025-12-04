@@ -7,6 +7,15 @@ from typing import Any, Dict, Optional
 import json
 from .config import CALIBRATION_PATH, ist_date
 
+
+def _json_dumps_for_prompt(obj: Any, **kwargs: Any) -> str:
+    """
+    JSON-encode helper for prompts that tolerates Python objects like date
+    by stringifying unknown types via default=str.
+    """
+
+    return json.dumps(obj, default=str, **kwargs)
+
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
@@ -770,7 +779,7 @@ def build_research_prompt_v2(
     resolution_source = question.get("resolution_source", "")
     model_info = model_info or {}
 
-    return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{json.dumps(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{json.dumps(hs_triage_entry, indent=2)}\n```\n\nModel/data notes:\n```json\n{json.dumps(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n\nYour tasks:\n\n1. Summarise the base rate of {metric} for this hazard/country using:\n   * Resolver history (with its caveats),\n   * high-quality external analytical sources (UN, ACAPS, etc.),\n   * your own knowledge of the country context.\n2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {{\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {{\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    }},\n    \"external_support\": {{\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }}\n  }},\n  \"update_signals\": [\n    {{\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6}}\n  ],\n  \"regime_shift_signals\": [\n    {{\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3}}\n  ],\n  \"data_gaps\": [\"...\"]\n}}\n```\n\nDo not include any text outside the JSON.\n"""
+    return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{_json_dumps_for_prompt(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n```\n\nModel/data notes:\n```json\n{_json_dumps_for_prompt(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n\nYour tasks:\n\n1. Summarise the base rate of {metric} for this hazard/country using:\n   * Resolver history (with its caveats),\n   * high-quality external analytical sources (UN, ACAPS, etc.),\n   * your own knowledge of the country context.\n2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {{\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {{\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    }},\n    \"external_support\": {{\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }}\n  }},\n  \"update_signals\": [\n    {{\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6}}\n  ],\n  \"regime_shift_signals\": [\n    {{\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3}}\n  ],\n  \"data_gaps\": [\"...\"]\n}}\n```\n\nDo not include any text outside the JSON.\n"""
 
 
 def build_spd_prompt_v2(
@@ -791,19 +800,19 @@ def build_spd_prompt_v2(
         "You are a probabilistic forecaster. Produce a six-month SPD for the question below.\n\n"
         "Question metadata:\n"
         "```json\n"
-        f"{json.dumps(question, indent=2)}\n"
+        f"{_json_dumps_for_prompt(question, indent=2)}\n"
         "```\n\n"
         "Resolver history summary (Resolver is one imperfect source; ACLED strong, IDMC short, EM-DAT patchy):\n"
         "```json\n"
-        f"{json.dumps(history_summary, indent=2)}\n"
+        f"{_json_dumps_for_prompt(history_summary, indent=2)}\n"
         "```\n\n"
         "HS triage output:\n"
         "```json\n"
-        f"{json.dumps(hs_triage_entry, indent=2)}\n"
+        f"{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n"
         "```\n\n"
         "Research evidence:\n"
         "```json\n"
-        f"{json.dumps(research_json, indent=2)}\n"
+        f"{_json_dumps_for_prompt(research_json, indent=2)}\n"
         "```\n\n"
         "Instructions:\n"
         "- Provide a five-bucket SPD for each of the next 6 months using the bucket labels in the question metadata.\n"
@@ -846,11 +855,11 @@ def build_scenario_prompt(
         "(e.g. ACLED/EM-DAT/IDMC).\n\n"
         "Ensemble SPD summary:\n"
         "```json\n"
-        f"{json.dumps(spd_summary, indent=2)}\n"
+        f"{_json_dumps_for_prompt(spd_summary, indent=2)}\n"
         "```\n\n"
         "HS triage and drivers:\n"
         "```json\n"
-        f"{json.dumps(hs_triage_entry, indent=2)}\n"
+        f"{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n"
         "```\n\n"
         "Optional HS scenario stub:\n"
         f"\"\"\"{scenario_text}\"\"\"\n\n"

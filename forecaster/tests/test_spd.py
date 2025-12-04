@@ -99,6 +99,67 @@ def test_parse_spd_json_failure_all_zero():
     assert _parse_spd_json(bad) is None
 
 
+def test_build_spd_prompt_v2_handles_date_in_history_summary() -> None:
+    """build_spd_prompt_v2 should not crash when history_summary contains date objects."""
+
+    question = {
+        "question_id": "q-test",
+        "iso3": "ETH",
+        "hazard_code": "ACO",
+        "metric": "FATALITIES",
+        "resolution_source": "ACLED",
+    }
+    history_summary = {
+        "source": "ACLED",
+        "history_length_months": 3,
+        "recent_mean": 10.0,
+        "recent_max": 20,
+        "trend": "up",
+        "last_6m_values": [
+            {"ym": date(2025, 1, 1), "value": 5},
+            {"ym": date(2025, 2, 1), "value": 10},
+            {"ym": date(2025, 3, 1), "value": 15},
+        ],
+        "data_quality": "high",
+        "notes": "test history",
+    }
+    hs_triage_entry = {"tier": "watchlist", "triage_score": 0.5}
+    research_json = {"base_rate": {"qualitative_summary": "test"}}
+
+    prompt_text = prompts.build_spd_prompt_v2(
+        question=question,
+        history_summary=history_summary,
+        hs_triage_entry=hs_triage_entry,
+        research_json=research_json,
+    )
+
+    assert "2025-01-01" in prompt_text
+    assert "Object of type date is not JSON serializable" not in prompt_text
+
+
+def test_build_research_prompt_v2_handles_date_in_resolver_features() -> None:
+    question = {
+        "question_id": "q-test",
+        "iso3": "SOM",
+        "hazard_code": "ACO",
+        "metric": "PA",
+        "resolution_source": "EMDAT",
+    }
+    resolver_features = {
+        "source": "ACLED",
+        "last_6m_values": [{"ym": date(2025, 5, 1), "value": 42}],
+    }
+    hs_triage_entry = {"tier": "priority", "triage_score": 0.8}
+
+    prompt_text = prompts.build_research_prompt_v2(
+        question=question,
+        hs_triage_entry=hs_triage_entry,
+        resolver_features=resolver_features,
+        model_info={},
+    )
+
+    assert "2025-05-01" in prompt_text
+
 def test_aggregate_spd_shape_and_uniform_fallback():
     """aggregate_spd should normalise, respect evidence, and fall back to uniform."""
     # Member with a strong preference for bucket 1 in month_1 only
