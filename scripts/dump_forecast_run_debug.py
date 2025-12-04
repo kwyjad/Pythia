@@ -121,7 +121,10 @@ def _load_model_spd_and_usage(con, run_id: str, question_id: str):
         SELECT model_name, month_index, bucket_index, probability,
                ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens, total_tokens
         FROM forecasts_raw
-        WHERE run_id = ? AND question_id = ?
+        WHERE run_id = ?
+          AND question_id = ?
+          AND status = 'ok'
+          AND month_index IS NOT NULL
         ORDER BY model_name, month_index, bucket_index
         """,
         [run_id, question_id],
@@ -140,6 +143,9 @@ def _load_model_spd_and_usage(con, run_id: str, question_id: str):
         completion_tokens,
         total_tokens,
     ) in rows:
+        if month_idx is None:
+            continue  # Skip any rows without a month index
+
         name = str(model_name)
         m = int(month_idx)
         b = int(bucket_idx)
@@ -314,6 +320,28 @@ def main():
             if centroid_source:
                 question_lines.append(f"- Centroid source: `{centroid_source}`")
             question_lines.append("")
+
+            if not model_spd:
+                nf_count = con.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM forecasts_raw
+                    WHERE run_id = ? AND question_id = ? AND status = 'no_forecast'
+                    """,
+                    [run_id, question_id],
+                ).fetchone()[0]
+
+                question_lines.append("### Per-model SPD & LLM metadata")
+                question_lines.append("")
+                if nf_count > 0:
+                    question_lines.append(
+                        "_No forecast was produced for this question (status = `no_forecast`)._"
+                    )
+                    question_lines.append("")
+                question_lines.append("---")
+                question_lines.append("")
+                lines.extend(question_lines)
+                continue
 
             question_lines.append("### Per-model SPD & LLM metadata")
             question_lines.append("")
