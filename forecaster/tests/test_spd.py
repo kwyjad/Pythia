@@ -18,6 +18,44 @@ from forecaster.providers import ModelSpec
 from pythia.db import schema as db_schema
 
 
+def test_call_research_model_uses_positional_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_call_chat_ms(ms, prompt, **kwargs):
+        calls["ms"] = ms
+        calls["prompt"] = prompt
+        calls["kwargs"] = kwargs
+        return "ok", {"total_tokens": 10}, None
+
+    monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)
+
+    text, usage, error, ms = cli._call_research_model("HELLO-RESEARCH")
+
+    assert text == "ok"
+    assert error is None
+    assert calls["prompt"] == "HELLO-RESEARCH"
+    assert "prompt_text" not in calls["kwargs"]
+
+
+def test_call_spd_model_uses_positional_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    async def fake_call_chat_ms(ms, prompt, **kwargs):
+        calls["ms"] = ms
+        calls["prompt"] = prompt
+        calls["kwargs"] = kwargs
+        return "ok", {"total_tokens": 10}, None
+
+    monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)
+
+    text, usage, error, ms = cli._call_spd_model("HELLO-SPD")
+
+    assert text == "ok"
+    assert error is None
+    assert calls["prompt"] == "HELLO-SPD"
+    assert "prompt_text" not in calls["kwargs"]
+
+
 def test_parse_spd_json_basic():
     """Happy-path SPD parsing: minimal JSON, missing months filled, rows normalized."""
     text = """
