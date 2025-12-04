@@ -37,7 +37,6 @@ from datetime import date, datetime
 from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Tuple
 import inspect
-import concurrent.futures
 
 import duckdb
 import numpy as np
@@ -298,7 +297,7 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
             try:
                 rows = con.execute(
                     """
-                    SELECT ym, value
+                    SELECT ym, pa
                     FROM emdat_pa
                     WHERE iso3 = ?
                       AND shock_type = ?
@@ -1524,7 +1523,9 @@ def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
     return bool(triage.get("need_full_spd", False))
 
 
-def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+async def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """Async wrapper for the research LLM call for v2 pipeline."""
+
     ms = ModelSpec(
         name="Gemini",
         provider="google",
@@ -1534,15 +1535,13 @@ def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str
     )
     start = time.time()
     try:
-        text, usage, error = asyncio.run(
-            call_chat_ms(
-                ms,
-                prompt,
-                temperature=0.3,
-                prompt_key="research.v2",
-                prompt_version="1.0.0",
-                component="Researcher",
-            )
+        text, usage, error = await call_chat_ms(
+            ms,
+            prompt,
+            temperature=0.3,
+            prompt_key="research.v2",
+            prompt_version="1.0.0",
+            component="Researcher",
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -1553,7 +1552,9 @@ def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str
     return text, usage, error, ms
 
 
-def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """Async wrapper for the SPD LLM call for v2 pipeline."""
+
     ms = ModelSpec(
         name="Gemini",
         provider="google",
@@ -1563,15 +1564,13 @@ def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], Mo
     )
     start = time.time()
     try:
-        text, usage, error = asyncio.run(
-            call_chat_ms(
-                ms,
-                prompt,
-                temperature=0.2,
-                prompt_key="spd.v2",
-                prompt_version="1.0.0",
-                component="Forecaster",
-            )
+        text, usage, error = await call_chat_ms(
+            ms,
+            prompt,
+            temperature=0.2,
+            prompt_key="spd.v2",
+            prompt_version="1.0.0",
+            component="Forecaster",
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -1583,7 +1582,7 @@ def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], Mo
 
 
 
-def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
+async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
     qid = question_row["question_id"]
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
@@ -1609,23 +1608,21 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
             model_info={},
         )
 
-        text, usage, error, ms = _call_research_model(prompt)
+        text, usage, error, ms = await _call_research_model(prompt)
 
-        asyncio.run(
-            log_forecaster_llm_call(
-                run_id=run_id,
-                question_id=qid,
-                iso3=iso3,
-                hazard_code=hz,
-                metric=metric,
-                model_spec=ms,
-                prompt_text=prompt,
-                response_text=text or "",
-                usage=usage,
-                error_text=str(error) if error else None,
-                phase="research_v2",
-                hs_run_id=hs_run_id,
-            )
+        await log_forecaster_llm_call(
+            run_id=run_id,
+            question_id=qid,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage,
+            error_text=str(error) if error else None,
+            phase="research_v2",
+            hs_run_id=hs_run_id,
         )
 
         if error or not text or not text.strip():
@@ -1741,42 +1738,42 @@ def _write_spd_outputs(
         con.close()
 
 
-def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
+async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
     qid = question_row["question_id"]
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
     metric = question_row["metric"]
 
-    resolution_source = _infer_resolution_source(hz, metric)
+    try:
+        resolution_source = _infer_resolution_source(hz, metric)
 
-    hs_run_id = question_row["hs_run_id"] or run_id
-    hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
-    history_summary = _build_history_summary(iso3, hz, metric)
-    research_json = _load_research_json(run_id, qid)
-    if not isinstance(research_json, dict):
-        research_json = {
-            "note": "missing_research_v2",
-            "base_rate_hint": "Use Resolver history + HS triage + model prior.",
-        }
+        hs_run_id = question_row["hs_run_id"] or run_id
+        hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+        history_summary = _build_history_summary(iso3, hz, metric)
+        research_json = _load_research_json(run_id, qid)
+        if not isinstance(research_json, dict):
+            research_json = {
+                "note": "missing_research_v2",
+                "base_rate_hint": "Use Resolver history + HS triage + model prior.",
+            }
 
-    prompt = build_spd_prompt_v2(
-        question={
-            "question_id": qid,
-            "iso3": iso3,
-            "hazard_code": hz,
-            "metric": metric,
-            "resolution_source": resolution_source,
-            "target_months": question_row.get("target_month"),
-        },
-        history_summary=history_summary,
-        hs_triage_entry=hs_entry,
-        research_json=research_json,
-    )
+        prompt = build_spd_prompt_v2(
+            question={
+                "question_id": qid,
+                "iso3": iso3,
+                "hazard_code": hz,
+                "metric": metric,
+                "resolution_source": resolution_source,
+                "target_months": question_row.get("target_month"),
+            },
+            history_summary=history_summary,
+            hs_triage_entry=hs_entry,
+            research_json=research_json,
+        )
 
-    text, usage, error, ms = _call_spd_model(prompt)
+        text, usage, error, ms = await _call_spd_model(prompt)
 
-    asyncio.run(
-        log_forecaster_llm_call(
+        await log_forecaster_llm_call(
             run_id=run_id,
             question_id=qid,
             iso3=iso3,
@@ -1790,35 +1787,34 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
             phase="spd_v2",
             hs_run_id=hs_run_id,
         )
-    )
 
-    if error or not text or not text.strip():
-        _record_no_forecast(
-            run_id,
-            qid,
-            iso3,
-            hz,
-            metric,
-            f"LLM error or empty response: {error}",
-        )
-        return
+        if error or not text or not text.strip():
+            _record_no_forecast(
+                run_id,
+                qid,
+                iso3,
+                hz,
+                metric,
+                f"LLM error or empty response: {error}",
+            )
+            return
 
-    try:
-        spd_obj = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raw_dir = Path("debug/spd_raw")
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = raw_dir / f"{run_id}__{qid}.txt"
-        raw_path.write_text(text or "", encoding="utf-8")
-        logging.error(
-            "SPD JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
-        )
-        _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad SPD JSON: {exc}")
-        return
+        try:
+            spd_obj = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raw_dir = Path("debug/spd_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}.txt"
+            raw_path.write_text(text or "", encoding="utf-8")
+            logging.error(
+                "SPD JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
+            )
+            _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad SPD JSON: {exc}")
+            return
 
-    if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
-        _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
-        return
+        if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
+            _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+            return
 
     spds = spd_obj.get("spds") or {}
     if not spds:
@@ -1832,6 +1828,9 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
         resolution_source=resolution_source,
         usage=usage or {},
     )
+
+    except Exception:
+        LOG.exception("SPD v2 failed for question_id=%s", qid)
 
 def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: str) -> Optional[str]:
     """
@@ -3670,25 +3669,26 @@ def main() -> None:
         run_id = f"fc_{int(time.time())}"
         print(f"[v2] run_id={run_id} | questions={len(questions)}")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_RESEARCH_WORKERS) as pool:
-            futures = [pool.submit(_run_research_for_question, run_id, q) for q in questions]
-            for fut in concurrent.futures.as_completed(futures):
-                try:
-                    fut.result()
-                except Exception:
-                    LOG.exception("Researcher v2 failed for a question")
+        async def _run_v2_pipeline_async() -> None:
+            research_sem = asyncio.Semaphore(MAX_RESEARCH_WORKERS)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_SPD_WORKERS) as pool:
-            futures = [
-                pool.submit(_run_spd_for_question, run_id, q)
-                for q in questions
-                if _question_needs_spd(run_id, q)
-            ]
-            for fut in concurrent.futures.as_completed(futures):
-                try:
-                    fut.result()
-                except Exception:
-                    LOG.exception("SPD v2 failed for a question")
+            async def _research_task(q: duckdb.Row) -> None:
+                async with research_sem:
+                    await _run_research_for_question(run_id, q)
+
+            await asyncio.gather(*(_research_task(q) for q in questions))
+
+            spd_sem = asyncio.Semaphore(MAX_SPD_WORKERS)
+
+            async def _spd_task(q: duckdb.Row) -> None:
+                if not _question_needs_spd(run_id, q):
+                    return
+                async with spd_sem:
+                    await _run_spd_for_question(run_id, q)
+
+            await asyncio.gather(*(_spd_task(q) for q in questions))
+
+        asyncio.run(_run_v2_pipeline_async())
 
         run_scenarios_for_run(run_id)
 
