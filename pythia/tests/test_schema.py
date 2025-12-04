@@ -4,6 +4,7 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
+from pythia.db import schema as db_schema
 from pythia.db.schema import ensure_schema
 
 
@@ -43,3 +44,22 @@ def test_ensure_schema_adds_missing_columns(tmp_path):
         assert "hs_run_id" in question_cols
     finally:
         con.close()
+
+
+def test_get_db_url_prefers_env_over_config(monkeypatch):
+    """Environment variable PYTHIA_DB_URL should override config app.db_url."""
+
+    def fake_load_config():
+        return {
+            "app": {
+                "db_url": "duckdb:///data/from-config.duckdb",
+            }
+        }
+
+    monkeypatch.setattr(db_schema, "load_config", fake_load_config)
+
+    env_url = "duckdb:///tmp/pythia-env-test.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", env_url)
+
+    url = db_schema.get_db_url()
+    assert url == env_url
