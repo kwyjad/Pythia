@@ -1528,7 +1528,7 @@ def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str
         text, usage, error = asyncio.run(
             call_chat_ms(
                 ms,
-                prompt_text=prompt,
+                prompt,
                 temperature=0.3,
                 prompt_key="research.v2",
                 prompt_version="1.0.0",
@@ -1557,7 +1557,7 @@ def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], Mo
         text, usage, error = asyncio.run(
             call_chat_ms(
                 ms,
-                prompt_text=prompt,
+                prompt,
                 temperature=0.2,
                 prompt_key="spd.v2",
                 prompt_version="1.0.0",
