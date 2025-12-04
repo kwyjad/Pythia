@@ -53,7 +53,13 @@ def get_db_url() -> str:
 
 
 def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
-    """Return a DuckDB connection for Pythia using the configured URL."""
+    """Return a DuckDB connection for Pythia using the configured URL.
+
+    For file-backed databases, we always open in read-write mode to avoid
+    DuckDB's "different configuration" error when mixing read-only and
+    read-write connections in the same process. For in-memory DBs we honour
+    the caller's requested read_only flag.
+    """
 
     url = get_db_url()
     if url.startswith("duckdb:///"):
@@ -67,8 +73,24 @@ def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
         if parent:
             parent.mkdir(parents=True, exist_ok=True)
 
-    logger.debug("Connecting to DuckDB at %s (read_only=%s)", db_path, read_only)
-    return duckdb.connect(db_path, read_only=read_only)
+    if db_path == ":memory:":
+        effective_read_only = read_only
+        logger.debug(
+            "Connecting to DuckDB at %s (requested read_only=%s, using_read_only=%s)",
+            db_path,
+            read_only,
+            effective_read_only,
+        )
+    else:
+        effective_read_only = False
+        logger.debug(
+            "Connecting to DuckDB at %s (requested read_only=%s, forcing_read_only=%s for file-backed DB)",
+            db_path,
+            read_only,
+            effective_read_only,
+        )
+
+    return duckdb.connect(db_path, read_only=effective_read_only)
 
 
 def _existing_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:

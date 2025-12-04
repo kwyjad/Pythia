@@ -13,6 +13,30 @@ def _resolve_db_path() -> str:
     return db_url
 
 
+def _get_latest_fc_run_id(con) -> str | None:
+    row = con.execute(
+        """
+        SELECT run_id
+        FROM forecasts_ensemble
+        WHERE run_id LIKE 'fc_%'
+        ORDER BY coalesce(created_at, CURRENT_TIMESTAMP) DESC, run_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+
+    row = con.execute(
+        """
+        SELECT run_id
+        FROM forecasts_ensemble
+        ORDER BY coalesce(created_at, CURRENT_TIMESTAMP) DESC, run_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
 def main() -> None:
     db_path = _resolve_db_path()
     if not db_path:
@@ -21,24 +45,60 @@ def main() -> None:
 
     con = duckdb.connect(db_path, read_only=True)
 
-    row = con.execute(
-        """
-        SELECT run_id, MAX(created_at) AS t
-        FROM forecasts_ensemble
-        WHERE run_id LIKE 'fc_%'
-        GROUP BY run_id
-        ORDER BY t DESC
-        LIMIT 1
-        """
-    ).fetchone()
-
-    if not row:
-        print("No fc_* runs found in forecasts_ensemble.")
+    run_id = _get_latest_fc_run_id(con)
+    if not run_id:
+        print("No forecasts_ensemble rows found; nothing to summarise.")
         con.close()
         sys.exit(0)
 
-    run_id = row[0]
-    print(f"=== Pythia v2 run summary for run_id={run_id} ===")
+    print(f"Pythia v2 run summary (run_id={run_id})")
+
+    hs_row = con.execute(
+        """
+        SELECT DISTINCT q.hs_run_id
+        FROM forecasts_ensemble fe
+        JOIN questions q ON q.question_id = fe.question_id
+        WHERE fe.run_id = ? AND q.hs_run_id IS NOT NULL
+        ORDER BY q.hs_run_id DESC
+        LIMIT 1
+        """,
+        [run_id],
+    ).fetchone()
+    hs_run_id = hs_row[0] if hs_row and hs_row[0] else None
+    if hs_run_id:
+        triage_count = con.execute(
+            "SELECT COUNT(*) FROM hs_triage WHERE run_id = ?", [hs_run_id]
+        ).fetchone()[0]
+        print(f"Linked hs_run_id: {hs_run_id} (hs_triage rows: {triage_count})")
+    else:
+        print("Linked hs_run_id: (none)")
+
+    questions = con.execute(
+        """
+        SELECT DISTINCT q.iso3, q.hazard_code, q.metric, q.question_id
+        FROM questions q
+        WHERE q.status = 'active'
+        ORDER BY q.iso3, q.hazard_code, q.metric, q.question_id
+        """
+    ).fetchall()
+
+    with_spd_rows = con.execute(
+        """
+        SELECT DISTINCT q.question_id
+        FROM questions q
+        JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+        WHERE fe.run_id = ?
+          AND fe.status = 'ok'
+          AND q.status = 'active'
+        """,
+        [run_id],
+    ).fetchall()
+
+    qids_with_spd = {row[0] for row in with_spd_rows}
+    print(f"\nActive questions total: {len(questions)}")
+    print(
+        f"Active questions with SPD rows for run_id={run_id}: {len(qids_with_spd)}"
+    )
 
     q_stats = con.execute(
         """

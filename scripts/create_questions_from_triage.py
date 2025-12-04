@@ -1,94 +1,245 @@
 from __future__ import annotations
 
 import argparse
+import json
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Dict, List, Optional, Tuple
 
 import duckdb
 
 from pythia.db.schema import ensure_schema
 
 
-def _latest_hs_run_id(con) -> str | None:
+DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
+
+
+@dataclass
+class TriagedHazard:
+    iso3: str
+    hazard_code: str
+    tier: str
+    triage_score: float
+    need_full_spd: bool
+
+
+SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
+    "ACO": ["FATALITIES", "PA"],
+    "ACE": ["FATALITIES", "PA"],
+    "CU": ["PA"],
+    "DR": ["PA"],
+    "FL": ["PA"],
+    "TC": ["PA"],
+    "HW": ["PA"],
+    "DI": ["PA"],
+}
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create Pythia questions from hs_triage for the latest HS run."
+    )
+    parser.add_argument(
+        "--db",
+        default=DEFAULT_DB_URL,
+        help="DuckDB URL, e.g. duckdb:///data/resolver.duckdb",
+    )
+    parser.add_argument(
+        "--hs-run-id",
+        default=None,
+        help="Optional explicit hs_run_id. If omitted, we use the latest from hs_runs/hs_triage.",
+    )
+    return parser.parse_args()
+
+
+def _resolve_db_path(db_url: str) -> str:
+    if db_url.startswith("duckdb:///"):
+        return db_url[len("duckdb:///") :]
+    return db_url
+
+
+def _select_hs_run_id(
+    con: duckdb.DuckDBPyConnection, explicit: Optional[str]
+) -> Optional[str]:
+    if explicit:
+        return explicit
+
+    row = con.execute(
+        """
+        SELECT hs_run_id
+        FROM hs_runs
+        ORDER BY generated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+
     row = con.execute(
         """
         SELECT run_id
         FROM hs_triage
-        GROUP BY run_id
-        ORDER BY MAX(created_at) DESC
+        ORDER BY rowid DESC
         LIMIT 1
         """
     ).fetchone()
-    return row[0] if row else None
+    if row and row[0]:
+        return row[0]
+
+    return None
 
 
-def _metrics_for_hazard(hz: str) -> list[tuple[str, str]]:
-    hz = hz.upper()
-    if hz in {"ACO", "ACE", "CU"}:
-        return [("FATALITIES", "ACLED"), ("PA", "IDMC")]
-    if hz in {"DR", "FL", "TC", "HW"}:
-        return [("PA", "EM-DAT")]
-    if hz == "DI":
-        return [("PA", "NONE")]
-    return []
+def _metrics_for_hazard(hz: str) -> List[str]:
+    hz_up = (hz or "").upper()
+    return SUPPORTED_HAZARD_METRICS.get(hz_up, [])
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="duckdb:///data/resolver.duckdb")
-    args = parser.parse_args()
+def _build_wording(iso3: str, hazard_code: str, metric: str) -> str:
+    hz = (hazard_code or "").upper()
+    mt = (metric or "").upper()
+    iso3_up = (iso3 or "").upper()
 
-    db_url = args.db
-    if db_url.startswith("duckdb:///"):
-        db_path = db_url[len("duckdb:///") :]
+    if mt == "FATALITIES":
+        return (
+            f"Monthly battle-related fatalities in {iso3_up} tied to hazard {hz}, "
+            "as recorded by ACLED."
+        )
+    if mt == "PA" and hz == "DI":
+        return (
+            f"Monthly new arrivals into {iso3_up} due to displacement inflows "
+            "from neighbouring countries (no Resolver base rate)."
+        )
+    if mt == "PA":
+        return (
+            f"Monthly people affected or displaced in {iso3_up} for hazard {hz}, "
+            "as recorded by the canonical Pythia resolution source."
+        )
+    return f"Monthly impact in {iso3_up} for hazard {hz} and metric {mt}."
+
+
+def _compute_target_and_window(today: date) -> Tuple[str, date, date]:
+    start_month = today.month + 1
+    start_year = today.year + (start_month - 1) // 12
+    start_month = ((start_month - 1) % 12) + 1
+    opening = date(start_year, start_month, 1)
+
+    end_month = start_month + 5
+    end_year = start_year + (end_month - 1) // 12
+    end_month = ((end_month - 1) % 12) + 1
+    if end_month == 12:
+        next_year, next_month = end_year + 1, 1
     else:
-        db_path = db_url
+        next_year, next_month = end_year, end_month + 1
+    closing = date(next_year, next_month, 1) - timedelta(days=1)
 
-    con = duckdb.connect(db_path, read_only=False)
-    ensure_schema(con)
+    target_month_label = f"{opening.year:04d}-{opening.month:02d}"
+    return target_month_label, opening, closing
+
+
+def _load_triage_rows(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> List[TriagedHazard]:
+    rows = con.execute(
+        """
+        SELECT iso3, hazard_code, tier, triage_score, need_full_spd
+        FROM hs_triage
+        WHERE run_id = ?
+        """,
+        [run_id],
+    ).fetchall()
+
+    triaged: List[TriagedHazard] = []
+    for iso3, hz, tier, score, need_full_spd in rows:
+        iso3_up = (iso3 or "").upper()
+        hz_up = (hz or "").upper()
+        tier_str = (tier or "").lower()
+        need = bool(need_full_spd) or tier_str in {"priority", "watchlist"}
+        score_f = float(score or 0.0)
+        if not need:
+            continue
+        if not _metrics_for_hazard(hz_up):
+            continue
+        triaged.append(
+            TriagedHazard(
+                iso3=iso3_up,
+                hazard_code=hz_up,
+                tier=tier_str,
+                triage_score=score_f,
+                need_full_spd=need,
+            )
+        )
+
+    triaged.sort(key=lambda th: (th.iso3, th.hazard_code, th.tier, th.triage_score))
+    return triaged
+
+
+def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -> int:
+    db_path = _resolve_db_path(db_url)
+    con = duckdb.connect(db_path)
     try:
-        hs_run_id = _latest_hs_run_id(con)
-        if not hs_run_id:
-            print("No hs_triage rows found; nothing to create.")
-            return
+        ensure_schema(con)
+        run_id = _select_hs_run_id(con, hs_run_id)
+        if not run_id:
+            print("create_questions_from_triage: no hs_run_id found; nothing to do.")
+            return 0
 
-        rows = con.execute(
-            """
-            SELECT iso3, hazard_code, tier, triage_score
-            FROM hs_triage
-            WHERE run_id = ? AND need_full_spd = TRUE
-            """,
-            [hs_run_id],
-        ).fetchall()
+        triaged = _load_triage_rows(con, run_id)
+        if not triaged:
+            print(f"create_questions_from_triage: no eligible hs_triage rows for run_id={run_id}.")
+            return 0
+
         inserted = 0
-        for iso3, hz, tier, score in rows:
-            for metric, _res_src in _metrics_for_hazard(hz):
-                qid = f"{iso3}_{hz}_{metric}"
-                target_month = ""
+        today = date.today()
+        target_month, opening, closing = _compute_target_and_window(today)
+
+        for th in triaged:
+            metrics = _metrics_for_hazard(th.hazard_code)
+            for mt in metrics:
+                qid = f"{th.iso3}_{th.hazard_code}_{mt}"
+                wording = _build_wording(th.iso3, th.hazard_code, mt)
+                meta = {
+                    "source": "hs_triage",
+                    "hs_run_id": run_id,
+                    "tier": th.tier,
+                    "triage_score": th.triage_score,
+                }
+
+                con.execute("DELETE FROM questions WHERE question_id = ?", [qid])
                 con.execute(
                     """
                     INSERT INTO questions (
-                        question_id, hs_run_id, iso3, hazard_code, metric,
+                        question_id, hs_run_id, scenario_ids_json,
+                        iso3, hazard_code, metric,
                         target_month, window_start_date, window_end_date,
-                        wording, status
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
-                    ON CONFLICT(question_id) DO NOTHING
+                        wording, status, pythia_metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         qid,
-                        hs_run_id,
-                        iso3,
-                        hz,
-                        metric,
+                        run_id,
+                        "[]",
+                        th.iso3,
+                        th.hazard_code,
+                        mt,
                         target_month,
-                        "",
-                        "",
-                        f"{iso3} / {hz} / {metric} auto-generated from HS triage",
+                        opening,
+                        closing,
+                        wording,
+                        "active",
+                        json.dumps(meta, ensure_ascii=False),
                     ],
                 )
                 inserted += 1
-        print(f"Created {inserted} questions from hs_triage run_id={hs_run_id}")
+
+        print(f"create_questions_from_triage: ensured {inserted} questions for run_id={run_id}")
+        return inserted
     finally:
         con.close()
+
+
+def main() -> None:
+    args = _parse_args()
+    create_questions_from_triage(args.db, args.hs_run_id)
 
 
 if __name__ == "__main__":

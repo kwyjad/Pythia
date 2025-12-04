@@ -63,3 +63,42 @@ def test_get_db_url_prefers_env_over_config(monkeypatch):
 
     url = db_schema.get_db_url()
     assert url == env_url
+
+
+def test_connect_normalises_read_only_for_file_backed_db(monkeypatch, tmp_path):
+    """For file-backed DBs, connect() should always open read-write."""
+    db_path = tmp_path / "test_duckdb_config.duckdb"
+    url = f"duckdb:///{db_path}"
+
+    def fake_get_db_url() -> str:
+        return url
+
+    monkeypatch.setattr(db_schema, "get_db_url", fake_get_db_url)
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_duckdb_connect(path: str, read_only: bool = False):
+        calls.append((path, read_only))
+
+        class DummyConn:
+            def execute(self, *args, **kwargs):
+                return self
+
+            def fetchall(self):
+                return []
+
+            def close(self):
+                pass
+
+        return DummyConn()
+
+    monkeypatch.setattr(db_schema.duckdb, "connect", fake_duckdb_connect)
+
+    con1 = db_schema.connect(read_only=False)
+    con2 = db_schema.connect(read_only=True)
+
+    assert con1 is not None
+    assert con2 is not None
+
+    assert all(call[0] == str(db_path) for call in calls)
+    assert all(call[1] is False for call in calls), calls

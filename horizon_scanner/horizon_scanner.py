@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from forecaster.providers import GEMINI_MODEL_ID, ModelSpec, call_chat_ms, estimate_cost_usd
-from horizon_scanner.db_writer import BLOCKED_HAZARDS, HAZARD_CONFIG
+from horizon_scanner.db_writer import (
+    BLOCKED_HAZARDS,
+    HAZARD_CONFIG,
+    log_hs_run_to_db,
+)
 from horizon_scanner.prompts import build_hs_triage_prompt
 from pythia.db.schema import connect as pythia_connect, ensure_schema
 
@@ -331,6 +335,14 @@ def main(countries: list[str] | None = None):
                 fut.result()
             except Exception:
                 logger.exception("HS triage failed for one country")
+
+    iso3_list = [iso3 for (_name, iso3) in country_entries]
+    try:
+        git_sha = os.getenv("GITHUB_SHA") or ""
+        config_profile = os.getenv("PYTHIA_CONFIG_PROFILE", "default")
+        log_hs_run_to_db(run_id, iso3_list, git_sha=git_sha, config_profile=config_profile)
+    except Exception as exc:  # pragma: no cover - best-effort logging
+        logger.warning("Failed to log hs_run %s: %s", run_id, exc)
 
     logger.info("Horizon Scanner triage run complete for %d countries", len(country_entries))
 

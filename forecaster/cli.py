@@ -52,6 +52,15 @@ MAX_RESEARCH_WORKERS = int(os.getenv("FORECASTER_RESEARCH_MAX_WORKERS", "6"))
 MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "4"))
 
 
+def _json_dumps_for_db(obj: Any, **kwargs: Any) -> str:
+    """
+    JSON-encode helper for DB payloads that may contain non-JSON-native
+    Python objects (e.g., date). Unknown types are stringified.
+    """
+
+    return json.dumps(obj, default=str, **kwargs)
+
+
 @dataclass
 class QuestionRunSummary:
     question_id: str
@@ -1645,7 +1654,7 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
                   (run_id, question_id, iso3, hazard_code, metric, research_json)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                [run_id, qid, iso3, hz, metric, json.dumps(research)],
+                [run_id, qid, iso3, hz, metric, _json_dumps_for_db(research)],
             )
         finally:
             con.close()
@@ -1704,7 +1713,7 @@ def _write_spd_outputs(
                         usage.get("prompt_tokens"),
                         usage.get("completion_tokens"),
                         usage.get("total_tokens"),
-                        json.dumps(spd_payload),
+                        _json_dumps_for_db(spd_payload),
                         human_explanation,
                     ],
                 )
@@ -2306,8 +2315,8 @@ async def _run_one_question_body(
                         metric_up,
                         snapshot_start,
                         snapshot_end,
-                        json.dumps(history_rows_out, ensure_ascii=False),
-                        json.dumps(context_extra, ensure_ascii=False),
+                        _json_dumps_for_db(history_rows_out, ensure_ascii=False),
+                        _json_dumps_for_db(context_extra, ensure_ascii=False),
                     ],
                 )
                 con.close()
@@ -3179,7 +3188,7 @@ async def _run_one_question_body(
             elif qtype in ("numeric", "discrete") and isinstance(final_main, dict):
                 _p10 = final_main.get("P10"); _p50 = final_main.get("P50"); _p90 = final_main.get("P90")
                 md.append(f"- final_quantiles: P10={_p10}, P50={_p50}, P90={_p90}")
-            md.append(f"- bmc_summary={json.dumps(bmc_json)}")
+            md.append(f"- bmc_summary={_json_dumps_for_db(bmc_json)}")
         except Exception as _bmc_dbg_ex:
             md.append(f"- bmc_debug_error={type(_bmc_dbg_ex).__name__}: {str(_bmc_dbg_ex)[:200]}")
     
