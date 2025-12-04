@@ -51,6 +51,7 @@ class ModelSpec:
     model_id: str
     weight: float = 1.0
     active: bool = True
+    purpose: Optional[str] = None
 
 
 llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
