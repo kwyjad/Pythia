@@ -24,7 +24,6 @@ class TriagedHazard:
 
 
 SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
-    "ACO": ["FATALITIES", "PA"],
     "ACE": ["FATALITIES", "PA"],
     "CU": ["PA"],
     "DR": ["PA"],
