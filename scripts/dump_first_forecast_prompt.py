@@ -5,8 +5,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import logging
+
 import duckdb
 from resolver.db import duckdb_io
+
+logger = logging.getLogger(__name__)
 
 try:
     # Prefer shared config if available
@@ -283,6 +287,15 @@ def _load_spd_from_forecasts_ensemble(
     ensemble_ev: Dict[int, float] = {}
 
     for month_idx, bucket_idx, p, ev_val in rows:
+        if month_idx is None or bucket_idx is None:
+            logger.debug(
+                "Ignoring forecasts_ensemble row with null month_index/bucket_index "
+                "for run_id=%s question_id=%s (likely status='no_forecast')",
+                run_id,
+                question_id,
+            )
+            continue
+
         m = int(month_idx)
         b = int(bucket_idx)
         probs = ensemble_probs.setdefault(m, [0.0] * 5)
