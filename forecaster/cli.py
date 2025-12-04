@@ -547,6 +547,7 @@ from .aggregate import (
     aggregate_numeric,
     aggregate_spd,
 )
+from .llm_logging import log_forecaster_llm_call
 from .research import run_research_async
 
 # --- Corrected seen_guard import ---
@@ -1567,97 +1568,6 @@ async def _call_spd_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, M
     return text, usage, error, ms
 
 
-def _log_llm_call_v2(
-    *,
-    run_id: str,
-    hs_run_id: Optional[str],
-    question_id: str,
-    model_spec: ModelSpec,
-    prompt_text: str,
-    response_text: str,
-    usage: Dict[str, Any],
-    error_text: Optional[str],
-    phase: str,
-) -> None:
-    usage = dict(usage or {})
-    prompt_tokens = int(usage.get("prompt_tokens") or 0)
-    completion_tokens = int(usage.get("completion_tokens") or 0)
-    total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
-    elapsed_ms = int(usage.get("elapsed_ms") or 0)
-    cost_usd = float(usage.get("cost_usd") or 0.0)
-    if cost_usd <= 0.0:
-        cost_usd = float(
-            estimate_cost_usd(
-                model_spec.model_id,
-                {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                },
-            )
-        )
-
-    call_id = f"fc_{run_id}_{question_id}_{int(time.time() * 1000)}"
-    ts = datetime.utcnow()
-
-    con = None
-    try:
-        con = connect(read_only=False)
-        ensure_schema(con)
-        con.execute(
-            """
-            INSERT INTO llm_calls (
-                call_id,
-                run_id,
-                hs_run_id,
-                question_id,
-                call_type,
-                model_name,
-                provider,
-                model_id,
-                prompt_text,
-                response_text,
-                parsed_json,
-                elapsed_ms,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                cost_usd,
-                error_text,
-                timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """,
-            [
-                call_id,
-                run_id,
-                hs_run_id or "",
-                question_id,
-                phase,
-                model_spec.name,
-                model_spec.provider,
-                model_spec.model_id,
-                prompt_text,
-                response_text,
-                None,
-                elapsed_ms,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                cost_usd,
-                error_text,
-                ts,
-            ],
-        )
-    except Exception as log_exc:  # noqa: BLE001
-        print(
-            f"[warn] Forecaster failed to log {phase} LLM call to llm_calls: {type(log_exc).__name__}: {log_exc}"
-        )
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
-
 
 def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
     qid = question_row["question_id"]
@@ -1686,29 +1596,42 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
 
     text, usage, error, ms = asyncio.run(_call_research_model(prompt))
 
-    _log_llm_call_v2(
-        run_id=run_id,
-        hs_run_id=hs_run_id,
-        question_id=qid,
-        model_spec=ms,
-        prompt_text=prompt,
-        response_text=text or "",
-        usage=usage or {},
-        error_text=str(error) if error else None,
-        phase="research_v2",
+    usage = dict(usage or {})
+    if error:
+        usage.setdefault("error_text", str(error))
+
+    asyncio.run(
+        log_forecaster_llm_call(
+            call_type="research_v2",
+            run_id=run_id,
+            hs_run_id=hs_run_id,
+            question_id=qid,
+            model_name=ms.name,
+            provider=ms.provider,
+            model_id=ms.model_id,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage,
+            error_text=str(error) if error else None,
+        )
     )
 
-    debug_dir = Path("debug/research_raw")
+    if error or not text or not text.strip():
+        if error:
+            raise RuntimeError(error)
+        return
+
     try:
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        (debug_dir / f"{run_id}__{qid}.txt").write_text(text or "", encoding="utf-8")
-    except Exception:
-        pass
-
-    if error:
-        raise RuntimeError(error)
-
-    research = json.loads(text)
+        research = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raw_dir = Path("debug/research_raw")
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = raw_dir / f"{run_id}__{qid}.txt"
+        raw_path.write_text(text or "", encoding="utf-8")
+        logging.error(
+            "Research JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
+        )
+        return
     con = connect(read_only=False)
     try:
         con.execute(
@@ -1816,33 +1739,48 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
 
     text, usage, error, ms = asyncio.run(_call_spd_model(prompt))
 
-    _log_llm_call_v2(
-        run_id=run_id,
-        hs_run_id=hs_run_id,
-        question_id=qid,
-        model_spec=ms,
-        prompt_text=prompt,
-        response_text=text or "",
-        usage=usage or {},
-        error_text=str(error) if error else None,
-        phase="spd_v2",
+    usage = dict(usage or {})
+    if error:
+        usage.setdefault("error_text", str(error))
+
+    asyncio.run(
+        log_forecaster_llm_call(
+            call_type="spd_v2",
+            run_id=run_id,
+            hs_run_id=hs_run_id,
+            question_id=qid,
+            model_name=ms.name,
+            provider=ms.provider,
+            model_id=ms.model_id,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage,
+            error_text=str(error) if error else None,
+        )
     )
 
-    debug_dir = Path("debug/spd_raw")
-    try:
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        (debug_dir / f"{run_id}__{qid}.txt").write_text(text or "", encoding="utf-8")
-    except Exception:
-        pass
-
-    if error:
-        _record_no_forecast(run_id, qid, iso3, hz, metric, error)
+    if error or not text or not text.strip():
+        _record_no_forecast(
+            run_id,
+            qid,
+            iso3,
+            hz,
+            metric,
+            f"LLM error or empty response: {error}",
+        )
         return
 
     try:
         spd_obj = json.loads(text)
     except json.JSONDecodeError as exc:
-        _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad JSON: {exc}")
+        raw_dir = Path("debug/spd_raw")
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = raw_dir / f"{run_id}__{qid}.txt"
+        raw_path.write_text(text or "", encoding="utf-8")
+        logging.error(
+            "SPD JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
+        )
+        _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad SPD JSON: {exc}")
         return
 
     if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
