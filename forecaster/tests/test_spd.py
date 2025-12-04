@@ -29,7 +29,7 @@ def test_call_research_model_uses_positional_prompt(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)
 
-    text, usage, error, ms = cli._call_research_model("HELLO-RESEARCH")
+    text, usage, error, ms = asyncio.run(cli._call_research_model("HELLO-RESEARCH"))
 
     assert text == "ok"
     assert error is None
@@ -48,7 +48,7 @@ def test_call_spd_model_uses_positional_prompt(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)
 
-    text, usage, error, ms = cli._call_spd_model("HELLO-SPD")
+    text, usage, error, ms = asyncio.run(cli._call_spd_model("HELLO-SPD"))
 
     assert text == "ok"
     assert error is None
@@ -376,7 +376,7 @@ def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     }
     fake_ms = ModelSpec(name="stub", provider="test", model_id="m1", active=True, purpose="spd_v2")
 
-    def fake_call_spd_model(prompt: str):
+    async def fake_call_spd_model(prompt: str):
         return json.dumps(fake_spd), {"elapsed_ms": 5}, None, fake_ms
 
     monkeypatch.setattr(cli, "_call_spd_model", fake_call_spd_model)
@@ -390,7 +390,7 @@ def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "hs_run_id": None,
     }
 
-    cli._run_spd_for_question("fc_test", question_row)
+    asyncio.run(cli._run_spd_for_question("fc_test", question_row))
 
     con = duckdb.connect(str(db_path))
     try:

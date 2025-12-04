@@ -68,6 +68,7 @@ HAZARD_CONFIG = {
         "label": "Civil Unrest",
         "class": "Conflict/Social",
         "question_types": ["unrest_displacement"],
+        "blocked": True,
     },
     "DI": {
         "label": "Displacement Influx",
