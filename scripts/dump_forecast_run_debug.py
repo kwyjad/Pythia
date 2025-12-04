@@ -176,7 +176,7 @@ def _load_llm_calls(con, run_id: str, question_id: str):
         FROM llm_calls
         WHERE run_id = ?
           AND question_id = ?
-          AND call_type = 'forecast'
+          AND call_type IN ('forecast', 'spd_v2', 'spd')
         ORDER BY timestamp
         """,
         [run_id, question_id],

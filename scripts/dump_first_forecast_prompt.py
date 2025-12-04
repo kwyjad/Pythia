@@ -43,7 +43,7 @@ def _get_latest_forecast_run_id(con) -> Optional[str]:
         """
         SELECT run_id
         FROM llm_calls
-        WHERE call_type IN ('forecast', 'spd_v2')
+        WHERE call_type IN ('forecast', 'spd_v2', 'spd')
           AND run_id IS NOT NULL
           AND run_id <> ''
         ORDER BY timestamp DESC
@@ -117,7 +117,7 @@ def _get_first_forecast_call_for_question(
         FROM llm_calls
         WHERE run_id = ?
           AND question_id = ?
-          AND call_type IN ('forecast', 'spd_v2')
+          AND call_type IN ('forecast', 'spd_v2', 'spd')
         ORDER BY timestamp
         LIMIT 1
         """,
