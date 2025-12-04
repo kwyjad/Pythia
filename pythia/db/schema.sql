@@ -159,6 +159,10 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   hs_run_id TEXT,                        -- fk -> hs_runs.run_id (nullable)
   ui_run_id TEXT,                        -- fk -> ui_runs.ui_run_id (nullable)
   forecaster_run_id TEXT,                -- Forecaster CLI run_id (nullable)
+  iso3 TEXT,
+  hazard_code TEXT,
+  metric TEXT,
+  phase TEXT,
   created_at TIMESTAMP DEFAULT now()
 );
 

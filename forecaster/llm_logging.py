@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from pythia.db.schema import connect, ensure_schema
 from forecaster.providers import estimate_cost_usd
+from forecaster.providers import ModelSpec
 
 LlmCallFn = Callable[..., Tuple[str, Dict[str, Any]] | Tuple[str, Dict[str, Any], Any]]
 
@@ -22,13 +23,18 @@ def _safe_get(d: Dict[str, Any], key: str, default: Any = 0) -> Any:
 
 async def log_forecaster_llm_call(
     *,
-    call_type: str,
     run_id: str,
     question_id: str,
-    model_name: str,
-    provider: str,
-    model_id: str,
     prompt_text: str,
+    model_spec: Optional[ModelSpec] = None,
+    model_name: Optional[str] = None,
+    provider: Optional[str] = None,
+    model_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    call_type: Optional[str] = None,
+    iso3: Optional[str] = None,
+    hazard_code: Optional[str] = None,
+    metric: Optional[str] = None,
     low_level_call: Optional[LlmCallFn] = None,
     low_level_kwargs: Optional[Dict[str, Any]] = None,
     hs_run_id: Optional[str] = None,
@@ -52,6 +58,11 @@ async def log_forecaster_llm_call(
     response: str = ""
     call_usage: Dict[str, Any] = {}
     error_text_local: str = error_text or ""
+
+    if model_spec is not None:
+        model_name = model_name or model_spec.name
+        provider = provider or model_spec.provider
+        model_id = model_id or model_spec.model_id
 
     if low_level_call is not None:
         try:
@@ -135,6 +146,7 @@ async def log_forecaster_llm_call(
 
     call_id = f"fc_{run_id}_{question_id}_{int(time.time() * 1000)}"
     ts = datetime.utcnow()
+    call_phase = phase or call_type or ""
 
     parsed_payload = parsed_json() if callable(parsed_json) else parsed_json
 
@@ -161,15 +173,19 @@ async def log_forecaster_llm_call(
                 total_tokens,
                 cost_usd,
                 error_text,
-                timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                timestamp,
+                iso3,
+                hazard_code,
+                metric,
+                phase
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 call_id,
                 run_id,
                 hs_run_id or "",
                 question_id,
-                call_type,
+                call_type or call_phase,
                 model_name,
                 provider,
                 model_id,
@@ -183,6 +199,10 @@ async def log_forecaster_llm_call(
                 cost_usd,
                 error_text_local,
                 ts,
+                iso3,
+                hazard_code,
+                metric,
+                call_phase,
             ],
         )
         con.close()

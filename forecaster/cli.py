@@ -524,6 +524,7 @@ from .providers import (
     GEMINI_MODEL_ID,
     ModelSpec,
     _get_or_client,
+    call_chat_ms,
     llm_semaphore,
     estimate_cost_usd,
 )
@@ -1514,7 +1515,7 @@ def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
     return bool(triage.get("need_full_spd", False))
 
 
-async def _call_research_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, ModelSpec]:
+def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     ms = ModelSpec(
         name="Gemini",
         provider="google",
@@ -1524,15 +1525,17 @@ async def _call_research_model(prompt_text: str) -> tuple[str, Dict[str, Any], s
     )
     start = time.time()
     try:
-        text, usage, error = await call_chat_ms(
-            ms,
-            prompt_text,
-            temperature=0.3,
-            prompt_key="research.v2",
-            prompt_version="1.0.0",
-            component="Researcher",
+        text, usage, error = asyncio.run(
+            call_chat_ms(
+                ms,
+                prompt_text=prompt,
+                temperature=0.3,
+                prompt_key="research.v2",
+                prompt_version="1.0.0",
+                component="Researcher",
+            )
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
         return "", {"elapsed_ms": elapsed_ms}, f"provider call error: {exc}", ms
 
@@ -1541,7 +1544,7 @@ async def _call_research_model(prompt_text: str) -> tuple[str, Dict[str, Any], s
     return text, usage, error, ms
 
 
-async def _call_spd_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, ModelSpec]:
+def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     ms = ModelSpec(
         name="Gemini",
         provider="google",
@@ -1551,15 +1554,17 @@ async def _call_spd_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, M
     )
     start = time.time()
     try:
-        text, usage, error = await call_chat_ms(
-            ms,
-            prompt_text,
-            temperature=0.2,
-            prompt_key="spd.v2",
-            prompt_version="1.0.0",
-            component="Forecaster",
+        text, usage, error = asyncio.run(
+            call_chat_ms(
+                ms,
+                prompt_text=prompt,
+                temperature=0.2,
+                prompt_key="spd.v2",
+                prompt_version="1.0.0",
+                component="Forecaster",
+            )
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
         return "", {"elapsed_ms": elapsed_ms}, f"provider call error: {exc}", ms
 
@@ -1580,6 +1585,7 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
     hs_run_id = question_row["hs_run_id"] or run_id
     hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
     history_summary = _build_history_summary(iso3, hz, metric)
+    resolver_features = history_summary
 
     prompt = build_research_prompt_v2(
         question={
@@ -1590,35 +1596,31 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
             "resolution_source": resolution_source,
         },
         hs_triage_entry=hs_entry,
-        resolver_features=history_summary,
+        resolver_features=resolver_features,
         model_info={},
     )
 
-    text, usage, error, ms = asyncio.run(_call_research_model(prompt))
-
-    usage = dict(usage or {})
-    if error:
-        usage.setdefault("error_text", str(error))
+    text, usage, error, ms = _call_research_model(prompt)
 
     asyncio.run(
         log_forecaster_llm_call(
-            call_type="research_v2",
             run_id=run_id,
-            hs_run_id=hs_run_id,
             question_id=qid,
-            model_name=ms.name,
-            provider=ms.provider,
-            model_id=ms.model_id,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
             prompt_text=prompt,
             response_text=text or "",
             usage=usage,
             error_text=str(error) if error else None,
+            phase="research_v2",
+            hs_run_id=hs_run_id,
         )
     )
 
     if error or not text or not text.strip():
-        if error:
-            raise RuntimeError(error)
+        logging.error("Research v2 returned error/empty for %s: %s", qid, error)
         return
 
     try:
@@ -1737,25 +1739,22 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
         research_json=research_json,
     )
 
-    text, usage, error, ms = asyncio.run(_call_spd_model(prompt))
-
-    usage = dict(usage or {})
-    if error:
-        usage.setdefault("error_text", str(error))
+    text, usage, error, ms = _call_spd_model(prompt)
 
     asyncio.run(
         log_forecaster_llm_call(
-            call_type="spd_v2",
             run_id=run_id,
-            hs_run_id=hs_run_id,
             question_id=qid,
-            model_name=ms.name,
-            provider=ms.provider,
-            model_id=ms.model_id,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
             prompt_text=prompt,
             response_text=text or "",
             usage=usage,
             error_text=str(error) if error else None,
+            phase="spd_v2",
+            hs_run_id=hs_run_id,
         )
     )
 

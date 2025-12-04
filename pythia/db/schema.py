@@ -468,6 +468,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 hs_run_id TEXT,
                 question_id TEXT,
                 call_type TEXT,
+                phase TEXT,
                 model_name TEXT,
                 provider TEXT,
                 model_id TEXT,
@@ -480,7 +481,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 total_tokens INTEGER,
                 cost_usd DOUBLE,
                 error_text TEXT,
-                timestamp TIMESTAMP
+                timestamp TIMESTAMP,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT
             );
             """,
             {
@@ -489,6 +493,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "hs_run_id": "TEXT",
                 "question_id": "TEXT",
                 "call_type": "TEXT",
+                "phase": "TEXT",
                 "model_name": "TEXT",
                 "provider": "TEXT",
                 "model_id": "TEXT",
@@ -502,6 +507,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "cost_usd": "DOUBLE",
                 "error_text": "TEXT",
                 "timestamp": "TIMESTAMP",
+                "iso3": "TEXT",
+                "hazard_code": "TEXT",
+                "metric": "TEXT",
             },
         )
 
