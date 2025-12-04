@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ import forecaster.prompts as prompts
 from forecaster.ensemble import _parse_spd_json, MemberOutput, EnsembleResult  # type: ignore
 from forecaster.aggregate import aggregate_spd  # type: ignore
 from forecaster.cli import _write_spd_ensemble_to_db, SPD_CLASS_BINS  # type: ignore
+from forecaster.providers import ModelSpec
+from pythia.db import schema as db_schema
 
 
 def test_parse_spd_json_basic():
@@ -247,6 +250,64 @@ def test_pythia_spd_hex_qid_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> N
         assert row.get("question_type") == "spd"
         # Sanity: we should have at least one per-model SPD JSON field
         assert any(k.startswith("spd_json__") for k in row.keys())
+
+
+@pytest.mark.db
+def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SPD v2 should log and write outputs even if research is missing."""
+
+    db_path = tmp_path / "spd_missing_research.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "_build_history_summary", lambda iso3, hazard_code, metric: {"history": "stub"})
+    monkeypatch.setattr(cli, "_load_research_json", lambda run_id, question_id: None)
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda hs_run_id, iso3, hz: {})
+
+    fake_spd = {
+        "spds": {
+            "month_1": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
+            "month_2": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
+        }
+    }
+    fake_ms = ModelSpec(name="stub", provider="test", model_id="m1", active=True, purpose="spd_v2")
+
+    def fake_call_spd_model(prompt: str):
+        return json.dumps(fake_spd), {"elapsed_ms": 5}, None, fake_ms
+
+    monkeypatch.setattr(cli, "_call_spd_model", fake_call_spd_model)
+
+    question_row = {
+        "question_id": "q-test",
+        "iso3": "ETH",
+        "hazard_code": "ACO",
+        "metric": "PA",
+        "target_month": "2024-06",
+        "hs_run_id": None,
+    }
+
+    cli._run_spd_for_question("fc_test", question_row)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        ensemble_count = con.execute(
+            "SELECT COUNT(*) FROM forecasts_ensemble WHERE run_id=? AND question_id=?",
+            ["fc_test", "q-test"],
+        ).fetchone()[0]
+        llm_call_count = con.execute(
+            "SELECT COUNT(*) FROM llm_calls WHERE run_id=? AND call_type='spd_v2' AND question_id=?",
+            ["fc_test", "q-test"],
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert ensemble_count > 0
+    assert llm_call_count > 0
 
 
 def test_spd_prompt_template_allows_literal_json_braces() -> None:

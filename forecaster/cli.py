@@ -1579,81 +1579,104 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
     metric = question_row["metric"]
+    try:
+        resolution_source = _infer_resolution_source(hz, metric)
 
-    resolution_source = _infer_resolution_source(hz, metric)
+        hs_run_id = question_row["hs_run_id"] or run_id
+        hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+        history_summary = _build_history_summary(iso3, hz, metric)
+        resolver_features = history_summary
 
-    hs_run_id = question_row["hs_run_id"] or run_id
-    hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
-    history_summary = _build_history_summary(iso3, hz, metric)
-    resolver_features = history_summary
-
-    prompt = build_research_prompt_v2(
-        question={
-            "question_id": qid,
-            "iso3": iso3,
-            "hazard_code": hz,
-            "metric": metric,
-            "resolution_source": resolution_source,
-        },
-        hs_triage_entry=hs_entry,
-        resolver_features=resolver_features,
-        model_info={},
-    )
-
-    text, usage, error, ms = _call_research_model(prompt)
-
-    asyncio.run(
-        log_forecaster_llm_call(
-            run_id=run_id,
-            question_id=qid,
-            iso3=iso3,
-            hazard_code=hz,
-            metric=metric,
-            model_spec=ms,
-            prompt_text=prompt,
-            response_text=text or "",
-            usage=usage,
-            error_text=str(error) if error else None,
-            phase="research_v2",
-            hs_run_id=hs_run_id,
+        prompt = build_research_prompt_v2(
+            question={
+                "question_id": qid,
+                "iso3": iso3,
+                "hazard_code": hz,
+                "metric": metric,
+                "resolution_source": resolution_source,
+            },
+            hs_triage_entry=hs_entry,
+            resolver_features=resolver_features,
+            model_info={},
         )
-    )
 
-    if error or not text or not text.strip():
-        logging.error("Research v2 returned error/empty for %s: %s", qid, error)
+        text, usage, error, ms = _call_research_model(prompt)
+
+        asyncio.run(
+            log_forecaster_llm_call(
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                model_spec=ms,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage,
+                error_text=str(error) if error else None,
+                phase="research_v2",
+                hs_run_id=hs_run_id,
+            )
+        )
+
+        if error or not text or not text.strip():
+            logging.error("Research v2 returned error/empty for %s: %s", qid, error)
+            return
+
+        try:
+            research = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raw_dir = Path("debug/research_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}.txt"
+            raw_path.write_text(text or "", encoding="utf-8")
+            logging.error(
+                "Research JSON decode failed for %s: %s (saved to %s)",
+                qid,
+                exc,
+                raw_path,
+            )
+            return
+        con = connect(read_only=False)
+        try:
+            con.execute(
+                """
+                INSERT INTO question_research
+                  (run_id, question_id, iso3, hazard_code, metric, research_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [run_id, qid, iso3, hz, metric, json.dumps(research)],
+            )
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        logging.error("Research v2 hard failure for %s: %s", qid, exc)
         return
 
-    try:
-        research = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raw_dir = Path("debug/research_raw")
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = raw_dir / f"{run_id}__{qid}.txt"
-        raw_path.write_text(text or "", encoding="utf-8")
-        logging.error(
-            "Research JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
-        )
-        return
-    con = connect(read_only=False)
-    try:
-        con.execute(
-            """
-            INSERT INTO question_research
-              (run_id, question_id, iso3, hazard_code, metric, research_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [run_id, qid, iso3, hz, metric, json.dumps(research)],
-        )
-    finally:
-        con.close()
 
-
-def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, Any], human_explanation: str, usage: Dict[str, Any]) -> None:
+def _write_spd_outputs(
+    run_id: str,
+    question_row: duckdb.Row,
+    spd_obj: Dict[str, Any],
+    *,
+    resolution_source: str,
+    usage: Dict[str, Any],
+) -> None:
     qid = question_row["question_id"]
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
     metric = question_row["metric"]
     bucket_labels = SPD_CLASS_BINS_FATALITIES if metric.upper() == "FATALITIES" else SPD_CLASS_BINS_PA
+
+    spds = spd_obj.get("spds") if isinstance(spd_obj, dict) else None
+    if not isinstance(spds, dict):
+        return
+
+    human_explanation = spd_obj.get("human_explanation") if isinstance(spd_obj, dict) else None
+    human_explanation = human_explanation or ""
+
+    spd_payload = dict(spd_obj)
+    spd_payload.setdefault("resolution_source", resolution_source)
 
     con = connect(read_only=False)
     try:
@@ -1661,7 +1684,7 @@ def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, An
             probs = payload.get("probs") if isinstance(payload, dict) else None
             if not probs:
                 continue
-            for bucket_index, prob in enumerate(list(probs)[: len(bucket_labels)]):
+            for bucket_index, prob in enumerate(list(probs)[: len(bucket_labels)], start=1):
                 con.execute(
                     """
                     INSERT INTO forecasts_raw (
@@ -1681,7 +1704,7 @@ def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, An
                         usage.get("prompt_tokens"),
                         usage.get("completion_tokens"),
                         usage.get("total_tokens"),
-                        json.dumps(spds),
+                        json.dumps(spd_payload),
                         human_explanation,
                     ],
                 )
@@ -1721,9 +1744,11 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
     hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
     history_summary = _build_history_summary(iso3, hz, metric)
     research_json = _load_research_json(run_id, qid)
-    if not research_json:
-        _record_no_forecast(run_id, qid, iso3, hz, metric, "missing research_json")
-        return
+    if not isinstance(research_json, dict):
+        research_json = {
+            "note": "missing_research_v2",
+            "base_rate_hint": "Use Resolver history + HS triage + model prior.",
+        }
 
     prompt = build_spd_prompt_v2(
         question={
@@ -1791,7 +1816,13 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
         _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
         return
 
-    _write_spd_outputs(run_id, question_row, spds, spd_obj.get("human_explanation") or "", usage or {})
+    _write_spd_outputs(
+        run_id,
+        question_row,
+        spd_obj,
+        resolution_source=resolution_source,
+        usage=usage or {},
+    )
 
 def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: str) -> Optional[str]:
     """

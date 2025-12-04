@@ -230,6 +230,13 @@ jobs:
 
           python scripts/post_run_diagnostics.py --db duckdb:///data/resolver.duckdb
 
+      - name: Pythia v2 run summary
+        run: |
+          set -e
+          python -m scripts.dump_pythia_v2_run_summary
+        env:
+          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+
       - name: Dump first forecast prompt
         run: python -m scripts.dump_first_forecast_prompt
 
