@@ -29,6 +29,19 @@ def _get_latest_run_id(con) -> str | None:
         """
         SELECT run_id, MAX(created_at) AS t
         FROM forecasts_ensemble
+        WHERE run_id LIKE 'fc_%'
+        GROUP BY run_id
+        ORDER BY t DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row:
+        return row[0]
+
+    row = con.execute(
+        """
+        SELECT run_id, MAX(created_at) AS t
+        FROM forecasts_ensemble
         GROUP BY run_id
         ORDER BY t DESC
         LIMIT 1

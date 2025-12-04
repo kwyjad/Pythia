@@ -1654,12 +1654,29 @@ def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
         return
 
 
-def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, Any], human_explanation: str, usage: Dict[str, Any]) -> None:
+def _write_spd_outputs(
+    run_id: str,
+    question_row: duckdb.Row,
+    spd_obj: Dict[str, Any],
+    *,
+    resolution_source: str,
+    usage: Dict[str, Any],
+) -> None:
     qid = question_row["question_id"]
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
     metric = question_row["metric"]
     bucket_labels = SPD_CLASS_BINS_FATALITIES if metric.upper() == "FATALITIES" else SPD_CLASS_BINS_PA
+
+    spds = spd_obj.get("spds") if isinstance(spd_obj, dict) else None
+    if not isinstance(spds, dict):
+        return
+
+    human_explanation = spd_obj.get("human_explanation") if isinstance(spd_obj, dict) else None
+    human_explanation = human_explanation or ""
+
+    spd_payload = dict(spd_obj)
+    spd_payload.setdefault("resolution_source", resolution_source)
 
     con = connect(read_only=False)
     try:
@@ -1667,7 +1684,7 @@ def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, An
             probs = payload.get("probs") if isinstance(payload, dict) else None
             if not probs:
                 continue
-            for bucket_index, prob in enumerate(list(probs)[: len(bucket_labels)]):
+            for bucket_index, prob in enumerate(list(probs)[: len(bucket_labels)], start=1):
                 con.execute(
                     """
                     INSERT INTO forecasts_raw (
@@ -1687,7 +1704,7 @@ def _write_spd_outputs(run_id: str, question_row: duckdb.Row, spds: Dict[str, An
                         usage.get("prompt_tokens"),
                         usage.get("completion_tokens"),
                         usage.get("total_tokens"),
-                        json.dumps(spds),
+                        json.dumps(spd_payload),
                         human_explanation,
                     ],
                 )
@@ -1729,8 +1746,8 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
     research_json = _load_research_json(run_id, qid)
     if not isinstance(research_json, dict):
         research_json = {
-            "error": "missing_research_v2",
-            "note": "Researcher v2 did not produce a brief; base-rate and HS triage should drive the forecast.",
+            "note": "missing_research_v2",
+            "base_rate_hint": "Use Resolver history + HS triage + model prior.",
         }
 
     prompt = build_spd_prompt_v2(
@@ -1799,7 +1816,13 @@ def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
         _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
         return
 
-    _write_spd_outputs(run_id, question_row, spds, spd_obj.get("human_explanation") or "", usage or {})
+    _write_spd_outputs(
+        run_id,
+        question_row,
+        spd_obj,
+        resolution_source=resolution_source,
+        usage=usage or {},
+    )
 
 def _maybe_dump_raw_gtmc1(content: str, *, run_id: str, question_id: str) -> Optional[str]:
     """
