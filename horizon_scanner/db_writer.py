@@ -125,6 +125,7 @@ DISPLACEMENT_TEMPLATES = {
 }
 
 BLOCKED_HAZARDS = {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
+BLOCKED_HAZARDS.add("ACO")
 ALLOWED = set(HAZARD_CONFIG.keys())
 CONFLICT_HAZARDS = {"CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
 
@@ -266,7 +267,7 @@ def _build_questions_for_scenario(
     hazard_code = (scenario.get("hazard_code") or "").upper()
     cfg = HAZARD_CONFIG.get(hazard_code, {})
 
-    if cfg.get("blocked"):
+    if cfg.get("blocked") or hazard_code in BLOCKED_HAZARDS:
         logging.info("[hs] Blocking question for hazard=%s (no resolution yet).", hazard_code)
         return []
 
