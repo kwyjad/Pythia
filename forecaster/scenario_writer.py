@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pythia.db.schema import connect
 
 from .hs_utils import load_hs_triage_entry
+from .llm_logging import log_forecaster_llm_call
 from .prompts import build_scenario_prompt
 
 LOG = logging.getLogger(__name__)
@@ -199,12 +200,30 @@ async def _run_scenario_for_question(
             component="ScenarioWriter",
         )
 
+    text: str = ""
+    usage: Dict[str, Any] = {}
+    error: Optional[str] = None
     try:
         text, usage, error = await asyncio.wait_for(
             _call(),
             timeout=SCENARIO_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
+        usage = {"elapsed_ms": SCENARIO_TIMEOUT_SECONDS * 1000}
+        await log_forecaster_llm_call(
+            run_id=run_id,
+            question_id=qid,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
+            prompt_text=prompt,
+            response_text=text,
+            usage=usage,
+            error_text=f"Scenario timeout after {SCENARIO_TIMEOUT_SECONDS}s",
+            phase="scenario_v2",
+            hs_run_id=hs_run_id,
+        )
         LOG.warning(
             "Scenario LLM timeout for %s (%s/%s/%s) after %ss",
             qid,
@@ -214,13 +233,43 @@ async def _run_scenario_for_question(
             SCENARIO_TIMEOUT_SECONDS,
         )
         return
-    except Exception:
+    except Exception as exc:
+        usage = {"elapsed_ms": int((time.time() - start) * 1000)}
+        await log_forecaster_llm_call(
+            run_id=run_id,
+            question_id=qid,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
+            prompt_text=prompt,
+            response_text=text,
+            usage=usage,
+            error_text=f"{type(exc).__name__}: {exc}",
+            phase="scenario_v2",
+            hs_run_id=hs_run_id,
+        )
         LOG.exception("Scenario LLM call failed for %s", qid)
         return
 
     elapsed_ms = int((time.time() - start) * 1000)
     usage = dict(usage or {})
     usage.setdefault("elapsed_ms", elapsed_ms)
+
+    await log_forecaster_llm_call(
+        run_id=run_id,
+        question_id=qid,
+        iso3=iso3,
+        hazard_code=hz,
+        metric=metric,
+        model_spec=ms,
+        prompt_text=prompt,
+        response_text=text or "",
+        usage=usage,
+        error_text=str(error) if error else None,
+        phase="scenario_v2",
+        hs_run_id=hs_run_id,
+    )
 
     if error or not text or not text.strip():
         LOG.warning("Scenario LLM returned error/empty for %s: %s", qid, error)

@@ -33,6 +33,18 @@ SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
     "DI": ["PA"],
 }
 
+HAZARD_HUMAN_NAMES = {
+    "DR": "drought",
+    "FL": "flooding",
+    "HW": "heatwave",
+    "TC": "tropical cyclone",
+}
+
+COUNTRY_NAMES = {
+    "ETH": "Ethiopia",
+    "SOM": "Somalia",
+}
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -93,27 +105,54 @@ def _metrics_for_hazard(hz: str) -> List[str]:
     return SUPPORTED_HAZARD_METRICS.get(hz_up, [])
 
 
-def _build_wording(iso3: str, hazard_code: str, metric: str) -> str:
-    hz = (hazard_code or "").upper()
-    mt = (metric or "").upper()
-    iso3_up = (iso3 or "").upper()
+def _country_label(iso3: str) -> str:
+    return COUNTRY_NAMES.get((iso3 or "").upper(), (iso3 or "").upper())
 
-    if mt == "FATALITIES":
+
+def _build_question_wording(
+    iso3: str,
+    hazard_code: str,
+    metric: str,
+    window_start_date: date,
+    window_end_date: date,
+) -> str:
+    iso3_up = (iso3 or "").upper()
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+    country = _country_label(iso3_up)
+
+    start_str = window_start_date.isoformat()
+    end_str = window_end_date.isoformat()
+
+    if hz == "ACE" and m == "PA":
         return (
-            f"Monthly battle-related fatalities in {iso3_up} tied to hazard {hz}, "
-            "as recorded by ACLED."
+            f"How many people will be displaced each month by armed conflict in {country} "
+            f"between {start_str} and {end_str}, as resolved by IDMC?"
         )
-    if mt == "PA" and hz == "DI":
+
+    if hz == "ACE" and m == "FATALITIES":
         return (
-            f"Monthly new arrivals into {iso3_up} due to displacement inflows "
-            "from neighbouring countries (no Resolver base rate)."
+            f"How many people will be killed each month by armed conflict in {country} "
+            f"between {start_str} and {end_str}, as resolved by ACLED?"
         )
-    if mt == "PA":
+
+    if hz == "DI" and m == "PA":
         return (
-            f"Monthly people affected or displaced in {iso3_up} for hazard {hz}, "
-            "as recorded by the canonical Pythia resolution source."
+            f"How many people will enter {country} because of armed conflict in a neighbouring country "
+            f"between {start_str} and {end_str}?"
         )
-    return f"Monthly impact in {iso3_up} for hazard {hz} and metric {mt}."
+
+    if hz in {"DR", "FL", "HW", "TC"} and m == "PA":
+        hazard_name = HAZARD_HUMAN_NAMES.get(hz, hz)
+        return (
+            f"How many people will be affected each month by {hazard_name} in {country} "
+            f"between {start_str} and {end_str}, as resolved by EM-DAT?"
+        )
+
+    return (
+        f"How many people will be affected each month in {country} by hazard {hz} "
+        f"between {start_str} and {end_str}?"
+    )
 
 
 def _compute_target_and_window(today: date) -> Tuple[str, date, date]:
@@ -154,6 +193,8 @@ def _load_triage_rows(
         tier_str = (tier or "").lower()
         need = bool(need_full_spd) or tier_str in {"priority", "watchlist"}
         score_f = float(score or 0.0)
+        if hz_up == "ACO":
+            continue
         if not need:
             continue
         if not _metrics_for_hazard(hz_up):
@@ -195,7 +236,9 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
             metrics = _metrics_for_hazard(th.hazard_code)
             for mt in metrics:
                 qid = f"{th.iso3}_{th.hazard_code}_{mt}"
-                wording = _build_wording(th.iso3, th.hazard_code, mt)
+                wording = _build_question_wording(
+                    th.iso3, th.hazard_code, mt, opening, closing
+                )
                 meta = {
                     "source": "hs_triage",
                     "hs_run_id": run_id,

@@ -193,10 +193,26 @@ def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
 def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
     """Build Resolver history summary per hazard/metric rules."""
 
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+
+    if hz == "DI":
+        return {
+            "source": "NONE",
+            "history_length_months": 0,
+            "recent_mean": None,
+            "recent_max": None,
+            "trend": "uncertain",
+            "last_6m_values": [],
+            "data_quality": "low",
+            "notes": (
+                "DI (displacement inflow) has no Resolver base rate; rely on HS + research "
+                "and exogenous neighbour shocks."
+            ),
+        }
+
     con = connect(read_only=True)
     try:
-        hz = (hazard_code or "").upper()
-        m = (metric or "").upper()
 
         if m == "FATALITIES":
             try:
@@ -262,17 +278,27 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                 "notes": "ACLED coverage is relatively strong for this country/hazard.",
             }
 
-        if m == "PA" and hz in {"ACO", "ACE", "CU", "DI"}:
+        if m == "PA" and hz in {"ACO", "ACE", "CU"}:
             try:
                 rows = con.execute(
                     """
-                    SELECT ym, value_stock
+                    SELECT
+                        ym,
+                        SUM(
+                            CASE
+                                WHEN lower(metric) = 'new_displacements' THEN COALESCE(value_new, 0)
+                                WHEN lower(metric) = 'idp_displacement_new_dtm' THEN COALESCE(value_new, 0)
+                                ELSE 0
+                            END
+                        ) AS flow_value
                     FROM facts_deltas
                     WHERE iso3 = ?
-                      AND metric = 'idp_displacement_stock_idmc'
+                      AND hazard_code = ?
+                      AND lower(series_semantics) = 'new'
+                      AND lower(metric) IN ('new_displacements', 'idp_displacement_new_dtm')
                     ORDER BY ym
                     """,
-                    [iso3],
+                    [iso3, hz],
                 ).fetchall()
             except Exception as exc:
                 logging.warning(
@@ -361,7 +387,7 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
 
             if not rows:
                 return {
-                    "source": "none",
+                    "source": "NONE",
                     "history_length_months": 0,
                     "recent_mean": None,
                     "recent_max": None,
@@ -397,23 +423,8 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                 "notes": "EM-DAT often only records large disasters; treat as a noisy base-rate signal.",
             }
 
-        if hz == "DI" and m == "PA":
-            return {
-                "source": "none",
-                "history_length_months": 0,
-                "recent_mean": None,
-                "recent_max": None,
-                "trend": "uncertain",
-                "last_6m_values": [],
-                "data_quality": "low",
-                "notes": (
-                    "Resolver does not currently provide a suitable base-rate series for displacement inflow; "
-                    "treat the base rate as unknown and lean on HS + research."
-                ),
-            }
-
         return {
-            "source": "none",
+            "source": "NONE",
             "history_length_months": 0,
             "recent_mean": None,
             "recent_max": None,
@@ -430,15 +441,15 @@ def _infer_resolution_source(hazard_code: str, metric: str) -> str:
     hz = (hazard_code or "").upper()
     mt = (metric or "").upper()
 
-    if mt == "FATALITIES":
+    if mt == "FATALITIES" and hz in {"ACE"}:
         return "ACLED"
-    if mt == "PA" and hz in {"ACO", "ACE", "CU"}:
+    if mt == "PA" and hz in {"ACE", "ACO", "CU"}:
         return "IDMC"
     if mt == "PA" and hz in {"DR", "FL", "TC", "HW"}:
         return "EM-DAT"
     if mt == "PA" and hz == "DI":
         return "NONE"
-    return "UNKNOWN"
+    return "NONE"
 
 
 def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:

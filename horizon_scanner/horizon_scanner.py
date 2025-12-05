@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -26,6 +27,7 @@ from horizon_scanner.db_writer import (
     log_hs_run_to_db,
 )
 from horizon_scanner.prompts import build_hs_triage_prompt
+from horizon_scanner.llm_logging import log_hs_llm_call
 from pythia.db.schema import connect as pythia_connect, ensure_schema
 
 # Ensure package imports resolve when executed as a script
@@ -204,14 +206,15 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
         con.close()
 
 
-async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str]:
+async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     spec = ModelSpec(
         name="Gemini",
         provider="google",
         model_id=_resolve_hs_model(),
         active=True,
     )
-    return await call_chat_ms(
+    start = time.time()
+    text, usage, error = await call_chat_ms(
         spec,
         prompt_text,
         temperature=HS_TEMPERATURE,
@@ -219,6 +222,9 @@ async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str]:
         prompt_version="1.0.0",
         component="HorizonScanner",
     )
+    usage = usage or {}
+    usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
+    return text, usage, error, spec
 
 
 def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
@@ -235,12 +241,35 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             model_info={},
         )
 
-        text, usage, error = asyncio.run(_call_hs_model(prompt))
+        call_start = time.time()
+        text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt))
+        usage = usage or {}
+        usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
         if error:
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code="",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage,
+                error_text=str(error),
+            )
             logger.error("HS triage model error for %s: %s", iso3, error)
             return
 
         if not text or not text.strip():
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code="",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage,
+                error_text="empty response",
+            )
             logger.error("HS triage LLM returned empty response for %s", iso3)
             return
 
@@ -251,6 +280,16 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             debug_dir.mkdir(parents=True, exist_ok=True)
             raw_path = debug_dir / f"{run_id}__{iso3}.txt"
             raw_path.write_text(text, encoding="utf-8")
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code="",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text,
+                usage=usage,
+                error_text="missing JSON fences",
+            )
             logger.error(
                 "HS triage response missing JSON fences for %s; raw saved to %s",
                 iso3,
@@ -267,6 +306,16 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             debug_dir.mkdir(parents=True, exist_ok=True)
             raw_path = debug_dir / f"{run_id}__{iso3}.txt"
             raw_path.write_text(text, encoding="utf-8")
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code="",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text,
+                usage=usage,
+                error_text=f"json decode failed: {exc}",
+            )
             logger.error(
                 "HS triage JSON decode failed for %s: %s (raw saved to %s)",
                 iso3,
@@ -274,6 +323,31 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
                 raw_path,
             )
             return
+
+        hazards = (triage.get("hazards") or {}).keys()
+        if not hazards:
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code="",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text,
+                usage=usage,
+                error_text=None,
+            )
+        else:
+            for hz_code in hazards:
+                log_hs_llm_call(
+                    hs_run_id=run_id,
+                    iso3=iso3,
+                    hazard_code=hz_code,
+                    model_spec=model_spec,
+                    prompt_text=prompt,
+                    response_text=text,
+                    usage=usage,
+                    error_text=None,
+                )
 
         _write_hs_triage(run_id, iso3, triage)
 

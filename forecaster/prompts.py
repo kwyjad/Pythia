@@ -777,10 +777,31 @@ def build_research_prompt_v2(
     hazard = question.get("hazard_code", "")
     metric = question.get("metric", "")
     resolution_source = question.get("resolution_source", "")
+    wording = question.get("wording") or question.get("title") or ""
     model_info = model_info or {}
 
-    return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{_json_dumps_for_prompt(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n```\n\nModel/data notes:\n```json\n{_json_dumps_for_prompt(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n\nYour tasks:\n\n1. Summarise the base rate of {metric} for this hazard/country using:\n   * Resolver history (with its caveats),\n   * high-quality external analytical sources (UN, ACAPS, etc.),\n   * your own knowledge of the country context.\n2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {{\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {{\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    }},\n    \"external_support\": {{\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }}\n  }},\n  \"update_signals\": [\n    {{\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6}}\n  ],\n  \"regime_shift_signals\": [\n    {{\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3}}\n  ],\n  \"data_gaps\": [\"...\"]\n}}\n```\n\nDo not include any text outside the JSON.\n"""
+    di_note = ""
+    if (hazard or "").upper() == "DI":
+        di_note = (
+            "Note: this DI hazard concerns incoming displacement flows from neighbouring countries into "
+            f"{iso3}. Focus on exogenous drivers (e.g. conflicts or crises in neighbouring states), not on purely internal "
+            "displacement dynamics.\n\n"
+        )
 
+    return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nQuestion metadata:\n```json\n{_json_dumps_for_prompt(question, indent=2)}\n```\n\nNatural-language question:\n"{wording}"\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{_json_dumps_for_prompt(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n```\n\nModel/data notes:\n```json\n{_json_dumps_for_prompt(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n{di_note}Your tasks:\n\n1. Summarise the base rate of {metric} for this hazard/country using:\n   * Resolver history (with its caveats),\n   * high-quality external analytical sources (UN, ACAPS, etc.),\n   * your own knowledge of the country context.\n2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nEmphasise major deviations from the historical base rate only when strongly supported by evidence.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {{\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {{\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    }},\n    \"external_support\": {{\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }}\n  }},\n  \"update_signals\": [\n    {{\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6}}\n  ],\n  \"regime_shift_signals\": [\n    {{\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3}}\n  ],\n  \"data_gaps\": [\"...\"]\n}}\n```\n\nDo not include any text outside the JSON.\n"""
+
+
+def _bucket_labels_for_question(question: Dict[str, Any]) -> list[str]:
+    """Return the correct 5 bucket labels for this question based on metric/hazard."""
+
+    metric = (question.get("metric") or "").upper()
+    explicit = question.get("bucket_labels") or question.get("class_bins")
+    if isinstance(explicit, list) and len(explicit) == 5:
+        return [str(x) for x in explicit]
+
+    if metric == "FATALITIES":
+        return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
+    return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
 
 def build_spd_prompt_v2(
     question: Dict[str, Any],
@@ -790,14 +811,44 @@ def build_spd_prompt_v2(
 ) -> str:
     """Assemble the SPD v2 forecasting prompt with structured context."""
 
+    iso3 = question.get("iso3", "")
+    hazard = question.get("hazard_code", "")
+    metric = (question.get("metric") or "").upper()
+    resolution_source = (question.get("resolution_source") or "").upper()
+    wording = question.get("wording") or question.get("title") or ""
+
     base_rate_note = ""
     if (history_summary.get("source") or "").lower() == "none":
         base_rate_note = (
-            "- Resolver does not currently provide a base-rate series for this hazard; treat the base rate as unknown and lean on HS triage + research.\n"
+            "- Resolver does not currently provide a base-rate series for this hazard; treat the base rate as uncertain and lean more heavily on HS triage + research.\n"
         )
 
+    buckets = _bucket_labels_for_question(question)
+    if metric == "FATALITIES" or "ACLED" in resolution_source:
+        unit_phrase = "people killed (conflict fatalities) per month"
+    else:
+        unit_phrase = "people affected or displaced per month"
+
+    di_line = ""
+    if metric == "PA" and (hazard or "").upper() == "DI":
+        di_line = (
+            "- For this DI question, focus on incoming flows driven by events in neighbouring countries around "
+            f"{iso3} (e.g. conflicts or crises across the border). Do not treat purely internal displacement as the target metric.\n"
+        )
+
+    nat_line = ""
+    if (hazard or "").upper() in {"DR", "FL", "HW", "TC"} and metric == "PA":
+        nat_line = (
+            "- Treat PA as people affected by the natural hazard event (as EM-DAT would record them), not conflict fatalities or incidental impacts.\n"
+        )
+
+    bucket_list_str = ", ".join([f'\"{b}\"' for b in buckets])
+
     return (
-        "You are a probabilistic forecaster. Produce a six-month SPD for the question below.\n\n"
+        "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
+        "Your task is to produce a six-month PROBABILITY DISTRIBUTION over five impact buckets for the question below, where each month’s probabilities sum to 1.0.\n\n"
+        "Natural-language question:\n"
+        f"\"{wording}\"\n\n"
         "Question metadata:\n"
         "```json\n"
         f"{_json_dumps_for_prompt(question, indent=2)}\n"
@@ -814,22 +865,30 @@ def build_spd_prompt_v2(
         "```json\n"
         f"{_json_dumps_for_prompt(research_json, indent=2)}\n"
         "```\n\n"
-        "Instructions:\n"
-        "- Provide a five-bucket SPD for each of the next 6 months using the bucket labels in the question metadata.\n"
-        "- Use the history summary as one signal; do not over-trust it if short or missing.\n"
+        "Buckets:\n"
+        f"- These buckets represent {unit_phrase} at the country level.\n"
+        f"- Bucket labels: {bucket_list_str}\n\n"
+        "Instructions (Bayesian SPD):\n"
+        "- Start from a base rate (prior) implied by historical data and reference classes.\n"
+        "- Use the research and HS triage to identify update signals that push risk up or down.\n"
+        "- Avoid large deviations from the base rate unless the evidence strongly supports them.\n"
+        f"{di_line}"
+        f"{nat_line}"
         f"{base_rate_note}"
         "- If Resolver history is missing (`source` = \"none\"), rely on HS + research to shape the base rate.\n"
-        "- Return a single JSON object only.\n\n"
-        "Return a JSON object with both probabilities and a short rationale:\n"
+        "- Think explicitly about tail risks (extreme buckets) but keep their probabilities calibrated.\n\n"
+        "Output instructions:\n"
+        "- Return ONLY a single JSON object with this schema (no extra commentary):\n\n"
         "```json\n"
         "{\n"
         '  "spds": {\n'
-        '    "YYYY-MM": {"buckets": ["<5","5-<25","25-<100","100-<500",">=500"], "probs": [0.7,0.2,0.07,0.02,0.01]},\n'
-        '    "YYYY-MM+1": {"buckets": ["<5","5-<25","25-<100","100-<500",">=500"], "probs": [0.7,0.2,0.07,0.02,0.01]}\n'
+        f'    "YYYY-MM": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}},\n'
+        f'    "YYYY-MM+1": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}}\n'
         "  },\n"
-        '  "human_explanation": "3–4 sentences explaining the drivers and uncertainties."\n'
+        '  "human_explanation": "3–4 sentences summarising the base rate, key update signals, and why any large deviations from the base rate are justified."\n'
         "}\n"
         "```\n"
+        "Each `probs` array must contain exactly five numbers between 0 and 1 that sum to ~1.0.\n"
         "Do not include any text outside the JSON.\n"
     )
 
