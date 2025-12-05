@@ -313,47 +313,38 @@ def _load_llm_calls_for_question(
 def _aggregate_usage_by_phase(
     con: duckdb.DuckDBPyConnection, run_id: str
 ) -> dict[str, dict[str, float]]:
-    """Aggregate tokens and costs per phase for a run (plus HS rows)."""
+    """
+    Aggregate token and cost usage by phase for a given forecast run.
 
-    hs_run_ids = {
-        r[0]
-        for r in con.execute(
-            """
-            SELECT DISTINCT COALESCE(q.hs_run_id, q.run_id)
-            FROM questions q
-            JOIN forecasts_ensemble fe
-              ON fe.question_id = q.question_id
-             AND fe.run_id = ?
-            WHERE COALESCE(q.hs_run_id, '') <> ''
-            """,
-            [run_id],
-        ).fetchall()
-        if r and r[0]
-    }
+    We:
+      - Include all llm_calls rows where run_id = <run_id>
+      - Optionally include HS triage calls (phase='hs_triage'), even if their run_id is NULL
+        or not equal to <run_id>, by matching on phase alone.
 
-    hs_run_ids = hs_run_ids or {run_id}
-
+    We DO NOT join to questions here to avoid schema assumptions such as q.run_id.
+    """
+    # Load all calls for this run (research_v2, spd_v2, scenario_v2, etc.)
     rows = _fetch_llm_rows(
         con,
         """
         SELECT *
         FROM llm_calls
         WHERE run_id = ?
-           OR (phase = 'hs_triage' AND run_id IN (__hs_placeholder__))
-        """.replace("__hs_placeholder__", ",".join(["?"] * len(hs_run_ids))),
-        [run_id, *hs_run_ids],
+           OR (phase = 'hs_triage')
+        """,
+        [run_id],
     )
 
-    aggregates: dict[str, dict[str, float]] = {}
+    out: dict[str, dict[str, float]] = {}
     for row in rows:
         phase = row.get("phase") or "unknown"
-        usage_raw = _build_usage_json_from_row(row)
+        usage_raw = row.get("usage_json") or "{}"
         try:
             usage = json.loads(usage_raw)
         except Exception:
             usage = {}
 
-        phase_totals = aggregates.setdefault(
+        phase_acc = out.setdefault(
             phase,
             {
                 "prompt_tokens": 0.0,
@@ -362,14 +353,15 @@ def _aggregate_usage_by_phase(
                 "total_cost_usd": 0.0,
             },
         )
-        phase_totals["prompt_tokens"] += float(usage.get("prompt_tokens") or 0.0)
-        phase_totals["completion_tokens"] += float(usage.get("completion_tokens") or 0.0)
-        phase_totals["total_tokens"] += float(usage.get("total_tokens") or 0.0)
-        phase_totals["total_cost_usd"] += float(
+        phase_acc["prompt_tokens"] += float(usage.get("prompt_tokens") or 0.0)
+        phase_acc["completion_tokens"] += float(usage.get("completion_tokens") or 0.0)
+        phase_acc["total_tokens"] += float(usage.get("total_tokens") or 0.0)
+        # For backwards compatibility, accept either total_cost_usd or cost_usd
+        phase_acc["total_cost_usd"] += float(
             usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0
         )
 
-    return aggregates
+    return out
 
 
 def _load_triage_tier(
