@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Tuple
 import duckdb
 from resolver.db import duckdb_io
 
+try:
+    from forecaster.prompts import _bucket_labels_for_question  # type: ignore
+except ImportError:  # pragma: no cover - optional helper
+    _bucket_labels_for_question = None
+
 
 def _fetch_llm_rows(
     con: duckdb.DuckDBPyConnection,
@@ -38,11 +43,101 @@ def _build_usage_json_from_row(row: dict[str, Any]) -> str:
         "elapsed_ms",
         "cost_usd",
         "cost",
+        "input_cost_usd",
+        "output_cost_usd",
+        "total_cost_usd",
     ):
         if key in row and row[key] is not None:
             usage[key] = row[key]
 
     return json.dumps(usage) if usage else "{}"
+
+
+def _load_bucket_centroids_for_question(
+    con: duckdb.DuckDBPyConnection,
+    hazard_code: str,
+    metric: str,
+    bucket_labels: List[str],
+) -> List[float]:
+    """
+    Return centroids (aligned to bucket_labels) for a hazard/metric.
+    Prefer DB bucket_centroids; fallback to default PA/FATALITIES values.
+    """
+
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+
+    try:
+        rows = con.execute(
+            """
+            SELECT bucket_index, centroid
+            FROM bucket_centroids
+            WHERE hazard_code = ? AND metric = ?
+            ORDER BY bucket_index
+            """,
+            [hz, m],
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    if rows:
+        centroids: List[float] = [0.0] * len(bucket_labels)
+        for idx, centroid in rows:
+            # bucket_index may be 0- or 1-based; normalise to 0-based
+            i = int(idx) - 1 if int(idx) > 0 else int(idx)
+            if 0 <= i < len(centroids):
+                centroids[i] = float(centroid or 0.0)
+        return centroids
+
+    if m == "FATALITIES":
+        return [0.0, 15.0, 62.0, 300.0, 700.0]
+    return [0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0]
+
+
+def _get_bucket_labels_for_question(question: Dict[str, Any]) -> List[str]:
+    explicit = question.get("bucket_labels") or question.get("class_bins")
+    if isinstance(explicit, list) and len(explicit) > 0:
+        return [str(x) for x in explicit]
+
+    if _bucket_labels_for_question is not None:
+        return list(_bucket_labels_for_question(question))
+
+    metric = (question.get("metric") or "").upper()
+    if metric == "FATALITIES":
+        return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
+    return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
+
+
+def _load_ensemble_spd_for_question(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    question_id: str,
+) -> Dict[int, Dict[str, Any]]:
+    """Return {month_index: {"probs": [p1..p5], "ev_value": ev or None}}."""
+
+    rows = con.execute(
+        """
+        SELECT month_index, bucket_index, probability, ev_value
+        FROM forecasts_ensemble
+        WHERE run_id = ? AND question_id = ?
+        ORDER BY month_index, bucket_index
+        """,
+        [run_id, question_id],
+    ).fetchall()
+
+    by_month: Dict[int, Dict[str, Any]] = {}
+    for month_idx, bucket_idx, prob, ev_value in rows:
+        m = int(month_idx)
+        b = int(bucket_idx)
+        entry = by_month.setdefault(m, {"probs": [0.0] * 5, "ev_value": None})
+        if 1 <= b <= 5:
+            entry["probs"][b - 1] = float(prob or 0.0)
+        elif 0 <= b < 5:
+            entry["probs"][b] = float(prob or 0.0)
+
+        if ev_value is not None:
+            entry["ev_value"] = float(ev_value)
+    return by_month
 
 
 def _parse_args() -> argparse.Namespace:
@@ -215,6 +310,68 @@ def _load_llm_calls_for_question(
     return calls
 
 
+def _aggregate_usage_by_phase(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> dict[str, dict[str, float]]:
+    """Aggregate tokens and costs per phase for a run (plus HS rows)."""
+
+    hs_run_ids = {
+        r[0]
+        for r in con.execute(
+            """
+            SELECT DISTINCT COALESCE(q.hs_run_id, q.run_id)
+            FROM questions q
+            JOIN forecasts_ensemble fe
+              ON fe.question_id = q.question_id
+             AND fe.run_id = ?
+            WHERE COALESCE(q.hs_run_id, '') <> ''
+            """,
+            [run_id],
+        ).fetchall()
+        if r and r[0]
+    }
+
+    hs_run_ids = hs_run_ids or {run_id}
+
+    rows = _fetch_llm_rows(
+        con,
+        """
+        SELECT *
+        FROM llm_calls
+        WHERE run_id = ?
+           OR (phase = 'hs_triage' AND run_id IN (__hs_placeholder__))
+        """.replace("__hs_placeholder__", ",".join(["?"] * len(hs_run_ids))),
+        [run_id, *hs_run_ids],
+    )
+
+    aggregates: dict[str, dict[str, float]] = {}
+    for row in rows:
+        phase = row.get("phase") or "unknown"
+        usage_raw = _build_usage_json_from_row(row)
+        try:
+            usage = json.loads(usage_raw)
+        except Exception:
+            usage = {}
+
+        phase_totals = aggregates.setdefault(
+            phase,
+            {
+                "prompt_tokens": 0.0,
+                "completion_tokens": 0.0,
+                "total_tokens": 0.0,
+                "total_cost_usd": 0.0,
+            },
+        )
+        phase_totals["prompt_tokens"] += float(usage.get("prompt_tokens") or 0.0)
+        phase_totals["completion_tokens"] += float(usage.get("completion_tokens") or 0.0)
+        phase_totals["total_tokens"] += float(usage.get("total_tokens") or 0.0)
+        phase_totals["total_cost_usd"] += float(
+            usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0
+        )
+
+    return aggregates
+
+
 def _load_triage_tier(
     con: duckdb.DuckDBPyConnection, hs_run_id: str, iso3: str, hazard_code: str
 ) -> str | None:
@@ -277,7 +434,23 @@ def _append_stage_block(lines: List[str], phase: str, call: Dict[str, Any] | Non
         lines.append("")
         lines.append("##### Usage / Cost")
         lines.append("")
+        ordered_keys = [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_cost_usd",
+            "output_cost_usd",
+            "total_cost_usd",
+            "cost_usd",
+            "elapsed_ms",
+        ]
+        for key in ordered_keys:
+            if key in usage and usage[key] is not None:
+                lines.append(f"- {key}: `{usage[key]}`")
+
         for key, val in usage.items():
+            if key in ordered_keys:
+                continue
             lines.append(f"- {key}: `{val}`")
 
     lines.append("")
@@ -313,6 +486,7 @@ def build_debug_bundle_markdown(
     lines: List[str] = []
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    usage_by_phase = _aggregate_usage_by_phase(con, run_id)
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
     lines.append("")
@@ -323,6 +497,30 @@ def build_debug_bundle_markdown(
     lines.append(f"- Database URL: `{db_url}`")
     lines.append(f"- Run ID: `{run_id}`")
     lines.append(f"- Question types included (by hazard_code, metric): {len(question_types)}")
+    lines.append("")
+
+    total_prompt = sum(v["prompt_tokens"] for v in usage_by_phase.values())
+    total_completion = sum(v["completion_tokens"] for v in usage_by_phase.values())
+    total_tokens = sum(v["total_tokens"] for v in usage_by_phase.values())
+    total_cost = sum(v["total_cost_usd"] for v in usage_by_phase.values())
+
+    lines.append("### 1.1 Token & Cost Summary")
+    lines.append("")
+    lines.append(f"- Total prompt tokens (all phases): `{int(total_prompt)}`")
+    lines.append(f"- Total completion tokens (all phases): `{int(total_completion)}`")
+    lines.append(f"- Total tokens (all phases): `{int(total_tokens)}`")
+    lines.append(f"- Total cost (USD, all phases): `{total_cost:.4f}`")
+    lines.append("")
+
+    lines.append("### 1.2 Cost by Phase")
+    lines.append("")
+    lines.append("| phase | prompt_tokens | completion_tokens | total_tokens | total_cost_usd |")
+    lines.append("|-------|---------------|-------------------|--------------|----------------|")
+    for phase, agg in sorted(usage_by_phase.items()):
+        lines.append(
+            f"| {phase} | {int(agg['prompt_tokens'])} | {int(agg['completion_tokens'])} | "
+            f"{int(agg['total_tokens'])} | {agg['total_cost_usd']:.4f} |"
+        )
     lines.append("")
 
     lines.append("## 2. Question Types")
@@ -388,6 +586,60 @@ def build_debug_bundle_markdown(
         lines.append(f"#### 2.{idx}.4 Scenarios (Scenario v2)")
         _append_stage_block(lines, "scenario_v2", calls.get("scenario_v2"))
         lines.append("")
+
+        lines.append(f"#### 2.{idx}.5 Ensemble SPD & EV (post-BayesMC)")
+        lines.append("")
+
+        q_dict = {
+            "question_id": qid,
+            "iso3": iso3_val,
+            "hazard_code": hz_val,
+            "metric": metric_val,
+            "wording": wording,
+        }
+        bucket_labels = _get_bucket_labels_for_question(q_dict)
+        centroids = _load_bucket_centroids_for_question(con, hz_val, metric_val, bucket_labels)
+
+        lines.append("##### Buckets & Centroids")
+        lines.append("")
+        lines.append("| index | bucket_label | centroid |")
+        lines.append("|-------|--------------|----------|")
+        for i, label in enumerate(bucket_labels):
+            centroid_val = centroids[i] if i < len(centroids) else 0.0
+            lines.append(f"| {i + 1} | {label} | {centroid_val} |")
+        lines.append("")
+
+        ensemble = _load_ensemble_spd_for_question(con, run_id, qid)
+        if not ensemble:
+            lines.append("_No ensemble SPD rows found for this question/run._")
+            lines.append("")
+        else:
+            lines.append("##### Ensemble SPD and EV by Month")
+            lines.append("")
+            lines.append(
+                "| month_index | "
+                + " | ".join(f"p(bucket {i + 1})" for i in range(5))
+                + " | EV (units of centroid) |"
+            )
+            lines.append("|------------|" + "|".join(["--------------"] * 6) + "|")
+            for month_idx in sorted(ensemble.keys()):
+                entry = ensemble[month_idx]
+                probs = entry.get("probs") or [0.0] * 5
+                ev_val = entry.get("ev_value")
+                prob_cells = " | ".join(f"{p:.3f}" for p in probs)
+                ev_cell = f"{ev_val:.1f}" if ev_val is not None else ""
+                lines.append(f"| {month_idx} | {prob_cells} | {ev_cell} |")
+            lines.append("")
+
+            lines.append("##### EV Calculation Notes")
+            lines.append("")
+            lines.append(
+                "For each month, the expected value (EV) is computed as:\n"
+                "- EV = sum_{i=1..5} p_i * centroid_i\n"
+                "where centroid_i is the representative value for bucket i (from `bucket_centroids` or defaults), "
+                "and p_i are the ensemble bucket probabilities after Bayes-MC aggregation."
+            )
+            lines.append("")
 
     return "\n".join(lines)
 

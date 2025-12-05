@@ -112,17 +112,27 @@ async def log_forecaster_llm_call(
     total_tokens = int(_safe_get(call_usage, "total_tokens", prompt_tokens + completion_tokens))
     cost_usd = float(_safe_get(call_usage, "cost_usd", 0.0))
 
-    if cost_usd <= 0.0:
-        cost_usd = float(
-            estimate_cost_usd(
-                model_id,
-                {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                },
+    input_cost_usd, output_cost_usd, total_cost_usd = _compute_costs_for_usage(
+        provider, model_id, call_usage
+    )
+
+    if total_cost_usd <= 0.0:
+        if cost_usd <= 0.0:
+            total_cost_usd = float(
+                estimate_cost_usd(
+                    model_id,
+                    {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                    },
+                )
             )
-        )
+        else:
+            total_cost_usd = cost_usd
+
+    if cost_usd <= 0.0:
+        cost_usd = total_cost_usd
 
     usage = {
         "elapsed_ms": elapsed_ms,
@@ -130,6 +140,9 @@ async def log_forecaster_llm_call(
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "cost_usd": cost_usd,
+        "input_cost_usd": round(input_cost_usd, 6),
+        "output_cost_usd": round(output_cost_usd, 6),
+        "total_cost_usd": round(total_cost_usd, 6),
         **{
             k: v
             for k, v in call_usage.items()
@@ -150,6 +163,8 @@ async def log_forecaster_llm_call(
 
     parsed_payload = parsed_json() if callable(parsed_json) else parsed_json
 
+    usage_json = json.dumps(usage, ensure_ascii=False)
+
     try:
         con = connect(read_only=False)
         ensure_schema(con)
@@ -161,12 +176,14 @@ async def log_forecaster_llm_call(
                 hs_run_id,
                 question_id,
                 call_type,
+                phase,
                 model_name,
                 provider,
                 model_id,
                 prompt_text,
                 response_text,
                 parsed_json,
+                usage_json,
                 elapsed_ms,
                 prompt_tokens,
                 completion_tokens,
@@ -176,9 +193,8 @@ async def log_forecaster_llm_call(
                 timestamp,
                 iso3,
                 hazard_code,
-                metric,
-                phase
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                metric
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 call_id,
@@ -186,12 +202,14 @@ async def log_forecaster_llm_call(
                 hs_run_id or "",
                 question_id,
                 call_type or call_phase,
+                call_phase,
                 model_name,
                 provider,
                 model_id,
                 prompt_text,
                 response,
                 json.dumps(parsed_payload) if parsed_payload is not None else None,
+                usage_json,
                 elapsed_ms,
                 prompt_tokens,
                 completion_tokens,
@@ -202,7 +220,6 @@ async def log_forecaster_llm_call(
                 iso3,
                 hazard_code,
                 metric,
-                call_phase,
             ],
         )
         con.close()
@@ -212,3 +229,44 @@ async def log_forecaster_llm_call(
         )
 
     return response, usage
+MODEL_PRICING: dict[tuple[str, str], dict[str, float]] = {
+    ("google", "gemini-3-pro-preview"): {
+        "input_per_million": 1.25,
+        "output_per_million": 5.0,
+    },
+    ("google", "gemini-2.5-flash-lite"): {
+        "input_per_million": 0.15,
+        "output_per_million": 0.60,
+    },
+    ("openai", "gpt-5.1"): {
+        "input_per_million": 2.50,
+        "output_per_million": 10.0,
+    },
+}
+
+
+def _compute_costs_for_usage(
+    provider: Optional[str], model_id: Optional[str], usage: Dict[str, Any]
+) -> Tuple[float, float, float]:
+    """
+    Compute (input_cost_usd, output_cost_usd, total_cost_usd) from provider/model and usage.
+    Falls back to zeros if pricing or token counts are missing.
+    """
+
+    if not provider or not model_id:
+        return 0.0, 0.0, 0.0
+
+    pricing = MODEL_PRICING.get((provider, model_id))
+    if not pricing:
+        return 0.0, 0.0, 0.0
+
+    prompt_tokens = float(_safe_get(usage, "prompt_tokens", 0.0))
+    completion_tokens = float(_safe_get(usage, "completion_tokens", 0.0))
+
+    input_rate = float(pricing.get("input_per_million") or 0.0)
+    output_rate = float(pricing.get("output_per_million") or 0.0)
+
+    input_cost = (prompt_tokens / 1_000_000.0) * input_rate
+    output_cost = (completion_tokens / 1_000_000.0) * output_rate
+    total_cost = input_cost + output_cost
+    return input_cost, output_cost, total_cost

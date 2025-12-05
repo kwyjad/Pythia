@@ -1,51 +1,49 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 
 import duckdb
 
 from pythia.db.schema import ensure_schema
+from scripts.create_questions_from_triage import _build_question_wording
 
 DEMO_QUESTIONS = [
     {
-        "question_id": "ETH_ACO_FATALITIES",
+        "question_id": "ETH_ACE_FATALITIES",
         "iso3": "ETH",
-        "hazard_code": "ACO",
+        "hazard_code": "ACE",
         "metric": "FATALITIES",
         "target_month": "2026-01",
         "window_start_date": "2026-01-01",
         "window_end_date": "2026-06-30",
-        "wording": "Monthly conflict fatalities in Ethiopia associated with armed conflict (ACLED).",
     },
     {
-        "question_id": "ETH_ACO_PA",
+        "question_id": "ETH_ACE_PA",
         "iso3": "ETH",
-        "hazard_code": "ACO",
+        "hazard_code": "ACE",
         "metric": "PA",
         "target_month": "2026-01",
         "window_start_date": "2026-01-01",
         "window_end_date": "2026-06-30",
-        "wording": "Monthly IDPs in Ethiopia due to armed conflict (IDMC as resolution).",
     },
     {
-        "question_id": "SOM_ACO_FATALITIES",
+        "question_id": "SOM_ACE_FATALITIES",
         "iso3": "SOM",
-        "hazard_code": "ACO",
+        "hazard_code": "ACE",
         "metric": "FATALITIES",
         "target_month": "2026-01",
         "window_start_date": "2026-01-01",
         "window_end_date": "2026-06-30",
-        "wording": "Monthly conflict fatalities in Somalia associated with armed conflict (ACLED).",
     },
     {
-        "question_id": "SOM_ACO_PA",
+        "question_id": "SOM_ACE_PA",
         "iso3": "SOM",
-        "hazard_code": "ACO",
+        "hazard_code": "ACE",
         "metric": "PA",
         "target_month": "2026-01",
         "window_start_date": "2026-01-01",
         "window_end_date": "2026-06-30",
-        "wording": "Monthly IDPs in Somalia due to armed conflict (IDMC as resolution).",
     },
 ]
 
@@ -71,9 +69,11 @@ def main() -> None:
             hz = q["hazard_code"]
             metric = q["metric"]
             target_month = q["target_month"]
-            window_start = q["window_start_date"]
-            window_end = q["window_end_date"]
-            wording = q["wording"]
+            window_start = date.fromisoformat(q["window_start_date"])
+            window_end = date.fromisoformat(q["window_end_date"])
+            wording = _build_question_wording(
+                iso3, hz, metric, window_start, window_end
+            )
 
             # delete any existing question with this id so we can reinsert cleanly
             con.execute(
