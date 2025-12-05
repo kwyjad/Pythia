@@ -11,6 +11,40 @@ import duckdb
 from resolver.db import duckdb_io
 
 
+def _fetch_llm_rows(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    params: list[Any],
+) -> list[dict[str, Any]]:
+    cur = con.execute(query, params)
+    rows = cur.fetchall()
+    desc = cur.description or []
+    col_names = [d[0] for d in desc]
+    return [dict(zip(col_names, row)) for row in rows]
+
+
+def _build_usage_json_from_row(row: dict[str, Any]) -> str:
+    # If there's already a usage_json column, prefer it
+    usage_raw = row.get("usage_json")
+    if isinstance(usage_raw, str) and usage_raw.strip():
+        return usage_raw
+
+    # Otherwise synthesize a usage dict from known numeric columns if they exist
+    usage: dict[str, Any] = {}
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "elapsed_ms",
+        "cost_usd",
+        "cost",
+    ):
+        if key in row and row[key] is not None:
+            usage[key] = row[key]
+
+    return json.dumps(usage) if usage else "{}"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Dump unified Pythia v2 debug bundle (HS, Research, SPD, Scenario) for one run.",
@@ -100,127 +134,82 @@ def _load_llm_calls_for_question(
     iso3: str,
     hazard_code: str,
 ) -> Dict[str, Dict[str, Any]]:
+    """
+    Return phase -> call dict for this question/run.
+
+    This function is robust to schema differences in llm_calls: it uses
+    SELECT * and only reads columns that exist.
+    """
     calls: Dict[str, Dict[str, Any]] = {}
 
-    rows = con.execute(
+    rows = _fetch_llm_rows(
+        con,
         """
-        SELECT
-            call_type,
-            phase,
-            provider,
-            model_id,
-            temperature,
-            run_id,
-            question_id,
-            iso3,
-            hazard_code,
-            metric,
-            prompt_text,
-            response_text,
-            error_text,
-            usage_json
+        SELECT *
         FROM llm_calls
         WHERE run_id = ?
           AND question_id = ?
           AND phase IN ('research_v2', 'spd_v2', 'scenario_v2')
-        ORDER BY created_at DESC
+        ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
         """,
         [run_id, question_id],
-    ).fetchall()
+    )
 
-    for (
-        call_type,
-        phase,
-        provider,
-        model_id,
-        temperature,
-        run_id2,
-        qid2,
-        iso3_val,
-        hz_val,
-        metric,
-        prompt_text,
-        response_text,
-        error_text,
-        usage_json,
-    ) in rows:
-        if phase and phase not in calls:
-            calls[phase] = {
-                "call_type": call_type,
-                "phase": phase,
-                "provider": provider,
-                "model_id": model_id,
-                "temperature": temperature,
-                "run_id": run_id2,
-                "question_id": qid2,
-                "iso3": iso3_val,
-                "hazard_code": hz_val,
-                "metric": metric,
-                "prompt_text": prompt_text or "",
-                "response_text": response_text or "",
-                "error_text": error_text or "",
-                "usage_json": usage_json or "{}",
-            }
+    for row in rows:
+        phase = row.get("phase")
+        if not phase or phase in calls:
+            continue
 
-    hs_row = con.execute(
+        usage_json = _build_usage_json_from_row(row)
+        calls[phase] = {
+            "call_type": row.get("call_type"),
+            "phase": phase,
+            "provider": row.get("provider"),
+            "model_id": row.get("model_id") or row.get("model"),
+            "temperature": row.get("temperature"),
+            "run_id": row.get("run_id"),
+            "question_id": row.get("question_id"),
+            "iso3": row.get("iso3"),
+            "hazard_code": row.get("hazard_code"),
+            "metric": row.get("metric"),
+            "prompt_text": row.get("prompt_text") or "",
+            "response_text": row.get("response_text") or "",
+            "error_text": row.get("error_text") or "",
+            "usage_json": usage_json,
+        }
+
+    hs_rows = _fetch_llm_rows(
+        con,
         """
-        SELECT
-            call_type,
-            phase,
-            provider,
-            model_id,
-            temperature,
-            run_id,
-            question_id,
-            iso3,
-            hazard_code,
-            metric,
-            prompt_text,
-            response_text,
-            error_text,
-            usage_json
+        SELECT *
         FROM llm_calls
         WHERE phase = 'hs_triage'
           AND iso3 = ?
           AND hazard_code = ?
-        ORDER BY created_at DESC
+        ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
         LIMIT 1
         """,
         [iso3, hazard_code],
-    ).fetchone()
+    )
 
-    if hs_row:
-        (
-            call_type,
-            phase,
-            provider,
-            model_id,
-            temperature,
-            run_id2,
-            qid2,
-            iso3_val,
-            hz_val,
-            metric,
-            prompt_text,
-            response_text,
-            error_text,
-            usage_json,
-        ) = hs_row
+    if hs_rows:
+        row = hs_rows[0]
+        usage_json = _build_usage_json_from_row(row)
         calls["hs_triage"] = {
-            "call_type": call_type,
-            "phase": phase,
-            "provider": provider,
-            "model_id": model_id,
-            "temperature": temperature,
-            "run_id": run_id2,
-            "question_id": qid2,
-            "iso3": iso3_val,
-            "hazard_code": hz_val,
-            "metric": metric,
-            "prompt_text": prompt_text or "",
-            "response_text": response_text or "",
-            "error_text": error_text or "",
-            "usage_json": usage_json or "{}",
+            "call_type": row.get("call_type"),
+            "phase": row.get("phase"),
+            "provider": row.get("provider"),
+            "model_id": row.get("model_id") or row.get("model"),
+            "temperature": row.get("temperature"),
+            "run_id": row.get("run_id"),
+            "question_id": row.get("question_id"),
+            "iso3": row.get("iso3"),
+            "hazard_code": row.get("hazard_code"),
+            "metric": row.get("metric"),
+            "prompt_text": row.get("prompt_text") or "",
+            "response_text": row.get("response_text") or "",
+            "error_text": row.get("error_text") or "",
+            "usage_json": usage_json,
         }
 
     return calls
