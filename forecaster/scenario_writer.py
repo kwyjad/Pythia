@@ -253,13 +253,12 @@ async def _run_scenario_for_question(
         con.execute(
             """
             INSERT INTO scenarios (
-                run_id, question_id, iso3, hazard_code, metric,
+                run_id, iso3, hazard_code, metric,
                 scenario_type, bucket_label, probability, text, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             [
                 run_id,
-                qid,
                 iso3,
                 hz,
                 metric,
@@ -274,13 +273,12 @@ async def _run_scenario_for_question(
             con.execute(
                 """
                 INSERT INTO scenarios (
-                    run_id, question_id, iso3, hazard_code, metric,
+                    run_id, iso3, hazard_code, metric,
                     scenario_type, bucket_label, probability, text, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """,
                 [
                     run_id,
-                    qid,
                     iso3,
                     hz,
                     metric,
