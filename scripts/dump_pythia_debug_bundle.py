@@ -120,6 +120,8 @@ def _load_ensemble_spd_for_question(
         SELECT month_index, bucket_index, probability, ev_value
         FROM forecasts_ensemble
         WHERE run_id = ? AND question_id = ?
+          AND month_index IS NOT NULL
+          AND bucket_index IS NOT NULL
         ORDER BY month_index, bucket_index
         """,
         [run_id, question_id],
@@ -127,6 +129,8 @@ def _load_ensemble_spd_for_question(
 
     by_month: Dict[int, Dict[str, Any]] = {}
     for month_idx, bucket_idx, prob, ev_value in rows:
+        if month_idx is None or bucket_idx is None:
+            continue
         m = int(month_idx)
         b = int(bucket_idx)
         entry = by_month.setdefault(m, {"probs": [0.0] * 5, "ev_value": None})
