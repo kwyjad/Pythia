@@ -784,9 +784,9 @@ def build_research_prompt_v2(
     if hazard == "DI":
         di_note = (
             f"For this DI (displacement inflow) hazard in {iso3}, there is **no Resolver base rate**. "
-            "You must construct the base rate yourself using UNHCR/IOM flux estimates, known historical inflow episodes "
-            "from neighbouring countries (e.g., Sudan, Somalia, South Sudan), and appropriate reference classes. Treat "
-            "those as the prior, then update it with current signals.\n\n"
+            "You must construct the base rate yourself using UNHCR/IOM flux estimates, known historical incoming "
+            "displacement flows from neighbouring countries (e.g., Sudan, Somalia, South Sudan), and appropriate "
+            "reference classes. Treat those as the prior, then update it with current signals.\n\n"
             "Do not treat internal conflict displacement within the country as the target metric here; this DI question is "
             "about people entering the country due to events in neighbouring states.\n\n"
         )
