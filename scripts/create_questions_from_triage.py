@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -12,6 +13,7 @@ from pythia.db.schema import ensure_schema
 
 
 DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
+LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -194,6 +196,10 @@ def _load_triage_rows(
         need = bool(need_full_spd) or tier_str in {"priority", "watchlist"}
         score_f = float(score or 0.0)
         if hz_up == "ACO":
+            LOG.info(
+                "Skipping ACO triage/question for %s; ACE is the canonical conflict hazard",
+                iso3_up,
+            )
             continue
         if not need:
             continue

@@ -16,7 +16,7 @@ from .prompts import build_scenario_prompt
 
 LOG = logging.getLogger(__name__)
 
-MAX_SCENARIO_WORKERS = int(os.getenv("FORECASTER_SCENARIO_MAX_WORKERS", "3"))
+MAX_SCENARIO_WORKERS = int(os.getenv("FORECASTER_SCENARIO_MAX_WORKERS", "6"))
 SCENARIO_TIMEOUT_SECONDS = int(os.getenv("FORECASTER_SCENARIO_TIMEOUT_SECONDS", "120"))
 
 
@@ -166,16 +166,17 @@ async def _run_scenario_for_question(
 
     rationale_key = (iso3, hz, metric)
     rationale_text = rationale_by_key.get(rationale_key, "")
-    scenario_stub = triage.get("scenario_stub", "") if triage else ""
-
     prompt = build_scenario_prompt(
-        iso3=iso3,
-        hazard_code=hz,
-        metric=metric,
-        spd_summary=spd_summary,
+        run_id=run_id,
+        question={
+            "iso3": iso3,
+            "hazard_code": hz,
+            "metric": metric,
+            "wording": question_row.get("wording") or question_row.get("title") or "",
+            "forecaster_rationale": rationale_text,
+        },
+        ensemble_spd=spd_summary,
         hs_triage_entry=triage or {},
-        scenario_stub=scenario_stub,
-        forecaster_rationale=rationale_text,
     )
 
     from forecaster.providers import call_chat_ms, ModelSpec  # local import to avoid cycles
@@ -297,6 +298,35 @@ async def _run_scenario_for_question(
 
     alternative = scenario.get("alternative") if isinstance(scenario, dict) else None
 
+    def _render_structured_scenario_text(s: Dict[str, Any]) -> str:
+        lines: list[str] = []
+
+        context_bullets = s.get("context") or []
+        needs = s.get("needs") or {}
+        ops_bullets = s.get("operational_impacts") or []
+
+        lines.append("Context")
+        for b in context_bullets:
+            if b:
+                lines.append(f"- {b}")
+
+        lines.append("")
+        lines.append("Humanitarian Needs")
+        for sector in ["WASH", "Health", "Nutrition", "Protection", "Education", "Shelter", "FoodSecurity"]:
+            sector_bullets = needs.get(sector) or []
+            lines.append(f"- {sector}:")
+            for sb in sector_bullets:
+                if sb:
+                    lines.append(f"  - {sb}")
+
+        lines.append("")
+        lines.append("Operational Impacts")
+        for b in ops_bullets:
+            if b:
+                lines.append(f"- {b}")
+
+        return "\n".join(lines)
+
     con = connect(read_only=False)
     try:
         con.execute(
@@ -314,7 +344,7 @@ async def _run_scenario_for_question(
                 "primary",
                 primary.get("bucket_label") or "",
                 float(primary.get("probability") or 0.0),
-                primary.get("text") or "",
+                _render_structured_scenario_text(primary),
             ],
         )
 
@@ -334,7 +364,7 @@ async def _run_scenario_for_question(
                     "alternative",
                     alternative.get("bucket_label") or "",
                     float(alternative.get("probability") or 0.0),
-                    alternative.get("text") or "",
+                    _render_structured_scenario_text(alternative),
                 ],
             )
     finally:

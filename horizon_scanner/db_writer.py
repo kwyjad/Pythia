@@ -124,8 +124,10 @@ DISPLACEMENT_TEMPLATES = {
     ),
 }
 
-BLOCKED_HAZARDS = {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
-BLOCKED_HAZARDS.add("ACO")
+BLOCKED_HAZARDS: set[str] = {
+    "CU",
+    "ACO",
+} | {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
 ALLOWED = set(HAZARD_CONFIG.keys())
 CONFLICT_HAZARDS = {"CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
 

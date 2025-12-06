@@ -7,7 +7,7 @@ import forecaster.scenario_writer as scenario_writer
 
 def test_safe_json_loads_scenario_handles_code_fence() -> None:
     fenced = """```json
-    {"primary": {"bucket_label": "bucket_3", "probability": 0.6, "text": "Test"},
+    {"primary": {"bucket_label": "bucket_3", "probability": 0.6, "context": ["c"], "needs": {"WASH": ["w"]}, "operational_impacts": ["o"]},
      "alternative": null}
     ```"""
 
@@ -126,8 +126,9 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
 
     async def fake_call_chat_ms(ms, prompt, **kwargs):
         return (
-            '{"primary":{"bucket_label":"bucket_3","probability":0.6,"text":"Test primary"},'
-            '"alternative":null}',
+            '{"primary":{"bucket_label":"bucket_3","probability":0.6,'
+            '"context":["c1","c2"],"needs":{"WASH":["water"],"Health":[],"Nutrition":[],"Protection":[],"Education":[],"Shelter":[],"FoodSecurity":[]},'
+            '"operational_impacts":["ops"]},"alternative":null}',
             {"total_tokens": 42, "elapsed_ms": 100},
             None,
         )
@@ -138,8 +139,14 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
 
     con = duckdb.connect(str(db_path))
     try:
-        count = con.execute("SELECT COUNT(*) FROM scenarios WHERE run_id = 'fc_scen'").fetchone()[0]
+        rows = con.execute(
+            "SELECT scenario_type, text FROM scenarios WHERE run_id = 'fc_scen' ORDER BY scenario_type"
+        ).fetchall()
     finally:
         con.close()
 
-    assert count > 0
+    assert rows
+    primary_text = dict(rows).get("primary", "")
+    assert "Context" in primary_text
+    assert "Humanitarian Needs" in primary_text
+    assert "Operational Impacts" in primary_text

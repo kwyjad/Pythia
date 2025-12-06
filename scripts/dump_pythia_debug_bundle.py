@@ -112,8 +112,14 @@ def _load_ensemble_spd_for_question(
     con: duckdb.DuckDBPyConnection,
     run_id: str,
     question_id: str,
+    centroids: list[float],
 ) -> Dict[int, Dict[str, Any]]:
-    """Return {month_index: {"probs": [p1..p5], "ev_value": ev or None}}."""
+    """
+    Return {month_index: {"probs": [p1..p5], "ev_value": ev or None}}.
+
+    Falls back to computing EV from bucket probabilities and provided centroids
+    when the database does not contain an ev_value.
+    """
 
     rows = con.execute(
         """
@@ -127,20 +133,30 @@ def _load_ensemble_spd_for_question(
         [run_id, question_id],
     ).fetchall()
 
+    bucket_count = len(centroids) if centroids else 5
     by_month: Dict[int, Dict[str, Any]] = {}
     for month_idx, bucket_idx, prob, ev_value in rows:
         if month_idx is None or bucket_idx is None:
             continue
         m = int(month_idx)
         b = int(bucket_idx)
-        entry = by_month.setdefault(m, {"probs": [0.0] * 5, "ev_value": None})
-        if 1 <= b <= 5:
+        entry = by_month.setdefault(m, {"probs": [0.0] * bucket_count, "ev_value": None})
+        if 1 <= b <= bucket_count:
             entry["probs"][b - 1] = float(prob or 0.0)
-        elif 0 <= b < 5:
+        elif 0 <= b < bucket_count:
             entry["probs"][b] = float(prob or 0.0)
 
         if ev_value is not None:
             entry["ev_value"] = float(ev_value)
+    for entry in by_month.values():
+        if entry.get("ev_value") is not None:
+            continue
+        probs = entry.get("probs") or []
+        n = min(len(probs), len(centroids))
+        ev_calc = 0.0
+        for i in range(n):
+            ev_calc += float(probs[i]) * float(centroids[i])
+        entry["ev_value"] = ev_calc
     return by_month
 
 
@@ -605,24 +621,25 @@ def build_debug_bundle_markdown(
             lines.append(f"| {i + 1} | {label} | {centroid_val} |")
         lines.append("")
 
-        ensemble = _load_ensemble_spd_for_question(con, run_id, qid)
+        ensemble = _load_ensemble_spd_for_question(con, run_id, qid, centroids)
         if not ensemble:
             lines.append("_No ensemble SPD rows found for this question/run._")
             lines.append("")
         else:
             lines.append("##### Ensemble SPD and EV by Month")
             lines.append("")
+            bucket_count = max(len(bucket_labels), 1)
             lines.append(
                 "| month_index | "
-                + " | ".join(f"p(bucket {i + 1})" for i in range(5))
+                + " | ".join(f"p(bucket {i + 1})" for i in range(bucket_count))
                 + " | EV (units of centroid) |"
             )
-            lines.append("|------------|" + "|".join(["--------------"] * 6) + "|")
+            lines.append("|------------|" + "|".join(["--------------"] * (bucket_count + 1)) + "|")
             for month_idx in sorted(ensemble.keys()):
                 entry = ensemble[month_idx]
-                probs = entry.get("probs") or [0.0] * 5
+                probs = entry.get("probs") or [0.0] * bucket_count
                 ev_val = entry.get("ev_value")
-                prob_cells = " | ".join(f"{p:.3f}" for p in probs)
+                prob_cells = " | ".join(f"{p:.3f}" for p in probs[:bucket_count])
                 ev_cell = f"{ev_val:.1f}" if ev_val is not None else ""
                 lines.append(f"| {month_idx} | {prob_cells} | {ev_cell} |")
             lines.append("")

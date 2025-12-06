@@ -101,6 +101,7 @@ def _build_hazard_catalog() -> Dict[str, str]:
     catalog: Dict[str, str] = {}
     for code, cfg in HAZARD_CONFIG.items():
         if code in BLOCKED_HAZARDS:
+            logger.debug("Skipping blocked hazard %s in HS triage", code)
             continue
         label = cfg.get("label") or code
         catalog[code] = label
@@ -214,14 +215,19 @@ async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, Mo
         active=True,
     )
     start = time.time()
-    text, usage, error = await call_chat_ms(
-        spec,
-        prompt_text,
-        temperature=HS_TEMPERATURE,
-        prompt_key="hs.triage.v2",
-        prompt_version="1.0.0",
-        component="HorizonScanner",
-    )
+    try:
+        text, usage, error = await call_chat_ms(
+            spec,
+            prompt_text,
+            temperature=HS_TEMPERATURE,
+            prompt_key="hs.triage.v2",
+            prompt_version="1.0.0",
+            component="HorizonScanner",
+        )
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.time() - start) * 1000)
+        return "", {"elapsed_ms": elapsed_ms}, f"provider call error: {exc}", spec
+
     usage = usage or {}
     usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
     return text, usage, error, spec
