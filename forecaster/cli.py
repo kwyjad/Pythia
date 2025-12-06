@@ -48,7 +48,7 @@ from forecaster.hs_utils import load_hs_triage_entry
 LOG = logging.getLogger(__name__)
 
 MAX_RESEARCH_WORKERS = int(os.getenv("FORECASTER_RESEARCH_MAX_WORKERS", "6"))
-MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "4"))
+MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "6"))
 
 
 def _safe_json_loads(text: str) -> Any:
@@ -1637,6 +1637,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
     metric = question_row["metric"]
+    wording = question_row.get("wording") or question_row.get("title") or ""
     try:
         resolution_source = _infer_resolution_source(hz, metric)
 
@@ -1652,6 +1653,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
                 "hazard_code": hz,
                 "metric": metric,
                 "resolution_source": resolution_source,
+                "wording": wording,
             },
             hs_triage_entry=hs_entry,
             resolver_features=resolver_features,
@@ -1793,6 +1795,7 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
     metric = question_row["metric"]
+    wording = question_row.get("wording") or question_row.get("title") or ""
 
     try:
         resolution_source = _infer_resolution_source(hz, metric)
@@ -1814,6 +1817,7 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
                 "hazard_code": hz,
                 "metric": metric,
                 "resolution_source": resolution_source,
+                "wording": wording,
                 "target_months": question_row.get("target_month"),
             },
             history_summary=history_summary,

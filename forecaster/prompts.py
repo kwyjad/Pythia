@@ -773,19 +773,22 @@ def build_research_prompt_v2(
 ) -> str:
     """Structured research prompt for Researcher v2."""
 
-    iso3 = question.get("iso3", "")
-    hazard = question.get("hazard_code", "")
-    metric = question.get("metric", "")
+    iso3 = (question.get("iso3") or "").upper()
+    hazard = (question.get("hazard_code") or "").upper()
+    metric = (question.get("metric") or "").upper()
     resolution_source = question.get("resolution_source", "")
     wording = question.get("wording") or question.get("title") or ""
     model_info = model_info or {}
 
     di_note = ""
-    if (hazard or "").upper() == "DI":
+    if hazard == "DI":
         di_note = (
-            "Note: this DI hazard concerns incoming displacement flows from neighbouring countries into "
-            f"{iso3}. Focus on exogenous drivers (e.g. conflicts or crises in neighbouring states), not on purely internal "
-            "displacement dynamics.\n\n"
+            f"For this DI (displacement inflow) hazard in {iso3}, there is **no Resolver base rate**. "
+            "You must construct the base rate yourself using UNHCR/IOM flux estimates, known historical inflow episodes "
+            "from neighbouring countries (e.g., Sudan, Somalia, South Sudan), and appropriate reference classes. Treat "
+            "those as the prior, then update it with current signals.\n\n"
+            "Do not treat internal conflict displacement within the country as the target metric here; this DI question is "
+            "about people entering the country due to events in neighbouring states.\n\n"
         )
 
     return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nQuestion metadata:\n```json\n{_json_dumps_for_prompt(question, indent=2)}\n```\n\nNatural-language question:\n"{wording}"\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{_json_dumps_for_prompt(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n```\n\nModel/data notes:\n```json\n{_json_dumps_for_prompt(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n{di_note}Your tasks:\n\n1. Summarise the base rate of {metric} for this hazard/country using:\n   * Resolver history (with its caveats),\n   * high-quality external analytical sources (UN, ACAPS, etc.),\n   * your own knowledge of the country context.\n2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nEmphasise major deviations from the historical base rate only when strongly supported by evidence.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {{\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {{\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    }},\n    \"external_support\": {{\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }}\n  }},\n  \"update_signals\": [\n    {{\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6}}\n  ],\n  \"regime_shift_signals\": [\n    {{\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3}}\n  ],\n  \"data_gaps\": [\"...\"]\n}}\n```\n\nDo not include any text outside the JSON.\n"""
@@ -811,8 +814,8 @@ def build_spd_prompt_v2(
 ) -> str:
     """Assemble the SPD v2 forecasting prompt with structured context."""
 
-    iso3 = question.get("iso3", "")
-    hazard = question.get("hazard_code", "")
+    iso3 = (question.get("iso3") or "").upper()
+    hazard = (question.get("hazard_code") or "").upper()
     metric = (question.get("metric") or "").upper()
     resolution_source = (question.get("resolution_source") or "").upper()
     wording = question.get("wording") or question.get("title") or ""
@@ -829,17 +832,19 @@ def build_spd_prompt_v2(
     else:
         unit_phrase = "people affected or displaced per month"
 
-    di_line = ""
-    if metric == "PA" and (hazard or "").upper() == "DI":
-        di_line = (
-            "- For this DI question, focus on incoming flows driven by events in neighbouring countries around "
-            f"{iso3} (e.g. conflicts or crises across the border). Do not treat purely internal displacement as the target metric.\n"
+    di_instruction = ""
+    if hazard == "DI" and metric == "PA":
+        di_instruction = (
+            "- For DI (displacement inflow), there is no Resolver base rate. Construct your **base rate** from the research JSON: "
+            "look at past monthly inflows, typical ranges, and relevant reference cases in the research evidence, then use that as your prior.\n"
+            "- Use HS triage and update_signals/regime_shift_signals from research to adjust this base rate up or down, but do not fabricate a history where none exists.\n"
+            "- Focus on **incoming flows driven by neighbour-country events** (e.g., conflict in Sudan), not internal displacement.\n"
         )
 
-    nat_line = ""
-    if (hazard or "").upper() in {"DR", "FL", "HW", "TC"} and metric == "PA":
-        nat_line = (
-            "- Treat PA as people affected by the natural hazard event (as EM-DAT would record them), not conflict fatalities or incidental impacts.\n"
+    hazard_nat_note = ""
+    if hazard in {"DR", "FL", "HW", "TC"} and metric == "PA":
+        hazard_nat_note = (
+            "- For this natural hazard PA question, treat PA as **people affected by the hazard** as EM-DAT would record them (injured, displaced, needing assistance), not as conflict fatalities or IDP metrics.\n"
         )
 
     bucket_list_str = ", ".join([f'\"{b}\"' for b in buckets])
@@ -870,10 +875,10 @@ def build_spd_prompt_v2(
         f"- Bucket labels: {bucket_list_str}\n\n"
         "Instructions (Bayesian SPD):\n"
         "- Start from a base rate (prior) implied by historical data and reference classes.\n"
+        f"{hazard_nat_note}"
+        f"{di_instruction}"
         "- Use the research and HS triage to identify update signals that push risk up or down.\n"
         "- Avoid large deviations from the base rate unless the evidence strongly supports them.\n"
-        f"{di_line}"
-        f"{nat_line}"
         f"{base_rate_note}"
         "- If Resolver history is missing (`source` = \"none\"), rely on HS + research to shape the base rate.\n"
         "- Think explicitly about tail risks (extreme buckets) but keep their probabilities calibrated.\n\n"
@@ -894,29 +899,33 @@ def build_spd_prompt_v2(
 
 
 def build_scenario_prompt(
-    iso3: str,
-    hazard_code: str,
-    metric: str,
-    spd_summary: Dict[str, Any],
+    run_id: str,
+    question: Dict[str, Any],
+    ensemble_spd: Dict[str, Any],
     hs_triage_entry: Dict[str, Any],
-    scenario_stub: str,
-    forecaster_rationale: str,
 ) -> str:
-    """Prompt the Scenario Writer to draft short scenarios from ensemble outputs."""
+    """Prompt the Scenario Writer to draft structured scenarios from ensemble outputs."""
 
-    scenario_text = scenario_stub or ""
-    rationale_text = forecaster_rationale or ""
+    iso3 = question.get("iso3", "")
+    hazard = (question.get("hazard_code") or "").upper()
+    metric = (question.get("metric") or "").upper()
+    wording = question.get("wording") or question.get("title") or ""
+    scenario_text = hs_triage_entry.get("scenario_stub", "") if hs_triage_entry else ""
+    rationale_text = question.get("forecaster_rationale") or ""
 
     return (
-        f"You are a humanitarian scenario writer.\n\n"
-        f"You are given a probabilistic forecast for {iso3}, hazard {hazard_code}, metric {metric}. "
-        "The forecast is over 5 buckets and represents recorded impact in the resolution dataset "
-        "(e.g. ACLED/EM-DAT/IDMC).\n\n"
-        "Ensemble SPD summary:\n"
+        "You are a humanitarian analyst writing structured scenarios for senior decision-makers.\n\n"
+        "Natural-language question:\n"
+        f"\"{wording}\"\n\n"
+        "Context for this question:\n"
+        f"- Country: {iso3}\n"
+        f"- Hazard: {hazard}\n"
+        f"- Metric: {metric}\n\n"
+        "Ensemble forecast (SPD) summary:\n"
         "```json\n"
-        f"{_json_dumps_for_prompt(spd_summary, indent=2)}\n"
+        f"{_json_dumps_for_prompt(ensemble_spd, indent=2)}\n"
         "```\n\n"
-        "HS triage and drivers:\n"
+        "HS triage summary:\n"
         "```json\n"
         f"{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n"
         "```\n\n"
@@ -924,25 +933,33 @@ def build_scenario_prompt(
         f"\"\"\"{scenario_text}\"\"\"\n\n"
         "Forecaster rationale:\n"
         f"\"\"\"{rationale_text}\"\"\"\n\n"
-        "Your tasks:\n\n"
-        "1. Write a short scenario (3–4 sentences) assuming the forecast's most likely bucket (bucket_max) occurs.\n"
-        "2. If there is a different bucket with probability >= 0.05 (bucket_alt), write a second short "
-        "scenario (3–4 sentences) assuming that alternative higher-impact bucket occurs.\n"
-        "3. If there is no such alternative bucket, only write the primary scenario.\n\n"
-        "Each scenario should:\n\n"
-        "* Describe the situation and context vs. today.\n"
-        "* Highlight key humanitarian needs by sector (high level; no numbers).\n"
-        "* Highlight operational challenges for humanitarian actors (access, funding, politics).\n\n"
-        "Return a JSON object:\n\n"
+        "Your task is to produce **two possible scenarios** (primary and optional alternative) for the forecast period.\n"
+        "The scenarios must be returned as a single JSON object with the following schema (no extra text):\n\n"
         "```json\n"
         "{\n"
         '  "primary": {\n'
-        '    "bucket_label": "...",\n'
-        '    "probability": 0.0,\n'
-        '    "text": "..."\n'
+        '    "bucket_label": "bucket_3",\n'
+        '    "probability": 0.6,\n'
+        '    "context": ["• brief bullet about context", "• another bullet"],\n'
+        '    "needs": {\n'
+        '      "WASH": ["• bullet", "• bullet"],\n'
+        '      "Health": ["• bullet"],\n'
+        '      "Nutrition": ["• bullet"],\n'
+        '      "Protection": ["• bullet"],\n'
+        '      "Education": ["• bullet"],\n'
+        '      "Shelter": ["• bullet"],\n'
+        '      "FoodSecurity": ["• bullet"]\n'
+        '    },\n'
+        '    "operational_impacts": ["• bullet about ops impact", "• another bullet"]\n'
         "  },\n"
         '  "alternative": null\n'
         "}\n"
         "```\n\n"
-        "No extra keys. No text outside the JSON.\n"
+        "Guidance:\n"
+        "- **Context**: bullets describing how the situation looks over the forecast period (conflict, climate, displacement, etc.).\n"
+        "- **Humanitarian Needs**: bullets for each sector (WASH, Health, Nutrition, Protection, Education, Shelter, Food Security), focusing on the main needs implied by the forecast.\n"
+        "- **Operational Impacts**: bullets on what this means for access, surge, supply chains, partnerships, and programmatic choices.\n"
+        "- Ensure bullets are concise and specific (no long paragraphs).\n"
+        "- Align the scenario with the ensemble SPD (bucket_label and probability) and HS triage evidence.\n"
+        "- If you believe an alternative scenario is important, set `alternative` to an object with the same structure; otherwise, set it to null.\n"
     )

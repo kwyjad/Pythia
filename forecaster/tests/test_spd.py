@@ -168,6 +168,90 @@ def test_build_research_prompt_v2_handles_date_in_resolver_features() -> None:
 
     assert "2025-05-01" in prompt_text
 
+
+def test_build_research_prompt_v2_di_note() -> None:
+    question = {
+        "question_id": "q-di",
+        "iso3": "eth",
+        "hazard_code": "DI",
+        "metric": "PA",
+        "resolution_source": "IDMC",
+        "wording": "DI question",
+    }
+    resolver_features = {"source": "none"}
+    hs_triage_entry = {}
+
+    prompt_text = prompts.build_research_prompt_v2(
+        question=question,
+        hs_triage_entry=hs_triage_entry,
+        resolver_features=resolver_features,
+        model_info={},
+    )
+
+    assert "no Resolver base rate" in prompt_text
+    assert "incoming displacement flows" in prompt_text
+
+
+def test_build_spd_prompt_v2_includes_wording() -> None:
+    question = {
+        "question_id": "q-wording",
+        "iso3": "ETH",
+        "hazard_code": "ACE",
+        "metric": "FATALITIES",
+        "resolution_source": "ACLED",
+        "wording": "How many?",
+        "target_months": "2025-01",
+    }
+    history_summary = {}
+    hs_triage_entry = {"tier": "priority", "triage_score": 0.9}
+    research_json = {"base_rate": {"qualitative_summary": "test"}}
+
+    prompt_text = prompts.build_spd_prompt_v2(
+        question=question,
+        history_summary=history_summary,
+        hs_triage_entry=hs_triage_entry,
+        research_json=research_json,
+    )
+
+    assert "Natural-language question:" in prompt_text
+    assert '"How many?"' in prompt_text
+
+
+def test_build_spd_prompt_v2_di_and_nat_notes() -> None:
+    question_di = {
+        "question_id": "test_di",
+        "iso3": "ETH",
+        "hazard_code": "DI",
+        "metric": "PA",
+        "wording": "DI wording",
+    }
+    prompt_di = prompts.build_spd_prompt_v2(
+        question=question_di,
+        history_summary={"source": "some"},
+        hs_triage_entry={},
+        research_json={},
+    )
+
+    assert "no Resolver base rate" in prompt_di
+    assert "incoming flows" in prompt_di
+
+    question_nat = {
+        "question_id": "test_nat",
+        "iso3": "ETH",
+        "hazard_code": "DR",
+        "metric": "PA",
+        "wording": "DR wording",
+    }
+
+    prompt_nat = prompts.build_spd_prompt_v2(
+        question=question_nat,
+        history_summary={},
+        hs_triage_entry={},
+        research_json={},
+    )
+
+    assert "people affected by the hazard" in prompt_nat
+
 def test_aggregate_spd_shape_and_uniform_fallback():
     """aggregate_spd should normalise, respect evidence, and fall back to uniform."""
     # Member with a strong preference for bucket 1 in month_1 only
