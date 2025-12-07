@@ -46,3 +46,4 @@ def test_idmc_history_for_conflict_pa(monkeypatch, tmp_path):
     assert summary["recent_max"] == pytest.approx(8000.0)
     assert summary["recent_mean"] == pytest.approx(sum(range(3000, 9000, 1000)) / 6)
     assert len(summary["last_6m_values"]) == 6
+    assert summary["last_6m_values"][-1]["value"] == pytest.approx(8000.0)

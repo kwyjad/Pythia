@@ -177,6 +177,159 @@ EMDAT_SHOCK_MAP = {
 IDMC_HZ_MAP = {"ACE", "DI"}
 
 
+def _load_idmc_conflict_flow_history_summary(
+    con,
+    iso3: str,
+    hazard_code: str,
+) -> Dict[str, Any]:
+    """
+    Best-effort IDMC/DTM conflict displacement history for use in _build_history_summary.
+
+    Reads per-month flows from facts_deltas for conflict hazards:
+      - metric ∈ {new_displacements, idp_displacement_new_dtm, idp_displacement_flow_idmc}
+      - series_semantics = 'new'
+      - iso3 and hazard_code filtered.
+
+    Returns a summary dict with:
+      - source: "IDMC"
+      - history_length_months: number of months with non-zero flow
+      - recent_mean: mean over the last up-to-6 months
+      - recent_max: max over the full window
+      - trend: crude "increasing" / "decreasing" / "flat" based on first vs last month
+      - last_6m_values: list of {"ym", "value"} for up to the last 6 months
+      - data_quality: "medium" (we’re using delta flows only)
+      - notes: short explanation of what we used.
+    """
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
+
+    if not iso3_up or not hz_up:
+        return {
+            "source": "IDMC",
+            "history_length_months": 0,
+            "recent_mean": None,
+            "recent_max": None,
+            "trend": "uncertain",
+            "last_6m_values": [],
+            "data_quality": "low",
+            "notes": "Missing iso3 or hazard_code for IDMC conflict PA history.",
+        }
+
+    try:
+        rows = con.execute(
+            """
+            SELECT
+                ym,
+                SUM(
+                    CASE
+                        WHEN lower(metric) = 'new_displacements'
+                             THEN COALESCE(value_new, 0)
+                        WHEN lower(metric) = 'idp_displacement_new_dtm'
+                             THEN COALESCE(value_new, 0)
+                        WHEN lower(metric) = 'idp_displacement_flow_idmc'
+                             THEN COALESCE(value_new, 0)
+                        ELSE 0
+                    END
+                ) AS flow_value
+            FROM facts_deltas
+            WHERE upper(iso3) = ?
+              AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') = ?
+              AND lower(series_semantics) = 'new'
+              AND lower(metric) IN (
+                'new_displacements',
+                'idp_displacement_new_dtm',
+                'idp_displacement_flow_idmc'
+              )
+            GROUP BY ym
+            ORDER BY ym
+            """,
+            [iso3_up, hz_up],
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "IDMC conflict PA history query failed for %s/%s: %s",
+            iso3_up,
+            hz_up,
+            exc,
+        )
+        return {
+            "source": "IDMC",
+            "history_length_months": 0,
+            "recent_mean": None,
+            "recent_max": None,
+            "trend": "uncertain",
+            "last_6m_values": [],
+            "data_quality": "low",
+            "notes": f"IDMC history unavailable due to query error: {type(exc).__name__}",
+        }
+
+    if not rows:
+        return {
+            "source": "IDMC",
+            "history_length_months": 0,
+            "recent_mean": None,
+            "recent_max": None,
+            "trend": "uncertain",
+            "last_6m_values": [],
+            "data_quality": "low",
+            "notes": "No IDMC/DTM displacement flow history found in facts_deltas.",
+        }
+
+    history: list[Dict[str, Any]] = []
+    values: list[float] = []
+
+    for ym_val, flow_val in rows:
+        try:
+            v = float(flow_val or 0.0)
+        except Exception:
+            v = 0.0
+
+        if v == 0:
+            continue
+
+        ym_str = str(ym_val)
+        history.append({"ym": ym_str, "value": v})
+        values.append(v)
+
+    if not values:
+        return {
+            "source": "IDMC",
+            "history_length_months": 0,
+            "recent_mean": None,
+            "recent_max": None,
+            "trend": "uncertain",
+            "last_6m_values": [],
+            "data_quality": "low",
+            "notes": "IDMC displacement flows found but all are zero.",
+        }
+
+    n = len(history)
+    last_6 = history[-6:]
+    recent_window = values[-6:]
+    recent_mean = sum(recent_window) / len(recent_window) if recent_window else None
+    recent_max = max(values) if values else None
+
+    trend = "flat"
+    if len(values) >= 2:
+        if values[-1] > values[0]:
+            trend = "increasing"
+        elif values[-1] < values[0]:
+            trend = "decreasing"
+
+    return {
+        "source": "IDMC",
+        "history_length_months": n,
+        "recent_mean": recent_mean,
+        "recent_max": recent_max,
+        "trend": trend,
+        "last_6m_values": last_6,
+        "data_quality": "medium",
+        "notes": (
+            "IDMC/DTM monthly displacement flows (facts_deltas) used as the conflict PA base rate."
+        ),
+    }
+
+
 def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
     hz = hazard_code.upper()
     if hz == "FL":
@@ -280,36 +433,15 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
 
         if m == "PA" and hz in {"ACE"}:
             try:
-                rows = con.execute(
-                    """
-                    SELECT
-                        ym,
-                        SUM(
-                            CASE
-                                WHEN lower(metric) = 'new_displacements' THEN COALESCE(value_new, 0)
-                                WHEN lower(metric) = 'idp_displacement_new_dtm' THEN COALESCE(value_new, 0)
-                                WHEN lower(metric) = 'idp_displacement_flow_idmc' THEN COALESCE(value_new, 0)
-                                ELSE 0
-                            END
-                        ) AS flow_value
-                    FROM facts_deltas
-                    WHERE iso3 = ?
-                      AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') = ?
-                      AND lower(series_semantics) = 'new'
-                      AND lower(metric) IN (
-                        'new_displacements',
-                        'idp_displacement_new_dtm',
-                        'idp_displacement_flow_idmc'
-                      )
-                    ORDER BY ym
-                    """,
-                    [iso3, hz],
-                ).fetchall()
-            except Exception as exc:
+                summary = _load_idmc_conflict_flow_history_summary(con, iso3, hz)
+            except Exception as exc:  # noqa: BLE001
                 logging.warning(
-                    "IDMC history query failed for %s: %s", iso3, exc
+                    "IDMC conflict PA summary helper failed for %s/%s: %s",
+                    iso3,
+                    hz,
+                    exc,
                 )
-                return {
+                summary = {
                     "source": "IDMC",
                     "history_length_months": 0,
                     "recent_mean": None,
@@ -317,50 +449,10 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                     "trend": "uncertain",
                     "last_6m_values": [],
                     "data_quality": "low",
-                    "notes": f"IDMC history unavailable: {type(exc).__name__}",
+                    "notes": f"IDMC history helper crashed: {type(exc).__name__}",
                 }
 
-            if not rows:
-                return {
-                    "source": "IDMC",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": "No IDMC history for this country/hazard.",
-                }
-
-            vals = [float(r[1]) for r in rows]
-            n = len(vals)
-            recent = vals[-min(n, 6):]
-            trend = "uncertain"
-            if len(recent) >= 2:
-                if recent[-1] > recent[0]:
-                    trend = "up"
-                elif recent[-1] < recent[0]:
-                    trend = "down"
-                else:
-                    trend = "flat"
-
-            data_quality = "medium" if n < 24 else "high"
-
-            return {
-                "source": "IDMC",
-                "history_length_months": n,
-                "recent_mean": sum(recent) / len(recent),
-                "recent_max": max(recent),
-                "trend": trend,
-                "last_6m_values": [
-                    {"ym": rows[i][0], "value": vals[i]}
-                    for i in range(max(0, n - 6), n)
-                ],
-                "data_quality": data_quality,
-                "notes": "IDMC history is short; treat it as a weak prior."
-                if n < 24
-                else "IDMC history reasonably long for this country/hazard.",
-            }
+            return summary
 
         if m == "PA" and hz in {"FL", "DR", "TC", "HW"}:
             shock = _map_hazard_to_emdat_shock(hazard_code)

@@ -69,8 +69,9 @@ def test_build_history_summary_idmc_conflict_flow(monkeypatch: pytest.MonkeyPatc
         """
         INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, value_new, series_semantics) VALUES
             (DATE '2024-01-01', 'ETH', 'ACE', 'new_displacements', 1000.0, 'new'),
-            (DATE '2024-02-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new'),
-            (DATE '2024-03-01', 'ETH', 'ACE', 'idp_displacement_new_dtm', 500.0, 'new')
+            (DATE '2024-02-01', 'ETH', 'ACE', 'idp_displacement_new_dtm', 2000.0, 'new'),
+            (DATE '2024-03-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new'),
+            (DATE '2024-03-01', 'ETH', 'ACE', 'idp_displacement_flow_idmc', 500.0, 'new')
         """
     )
 
