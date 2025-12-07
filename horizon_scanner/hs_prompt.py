@@ -103,7 +103,8 @@ Present the final output as a single, fenced markdown code block that begins wit
     + SCENARIO_DATA_INSTRUCTIONS
     + """
 
-    * `"hazard_code"` must be one of `[FL, DR, TC, HW, ACO, ACE, DI, CU, EC, PHE]`. **Do not** use `MULTI` or `OT`.
+    * `"hazard_code"` must be one of `[FL, DR, TC, HW, ACE, DI, CU, EC, PHE]`. **Do not** use `ACO`, `MULTI`, or `OT`.
+      - Use `ACE` for any armed conflict hazard (onset or escalation). Do not use `ACO`.
     * `"likely_window_month"` must be the single most likely `YYYY-MM` within the next six months for the peak impact of the scenario.
     * `"best_guess"` must contain integer point estimates for affected people: `{"PIN": <persons>, "PA": <persons>}`.
     * Keep every scenario strictly single-hazard—never aggregate multiple hazards into one scenario.

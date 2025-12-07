@@ -1578,6 +1578,9 @@ def _load_pythia_questions(limit: int) -> List[dict]:
                 pythia_metadata_json
             FROM questions
             WHERE status = 'active'
+              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+              AND hs_run_id IS NOT NULL
+              AND hs_run_id <> ''
             ORDER BY iso3, hazard_code, metric, target_month, question_id
             LIMIT ?
         """
@@ -1636,6 +1639,11 @@ def _load_pythia_questions(limit: int) -> List[dict]:
             "created_time_iso": datetime.utcnow().isoformat(),
         }
         posts.append(post)
+
+    if not posts:
+        LOG.warning(
+            "Pythia mode: no eligible HS-driven questions found (active, non-ACO, hs_run_id set)."
+        )
 
     return posts
 
