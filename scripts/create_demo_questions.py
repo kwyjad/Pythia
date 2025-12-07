@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import date
 
 import duckdb
@@ -52,6 +53,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create demo questions in DuckDB")
     parser.add_argument("--db", default="duckdb:///data/resolver.duckdb", help="DuckDB URL")
     args = parser.parse_args()
+
+    if os.getenv("PYTHIA_ENABLE_DEMO_QUESTIONS", "0") != "1":
+        print("[info] Demo questions disabled (PYTHIA_ENABLE_DEMO_QUESTIONS != 1)")
+        return
 
     db_url = args.db
     if db_url.startswith("duckdb:///"):

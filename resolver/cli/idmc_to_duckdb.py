@@ -291,6 +291,17 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     prepared_deltas = _ensure_flow_value_columns(prepared_deltas)
 
+    if prepared_deltas is not None:
+        deltas_working = prepared_deltas.copy()
+        if "hazard_code" not in deltas_working.columns:
+            deltas_working["hazard_code"] = "ACE"
+        else:
+            hazard_series = deltas_working["hazard_code"].fillna("").astype(str)
+            deltas_working["hazard_code"] = hazard_series.str.upper().where(
+                hazard_series.str.strip().ne(""), "ACE"
+            )
+        prepared_deltas = deltas_working
+
     total_rows = 0
     resolved_count = 0
     deltas_count = 0

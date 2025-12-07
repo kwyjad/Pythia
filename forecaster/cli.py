@@ -170,11 +170,11 @@ HZ_QUERY_MAP = {
 EMDAT_SHOCK_MAP = {
     "FL": "flood",
     "DR": "drought",
-    "TC": "tropical_cyclone",
-    "HW": "heat_wave",
+    "TC": "tropical cyclone",
+    "HW": "heat wave",
 }
 
-IDMC_HZ_MAP = {"ACO", "ACE", "CU", "DI"}
+IDMC_HZ_MAP = {"ACE", "DI"}
 
 
 def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
@@ -184,9 +184,9 @@ def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
     if hz == "DR":
         return "drought"
     if hz == "TC":
-        return "tropical_cyclone"
+        return "tropical cyclone"
     if hz == "HW":
-        return "heat_wave"
+        return "heat wave"
     return hz.lower()
 
 
@@ -278,7 +278,7 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                 "notes": "ACLED coverage is relatively strong for this country/hazard.",
             }
 
-        if m == "PA" and hz in {"ACO", "ACE", "CU"}:
+        if m == "PA" and hz in {"ACE"}:
             try:
                 rows = con.execute(
                     """
@@ -288,14 +288,19 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                             CASE
                                 WHEN lower(metric) = 'new_displacements' THEN COALESCE(value_new, 0)
                                 WHEN lower(metric) = 'idp_displacement_new_dtm' THEN COALESCE(value_new, 0)
+                                WHEN lower(metric) = 'idp_displacement_flow_idmc' THEN COALESCE(value_new, 0)
                                 ELSE 0
                             END
                         ) AS flow_value
                     FROM facts_deltas
                     WHERE iso3 = ?
-                      AND hazard_code = ?
+                      AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') = ?
                       AND lower(series_semantics) = 'new'
-                      AND lower(metric) IN ('new_displacements', 'idp_displacement_new_dtm')
+                      AND lower(metric) IN (
+                        'new_displacements',
+                        'idp_displacement_new_dtm',
+                        'idp_displacement_flow_idmc'
+                      )
                     ORDER BY ym
                     """,
                     [iso3, hz],
@@ -387,7 +392,7 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
 
             if not rows:
                 return {
-                    "source": "NONE",
+                    "source": "EM-DAT",
                     "history_length_months": 0,
                     "recent_mean": None,
                     "recent_max": None,
@@ -443,7 +448,7 @@ def _infer_resolution_source(hazard_code: str, metric: str) -> str:
 
     if mt == "FATALITIES" and hz in {"ACE"}:
         return "ACLED"
-    if mt == "PA" and hz in {"ACE", "ACO", "CU"}:
+    if mt == "PA" and hz in {"ACE"}:
         return "IDMC"
     if mt == "PA" and hz in {"DR", "FL", "TC", "HW"}:
         return "EM-DAT"
