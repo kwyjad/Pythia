@@ -236,12 +236,13 @@ async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, Mo
 def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
     con = pythia_connect(read_only=False)
     try:
-        logger.info("Running HS triage for %s (%s)", country_name, iso3)
+        iso3_up = (iso3 or "").upper()
+        logger.info("Running HS triage for %s (%s)", country_name, iso3_up)
         resolver_features = _build_resolver_features_for_country(iso3)
         hazard_catalog = _build_hazard_catalog()
         prompt = build_hs_triage_prompt(
             country_name=country_name,
-            iso3=iso3,
+            iso3=iso3_up,
             hazard_catalog=hazard_catalog,
             resolver_features=resolver_features,
             model_info={},
@@ -254,29 +255,29 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
         if error:
             log_hs_llm_call(
                 hs_run_id=run_id,
-                iso3=iso3,
-                hazard_code="",
+                iso3=iso3_up,
+                hazard_code="MULTI",
                 model_spec=model_spec,
                 prompt_text=prompt,
                 response_text=text or "",
                 usage=usage,
                 error_text=str(error),
             )
-            logger.error("HS triage model error for %s: %s", iso3, error)
+            logger.error("HS triage model error for %s: %s", iso3_up, error)
             return
 
         if not text or not text.strip():
             log_hs_llm_call(
                 hs_run_id=run_id,
-                iso3=iso3,
-                hazard_code="",
+                iso3=iso3_up,
+                hazard_code="MULTI",
                 model_spec=model_spec,
                 prompt_text=prompt,
                 response_text=text or "",
                 usage=usage,
                 error_text="empty response",
             )
-            logger.error("HS triage LLM returned empty response for %s", iso3)
+            logger.error("HS triage LLM returned empty response for %s", iso3_up)
             return
 
         raw = text.strip()
@@ -288,8 +289,8 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             raw_path.write_text(text, encoding="utf-8")
             log_hs_llm_call(
                 hs_run_id=run_id,
-                iso3=iso3,
-                hazard_code="",
+                iso3=iso3_up,
+                hazard_code="MULTI",
                 model_spec=model_spec,
                 prompt_text=prompt,
                 response_text=text,
@@ -298,7 +299,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             )
             logger.error(
                 "HS triage response missing JSON fences for %s; raw saved to %s",
-                iso3,
+                iso3_up,
                 raw_path,
             )
             return
@@ -314,8 +315,8 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             raw_path.write_text(text, encoding="utf-8")
             log_hs_llm_call(
                 hs_run_id=run_id,
-                iso3=iso3,
-                hazard_code="",
+                iso3=iso3_up,
+                hazard_code="MULTI",
                 model_spec=model_spec,
                 prompt_text=prompt,
                 response_text=text,
@@ -324,7 +325,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             )
             logger.error(
                 "HS triage JSON decode failed for %s: %s (raw saved to %s)",
-                iso3,
+                iso3_up,
                 exc,
                 raw_path,
             )
@@ -334,8 +335,8 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
         if not hazards:
             log_hs_llm_call(
                 hs_run_id=run_id,
-                iso3=iso3,
-                hazard_code="",
+                iso3=iso3_up,
+                hazard_code="MULTI",
                 model_spec=model_spec,
                 prompt_text=prompt,
                 response_text=text,
@@ -344,10 +345,11 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             )
         else:
             for hz_code in hazards:
+                hz_code_up = (hz_code or "").upper()
                 log_hs_llm_call(
                     hs_run_id=run_id,
-                    iso3=iso3,
-                    hazard_code=hz_code,
+                    iso3=iso3_up,
+                    hazard_code=hz_code_up,
                     model_spec=model_spec,
                     prompt_text=prompt,
                     response_text=text,
@@ -355,7 +357,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
                     error_text=None,
                 )
 
-        _write_hs_triage(run_id, iso3, triage)
+        _write_hs_triage(run_id, iso3_up, triage)
 
         cost = usage.get("cost_usd") or estimate_cost_usd(_resolve_hs_model(), usage)
         logger.info(
