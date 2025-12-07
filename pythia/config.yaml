@@ -8,7 +8,7 @@ security:
   api_token_header: "X-Pythia-Token"
   api_tokens: ["CHANGE_THIS_TOKEN"]
 
-hazards_allowed: ["FL","DR","TC","HW","ACO","ACE","DI","CU","EC","PHE"]   # MULTI/OT disabled
+hazards_allowed: ["FL","DR","TC","HW","ACE","DI","CU","EC","PHE"]   # MULTI/OT disabled; ACO retired in favour of ACE
 
 hs:
   horizon_months: 6

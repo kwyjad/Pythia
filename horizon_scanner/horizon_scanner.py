@@ -175,6 +175,17 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
             tier = (hdata.get("tier") or "quiet").lower()
             score = float(hdata.get("triage_score") or 0.0)
 
+            hz_up = (hz_code or "").upper().strip()
+            iso3_up = (iso3 or "").upper().strip()
+
+            # Retire ACO in favour of ACE as the canonical conflict hazard code.
+            if hz_up == "ACO":
+                logger.info(
+                    "HS triage: skipping ACO hazard for %s; ACE is the canonical conflict hazard.",
+                    iso3_up,
+                )
+                continue
+
             need_full_spd = False
             if tier == "priority" or score >= 0.7:
                 need_full_spd = True
@@ -192,8 +203,8 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
                 """,
                 [
                     run_id,
-                    iso3,
-                    hz_code,
+                    iso3_up,
+                    hz_up,
                     tier,
                     score,
                     need_full_spd,
