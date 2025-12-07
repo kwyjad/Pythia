@@ -2,6 +2,7 @@
 from __future__ import annotations
 import importlib
 import os
+import re
 from datetime import date
 from typing import Any, Dict, Optional
 import json
@@ -820,6 +821,56 @@ def _bucket_labels_for_question(question: Dict[str, Any]) -> list[str]:
         return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
     return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
 
+
+def _forecast_month_keys_from_question(
+    question: Dict[str, Any],
+    horizon_months: int = 6,
+) -> list[str]:
+    """
+    Derive a list of YYYY-MM month keys for the SPD forecast horizon.
+
+    We prefer:
+      - question['target_months'], then
+      - question['target_month'], else
+      - return [] (caller falls back to generic placeholders).
+
+    Expected formats:
+      - 'YYYY-MM'
+      - 'YYYY-MM-DD'
+    """
+
+    raw = str(
+        question.get("target_months")
+        or question.get("target_month")
+        or ""
+    ).strip()
+    if not raw:
+        return []
+
+    # Normalize to 'YYYY-MM'
+    m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?$", raw)
+    if not m:
+        return []
+
+    try:
+        year = int(m.group(1))
+        month = int(m.group(2))
+    except Exception:
+        return []
+
+    if not (1 <= month <= 12):
+        return []
+
+    keys: list[str] = []
+    y, mm = year, month
+    for _ in range(horizon_months):
+        keys.append(f"{y:04d}-{mm:02d}")
+        mm += 1
+        if mm > 12:
+            mm = 1
+            y += 1
+    return keys
+
 def build_spd_prompt_v2(
     question: Dict[str, Any],
     history_summary: Dict[str, Any],
@@ -833,6 +884,18 @@ def build_spd_prompt_v2(
     metric = (question.get("metric") or "").upper()
     resolution_source = (question.get("resolution_source") or "").upper()
     wording = question.get("wording") or question.get("title") or ""
+
+    forecast_keys = _forecast_month_keys_from_question(question, horizon_months=6)
+    forecast_labels: list[str] = []
+    if forecast_keys:
+        for k in forecast_keys:
+            try:
+                y = int(k[0:4])
+                m = int(k[5:7])
+                d = date(y, m, 1)
+                forecast_labels.append(d.strftime("%B %Y"))
+            except Exception:
+                forecast_labels.append(k)
 
     base_rate_note = ""
     if (history_summary.get("source") or "").lower() == "none":
@@ -863,6 +926,26 @@ def build_spd_prompt_v2(
 
     bucket_list_str = ", ".join([f'\"{b}\"' for b in buckets])
 
+    if forecast_keys and len(forecast_keys) >= 2:
+        example_key_1 = forecast_keys[0]
+        example_key_2 = forecast_keys[1]
+    else:
+        example_key_1 = "YYYY-MM"
+        example_key_2 = "YYYY-MM+1"
+
+    horizon_note = ""
+    if forecast_keys and forecast_labels and len(forecast_keys) == len(forecast_labels) == 6:
+        horizon_note = (
+            "Forecast horizon (months and JSON keys):\n"
+            f"- Month 1: {forecast_labels[0]} (key: \"{forecast_keys[0]}\")\n"
+            f"- Month 2: {forecast_labels[1]} (key: \"{forecast_keys[1]}\")\n"
+            f"- Month 3: {forecast_labels[2]} (key: \"{forecast_keys[2]}\")\n"
+            f"- Month 4: {forecast_labels[3]} (key: \"{forecast_keys[3]}\")\n"
+            f"- Month 5: {forecast_labels[4]} (key: \"{forecast_keys[4]}\")\n"
+            f"- Month 6: {forecast_labels[5]} (key: \"{forecast_keys[5]}\")\n\n"
+            "You MUST use exactly these six keys in the `spds` object (no extra months).\n\n"
+        )
+
     return (
         "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
         "Your task is to produce a six-month PROBABILITY DISTRIBUTION over five impact buckets for the question below, where each month’s probabilities sum to 1.0.\n\n"
@@ -872,6 +955,7 @@ def build_spd_prompt_v2(
         "```json\n"
         f"{_json_dumps_for_prompt(question, indent=2)}\n"
         "```\n\n"
+        f"{horizon_note}"
         "Resolver history summary (Resolver is one imperfect source; ACLED strong, IDMC short, EM-DAT patchy):\n"
         "```json\n"
         f"{_json_dumps_for_prompt(history_summary, indent=2)}\n"
@@ -901,8 +985,8 @@ def build_spd_prompt_v2(
         "```json\n"
         "{\n"
         '  "spds": {\n'
-        f'    "YYYY-MM": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}},\n'
-        f'    "YYYY-MM+1": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}}\n'
+        f'    "{example_key_1}": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}},\n'
+        f'    "{example_key_2}": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}}\n'
         "  },\n"
         '  "human_explanation": "3–4 sentences summarising the base rate, key update signals, and why any large deviations from the base rate are justified."\n'
         "}\n"

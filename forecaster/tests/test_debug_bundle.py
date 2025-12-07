@@ -137,3 +137,5 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
     assert "#### 2.1.2 Research (Research v2)" in md
     assert "##### Prompt" in md
     assert "##### Output" in md
+    assert "hs_triage table" in md
+    assert "priority" in md

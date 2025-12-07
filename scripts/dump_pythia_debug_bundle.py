@@ -248,6 +248,7 @@ def _load_llm_calls_for_question(
     question_id: str,
     iso3: str,
     hazard_code: str,
+    hs_run_id: str | None = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Return phase -> call dict for this question/run.
@@ -293,19 +294,31 @@ def _load_llm_calls_for_question(
             "usage_json": usage_json,
         }
 
-    hs_rows = _fetch_llm_rows(
-        con,
+    hs_params: list[Any] = [iso3, hazard_code]
+    if hs_run_id:
+        hs_sql = """
+            SELECT *
+            FROM llm_calls
+            WHERE phase = 'hs_triage'
+              AND iso3 = ?
+              AND hazard_code = ?
+              AND hs_run_id = ?
+            ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
+            LIMIT 1
         """
-        SELECT *
-        FROM llm_calls
-        WHERE phase = 'hs_triage'
-          AND iso3 = ?
-          AND hazard_code = ?
-        ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
-        LIMIT 1
-        """,
-        [iso3, hazard_code],
-    )
+        hs_params.append(hs_run_id)
+    else:
+        hs_sql = """
+            SELECT *
+            FROM llm_calls
+            WHERE phase = 'hs_triage'
+              AND iso3 = ?
+              AND hazard_code = ?
+            ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
+            LIMIT 1
+        """
+
+    hs_rows = _fetch_llm_rows(con, hs_sql, hs_params)
 
     if hs_rows:
         row = hs_rows[0]
@@ -326,12 +339,87 @@ def _load_llm_calls_for_question(
             "error_text": row.get("error_text") or "",
             "usage_json": usage_json,
         }
+    else:
+        triage_rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT *
+            FROM hs_triage
+            WHERE run_id = ?
+              AND iso3 = ?
+              AND hazard_code = ?
+            ORDER BY COALESCE(created_at, CURRENT_TIMESTAMP) DESC
+            LIMIT 1
+            """,
+            [hs_run_id or run_id, iso3, hazard_code],
+        )
+
+        if triage_rows:
+            triage = triage_rows[0]
+            triage_payload = {
+                "tier": triage.get("tier"),
+                "triage_score": triage.get("triage_score"),
+                "need_full_spd": triage.get("need_full_spd"),
+                "drivers": triage.get("drivers_json"),
+                "regime_shifts": triage.get("regime_shifts_json"),
+                "data_quality": triage.get("data_quality_json"),
+                "scenario_stub": triage.get("scenario_stub"),
+            }
+
+            for key in ("drivers", "regime_shifts", "data_quality"):
+                raw_val = triage_payload.get(key)
+                if isinstance(raw_val, str):
+                    try:
+                        triage_payload[key] = json.loads(raw_val)
+                    except Exception:
+                        continue
+
+            calls["hs_triage"] = {
+                "call_type": "hs_triage_fallback",
+                "phase": "hs_triage",
+                "provider": None,
+                "model_id": None,
+                "temperature": None,
+                "run_id": triage.get("run_id") or hs_run_id or run_id,
+                "question_id": question_id,
+                "iso3": triage.get("iso3") or iso3,
+                "hazard_code": triage.get("hazard_code") or hazard_code,
+                "metric": None,
+                "prompt_text": "HS triage (from hs_triage table; no llm_calls row)",
+                "response_text": json.dumps(triage_payload, ensure_ascii=False, indent=2),
+                "error_text": "",
+                "usage_json": "{}",
+            }
 
     return calls
 
 
-def _aggregate_usage_by_phase(
+def _resolve_hs_run_id_for_forecast(
     con: duckdb.DuckDBPyConnection, run_id: str
+) -> str | None:
+    try:
+        row = con.execute(
+            """
+            SELECT q.hs_run_id
+            FROM forecasts_ensemble fe
+            JOIN questions q ON fe.question_id = q.question_id
+            WHERE fe.run_id = ?
+              AND q.hs_run_id IS NOT NULL
+              AND q.hs_run_id <> ''
+            ORDER BY COALESCE(fe.created_at, CURRENT_TIMESTAMP) DESC
+            LIMIT 1
+            """,
+            [run_id],
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        return None
+    return None
+
+
+def _aggregate_usage_by_phase(
+    con: duckdb.DuckDBPyConnection, run_id: str, hs_run_id: str | None
 ) -> dict[str, dict[str, float]]:
     """
     Aggregate token and cost usage by phase for a given forecast run.
@@ -344,16 +432,24 @@ def _aggregate_usage_by_phase(
     We DO NOT join to questions here to avoid schema assumptions such as q.run_id.
     """
     # Load all calls for this run (research_v2, spd_v2, scenario_v2, etc.)
-    rows = _fetch_llm_rows(
-        con,
+    params: list[Any] = [run_id]
+    if hs_run_id:
+        query = """
+            SELECT *
+            FROM llm_calls
+            WHERE run_id = ?
+               OR (phase = 'hs_triage' AND hs_run_id = ?)
         """
-        SELECT *
-        FROM llm_calls
-        WHERE run_id = ?
-           OR (phase = 'hs_triage')
-        """,
-        [run_id],
-    )
+        params.append(hs_run_id)
+    else:
+        query = """
+            SELECT *
+            FROM llm_calls
+            WHERE run_id = ?
+               OR (phase = 'hs_triage')
+        """
+
+    rows = _fetch_llm_rows(con, query, params)
 
     out: dict[str, dict[str, float]] = {}
     for row in rows:
@@ -498,7 +594,8 @@ def build_debug_bundle_markdown(
     lines: List[str] = []
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    usage_by_phase = _aggregate_usage_by_phase(con, run_id)
+    hs_run_id_for_costs = _resolve_hs_run_id_for_forecast(con, run_id)
+    usage_by_phase = _aggregate_usage_by_phase(con, run_id, hs_run_id_for_costs)
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
     lines.append("")
@@ -581,7 +678,9 @@ def build_debug_bundle_markdown(
         lines.append(f"- Wording: {wording}")
         lines.append("")
 
-        calls = _load_llm_calls_for_question(con, run_id, qid, iso3_val, hz_val)
+        calls = _load_llm_calls_for_question(
+            con, run_id, qid, iso3_val, hz_val, hs_run_id
+        )
 
         lines.append(f"#### 2.{idx}.1 Horizon Scanner (HS)")
         _append_stage_block(lines, "hs_triage", calls.get("hs_triage"))

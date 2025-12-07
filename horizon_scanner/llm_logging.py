@@ -12,9 +12,7 @@ LOG = logging.getLogger(__name__)
 
 
 def _safe_get(d: Dict[str, Any], key: str, default: Any = 0) -> Any:
-    """
-    Safe dict getter that tolerates missing or None values.
-    """
+    """Safe dict getter that tolerates missing or None values."""
     try:
         v = d.get(key, default)
         return v if v is not None else default
@@ -42,9 +40,13 @@ def log_hs_llm_call(
     - Never raises on logging failure; errors are logged as warnings.
     """
 
-    usage_dict: Dict[str, Any] = dict(usage or {})
+    usage_dict: Dict[str, Any] = {}
+    try:
+        usage_dict = dict(usage or {})
+    except Exception:  # noqa: BLE001
+        usage_dict = {}
 
-    # Preserve elapsed_ms from the provider if present; otherwise default to 0.
+    # Pull basic usage stats; if elapsed_ms is missing, leave it at 0 (HS already sets it).
     elapsed_ms = int(_safe_get(usage_dict, "elapsed_ms", 0))
     prompt_tokens = int(_safe_get(usage_dict, "prompt_tokens", 0))
     completion_tokens = int(_safe_get(usage_dict, "completion_tokens", 0))
@@ -53,21 +55,21 @@ def log_hs_llm_call(
     )
     cost_usd = float(_safe_get(usage_dict, "cost_usd", 0.0))
 
-    # Bubble up any error text from the provider into error_text if not already set.
+    # Bubble up error text, if any.
     error_text_local = error_text or ""
-    usage_error = _safe_get(usage_dict, "error_text", "")
-    if usage_error and not error_text_local:
-        error_text_local = str(usage_error)
+    usage_error_text = _safe_get(usage_dict, "error_text", "")
+    if usage_error_text and not error_text_local:
+        error_text_local = str(usage_error_text)
 
-    # For convenience in the debug bundle, keep HS temperature in the usage JSON.
+    # For convenience, keep HS temperature in the usage JSON (no dedicated column).
     temperature = getattr(model_spec, "temperature", None)
     if temperature is not None and "temperature" not in usage_dict:
         usage_dict["temperature"] = temperature
 
     usage_json = json.dumps(usage_dict, ensure_ascii=False)
 
-    iso3_up = (iso3 or "").upper()
-    hz_up = (hazard_code or "").upper()
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
 
     model_name = getattr(model_spec, "name", None) or getattr(model_spec, "model_id", None)
     provider = getattr(model_spec, "provider", None)
@@ -87,7 +89,7 @@ def log_hs_llm_call(
         return
 
     try:
-        # Ensure llm_calls exists with the expected schema.
+        # Make sure llm_calls exists with the expected schema.
         ensure_schema(con)
 
         con.execute(
@@ -120,9 +122,9 @@ def log_hs_llm_call(
             """,
             [
                 call_id,
-                "",  # HS runs are separate from forecast run IDs
+                "",  # HS runs don't have a Forecaster run_id
                 hs_run_id,
-                None,  # No per-question ID at HS triage stage
+                None,  # No per-question ID yet at HS stage
                 "chat",
                 "hs_triage",
                 model_name,
@@ -130,7 +132,7 @@ def log_hs_llm_call(
                 model_id,
                 prompt_text,
                 response_text,
-                None,  # parsed_json; HS triage currently stored as text
+                None,  # parsed_json; HS triage is currently stored as raw text
                 usage_json,
                 elapsed_ms,
                 prompt_tokens,
@@ -141,19 +143,24 @@ def log_hs_llm_call(
                 ts,
                 iso3_up,
                 hz_up,
-                None,  # metric is not defined at HS stage
+                None,  # metric not defined at HS stage
             ],
         )
-        LOG.debug(
-            "HS triage: logged LLM call to llm_calls (call_id=%s, iso3=%s, hazard=%s, tokens=%s).",
+
+        # Explicit INFO log so we can see that logging actually happened in CI logs.
+        LOG.info(
+            "HS triage: logged LLM call to llm_calls (call_id=%s, iso3=%s, hazard=%s, tokens=%s, cost_usd=%.6f).",
             call_id,
             iso3_up,
             hz_up,
             total_tokens,
+            cost_usd,
         )
     except Exception as exc:  # noqa: BLE001
         LOG.warning(
-            "HS triage: failed to log LLM call to llm_calls: %s: %s",
+            "HS triage: failed to log LLM call to llm_calls for %s/%s: %s: %s",
+            iso3_up,
+            hz_up,
             type(exc).__name__,
             exc,
         )

@@ -217,6 +217,31 @@ def test_build_spd_prompt_v2_includes_wording() -> None:
     assert '"How many?"' in prompt_text
 
 
+def test_build_spd_prompt_uses_target_month_keys_for_pa() -> None:
+    question = {
+        "question_id": "TEST_FL_PA",
+        "iso3": "ETH",
+        "hazard_code": "FL",
+        "metric": "PA",
+        "resolution_source": "EM-DAT",
+        "wording": "Monthly people affected or displaced in ETH for hazard FL, as recorded by the canonical Pythia resolution source.",
+        "target_months": "2026-01",
+    }
+    history_summary = {"source": "EM-DAT"}
+    hs_triage_entry = {}
+    research_json = {}
+
+    prompt = prompts.build_spd_prompt_v2(
+        question=question,
+        history_summary=history_summary,
+        hs_triage_entry=hs_triage_entry,
+        research_json=research_json,
+    )
+
+    assert "Month 1: January 2026 (key: \"2026-01\")" in prompt
+    assert "\"2026-01\": {\"buckets\": [" in prompt
+
+
 def test_build_spd_prompt_v2_di_and_nat_notes() -> None:
     question_di = {
         "question_id": "test_di",
