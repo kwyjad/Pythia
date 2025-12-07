@@ -50,12 +50,18 @@ DEMO_QUESTIONS = [
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create demo questions in DuckDB")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Create demo questions in DuckDB (gated by PYTHIA_ENABLE_DEMO_QUESTIONS=1)"
+        )
+    )
     parser.add_argument("--db", default="duckdb:///data/resolver.duckdb", help="DuckDB URL")
     args = parser.parse_args()
 
     if os.getenv("PYTHIA_ENABLE_DEMO_QUESTIONS", "0") != "1":
-        print("[info] Demo questions disabled (PYTHIA_ENABLE_DEMO_QUESTIONS != 1)")
+        print(
+            "[info] Demo questions disabled (set PYTHIA_ENABLE_DEMO_QUESTIONS=1 to enable)"
+        )
         return
 
     db_url = args.db

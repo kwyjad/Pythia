@@ -1601,9 +1601,23 @@ def _load_pythia_questions(limit: int) -> List[dict]:
         duckdb_io.close_db(conn)
 
     cols = [c[0] for c in description]
-    posts: List[dict] = []
+    filtered_rows = []
     for row in rows:
         rec = dict(zip(cols, row))
+        meta_raw = rec.get("pythia_metadata_json")
+        if meta_raw:
+            try:
+                meta = json.loads(meta_raw)
+            except Exception:
+                meta = {}
+        else:
+            meta = {}
+        if meta.get("source") == "demo":
+            continue
+        filtered_rows.append(rec)
+
+    posts: List[dict] = []
+    for rec in filtered_rows:
         qid = rec.get("question_id")
         iso3 = (rec.get("iso3") or "").upper()
         hz = (rec.get("hazard_code") or "").upper()
