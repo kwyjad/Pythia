@@ -24,12 +24,13 @@ def test_idmc_history_for_conflict_pa(monkeypatch, tmp_path):
             """
         )
         for month in range(1, 9):
+            ym = f"2024-{month:02d}-01"
             con.execute(
                 """
                 INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, series_semantics, value_new)
-                VALUES (DATE '2024-0'||?||'-01', 'ETH', 'ACE', 'idp_displacement_flow_idmc', 'new', ?)
+                VALUES (?, 'ETH', 'ACE', 'idp_displacement_flow_idmc', 'new', ?)
                 """,
-                [month, 1000.0 * month],
+                [ym, 1000.0 * month],
             )
     finally:
         con.close()
