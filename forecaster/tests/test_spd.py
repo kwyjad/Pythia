@@ -469,6 +469,79 @@ def test_pythia_spd_hex_qid_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.db
+def test_spd_missing_spds_records_reason_and_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing `spds` key should log no_forecast, reason, and raw text."""
+
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "spd_missing_spds.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "TEST_DR_PA",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test DR PA question",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?", ["TEST_DR_PA"]
+        ).fetchone()
+    finally:
+        con.close()
+
+    async def fake_call_chat_ms(ms, prompt, **_kwargs):
+        return json.dumps({"note": "test: no spds key"}), {"total_tokens": 5}, None
+
+    monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    asyncio.run(cli._run_spd_for_question("run_spd_missing", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            """
+            SELECT status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ?
+            """,
+            ["run_spd_missing", "TEST_DR_PA"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row is not None
+    assert row[0] == "no_forecast"
+    assert "missing spds" in (row[1] or "").lower()
+
+    raw_path = Path("debug/spd_raw") / "run_spd_missing__TEST_DR_PA_missing_spds.txt"
+    assert raw_path.exists()
+    assert "no spds key" in raw_path.read_text()
+
+
+@pytest.mark.db
 def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SPD v2 should log and write outputs even if research is missing."""
 

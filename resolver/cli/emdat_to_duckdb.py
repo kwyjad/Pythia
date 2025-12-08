@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Optional, Sequence
 
 from resolver.db import duckdb_io
 from resolver.ingestion import emdat_stub
@@ -200,6 +200,39 @@ def run(argv: Sequence[str] | None = None) -> int:
 
 def main() -> None:
     sys.exit(run())
+
+
+def run_emdat_pa_backfill(
+    from_year: int,
+    to_year: int,
+    *,
+    db_url: str,
+    iso3_list: Optional[Iterable[str]] = None,
+    network: bool = True,
+    limit: Optional[int] = None,
+) -> int:
+    """Programmatic wrapper around the EM-DAT PA backfill.
+
+    This leaves CLI behaviour unchanged while enabling tests/CI to run the
+    backfill with explicit parameters.
+
+    Returns the same integer status code as ``run(argv)``.
+    """
+
+    argv: list[str] = ["--from", str(from_year), "--to", str(to_year), "--db", db_url]
+
+    if iso3_list:
+        iso_csv = ",".join(sorted({value.upper() for value in iso3_list if value}))
+        if iso_csv:
+            argv.extend(["--countries", iso_csv])
+
+    if network:
+        argv.append("--network")
+
+    if limit is not None:
+        argv.extend(["--limit", str(limit)])
+
+    return run(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint

@@ -487,6 +487,7 @@ jobs:
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
+      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -527,6 +528,26 @@ jobs:
             mkdir -p diagnostics/ingestion/acled
             cp -R acled-artifacts/diagnostics/acled/. diagnostics/ingestion/acled/
           fi
+
+      - name: Run EM-DAT PA backfill into resolver.duckdb
+        if: ${{ always() && env.EMDAT_API_KEY != '' }}
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+        run: |
+          set -euo pipefail
+
+          DB_URL="${RESOLVER_DB_URL:-duckdb:///${GITHUB_WORKSPACE}/data/resolver.duckdb}"
+
+          END_ISO="$(date -u +%Y-%m-%d)"
+          END_YEAR="${END_ISO%%-*}"
+          START_YEAR=$((END_YEAR - 5))
+
+          echo "Running EM-DAT PA backfill from ${START_YEAR} to ${END_YEAR} into ${DB_URL}"
+          python -m resolver.emdat_to_duckdb \
+            --from "${START_YEAR}" \
+            --to "${END_YEAR}" \
+            --db "${DB_URL}" \
+            --network
 
       - name: Export canonical facts
         run: |

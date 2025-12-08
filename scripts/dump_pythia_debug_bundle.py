@@ -720,38 +720,57 @@ def build_debug_bundle_markdown(
             lines.append(f"| {i + 1} | {label} | {centroid_val} |")
         lines.append("")
 
-        ensemble = _load_ensemble_spd_for_question(con, run_id, qid, centroids)
-        if not ensemble:
+        ensemble_rows = con.execute(
+            """
+            SELECT month_index, bucket_index, probability, ev_value, status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ?
+            ORDER BY month_index, bucket_index
+            """,
+            [run_id, qid],
+        ).fetchall()
+
+        if not ensemble_rows:
             lines.append("_No ensemble SPD rows found for this question/run._")
             lines.append("")
         else:
-            lines.append("##### Ensemble SPD and EV by Month")
-            lines.append("")
-            bucket_count = max(len(bucket_labels), 1)
-            lines.append(
-                "| month_index | "
-                + " | ".join(f"p(bucket {i + 1})" for i in range(bucket_count))
-                + " | EV (units of centroid) |"
-            )
-            lines.append("|------------|" + "|".join(["--------------"] * (bucket_count + 1)) + "|")
-            for month_idx in sorted(ensemble.keys()):
-                entry = ensemble[month_idx]
-                probs = entry.get("probs") or [0.0] * bucket_count
-                ev_val = entry.get("ev_value")
-                prob_cells = " | ".join(f"{p:.3f}" for p in probs[:bucket_count])
-                ev_cell = f"{ev_val:.1f}" if ev_val is not None else ""
-                lines.append(f"| {month_idx} | {prob_cells} | {ev_cell} |")
-            lines.append("")
+            statuses = {row[4] for row in ensemble_rows if row}
+            if statuses == {"no_forecast"}:
+                reason = (ensemble_rows[0][5] or "unknown") if ensemble_rows else "unknown"
+                lines.append("_SPD status: `no_forecast`._")
+                lines.append(f"_SPD failure reason: {reason}_")
+                lines.append("")
+                lines.append("_No ensemble SPD rows found for this question/run._")
+                lines.append("")
+            else:
+                ensemble = _load_ensemble_spd_for_question(con, run_id, qid, centroids)
+                lines.append("##### Ensemble SPD and EV by Month")
+                lines.append("")
+                bucket_count = max(len(bucket_labels), 1)
+                lines.append(
+                    "| month_index | "
+                    + " | ".join(f"p(bucket {i + 1})" for i in range(bucket_count))
+                    + " | EV (units of centroid) |"
+                )
+                lines.append("|------------|" + "|".join(["--------------"] * (bucket_count + 1)) + "|")
+                for month_idx in sorted(ensemble.keys()):
+                    entry = ensemble[month_idx]
+                    probs = entry.get("probs") or [0.0] * bucket_count
+                    ev_val = entry.get("ev_value")
+                    prob_cells = " | ".join(f"{p:.3f}" for p in probs[:bucket_count])
+                    ev_cell = f"{ev_val:.1f}" if ev_val is not None else ""
+                    lines.append(f"| {month_idx} | {prob_cells} | {ev_cell} |")
+                lines.append("")
 
-            lines.append("##### EV Calculation Notes")
-            lines.append("")
-            lines.append(
-                "For each month, the expected value (EV) is computed as:\n"
-                "- EV = sum_{i=1..5} p_i * centroid_i\n"
-                "where centroid_i is the representative value for bucket i (from `bucket_centroids` or defaults), "
-                "and p_i are the ensemble bucket probabilities after Bayes-MC aggregation."
-            )
-            lines.append("")
+                lines.append("##### EV Calculation Notes")
+                lines.append("")
+                lines.append(
+                    "For each month, the expected value (EV) is computed as:\n"
+                    "- EV = sum_{i=1..5} p_i * centroid_i\n"
+                    "where centroid_i is the representative value for bucket i (from `bucket_centroids` or defaults), "
+                    "and p_i are the ensemble bucket probabilities after Bayes-MC aggregation."
+                )
+                lines.append("")
 
     return "\n".join(lines)
 
