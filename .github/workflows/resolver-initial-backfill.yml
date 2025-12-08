@@ -544,7 +544,7 @@ jobs:
           START_YEAR=$((END_YEAR - 5))
 
           echo "Running EM-DAT PA backfill from ${START_YEAR} to ${END_YEAR} into ${DB_URL}"
-          python -m resolver.emdat_to_duckdb \
+          python -m resolver.cli.emdat_to_duckdb \
             --from "${START_YEAR}" \
             --to "${END_YEAR}" \
             --db "${DB_URL}" \
