@@ -1544,143 +1544,136 @@ def _load_pa_history_block(
     return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 
 
-def _load_pythia_questions(limit: Optional[int] = None) -> List[dict]:
+def _row_to_pythia_question(row: Any) -> PythiaQuestion:
+    return PythiaQuestion(
+        question_id=row["question_id"],
+        hs_run_id=row["hs_run_id"],
+        iso3=row["iso3"],
+        hazard_code=row["hazard_code"],
+        metric=row["metric"],
+        target_month=row["target_month"],
+        window_start_date=row["window_start_date"],
+        window_end_date=row["window_end_date"],
+        wording=row["wording"],
+        status=row["status"],
+        pythia_metadata_json=row["pythia_metadata_json"],
+        scenario_ids_json=row["scenario_ids_json"],
+    )
+
+
+def _pythia_question_to_post(question: PythiaQuestion) -> Optional[dict]:
+    meta = _as_dict(question.pythia_metadata_json or {})
+    if meta.get("source") == "demo":
+        return None
+
+    qid = question.question_id
+    iso3 = (question.iso3 or "").upper()
+    hz = (question.hazard_code or "").upper()
+    metric = question.metric or "PA"
+    target_month = question.target_month or ""
+    wording = question.wording or ""
+    hs_run_id = question.hs_run_id
+
+    scenario_ids = _safe_json_load(question.scenario_ids_json or "[]") or []
+
+    question_block = {
+        "id": qid,
+        "title": wording,
+        "type": "spd",
+        "possibilities": {"type": "spd"},
+    }
+
+    return {
+        "id": qid,
+        "question": question_block,
+        "description": "",
+        "pythia_iso3": iso3,
+        "pythia_hazard_code": hz,
+        "pythia_metric": metric,
+        "pythia_target_month": target_month,
+        "pythia_status": question.status,
+        "pythia_hs_run_id": hs_run_id,
+        "pythia_scenario_ids": scenario_ids,
+        "pythia_window_start_date": question.window_start_date,
+        "pythia_window_end_date": question.window_end_date,
+        "pythia_metadata": meta,
+        "created_time_iso": datetime.utcnow().isoformat(),
+    }
+
+
+def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
     """
     Load questions for Pythia runs with transitional gating:
 
+    - Exclude ACO entirely.
     - Prefer HS-generated questions (hs_run_id not null) for each (iso3, hazard_code, metric).
     - Fall back to legacy static questions only when no HS question exists for that triple.
-    - Always exclude hazard_code = 'ACO'.
     """
-
-    from datetime import datetime
-
-    import duckdb
 
     con = pythia_connect(read_only=True)
 
-    def _rows_to_records(cursor: duckdb.DuckDBPyRelation) -> tuple[List[Dict[str, Any]], List[str]]:
-        rows = cursor.fetchall()
-        cols = [c[0] for c in (getattr(cursor, "description", []) or [])]
-        return [dict(zip(cols, row)) for row in rows], cols
+    hs_sql = """
+        SELECT
+            question_id, hs_run_id, scenario_ids_json,
+            iso3, hazard_code, metric,
+            target_month, window_start_date, window_end_date,
+            wording, status, pythia_metadata_json
+        FROM questions
+        WHERE status = 'active'
+          AND hs_run_id IS NOT NULL
+          AND hs_run_id <> ''
+          AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+    """
+    if limit is not None:
+        hs_sql += " LIMIT ?"
+        hs_rows = con.execute(hs_sql, [limit]).fetchall()
+    else:
+        hs_rows = con.execute(hs_sql).fetchall()
 
-    def _record_to_post(rec: Dict[str, Any]) -> Optional[dict]:
-        meta = _as_dict(rec.get("pythia_metadata_json") or {})
-        if meta.get("source") == "demo":
-            return None
+    hs_questions = [_row_to_pythia_question(row) for row in hs_rows]
+    hs_keys = {(q.iso3, q.hazard_code, q.metric) for q in hs_questions}
 
-        qid = rec.get("question_id")
-        iso3 = (rec.get("iso3") or "").upper()
-        hz = (rec.get("hazard_code") or "").upper()
-        metric = rec.get("metric") or "PA"
-        target_month = rec.get("target_month") or ""
-        wording = rec.get("wording") or ""
-        hs_run_id = rec.get("hs_run_id")
+    legacy_sql = """
+        SELECT
+            question_id, hs_run_id, scenario_ids_json,
+            iso3, hazard_code, metric,
+            target_month, window_start_date, window_end_date,
+            wording, status, pythia_metadata_json
+        FROM questions
+        WHERE status = 'active'
+          AND (hs_run_id IS NULL OR hs_run_id = '')
+          AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+    """
+    if limit is not None:
+        legacy_sql += " LIMIT ?"
+        legacy_rows = con.execute(legacy_sql, [limit]).fetchall()
+    else:
+        legacy_rows = con.execute(legacy_sql).fetchall()
 
-        scenario_ids = _safe_json_load(rec.get("scenario_ids_json") or "[]") or []
+    legacy_questions: List[PythiaQuestion] = []
+    for row in legacy_rows:
+        q = _row_to_pythia_question(row)
+        key = (q.iso3, q.hazard_code, q.metric)
+        if key in hs_keys:
+            continue
+        legacy_questions.append(q)
 
-        question = {
-            "id": qid,
-            "title": wording,
-            "type": "spd",
-            "possibilities": {"type": "spd"},
-        }
+    con.close()
 
-        return {
-            "id": qid,
-            "question": question,
-            "description": "",
-            "pythia_iso3": iso3,
-            "pythia_hazard_code": hz,
-            "pythia_metric": metric,
-            "pythia_target_month": target_month,
-            "pythia_status": rec.get("status"),
-            "pythia_hs_run_id": hs_run_id,
-            "pythia_scenario_ids": scenario_ids,
-            "pythia_window_start_date": rec.get("window_start_date"),
-            "pythia_window_end_date": rec.get("window_end_date"),
-            "pythia_metadata": _as_dict(rec.get("pythia_metadata_json") or {}),
-            "created_time_iso": datetime.utcnow().isoformat(),
-        }
-
-    try:
-        hs_sql = """
-            SELECT
-                question_id, hs_run_id, scenario_ids_json,
-                iso3, hazard_code, metric,
-                target_month, window_start_date, window_end_date,
-                wording, status, pythia_metadata_json
-            FROM questions
-            WHERE status = 'active'
-              AND hs_run_id IS NOT NULL
-              AND hs_run_id <> ''
-              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
-            ORDER BY iso3, hazard_code, metric, target_month, question_id
-        """
-        if limit is not None:
-            hs_sql += " LIMIT ?"
-            hs_cursor = con.execute(hs_sql, [limit])
-        else:
-            hs_cursor = con.execute(hs_sql)
-
-        hs_records, _ = _rows_to_records(hs_cursor)
-        hs_posts = []
-        for rec in hs_records:
-            post = _record_to_post(rec)
-            if post:
-                hs_posts.append(post)
-
-        hs_keys = {(p["pythia_iso3"], p["pythia_hazard_code"], p["pythia_metric"]) for p in hs_posts}
-
-        legacy_sql = """
-            SELECT
-                question_id, hs_run_id, scenario_ids_json,
-                iso3, hazard_code, metric,
-                target_month, window_start_date, window_end_date,
-                wording, status, pythia_metadata_json
-            FROM questions
-            WHERE status = 'active'
-              AND (hs_run_id IS NULL OR hs_run_id = '')
-              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
-            ORDER BY iso3, hazard_code, metric, target_month, question_id
-        """
-        if limit is not None:
-            legacy_sql += " LIMIT ?"
-            legacy_cursor = con.execute(legacy_sql, [limit])
-        else:
-            legacy_cursor = con.execute(legacy_sql)
-
-        legacy_records, _ = _rows_to_records(legacy_cursor)
-        legacy_posts = []
-        for rec in legacy_records:
-            post = _record_to_post(rec)
-            if not post:
-                continue
-            key = (
-                post["pythia_iso3"],
-                post["pythia_hazard_code"],
-                post["pythia_metric"],
-            )
-            if key in hs_keys:
-                continue
-            legacy_posts.append(post)
-    finally:
-        con.close()
-
-    all_posts = hs_posts + legacy_posts
+    all_questions = hs_questions + legacy_questions
 
     LOG.info(
-        "Loaded %d HS-driven questions and %d legacy fallback questions (ACO fully excluded).",
-        len(hs_posts),
-        len(legacy_posts),
+        "Pythia question loader: %d HS-driven questions, %d legacy fallback questions (ACO fully excluded).",
+        len(hs_questions),
+        len(legacy_questions),
     )
 
-    if not all_posts:
+    if not all_questions:
         LOG.warning(
             "Pythia question loader returned an empty set. Check HS runs and the questions table."
         )
 
-    return all_posts
+    return all_questions
 
 
 def _load_research_json(run_id: str, question_id: str) -> Optional[Dict[str, Any]]:
@@ -3652,8 +3645,15 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
         print(f"[info] Loaded {len(posts)} test post(s) from {qfile.as_posix()}.")
     elif mode == "pythia":
         print("[info] Loading Pythia questions from DuckDB...")
-        posts = _load_pythia_questions(fetch_limit)
-        print(f"[info] Loaded {len(posts)} question(s) from DuckDB (Pythia mode).")
+        questions_loaded = _load_pythia_questions(fetch_limit)
+        posts = []
+        for q in questions_loaded:
+            post = _pythia_question_to_post(q)
+            if post:
+                posts.append(post)
+        print(
+            f"[info] Loaded {len(posts)} question(s) from DuckDB (Pythia mode)."
+        )
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 
@@ -3962,3 +3962,18 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+@dataclass
+class PythiaQuestion:
+    question_id: str
+    hs_run_id: Optional[str]
+    iso3: str
+    hazard_code: str
+    metric: str
+    target_month: Optional[str]
+    window_start_date: Optional[str]
+    window_end_date: Optional[str]
+    wording: str
+    status: str
+    pythia_metadata_json: Optional[str]
+    scenario_ids_json: Optional[str] = None
+

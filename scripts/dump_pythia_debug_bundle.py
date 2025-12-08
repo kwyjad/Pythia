@@ -320,6 +320,20 @@ def _load_llm_calls_for_question(
 
     hs_rows = _fetch_llm_rows(con, hs_sql, hs_params)
 
+    if not hs_rows:
+        hs_rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT *
+            FROM llm_calls
+            WHERE phase = 'hs_triage'
+              AND iso3 = ?
+            ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
+            LIMIT 1
+            """,
+            [iso3],
+        )
+
     if hs_rows:
         row = hs_rows[0]
         usage_json = _build_usage_json_from_row(row)
