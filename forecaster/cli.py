@@ -36,7 +36,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from contextlib import ExitStack
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import inspect
 
 import duckdb
@@ -1606,50 +1606,71 @@ def _pythia_question_to_post(question: PythiaQuestion) -> Optional[dict]:
     }
 
 
-def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
+def _load_pythia_questions(
+    limit: Optional[int] = None, iso3_filter: Optional[Set[str]] = None
+) -> List[PythiaQuestion]:
     """
     Load questions for Pythia runs with epoch-aware gating:
 
     - Exclude ACO entirely.
+    - Restrict iso3 to iso3_filter if provided; otherwise default to iso3 values
+      present in hs_triage. If hs_triage is empty and no filter is provided,
+      fall back to all iso3s present in the questions table.
     - For each (iso3, hazard_code, metric), prefer HS-generated questions
       (hs_run_id not null). Among HS questions, only those with the *latest*
-      hs_run_id for that triple are kept.
+      hs_run_id for that (iso3, hazard_code) are kept.
     - Only when no HS-driven questions exist for a triple, fall back to legacy
       static questions (hs_run_id is null/empty), still excluding ACO.
     """
 
     con = pythia_connect(read_only=True)
 
-    hs_latest_sql = """
-        WITH hs_q AS (
-            SELECT
-                iso3,
-                hazard_code,
-                metric,
-                hs_run_id
-            FROM questions
-            WHERE status = 'active'
-              AND hs_run_id IS NOT NULL
-              AND hs_run_id <> ''
-              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+    if iso3_filter:
+        iso3_allowed = {code.upper() for code in iso3_filter if code}
+    else:
+        rows = con.execute(
+            "SELECT DISTINCT iso3 FROM hs_triage ORDER BY iso3"
+        ).fetchall()
+        iso3_allowed = {r["iso3"] for r in rows}
+
+    if not iso3_allowed:
+        LOG.warning(
+            "No iso3s found in hs_triage and no iso3 filter provided; "
+            "falling back to all iso3s in questions."
         )
+        rows = con.execute(
+            "SELECT DISTINCT iso3 FROM questions ORDER BY iso3"
+        ).fetchall()
+        iso3_allowed = {r["iso3"] for r in rows}
+
+    if not iso3_allowed:
+        LOG.warning("No iso3s available for Pythia loader; returning empty set.")
+        con.close()
+        return []
+
+    iso3_params = sorted(iso3_allowed)
+    placeholders = ",".join(["?"] * len(iso3_params))
+
+    LOG.info("Pythia loader iso3_allowed: %s", iso3_params)
+
+    hs_latest_sql = f"""
         SELECT
             iso3,
             hazard_code,
-            metric,
-            MAX(hs_run_id) AS hs_run_id
-        FROM hs_q
-        GROUP BY iso3, hazard_code, metric
+            MAX(run_id) AS hs_run_id
+        FROM hs_triage
+        WHERE iso3 IN ({placeholders})
+        GROUP BY iso3, hazard_code
     """
-    hs_latest_rows = con.execute(hs_latest_sql).fetchall()
-    latest_hs_keys: Dict[Tuple[str, str, str], str] = {}
+    hs_latest_rows = con.execute(hs_latest_sql, iso3_params).fetchall()
+    latest_hs_by_iso_hz: Dict[Tuple[str, str], str] = {}
     for row in hs_latest_rows:
-        key = (row["iso3"], row["hazard_code"], row["metric"])
-        latest_hs_keys[key] = row["hs_run_id"]
+        key = (row["iso3"], row["hazard_code"])
+        latest_hs_by_iso_hz[key] = row["hs_run_id"]
 
     hs_questions: List[PythiaQuestion] = []
-    if latest_hs_keys:
-        hs_all_sql = """
+    if latest_hs_by_iso_hz:
+        hs_all_sql = f"""
             SELECT
                 question_id, hs_run_id, scenario_ids_json,
                 iso3, hazard_code, metric,
@@ -1660,18 +1681,19 @@ def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
               AND hs_run_id IS NOT NULL
               AND hs_run_id <> ''
               AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+              AND iso3 IN ({placeholders})
         """
-        hs_all_rows = con.execute(hs_all_sql).fetchall()
+        hs_all_rows = con.execute(hs_all_sql, iso3_params).fetchall()
         for row in hs_all_rows:
             q = _row_to_pythia_question(row)
-            key = (q.iso3, q.hazard_code, q.metric)
-            latest_hs = latest_hs_keys.get(key)
+            key_iso_hz = (q.iso3, q.hazard_code)
+            latest_hs = latest_hs_by_iso_hz.get(key_iso_hz)
             if latest_hs is not None and q.hs_run_id == latest_hs:
                 hs_questions.append(q)
 
-    hs_keys = {(q.iso3, q.hazard_code, q.metric) for q in hs_questions}
+    hs_triples = {(q.iso3, q.hazard_code, q.metric) for q in hs_questions}
 
-    legacy_sql = """
+    legacy_sql = f"""
         SELECT
             question_id, hs_run_id, scenario_ids_json,
             iso3, hazard_code, metric,
@@ -1681,13 +1703,14 @@ def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
         WHERE status = 'active'
           AND (hs_run_id IS NULL OR hs_run_id = '')
           AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+          AND iso3 IN ({placeholders})
     """
-    legacy_rows = con.execute(legacy_sql).fetchall()
+    legacy_rows = con.execute(legacy_sql, iso3_params).fetchall()
     legacy_questions: List[PythiaQuestion] = []
     for row in legacy_rows:
         q = _row_to_pythia_question(row)
-        key = (q.iso3, q.hazard_code, q.metric)
-        if key in hs_keys:
+        triple = (q.iso3, q.hazard_code, q.metric)
+        if triple in hs_triples:
             continue
         legacy_questions.append(q)
 
@@ -1713,7 +1736,7 @@ def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
 
     if not all_questions:
         LOG.warning(
-            "Pythia question loader returned an empty set. Check HS runs and the questions table."
+            "Pythia question loader returned an empty set. Check HS runs, iso3 filter, and the questions table."
         )
 
     return all_questions
@@ -3633,12 +3656,21 @@ async def run_one_question(
 # Top-level runner (fetch posts, iterate, and commit logs)
 # ==============================================================================
 
-async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = "data/test_questions.json") -> None:
+async def run_job(
+    mode: str,
+    limit: int,
+    purpose: str,
+    *,
+    questions_file: str = "data/test_questions.json",
+    iso3_filter: Optional[Set[str]] = None,
+) -> None:
     """
     Fetch a batch of posts and process them one by one.
     Supports:
       - mode="pythia": reads Horizon Scanner questions from DuckDB
       - mode="test_questions": reads local JSON of test posts
+
+    iso3_filter can be used to restrict Pythia runs to specific ISO3 codes.
     """
     # --- local imports to keep this function self-contained ---------------
     import os, json, inspect
@@ -3660,6 +3692,10 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
 
     run_summaries: List[QuestionRunSummary] = []
     hs_run_ids: set[str] = set()
+
+    iso3_filter_normalized = (
+        {code.upper() for code in iso3_filter} if iso3_filter else None
+    )
 
     # --- load helpers from this module scope --------------------------------
     # They already exist below in this file; just reference them:
@@ -3688,7 +3724,9 @@ async def run_job(mode: str, limit: int, purpose: str, *, questions_file: str = 
         print(f"[info] Loaded {len(posts)} test post(s) from {qfile.as_posix()}.")
     elif mode == "pythia":
         print("[info] Loading Pythia questions from DuckDB...")
-        questions_loaded = _load_pythia_questions(fetch_limit)
+        questions_loaded = _load_pythia_questions(
+            fetch_limit, iso3_filter=iso3_filter_normalized
+        )
         posts = []
         for q in questions_loaded:
             post = _pythia_question_to_post(q)
@@ -3925,6 +3963,15 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--limit", type=int, default=20, help="Max posts to fetch/process")
     p.add_argument("--purpose", default="ad_hoc", help="String tag recorded in CSV/logs")
+    p.add_argument(
+        "--iso3",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated list of ISO3 codes to forecast (e.g. 'ETH,SOM'). "
+            "If not provided, defaults to countries present in hs_triage."
+        ),
+    )
     p.add_argument("--questions-file", default="data/test_questions.json",
                    help="When --mode test_questions, path to JSON payload")
     return p.parse_args()
@@ -3938,35 +3985,38 @@ def main() -> None:
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
 
+    iso3_filter = {
+        code.strip().upper()
+        for code in (args.iso3 or "").split(",")
+        if code.strip()
+    } or None
+
     def _run_v2_pipeline():
         ensure_schema()
-        con = connect(read_only=True)
-        try:
-            cols = [
-                "question_id",
-                "hs_run_id",
-                "iso3",
-                "hazard_code",
-                "metric",
-                "target_month",
-                "window_start_date",
-                "window_end_date",
-                "wording",
-            ]
-            raw_rows = con.execute(
-                """
-                SELECT question_id, hs_run_id, iso3, hazard_code, metric, target_month,
-                       window_start_date, window_end_date, wording
-                FROM questions
-                WHERE status = 'active'
-                ORDER BY iso3, hazard_code, metric, target_month, question_id
-                LIMIT ?
-                """,
-                [args.limit],
-            ).fetchall()
-            questions = [dict(zip(cols, row)) for row in raw_rows]
-        finally:
-            con.close()
+        questions_loaded = sorted(
+            _load_pythia_questions(limit=args.limit, iso3_filter=iso3_filter),
+            key=lambda q: (
+                q.iso3,
+                q.hazard_code,
+                q.metric,
+                q.target_month or "",
+                q.question_id,
+            ),
+        )
+        questions = [
+            {
+                "question_id": q.question_id,
+                "hs_run_id": q.hs_run_id,
+                "iso3": q.iso3,
+                "hazard_code": q.hazard_code,
+                "metric": q.metric,
+                "target_month": q.target_month,
+                "window_start_date": q.window_start_date,
+                "window_end_date": q.window_end_date,
+                "wording": q.wording,
+            }
+            for q in questions_loaded
+        ]
 
         run_id = f"fc_{int(time.time())}"
         print(f"[v2] run_id={run_id} | questions={len(questions)}")
