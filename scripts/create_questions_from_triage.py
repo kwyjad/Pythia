@@ -5,7 +5,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
 
@@ -219,6 +219,49 @@ def _load_triage_rows(
     return triaged
 
 
+def _upsert_question(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    question_id: str,
+    hs_run_id: str,
+    iso3: str,
+    hazard_code: str,
+    metric: str,
+    wording: str,
+    status: str,
+    metadata: Dict[str, Any],
+    target_month: Optional[str],
+    window_start_date: date,
+    window_end_date: date,
+) -> None:
+    meta_json = json.dumps(metadata, ensure_ascii=False)
+    con.execute("DELETE FROM questions WHERE question_id = ?", [question_id])
+    con.execute(
+        """
+        INSERT INTO questions (
+            question_id, hs_run_id, scenario_ids_json,
+            iso3, hazard_code, metric,
+            target_month, window_start_date, window_end_date,
+            wording, status, pythia_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            question_id,
+            hs_run_id,
+            "[]",
+            iso3,
+            hazard_code,
+            metric,
+            target_month,
+            window_start_date,
+            window_end_date,
+            wording,
+            status,
+            meta_json,
+        ],
+    )
+
+
 def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -> int:
     db_path = _resolve_db_path(db_url)
     con = duckdb.connect(db_path)
@@ -240,8 +283,54 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
         for th in triaged:
             metrics = _metrics_for_hazard(th.hazard_code)
+            if th.hazard_code == "ACE":
+                conflict_meta = {
+                    "source": "hs_triage",
+                    "hs_run_id": run_id,
+                    "tier": th.tier,
+                    "triage_score": th.triage_score,
+                    "hazard_family": "conflict",
+                }
+                _upsert_question(
+                    con,
+                    question_id=f"{th.iso3}_ACE_FATALITIES",
+                    hs_run_id=run_id,
+                    iso3=th.iso3,
+                    hazard_code="ACE",
+                    metric="FATALITIES",
+                    wording=(
+                        f"How many people will be killed each month by armed conflict in {th.iso3} "
+                        "between the forecast start and end dates, as resolved by ACLED?"
+                    ),
+                    status="active",
+                    metadata=conflict_meta,
+                    target_month=target_month,
+                    window_start_date=opening,
+                    window_end_date=closing,
+                )
+                inserted += 1
+
+                _upsert_question(
+                    con,
+                    question_id=f"{th.iso3}_ACE_PA",
+                    hs_run_id=run_id,
+                    iso3=th.iso3,
+                    hazard_code="ACE",
+                    metric="PA",
+                    wording=(
+                        f"How many people will be newly displaced or affected by conflict in {th.iso3} "
+                        "each month, as measured by IDMC displacement data and related sources?"
+                    ),
+                    status="active",
+                    metadata=conflict_meta,
+                    target_month=target_month,
+                    window_start_date=opening,
+                    window_end_date=closing,
+                )
+                inserted += 1
+                continue
+
             for mt in metrics:
-                qid = f"{th.iso3}_{th.hazard_code}_{mt}"
                 wording = _build_question_wording(
                     th.iso3, th.hazard_code, mt, opening, closing
                 )
@@ -252,30 +341,19 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     "triage_score": th.triage_score,
                 }
 
-                con.execute("DELETE FROM questions WHERE question_id = ?", [qid])
-                con.execute(
-                    """
-                    INSERT INTO questions (
-                        question_id, hs_run_id, scenario_ids_json,
-                        iso3, hazard_code, metric,
-                        target_month, window_start_date, window_end_date,
-                        wording, status, pythia_metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        qid,
-                        run_id,
-                        "[]",
-                        th.iso3,
-                        th.hazard_code,
-                        mt,
-                        target_month,
-                        opening,
-                        closing,
-                        wording,
-                        "active",
-                        json.dumps(meta, ensure_ascii=False),
-                    ],
+                _upsert_question(
+                    con,
+                    question_id=f"{th.iso3}_{th.hazard_code}_{mt}",
+                    hs_run_id=run_id,
+                    iso3=th.iso3,
+                    hazard_code=th.hazard_code,
+                    metric=mt,
+                    wording=wording,
+                    status="active",
+                    metadata=meta,
+                    target_month=target_month,
+                    window_start_date=opening,
+                    window_end_date=closing,
                 )
                 inserted += 1
 

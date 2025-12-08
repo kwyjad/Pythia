@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, List
 
 from pythia.db.schema import connect as pythia_connect
 
@@ -11,14 +11,15 @@ LOG = logging.getLogger(__name__)
 
 def main() -> None:
     """
-    One-off maintenance script to deactivate legacy/demo questions:
+    One-off maintenance script to deactivate legacy questions:
 
     - Any question with hazard_code = 'ACO'.
     - Any question with pythia_metadata_json["source"] = "demo".
     """
+
+    logging.basicConfig(level=logging.INFO)
     con = pythia_connect(read_only=False)
 
-    # 1) Deactivate ACO questions
     LOG.info("Deactivating ACO questions in 'questions' table...")
     con.execute(
         """
@@ -29,17 +30,20 @@ def main() -> None:
         """
     )
     aco_count = con.execute(
-        "SELECT COUNT(*) FROM questions WHERE UPPER(COALESCE(hazard_code, '')) = 'ACO' AND status = 'inactive'"
+        """
+        SELECT COUNT(*) FROM questions
+        WHERE UPPER(COALESCE(hazard_code, '')) = 'ACO'
+          AND status = 'inactive'
+        """
     ).fetchone()[0]
     LOG.info("ACO questions now inactive: %d", aco_count)
 
-    # 2) Deactivate demo questions (by metadata)
     LOG.info("Deactivating demo questions (pythia_metadata_json.source = 'demo')...")
     rows = con.execute(
         "SELECT question_id, pythia_metadata_json FROM questions WHERE status = 'active'"
     ).fetchall()
 
-    demo_ids: list[str] = []
+    demo_ids: List[str] = []
     for question_id, meta_raw in rows:
         if not meta_raw:
             continue
@@ -62,5 +66,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()
+
