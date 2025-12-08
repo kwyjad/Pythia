@@ -294,21 +294,26 @@ def _load_llm_calls_for_question(
             "usage_json": usage_json,
         }
 
-    hs_params: list[Any] = [iso3, hazard_code]
+    hs_rows: list[dict[str, Any]] = []
+
     if hs_run_id:
-        hs_sql = """
+        hs_rows = _fetch_llm_rows(
+            con,
+            """
             SELECT *
             FROM llm_calls
             WHERE phase = 'hs_triage'
-              AND iso3 = ?
-              AND hazard_code = ?
               AND hs_run_id = ?
             ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
             LIMIT 1
-        """
-        hs_params.append(hs_run_id)
-    else:
-        hs_sql = """
+            """,
+            [hs_run_id],
+        )
+
+    if not hs_rows:
+        hs_rows = _fetch_llm_rows(
+            con,
+            """
             SELECT *
             FROM llm_calls
             WHERE phase = 'hs_triage'
@@ -316,9 +321,9 @@ def _load_llm_calls_for_question(
               AND hazard_code = ?
             ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
             LIMIT 1
-        """
-
-    hs_rows = _fetch_llm_rows(con, hs_sql, hs_params)
+            """,
+            [iso3, hazard_code],
+        )
 
     if not hs_rows:
         hs_rows = _fetch_llm_rows(

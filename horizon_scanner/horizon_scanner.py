@@ -263,110 +263,77 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
         text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt))
         usage = usage or {}
         usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
+
+        log_error_text: str | None = None
+        triage: Dict[str, Any] = {}
+        hazards_dict: Dict[str, Any] = {}
+
         if error:
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code="MULTI",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text or "",
-                usage=usage,
-                error_text=str(error),
-            )
-            logger.error("HS triage model error for %s: %s", iso3_up, error)
-            return
-
-        if not text or not text.strip():
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code="MULTI",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text or "",
-                usage=usage,
-                error_text="empty response",
-            )
-            logger.error("HS triage LLM returned empty response for %s", iso3_up)
-            return
-
-        raw = text.strip()
-        fence_match = re.search(r"```json\s*(.*?)\s*```", raw, flags=re.S)
-        if not fence_match:
-            debug_dir = Path("debug/hs_triage_raw")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = debug_dir / f"{run_id}__{iso3}.txt"
-            raw_path.write_text(text, encoding="utf-8")
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code="MULTI",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text,
-                usage=usage,
-                error_text="missing JSON fences",
-            )
-            logger.error(
-                "HS triage response missing JSON fences for %s; raw saved to %s",
-                iso3_up,
-                raw_path,
-            )
-            return
-
-        payload = fence_match.group(1).strip()
-
-        try:
-            triage = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            debug_dir = Path("debug/hs_triage_raw")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = debug_dir / f"{run_id}__{iso3}.txt"
-            raw_path.write_text(text, encoding="utf-8")
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code="MULTI",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text,
-                usage=usage,
-                error_text=f"json decode failed: {exc}",
-            )
-            logger.error(
-                "HS triage JSON decode failed for %s: %s (raw saved to %s)",
-                iso3_up,
-                exc,
-                raw_path,
-            )
-            return
-
-        hazards = (triage.get("hazards") or {}).keys()
-        if not hazards:
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code="MULTI",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text,
-                usage=usage,
-                error_text=None,
-            )
+            log_error_text = str(error)
         else:
-            for hz_code in hazards:
-                hz_code_up = (hz_code or "").upper()
+            raw = (text or "").strip()
+            if not raw:
+                log_error_text = "empty response"
+            else:
+                fence_match = re.search(r"```json\s*(.*?)\s*```", raw, flags=re.S)
+                if not fence_match:
+                    debug_dir = Path("debug/hs_triage_raw")
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    raw_path = debug_dir / f"{run_id}__{iso3}.txt"
+                    raw_path.write_text(text or "", encoding="utf-8")
+                    log_error_text = "missing JSON fences"
+                    logger.error(
+                        "HS triage response missing JSON fences for %s; raw saved to %s",
+                        iso3_up,
+                        raw_path,
+                    )
+                else:
+                    payload = fence_match.group(1).strip()
+                    try:
+                        triage = json.loads(payload)
+                        hazards_dict = triage.get("hazards") or {}
+                    except json.JSONDecodeError as exc:
+                        debug_dir = Path("debug/hs_triage_raw")
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        raw_path = debug_dir / f"{run_id}__{iso3}.txt"
+                        raw_path.write_text(text or "", encoding="utf-8")
+                        log_error_text = f"json decode failed: {exc}"
+                        logger.error(
+                            "HS triage JSON decode failed for %s: %s (raw saved to %s)",
+                            iso3_up,
+                            exc,
+                            raw_path,
+                        )
+
+        hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
+        if hazards_dict:
+            for hz_code in hazards_dict.keys():
+                hz_code_up = (hz_code or "").upper().strip()
                 log_hs_llm_call(
                     hs_run_id=run_id,
                     iso3=iso3_up,
                     hazard_code=hz_code_up,
                     model_spec=model_spec,
                     prompt_text=prompt,
-                    response_text=text,
+                    response_text=text or "",
                     usage=usage,
-                    error_text=None,
+                    error_text=log_error_text,
                 )
+        else:
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3_up,
+                hazard_code="",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage,
+                error_text=log_error_text,
+            )
+
+        if log_error_text:
+            logger.error("HS triage error for %s: %s", iso3_up, log_error_text)
+            return
 
         _write_hs_triage(run_id, iso3_up, triage)
 
