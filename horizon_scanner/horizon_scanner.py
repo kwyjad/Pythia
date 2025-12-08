@@ -319,6 +319,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
                     usage=usage,
                     error_text=log_error_text,
                 )
+                logger.info(
+                    "HS logged triage call: hs_run_id=%s iso3=%s hazard=%s",
+                    run_id,
+                    iso3_up,
+                    hz_code_up,
+                )
         else:
             log_hs_llm_call(
                 hs_run_id=run_id,
@@ -329,6 +335,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
                 response_text=text or "",
                 usage=usage,
                 error_text=log_error_text,
+            )
+            logger.info(
+                "HS logged triage call: hs_run_id=%s iso3=%s hazard=%s (no hazards in triage JSON)",
+                run_id,
+                iso3_up,
+                "",
             )
 
         if log_error_text:

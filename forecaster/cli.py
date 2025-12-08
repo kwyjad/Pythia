@@ -1698,6 +1698,13 @@ def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
     if limit is not None and len(all_questions) > limit:
         all_questions = all_questions[:limit]
 
+    selected_ids = sorted({q.question_id for q in all_questions})
+    LOG.info(
+        "Pythia loader selected %d questions: %s",
+        len(selected_ids),
+        selected_ids,
+    )
+
     LOG.info(
         "Pythia question loader: %d HS-driven questions (latest per triple), %d legacy fallback questions (ACO excluded).",
         len(hs_questions),
