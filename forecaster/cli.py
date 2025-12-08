@@ -32,6 +32,7 @@ import re
 import logging
 import time
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from contextlib import ExitStack
@@ -1929,17 +1930,64 @@ def _write_spd_outputs(
         con.close()
 
 
-async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
-    qid = question_row["question_id"]
-    iso3 = question_row["iso3"]
-    hz = question_row["hazard_code"]
-    metric = question_row["metric"]
-    wording = question_row.get("wording") or question_row.get("title") or ""
+def _normalize_question_row_for_spd(question_row: Any) -> Dict[str, Any]:
+    """
+    Normalise a question row (dict, duckdb.Row, or tuple/list) into a plain dict.
+
+    This keeps `_run_spd_for_question` robust when called from:
+      - The main pipeline (where questions are dict-like records)
+      - Unit tests that use `con.execute(...).fetchone()` (tuple rows)
+    """
+
+    if isinstance(question_row, Mapping):
+        return dict(question_row)
+
+    try:
+        _ = question_row["question_id"]  # type: ignore[index]
+        if hasattr(question_row, "keys"):
+            keys = list(question_row.keys())  # type: ignore[attr-defined]
+            return {k: question_row[k] for k in keys}  # type: ignore[index]
+    except Exception:
+        pass
+
+    if isinstance(question_row, (tuple, list)):
+        if len(question_row) < 12:
+            raise TypeError(
+                f"Unsupported questions row shape for SPD; expected >=12 columns, got {len(question_row)}"
+            )
+        return {
+            "question_id": question_row[0],
+            "hs_run_id": question_row[1],
+            "scenario_ids_json": question_row[2],
+            "iso3": question_row[3],
+            "hazard_code": question_row[4],
+            "metric": question_row[5],
+            "target_month": question_row[6],
+            "window_start_date": question_row[7],
+            "window_end_date": question_row[8],
+            "wording": question_row[9],
+            "status": question_row[10],
+            "pythia_metadata_json": question_row[11],
+        }
+
+    raise TypeError(
+        f"Unsupported question_row type {type(question_row)!r}; expected Mapping, duckdb.Row, or tuple/list."
+    )
+
+
+async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
+    rec = _normalize_question_row_for_spd(question_row)
+
+    qid = rec.get("question_id")
+    iso3 = (rec.get("iso3") or "").upper()
+    hz = (rec.get("hazard_code") or "").upper()
+    metric = rec.get("metric") or "PA"
+    wording = rec.get("wording") or rec.get("title") or ""
 
     try:
         resolution_source = _infer_resolution_source(hz, metric)
 
-        hs_run_id = question_row["hs_run_id"] or run_id
+        hs_run_id = rec.get("hs_run_id") or run_id
         hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
         history_summary = _build_history_summary(iso3, hz, metric)
         research_json = _load_research_json(run_id, qid)
@@ -1957,7 +2005,7 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
                 "metric": metric,
                 "resolution_source": resolution_source,
                 "wording": wording,
-                "target_months": question_row.get("target_month"),
+                "target_months": rec.get("target_months") or rec.get("target_month"),
             },
             history_summary=history_summary,
             hs_triage_entry=hs_entry,
