@@ -1545,6 +1545,11 @@ def _load_pa_history_block(
 
 
 def _row_to_pythia_question(row: Any) -> PythiaQuestion:
+    """
+    Convert a duckdb.Row or dict-like row from the questions table to PythiaQuestion.
+    Assumes the schema defined by pythia.db.schema.ensure_schema().
+    """
+
     return PythiaQuestion(
         question_id=row["question_id"],
         hs_run_id=row["hs_run_id"],
@@ -1603,34 +1608,67 @@ def _pythia_question_to_post(question: PythiaQuestion) -> Optional[dict]:
 
 def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
     """
-    Load questions for Pythia runs with transitional gating:
+    Load questions for Pythia runs with epoch-aware gating:
 
     - Exclude ACO entirely.
-    - Prefer HS-generated questions (hs_run_id not null) for each (iso3, hazard_code, metric).
-    - Fall back to legacy static questions only when no HS question exists for that triple.
+    - For each (iso3, hazard_code, metric), prefer HS-generated questions
+      (hs_run_id not null). Among HS questions, only those with the *latest*
+      hs_run_id for that triple are kept.
+    - Only when no HS-driven questions exist for a triple, fall back to legacy
+      static questions (hs_run_id is null/empty), still excluding ACO.
     """
 
     con = pythia_connect(read_only=True)
 
-    hs_sql = """
+    hs_latest_sql = """
+        WITH hs_q AS (
+            SELECT
+                iso3,
+                hazard_code,
+                metric,
+                hs_run_id
+            FROM questions
+            WHERE status = 'active'
+              AND hs_run_id IS NOT NULL
+              AND hs_run_id <> ''
+              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+        )
         SELECT
-            question_id, hs_run_id, scenario_ids_json,
-            iso3, hazard_code, metric,
-            target_month, window_start_date, window_end_date,
-            wording, status, pythia_metadata_json
-        FROM questions
-        WHERE status = 'active'
-          AND hs_run_id IS NOT NULL
-          AND hs_run_id <> ''
-          AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+            iso3,
+            hazard_code,
+            metric,
+            MAX(hs_run_id) AS hs_run_id
+        FROM hs_q
+        GROUP BY iso3, hazard_code, metric
     """
-    if limit is not None:
-        hs_sql += " LIMIT ?"
-        hs_rows = con.execute(hs_sql, [limit]).fetchall()
-    else:
-        hs_rows = con.execute(hs_sql).fetchall()
+    hs_latest_rows = con.execute(hs_latest_sql).fetchall()
+    latest_hs_keys: Dict[Tuple[str, str, str], str] = {}
+    for row in hs_latest_rows:
+        key = (row["iso3"], row["hazard_code"], row["metric"])
+        latest_hs_keys[key] = row["hs_run_id"]
 
-    hs_questions = [_row_to_pythia_question(row) for row in hs_rows]
+    hs_questions: List[PythiaQuestion] = []
+    if latest_hs_keys:
+        hs_all_sql = """
+            SELECT
+                question_id, hs_run_id, scenario_ids_json,
+                iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date,
+                wording, status, pythia_metadata_json
+            FROM questions
+            WHERE status = 'active'
+              AND hs_run_id IS NOT NULL
+              AND hs_run_id <> ''
+              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+        """
+        hs_all_rows = con.execute(hs_all_sql).fetchall()
+        for row in hs_all_rows:
+            q = _row_to_pythia_question(row)
+            key = (q.iso3, q.hazard_code, q.metric)
+            latest_hs = latest_hs_keys.get(key)
+            if latest_hs is not None and q.hs_run_id == latest_hs:
+                hs_questions.append(q)
+
     hs_keys = {(q.iso3, q.hazard_code, q.metric) for q in hs_questions}
 
     legacy_sql = """
@@ -1644,12 +1682,7 @@ def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
           AND (hs_run_id IS NULL OR hs_run_id = '')
           AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
     """
-    if limit is not None:
-        legacy_sql += " LIMIT ?"
-        legacy_rows = con.execute(legacy_sql, [limit]).fetchall()
-    else:
-        legacy_rows = con.execute(legacy_sql).fetchall()
-
+    legacy_rows = con.execute(legacy_sql).fetchall()
     legacy_questions: List[PythiaQuestion] = []
     for row in legacy_rows:
         q = _row_to_pythia_question(row)
@@ -1662,8 +1695,11 @@ def _load_pythia_questions(limit: Optional[int] = None) -> List[PythiaQuestion]:
 
     all_questions = hs_questions + legacy_questions
 
+    if limit is not None and len(all_questions) > limit:
+        all_questions = all_questions[:limit]
+
     LOG.info(
-        "Pythia question loader: %d HS-driven questions, %d legacy fallback questions (ACO fully excluded).",
+        "Pythia question loader: %d HS-driven questions (latest per triple), %d legacy fallback questions (ACO excluded).",
         len(hs_questions),
         len(legacy_questions),
     )

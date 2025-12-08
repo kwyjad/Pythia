@@ -28,7 +28,7 @@ def test_create_questions_from_triage_creates_expected_questions(tmp_path: Path)
             INSERT INTO hs_triage (
                 run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
                 drivers_json, regime_shifts_json, data_quality_json, scenario_stub
-            ) VALUES ('hs_test', 'ETH', 'ACO', 'priority', 0.8, TRUE, '[]', '[]', '{}', '')
+            ) VALUES ('hs_test', 'ETH', 'ACE', 'priority', 0.8, TRUE, '[]', '[]', '{}', '')
             """
         )
     finally:
@@ -41,7 +41,7 @@ def test_create_questions_from_triage_creates_expected_questions(tmp_path: Path)
     try:
         rows = con.execute(
             """
-            SELECT question_id, iso3, hazard_code, metric, status, hs_run_id
+            SELECT question_id, iso3, hazard_code, metric, status, hs_run_id, pythia_metadata_json
             FROM questions
             ORDER BY question_id
             """
@@ -51,7 +51,9 @@ def test_create_questions_from_triage_creates_expected_questions(tmp_path: Path)
 
     assert rows
     qids = {r[0] for r in rows}
-    assert "ETH_ACO_FATALITIES" in qids
-    assert "ETH_ACO_PA" in qids
+    assert "ETH_ACE_FATALITIES" in qids
+    assert "ETH_ACE_PA" in qids
+    assert all(r[2] == "ACE" for r in rows)
     assert all(r[5] == "hs_test" for r in rows)
     assert all(r[4] == "active" for r in rows)
+    assert all("hs_triage" in (r[6] or "") for r in rows)

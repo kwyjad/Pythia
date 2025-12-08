@@ -66,7 +66,10 @@ def log_hs_llm_call(
     if temperature is not None and "temperature" not in usage_dict:
         usage_dict["temperature"] = temperature
 
-    usage_json = json.dumps(usage_dict, ensure_ascii=False)
+    try:
+        usage_json = json.dumps(usage_dict, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        usage_json = "{}"
 
     iso3_up = (iso3 or "").upper().strip()
     hz_up = (hazard_code or "").upper().strip()
