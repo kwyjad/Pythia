@@ -43,6 +43,7 @@ import numpy as np
 
 from pathlib import Path
 from pythia.db.schema import connect, ensure_schema
+from pythia.db.schema import connect as pythia_connect
 from forecaster.hs_utils import load_hs_triage_entry
 
 LOG = logging.getLogger(__name__)
@@ -1542,82 +1543,31 @@ def _load_pa_history_block(
     return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 
 
-def _load_pythia_questions(limit: int) -> List[dict]:
+def _load_pythia_questions(limit: Optional[int] = None) -> List[dict]:
     """
-    Load active Horizon Scanner questions from DuckDB and adapt them to the
-    question 'post' shape expected by _run_one_question_body.
+    Load questions for Pythia runs with transitional gating:
 
-    For now, we treat each PA question as a numeric question:
-      - q['type'] = 'numeric'
-      - title = wording from Horizon Scanner
-      - description/criteria left blank (research still works with title alone)
+    - Prefer HS-generated questions (hs_run_id not null) for each (iso3, hazard_code, metric).
+    - Fall back to legacy static questions only when no HS question exists for that triple.
+    - Always exclude hazard_code = 'ACO'.
     """
 
     from datetime import datetime
 
     import duckdb
-    from resolver.db import duckdb_io
 
-    max_limit = max(1, int(limit))
-    db_url = _pythia_db_url_from_config() or duckdb_io.DEFAULT_DB_URL
-    conn = duckdb_io.get_db(db_url)
-    try:
-        sql = """
-            SELECT
-                question_id,
-                hs_run_id,
-                scenario_ids_json,
-                iso3,
-                hazard_code,
-                metric,
-                target_month,
-                window_start_date,
-                window_end_date,
-                wording,
-                status,
-                pythia_metadata_json
-            FROM questions
-            WHERE status = 'active'
-              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
-              AND hs_run_id IS NOT NULL
-              AND hs_run_id <> ''
-            ORDER BY iso3, hazard_code, metric, target_month, question_id
-            LIMIT ?
-        """
-        try:
-            cursor = conn.execute(sql, [max_limit])
-        except duckdb.BinderException as exc:
-            LOG.error("BinderException in _load_pythia_questions: %s", exc)
-            LOG.error("SQL attempted in _load_pythia_questions:\n%s", sql.strip())
-            try:
-                cols = conn.execute("PRAGMA table_info('questions');").fetchall()
-                LOG.error("questions table columns: %s", cols)
-            except Exception as debug_exc:
-                LOG.error("Failed to introspect questions table: %s", debug_exc)
-            raise
+    con = pythia_connect(read_only=True)
+
+    def _rows_to_records(cursor: duckdb.DuckDBPyRelation) -> tuple[List[Dict[str, Any]], List[str]]:
         rows = cursor.fetchall()
-        description = getattr(cursor, "description", []) or []
-    finally:
-        duckdb_io.close_db(conn)
+        cols = [c[0] for c in (getattr(cursor, "description", []) or [])]
+        return [dict(zip(cols, row)) for row in rows], cols
 
-    cols = [c[0] for c in description]
-    filtered_rows = []
-    for row in rows:
-        rec = dict(zip(cols, row))
-        meta_raw = rec.get("pythia_metadata_json")
-        if meta_raw:
-            try:
-                meta = json.loads(meta_raw)
-            except Exception:
-                meta = {}
-        else:
-            meta = {}
+    def _record_to_post(rec: Dict[str, Any]) -> Optional[dict]:
+        meta = _as_dict(rec.get("pythia_metadata_json") or {})
         if meta.get("source") == "demo":
-            continue
-        filtered_rows.append(rec)
+            return None
 
-    posts: List[dict] = []
-    for rec in filtered_rows:
         qid = rec.get("question_id")
         iso3 = (rec.get("iso3") or "").upper()
         hz = (rec.get("hazard_code") or "").upper()
@@ -1627,7 +1577,6 @@ def _load_pythia_questions(limit: int) -> List[dict]:
         hs_run_id = rec.get("hs_run_id")
 
         scenario_ids = _safe_json_load(rec.get("scenario_ids_json") or "[]") or []
-        pythia_meta = _as_dict(rec.get("pythia_metadata_json") or {})
 
         question = {
             "id": qid,
@@ -1636,7 +1585,7 @@ def _load_pythia_questions(limit: int) -> List[dict]:
             "possibilities": {"type": "spd"},
         }
 
-        post = {
+        return {
             "id": qid,
             "question": question,
             "description": "",
@@ -1649,17 +1598,88 @@ def _load_pythia_questions(limit: int) -> List[dict]:
             "pythia_scenario_ids": scenario_ids,
             "pythia_window_start_date": rec.get("window_start_date"),
             "pythia_window_end_date": rec.get("window_end_date"),
-            "pythia_metadata": pythia_meta,
+            "pythia_metadata": _as_dict(rec.get("pythia_metadata_json") or {}),
             "created_time_iso": datetime.utcnow().isoformat(),
         }
-        posts.append(post)
 
-    if not posts:
+    try:
+        hs_sql = """
+            SELECT
+                question_id, hs_run_id, scenario_ids_json,
+                iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date,
+                wording, status, pythia_metadata_json
+            FROM questions
+            WHERE status = 'active'
+              AND hs_run_id IS NOT NULL
+              AND hs_run_id <> ''
+              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+            ORDER BY iso3, hazard_code, metric, target_month, question_id
+        """
+        if limit is not None:
+            hs_sql += " LIMIT ?"
+            hs_cursor = con.execute(hs_sql, [limit])
+        else:
+            hs_cursor = con.execute(hs_sql)
+
+        hs_records, _ = _rows_to_records(hs_cursor)
+        hs_posts = []
+        for rec in hs_records:
+            post = _record_to_post(rec)
+            if post:
+                hs_posts.append(post)
+
+        hs_keys = {(p["pythia_iso3"], p["pythia_hazard_code"], p["pythia_metric"]) for p in hs_posts}
+
+        legacy_sql = """
+            SELECT
+                question_id, hs_run_id, scenario_ids_json,
+                iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date,
+                wording, status, pythia_metadata_json
+            FROM questions
+            WHERE status = 'active'
+              AND (hs_run_id IS NULL OR hs_run_id = '')
+              AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+            ORDER BY iso3, hazard_code, metric, target_month, question_id
+        """
+        if limit is not None:
+            legacy_sql += " LIMIT ?"
+            legacy_cursor = con.execute(legacy_sql, [limit])
+        else:
+            legacy_cursor = con.execute(legacy_sql)
+
+        legacy_records, _ = _rows_to_records(legacy_cursor)
+        legacy_posts = []
+        for rec in legacy_records:
+            post = _record_to_post(rec)
+            if not post:
+                continue
+            key = (
+                post["pythia_iso3"],
+                post["pythia_hazard_code"],
+                post["pythia_metric"],
+            )
+            if key in hs_keys:
+                continue
+            legacy_posts.append(post)
+    finally:
+        con.close()
+
+    all_posts = hs_posts + legacy_posts
+
+    LOG.info(
+        "Loaded %d HS-driven questions and %d legacy fallback questions (ACO fully excluded).",
+        len(hs_posts),
+        len(legacy_posts),
+    )
+
+    if not all_posts:
         LOG.warning(
-            "Pythia mode: no eligible HS-driven questions found (active, non-ACO, hs_run_id set)."
+            "Pythia question loader returned an empty set. Check HS runs and the questions table."
         )
 
-    return posts
+    return all_posts
 
 
 def _load_research_json(run_id: str, question_id: str) -> Optional[Dict[str, Any]]:
@@ -1968,7 +1988,7 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
                 iso3,
                 hz,
                 metric,
-                f"LLM error or empty response: {error}",
+                f"LLM error or empty response: {error or 'no text'}",
             )
             return
 
@@ -1986,11 +2006,29 @@ async def _run_spd_for_question(run_id: str, question_row: duckdb.Row) -> None:
             return
 
         if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
+            raw_dir = Path("debug/spd_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
+            raw_path.write_text(text or "", encoding="utf-8")
+            LOG.error(
+                "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
+                qid,
+                raw_path,
+            )
             _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
             return
 
         spds = spd_obj.get("spds") or {}
         if not spds:
+            raw_dir = Path("debug/spd_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}_empty_spds.txt"
+            raw_path.write_text(text or "", encoding="utf-8")
+            LOG.error(
+                "SPD JSON contained empty 'spds' for %s (saved raw text to %s)",
+                qid,
+                raw_path,
+            )
             _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
             return
 
