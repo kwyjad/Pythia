@@ -238,6 +238,7 @@ jobs:
           IDMC_HTTP_VERIFY: "true"
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"
+          RESOLVER_SKIP_DTM: "1"
         shell: bash
         run: |
           set -euo pipefail
