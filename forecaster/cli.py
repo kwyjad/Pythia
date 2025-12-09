@@ -1544,25 +1544,55 @@ def _load_pa_history_block(
     return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 
 
+def _safe_row_get(row: Any, index: int, name: str) -> Any:
+    """
+    Safely get a column from a duckdb row that might be:
+      - a mapping-like object (supports row[name]), or
+      - a tuple/list (positional access only).
+
+    - index: positional index of the column in the SELECT clause.
+    - name: column name to try first when row is dict-like.
+
+    This keeps our loader robust whether duckdb returns duckdb.Row or plain tuples.
+    """
+    try:
+        return row[name]  # type: ignore[index]
+    except Exception:
+        return row[index]
+
+
 def _row_to_pythia_question(row: Any) -> PythiaQuestion:
     """
-    Convert a duckdb.Row or dict-like row from the questions table to PythiaQuestion.
-    Assumes the schema defined by pythia.db.schema.ensure_schema().
+    Convert a questions row (duckdb.Row or tuple) into a PythiaQuestion.
+
+    Assumes the SELECT order used in _load_pythia_questions:
+      0: question_id
+      1: hs_run_id
+      2: scenario_ids_json
+      3: iso3
+      4: hazard_code
+      5: metric
+      6: target_month
+      7: window_start_date
+      8: window_end_date
+      9: wording
+     10: status
+     11: pythia_metadata_json
     """
 
     return PythiaQuestion(
-        question_id=row["question_id"],
-        hs_run_id=row["hs_run_id"],
-        iso3=row["iso3"],
-        hazard_code=row["hazard_code"],
-        metric=row["metric"],
-        target_month=row["target_month"],
-        window_start_date=row["window_start_date"],
-        window_end_date=row["window_end_date"],
-        wording=row["wording"],
-        status=row["status"],
-        pythia_metadata_json=row["pythia_metadata_json"],
-        scenario_ids_json=row["scenario_ids_json"],
+        question_id=_safe_row_get(row, 0, "question_id"),
+        hs_run_id=_safe_row_get(row, 1, "hs_run_id"),
+        iso3=_safe_row_get(row, 3, "iso3"),
+        hazard_code=_safe_row_get(row, 4, "hazard_code"),
+        metric=_safe_row_get(row, 5, "metric"),
+        target_month=_safe_row_get(row, 6, "target_month"),
+        window_start_date=_safe_row_get(row, 7, "window_start_date"),
+        window_end_date=_safe_row_get(row, 8, "window_end_date"),
+        wording=_safe_row_get(row, 9, "wording"),
+        status=_safe_row_get(row, 10, "status"),
+        pythia_metadata_json=_safe_row_get(row, 11, "pythia_metadata_json"),
+        scenario_ids_json=_safe_row_get(row, 2, "scenario_ids_json"),
     )
 
 
@@ -1631,7 +1661,7 @@ def _load_pythia_questions(
         rows = con.execute(
             "SELECT DISTINCT iso3 FROM hs_triage ORDER BY iso3"
         ).fetchall()
-        iso3_allowed = {r["iso3"] for r in rows}
+        iso3_allowed = {_safe_row_get(r, 0, "iso3") for r in rows}
 
     if not iso3_allowed:
         LOG.warning(
@@ -1641,7 +1671,7 @@ def _load_pythia_questions(
         rows = con.execute(
             "SELECT DISTINCT iso3 FROM questions ORDER BY iso3"
         ).fetchall()
-        iso3_allowed = {r["iso3"] for r in rows}
+        iso3_allowed = {_safe_row_get(r, 0, "iso3") for r in rows}
 
     if not iso3_allowed:
         LOG.warning("No iso3s available for Pythia loader; returning empty set.")
@@ -1665,8 +1695,11 @@ def _load_pythia_questions(
     hs_latest_rows = con.execute(hs_latest_sql, iso3_params).fetchall()
     latest_hs_by_iso_hz: Dict[Tuple[str, str], str] = {}
     for row in hs_latest_rows:
-        key = (row["iso3"], row["hazard_code"])
-        latest_hs_by_iso_hz[key] = row["hs_run_id"]
+        iso3 = _safe_row_get(row, 0, "iso3")
+        hz = _safe_row_get(row, 1, "hazard_code")
+        hs_run_id = _safe_row_get(row, 2, "hs_run_id")
+        key = (iso3, hz)
+        latest_hs_by_iso_hz[key] = hs_run_id
 
     hs_questions: List[PythiaQuestion] = []
     if latest_hs_by_iso_hz:
