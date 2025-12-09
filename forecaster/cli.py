@@ -941,6 +941,48 @@ def _pythia_db_path_from_config() -> str:
     return db_url
 
 
+def _select_hs_run_id_for_forecast(
+    con: duckdb.DuckDBPyConnection,
+    explicit: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Choose which HS epoch (hs_run_id) to use for SPD v2 forecasting.
+
+    - If `explicit` is provided (CLI --hs-run-id), use that.
+    - Else, prefer the latest hs_run_id from hs_runs (generated_at DESC).
+    - If hs_runs is empty, fall back to the latest run_id from hs_triage.
+    - If nothing found, return None.
+    """
+    if explicit:
+        return explicit
+
+    # Prefer hs_runs if available
+    row = con.execute(
+        """
+        SELECT hs_run_id
+        FROM hs_runs
+        ORDER BY generated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+
+    # Fallback: latest run_id in hs_triage
+    row = con.execute(
+        """
+        SELECT run_id
+        FROM hs_triage
+        ORDER BY rowid DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+
+    return None
+
+
 def _write_spd_ensemble_to_db(
     *,
     run_id: str,
@@ -4015,19 +4057,37 @@ def _parse_args() -> argparse.Namespace:
             "'test_questions' (local JSON)."
         ),
     )
-    p.add_argument("--limit", type=int, default=20, help="Max posts to fetch/process")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max questions to forecast (applied after epoch/country selection)",
+    )
     p.add_argument("--purpose", default="ad_hoc", help="String tag recorded in CSV/logs")
+    p.add_argument(
+        "--questions-file",
+        default="data/test_questions.json",
+        help="When --mode test_questions, path to JSON payload",
+    )
     p.add_argument(
         "--iso3",
         type=str,
         default="",
         help=(
-            "Comma-separated list of ISO3 codes to forecast (e.g. 'ETH,SOM'). "
-            "If not provided, defaults to countries present in hs_triage."
+            "Optional comma-separated list of ISO3 codes to forecast "
+            "(e.g. 'ETH,SOM'). If omitted, SPD v2 defaults to all countries "
+            "present in hs_triage for the chosen HS epoch."
         ),
     )
-    p.add_argument("--questions-file", default="data/test_questions.json",
-                   help="When --mode test_questions, path to JSON payload")
+    p.add_argument(
+        "--hs-run-id",
+        type=str,
+        default="",
+        help=(
+            "Optional HS run id (hs_run_id) to use as epoch for SPD v2. "
+            "If omitted, the latest hs_run_id in hs_runs/hs_triage is used."
+        ),
+    )
     return p.parse_args()
 
 def main() -> None:
@@ -4039,38 +4099,108 @@ def main() -> None:
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
 
-    iso3_filter = {
-        code.strip().upper()
-        for code in (args.iso3 or "").split(",")
-        if code.strip()
-    } or None
-
     def _run_v2_pipeline():
         ensure_schema()
-        questions_loaded = sorted(
-            _load_pythia_questions(limit=args.limit, iso3_filter=iso3_filter),
-            key=lambda q: (
-                q.iso3,
-                q.hazard_code,
-                q.metric,
-                q.target_month or "",
-                q.question_id,
-            ),
-        )
+
+        # Parse iso3 filter from CLI
+        iso3_filter: Optional[set[str]] = None
+        if args.iso3:
+            iso3_filter = {
+                code.strip().upper()
+                for code in args.iso3.split(",")
+                if code.strip()
+            } or None
+
+        # Determine HS epoch (hs_run_id) to use
+        con = connect(read_only=True)
+        try:
+            hs_run_id = _select_hs_run_id_for_forecast(
+                con,
+                explicit=(args.hs_run_id or None),
+            )
+            if not hs_run_id:
+                print("[fatal] No HS epoch (hs_run_id) found; cannot run SPD v2.")
+                return
+
+            print(f"[v2] Using HS epoch hs_run_id={hs_run_id}")
+            rows = con.execute(
+                """
+                SELECT DISTINCT iso3
+                FROM hs_triage
+                WHERE run_id = ?
+                ORDER BY iso3
+                """,
+                [hs_run_id],
+            ).fetchall()
+            epoch_iso3s = {row[0] for row in rows}
+
+            if iso3_filter:
+                allowed_iso3s = (
+                    epoch_iso3s & iso3_filter if epoch_iso3s else iso3_filter
+                )
+            else:
+                allowed_iso3s = epoch_iso3s
+
+            if not allowed_iso3s:
+                print(
+                    f"[fatal] No iso3s to forecast for hs_run_id={hs_run_id} (allowed_iso3s empty)."
+                )
+                return
+
+            cols = [
+                "question_id",
+                "hs_run_id",
+                "iso3",
+                "hazard_code",
+                "metric",
+                "target_month",
+                "window_start_date",
+                "window_end_date",
+                "wording",
+            ]
+            placeholders = ",".join(["?"] * len(allowed_iso3s))
+            sql = f"""
+                SELECT
+                    question_id, hs_run_id, iso3, hazard_code, metric,
+                    target_month, window_start_date, window_end_date, wording
+                FROM questions
+                WHERE status = 'active'
+                  AND hs_run_id = ?
+                  AND iso3 IN ({placeholders})
+                  AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
+                ORDER BY iso3, hazard_code, metric, target_month, question_id
+            """
+            params: List[Any] = [hs_run_id] + list(allowed_iso3s)
+            raw_rows = con.execute(sql, params).fetchall()
+        finally:
+            con.close()
+
+        if args.limit is not None and args.limit >= 0 and len(raw_rows) > args.limit:
+            raw_rows = raw_rows[: args.limit]
+
         questions = [
-            {
-                "question_id": q.question_id,
-                "hs_run_id": q.hs_run_id,
-                "iso3": q.iso3,
-                "hazard_code": q.hazard_code,
-                "metric": q.metric,
-                "target_month": q.target_month,
-                "window_start_date": q.window_start_date,
-                "window_end_date": q.window_end_date,
-                "wording": q.wording,
-            }
-            for q in questions_loaded
+            dict(
+                zip(
+                    [
+                        "question_id",
+                        "hs_run_id",
+                        "iso3",
+                        "hazard_code",
+                        "metric",
+                        "target_month",
+                        "window_start_date",
+                        "window_end_date",
+                        "wording",
+                    ],
+                    row,
+                )
+            )
+            for row in raw_rows
         ]
+
+        if not questions:
+            print("[fatal] No questions selected for SPD v2; nothing to forecast.")
+            return
 
         run_id = f"fc_{int(time.time())}"
         print(f"[v2] run_id={run_id} | questions={len(questions)}")
