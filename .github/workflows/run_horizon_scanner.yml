@@ -209,7 +209,13 @@ jobs:
         run: |
           set -e
           echo "=== Running Forecaster in Pythia mode on active HS questions ==="
-          python -m forecaster.cli --mode pythia --limit 200 --purpose hs_pipeline
+          # No limit: forecast all questions from the current HS epoch.
+          # Use a batch size to keep per-batch concurrency manageable for large epochs.
+          python -m forecaster.cli \
+            --mode pythia \
+            --limit 0 \
+            --batch-size 100 \
+            --purpose hs_pipeline
           echo "=== Forecaster (Pythia mode) completed ==="
 
       # Step 8: Diagnostics – DuckDB validation

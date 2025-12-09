@@ -1814,7 +1814,7 @@ def _load_pythia_questions(
 
     all_questions = hs_questions + legacy_questions
 
-    if limit is not None and len(all_questions) > limit:
+    if limit is not None and limit > 0 and len(all_questions) > limit:
         all_questions = all_questions[:limit]
 
     selected_ids = sorted({q.question_id for q in all_questions})
@@ -4060,8 +4060,21 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--limit",
         type=int,
-        default=20,
-        help="Max questions to forecast (applied after epoch/country selection)",
+        default=0,
+        help=(
+            "Max questions to forecast. If <= 0, no limit is applied (all questions "
+            "from the current HS epoch)."
+        ),
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Optional batch size for SPD v2. If > 0, Research/SPD/Scenario will "
+            "run in batches of this many questions; otherwise all questions are "
+            "processed in a single batch."
+        ),
     )
     p.add_argument("--purpose", default="ad_hoc", help="String tag recorded in CSV/logs")
     p.add_argument(
@@ -4171,12 +4184,14 @@ def main() -> None:
                 ORDER BY iso3, hazard_code, metric, target_month, question_id
             """
             params: List[Any] = [hs_run_id] + list(allowed_iso3s)
+
+            if args.limit and args.limit > 0:
+                sql += "\n                LIMIT ?"
+                params.append(args.limit)
+
             raw_rows = con.execute(sql, params).fetchall()
         finally:
             con.close()
-
-        if args.limit is not None and args.limit >= 0 and len(raw_rows) > args.limit:
-            raw_rows = raw_rows[: args.limit]
 
         questions = [
             dict(
@@ -4207,22 +4222,32 @@ def main() -> None:
 
         async def _run_v2_pipeline_async() -> None:
             research_sem = asyncio.Semaphore(MAX_RESEARCH_WORKERS)
+            spd_sem = asyncio.Semaphore(MAX_SPD_WORKERS)
 
-            async def _research_task(q: duckdb.Row) -> None:
+            async def _research_task(q: dict) -> None:
                 async with research_sem:
                     await _run_research_for_question(run_id, q)
 
-            await asyncio.gather(*(_research_task(q) for q in questions))
-
-            spd_sem = asyncio.Semaphore(MAX_SPD_WORKERS)
-
-            async def _spd_task(q: duckdb.Row) -> None:
+            async def _spd_task(q: dict) -> None:
                 if not _question_needs_spd(run_id, q):
                     return
                 async with spd_sem:
                     await _run_spd_for_question(run_id, q)
 
-            await asyncio.gather(*(_spd_task(q) for q in questions))
+            if args.batch_size and args.batch_size > 0:
+                batch_size = max(1, args.batch_size)
+            else:
+                batch_size = len(questions) or 1
+
+            for start_idx in range(0, len(questions), batch_size):
+                batch = questions[start_idx : start_idx + batch_size]
+                print(
+                    f"[v2] Processing batch {start_idx // batch_size + 1} "
+                    f"({len(batch)} question(s)) / total {len(questions)}"
+                )
+
+                await asyncio.gather(*(_research_task(q) for q in batch))
+                await asyncio.gather(*(_spd_task(q) for q in batch))
 
         asyncio.run(_run_v2_pipeline_async())
 
