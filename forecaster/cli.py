@@ -116,6 +116,27 @@ class QuestionRunSummary:
     models: Dict[str, Dict[str, float]] = field(default_factory=dict)
     error: Optional[str] = None
 
+
+@dataclass
+class PythiaQuestion:
+    """
+    Minimal representation of a forecastable question in Pythia, as loaded from the
+    `questions` table. This is used by the epoch-aware loader.
+    """
+
+    question_id: str
+    hs_run_id: Optional[str]
+    iso3: str
+    hazard_code: str
+    metric: str
+    target_month: Optional[str]
+    window_start_date: Optional[str]
+    window_end_date: Optional[str]
+    wording: str
+    status: str
+    pythia_metadata_json: Optional[str]
+    scenario_ids_json: Optional[str] = None
+
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
@@ -4088,18 +4109,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-@dataclass
-class PythiaQuestion:
-    question_id: str
-    hs_run_id: Optional[str]
-    iso3: str
-    hazard_code: str
-    metric: str
-    target_month: Optional[str]
-    window_start_date: Optional[str]
-    window_end_date: Optional[str]
-    wording: str
-    status: str
-    pythia_metadata_json: Optional[str]
-    scenario_ids_json: Optional[str] = None
-
