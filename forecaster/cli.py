@@ -2334,63 +2334,26 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             usage=aggregated_usage or {},
         )
 
-        # --- Minimal SPD v2 logging into llm_calls (test-safe) ------------------
+        # --- Direct SPD v2 logging into llm_calls (test-safe) ------------------
+        from datetime import datetime as _dt
+        import json as _json
+        from pythia.db import schema as db_schema
+
+        con_log = None
         try:
-            import json as _json
-            from datetime import datetime as _dt
+            con_log = db_schema.connect(read_only=False)
+            db_schema.ensure_schema(con_log)
 
-            import duckdb
+            usage_dict = dict(aggregated_usage or {})
+            elapsed_ms = int(usage_dict.get("elapsed_ms", 0) or 0)
+            prompt_tokens = int(usage_dict.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage_dict.get("completion_tokens", 0) or 0)
+            total_tokens = int(usage_dict.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+            cost_usd = float(usage_dict.get("cost_usd", 0.0) or 0.0)
 
-            db_url = _pythia_db_url_from_config()
-            db_path = db_url.replace("duckdb:///", "", 1) if db_url.startswith("duckdb:///") else db_url
+            usage_json = _json.dumps(usage_dict, ensure_ascii=False)
 
-            con_log = duckdb.connect(db_path)
-            con_log.execute(
-                """
-                CREATE TABLE IF NOT EXISTS llm_calls (
-                    call_id TEXT,
-                    run_id TEXT,
-                    hs_run_id TEXT,
-                    question_id TEXT,
-                    call_type TEXT,
-                    phase TEXT,
-                    model_name TEXT,
-                    provider TEXT,
-                    model_id TEXT,
-                    prompt_text TEXT,
-                    response_text TEXT,
-                    parsed_json TEXT,
-                    usage_json TEXT,
-                    elapsed_ms INTEGER,
-                    prompt_tokens INTEGER,
-                    completion_tokens INTEGER,
-                    total_tokens INTEGER,
-                    cost_usd DOUBLE,
-                    error_text TEXT,
-                    timestamp TIMESTAMP,
-                    iso3 TEXT,
-                    hazard_code TEXT,
-                    metric TEXT
-                );
-                """
-            )
-
-            usage_json = _json.dumps(aggregated_usage or {}, ensure_ascii=False)
-            elapsed_ms = int((aggregated_usage or {}).get("elapsed_ms", 0) or 0)
-            prompt_tokens = int((aggregated_usage or {}).get("prompt_tokens", 0) or 0)
-            completion_tokens = int((aggregated_usage or {}).get("completion_tokens", 0) or 0)
-            total_tokens = int(
-                (aggregated_usage or {}).get("total_tokens", prompt_tokens + completion_tokens) or 0
-            )
-            cost_usd = float((aggregated_usage or {}).get("cost_usd", 0.0) or 0.0)
-
-            model_name = provider = model_id = None
-            if raw_calls:
-                ms_used = raw_calls[0].get("model_spec")
-                if ms_used is not None:
-                    model_name = getattr(ms_used, "name", None)
-                    provider = getattr(ms_used, "provider", None)
-                    model_id = getattr(ms_used, "model_id", None)
+            ms = raw_calls[0].get("model_spec") if raw_calls else None
 
             con_log.execute(
                 """
@@ -2423,34 +2386,38 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 [
                     f"spd_v2_direct_{run_id}_{qid}",
                     run_id,
-                    rec.get("hs_run_id") or "",
+                    question_row.get("hs_run_id") or "",
                     qid,
-                    "spd_v2",
-                    "spd_v2",
-                    model_name,
-                    provider,
-                    model_id,
+                    "spd_v2",  # call_type
+                    "spd_v2",  # phase
+                    getattr(ms, "name", None),
+                    getattr(ms, "provider", None),
+                    getattr(ms, "model_id", None),
                     prompt,
-                    "",
-                    None,
+                    "",  # response_text (not needed for the test)
+                    None,  # parsed_json
                     usage_json,
                     elapsed_ms,
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
                     cost_usd,
-                    None,
+                    None,  # error_text
                     _dt.utcnow(),
                     iso3,
                     hz,
                     metric,
                 ],
             )
-
-            con_log.close()
         except Exception:
             # Never crash SPD v2 if this direct logging fails.
             pass
+        finally:
+            try:
+                if con_log is not None:
+                    con_log.close()
+            except Exception:
+                pass
         # ------------------------------------------------------------------------
 
     except Exception:
