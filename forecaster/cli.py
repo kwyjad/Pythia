@@ -2280,6 +2280,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 usage=rc.get("usage") or {},
                 error_text=str(rc.get("error")) if rc.get("error") else None,
                 phase="spd_v2",
+                call_type="spd_v2",
                 hs_run_id=hs_run_id,
             )
 
@@ -2332,104 +2333,6 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             resolution_source=resolution_source,
             usage=aggregated_usage or {},
         )
-
-        # Fallback: ensure at least one SPD v2 llm_call row exists for this question/run.
-        # In some environments (e.g., tests with stubbed logging), log_forecaster_llm_call
-        # may fail silently and leave no llm_calls rows. To keep SPD v2 diagnostics intact,
-        # insert a minimal record if none exists yet.
-        try:
-            from pythia.db.schema import connect as _spd_connect, ensure_schema as _spd_ensure_schema
-
-            con_log = _spd_connect(read_only=False)
-            try:
-                _spd_ensure_schema(con_log)
-
-                existing = con_log.execute(
-                    """
-                    SELECT 1
-                    FROM llm_calls
-                    WHERE run_id = ?
-                      AND question_id = ?
-                      AND call_type = 'spd_v2'
-                      AND phase = 'spd_v2'
-                    LIMIT 1
-                    """,
-                    [run_id, qid],
-                ).fetchone()
-
-                if not existing:
-                    rc = raw_calls[0] if raw_calls else {}
-                    ms_used = rc.get("model_spec") if isinstance(rc, dict) else None
-                    usage_for_log = rc.get("usage") if isinstance(rc, dict) else aggregated_usage or {}
-                    text_for_log = rc.get("text") if isinstance(rc, dict) else ""
-
-                    elapsed_ms = int((usage_for_log or {}).get("elapsed_ms", 0) or 0)
-                    prompt_tokens = int((usage_for_log or {}).get("prompt_tokens", 0) or 0)
-                    completion_tokens = int((usage_for_log or {}).get("completion_tokens", 0) or 0)
-                    total_tokens = int(
-                        (usage_for_log or {}).get("total_tokens", prompt_tokens + completion_tokens) or 0
-                    )
-                    cost_usd = float((usage_for_log or {}).get("cost_usd", 0.0) or 0.0)
-
-                    con_log.execute(
-                        """
-                        INSERT INTO llm_calls (
-                            call_id,
-                            run_id,
-                            hs_run_id,
-                            question_id,
-                            call_type,
-                            phase,
-                            model_name,
-                            provider,
-                            model_id,
-                            prompt_text,
-                            response_text,
-                            parsed_json,
-                            usage_json,
-                            elapsed_ms,
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens,
-                            cost_usd,
-                            error_text,
-                            timestamp,
-                            iso3,
-                            hazard_code,
-                            metric
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            f"spd_v2_fallback_{run_id}_{qid}",
-                            run_id,
-                            hs_run_id or "",
-                            qid,
-                            "spd_v2",
-                            "spd_v2",
-                            getattr(ms_used, "name", None),
-                            getattr(ms_used, "provider", None),
-                            getattr(ms_used, "model_id", None),
-                            prompt,
-                            text_for_log or "",
-                            None,
-                            json.dumps(usage_for_log or {}, ensure_ascii=False),
-                            elapsed_ms,
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens,
-                            cost_usd,
-                            None,
-                            datetime.utcnow(),
-                            iso3,
-                            hz,
-                            metric,
-                        ],
-                    )
-            finally:
-                con_log.close()
-        except Exception:
-            # Never crash SPD v2 if fallback logging fails.
-            pass
 
     except Exception:
         LOG.exception("SPD v2 failed for question_id=%s", qid)
