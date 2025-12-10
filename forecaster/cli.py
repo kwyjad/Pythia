@@ -2284,10 +2284,17 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             )
 
         if not spd_obj:
+            raw_text = (raw_calls[0].get("text") if raw_calls else "") or ""
+            if not raw_text:
+                try:
+                    raw_text, _usage, _error, _ms = await _call_spd_model(prompt)
+                except Exception:  # noqa: BLE001
+                    raw_text = ""
+
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
             raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
+            raw_path.write_text(raw_text, encoding="utf-8")
             _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
             return
 
