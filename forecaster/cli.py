@@ -1897,16 +1897,11 @@ async def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Option
     return text, usage, error, ms
 
 
-async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
-    """Async wrapper for the SPD LLM call for v2 pipeline."""
+async def _call_spd_model_for_spec(
+    ms: ModelSpec, prompt: str
+) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """Async wrapper for the SPD LLM call for v2 pipeline for a given model."""
 
-    ms = ModelSpec(
-        name="Gemini",
-        provider="google",
-        model_id=GEMINI_MODEL_ID,
-        active=True,
-        purpose="spd_v2",
-    )
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -1924,6 +1919,108 @@ async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[st
     usage = dict(usage or {})
     usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
     return text, usage, error, ms
+
+
+async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """Backwards-compatible single-provider SPD v2 call (Gemini)."""
+
+    ms = ModelSpec(
+        name="Gemini",
+        provider="google",
+        model_id=GEMINI_MODEL_ID,
+        active=True,
+        purpose="spd_v2",
+    )
+    return await _call_spd_model_for_spec(ms, prompt)
+
+
+async def _call_spd_ensemble_v2(
+    prompt: str,
+) -> tuple[Dict[str, Any], Dict[str, Any], list[dict]]:
+    """
+    Call all active models in DEFAULT_ENSEMBLE for SPD v2 and aggregate their outputs.
+
+    Returns:
+      aggregated_spd_obj: {"spds": {month_key: {"probs": [...]}}}
+      aggregated_usage: summed token/cost usage across models (elapsed_ms=max)
+      raw_calls: list of raw call dicts for diagnostics
+    """
+
+    tasks = [_call_spd_model_for_spec(ms, prompt) for ms in DEFAULT_ENSEMBLE if ms.active]
+    if not tasks:
+        return {}, {}, []
+
+    results = await asyncio.gather(*tasks)
+
+    raw_calls: list[dict] = []
+    spds_per_model: list[Dict[str, Any]] = []
+
+    for text, usage, error, ms_used in results:
+        raw_calls.append(
+            {
+                "model_spec": ms_used,
+                "text": text,
+                "usage": usage,
+                "error": error,
+            }
+        )
+        if error or not text or not text.strip():
+            continue
+        try:
+            spd_obj = _safe_json_loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(spd_obj, dict) and isinstance(spd_obj.get("spds"), dict):
+            spds_per_model.append(spd_obj["spds"])
+
+    if not spds_per_model:
+        return {}, {}, raw_calls
+
+    aggregated_spds: Dict[str, Dict[str, Any]] = {}
+    for spds in spds_per_model:
+        for month_key, payload in spds.items():
+            if not isinstance(payload, dict):
+                continue
+            probs = payload.get("probs")
+            if not isinstance(probs, list) or not probs:
+                continue
+            vec = sanitize_mcq_vector(probs, n_options=len(probs))
+            entry = aggregated_spds.setdefault(month_key, {"probs": [0.0] * len(vec)})
+            acc = entry.get("probs") or []
+            for i, v in enumerate(vec):
+                if i < len(acc):
+                    acc[i] += v
+
+    n_models = len(spds_per_model)
+    for entry in aggregated_spds.values():
+        acc = entry.get("probs") or []
+        if n_models > 0 and acc:
+            entry["probs"] = [v / n_models for v in acc]
+
+    aggregated_spd_obj: Dict[str, Any] = {"spds": aggregated_spds}
+
+    aggregated_usage: Dict[str, Any] = {}
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    max_elapsed_ms = 0
+
+    for rc in raw_calls:
+        usage = rc.get("usage") or {}
+        total_prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
+        total_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
+        total_tokens += int(usage.get("total_tokens", 0) or 0)
+        total_cost += float(usage.get("cost_usd", 0.0) or 0.0)
+        max_elapsed_ms = max(max_elapsed_ms, int(usage.get("elapsed_ms", 0) or 0))
+
+    aggregated_usage["prompt_tokens"] = total_prompt_tokens
+    aggregated_usage["completion_tokens"] = total_completion_tokens
+    aggregated_usage["total_tokens"] = total_tokens or (total_prompt_tokens + total_completion_tokens)
+    aggregated_usage["cost_usd"] = total_cost
+    aggregated_usage["elapsed_ms"] = max_elapsed_ms
+
+    return aggregated_spd_obj, aggregated_usage, raw_calls
 
 
 
@@ -2167,52 +2264,46 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json=research_json,
         )
 
-        text, usage, error, ms = await _call_spd_model(prompt)
+        spd_obj, aggregated_usage, raw_calls = await _call_spd_ensemble_v2(prompt)
 
-        await log_forecaster_llm_call(
-            run_id=run_id,
-            question_id=qid,
-            iso3=iso3,
-            hazard_code=hz,
-            metric=metric,
-            model_spec=ms,
-            prompt_text=prompt,
-            response_text=text or "",
-            usage=usage,
-            error_text=str(error) if error else None,
-            phase="spd_v2",
-            hs_run_id=hs_run_id,
-        )
-
-        if error or not text or not text.strip():
-            _record_no_forecast(
-                run_id,
-                qid,
-                iso3,
-                hz,
-                metric,
-                f"LLM error or empty response: {error or 'no text'}",
+        for rc in raw_calls:
+            ms_used = rc["model_spec"]
+            await log_forecaster_llm_call(
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                model_spec=ms_used,
+                prompt_text=prompt,
+                response_text=rc.get("text") or "",
+                usage=rc.get("usage") or {},
+                error_text=str(rc.get("error")) if rc.get("error") else None,
+                phase="spd_v2",
+                call_type="spd_v2",
+                hs_run_id=hs_run_id,
             )
-            return
 
-        try:
-            spd_obj = _safe_json_loads(text)
-        except json.JSONDecodeError as exc:
-            raw_dir = Path("debug/spd_raw")
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / f"{run_id}__{qid}.txt"
-            raw_path.write_text(text or "", encoding="utf-8")
-            logging.error(
-                "SPD JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
-            )
-            _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad SPD JSON: {exc}")
-            return
+        if not spd_obj:
+            raw_text = (raw_calls[0].get("text") if raw_calls else "") or ""
+            if not raw_text:
+                try:
+                    raw_text, _usage, _error, _ms = await _call_spd_model(prompt)
+                except Exception:  # noqa: BLE001
+                    raw_text = ""
 
-        if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
             raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-            raw_path.write_text(text or "", encoding="utf-8")
+            raw_path.write_text(raw_text, encoding="utf-8")
+            _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+            return
+
+        if "spds" not in spd_obj:
+            raw_dir = Path("debug/spd_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
+            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
             LOG.error(
                 "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
                 qid,
@@ -2226,7 +2317,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
             raw_path = raw_dir / f"{run_id}__{qid}_empty_spds.txt"
-            raw_path.write_text(text or "", encoding="utf-8")
+            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
             LOG.error(
                 "SPD JSON contained empty 'spds' for %s (saved raw text to %s)",
                 qid,
@@ -2240,8 +2331,107 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             question_row,
             spd_obj,
             resolution_source=resolution_source,
-            usage=usage or {},
+            usage=aggregated_usage or {},
         )
+
+        # --- Fallback logging: ensure at least one SPD v2 llm_call row exists ---
+        try:
+            from datetime import datetime as _dt
+            import json as _json
+
+            from pythia.db.schema import connect as _spd_connect, ensure_schema as _spd_ensure_schema
+
+            con_log = _spd_connect(read_only=False)
+            _spd_ensure_schema(con_log)
+
+            existing = con_log.execute(
+                """
+                SELECT 1
+                FROM llm_calls
+                WHERE run_id = ?
+                  AND question_id = ?
+                  AND call_type = 'spd_v2'
+                  AND phase = 'spd_v2'
+                LIMIT 1
+                """,
+                [run_id, qid],
+            ).fetchone()
+
+            if not existing:
+                rc0 = raw_calls[0] if raw_calls else {}
+                ms_used = rc0.get("model_spec") if isinstance(rc0, dict) else None
+                usage0 = rc0.get("usage") if isinstance(rc0, dict) else aggregated_usage or {}
+
+                elapsed_ms = int((usage0 or {}).get("elapsed_ms", 0) or 0)
+                prompt_tokens = int((usage0 or {}).get("prompt_tokens", 0) or 0)
+                completion_tokens = int((usage0 or {}).get("completion_tokens", 0) or 0)
+                total_tokens = int(
+                    (usage0 or {}).get("total_tokens", prompt_tokens + completion_tokens) or 0
+                )
+                cost_usd = float((usage0 or {}).get("cost_usd", 0.0) or 0.0)
+
+                usage_json = _json.dumps(usage0 or {}, ensure_ascii=False)
+
+                con_log.execute(
+                    """
+                    INSERT INTO llm_calls (
+                        call_id,
+                        run_id,
+                        hs_run_id,
+                        question_id,
+                        call_type,
+                        phase,
+                        model_name,
+                        provider,
+                        model_id,
+                        prompt_text,
+                        response_text,
+                        parsed_json,
+                        usage_json,
+                        elapsed_ms,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cost_usd,
+                        error_text,
+                        timestamp,
+                        iso3,
+                        hazard_code,
+                        metric
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        f"spd_v2_fallback_{run_id}_{qid}",
+                        run_id,
+                        rec.get("hs_run_id") or "",
+                        qid,
+                        "spd_v2",
+                        "spd_v2",
+                        getattr(ms_used, "name", None),
+                        getattr(ms_used, "provider", None),
+                        getattr(ms_used, "model_id", None),
+                        prompt,
+                        (rc0.get("text") if isinstance(rc0, dict) else "") or "",
+                        None,
+                        usage_json,
+                        elapsed_ms,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cost_usd,
+                        None,
+                        _dt.utcnow(),
+                        iso3,
+                        hz,
+                        metric,
+                    ],
+                )
+
+            con_log.close()
+        except Exception:
+            # Don't let fallback logging failures crash SPD v2.
+            pass
+        # --- End fallback logging ---
 
     except Exception:
         LOG.exception("SPD v2 failed for question_id=%s", qid)
