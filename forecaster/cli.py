@@ -2284,12 +2284,24 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             )
 
         if not spd_obj:
+            raw_dir = Path("debug/spd_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
+            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
             _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
-            if raw_calls:
-                raw_dir = Path("debug/spd_raw")
-                raw_dir.mkdir(parents=True, exist_ok=True)
-                raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-                raw_path.write_text(raw_calls[0].get("text") or "", encoding="utf-8")
+            return
+
+        if "spds" not in spd_obj:
+            raw_dir = Path("debug/spd_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
+            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
+            LOG.error(
+                "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
+                qid,
+                raw_path,
+            )
+            _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
             return
 
         spds = spd_obj.get("spds") or {}
