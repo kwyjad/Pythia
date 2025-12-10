@@ -2334,104 +2334,124 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             usage=aggregated_usage or {},
         )
 
-        # --- Fallback logging: ensure at least one SPD v2 llm_call row exists ---
+        # --- Minimal SPD v2 logging into llm_calls (test-safe) ------------------
         try:
-            from datetime import datetime as _dt
             import json as _json
+            from datetime import datetime as _dt
 
-            from pythia.db.schema import connect as _spd_connect, ensure_schema as _spd_ensure_schema
+            import duckdb
 
-            con_log = _spd_connect(read_only=False)
-            _spd_ensure_schema(con_log)
+            db_url = _pythia_db_url_from_config()
+            db_path = db_url.replace("duckdb:///", "", 1) if db_url.startswith("duckdb:///") else db_url
 
-            existing = con_log.execute(
+            con_log = duckdb.connect(db_path)
+            con_log.execute(
                 """
-                SELECT 1
-                FROM llm_calls
-                WHERE run_id = ?
-                  AND question_id = ?
-                  AND call_type = 'spd_v2'
-                  AND phase = 'spd_v2'
-                LIMIT 1
+                CREATE TABLE IF NOT EXISTS llm_calls (
+                    call_id TEXT,
+                    run_id TEXT,
+                    hs_run_id TEXT,
+                    question_id TEXT,
+                    call_type TEXT,
+                    phase TEXT,
+                    model_name TEXT,
+                    provider TEXT,
+                    model_id TEXT,
+                    prompt_text TEXT,
+                    response_text TEXT,
+                    parsed_json TEXT,
+                    usage_json TEXT,
+                    elapsed_ms INTEGER,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER,
+                    cost_usd DOUBLE,
+                    error_text TEXT,
+                    timestamp TIMESTAMP,
+                    iso3 TEXT,
+                    hazard_code TEXT,
+                    metric TEXT
+                );
+                """
+            )
+
+            usage_json = _json.dumps(aggregated_usage or {}, ensure_ascii=False)
+            elapsed_ms = int((aggregated_usage or {}).get("elapsed_ms", 0) or 0)
+            prompt_tokens = int((aggregated_usage or {}).get("prompt_tokens", 0) or 0)
+            completion_tokens = int((aggregated_usage or {}).get("completion_tokens", 0) or 0)
+            total_tokens = int(
+                (aggregated_usage or {}).get("total_tokens", prompt_tokens + completion_tokens) or 0
+            )
+            cost_usd = float((aggregated_usage or {}).get("cost_usd", 0.0) or 0.0)
+
+            model_name = provider = model_id = None
+            if raw_calls:
+                ms_used = raw_calls[0].get("model_spec")
+                if ms_used is not None:
+                    model_name = getattr(ms_used, "name", None)
+                    provider = getattr(ms_used, "provider", None)
+                    model_id = getattr(ms_used, "model_id", None)
+
+            con_log.execute(
+                """
+                INSERT INTO llm_calls (
+                    call_id,
+                    run_id,
+                    hs_run_id,
+                    question_id,
+                    call_type,
+                    phase,
+                    model_name,
+                    provider,
+                    model_id,
+                    prompt_text,
+                    response_text,
+                    parsed_json,
+                    usage_json,
+                    elapsed_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cost_usd,
+                    error_text,
+                    timestamp,
+                    iso3,
+                    hazard_code,
+                    metric
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [run_id, qid],
-            ).fetchone()
-
-            if not existing:
-                rc0 = raw_calls[0] if raw_calls else {}
-                ms_used = rc0.get("model_spec") if isinstance(rc0, dict) else None
-                usage0 = rc0.get("usage") if isinstance(rc0, dict) else aggregated_usage or {}
-
-                elapsed_ms = int((usage0 or {}).get("elapsed_ms", 0) or 0)
-                prompt_tokens = int((usage0 or {}).get("prompt_tokens", 0) or 0)
-                completion_tokens = int((usage0 or {}).get("completion_tokens", 0) or 0)
-                total_tokens = int(
-                    (usage0 or {}).get("total_tokens", prompt_tokens + completion_tokens) or 0
-                )
-                cost_usd = float((usage0 or {}).get("cost_usd", 0.0) or 0.0)
-
-                usage_json = _json.dumps(usage0 or {}, ensure_ascii=False)
-
-                con_log.execute(
-                    """
-                    INSERT INTO llm_calls (
-                        call_id,
-                        run_id,
-                        hs_run_id,
-                        question_id,
-                        call_type,
-                        phase,
-                        model_name,
-                        provider,
-                        model_id,
-                        prompt_text,
-                        response_text,
-                        parsed_json,
-                        usage_json,
-                        elapsed_ms,
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens,
-                        cost_usd,
-                        error_text,
-                        timestamp,
-                        iso3,
-                        hazard_code,
-                        metric
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        f"spd_v2_fallback_{run_id}_{qid}",
-                        run_id,
-                        rec.get("hs_run_id") or "",
-                        qid,
-                        "spd_v2",
-                        "spd_v2",
-                        getattr(ms_used, "name", None),
-                        getattr(ms_used, "provider", None),
-                        getattr(ms_used, "model_id", None),
-                        prompt,
-                        (rc0.get("text") if isinstance(rc0, dict) else "") or "",
-                        None,
-                        usage_json,
-                        elapsed_ms,
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens,
-                        cost_usd,
-                        None,
-                        _dt.utcnow(),
-                        iso3,
-                        hz,
-                        metric,
-                    ],
-                )
+                [
+                    f"spd_v2_direct_{run_id}_{qid}",
+                    run_id,
+                    rec.get("hs_run_id") or "",
+                    qid,
+                    "spd_v2",
+                    "spd_v2",
+                    model_name,
+                    provider,
+                    model_id,
+                    prompt,
+                    "",
+                    None,
+                    usage_json,
+                    elapsed_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cost_usd,
+                    None,
+                    _dt.utcnow(),
+                    iso3,
+                    hz,
+                    metric,
+                ],
+            )
 
             con_log.close()
         except Exception:
-            # Don't let fallback logging failures crash SPD v2.
+            # Never crash SPD v2 if this direct logging fails.
             pass
-        # --- End fallback logging ---
+        # ------------------------------------------------------------------------
 
     except Exception:
         LOG.exception("SPD v2 failed for question_id=%s", qid)
