@@ -566,10 +566,10 @@ def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     }
     fake_ms = ModelSpec(name="stub", provider="test", model_id="m1", active=True, purpose="spd_v2")
 
-    async def fake_call_spd_model(prompt: str):
-        return json.dumps(fake_spd), {"elapsed_ms": 5}, None, fake_ms
+    async def fake_call_spd_model(ms: ModelSpec, prompt: str):
+        return json.dumps(fake_spd), {"elapsed_ms": 5}, None, ms
 
-    monkeypatch.setattr(cli, "_call_spd_model", fake_call_spd_model)
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model)
 
     question_row = {
         "question_id": "q-test",
