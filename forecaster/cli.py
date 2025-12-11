@@ -1922,16 +1922,46 @@ async def _call_spd_model_for_spec(
 
 
 async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
-    """Backwards-compatible single-provider SPD v2 call (Gemini)."""
+    """
+    SPD v2 façade: call the ensemble and return a single-call view.
 
-    ms = ModelSpec(
-        name="Gemini",
-        provider="google",
-        model_id=GEMINI_MODEL_ID,
-        active=True,
-        purpose="spd_v2",
-    )
-    return await _call_spd_model_for_spec(ms, prompt)
+    - Uses _call_spd_ensemble_v2 under the hood.
+    - Returns:
+        text: JSON encoding of the aggregated SPD if available, else primary raw text.
+        usage: aggregated usage dict (sum of tokens/costs, max elapsed_ms).
+        error: optional error text.
+        ms: primary ModelSpec used for logging.
+    """
+
+    aggregated_spd, aggregated_usage, raw_calls = await _call_spd_ensemble_v2(prompt)
+
+    if not raw_calls:
+        ms = ModelSpec(
+            name="Ensemble",
+            provider="ensemble",
+            model_id="ensemble_spd_v2",
+            active=True,
+            purpose="spd_v2",
+        )
+        return "", aggregated_usage or {}, "no active SPD v2 models", ms
+
+    primary = raw_calls[0]
+    ms = primary["model_spec"]
+
+    if (
+        isinstance(aggregated_spd, dict)
+        and isinstance(aggregated_spd.get("spds"), dict)
+        and aggregated_spd["spds"]
+    ):
+        text = json.dumps(aggregated_spd)
+    else:
+        text = primary.get("text") or ""
+
+    usage = aggregated_usage or primary.get("usage") or {}
+    error = primary.get("error")
+    error_text = str(error) if error else None
+
+    return text, usage, error_text, ms
 
 
 async def _call_spd_ensemble_v2(
@@ -2264,51 +2294,48 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json=research_json,
         )
 
-        spd_obj, aggregated_usage, raw_calls = await _call_spd_ensemble_v2(prompt)
+        text, usage, error, ms = await _call_spd_model(prompt)
 
-        for rc in raw_calls:
-            ms_used = rc["model_spec"]
-            await log_forecaster_llm_call(
-                run_id=run_id,
-                question_id=qid,
-                iso3=iso3,
-                hazard_code=hz,
-                metric=metric,
-                model_spec=ms_used,
-                prompt_text=prompt,
-                response_text=rc.get("text") or "",
-                usage=rc.get("usage") or {},
-                error_text=str(rc.get("error")) if rc.get("error") else None,
-                phase="spd_v2",
-                call_type="spd_v2",
-                hs_run_id=hs_run_id,
-            )
+        await log_forecaster_llm_call(
+            run_id=run_id,
+            question_id=qid,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage or {},
+            error_text=str(error) if error else None,
+            phase="spd_v2",
+            call_type="spd_v2",
+            hs_run_id=hs_run_id,
+        )
 
-        if not spd_obj:
-            raw_text = (raw_calls[0].get("text") if raw_calls else "") or ""
-            if not raw_text:
-                try:
-                    raw_text, _usage, _error, _ms = await _call_spd_model(prompt)
-                except Exception:  # noqa: BLE001
-                    raw_text = ""
+        if error or not (text and text.strip()):
+            LOG.error("SPD v2 returned error/empty for %s: %s", qid, error)
+            _record_no_forecast(run_id, qid, iso3, hz, metric, "spd v2 error or empty response")
+            return
 
+        try:
+            spd_obj = _safe_json_loads(text)
+        except json.JSONDecodeError:
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-            raw_path.write_text(raw_text, encoding="utf-8")
-            _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+            raw_path = raw_dir / f"{run_id}__{qid}_invalid_spd_json.txt"
+            raw_path.write_text(text or "", encoding="utf-8")
+
+            LOG.error("SPD JSON parse error for %s (saved raw text to %s)", qid, raw_path)
+            _record_no_forecast(run_id, qid, iso3, hz, metric, "invalid spd json")
             return
 
         if "spds" not in spd_obj:
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
             raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
-            LOG.error(
-                "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
-                qid,
-                raw_path,
-            )
+            raw_path.write_text(text or "", encoding="utf-8")
+
+            LOG.error("SPD JSON missing 'spds' key for %s (saved raw text to %s)", qid, raw_path)
             _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
             return
 
@@ -2317,12 +2344,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             raw_dir = Path("debug/spd_raw")
             raw_dir.mkdir(parents=True, exist_ok=True)
             raw_path = raw_dir / f"{run_id}__{qid}_empty_spds.txt"
-            raw_path.write_text((raw_calls[0].get("text") if raw_calls else "") or "", encoding="utf-8")
-            LOG.error(
-                "SPD JSON contained empty 'spds' for %s (saved raw text to %s)",
-                qid,
-                raw_path,
-            )
+            raw_path.write_text(text or "", encoding="utf-8")
+
+            LOG.error("SPD JSON contained empty 'spds' for %s (saved raw text to %s)", qid, raw_path)
             _record_no_forecast(run_id, qid, iso3, hz, metric, "empty spds")
             return
 
@@ -2331,94 +2355,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             question_row,
             spd_obj,
             resolution_source=resolution_source,
-            usage=aggregated_usage or {},
+            usage=usage or {},
         )
-
-        # --- Direct SPD v2 logging into llm_calls (test-safe) ------------------
-        from datetime import datetime as _dt
-        import json as _json
-        from pythia.db import schema as db_schema
-
-        con_log = None
-        try:
-            con_log = db_schema.connect(read_only=False)
-            db_schema.ensure_schema(con_log)
-
-            usage_dict = dict(aggregated_usage or {})
-            elapsed_ms = int(usage_dict.get("elapsed_ms", 0) or 0)
-            prompt_tokens = int(usage_dict.get("prompt_tokens", 0) or 0)
-            completion_tokens = int(usage_dict.get("completion_tokens", 0) or 0)
-            total_tokens = int(usage_dict.get("total_tokens", prompt_tokens + completion_tokens) or 0)
-            cost_usd = float(usage_dict.get("cost_usd", 0.0) or 0.0)
-
-            usage_json = _json.dumps(usage_dict, ensure_ascii=False)
-
-            ms = raw_calls[0].get("model_spec") if raw_calls else None
-
-            con_log.execute(
-                """
-                INSERT INTO llm_calls (
-                    call_id,
-                    run_id,
-                    hs_run_id,
-                    question_id,
-                    call_type,
-                    phase,
-                    model_name,
-                    provider,
-                    model_id,
-                    prompt_text,
-                    response_text,
-                    parsed_json,
-                    usage_json,
-                    elapsed_ms,
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                    cost_usd,
-                    error_text,
-                    timestamp,
-                    iso3,
-                    hazard_code,
-                    metric
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    f"spd_v2_direct_{run_id}_{qid}",
-                    run_id,
-                    question_row.get("hs_run_id") or "",
-                    qid,
-                    "spd_v2",  # call_type
-                    "spd_v2",  # phase
-                    getattr(ms, "name", None),
-                    getattr(ms, "provider", None),
-                    getattr(ms, "model_id", None),
-                    prompt,
-                    "",  # response_text (not needed for the test)
-                    None,  # parsed_json
-                    usage_json,
-                    elapsed_ms,
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                    cost_usd,
-                    None,  # error_text
-                    _dt.utcnow(),
-                    iso3,
-                    hz,
-                    metric,
-                ],
-            )
-        except Exception:
-            # Never crash SPD v2 if this direct logging fails.
-            pass
-        finally:
-            try:
-                if con_log is not None:
-                    con_log.close()
-            except Exception:
-                pass
-        # ------------------------------------------------------------------------
 
     except Exception:
         LOG.exception("SPD v2 failed for question_id=%s", qid)
