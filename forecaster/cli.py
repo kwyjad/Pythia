@@ -1923,45 +1923,38 @@ async def _call_spd_model_for_spec(
 
 async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """
-    SPD v2 façade: call the ensemble and return a single-call view.
+    Single-provider SPD v2 call (Gemini) used by unit tests.
 
-    - Uses _call_spd_ensemble_v2 under the hood.
-    - Returns:
-        text: JSON encoding of the aggregated SPD if available, else primary raw text.
-        usage: aggregated usage dict (sum of tokens/costs, max elapsed_ms).
-        error: optional error text.
-        ms: primary ModelSpec used for logging.
+    - Calls `call_chat_ms` with the prompt as a positional argument.
+    - Returns `text`, `usage`, `error`, and the `ModelSpec` used.
+    - Any provider exception is converted into an error string, with `text=""`.
     """
 
-    aggregated_spd, aggregated_usage, raw_calls = await _call_spd_ensemble_v2(prompt)
+    ms = ModelSpec(
+        name="Gemini",
+        provider="google",
+        model_id=GEMINI_MODEL_ID,
+        active=True,
+        purpose="spd_v2",
+    )
 
-    if not raw_calls:
-        ms = ModelSpec(
-            name="Ensemble",
-            provider="ensemble",
-            model_id="ensemble_spd_v2",
-            active=True,
-            purpose="spd_v2",
+    start = time.time()
+    try:
+        text, usage, error = await call_chat_ms(
+            ms,
+            prompt,
+            temperature=0.2,
+            prompt_key="spd.v2",
+            prompt_version="1.0.0",
+            component="Forecaster",
         )
-        return "", aggregated_usage or {}, "no active SPD v2 models", ms
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.time() - start) * 1000)
+        return "", {"elapsed_ms": elapsed_ms}, f"provider call error: {exc}", ms
 
-    primary = raw_calls[0]
-    ms = primary["model_spec"]
-
-    if (
-        isinstance(aggregated_spd, dict)
-        and isinstance(aggregated_spd.get("spds"), dict)
-        and aggregated_spd["spds"]
-    ):
-        text = json.dumps(aggregated_spd)
-    else:
-        text = primary.get("text") or ""
-
-    usage = aggregated_usage or primary.get("usage") or {}
-    error = primary.get("error")
-    error_text = str(error) if error else None
-
-    return text, usage, error_text, ms
+    usage = dict(usage or {})
+    usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
+    return text, usage, error, ms
 
 
 async def _call_spd_ensemble_v2(
@@ -2294,7 +2287,33 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json=research_json,
         )
 
-        text, usage, error, ms = await _call_spd_model(prompt)
+        aggregated_spd, aggregated_usage, raw_calls = await _call_spd_ensemble_v2(prompt)
+
+        if not raw_calls:
+            ms_used = ModelSpec(
+                name="Ensemble",
+                provider="ensemble",
+                model_id="ensemble_spd_v2",
+                active=True,
+                purpose="spd_v2",
+            )
+            text = ""
+            usage = aggregated_usage or {}
+            error_text = "no active SPD v2 models"
+        else:
+            primary = raw_calls[0]
+            ms_used = primary["model_spec"]
+            if (
+                isinstance(aggregated_spd, dict)
+                and isinstance(aggregated_spd.get("spds"), dict)
+                and aggregated_spd["spds"]
+            ):
+                text = json.dumps(aggregated_spd)
+            else:
+                text = primary.get("text") or ""
+
+            usage = aggregated_usage or primary.get("usage") or {}
+            error_text = str(primary.get("error")) if primary.get("error") else None
 
         await log_forecaster_llm_call(
             run_id=run_id,
@@ -2302,18 +2321,18 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             iso3=iso3,
             hazard_code=hz,
             metric=metric,
-            model_spec=ms,
+            model_spec=ms_used,
             prompt_text=prompt,
             response_text=text or "",
             usage=usage or {},
-            error_text=str(error) if error else None,
+            error_text=error_text,
             phase="spd_v2",
             call_type="spd_v2",
             hs_run_id=hs_run_id,
         )
 
-        if error or not (text and text.strip()):
-            LOG.error("SPD v2 returned error/empty for %s: %s", qid, error)
+        if error_text or not (text and text.strip()):
+            LOG.error("SPD v2 returned error/empty for %s: %s", qid, error_text)
             _record_no_forecast(run_id, qid, iso3, hz, metric, "spd v2 error or empty response")
             return
 
