@@ -1949,6 +1949,36 @@ async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[st
     return text, usage, error, ms
 
 
+async def _call_spd_ensemble_v2(
+    prompt: str,
+) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
+    """Thin wrapper around the current SPD v2 call path for diagnostics."""
+
+    text, usage, error, ms = await _call_spd_model(prompt)
+
+    raw_calls = [
+        {
+            "model_spec": ms,
+            "text": text or "",
+            "usage": usage,
+            "error": error,
+        }
+    ]
+
+    if error or not text or not text.strip():
+        return {}, usage, raw_calls
+
+    try:
+        spd_obj = _safe_json_loads(text)
+    except Exception:  # noqa: BLE001
+        return {}, usage, raw_calls
+
+    if not isinstance(spd_obj, dict):
+        return {}, usage, raw_calls
+
+    return spd_obj, usage, raw_calls
+
+
 async def _call_spd_bayesmc_v2(
     prompt: str,
     *,
@@ -2039,6 +2069,102 @@ async def _call_spd_bayesmc_v2(
     spd_obj: dict[str, object] = {"spds": spds_v2}
 
     return spd_obj, aggregated_usage, raw_calls
+
+
+def _spd_v2_to_month_vectors(spd_obj: dict[str, object] | None) -> dict[str, list[float]]:
+    """
+    Convert SPD v2 object {"spds": {month: {"probs": [...]}}} into {month: [..]}.
+    Defensive: ignores malformed entries.
+    """
+    if not isinstance(spd_obj, dict):
+        return {}
+    spds = spd_obj.get("spds")
+    if not isinstance(spds, dict):
+        return {}
+
+    out: dict[str, list[float]] = {}
+    for month, payload in spds.items():
+        if not isinstance(payload, dict):
+            continue
+        probs = payload.get("probs")
+        if not isinstance(probs, list) or not probs:
+            continue
+        try:
+            vec = [float(x) for x in probs]
+        except Exception:  # noqa: BLE001
+            continue
+        out[str(month)] = vec
+    return out
+
+
+def _compare_spd_vectors(
+    a: dict[str, list[float]],
+    b: dict[str, list[float]],
+) -> dict[str, object]:
+    """
+    Compare two month->prob-vector mappings.
+
+    Produces per-month:
+      - max_abs_diff
+      - l1_diff
+      - length mismatch info
+    and overall summary stats.
+    """
+    months_a = set(a.keys())
+    months_b = set(b.keys())
+    months_union = sorted(months_a | months_b)
+
+    per_month: dict[str, object] = {}
+    max_max_abs = 0.0
+    max_l1 = 0.0
+
+    for m in months_union:
+        va = a.get(m)
+        vb = b.get(m)
+        if va is None or vb is None:
+            per_month[m] = {
+                "present_in": "a_only" if vb is None else "b_only",
+            }
+            continue
+
+        la, lb = len(va), len(vb)
+        n = min(la, lb)
+        diffs = [abs(va[i] - vb[i]) for i in range(n)]
+        max_abs = max(diffs) if diffs else 0.0
+        l1 = sum(diffs)
+
+        entry: dict[str, object] = {
+            "max_abs_diff": max_abs,
+            "l1_diff": l1,
+            "len_a": la,
+            "len_b": lb,
+        }
+        if la != lb:
+            entry["length_mismatch"] = True
+        per_month[m] = entry
+
+        max_max_abs = max(max_max_abs, max_abs)
+        max_l1 = max(max_l1, l1)
+
+    return {
+        "months_a": sorted(months_a),
+        "months_b": sorted(months_b),
+        "months_union": months_union,
+        "per_month": per_month,
+        "summary": {
+            "n_months_a": len(months_a),
+            "n_months_b": len(months_b),
+            "max_max_abs_diff": max_max_abs,
+            "max_l1_diff": max_l1,
+        },
+    }
+
+
+def _write_spd_compare_artifact(run_id: str, qid: str, payload: dict[str, object]) -> None:
+    out_dir = Path("debug/spd_compare")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{run_id}__{qid}.json"
+    out_path.write_text(_json_dumps_for_db(payload), encoding="utf-8")
 
 
 
@@ -2286,12 +2412,58 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json=research_json,
         )
 
+        dual_run = os.getenv("PYTHIA_SPD_V2_DUAL_RUN", "0") == "1"
+        use_bayesmc = os.getenv("PYTHIA_SPD_V2_USE_BAYESMC", "0") == "1"
+
+        if dual_run:
+            try:
+                spd_v2, usage_v2, calls_v2 = await _call_spd_ensemble_v2(prompt)
+                spd_bm, usage_bm, calls_bm = await _call_spd_bayesmc_v2(
+                    prompt, run_id=run_id, question_id=qid, hs_run_id=hs_run_id
+                )
+
+                vec_v2 = _spd_v2_to_month_vectors(spd_v2)
+                vec_bm = _spd_v2_to_month_vectors(spd_bm)
+
+                diff = _compare_spd_vectors(vec_v2, vec_bm)
+
+                def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
+                    out: list[str] = []
+                    for c in calls:
+                        ms = c.get("model_spec")
+                        if isinstance(ms, ModelSpec):
+                            out.append(f"{ms.provider}:{ms.model_id}")
+                    return out
+
+                payload: dict[str, object] = {
+                    "run_id": run_id,
+                    "question_id": qid,
+                    "iso3": iso3,
+                    "hazard_code": hz,
+                    "metric": metric,
+                    "hs_run_id": hs_run_id,
+                    "write_path": "bayesmc" if use_bayesmc else "v2_ensemble",
+                    "v2_ensemble": {
+                        "n_calls": len(calls_v2),
+                        "models": _calls_summary(calls_v2),
+                        "usage": usage_v2,
+                    },
+                    "bayesmc": {
+                        "n_calls": len(calls_bm),
+                        "models": _calls_summary(calls_bm),
+                        "usage": usage_bm,
+                    },
+                    "diff": diff,
+                }
+                _write_spd_compare_artifact(run_id, qid, payload)
+            except Exception:  # noqa: BLE001
+                LOG.exception("[debug] SPD dual-run compare failed for %s", qid)
+
         # CI contract (forecaster/tests/test_spd.py):
         # - On successful SPD v2 run: must write >=1 row to forecasts_ensemble for (run_id, question_id).
         # - Must also log >=1 row to llm_calls with call_type='spd_v2' for (run_id, question_id).
         # - If response JSON is missing 'spds': must record no_forecast w/ reason containing 'missing spds'
         #   and write debug/spd_raw/{run_id}__{question_id}_missing_spds.txt.
-        use_bayesmc = os.getenv("PYTHIA_SPD_V2_USE_BAYESMC", "0") == "1"
 
         spd_obj: Dict[str, Any] | None = None
         usage: Dict[str, Any] = {}
