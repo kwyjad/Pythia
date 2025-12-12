@@ -1998,12 +1998,18 @@ async def _call_spd_bayesmc_v2(
 
     for m in ens.members:
         usage = m.usage or {}
+        text = getattr(m, "raw_text", None)
+        if text is None:
+            text = getattr(m, "text", "")
+        error_val = getattr(m, "error", None)
+        if error_val is None:
+            error_val = getattr(m, "error_text", None)
         raw_calls.append(
             {
                 "model_spec": m.model_spec,
-                "text": m.raw_text or "",
+                "text": text or "",
                 "usage": usage,
-                "error": m.error,
+                "error": error_val,
             }
         )
 
@@ -2288,6 +2294,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             )
             text = json.dumps(spd_obj)
 
+            logged_any_spd_call = False
+
             for call in raw_calls:
                 ms = call.get("model_spec")
                 if not isinstance(ms, ModelSpec):
@@ -2303,6 +2311,31 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     response_text=str(call.get("text") or ""),
                     usage=call.get("usage") or {},
                     error_text=str(call.get("error")) if call.get("error") else None,
+                    phase="spd_v2",
+                    call_type="spd_v2",
+                    hs_run_id=hs_run_id,
+                )
+                logged_any_spd_call = True
+
+            if not logged_any_spd_call:
+                fallback = raw_calls[0] if raw_calls else {}
+                await log_forecaster_llm_call(
+                    run_id=run_id,
+                    question_id=qid,
+                    iso3=iso3,
+                    hazard_code=hz,
+                    metric=metric,
+                    model_spec=fallback.get("model_spec")
+                    if isinstance(fallback.get("model_spec"), ModelSpec)
+                    else None,
+                    prompt_text=prompt,
+                    response_text=str(fallback.get("text") or ""),
+                    usage=fallback.get("usage") or {},
+                    error_text=(
+                        str(fallback.get("error"))
+                        if fallback.get("error")
+                        else "bayesmc: no ensemble members"
+                    ),
                     phase="spd_v2",
                     call_type="spd_v2",
                     hs_run_id=hs_run_id,
