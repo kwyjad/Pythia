@@ -51,9 +51,9 @@ jobs:
           if [ ! -f "data/resolver.duckdb" ]; then
             echo "Resolver DB artifact not found; creating empty placeholder DB."
             python - <<'PY'
-            import duckdb
-            duckdb.connect("data/resolver.duckdb").close()
-            PY
+import duckdb
+duckdb.connect("data/resolver.duckdb").close()
+PY
           fi
 
       - name: Check canonical DB presence
