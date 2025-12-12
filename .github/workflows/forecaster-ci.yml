@@ -39,15 +39,15 @@ jobs:
           if [ ! -f "data/resolver.duckdb" ]; then
             echo "Resolver DB artifact not found; creating empty placeholder DB at data/resolver.duckdb"
             python - <<'PY'
-          import pathlib
-          path = pathlib.Path("data/resolver.duckdb")
-          try:
-              import duckdb  # type: ignore
-              con = duckdb.connect(path.as_posix())
-              con.close()
-          except ModuleNotFoundError:
-              path.touch()
-PY
+            import pathlib
+            path = pathlib.Path("data/resolver.duckdb")
+            try:
+                import duckdb  # type: ignore
+                con = duckdb.connect(path.as_posix())
+                con.close()
+            except ModuleNotFoundError:
+                path.touch()
+            PY
           else
             echo "Found data/resolver.duckdb from artifact."
           fi
