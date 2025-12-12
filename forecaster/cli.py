@@ -53,6 +53,29 @@ MAX_RESEARCH_WORKERS = int(os.getenv("FORECASTER_RESEARCH_MAX_WORKERS", "6"))
 MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "6"))
 
 
+_DEFAULT_ENSEMBLE_LOGGED = False
+
+
+def _maybe_log_default_ensemble() -> None:
+    global _DEFAULT_ENSEMBLE_LOGGED
+    if _DEFAULT_ENSEMBLE_LOGGED:
+        return
+    if os.getenv("PYTHIA_DEBUG_MODELS", "0") != "1":
+        return
+
+    _DEFAULT_ENSEMBLE_LOGGED = True
+    try:
+        from forecaster.providers import DEFAULT_ENSEMBLE, default_ensemble_summary
+
+        LOG.info(
+            "[debug] DEFAULT_ENSEMBLE models=%d | %s",
+            len(DEFAULT_ENSEMBLE),
+            default_ensemble_summary(),
+        )
+    except Exception:  # noqa: BLE001
+        LOG.exception("[debug] Failed to summarize DEFAULT_ENSEMBLE")
+
+
 def _safe_json_loads(text: str) -> Any:
     """
     Best-effort JSON loader for LLM responses.
@@ -2131,6 +2154,8 @@ def _normalize_question_row_for_spd(question_row: Any) -> Dict[str, Any]:
 
 
 async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
+    _maybe_log_default_ensemble()
+
     rec = _normalize_question_row_for_spd(question_row)
 
     qid = rec.get("question_id")
@@ -2167,6 +2192,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json=research_json,
         )
 
+        # CI contract (forecaster/tests/test_spd.py):
+        # - On successful SPD v2 run: must write >=1 row to forecasts_ensemble for (run_id, question_id).
+        # - Must also log >=1 row to llm_calls with call_type='spd_v2' for (run_id, question_id).
+        # - If response JSON is missing 'spds': must record no_forecast w/ reason containing 'missing spds'
+        #   and write debug/spd_raw/{run_id}__{question_id}_missing_spds.txt.
         text, usage, error, ms = await _call_spd_model(prompt)
 
         await log_forecaster_llm_call(
@@ -2522,6 +2552,7 @@ async def _run_one_question_body(
     summary: Optional[QuestionRunSummary] = None,
 ) -> None:
     t_start_total = time.time()
+    _maybe_log_default_ensemble()
     _post_original = post
     try:
     

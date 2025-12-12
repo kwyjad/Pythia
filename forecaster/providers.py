@@ -216,6 +216,24 @@ KNOWN_MODELS: List[str] = [spec.name for spec in _MODEL_SPECS]
 DEFAULT_ENSEMBLE: List[ModelSpec] = [spec for spec in _MODEL_SPECS if spec.active]
 
 
+def summarize_model_specs(specs: List[ModelSpec]) -> str:
+    """Return a stable, non-secret summary of model specs."""
+
+    parts: List[str] = []
+    for ms in specs:
+        parts.append(
+            f"{ms.provider}:{ms.model_id}"
+            f"({'active' if ms.active else 'inactive'},w={getattr(ms, 'weight', 1.0)})"
+        )
+    return ", ".join(parts)
+
+
+def default_ensemble_summary() -> str:
+    """Summarize the current default ensemble without secrets."""
+
+    return summarize_model_specs(DEFAULT_ENSEMBLE)
+
+
 # backwards-compatible aliases reused elsewhere in the forecaster package
 _OPENAI_STATE = _PROVIDER_STATES.get("openai", {})
 OPENAI_MODEL_ID = _OPENAI_STATE.get("model", "")
