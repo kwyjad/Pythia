@@ -2333,7 +2333,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
         if error_text or not (text and text.strip()):
             LOG.error("SPD v2 returned error/empty for %s: %s", qid, error_text)
-            _record_no_forecast(run_id, qid, iso3, hz, metric, "spd v2 error or empty response")
+            reason = "missing spds: spd v2 error or empty response"
+            if error_text:
+                reason = f"{reason} ({error_text})"
+            _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
             return
 
         try:
