@@ -2105,16 +2105,18 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
 
 def _write_spd_outputs(
     run_id: str,
-    question_row: duckdb.Row,
+    question_row: Any,
     spd_obj: Dict[str, Any],
     *,
     resolution_source: str,
     usage: Dict[str, Any],
 ) -> None:
-    qid = question_row["question_id"]
-    iso3 = question_row["iso3"]
-    hz = question_row["hazard_code"]
-    metric = question_row["metric"]
+    rec = _normalize_question_row_for_spd(question_row)
+
+    qid = rec["question_id"]
+    iso3 = rec["iso3"]
+    hz = rec["hazard_code"]
+    metric = rec["metric"]
     bucket_labels = SPD_CLASS_BINS_FATALITIES if metric.upper() == "FATALITIES" else SPD_CLASS_BINS_PA
 
     spds = spd_obj.get("spds") if isinstance(spd_obj, dict) else None
