@@ -2005,11 +2005,19 @@ async def _call_spd_bayesmc_v2(
             }
         )
 
-        total_prompt_tokens += int(usage.get("prompt_tokens", m.prompt_tokens) or 0)
-        total_completion_tokens += int(usage.get("completion_tokens", m.completion_tokens) or 0)
-        total_tokens += int(usage.get("total_tokens", m.total_tokens) or 0)
-        total_cost += float(usage.get("cost_usd", m.cost_usd) or 0.0)
-        max_elapsed_ms = max(max_elapsed_ms, int(usage.get("elapsed_ms", m.elapsed_ms) or 0))
+        prompt_tokens = int(usage.get("prompt_tokens") or getattr(m, "prompt_tokens", 0) or 0)
+        completion_tokens = int(
+            usage.get("completion_tokens") or getattr(m, "completion_tokens", 0) or 0
+        )
+        total_tokens_val = int(usage.get("total_tokens") or getattr(m, "total_tokens", 0) or 0)
+        cost_usd_val = float(usage.get("cost_usd") or getattr(m, "cost_usd", 0.0) or 0.0)
+        elapsed_ms_val = int(usage.get("elapsed_ms") or getattr(m, "elapsed_ms", 0) or 0)
+
+        total_prompt_tokens += prompt_tokens
+        total_completion_tokens += completion_tokens
+        total_tokens += total_tokens_val
+        total_cost += cost_usd_val
+        max_elapsed_ms = max(max_elapsed_ms, elapsed_ms_val)
 
     aggregated_usage["prompt_tokens"] = total_prompt_tokens
     aggregated_usage["completion_tokens"] = total_completion_tokens
@@ -2298,6 +2306,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 hs_run_id=hs_run_id,
             )
             text = json.dumps(spd_obj)
+
+            # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
+            if not spd_obj:
+                raw_dir = Path("debug/spd_raw")
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
+
+                # Prefer raw text from the first member if available
+                first_text = ""
+                if raw_calls:
+                    first_text = str(raw_calls[0].get("text") or "")
+                raw_path.write_text(first_text, encoding="utf-8")
+
+                _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+                return
 
             logged_any_spd_call = False
 
