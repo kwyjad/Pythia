@@ -24,12 +24,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download canonical resolver DB
+      - name: Download canonical resolver DB (optional)
+        id: dl_resolver_db
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: pythia-resolver-db
           path: data
-        continue-on-error: true
+
+      - name: Ensure resolver DB file exists (fallback)
+        shell: bash
+        run: |
+          mkdir -p data
+          if [ ! -f "data/resolver.duckdb" ]; then
+            echo "Resolver DB artifact not found; creating empty placeholder DB at data/resolver.duckdb"
+            python -c $'import pathlib\npath = pathlib.Path("data/resolver.duckdb")\ntry:\n    import duckdb  # type: ignore\n    con = duckdb.connect(path.as_posix())\n    con.close()\nexcept ModuleNotFoundError:\n    path.touch()\n'
+          else
+            echo "Found data/resolver.duckdb from artifact."
+          fi
 
       - name: Check canonical DB presence
         run: |

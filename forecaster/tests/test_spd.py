@@ -678,8 +678,8 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
         spd_main = {"2025-12": [0.1, 0.2, 0.3, 0.2, 0.2]}
         return spd_main, {}, {}
 
-    monkeypatch.setattr("forecaster.ensemble.run_ensemble_spd", fake_run_ensemble_spd)
-    monkeypatch.setattr("forecaster.aggregate.aggregate_spd", fake_aggregate_spd)
+    monkeypatch.setattr(cli, "run_ensemble_spd", fake_run_ensemble_spd)
+    monkeypatch.setattr(cli, "aggregate_spd", fake_aggregate_spd)
 
     asyncio.run(cli._run_spd_for_question("run_bayesmc_ok", question_row))
 
@@ -784,8 +784,8 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
         # Empty spd_main -> bridge produces {"spds": {}}
         return {}, {}, {}
 
-    monkeypatch.setattr("forecaster.ensemble.run_ensemble_spd", fake_run_ensemble_spd)
-    monkeypatch.setattr("forecaster.aggregate.aggregate_spd", fake_aggregate_spd)
+    monkeypatch.setattr(cli, "run_ensemble_spd", fake_run_ensemble_spd)
+    monkeypatch.setattr(cli, "aggregate_spd", fake_aggregate_spd)
 
     asyncio.run(cli._run_spd_for_question("run_bayesmc_missing", question_row))
 
