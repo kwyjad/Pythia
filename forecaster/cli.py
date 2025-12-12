@@ -1949,6 +1949,79 @@ async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[st
     return text, usage, error, ms
 
 
+async def _call_spd_bayesmc_v2(
+    prompt: str,
+    *,
+    run_id: str,
+    question_id: str,
+    hs_run_id: str | None,
+) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
+    """
+    BayesMC-backed SPD v2 bridge.
+
+    Returns:
+      - spd_obj: {"spds": {month_key: {"probs": [...]}}}
+      - aggregated_usage: aggregated usage across members
+      - raw_calls: list of member call summaries (model_spec, text, usage, error)
+    """
+
+    # Run the existing ensemble runner (classic path)
+    ens = await run_ensemble_spd(
+        prompt=prompt,
+        specs=DEFAULT_ENSEMBLE,
+        run_id=run_id,
+        question_id=question_id,
+        hs_run_id=hs_run_id,
+    )
+
+    # Aggregate to a single SPD (month -> vector)
+    # Keep weights/centroids default for now (small bite).
+    spd_main, _ev_dict, _bmc_summary = aggregate_spd(ens)
+
+    # Convert to SPD v2 JSON shape
+    spds_v2: dict[str, dict[str, object]] = {}
+    for month_key, vec in (spd_main or {}).items():
+        probs = sanitize_mcq_vector(list(vec), n_options=len(vec))
+        spds_v2[str(month_key)] = {"probs": probs}
+
+    spd_obj: dict[str, object] = {"spds": spds_v2}
+
+    # Build a raw_calls summary for logging/debug parity with _call_spd_model
+    raw_calls: list[dict[str, object]] = []
+    aggregated_usage: dict[str, object] = {}
+
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    max_elapsed_ms = 0
+
+    for m in ens.members:
+        usage = m.usage or {}
+        raw_calls.append(
+            {
+                "model_spec": m.model_spec,
+                "text": m.raw_text or "",
+                "usage": usage,
+                "error": m.error,
+            }
+        )
+
+        total_prompt_tokens += int(usage.get("prompt_tokens", m.prompt_tokens) or 0)
+        total_completion_tokens += int(usage.get("completion_tokens", m.completion_tokens) or 0)
+        total_tokens += int(usage.get("total_tokens", m.total_tokens) or 0)
+        total_cost += float(usage.get("cost_usd", m.cost_usd) or 0.0)
+        max_elapsed_ms = max(max_elapsed_ms, int(usage.get("elapsed_ms", m.elapsed_ms) or 0))
+
+    aggregated_usage["prompt_tokens"] = total_prompt_tokens
+    aggregated_usage["completion_tokens"] = total_completion_tokens
+    aggregated_usage["total_tokens"] = total_tokens or (total_prompt_tokens + total_completion_tokens)
+    aggregated_usage["cost_usd"] = total_cost
+    aggregated_usage["elapsed_ms"] = max_elapsed_ms
+
+    return spd_obj, aggregated_usage, raw_calls
+
+
 
 async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
     qid = question_row["question_id"]
@@ -2197,46 +2270,82 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         # - Must also log >=1 row to llm_calls with call_type='spd_v2' for (run_id, question_id).
         # - If response JSON is missing 'spds': must record no_forecast w/ reason containing 'missing spds'
         #   and write debug/spd_raw/{run_id}__{question_id}_missing_spds.txt.
-        text, usage, error, ms = await _call_spd_model(prompt)
+        use_bayesmc = os.getenv("PYTHIA_SPD_V2_USE_BAYESMC", "0") == "1"
 
-        await log_forecaster_llm_call(
-            run_id=run_id,
-            question_id=qid,
-            iso3=iso3,
-            hazard_code=hz,
-            metric=metric,
-            model_spec=ms,
-            prompt_text=prompt,
-            response_text=text or "",
-            usage=usage,
-            error_text=str(error) if error else None,
-            phase="spd_v2",
-            hs_run_id=hs_run_id,
-        )
+        spd_obj: Dict[str, Any] | None = None
+        usage: Dict[str, Any] = {}
+        text = ""
+        raw_calls: list[dict[str, object]] = []
 
-        if error or not text or not text.strip():
-            _record_no_forecast(
-                run_id,
-                qid,
-                iso3,
-                hz,
-                metric,
-                f"LLM error or empty response: {error or 'no text'}",
+        if use_bayesmc:
+            spd_obj, usage, raw_calls = await _call_spd_bayesmc_v2(
+                prompt,
+                run_id=run_id,
+                question_id=qid,
+                hs_run_id=hs_run_id,
             )
-            return
+            text = json.dumps(spd_obj)
 
-        try:
-            spd_obj = _safe_json_loads(text)
-        except json.JSONDecodeError as exc:
-            raw_dir = Path("debug/spd_raw")
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / f"{run_id}__{qid}.txt"
-            raw_path.write_text(text or "", encoding="utf-8")
-            logging.error(
-                "SPD JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
+            for call in raw_calls:
+                ms = call.get("model_spec")
+                if not isinstance(ms, ModelSpec):
+                    continue
+                await log_forecaster_llm_call(
+                    run_id=run_id,
+                    question_id=qid,
+                    iso3=iso3,
+                    hazard_code=hz,
+                    metric=metric,
+                    model_spec=ms,
+                    prompt_text=prompt,
+                    response_text=str(call.get("text") or ""),
+                    usage=call.get("usage") or {},
+                    error_text=str(call.get("error")) if call.get("error") else None,
+                    phase="spd_v2",
+                    call_type="spd_v2",
+                    hs_run_id=hs_run_id,
+                )
+        else:
+            text, usage, error, ms = await _call_spd_model(prompt)
+
+            await log_forecaster_llm_call(
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                model_spec=ms,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage,
+                error_text=str(error) if error else None,
+                phase="spd_v2",
+                hs_run_id=hs_run_id,
             )
-            _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad SPD JSON: {exc}")
-            return
+
+            if error or not text or not text.strip():
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    f"LLM error or empty response: {error or 'no text'}",
+                )
+                return
+
+            try:
+                spd_obj = _safe_json_loads(text)
+            except json.JSONDecodeError as exc:
+                raw_dir = Path("debug/spd_raw")
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                raw_path = raw_dir / f"{run_id}__{qid}.txt"
+                raw_path.write_text(text or "", encoding="utf-8")
+                logging.error(
+                    "SPD JSON decode failed for %s: %s (saved to %s)", qid, exc, raw_path
+                )
+                _record_no_forecast(run_id, qid, iso3, hz, metric, f"bad SPD JSON: {exc}")
+                return
 
         if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
             raw_dir = Path("debug/spd_raw")

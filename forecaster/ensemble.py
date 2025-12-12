@@ -25,6 +25,8 @@ class MemberOutput:
     total_tokens: int = 0
     cost_usd: float = 0.0
     error: str = ""  # non-empty if provider errored quickly
+    model_spec: ModelSpec | None = None
+    usage: dict | None = None
 
 @dataclass
 class EnsembleResult:
@@ -490,6 +492,8 @@ async def run_ensemble_spd(
                 total_tokens=total_tokens,
                 cost_usd=cost_usd,
                 error=err_text,
+                model_spec=ms,
+                usage=usage,
             )
 
         tasks.append(_one())
