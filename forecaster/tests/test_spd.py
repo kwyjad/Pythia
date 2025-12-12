@@ -599,6 +599,217 @@ def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert llm_call_count > 0
 
 
+@pytest.mark.db
+def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    # Enable BayesMC path
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_bayesmc_happy.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    # Seed DB with one question
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_BAYESMC_OK",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test DR PA question",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_BAYESMC_OK"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    # Minimal stubs to avoid external deps
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    # Fake EnsembleResult + members (shape only needs what _call_spd_bayesmc_v2 reads)
+    class _M:
+        def __init__(self, model_spec, text, usage, error_text=None):
+            self.model_spec = model_spec
+            self.text = text
+            self.usage = usage
+            self.error_text = error_text
+
+    class _ER:
+        def __init__(self, members):
+            self.members = members
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    fake_ens = _ER(
+        members=[
+            _M(ms1, text='{"any":"raw"}', usage={"total_tokens": 10, "elapsed_ms": 5}, error_text=None),
+            _M(ms2, text='{"any":"raw"}', usage={"total_tokens": 12, "elapsed_ms": 6}, error_text=None),
+        ]
+    )
+
+    async def fake_run_ensemble_spd(*_args, **_kwargs):
+        return fake_ens
+
+    def fake_aggregate_spd(_ens, *_args, **_kwargs):
+        # Return classic aggregate_spd shape: (spd_main, ev_dict, bmc_summary)
+        spd_main = {"2025-12": [0.1, 0.2, 0.3, 0.2, 0.2]}
+        return spd_main, {}, {}
+
+    monkeypatch.setattr("forecaster.ensemble.run_ensemble_spd", fake_run_ensemble_spd)
+    monkeypatch.setattr("forecaster.aggregate.aggregate_spd", fake_aggregate_spd)
+
+    asyncio.run(cli._run_spd_for_question("run_bayesmc_ok", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        # Ensure ensemble write happened
+        row = con.execute(
+            """
+            SELECT status
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ?
+            """,
+            ["run_bayesmc_ok", "Q_BAYESMC_OK"],
+        ).fetchone()
+        assert row is not None
+        assert (row[0] or "").lower() == "ok"
+
+        # Ensure at least one spd_v2 llm call was logged
+        llm_count = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM llm_calls
+            WHERE run_id = ? AND question_id = ? AND call_type = 'spd_v2'
+            """,
+            ["run_bayesmc_ok", "Q_BAYESMC_OK"],
+        ).fetchone()[0]
+        assert llm_count > 0
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_bayesmc_missing.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_BAYESMC_MISSING",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test DR PA question",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_BAYESMC_MISSING"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    # Fake ensemble with members that have raw text containing a marker
+    class _M:
+        def __init__(self, model_spec, text, usage, error_text=None):
+            self.model_spec = model_spec
+            self.text = text
+            self.usage = usage
+            self.error_text = error_text
+
+    class _ER:
+        def __init__(self, members):
+            self.members = members
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    fake_ens = _ER(
+        members=[
+            _M(ms1, text='{"note":"test: no spds key"}', usage={"total_tokens": 5, "elapsed_ms": 3}, error_text=None),
+        ]
+    )
+
+    async def fake_run_ensemble_spd(*_args, **_kwargs):
+        return fake_ens
+
+    def fake_aggregate_spd(_ens, *_args, **_kwargs):
+        # Empty spd_main -> bridge produces {"spds": {}}
+        return {}, {}, {}
+
+    monkeypatch.setattr("forecaster.ensemble.run_ensemble_spd", fake_run_ensemble_spd)
+    monkeypatch.setattr("forecaster.aggregate.aggregate_spd", fake_aggregate_spd)
+
+    asyncio.run(cli._run_spd_for_question("run_bayesmc_missing", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            """
+            SELECT status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ?
+            """,
+            ["run_bayesmc_missing", "Q_BAYESMC_MISSING"],
+        ).fetchone()
+        assert row is not None
+        assert (row[0] or "").lower() == "no_forecast"
+        assert "missing spds" in (row[1] or "").lower()
+    finally:
+        con.close()
+
+    raw_path = Path("debug/spd_raw") / "run_bayesmc_missing__Q_BAYESMC_MISSING_missing_spds.txt"
+    assert raw_path.exists()
+    assert "no spds key" in raw_path.read_text(encoding="utf-8").lower()
+
+
 def test_spd_prompt_template_allows_literal_json_braces() -> None:
     """
     Ensure SPD_PROMPT_TEMPLATE.format(...) works when literal JSON is present.
