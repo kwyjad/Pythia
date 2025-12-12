@@ -4470,4 +4470,4 @@ test = ["duckdb", "httpx", "pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "7adbe0ec13583a18395e4c5a07425ffc0f4ea799e0af28f4882fcd2f62c9403d"
+content-hash = "7b6521ac0dbc95b285eadfd3ad5cc5b9f62b893bd7dcf70a72642d453dfe9277"
