@@ -37,23 +37,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download canonical resolver DB (optional)
-        id: dl_resolver_db
+      - name: Download resolver DB artifact (optional)
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: pythia-resolver-db
-          path: data
+          path: data/
 
-      - name: Ensure resolver DB file exists (fallback)
+      - name: Ensure resolver DB exists (fallback)
         shell: bash
         run: |
           mkdir -p data
           if [ ! -f "data/resolver.duckdb" ]; then
-            echo "Resolver DB artifact not found; creating empty placeholder DB at data/resolver.duckdb"
-            python -c $'import pathlib\npath = pathlib.Path("data/resolver.duckdb")\ntry:\n    import duckdb  # type: ignore\n    con = duckdb.connect(path.as_posix())\n    con.close()\nexcept ModuleNotFoundError:\n    path.touch()\n'
-          else
-            echo "Found data/resolver.duckdb from artifact."
+            echo "Resolver DB artifact not found; creating empty placeholder DB."
+            python - <<'PY'
+import duckdb
+duckdb.connect("data/resolver.duckdb").close()
+PY
           fi
 
       - name: Check canonical DB presence
@@ -96,19 +96,29 @@ jobs:
           pip install -r python_library_requirements.txt
           pip install pytest
 
-      - name: Run Forecaster SPD tests (with debug logging)
+      - name: === Running Forecaster SPD unit tests ===
         env:
           PYTHIA_DEBUG_SPD: "1"
           PYTHIA_DEBUG_DB: "1"
-          # Mode selector (only applies to workflow_dispatch runs)
-          PYTHIA_SPD_V2_DUAL_RUN: ${{ (github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')) && '1' || '0' }}
-          PYTHIA_SPD_V2_USE_BAYESMC: ${{ (github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')) && '1' || '0' }}
+          PYTHIA_SPD_V2_DUAL_RUN: "0"
+          PYTHIA_SPD_V2_USE_BAYESMC: "0"
         run: |
           echo "=== Running Forecaster SPD unit tests ==="
-          echo "spd_mode=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.spd_mode || 'default(pr)' }}"
+          pytest -vv forecaster/tests/test_spd.py
+
+      - name: Run SPD experimental mode (dual/bayesmc)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.spd_mode != 'default'
+        env:
+          PYTHIA_DEBUG_SPD: "1"
+          PYTHIA_DEBUG_DB: "1"
+          PYTHIA_SPD_V2_DUAL_RUN: ${{ (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
+          PYTHIA_SPD_V2_USE_BAYESMC: ${{ (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
+        run: |
+          echo "=== Running SPD experimental mode ==="
+          echo "spd_mode=${{ github.event.inputs.spd_mode }}"
           echo "PYTHIA_SPD_V2_DUAL_RUN=$PYTHIA_SPD_V2_DUAL_RUN"
           echo "PYTHIA_SPD_V2_USE_BAYESMC=$PYTHIA_SPD_V2_USE_BAYESMC"
-          pytest -vv forecaster/tests/test_spd.py
+          pytest -vv forecaster/tests/test_spd.py -k "bayesmc_flag or spd_bayesmc_flag"
 
       - name: Upload SPD compare artifacts
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
