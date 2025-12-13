@@ -150,13 +150,15 @@ jobs:
           PY
           python scripts/run_spd_dual_smoke.py
 
-      - name: Assert smoke compare JSON exists
+      - name: Assert smoke compare JSON exists and matches SMOKE_* naming
         if: github.event_name == 'workflow_dispatch' && inputs.run_spd_smoke == 'true'
         shell: bash
         run: |
-          echo "Listing debug/spd_compare_smoke:"
-          find debug/spd_compare_smoke -maxdepth 1 -type f -name '*.json' -print || true
-          test -n "$(find debug/spd_compare_smoke -maxdepth 1 -type f -name '*.json' -print -quit)" || (echo "No smoke compare JSON produced" && exit 1)
+          echo "Listing smoke compare dir:"
+          ls -la debug/spd_compare_smoke || true
+          test -n "$(ls -1 debug/spd_compare_smoke/*.json 2>/dev/null | head -n 1)" || (echo "No smoke compare JSON produced in debug/spd_compare_smoke" && exit 1)
+          # Ensure at least one smoke file contains SMOKE_ in filename
+          ls -1 debug/spd_compare_smoke/*.json | grep -q "SMOKE_" || (echo "Smoke compare JSON exists but filename does not contain SMOKE_. Wrong outputs are being uploaded." && exit 1)
 
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
