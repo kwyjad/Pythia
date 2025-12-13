@@ -138,8 +138,6 @@ jobs:
           PYTHIA_SPD_V2_USE_BAYESMC: ${{ (inputs.spd_mode == 'bayesmc_write' || inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
           PYTHIA_SPD_COMPARE_DIR: debug/spd_compare_smoke
           PYTHIA_DEBUG_MODELS: "1"
-          SPD_SMOKE_RUN_ID: smoke_${{ github.run_id }}
-          SPD_SMOKE_QID: SMOKE_${{ inputs.smoke_iso3 }}_${{ inputs.smoke_hazard }}_${{ inputs.smoke_metric }}_${{ inputs.smoke_target_month }}
           SPD_SMOKE_ISO3: ${{ inputs.smoke_iso3 }}
           SPD_SMOKE_HAZARD: ${{ inputs.smoke_hazard }}
           SPD_SMOKE_METRIC: ${{ inputs.smoke_metric }}
@@ -152,14 +150,13 @@ jobs:
           PY
           python scripts/run_spd_dual_smoke.py
 
-      - name: Verify SPD smoke compare artifact exists
-        if: always() && github.event_name == 'workflow_dispatch' && inputs.run_spd_smoke == 'true'
+      - name: Assert smoke compare JSON exists
+        if: github.event_name == 'workflow_dispatch' && inputs.run_spd_smoke == 'true'
         shell: bash
         run: |
-          if ! ls debug/spd_compare_smoke/*.json >/dev/null 2>&1; then
-            echo "ERROR: No SPD smoke compare JSONs found under debug/spd_compare_smoke/"
-            exit 1
-          fi
+          echo "Listing debug/spd_compare_smoke:"
+          ls -la debug/spd_compare_smoke || true
+          test -n "$(ls -1 debug/spd_compare_smoke/*.json 2>/dev/null | head -n 1)" || (echo "No smoke compare JSON produced" && exit 1)
 
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
@@ -185,4 +182,4 @@ jobs:
         with:
           name: spd-compare-smoke
           path: debug/spd_compare_smoke/*.json
-          if-no-files-found: warn
+          if-no-files-found: error
