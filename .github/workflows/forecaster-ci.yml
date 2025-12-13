@@ -26,6 +26,27 @@ on:
           - dual_compare
           - bayesmc_write
           - dual_compare_bayesmc_write
+      run_spd_smoke:
+        description: "Run SPD smoke dual-compare against real configs"
+        required: false
+        default: false
+        type: boolean
+      smoke_iso3:
+        description: "Smoke question ISO3 (optional)"
+        required: false
+        default: ""
+      smoke_hazard:
+        description: "Smoke question hazard code (optional)"
+        required: false
+        default: ""
+      smoke_metric:
+        description: "Smoke question metric (optional)"
+        required: false
+        default: ""
+      smoke_target_month:
+        description: "Smoke question target month (YYYY-MM, optional)"
+        required: false
+        default: ""
 
 jobs:
   forecaster-spd-tests:
@@ -110,6 +131,20 @@ jobs:
           echo "PYTHIA_SPD_V2_USE_BAYESMC=$PYTHIA_SPD_V2_USE_BAYESMC"
           pytest -vv forecaster/tests/test_spd.py -k "bayesmc_flag or spd_bayesmc_flag"
 
+      - name: Run SPD dual-run smoke compare
+        if: github.event_name == 'workflow_dispatch' && inputs.run_spd_smoke == 'true'
+        env:
+          PYTHIA_SPD_V2_DUAL_RUN: "1"
+          PYTHIA_SPD_V2_USE_BAYESMC: ${{ (inputs.spd_mode == 'bayesmc_write' || inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
+          SPD_SMOKE_RUN_ID: smoke_${{ github.run_id }}
+          SPD_SMOKE_QID: SMOKE_${{ inputs.smoke_iso3 }}_${{ inputs.smoke_hazard }}_${{ inputs.smoke_metric }}
+          SPD_SMOKE_ISO3: ${{ inputs.smoke_iso3 }}
+          SPD_SMOKE_HAZARD: ${{ inputs.smoke_hazard }}
+          SPD_SMOKE_METRIC: ${{ inputs.smoke_metric }}
+          SPD_SMOKE_TARGET_MONTH: ${{ inputs.smoke_target_month }}
+        run: |
+          python scripts/run_spd_dual_smoke.py
+
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
         shell: bash
@@ -121,7 +156,7 @@ jobs:
           find debug/spd_compare -maxdepth 1 -type f -name '*.json' -print | wc -l || true
 
       - name: Upload SPD compare artifacts
-        if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
+        if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: spd-compare
