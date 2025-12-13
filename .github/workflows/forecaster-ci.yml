@@ -156,9 +156,18 @@ jobs:
         run: |
           echo "Listing smoke compare dir:"
           ls -la debug/spd_compare_smoke || true
-          test -n "$(ls -1 debug/spd_compare_smoke/*.json 2>/dev/null | head -n 1)" || (echo "No smoke compare JSON produced in debug/spd_compare_smoke" && exit 1)
+          shopt -s nullglob
+          json_files=(debug/spd_compare_smoke/*.json)
+          if [ ${#json_files[@]} -eq 0 ]; then
+            echo "No smoke compare JSON produced in debug/spd_compare_smoke"
+            exit 1
+          fi
           # Ensure at least one smoke file contains SMOKE_ in filename
-          ls -1 debug/spd_compare_smoke/*.json | grep -q "SMOKE_" || (echo "Smoke compare JSON exists but filename does not contain SMOKE_. Wrong outputs are being uploaded." && exit 1)
+          smoke_named=(debug/spd_compare_smoke/SMOKE_*.json)
+          if [ ${#smoke_named[@]} -eq 0 ]; then
+            echo "Smoke compare JSON exists but filename does not contain SMOKE_. Wrong outputs are being uploaded."
+            exit 1
+          fi
 
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
