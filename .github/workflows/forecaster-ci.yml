@@ -118,7 +118,7 @@ jobs:
           # Copy any compare JSONs produced under pytest tmp dirs into the workspace
           find /tmp/pytest-of-runner -type f -path "*/debug/spd_compare/*.json" -print -exec cp {} debug/spd_compare/ \; || true
           echo "Collected compare JSON count:"
-          ls -1 debug/spd_compare/*.json 2>/dev/null | wc -l || true
+          find debug/spd_compare -maxdepth 1 -type f -name '*.json' -print | wc -l || true
 
       - name: Upload SPD compare artifacts
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
