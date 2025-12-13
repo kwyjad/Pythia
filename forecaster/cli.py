@@ -1930,6 +1930,14 @@ async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[st
         active=True,
         purpose="spd_v2",
     )
+    return await _call_spd_model_for_spec(ms, prompt)
+
+
+async def _call_spd_model_for_spec(
+    ms: ModelSpec, prompt: str
+) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """Async wrapper for the SPD LLM call for a given model spec."""
+
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -1951,18 +1959,29 @@ async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[st
 
 async def _call_spd_ensemble_v2(
     prompt: str,
+    *,
+    specs: list[ModelSpec] | None = None,
 ) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
     """Thin wrapper around the current SPD v2 call path for diagnostics."""
 
-    text, usage, error, ms = await _call_spd_model(prompt)
+    specs = specs or DEFAULT_ENSEMBLE
+
+    tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
+    if not tasks:
+        return {}, {}, []
+
+    call_results = await asyncio.gather(*tasks)
+
+    text, usage, error, ms = call_results[0]
 
     raw_calls = [
         {
-            "model_spec": ms,
-            "text": text or "",
-            "usage": usage,
-            "error": error,
+            "model_spec": ms_val,
+            "text": text_val or "",
+            "usage": usage_val,
+            "error": error_val,
         }
+        for text_val, usage_val, error_val, ms_val in call_results
     ]
 
     if error or not text or not text.strip():
@@ -1985,6 +2004,7 @@ async def _call_spd_bayesmc_v2(
     run_id: str,
     question_id: str,
     hs_run_id: str | None,
+    specs: list[ModelSpec] | None = None,
 ) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
     """
     BayesMC-backed SPD v2 bridge.
@@ -1995,10 +2015,12 @@ async def _call_spd_bayesmc_v2(
       - raw_calls: list of member call summaries (model_spec, text, usage, error)
     """
 
+    specs = specs or DEFAULT_ENSEMBLE
+
     # Run the existing ensemble runner (classic path)
     ens = await run_ensemble_spd(
         prompt=prompt,
-        specs=DEFAULT_ENSEMBLE,
+        specs=specs,
         run_id=run_id,
         question_id=question_id,
         hs_run_id=hs_run_id,
@@ -2069,6 +2091,66 @@ async def _call_spd_bayesmc_v2(
     spd_obj: dict[str, object] = {"spds": spds_v2}
 
     return spd_obj, aggregated_usage, raw_calls
+
+
+def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
+    out: list[str] = []
+    for c in calls:
+        ms = c.get("model_spec")
+        if isinstance(ms, ModelSpec):
+            out.append(f"{ms.provider}:{ms.model_id}")
+    return out
+
+
+def _specs_summary(specs: list[ModelSpec]) -> list[str]:
+    out: list[str] = []
+    for ms in specs:
+        out.append(f"{ms.provider}:{ms.model_id}{'' if ms.active else '(inactive)'}")
+    return out
+
+
+def _spd_side_status(
+    spd_obj: dict[str, object] | None, raw_calls: list[dict[str, object]], specs: list[ModelSpec]
+) -> dict[str, object]:
+    """
+    Return status metadata for one SPD path.
+    """
+
+    active_specs = [ms for ms in specs if ms.active]
+    if not active_specs:
+        return {
+            "status": "no_active_models",
+            "reason": "spec list has no active models",
+            "n_calls": len(raw_calls),
+            "n_active_specs": 0,
+        }
+
+    if not spd_obj:
+        n_errors = sum(1 for c in raw_calls if c.get("error"))
+        return {
+            "status": "missing_spds",
+            "reason": "no aggregated SPD object produced",
+            "n_calls": len(raw_calls),
+            "n_active_specs": len(active_specs),
+            "n_errors": n_errors,
+        }
+
+    vecs = _spd_v2_to_month_vectors(spd_obj)
+    if not vecs:
+        return {
+            "status": "missing_spds",
+            "reason": "spd_obj had no usable month vectors",
+            "n_calls": len(raw_calls),
+            "n_active_specs": len(active_specs),
+        }
+
+    return {
+        "status": "ok",
+        "reason": "",
+        "n_calls": len(raw_calls),
+        "n_active_specs": len(active_specs),
+        "n_months": len(vecs),
+    }
 
 
 def _spd_v2_to_month_vectors(spd_obj: dict[str, object] | None) -> dict[str, list[float]]:
@@ -2416,24 +2498,17 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         use_bayesmc = os.getenv("PYTHIA_SPD_V2_USE_BAYESMC", "0") == "1"
 
         if dual_run:
+            specs = list(DEFAULT_ENSEMBLE)
             try:
-                spd_v2, usage_v2, calls_v2 = await _call_spd_ensemble_v2(prompt)
+                spd_v2, usage_v2, calls_v2 = await _call_spd_ensemble_v2(prompt, specs=specs)
                 spd_bm, usage_bm, calls_bm = await _call_spd_bayesmc_v2(
-                    prompt, run_id=run_id, question_id=qid, hs_run_id=hs_run_id
+                    prompt, run_id=run_id, question_id=qid, hs_run_id=hs_run_id, specs=specs
                 )
 
                 vec_v2 = _spd_v2_to_month_vectors(spd_v2)
                 vec_bm = _spd_v2_to_month_vectors(spd_bm)
 
                 diff = _compare_spd_vectors(vec_v2, vec_bm)
-
-                def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
-                    out: list[str] = []
-                    for c in calls:
-                        ms = c.get("model_spec")
-                        if isinstance(ms, ModelSpec):
-                            out.append(f"{ms.provider}:{ms.model_id}")
-                    return out
 
                 payload: dict[str, object] = {
                     "run_id": run_id,
@@ -2443,15 +2518,16 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     "metric": metric,
                     "hs_run_id": hs_run_id,
                     "write_path": "bayesmc" if use_bayesmc else "v2_ensemble",
+                    "specs_used": _specs_summary(specs),
                     "v2_ensemble": {
-                        "n_calls": len(calls_v2),
                         "models": _calls_summary(calls_v2),
                         "usage": usage_v2,
+                        "status_info": _spd_side_status(spd_v2, calls_v2, specs),
                     },
                     "bayesmc": {
-                        "n_calls": len(calls_bm),
                         "models": _calls_summary(calls_bm),
                         "usage": usage_bm,
+                        "status_info": _spd_side_status(spd_bm, calls_bm, specs),
                     },
                     "diff": diff,
                 }
