@@ -2117,6 +2117,17 @@ def _spd_side_status(
     """
 
     active_specs = [ms for ms in specs if ms.active]
+    if not specs and raw_calls:
+        return {
+            "status": "specs_empty",
+            "reason": "spec list empty; inferred models from raw_calls",
+            "n_calls": len(raw_calls),
+            "n_active_specs": 0,
+            "n_models_in_calls": sum(
+                1 for c in raw_calls if isinstance(c.get("model_spec"), ModelSpec)
+            ),
+        }
+
     if not active_specs:
         return {
             "status": "no_active_models",
