@@ -49,8 +49,10 @@ jobs:
         run: |
           mkdir -p data
           if [ ! -f "data/resolver.duckdb" ]; then
-            echo "Resolver DB artifact not found; creating empty placeholder DB."
-            python -c "import duckdb; duckdb.connect('data/resolver.duckdb').close()"
+            echo "Resolver DB artifact not found; creating empty placeholder file at data/resolver.duckdb"
+            : > data/resolver.duckdb
+          else
+            echo "Found data/resolver.duckdb"
           fi
 
       - name: Check canonical DB presence
