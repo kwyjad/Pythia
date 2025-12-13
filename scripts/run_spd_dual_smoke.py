@@ -10,21 +10,24 @@ from pythia.db import schema as db_schema
 from forecaster import cli
 
 
-os.environ.setdefault("PYTHIA_SPD_COMPARE_DIR", "debug/spd_compare_smoke")
-os.environ.setdefault("PYTHIA_SPD_V2_DUAL_RUN", "1")
+os.environ["PYTHIA_SPD_COMPARE_DIR"] = "debug/spd_compare_smoke"
+os.environ["PYTHIA_SPD_V2_DUAL_RUN"] = "1"
 
 
 def main() -> None:
-    run_id = os.getenv("SPD_SMOKE_RUN_ID") or f"smoke_{os.getenv('GITHUB_RUN_ID', 'local')}"
+    run_id = f"smoke_{os.getenv('GITHUB_RUN_ID', 'local')}"
     os.environ["SPD_SMOKE_RUN_ID"] = run_id
 
     iso3 = os.getenv("SPD_SMOKE_ISO3", "ETH")
     hz = os.getenv("SPD_SMOKE_HAZARD", "DR")
     metric = os.getenv("SPD_SMOKE_METRIC", "PA")
     target_month = os.getenv("SPD_SMOKE_TARGET_MONTH", "2025-12")
-    default_qid = f"SMOKE_{iso3}_{hz}_{metric}_{target_month}"
-    qid = os.getenv("SPD_SMOKE_QID") or default_qid
+    qid = f"SMOKE_{iso3}_{hz}_{metric}_{target_month}"
     os.environ["SPD_SMOKE_QID"] = qid
+
+    print(f"[smoke] run_id={run_id}")
+    print(f"[smoke] question_id={qid}")
+    print(f"[smoke] compare_dir={os.environ['PYTHIA_SPD_COMPARE_DIR']}")
 
     db_path = Path("data") / "spd_smoke.duckdb"
     os.environ["PYTHIA_DB_URL"] = f"duckdb:///{db_path}"
