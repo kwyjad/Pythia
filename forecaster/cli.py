@@ -2254,7 +2254,7 @@ def _compare_spd_vectors(
 
 
 def _write_spd_compare_artifact(run_id: str, qid: str, payload: dict[str, object]) -> None:
-    out_dir = Path("debug/spd_compare")
+    out_dir = Path(os.getenv("PYTHIA_SPD_COMPARE_DIR", "debug/spd_compare"))
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{run_id}__{qid}.json"
     out_path.write_text(_json_dumps_for_db(payload), encoding="utf-8")

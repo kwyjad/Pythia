@@ -136,29 +136,53 @@ jobs:
         env:
           PYTHIA_SPD_V2_DUAL_RUN: "1"
           PYTHIA_SPD_V2_USE_BAYESMC: ${{ (inputs.spd_mode == 'bayesmc_write' || inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
+          PYTHIA_SPD_COMPARE_DIR: debug/spd_compare_smoke
+          PYTHIA_DEBUG_MODELS: "1"
           SPD_SMOKE_RUN_ID: smoke_${{ github.run_id }}
-          SPD_SMOKE_QID: SMOKE_${{ inputs.smoke_iso3 }}_${{ inputs.smoke_hazard }}_${{ inputs.smoke_metric }}
+          SPD_SMOKE_QID: SMOKE_${{ inputs.smoke_iso3 }}_${{ inputs.smoke_hazard }}_${{ inputs.smoke_metric }}_${{ inputs.smoke_target_month }}
           SPD_SMOKE_ISO3: ${{ inputs.smoke_iso3 }}
           SPD_SMOKE_HAZARD: ${{ inputs.smoke_hazard }}
           SPD_SMOKE_METRIC: ${{ inputs.smoke_metric }}
           SPD_SMOKE_TARGET_MONTH: ${{ inputs.smoke_target_month }}
         run: |
+          python - <<'PY'
+          from forecaster.providers import DEFAULT_ENSEMBLE, default_ensemble_summary
+
+          print(f"DEFAULT_ENSEMBLE ({len(DEFAULT_ENSEMBLE)}): {default_ensemble_summary()}")
+          PY
           python scripts/run_spd_dual_smoke.py
+
+      - name: Verify SPD smoke compare artifact exists
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.run_spd_smoke == 'true'
+        shell: bash
+        run: |
+          if ! ls debug/spd_compare_smoke/*.json >/dev/null 2>&1; then
+            echo "ERROR: No SPD smoke compare JSONs found under debug/spd_compare_smoke/"
+            exit 1
+          fi
 
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
         shell: bash
         run: |
-          mkdir -p debug/spd_compare
+          mkdir -p debug/spd_compare_tests
           # Copy any compare JSONs produced under pytest tmp dirs into the workspace
-          find /tmp/pytest-of-runner -type f -path "*/debug/spd_compare/*.json" -print -exec cp {} debug/spd_compare/ \; || true
-          echo "Collected compare JSON count:"
-          find debug/spd_compare -maxdepth 1 -type f -name '*.json' -print | wc -l || true
+          find /tmp/pytest-of-runner -type f -path "*/debug/spd_compare/*.json" -print -exec cp {} debug/spd_compare_tests/ \; || true
+          echo "Collected unit test compare JSON count:"
+          find debug/spd_compare_tests -maxdepth 1 -type f -name '*.json' -print | wc -l || true
 
-      - name: Upload SPD compare artifacts
-        if: always() && github.event_name == 'workflow_dispatch'
+      - name: Upload SPD compare test artifacts
+        if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
         uses: actions/upload-artifact@v4
         with:
-          name: spd-compare
-          path: debug/spd_compare/*.json
+          name: spd-compare-tests
+          path: debug/spd_compare_tests/*.json
+          if-no-files-found: warn
+
+      - name: Upload SPD smoke compare artifacts
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.run_spd_smoke == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spd-compare-smoke
+          path: debug/spd_compare_smoke/*.json
           if-no-files-found: warn
