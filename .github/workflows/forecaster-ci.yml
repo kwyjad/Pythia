@@ -37,22 +37,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download resolver DB artifact (optional)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: pythia-resolver-db
-          path: data/
-
-      - name: Ensure resolver DB exists (fallback)
+      - name: Ensure resolver DB file exists (placeholder)
         shell: bash
         run: |
           mkdir -p data
           if [ ! -f "data/resolver.duckdb" ]; then
-            echo "Resolver DB artifact not found; creating empty placeholder file at data/resolver.duckdb"
+            echo "Creating empty placeholder data/resolver.duckdb"
             : > data/resolver.duckdb
-          else
-            echo "Found data/resolver.duckdb"
           fi
 
       - name: Check canonical DB presence
@@ -119,17 +110,20 @@ jobs:
           echo "PYTHIA_SPD_V2_USE_BAYESMC=$PYTHIA_SPD_V2_USE_BAYESMC"
           pytest -vv forecaster/tests/test_spd.py -k "bayesmc_flag or spd_bayesmc_flag"
 
+      - name: Collect SPD compare JSONs from pytest temp dirs
+        if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
+        shell: bash
+        run: |
+          mkdir -p debug/spd_compare
+          # Copy any compare JSONs produced under pytest tmp dirs into the workspace
+          find /tmp/pytest-of-runner -type f -path "*/debug/spd_compare/*.json" -print -exec cp {} debug/spd_compare/ \; || true
+          echo "Collected compare JSON count:"
+          find debug/spd_compare -maxdepth 1 -type f -name '*.json' -print | wc -l || true
+
       - name: Upload SPD compare artifacts
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
         uses: actions/upload-artifact@v4
         with:
           name: spd-compare
           path: debug/spd_compare/*.json
-          if-no-files-found: ignore
-
-      - name: Upload canonical resolver DB
-        if: success() && hashFiles('data/resolver.duckdb') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-resolver-db
-          path: data/resolver.duckdb
+          if-no-files-found: warn
