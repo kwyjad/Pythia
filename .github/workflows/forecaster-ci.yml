@@ -55,6 +55,7 @@ on:
 
 jobs:
   forecaster-spd-tests:
+    environment: prod-llm
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
