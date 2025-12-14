@@ -157,8 +157,8 @@ jobs:
         shell: bash
         run: |
           echo "Smoke compare dir contents:"
-          ls -la debug/spd_compare_smoke || true
-          test -n "$(ls -1 debug/spd_compare_smoke/*.json 2>/dev/null | head -n 1)" || (echo "No smoke compare JSON produced" && exit 1)
+          find debug/spd_compare_smoke -maxdepth 1 -type f -print 2>/dev/null || true
+          test -n "$(find debug/spd_compare_smoke -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null)" || (echo "No smoke compare JSON produced" && exit 1)
 
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
