@@ -139,6 +139,7 @@ jobs:
       - name: Run SPD smoke compare (workspace)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_smoke == 'true'
         env:
+          PYTHONPATH: ${{ github.workspace }}
           PYTHIA_SPD_V2_DUAL_RUN: ${{ (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
           PYTHIA_SPD_V2_USE_BAYESMC: ${{ (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
           PYTHIA_SPD_COMPARE_DIR: "debug/spd_compare_smoke"
@@ -150,15 +151,16 @@ jobs:
           SPD_SMOKE_TARGET_MONTH: ${{ github.event.inputs.smoke_target_month }}
           SPD_SMOKE_QID: SMOKE_${{ github.event.inputs.smoke_iso3 }}_${{ github.event.inputs.smoke_hazard }}_${{ github.event.inputs.smoke_metric }}_${{ github.event.inputs.smoke_target_month }}
         run: |
-          python scripts/run_spd_dual_smoke.py
+          mkdir -p debug/spd_compare_smoke
+          python -u scripts/run_spd_dual_smoke.py
 
       - name: Assert smoke compare JSON exists
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_smoke == 'true'
         shell: bash
         run: |
           echo "Smoke compare dir contents:"
-          find debug/spd_compare_smoke -maxdepth 1 -type f -print 2>/dev/null || true
-          test -n "$(find debug/spd_compare_smoke -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null)" || (echo "No smoke compare JSON produced" && exit 1)
+          ls -la debug/spd_compare_smoke || true
+          test -n "$(ls -1 debug/spd_compare_smoke/*.json 2>/dev/null | head -n 1)" || (echo "No smoke compare JSON produced" && exit 1)
 
       - name: Collect SPD compare JSONs from pytest temp dirs
         if: always() && github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write')
@@ -184,4 +186,4 @@ jobs:
         with:
           name: spd-compare-smoke
           path: debug/spd_compare_smoke/*.json
-          if-no-files-found: error
+          if-no-files-found: warn
