@@ -605,6 +605,8 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+
     # Enable BayesMC path
     monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
 
@@ -716,6 +718,8 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
 
     monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
 
