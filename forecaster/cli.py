@@ -724,6 +724,7 @@ from .providers import (
     DEFAULT_ENSEMBLE,
     GEMINI_MODEL_ID,
     ModelSpec,
+    _PROVIDER_STATES,
     _get_or_client,
     call_chat_ms,
     llm_semaphore,
@@ -2109,6 +2110,23 @@ def _specs_summary(specs: list[ModelSpec]) -> list[str]:
     return out
 
 
+def _provider_debug_snapshot() -> dict[str, object]:
+    """Return provider active/credential status for diagnostics."""
+
+    snapshot: dict[str, object] = {}
+    try:
+        for name in sorted(_PROVIDER_STATES.keys()):
+            state = _PROVIDER_STATES.get(name, {})
+            snapshot[name] = {
+                "active": bool(state.get("active")),
+                "has_api_key": bool(state.get("api_key")),
+                "model": state.get("model", ""),
+            }
+    except Exception:  # noqa: BLE001
+        snapshot = {"error": "provider_snapshot_failed"}
+    return snapshot
+
+
 def _spd_side_status(
     spd_obj: dict[str, object] | None, raw_calls: list[dict[str, object]], specs: list[ModelSpec]
 ) -> dict[str, object]:
@@ -2511,6 +2529,49 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
         if dual_run:
             specs = list(DEFAULT_ENSEMBLE)
+            specs_used = _specs_summary(specs)
+            n_active_specs = sum(1 for ms in specs if getattr(ms, "active", False))
+            if not specs or n_active_specs == 0:
+                diff = {
+                    "error": "no_active_models",
+                    "reason": "DEFAULT_ENSEMBLE has no active model specs",
+                    "n_specs": len(specs),
+                    "n_active_specs": n_active_specs,
+                    "providers": _provider_debug_snapshot(),
+                }
+                payload = {
+                    "run_id": run_id,
+                    "question_id": qid,
+                    "iso3": iso3,
+                    "hazard_code": hz,
+                    "metric": metric,
+                    "hs_run_id": hs_run_id,
+                    "write_path": "bayesmc" if use_bayesmc else "v2_ensemble",
+                    "specs_used": specs_used,
+                    "v2_ensemble": {
+                        "models": [],
+                        "usage": {},
+                        "status_info": {
+                            "status": "no_active_models",
+                            "reason": "spec list empty or inactive",
+                            "n_calls": 0,
+                            "n_active_specs": n_active_specs,
+                        },
+                    },
+                    "bayesmc": {
+                        "models": [],
+                        "usage": {},
+                        "status_info": {
+                            "status": "no_active_models",
+                            "reason": "spec list empty or inactive",
+                            "n_calls": 0,
+                            "n_active_specs": n_active_specs,
+                        },
+                    },
+                    "diff": diff,
+                }
+                _write_spd_compare_artifact(run_id, qid, payload)
+                return
             try:
                 spd_v2, usage_v2, calls_v2 = await _call_spd_ensemble_v2(prompt, specs=specs)
                 spd_bm, usage_bm, calls_bm = await _call_spd_bayesmc_v2(
@@ -2530,7 +2591,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     "metric": metric,
                     "hs_run_id": hs_run_id,
                     "write_path": "bayesmc" if use_bayesmc else "v2_ensemble",
-                    "specs_used": _specs_summary(specs),
+                    "specs_used": specs_used,
                     "v2_ensemble": {
                         "models": _calls_summary(calls_v2),
                         "usage": usage_v2,

@@ -152,6 +152,7 @@ jobs:
           SPD_SMOKE_QID: SMOKE_${{ github.event.inputs.smoke_iso3 }}_${{ github.event.inputs.smoke_hazard }}_${{ github.event.inputs.smoke_metric }}_${{ github.event.inputs.smoke_target_month }}
         run: |
           mkdir -p debug/spd_compare_smoke
+          PYTHIA_DEBUG_MODELS=1 python scripts/print_forecaster_ensemble.py
           python -u scripts/run_spd_dual_smoke.py
 
       - name: Assert smoke compare JSON exists
