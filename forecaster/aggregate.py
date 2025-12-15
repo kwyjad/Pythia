@@ -1,9 +1,13 @@
 # ANCHOR: aggregate (paste whole file)
 from __future__ import annotations
 import math, numpy as np
+from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional, Any
 
-from .ensemble import EnsembleResult, sanitize_mcq_vector, MemberOutput
+from forecaster.bayes_mc import DirichletPrior, MCQEvidence, update_mcq_with_mc
+from forecaster.ensemble import sanitize_mcq_vector
+
+from .ensemble import EnsembleResult, MemberOutput
 from . import bayes_mc as BMC
 
 # Default centroids for PA buckets (can be moved to config later). Bucket 1
@@ -193,6 +197,83 @@ def aggregate_spd(
 
     expected = _expected_from_spd(spd_mean, centroids)
     return spd_mean, expected, summary
+
+
+def aggregate_spd_v2_bayesmc(
+    per_model_spds: list[dict[str, list[float]]],
+    *,
+    n_buckets: int = 5,
+    prior_alpha: float = 0.1,
+    weights_by_model: dict[str, float] | None = None,
+    model_names: list[str] | None = None,
+) -> tuple[dict[str, list[float]], dict[str, Any]]:
+    """
+    BayesMC aggregation for SPD v2:
+      per_model_spds: list of { "YYYY-MM": [p1..p5], ... } one per model
+    Returns:
+      spd_by_month: { "YYYY-MM": [..] }
+      diag: diagnostics (evidence counts, posterior alpha, etc.)
+    Guardrail: If there is *no valid evidence for any month*, returns ({}, diag).
+    """
+    if not per_model_spds:
+        return {}, {"status": "no_models"}
+
+    months: set[str] = set()
+    for mspds in per_model_spds:
+        months.update(mspds.keys())
+    months_sorted = sorted(months)
+
+    diag: dict[str, Any] = {"months": {}, "status": "ok"}
+    out: dict[str, list[float]] = {}
+
+    any_evidence = False
+
+    for month in months_sorted:
+        evidences: list[MCQEvidence] = []
+        for i, mspds in enumerate(per_model_spds):
+            vec = mspds.get(month)
+            if not vec:
+                continue
+            vec = sanitize_mcq_vector(list(vec), n_options=n_buckets)
+
+            w = 1.0
+            if weights_by_model and model_names and i < len(model_names):
+                w = float(weights_by_model.get(model_names[i], 1.0) or 1.0)
+
+            evidences.append(MCQEvidence(probs=vec, w=w))
+
+        diag["months"][month] = {"n_evidence": len(evidences)}
+
+        if not evidences:
+            continue
+
+        any_evidence = True
+
+        prior = DirichletPrior(alphas=[prior_alpha] * n_buckets)
+        bmc = update_mcq_with_mc(prior, evidences, n_samples=20000)
+
+        mean = bmc.get("mean")
+        if isinstance(mean, list) and len(mean) == n_buckets:
+            mean_vec = sanitize_mcq_vector(mean, n_options=n_buckets)
+            out[month] = mean_vec
+        else:
+            # If BayesMC didn't produce a usable mean, skip this month (no uniform fallback here)
+            continue
+
+        posterior_alpha = bmc.get("posterior_alpha")
+        if isinstance(posterior_alpha, list) and len(posterior_alpha) == n_buckets:
+            diag["months"][month].update(
+                {
+                    "posterior_alpha_sum": float(sum(float(x) for x in posterior_alpha)),
+                    "posterior_alpha": [float(x) for x in posterior_alpha],
+                }
+            )
+
+    if not any_evidence:
+        diag["status"] = "no_evidence_all_months"
+        return {}, diag
+
+    return out, diag
 
 # ---------------- Numeric / Discrete ----------------
 
