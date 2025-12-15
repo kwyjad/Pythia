@@ -228,43 +228,43 @@ jobs:
         run: |
           set -e
           python - <<'PY'
-import os
+          import os
 
-from resolver.db import duckdb_io
+          from resolver.db import duckdb_io
 
-db_url = os.environ.get("PYTHIA_DB_URL", "duckdb:///data/resolver.duckdb")
+          db_url = os.environ.get("PYTHIA_DB_URL", "duckdb:///data/resolver.duckdb")
 
-con = duckdb_io.get_db(db_url)
-try:
-    # show latest run_id
-    run_id = con.execute("SELECT max(run_id) FROM forecasts_ensemble").fetchone()[0]
-    print("latest_run_id:", run_id)
+          con = duckdb_io.get_db(db_url)
+          try:
+              # show latest run_id
+              run_id = con.execute("SELECT max(run_id) FROM forecasts_ensemble").fetchone()[0]
+              print("latest_run_id:", run_id)
 
-    rows = con.execute(
-        """
-        SELECT model_name, count(*) as n
-        FROM forecasts_ensemble
-        WHERE run_id = ?
-        GROUP BY 1
-        ORDER BY n DESC
-        """,
-        [run_id],
-    ).fetchall()
+              rows = con.execute(
+                  """
+                  SELECT model_name, count(*) as n
+                  FROM forecasts_ensemble
+                  WHERE run_id = ?
+                  GROUP BY 1
+                  ORDER BY n DESC
+                  """,
+                  [run_id],
+              ).fetchall()
 
-    print("model_name counts:", rows)
+              print("model_name counts:", rows)
 
-    # Fail if we don't see BOTH expected model names
-    names = {r[0] for r in rows}
-    needed = {"ensemble_mean_v2", "ensemble_bayesmc_v2"}
-    missing = needed - names
-    if missing:
-        raise SystemExit(
-            f"Missing expected model_names in forecasts_ensemble: {missing}"
-        )
+              # Fail if we don't see BOTH expected model names
+              names = {r[0] for r in rows}
+              needed = {"ensemble_mean_v2", "ensemble_bayesmc_v2"}
+              missing = needed - names
+              if missing:
+                  raise SystemExit(
+                      f"Missing expected model_names in forecasts_ensemble: {missing}"
+                  )
 
-    print("OK: both aggregation methods present.")
-finally:
-    duckdb_io.close_db(con)
+              print("OK: both aggregation methods present.")
+          finally:
+              duckdb_io.close_db(con)
 PY
 
       # Step 8: Diagnostics – DuckDB validation
