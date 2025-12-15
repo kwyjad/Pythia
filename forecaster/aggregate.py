@@ -199,6 +199,41 @@ def aggregate_spd(
     return spd_mean, expected, summary
 
 
+def aggregate_spd_v2_mean(
+    per_model_spds: list[dict[str, list[float]]], *, n_buckets: int = 5
+) -> dict[str, list[float]]:
+    """Simple mean aggregation for SPD v2 per month across ensemble members."""
+
+    if not per_model_spds:
+        return {}
+
+    months: set[str] = set()
+    for mspds in per_model_spds:
+        months.update(mspds.keys())
+
+    out: dict[str, list[float]] = {}
+    for month in sorted(months):
+        vecs: list[list[float]] = []
+        for mspds in per_model_spds:
+            vec = mspds.get(month)
+            if not vec:
+                continue
+            vecs.append(sanitize_mcq_vector(list(vec), n_options=n_buckets))
+
+        if not vecs:
+            continue
+
+        sums = [0.0] * n_buckets
+        for vec in vecs:
+            for idx, val in enumerate(vec[:n_buckets]):
+                sums[idx] += float(val)
+
+        mean_vec = [val / float(len(vecs)) for val in sums]
+        out[month] = sanitize_mcq_vector(mean_vec, n_options=n_buckets)
+
+    return out
+
+
 def aggregate_spd_v2_bayesmc(
     per_model_spds: list[dict[str, list[float]]],
     *,

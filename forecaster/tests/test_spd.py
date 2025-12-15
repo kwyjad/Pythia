@@ -653,8 +653,15 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
 
     fake_spd = {
         "spds": {
-            "2025-12": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
-            "2026-01": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
+            month: {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]}
+            for month in [
+                "2025-12",
+                "2026-01",
+                "2026-02",
+                "2026-03",
+                "2026-04",
+                "2026-05",
+            ]
         }
     }
 
@@ -777,6 +784,98 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
     raw_path = Path("debug/spd_raw") / "run_bayesmc_missing__Q_BAYESMC_MISSING_missing_spds.txt"
     assert raw_path.exists()
     assert "no spds key" in raw_path.read_text(encoding="utf-8").lower()
+
+
+@pytest.mark.db
+def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "1")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_write_both.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_WRITE_BOTH",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test write both variants",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_WRITE_BOTH"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    months = ["2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]
+    fake_spd = {"spds": {m: {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]} for m in months}}
+
+    async def fake_call_spd_model_for_spec(ms, prompt):
+        return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
+
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+
+    asyncio.run(cli._run_spd_for_question("run_write_both", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            """
+            SELECT model_name, COUNT(*) AS n_rows, MIN(status), MAX(status)
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name IN ('ensemble_mean_v2','ensemble_bayesmc_v2')
+            GROUP BY model_name
+            ORDER BY model_name
+            """,
+            ["run_write_both", "Q_WRITE_BOTH"],
+        ).fetchall()
+
+        assert len(rows) == 2
+        for _, count, status_min, status_max in rows:
+            assert count > 0
+            assert status_min == "ok"
+            assert status_max == "ok"
+
+        llm_calls = con.execute(
+            """
+            SELECT COUNT(*) FROM llm_calls
+            WHERE run_id = ? AND question_id = ? AND call_type = 'spd_v2'
+            """,
+            ["run_write_both", "Q_WRITE_BOTH"],
+        ).fetchone()[0]
+        assert llm_calls == 2
+    finally:
+        con.close()
 
 
 def test_spd_prompt_template_allows_literal_json_braces() -> None:
