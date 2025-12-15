@@ -294,6 +294,7 @@ jobs:
       - name: Evaluate SPD aggregations (Brier + log score)
         env:
           PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           set -e
           mkdir -p debug/eval
