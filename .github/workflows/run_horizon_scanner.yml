@@ -101,6 +101,11 @@ jobs:
             echo "Using canonical DB at data/resolver.duckdb"
           fi
 
+          if [ -n "${DB_RUN_ID:-}" ] && [ ! -f data/resolver.duckdb ]; then
+            echo "ERROR: Expected to download resolver.duckdb from artifact run $DB_RUN_ID but did not find it."
+            exit 1
+          fi
+
       # Step 2: Set up Python
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -260,6 +265,25 @@ jobs:
               if missing:
                   raise SystemExit(
                       f"Missing expected model_names in forecasts_ensemble: {missing}"
+                  )
+
+              pairs = con.execute(
+                  """
+                  SELECT question_id,
+                         SUM(CASE WHEN model_name='ensemble_mean_v2' THEN 1 ELSE 0 END) AS n_mean,
+                         SUM(CASE WHEN model_name='ensemble_bayesmc_v2' THEN 1 ELSE 0 END) AS n_bmc
+                  FROM forecasts_ensemble
+                  WHERE run_id = ?
+                  GROUP BY 1
+                  HAVING n_mean = 0 OR n_bmc = 0
+                  LIMIT 20
+                  """,
+                  [run_id],
+              ).fetchall()
+
+              if pairs:
+                  raise SystemExit(
+                      f"Some questions missing one aggregation method (showing up to 20): {pairs}"
                   )
 
               print("OK: both aggregation methods present.")
