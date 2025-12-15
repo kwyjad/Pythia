@@ -1958,7 +1958,12 @@ async def _call_spd_model_for_spec(
 
 async def _call_spd_members_v2(
     prompt: str, specs: list[ModelSpec]
-) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]]]:
+) -> tuple[
+    list[dict[str, list[float]]],
+    dict[str, object],
+    list[dict[str, object]],
+    dict[str, object],
+]:
     """
     Call active SPD v2 members once and parse per-model SPDs.
 
@@ -1966,11 +1971,19 @@ async def _call_spd_members_v2(
       per_model_spds: list of {month: [probs]} dicts (may be empty per model)
       aggregated_usage: summed tokens/cost, max elapsed across models
       raw_calls: [{"model_spec", "text", "usage", "error"}]
+      ensemble_meta: {"n_models_active", "n_models_ok", "failed_providers", "partial_ensemble"}
     """
 
     specs_used = [ms for ms in specs if ms.active]
+    ensemble_meta = {
+        "n_models_active": len(specs_used),
+        "n_models_ok": 0,
+        "failed_providers": [],
+        "partial_ensemble": False,
+    }
+
     if not specs_used:
-        return [], {}, []
+        return [], {}, [], ensemble_meta
 
     tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs_used]
     call_results = await asyncio.gather(*tasks)
@@ -1983,6 +1996,8 @@ async def _call_spd_members_v2(
     total_tokens = 0
     total_cost = 0.0
     max_elapsed_ms = 0
+
+    model_success: list[tuple[str, bool]] = []
 
     for text, usage, error, ms_val in call_results:
         usage = usage or {}
@@ -2011,21 +2026,25 @@ async def _call_spd_members_v2(
 
         if error or not text or not str(text).strip():
             per_model_spds.append(model_spd)
+            model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
         try:
             spd_obj = _safe_json_loads(text)
         except Exception:  # noqa: BLE001
             per_model_spds.append(model_spd)
+            model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
         if not isinstance(spd_obj, dict):
             per_model_spds.append(model_spd)
+            model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
         spds = spd_obj.get("spds")
         if not isinstance(spds, dict):
             per_model_spds.append(model_spd)
+            model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
         for month, payload in spds.items():
@@ -2038,6 +2057,7 @@ async def _call_spd_members_v2(
             model_spd[str(month)] = vec
 
         per_model_spds.append(model_spd)
+        model_success.append((getattr(ms_val, "provider", ""), bool(model_spd)))
 
     aggregated_usage: dict[str, object] = {
         "prompt_tokens": total_prompt_tokens,
@@ -2047,7 +2067,16 @@ async def _call_spd_members_v2(
         "elapsed_ms": max_elapsed_ms,
     }
 
-    return per_model_spds, aggregated_usage, raw_calls
+    failed_providers = sorted({provider for provider, ok in model_success if not ok and provider})
+    n_models_ok = sum(1 for _, ok in model_success if ok)
+    ensemble_meta = {
+        "n_models_active": len(specs_used),
+        "n_models_ok": n_models_ok,
+        "failed_providers": failed_providers,
+        "partial_ensemble": n_models_ok < len(specs_used),
+    }
+
+    return per_model_spds, aggregated_usage, raw_calls, ensemble_meta
 
 
 async def _call_spd_ensemble_v2(
@@ -2221,7 +2250,9 @@ async def _call_spd_bayesmc_v2(
     hs_run_id: str | None,
     target_month: str | None = None,
     specs: list[ModelSpec] | None = None,
-) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
+) -> tuple[
+    dict[str, object], dict[str, object], list[dict[str, object]], dict[str, object]
+]:
     """
     BayesMC-backed SPD v2 bridge.
 
@@ -2229,6 +2260,7 @@ async def _call_spd_bayesmc_v2(
       - spd_obj: {"spds": {month_key: {"probs": [...]}}}
       - aggregated_usage: aggregated usage across members
       - raw_calls: list of member call summaries (model_spec, text, usage, error)
+      - ensemble_meta: {"n_models_active", "n_models_ok", "failed_providers", "partial_ensemble"}
 
     BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
     to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
@@ -2237,18 +2269,65 @@ async def _call_spd_bayesmc_v2(
     specs_used = [ms for ms in specs if ms.active]
 
     if not specs_used:
-        return {}, {}, []
+        ensemble_meta: dict[str, object] = {
+            "n_models_active": 0,
+            "n_models_ok": 0,
+            "failed_providers": [],
+            "partial_ensemble": False,
+        }
+        return {}, {}, [], ensemble_meta
 
-    per_model_spds, aggregated_usage, raw_calls = await _call_spd_members_v2(prompt, specs_used)
+    per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
+        prompt, specs_used
+    )
 
     spd_obj, _diag = _build_bayesmc_spd_obj(
         per_model_spds, target_month=target_month, specs_used=specs_used
     )
 
-    if not spd_obj:
-        return {}, aggregated_usage, raw_calls
+    if spd_obj:
+        _attach_ensemble_meta(spd_obj, ensemble_meta)
 
-    return spd_obj, aggregated_usage, raw_calls
+    if not spd_obj:
+        return {}, aggregated_usage, raw_calls, ensemble_meta
+
+    return spd_obj, aggregated_usage, raw_calls, ensemble_meta
+
+
+def _format_ensemble_meta(ensemble_meta: dict[str, object]) -> str:
+    n_models_active = int(ensemble_meta.get("n_models_active") or 0)
+    n_models_ok = int(ensemble_meta.get("n_models_ok") or 0)
+    failed = ensemble_meta.get("failed_providers") or []
+    return f"ensemble_meta: ok={n_models_ok}/{n_models_active} failed={failed}"
+
+
+def _append_ensemble_meta(reason: str, ensemble_meta: str) -> str:
+    reason = (reason or "").strip()
+    ensemble_meta = (ensemble_meta or "").strip()
+    if not ensemble_meta:
+        return reason
+    if not reason:
+        return ensemble_meta
+    return f"{reason} | {ensemble_meta}"
+
+
+def _attach_ensemble_meta(spd_obj: dict[str, object], ensemble_meta: dict[str, object]) -> None:
+    spd_obj["ensemble_meta"] = ensemble_meta
+
+    suffix = _format_ensemble_meta(ensemble_meta)
+    human_explanation = spd_obj.get("human_explanation")
+    if isinstance(human_explanation, str) and human_explanation.strip():
+        spd_obj["human_explanation"] = f"{human_explanation}\n{suffix}"
+    else:
+        spd_obj["human_explanation"] = suffix
+
+
+def _write_spd_raw_debug(run_id: str, qid: str, suffix: str, text: str) -> Path:
+    raw_dir = Path("debug/spd_raw")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / f"{run_id}__{qid}_{suffix}.txt"
+    raw_path.write_text(text or "", encoding="utf-8")
+    return raw_path
 
 
 def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
@@ -2752,17 +2831,19 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _write_spd_compare_artifact(run_id, qid, payload)
                 return
             try:
-                per_model_spds, aggregated_usage, raw_calls = await _call_spd_members_v2(
-                    prompt, specs_active
+                per_model_spds, aggregated_usage, raw_calls, ensemble_meta = (
+                    await _call_spd_members_v2(prompt, specs_active)
                 )
                 spd_mean = aggregate_spd_v2_mean(per_model_spds)
                 spd_v2 = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
+                _attach_ensemble_meta(spd_v2, ensemble_meta)
 
                 spd_bm, diag_bm = _build_bayesmc_spd_obj(
                     per_model_spds, target_month=target_month, specs_used=specs_active
                 )
                 if spd_bm:
                     spd_bm.setdefault("bayesmc_diag", diag_bm)
+                    _attach_ensemble_meta(spd_bm, ensemble_meta)
 
                 vec_v2 = _spd_v2_to_month_vectors(spd_v2)
                 vec_bm = _spd_v2_to_month_vectors(spd_bm)
@@ -2853,7 +2934,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
                 return
 
-            per_model_spds, usage, raw_calls = await _call_spd_members_v2(prompt, specs_active)
+            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
+                prompt, specs_active
+            )
 
             logged_any_spd_call = False
             for call in raw_calls:
@@ -2901,14 +2984,40 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hs_run_id=hs_run_id,
                 )
 
+            ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
+
+            if int(ensemble_meta.get("n_models_ok") or 0) < 2:
+                reason = _append_ensemble_meta("insufficient ensemble coverage", ensemble_meta_str)
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    reason,
+                    model_name="ensemble_mean_v2",
+                )
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    reason,
+                    model_name="ensemble_bayesmc_v2",
+                )
+                return
+
             spd_mean = aggregate_spd_v2_mean(per_model_spds)
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
+            _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
                 per_model_spds, target_month=target_month, specs_used=specs_active
             )
             if spd_bm_obj:
                 spd_bm_obj.setdefault("bayesmc_diag", diag_bm)
+                _attach_ensemble_meta(spd_bm_obj, ensemble_meta)
 
             if spd_mean_obj:
                 _write_spd_outputs(
@@ -2920,13 +3029,14 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_mean_v2",
                 )
             else:
+                reason_mean = _append_ensemble_meta("missing spds", ensemble_meta_str)
                 _record_no_forecast(
                     run_id,
                     qid,
                     iso3,
                     hz,
                     metric,
-                    "missing spds",
+                    reason_mean,
                     model_name="ensemble_mean_v2",
                 )
 
@@ -2944,6 +3054,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_bayesmc_v2",
                 )
             else:
+                reason_bm = _append_ensemble_meta(reason_bm, ensemble_meta_str)
                 _record_no_forecast(
                     run_id,
                     qid,
@@ -2957,7 +3068,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             return
 
         if use_bayesmc:
-            spd_obj, usage, raw_calls = await _call_spd_bayesmc_v2(
+            spd_obj, usage, raw_calls, ensemble_meta = await _call_spd_bayesmc_v2(
                 prompt,
                 run_id=run_id,
                 question_id=qid,
@@ -2966,19 +3077,30 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             )
             text = json.dumps(spd_obj)
 
-            # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
-            if not spd_obj:
-                raw_dir = Path("debug/spd_raw")
-                raw_dir.mkdir(parents=True, exist_ok=True)
-                raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
+            ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
 
-                # Prefer raw text from the first member if available
+            # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
+            if int((ensemble_meta or {}).get("n_models_ok") or 0) < 2:
                 first_text = ""
                 if raw_calls:
                     first_text = str(raw_calls[0].get("text") or "")
-                raw_path.write_text(first_text, encoding="utf-8")
+                elif text:
+                    first_text = str(text)
 
-                _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+
+                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
+                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
+                return
+
+            if not spd_obj:
+                first_text = ""
+                if raw_calls:
+                    first_text = str(raw_calls[0].get("text") or "")
+                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+
+                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
+                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
                 return
 
             logged_any_spd_call = False
@@ -3070,10 +3192,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
 
         if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
-            raw_dir = Path("debug/spd_raw")
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-            raw_path.write_text(text or "", encoding="utf-8")
+            first_text = text or ""
+            if raw_calls:
+                first_text = str(raw_calls[0].get("text") or "")
+            raw_path = _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
             LOG.error(
                 "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
                 qid,
