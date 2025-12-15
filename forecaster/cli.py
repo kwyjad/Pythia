@@ -2631,6 +2631,28 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
                 diff = _compare_spd_vectors(vec_v2, vec_bm)
 
+                vectors: dict[str, dict[str, object]] = {}
+                for m in diff["months_union"]:
+                    va = vec_v2.get(m)
+                    vb = vec_bm.get(m)
+                    entry: dict[str, object] = {}
+
+                    if va is not None:
+                        entry["v2_probs"] = va
+                        if len(va) > 0:
+                            top_idx = int(max(range(len(va)), key=lambda i: va[i]))
+                            entry["v2_top"] = {"idx": top_idx + 1, "p": va[top_idx]}
+                        entry["v2_sum"] = sum(va)
+
+                    if vb is not None:
+                        entry["bayesmc_probs"] = vb
+                        if len(vb) > 0:
+                            top_idx = int(max(range(len(vb)), key=lambda i: vb[i]))
+                            entry["bayesmc_top"] = {"idx": top_idx + 1, "p": vb[top_idx]}
+                        entry["bayesmc_sum"] = sum(vb)
+
+                    vectors[m] = entry
+
                 payload: dict[str, object] = {
                     "run_id": run_id,
                     "question_id": qid,
@@ -2651,6 +2673,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         "status_info": _spd_side_status(spd_bm, calls_bm, specs),
                     },
                     "diff": diff,
+                    "vectors": vectors,
                 }
                 _write_spd_compare_artifact(run_id, qid, payload)
             except Exception:  # noqa: BLE001
