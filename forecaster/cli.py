@@ -2322,6 +2322,14 @@ def _attach_ensemble_meta(spd_obj: dict[str, object], ensemble_meta: dict[str, o
         spd_obj["human_explanation"] = suffix
 
 
+def _write_spd_raw_debug(run_id: str, qid: str, suffix: str, text: str) -> Path:
+    raw_dir = Path("debug/spd_raw")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = raw_dir / f"{run_id}__{qid}_{suffix}.txt"
+    raw_path.write_text(text or "", encoding="utf-8")
+    return raw_path
+
+
 def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
     out: list[str] = []
     for c in calls:
@@ -3078,15 +3086,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
 
             if not spd_obj:
-                raw_dir = Path("debug/spd_raw")
-                raw_dir.mkdir(parents=True, exist_ok=True)
-                raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-
-                # Prefer raw text from the first member if available
                 first_text = ""
                 if raw_calls:
                     first_text = str(raw_calls[0].get("text") or "")
-                raw_path.write_text(first_text, encoding="utf-8")
+                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
 
                 reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
                 _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
@@ -3181,10 +3184,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
 
         if not isinstance(spd_obj, dict) or "spds" not in spd_obj:
-            raw_dir = Path("debug/spd_raw")
-            raw_dir.mkdir(parents=True, exist_ok=True)
-            raw_path = raw_dir / f"{run_id}__{qid}_missing_spds.txt"
-            raw_path.write_text(text or "", encoding="utf-8")
+            first_text = text or ""
+            if raw_calls:
+                first_text = str(raw_calls[0].get("text") or "")
+            raw_path = _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
             LOG.error(
                 "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
                 qid,
