@@ -651,37 +651,17 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
     monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
 
-    # Fake EnsembleResult + members (shape only needs what _call_spd_bayesmc_v2 reads)
-    class _M:
-        def __init__(self, model_spec, text, usage, error_text=None):
-            self.model_spec = model_spec
-            self.text = text
-            self.usage = usage
-            self.error_text = error_text
+    fake_spd = {
+        "spds": {
+            "2025-12": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
+            "2026-01": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
+        }
+    }
 
-    class _ER:
-        def __init__(self, members):
-            self.members = members
+    async def fake_call_spd_model_for_spec(ms, prompt):
+        return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
 
-    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
-    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
-    fake_ens = _ER(
-        members=[
-            _M(ms1, text='{"any":"raw"}', usage={"total_tokens": 10, "elapsed_ms": 5}, error_text=None),
-            _M(ms2, text='{"any":"raw"}', usage={"total_tokens": 12, "elapsed_ms": 6}, error_text=None),
-        ]
-    )
-
-    async def fake_run_ensemble_spd(*_args, **_kwargs):
-        return fake_ens
-
-    def fake_aggregate_spd(_ens, *_args, **_kwargs):
-        # Return classic aggregate_spd shape: (spd_main, ev_dict, bmc_summary)
-        spd_main = {"2025-12": [0.1, 0.2, 0.3, 0.2, 0.2]}
-        return spd_main, {}, {}
-
-    monkeypatch.setattr(cli, "run_ensemble_spd", fake_run_ensemble_spd)
-    monkeypatch.setattr(cli, "aggregate_spd", fake_aggregate_spd)
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
 
     asyncio.run(cli._run_spd_for_question("run_bayesmc_ok", question_row))
 
