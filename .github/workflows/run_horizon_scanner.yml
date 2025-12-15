@@ -265,7 +265,7 @@ jobs:
               print("OK: both aggregation methods present.")
           finally:
               duckdb_io.close_db(con)
-PY
+          PY
 
       # Step 8: Diagnostics – DuckDB validation
       - name: Diagnostics — DuckDB
