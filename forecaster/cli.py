@@ -1973,8 +1973,6 @@ async def _call_spd_ensemble_v2(
 
     call_results = await asyncio.gather(*tasks)
 
-    text, usage, error, ms = call_results[0]
-
     raw_calls = [
         {
             "model_spec": ms_val,
@@ -1985,18 +1983,86 @@ async def _call_spd_ensemble_v2(
         for text_val, usage_val, error_val, ms_val in call_results
     ]
 
-    if error or not text or not text.strip():
-        return {}, usage, raw_calls
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    max_elapsed_ms = 0
 
-    try:
-        spd_obj = _safe_json_loads(text)
-    except Exception:  # noqa: BLE001
-        return {}, usage, raw_calls
+    month_sums: dict[str, list[float]] = {}
+    month_counts: dict[str, int] = {}
 
-    if not isinstance(spd_obj, dict):
-        return {}, usage, raw_calls
+    for text, usage, error, _ms in call_results:
+        usage = usage or {}
 
-    return spd_obj, usage, raw_calls
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens_val = int(usage.get("total_tokens") or 0)
+        cost_usd_val = float(usage.get("cost_usd") or 0.0)
+        elapsed_ms_val = int(usage.get("elapsed_ms") or 0)
+
+        total_prompt_tokens += prompt_tokens
+        total_completion_tokens += completion_tokens
+        total_tokens += total_tokens_val
+        total_cost += cost_usd_val
+        max_elapsed_ms = max(max_elapsed_ms, elapsed_ms_val)
+
+        if error or not text or not str(text).strip():
+            continue
+
+        try:
+            spd_obj = _safe_json_loads(text)
+        except Exception:  # noqa: BLE001
+            continue
+
+        if not isinstance(spd_obj, dict):
+            continue
+
+        spds = spd_obj.get("spds")
+        if not isinstance(spds, dict):
+            continue
+
+        for month, payload in spds.items():
+            if not isinstance(payload, dict):
+                continue
+            probs = payload.get("probs")
+            if not isinstance(probs, list):
+                continue
+
+            vec = sanitize_mcq_vector(list(probs), n_options=5)
+            if month not in month_sums:
+                month_sums[month] = [0.0 for _ in vec]
+                month_counts[month] = 0
+
+            if len(vec) != len(month_sums[month]):
+                vec = vec[: len(month_sums[month])]
+
+            for idx, val in enumerate(vec):
+                month_sums[month][idx] += float(val)
+            month_counts[month] += 1
+
+    aggregated_usage: dict[str, object] = {
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
+        "total_tokens": total_tokens or (total_prompt_tokens + total_completion_tokens),
+        "cost_usd": total_cost,
+        "elapsed_ms": max_elapsed_ms,
+    }
+
+    if not month_sums:
+        return {}, aggregated_usage, raw_calls
+
+    spds_v2: dict[str, dict[str, object]] = {}
+    for month, sums in month_sums.items():
+        count = month_counts.get(month, 0)
+        if count <= 0:
+            continue
+        avg_vec = [val / float(count) for val in sums]
+        spds_v2[str(month)] = {"probs": sanitize_mcq_vector(avg_vec, n_options=len(avg_vec))}
+
+    spd_obj: dict[str, object] = {"spds": spds_v2}
+
+    return spd_obj, aggregated_usage, raw_calls
 
 
 def _month_label_from_target(target_month: str, month_index: int) -> str | None:
