@@ -11,6 +11,13 @@ concurrency:
 on:
   # Manual run from the Actions tab
   workflow_dispatch:
+    inputs:
+      run_spd_eval:
+        description: "Run SPD aggregation evaluation (non-core)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
 # --- Job Definition ---
 jobs:
@@ -292,6 +299,8 @@ jobs:
           PY
 
       - name: Evaluate SPD aggregations (Brier + log score)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
+        continue-on-error: true
         env:
           PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
           PYTHONPATH: ${{ github.workspace }}
@@ -339,7 +348,7 @@ jobs:
           path: debug/pytia_debug_bundle__*.md
 
       - name: Upload evaluation artifacts
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-eval
