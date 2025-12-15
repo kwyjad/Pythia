@@ -228,34 +228,44 @@ jobs:
         run: |
           set -e
           python - <<'PY'
-            import duckdb
+import os
 
-            con = duckdb.connect("data/resolver.duckdb")
+from resolver.db import duckdb_io
 
-            # show latest run_id
-            run_id = con.execute("SELECT max(run_id) FROM forecasts_ensemble").fetchone()[0]
-            print("latest_run_id:", run_id)
+db_url = os.environ.get("PYTHIA_DB_URL", "duckdb:///data/resolver.duckdb")
 
-            rows = con.execute("""
-            SELECT model_name, count(*) as n
-            FROM forecasts_ensemble
-            WHERE run_id = ?
-            GROUP BY 1
-            ORDER BY n DESC
-            """, [run_id]).fetchall()
+con = duckdb_io.get_db(db_url)
+try:
+    # show latest run_id
+    run_id = con.execute("SELECT max(run_id) FROM forecasts_ensemble").fetchone()[0]
+    print("latest_run_id:", run_id)
 
-            print("model_name counts:", rows)
+    rows = con.execute(
+        """
+        SELECT model_name, count(*) as n
+        FROM forecasts_ensemble
+        WHERE run_id = ?
+        GROUP BY 1
+        ORDER BY n DESC
+        """,
+        [run_id],
+    ).fetchall()
 
-            # Fail if we don't see BOTH expected model names
-            names = {r[0] for r in rows}
-            needed = {"ensemble_mean_v2", "ensemble_bayesmc_v2"}
-            missing = needed - names
-            if missing:
-                raise SystemExit(f"Missing expected model_names in forecasts_ensemble: {missing}")
+    print("model_name counts:", rows)
 
-            print("OK: both aggregation methods present.")
-            con.close()
-            PY
+    # Fail if we don't see BOTH expected model names
+    names = {r[0] for r in rows}
+    needed = {"ensemble_mean_v2", "ensemble_bayesmc_v2"}
+    missing = needed - names
+    if missing:
+        raise SystemExit(
+            f"Missing expected model_names in forecasts_ensemble: {missing}"
+        )
+
+    print("OK: both aggregation methods present.")
+finally:
+    duckdb_io.close_db(con)
+PY
 
       # Step 8: Diagnostics – DuckDB validation
       - name: Diagnostics — DuckDB
