@@ -1999,12 +1999,28 @@ async def _call_spd_ensemble_v2(
     return spd_obj, usage, raw_calls
 
 
+def _month_label_from_target(target_month: str, month_index: int) -> str | None:
+    """Return YYYY-MM label offset by ``month_index`` months from ``target_month``."""
+
+    try:
+        base_month = datetime.strptime(target_month, "%Y-%m")
+    except ValueError:
+        return None
+
+    total_months = (base_month.year * 12) + (base_month.month - 1) + month_index
+    year = total_months // 12
+    month = (total_months % 12) + 1
+
+    return f"{year:04d}-{month:02d}"
+
+
 async def _call_spd_bayesmc_v2(
     prompt: str,
     *,
     run_id: str,
     question_id: str,
     hs_run_id: str | None,
+    target_month: str | None = None,
     specs: list[ModelSpec] | None = None,
 ) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
     """
@@ -2014,6 +2030,9 @@ async def _call_spd_bayesmc_v2(
       - spd_obj: {"spds": {month_key: {"probs": [...]}}}
       - aggregated_usage: aggregated usage across members
       - raw_calls: list of member call summaries (model_spec, text, usage, error)
+
+    BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
+    to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
     """
 
     specs = specs or DEFAULT_ENSEMBLE
@@ -2082,7 +2101,14 @@ async def _call_spd_bayesmc_v2(
     spds_v2: dict[str, dict[str, object]] = {}
     for month_key, vec in (spd_main or {}).items():
         probs = sanitize_mcq_vector(list(vec), n_options=len(vec))
-        spds_v2[str(month_key)] = {"probs": probs}
+        month_label = str(month_key)
+
+        match = re.fullmatch(r"month_(\d+)", month_label)
+        if match and target_month:
+            month_index = int(match.group(1)) - 1
+            month_label = _month_label_from_target(target_month, month_index) or month_label
+
+        spds_v2[month_label] = {"probs": probs}
 
     # If BayesMC aggregation yields no SPDs, return an empty object so callers
     # follow the existing "missing spds" path (writing *_missing_spds.txt, etc.).
@@ -2485,6 +2511,20 @@ def _normalize_question_row_for_spd(question_row: Any) -> Dict[str, Any]:
     )
 
 
+def _first_target_month(target_months: Any) -> str | None:
+    """Return the first target month string from a string or iterable, if present."""
+
+    if isinstance(target_months, str) and target_months.strip():
+        return target_months.strip()
+
+    if isinstance(target_months, (list, tuple)):
+        for month_val in target_months:
+            if isinstance(month_val, str) and month_val.strip():
+                return month_val.strip()
+
+    return None
+
+
 async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
     _maybe_log_default_ensemble()
 
@@ -2509,6 +2549,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 "base_rate_hint": "Use Resolver history + HS triage + model prior.",
             }
 
+        target_months = rec.get("target_months") or rec.get("target_month")
+        target_month = _first_target_month(target_months)
+
         prompt = build_spd_prompt_v2(
             question={
                 "question_id": qid,
@@ -2517,7 +2560,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 "metric": metric,
                 "resolution_source": resolution_source,
                 "wording": wording,
-                "target_months": rec.get("target_months") or rec.get("target_month"),
+                "target_months": target_months,
             },
             history_summary=history_summary,
             hs_triage_entry=hs_entry,
@@ -2575,7 +2618,12 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             try:
                 spd_v2, usage_v2, calls_v2 = await _call_spd_ensemble_v2(prompt, specs=specs)
                 spd_bm, usage_bm, calls_bm = await _call_spd_bayesmc_v2(
-                    prompt, run_id=run_id, question_id=qid, hs_run_id=hs_run_id, specs=specs
+                    prompt,
+                    run_id=run_id,
+                    question_id=qid,
+                    hs_run_id=hs_run_id,
+                    target_month=target_month,
+                    specs=specs,
                 )
 
                 vec_v2 = _spd_v2_to_month_vectors(spd_v2)
@@ -2625,6 +2673,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 run_id=run_id,
                 question_id=qid,
                 hs_run_id=hs_run_id,
+                target_month=target_month,
             )
             text = json.dumps(spd_obj)
 
