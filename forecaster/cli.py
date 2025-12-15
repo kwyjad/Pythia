@@ -1067,8 +1067,6 @@ def _write_spd_ensemble_to_db(
         )
         return
 
-    now = datetime.utcnow()
-
     try:
         con.execute(
             """
@@ -1115,39 +1113,25 @@ def _write_spd_ensemble_to_db(
                     con.execute(
                         """
                         INSERT INTO forecasts_ensemble (
+                            run_id,
+                            question_id,
+                            model_name,
+                            metric,
+                            hazard_code,
                             horizon_m,
                             class_bin,
-                            p,
-                            run_id,
-                            question_id,
-                            iso3,
-                            hazard_code,
-                            metric,
-                            model_name,
-                            month_index,
-                            bucket_index,
-                            probability,
-                            ev_value,
-                            weights_profile,
-                            created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            p
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         [
+                            run_id,
+                            question_id,
+                            "ensemble",
+                            metric_up,
+                            hz_up,
                             month_idx,
                             class_bin,
                             float(prob),
-                            run_id,
-                            question_id,
-                            iso3,
-                            hz_up,
-                            metric_up,
-                            "ensemble",
-                            month_idx,
-                            bucket_idx,
-                            float(prob),
-                            ev_val if ev_val is not None and bucket_idx == 1 else None,
-                            weights_profile,
-                            now,
                         ],
                     )
                 except Exception as exc:  # noqa: BLE001
