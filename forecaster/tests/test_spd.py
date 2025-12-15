@@ -748,34 +748,13 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
     monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
 
-    # Fake ensemble with members that have raw text containing a marker
-    class _M:
-        def __init__(self, model_spec, text, usage, error_text=None):
-            self.model_spec = model_spec
-            self.text = text
-            self.usage = usage
-            self.error_text = error_text
-
-    class _ER:
-        def __init__(self, members):
-            self.members = members
-
     ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
-    fake_ens = _ER(
-        members=[
-            _M(ms1, text='{"note":"test: no spds key"}', usage={"total_tokens": 5, "elapsed_ms": 3}, error_text=None),
-        ]
-    )
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1])
 
-    async def fake_run_ensemble_spd(*_args, **_kwargs):
-        return fake_ens
+    async def fake_call_spd_model_for_spec(ms, prompt):
+        return json.dumps({"note": "test: no spds key"}), {"total_tokens": 5, "elapsed_ms": 3}, None, ms
 
-    def fake_aggregate_spd(_ens, *_args, **_kwargs):
-        # Empty spd_main -> bridge produces {"spds": {}}
-        return {}, {}, {}
-
-    monkeypatch.setattr(cli, "run_ensemble_spd", fake_run_ensemble_spd)
-    monkeypatch.setattr(cli, "aggregate_spd", fake_aggregate_spd)
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
 
     asyncio.run(cli._run_spd_for_question("run_bayesmc_missing", question_row))
 
