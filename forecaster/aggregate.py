@@ -250,17 +250,24 @@ def aggregate_spd_v2_bayesmc(
         any_evidence = True
 
         prior = DirichletPrior(alphas=[prior_alpha] * n_buckets)
-        post = update_mcq_with_mc(prior, evidences, n_samples=20000)
+        bmc = update_mcq_with_mc(prior, evidences, n_samples=20000)
 
-        mean_vec = sanitize_mcq_vector(list(post.mean), n_options=n_buckets)
-        out[month] = mean_vec
+        mean = bmc.get("mean")
+        if isinstance(mean, list) and len(mean) == n_buckets:
+            mean_vec = sanitize_mcq_vector(mean, n_options=n_buckets)
+            out[month] = mean_vec
+        else:
+            # If BayesMC didn't produce a usable mean, skip this month (no uniform fallback here)
+            continue
 
-        diag["months"][month].update(
-            {
-                "posterior_alpha_sum": float(sum(post.posterior_alphas)),
-                "posterior_alphas": [float(x) for x in post.posterior_alphas],
-            }
-        )
+        posterior_alpha = bmc.get("posterior_alpha")
+        if isinstance(posterior_alpha, list) and len(posterior_alpha) == n_buckets:
+            diag["months"][month].update(
+                {
+                    "posterior_alpha_sum": float(sum(float(x) for x in posterior_alpha)),
+                    "posterior_alpha": [float(x) for x in posterior_alpha],
+                }
+            )
 
     if not any_evidence:
         diag["status"] = "no_evidence_all_months"
