@@ -663,6 +663,12 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
 
     monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
 
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+
+    # Ensure BayesMC path has active specs to call
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+
     asyncio.run(cli._run_spd_for_question("run_bayesmc_ok", question_row))
 
     con = duckdb.connect(str(db_path))
