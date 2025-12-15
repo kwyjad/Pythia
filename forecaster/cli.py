@@ -2301,6 +2301,16 @@ def _format_ensemble_meta(ensemble_meta: dict[str, object]) -> str:
     return f"ensemble_meta: ok={n_models_ok}/{n_models_active} failed={failed}"
 
 
+def _append_ensemble_meta(reason: str, ensemble_meta: str) -> str:
+    reason = (reason or "").strip()
+    ensemble_meta = (ensemble_meta or "").strip()
+    if not ensemble_meta:
+        return reason
+    if not reason:
+        return ensemble_meta
+    return f"{reason} | {ensemble_meta}"
+
+
 def _attach_ensemble_meta(spd_obj: dict[str, object], ensemble_meta: dict[str, object]) -> None:
     spd_obj["ensemble_meta"] = ensemble_meta
 
@@ -2966,8 +2976,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hs_run_id=hs_run_id,
                 )
 
+            ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
+
             if int(ensemble_meta.get("n_models_ok") or 0) < 2:
-                reason = _format_ensemble_meta(ensemble_meta)
+                reason = _append_ensemble_meta("insufficient ensemble coverage", ensemble_meta_str)
                 _record_no_forecast(
                     run_id,
                     qid,
@@ -3009,13 +3021,14 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_mean_v2",
                 )
             else:
+                reason_mean = _append_ensemble_meta("missing spds", ensemble_meta_str)
                 _record_no_forecast(
                     run_id,
                     qid,
                     iso3,
                     hz,
                     metric,
-                    "missing spds",
+                    reason_mean,
                     model_name="ensemble_mean_v2",
                 )
 
@@ -3033,6 +3046,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_bayesmc_v2",
                 )
             else:
+                reason_bm = _append_ensemble_meta(reason_bm, ensemble_meta_str)
                 _record_no_forecast(
                     run_id,
                     qid,
@@ -3055,9 +3069,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             )
             text = json.dumps(spd_obj)
 
+            ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
+
             # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
             if int((ensemble_meta or {}).get("n_models_ok") or 0) < 2:
-                reason = _format_ensemble_meta(ensemble_meta)
+                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
                 _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
                 return
 
@@ -3072,7 +3088,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     first_text = str(raw_calls[0].get("text") or "")
                 raw_path.write_text(first_text, encoding="utf-8")
 
-                _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
+                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
                 return
 
             logged_any_spd_call = False
