@@ -291,6 +291,18 @@ jobs:
               duckdb_io.close_db(con)
           PY
 
+      - name: Evaluate SPD aggregations (Brier + log score)
+        env:
+          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+        run: |
+          set -e
+          mkdir -p debug/eval
+          python scripts/evaluate_spd_aggregations.py \
+            --db duckdb:///data/resolver.duckdb \
+            --model-names ensemble_mean_v2,ensemble_bayesmc_v2 \
+            --out-dir debug/eval
+          ls -la debug/eval
+
       # Step 8: Diagnostics – DuckDB validation
       - name: Diagnostics — DuckDB
         run: |
@@ -324,6 +336,14 @@ jobs:
         with:
           name: pythia-debug-bundle
           path: debug/pytia_debug_bundle__*.md
+
+      - name: Upload evaluation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-eval
+          path: debug/eval/*
+          if-no-files-found: warn
 
       - name: Upload canonical resolver DB
         if: success()

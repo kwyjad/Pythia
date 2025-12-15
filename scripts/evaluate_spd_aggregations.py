@@ -346,7 +346,7 @@ def _score(
 
 def _summaries(rows: list[ScoreRow]) -> dict:
     df = pd.DataFrame(rows)
-    summaries: dict[str, object] = {}
+    summaries: dict[str, object] = {"n_scored": len(rows)}
     if df.empty:
         return summaries
     summaries["overall"] = (
@@ -383,7 +383,7 @@ def _summaries(rows: list[ScoreRow]) -> dict:
 
 def _print_summary(rows: list[ScoreRow]) -> None:
     if not rows:
-        print("No resolved forecasts found for evaluation.")
+        print("No resolved forecasts found for evaluation. 0 scored points.")
         return
     df = pd.DataFrame(rows)
     print("### SPD aggregation evaluation")
@@ -466,7 +466,7 @@ def main() -> None:
     csv_path = os.path.join(out_dir, f"spd_eval__{run_id}.csv")
     json_path = os.path.join(out_dir, f"spd_eval_summary__{run_id}.json")
 
-    pd.DataFrame(scored_rows).to_csv(csv_path, index=False)
+    pd.DataFrame(scored_rows, columns=ScoreRow._fields).to_csv(csv_path, index=False)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(_summaries(scored_rows), f, indent=2)
 
