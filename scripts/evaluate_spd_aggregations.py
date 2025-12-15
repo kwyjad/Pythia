@@ -61,7 +61,12 @@ class ScoreRow(NamedTuple):
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", dest="db_url", default=duckdb_io.DEFAULT_DB_URL)
-    parser.add_argument("--run-id", dest="run_id", type=int)
+    parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        type=str,
+        help="Run identifier (string). Use 'latest' to auto-select.",
+    )
     parser.add_argument(
         "--model-names",
         default=",".join(DEFAULT_MODELS),
@@ -91,46 +96,32 @@ def _parse_month(value: object) -> date:
     raise ValueError(f"Unrecognized month value: {value}")
 
 
-def _resolve_run_id(conn, explicit_run_id: Optional[int]) -> int:
-    if explicit_run_id is not None:
+def _resolve_run_id(conn, explicit_run_id: Optional[str]) -> str:
+    if explicit_run_id and explicit_run_id.lower() != "latest":
+        exists = conn.execute(
+            "SELECT 1 FROM forecasts_ensemble WHERE run_id = ? LIMIT 1",
+            [explicit_run_id],
+        ).fetchone()
+        if not exists:
+            raise RuntimeError(f"run_id not found in DB: {explicit_run_id}")
         return explicit_run_id
 
-    table_info = conn.execute("PRAGMA table_info('forecasts_ensemble')").fetchall()
-    columns = {row[1].lower() for row in table_info}
-    timestamp_col = None
-    for candidate in ("timestamp", "created_at"):
-        if candidate in columns:
-            timestamp_col = candidate
-            break
-
-    if timestamp_col:
-        query = f"""
-            SELECT run_id
-            FROM forecasts_ensemble
-            ORDER BY {timestamp_col} DESC
-            LIMIT 1
-        """
-        run_id = conn.execute(query).fetchone()
-        if run_id:
-            return int(run_id[0])
-
-    run_id = conn.execute(
+    run_id_row = conn.execute(
         """
         SELECT run_id
         FROM forecasts_ensemble
-        GROUP BY 1
-        ORDER BY COUNT(*) DESC
+        ORDER BY run_id DESC
         LIMIT 1
         """
     ).fetchone()
-    if not run_id:
+    if not run_id_row or not run_id_row[0]:
         raise RuntimeError("No forecasts_ensemble rows available to select a run_id.")
-    return int(run_id[0])
+    return str(run_id_row[0])
 
 
 def _load_forecasts(
     conn,
-    run_id: int,
+    run_id: str,
     model_names: Iterable[str],
     metric_filter: Optional[str],
     hazard_filter: Optional[str],
@@ -151,7 +142,7 @@ def _load_forecasts(
         FROM forecasts_ensemble f
         JOIN questions q USING(question_id)
         WHERE f.status = 'ok'
-          AND f.run_id = {run_id}
+          AND f.run_id = ?
           AND f.model_name IN ({models_sql})
     """
 
@@ -165,7 +156,7 @@ def _load_forecasts(
     if filters:
         query += " AND " + " AND ".join(filters)
 
-    params: list[object] = []
+    params: list[object] = [run_id]
     if metric_filter:
         params.append(metric_filter)
     if hazard_filter:
