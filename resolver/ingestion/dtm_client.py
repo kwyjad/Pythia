@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """DTM connector that fetches displacement data exclusively through the official API."""
 
 from __future__ import annotations
@@ -6604,4 +6609,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main(sys.argv[1:]))
-

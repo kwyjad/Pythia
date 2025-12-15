@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Download DuckDB-related wheels for offline installation.
 
 Run this script on a machine with internet access to refresh the offline wheel

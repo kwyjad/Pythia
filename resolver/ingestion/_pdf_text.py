@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Utilities for extracting text from ReliefWeb PDF resources.
 
 The real ReliefWeb connector relies on a combination of native PDF text
@@ -229,4 +234,3 @@ def install_test_extractors(
     global _NATIVE_EXTRACTOR, _OCR_EXTRACTOR
     _NATIVE_EXTRACTOR = native
     _OCR_EXTRACTOR = ocr
-

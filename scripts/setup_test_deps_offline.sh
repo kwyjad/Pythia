@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 set -euo pipefail
 
 # Offline helper to install vendored test dependencies (currently duckdb) without network access.

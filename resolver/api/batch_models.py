@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Pydantic models for the batch resolve API."""
 from __future__ import annotations
 
@@ -99,4 +104,3 @@ class ResolveResponseRow(BaseModel):
     fallback_used: Optional[bool] = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-

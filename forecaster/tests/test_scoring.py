@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 import math
 
 import pytest
@@ -38,4 +43,3 @@ def test_log_score() -> None:
 
 def test_normalize_probs_handles_zero_total() -> None:
     assert scoring.normalize_probs([0, 0, 0]) == [pytest.approx(1 / 3)] * 3
-

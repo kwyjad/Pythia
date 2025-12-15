@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 from __future__ import annotations
 
 import importlib
@@ -332,4 +337,3 @@ def test_fetch_resolved_point_respects_cutoff_and_metric_preference(tmp_path, mo
     )
     assert row_cutoff is not None
     assert row_cutoff["metric"].lower() == "affected"
-

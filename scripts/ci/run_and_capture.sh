@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 # Run a command, teeing its stdout/stderr to diagnostics logs and recording exit codes.
 set -euo pipefail
 

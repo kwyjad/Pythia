@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Helper utilities for connector enable flags and overrides.
 
 All ingestion connector YAML configs now expose a top-level ``enabled`` boolean

@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Synthetic fixtures for running resolver tests without large datasets.
 
 This module builds tiny, schema-compliant DataFrames and writes them to a
@@ -244,4 +249,3 @@ def write_csv(dirpath: Path) -> Dict[str, Path]:
     (dirpath / "review").mkdir(exist_ok=True)
 
     return manifest
-

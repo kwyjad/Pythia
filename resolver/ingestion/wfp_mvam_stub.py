@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 from pathlib import Path
 from _stub_utils import load_registries, now_dates, write_staging
 

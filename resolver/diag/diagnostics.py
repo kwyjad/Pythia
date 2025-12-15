@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Diagnostic logging helpers gated by the ``RESOLVER_DIAG`` flag."""
 
 from __future__ import annotations
@@ -137,4 +142,3 @@ def dump_counts(
             except Exception as exc:  # pragma: no cover - diagnostic helper
                 counts["facts_deltas_cutoff_count_error"] = repr(exc)
     return counts
-

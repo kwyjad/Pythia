@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Smoke-level checks for resolver.tools.load_and_derive CLI usage."""
 
 from __future__ import annotations

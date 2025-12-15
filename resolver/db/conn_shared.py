@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Shared DuckDB connection helpers with canonical URL handling and caching."""
 
 from __future__ import annotations
@@ -229,4 +234,3 @@ def clear_all_cached_connections() -> None:
 
 
 atexit.register(clear_all_cached_connections)
-

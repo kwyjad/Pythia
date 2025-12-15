@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 from __future__ import annotations
 
 from datetime import date
@@ -30,4 +35,3 @@ def test_spd_months_match_question_window() -> None:
 
     assert "month_1 = January 2026" in block
     assert "month_6 = June 2026" in block
-
