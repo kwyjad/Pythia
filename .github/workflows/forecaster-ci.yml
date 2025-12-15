@@ -140,6 +140,10 @@ jobs:
       - name: Run SPD smoke compare (workspace)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_smoke == 'true'
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           PYTHONPATH: ${{ github.workspace }}
           PYTHIA_SPD_V2_DUAL_RUN: ${{ (github.event.inputs.spd_mode == 'dual_compare' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
           PYTHIA_SPD_V2_USE_BAYESMC: ${{ (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') && '1' || '0' }}
