@@ -3081,6 +3081,14 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
             # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
             if int((ensemble_meta or {}).get("n_models_ok") or 0) < 2:
+                first_text = ""
+                if raw_calls:
+                    first_text = str(raw_calls[0].get("text") or "")
+                elif text:
+                    first_text = str(text)
+
+                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+
                 reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
                 _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
                 return
