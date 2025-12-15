@@ -749,6 +749,7 @@ from .aggregate import (
     aggregate_mcq,
     aggregate_numeric,
     aggregate_spd,
+    aggregate_spd_v2_bayesmc,
 )
 from .llm_logging import log_forecaster_llm_call
 from .research import run_research_async
@@ -2100,23 +2101,15 @@ async def _call_spd_bayesmc_v2(
     BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
     to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
     """
-
     specs = specs or DEFAULT_ENSEMBLE
+    specs_used = [ms for ms in specs if ms.active]
 
-    # Run the existing ensemble runner (classic path)
-    ens = await run_ensemble_spd(
-        prompt=prompt,
-        specs=specs,
-        run_id=run_id,
-        question_id=question_id,
-        hs_run_id=hs_run_id,
-    )
+    if not specs_used:
+        return {}, {}, []
 
-    # Aggregate to a single SPD (month -> vector)
-    # Keep weights/centroids default for now (small bite).
-    spd_main, _ev_dict, _bmc_summary = aggregate_spd(ens)
+    tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs_used]
+    call_results = await asyncio.gather(*tasks)
 
-    # Build a raw_calls summary for logging/debug parity with _call_spd_model
     raw_calls: list[dict[str, object]] = []
     aggregated_usage: dict[str, object] = {}
 
@@ -2126,30 +2119,24 @@ async def _call_spd_bayesmc_v2(
     total_cost = 0.0
     max_elapsed_ms = 0
 
-    for m in ens.members:
-        usage = m.usage or {}
-        text = getattr(m, "raw_text", None)
-        if text is None:
-            text = getattr(m, "text", "")
-        error_val = getattr(m, "error", None)
-        if error_val is None:
-            error_val = getattr(m, "error_text", None)
+    per_model_spds: list[dict[str, list[float]]] = []
+
+    for text, usage, error, ms_val in call_results:
+        usage = usage or {}
         raw_calls.append(
             {
-                "model_spec": m.model_spec,
+                "model_spec": ms_val,
                 "text": text or "",
                 "usage": usage,
-                "error": error_val,
+                "error": error,
             }
         )
 
-        prompt_tokens = int(usage.get("prompt_tokens") or getattr(m, "prompt_tokens", 0) or 0)
-        completion_tokens = int(
-            usage.get("completion_tokens") or getattr(m, "completion_tokens", 0) or 0
-        )
-        total_tokens_val = int(usage.get("total_tokens") or getattr(m, "total_tokens", 0) or 0)
-        cost_usd_val = float(usage.get("cost_usd") or getattr(m, "cost_usd", 0.0) or 0.0)
-        elapsed_ms_val = int(usage.get("elapsed_ms") or getattr(m, "elapsed_ms", 0) or 0)
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens_val = int(usage.get("total_tokens") or 0)
+        cost_usd_val = float(usage.get("cost_usd") or 0.0)
+        elapsed_ms_val = int(usage.get("elapsed_ms") or 0)
 
         total_prompt_tokens += prompt_tokens
         total_completion_tokens += completion_tokens
@@ -2157,31 +2144,57 @@ async def _call_spd_bayesmc_v2(
         total_cost += cost_usd_val
         max_elapsed_ms = max(max_elapsed_ms, elapsed_ms_val)
 
+        model_spd: dict[str, list[float]] = {}
+
+        if error or not text or not str(text).strip():
+            per_model_spds.append(model_spd)
+            continue
+
+        try:
+            spd_obj = _safe_json_loads(text)
+        except Exception:  # noqa: BLE001
+            per_model_spds.append(model_spd)
+            continue
+
+        if not isinstance(spd_obj, dict):
+            per_model_spds.append(model_spd)
+            continue
+
+        spds = spd_obj.get("spds")
+        if not isinstance(spds, dict):
+            per_model_spds.append(model_spd)
+            continue
+
+        for month, payload in spds.items():
+            if not isinstance(payload, dict):
+                continue
+            probs = payload.get("probs")
+            if not isinstance(probs, list):
+                continue
+            vec = sanitize_mcq_vector(list(probs), n_options=5)
+            model_spd[str(month)] = vec
+
+        per_model_spds.append(model_spd)
+
     aggregated_usage["prompt_tokens"] = total_prompt_tokens
     aggregated_usage["completion_tokens"] = total_completion_tokens
     aggregated_usage["total_tokens"] = total_tokens or (total_prompt_tokens + total_completion_tokens)
     aggregated_usage["cost_usd"] = total_cost
     aggregated_usage["elapsed_ms"] = max_elapsed_ms
 
-    # Convert to SPD v2 JSON shape
-    spds_v2: dict[str, dict[str, object]] = {}
-    for month_key, vec in (spd_main or {}).items():
-        probs = sanitize_mcq_vector(list(vec), n_options=len(vec))
-        month_label = str(month_key)
+    spd_by_month, diag = aggregate_spd_v2_bayesmc(
+        per_model_spds,
+        n_buckets=5,
+        prior_alpha=0.1,
+        weights_by_model=None,
+        model_names=[ms.name for ms in specs_used],
+    )
 
-        match = re.fullmatch(r"month_(\d+)", month_label)
-        if match and target_month:
-            month_index = int(match.group(1)) - 1
-            month_label = _month_label_from_target(target_month, month_index) or month_label
-
-        spds_v2[month_label] = {"probs": probs}
-
-    # If BayesMC aggregation yields no SPDs, return an empty object so callers
-    # follow the existing "missing spds" path (writing *_missing_spds.txt, etc.).
-    if not spd_main:
+    if not spd_by_month:
         return {}, aggregated_usage, raw_calls
 
-    spd_obj: dict[str, object] = {"spds": spds_v2}
+    spd_obj: dict[str, object] = {"spds": {m: {"probs": vec} for m, vec in spd_by_month.items()}}
+    spd_obj["bayesmc_diag"] = diag
 
     return spd_obj, aggregated_usage, raw_calls
 
