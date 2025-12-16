@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import duckdb
 from resolver.db import duckdb_io
@@ -165,6 +165,76 @@ def _load_ensemble_spd_for_question(
     return by_month
 
 
+def _load_triage_entry(
+    con: duckdb.DuckDBPyConnection,
+    hs_run_id: str | None,
+    iso3: str,
+    hazard_code: str,
+    cache: dict[tuple[str, str, str], dict[str, Any] | None] | None = None,
+) -> dict[str, Any] | None:
+    key = (hs_run_id or "", (iso3 or "").upper(), (hazard_code or "").upper())
+    if cache is not None and key in cache:
+        return cache[key]
+
+    if not hs_run_id:
+        if cache is not None:
+            cache[key] = None
+        return None
+
+    rows = _fetch_llm_rows(
+        con,
+        """
+        SELECT *
+        FROM hs_triage
+        WHERE run_id = ? AND iso3 = ? AND hazard_code = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        [hs_run_id, iso3, hazard_code],
+    )
+    entry = rows[0] if rows else None
+    if cache is not None:
+        cache[key] = entry
+    return entry
+
+
+def _scenario_expected(
+    hazard_code: str | None, metric: str | None, hs_entry: dict[str, Any] | None
+) -> tuple[bool, str]:
+    hz = (hazard_code or "").upper()
+    tier = str((hs_entry or {}).get("tier") or "").lower()
+
+    enabled_hazards = {"ACE", "DI"}
+    watchlist_hazards = {"DR", "FL"}
+
+    if hz in watchlist_hazards or tier == "watchlist":
+        return False, "watchlist"
+    if hz not in enabled_hazards:
+        return False, "hazard_not_enabled"
+    if tier and tier != "priority":
+        return False, f"triage_tier:{tier}"
+    return True, ""
+
+
+def _load_scenario_call_count(
+    con: duckdb.DuckDBPyConnection, run_id: str, question_id: str
+) -> int:
+    row = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM llm_calls
+        WHERE run_id = ?
+          AND question_id = ?
+          AND (
+              LOWER(COALESCE(call_type, '')) LIKE 'scenario%'
+           OR LOWER(COALESCE(phase, '')) LIKE 'scenario%'
+          )
+        """,
+        [run_id, question_id],
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Dump unified Pythia v2 debug bundle (HS, Research, SPD, Scenario) for one run.",
@@ -208,43 +278,55 @@ def _select_run_id(con: duckdb.DuckDBPyConnection, explicit: str | None) -> str 
     return row[0] if row and row[0] else None
 
 
-def _load_question_types(
-    con: duckdb.DuckDBPyConnection, run_id: str
-) -> List[Tuple[str, str, str, str]]:
+def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict[str, Any]]:
     rows = con.execute(
         """
-        WITH q_run AS (
-            SELECT DISTINCT
-                q.question_id,
-                q.iso3,
-                q.hazard_code,
-                q.metric
-            FROM questions q
-            JOIN forecasts_ensemble fe
-              ON fe.question_id = q.question_id
-             AND fe.run_id = ?
-            WHERE q.status = 'active'
-        ),
-        ranked AS (
-            SELECT
-                question_id,
-                iso3,
-                hazard_code,
-                metric,
-                ROW_NUMBER() OVER (
-                    PARTITION BY hazard_code, metric
-                    ORDER BY iso3, question_id
-                ) AS rn
-            FROM q_run
-        )
-        SELECT question_id, iso3, hazard_code, metric
-        FROM ranked
-        WHERE rn = 1
-        ORDER BY hazard_code, metric, iso3, question_id
+        SELECT DISTINCT
+            q.question_id,
+            q.hs_run_id,
+            q.iso3,
+            q.hazard_code,
+            q.metric,
+            q.target_month,
+            q.window_start_date,
+            q.window_end_date,
+            q.wording
+        FROM questions q
+        JOIN forecasts_ensemble fe
+          ON fe.question_id = q.question_id
+         AND fe.run_id = ?
+        WHERE q.status = 'active'
+        ORDER BY q.iso3, q.hazard_code, q.metric, q.question_id
         """,
         [run_id],
     ).fetchall()
-    return [(qid, iso3, hz, metric) for (qid, iso3, hz, metric) in rows]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        (
+            qid,
+            hs_run_id,
+            iso3,
+            hazard_code,
+            metric,
+            target_month,
+            window_start_date,
+            window_end_date,
+            wording,
+        ) = row
+        out.append(
+            {
+                "question_id": qid,
+                "hs_run_id": hs_run_id,
+                "iso3": iso3,
+                "hazard_code": hazard_code,
+                "metric": metric,
+                "target_month": target_month,
+                "window_start_date": window_start_date,
+                "window_end_date": window_end_date,
+                "wording": wording,
+            }
+        )
+    return out
 
 
 def _load_llm_calls_for_question(
@@ -613,13 +695,53 @@ def build_debug_bundle_markdown(
     con: duckdb.DuckDBPyConnection,
     db_url: str,
     run_id: str,
-    question_types: List[Tuple[str, str, str, str]],
+    questions: list[dict[str, Any]],
 ) -> str:
     lines: List[str] = []
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     hs_run_id_for_costs = _resolve_hs_run_id_for_forecast(con, run_id)
     usage_by_phase = _aggregate_usage_by_phase(con, run_id, hs_run_id_for_costs)
+    triage_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+
+    hazards = sorted(
+        {(q.get("hazard_code") or "").upper() for q in questions if q.get("hazard_code")}
+    )
+    iso3s = sorted({(q.get("iso3") or "").upper() for q in questions if q.get("iso3")})
+    metrics = sorted({(q.get("metric") or "").upper() for q in questions if q.get("metric")})
+    hs_run_ids = sorted({q.get("hs_run_id") for q in questions if q.get("hs_run_id")})
+
+    scenario_status_rows: list[dict[str, Any]] = []
+    for q in questions:
+        qid = q.get("question_id")
+        iso3 = q.get("iso3") or ""
+        hz = q.get("hazard_code") or ""
+        metric = q.get("metric") or ""
+        hs_run_id = q.get("hs_run_id") or hs_run_id_for_costs or run_id
+        triage_entry = _load_triage_entry(con, hs_run_id, iso3, hz, cache=triage_cache)
+        triage_tier = (triage_entry or {}).get("tier")
+        expected, reason = _scenario_expected(hz, metric, triage_entry)
+        call_count = _load_scenario_call_count(con, run_id, str(qid))
+        if call_count > 0:
+            status = "generated"
+        elif not expected:
+            status = f"skipped_by_design: {reason or 'not_expected'}"
+        else:
+            status = "missing_unexpected"
+        scenario_status_rows.append(
+            {
+                "question_id": qid,
+                "iso3": iso3,
+                "hazard_code": hz,
+                "metric": metric,
+                "hs_run_id": hs_run_id,
+                "triage_tier": triage_tier,
+                "status": status,
+                "expected": expected,
+                "call_count": call_count,
+            }
+        )
+    scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
     lines.append("")
@@ -629,7 +751,11 @@ def build_debug_bundle_markdown(
     lines.append("")
     lines.append(f"- Database URL: `{db_url}`")
     lines.append(f"- Run ID: `{run_id}`")
-    lines.append(f"- Question types included (by hazard_code, metric): {len(question_types)}")
+    lines.append(f"- Question types included (by hazard_code, metric): {len(questions)}")
+    lines.append(f"- Hazards present: {', '.join(hazards) if hazards else '(none)'}")
+    lines.append(f"- ISO3s present: {', '.join(iso3s) if iso3s else '(none)'}")
+    lines.append(f"- Metrics present: {', '.join(metrics) if metrics else '(none)'}")
+    lines.append(f"- Linked HS run IDs: {', '.join(hs_run_ids) if hs_run_ids else '(none)'}")
     lines.append("")
 
     total_prompt = sum(v["prompt_tokens"] for v in usage_by_phase.values())
@@ -656,37 +782,50 @@ def build_debug_bundle_markdown(
         )
     lines.append("")
 
+    lines.append("### 1.3 Scenario status (per question)")
+    lines.append("")
+    lines.append(
+        "| question_id | iso3 | hazard | metric | hs_run_id | triage_tier | scenario_status | calls_logged |"
+    )
+    lines.append("|-------------|------|--------|--------|----------|-------------|-----------------|--------------|")
+    for row in sorted(
+        scenario_status_rows,
+        key=lambda r: (
+            str(r.get("iso3") or ""),
+            str(r.get("hazard_code") or ""),
+            str(r.get("metric") or ""),
+            str(r.get("question_id") or ""),
+        ),
+    ):
+        lines.append(
+            f"| {row.get('question_id')} | {row.get('iso3')} | {row.get('hazard_code')} | "
+            f"{row.get('metric')} | {row.get('hs_run_id')} | {row.get('triage_tier') or ''} | "
+            f"{row.get('status')} | {row.get('call_count')} |"
+        )
+    lines.append("")
+
     lines.append("## 2. Question Types")
     lines.append("")
 
-    for idx, (question_id, iso3, hazard_code, metric) in enumerate(question_types, start=1):
-        q_row = con.execute(
-            """
-            SELECT
-                question_id, hs_run_id, iso3, hazard_code, metric,
-                target_month, window_start_date, window_end_date, wording
-            FROM questions
-            WHERE question_id = ?
-            """,
-            [question_id],
-        ).fetchone()
-        if not q_row:
-            continue
+    for idx, question in enumerate(questions, start=1):
+        qid = question.get("question_id")
+        hs_run_id = question.get("hs_run_id")
+        iso3_val = question.get("iso3")
+        hz_val = question.get("hazard_code")
+        metric_val = question.get("metric")
+        target_month = question.get("target_month")
+        window_start_date = question.get("window_start_date")
+        window_end_date = question.get("window_end_date")
+        wording = question.get("wording")
 
-        (
-            qid,
-            hs_run_id,
-            iso3_val,
-            hz_val,
-            metric_val,
-            target_month,
-            window_start_date,
-            window_end_date,
-            wording,
-        ) = q_row
-
-        triage_tier = _load_triage_tier(con, hs_run_id or run_id, iso3_val, hz_val)
+        triage_entry = _load_triage_entry(
+            con, hs_run_id or hs_run_id_for_costs or run_id, iso3_val, hz_val, cache=triage_cache
+        )
+        triage_tier = (triage_entry or {}).get("tier") or _load_triage_tier(
+            con, hs_run_id or run_id, iso3_val, hz_val
+        )
         spd_status = _load_spd_status(con, run_id, qid)
+        scenario_meta = scenario_status_by_qid.get(qid) or {}
 
         section_label = f"{iso3_val} / {hz_val} / {metric_val}"
         lines.append(f"### 2.{idx} {section_label} (question_id={qid})")
@@ -697,6 +836,11 @@ def build_debug_bundle_markdown(
         lines.append(f"- HS run_id: `{hs_run_id or 'N/A'}`")
         lines.append(f"- Triaged tier: `{triage_tier or 'N/A'}`")
         lines.append(f"- SPD ensemble status: `{spd_status or 'N/A'}`")
+        lines.append(
+            f"- Scenario status: `{scenario_meta.get('status', 'unknown')}` "
+            f"(calls logged: {scenario_meta.get('call_count', 0)}, "
+            f"expected: {'yes' if scenario_meta.get('expected') else 'no'})"
+        )
         lines.append(f"- Target month: `{target_month}`")
         lines.append(f"- Window: `{window_start_date}` → `{window_end_date}`")
         lines.append(f"- Wording: {wording}")
@@ -719,6 +863,16 @@ def build_debug_bundle_markdown(
         lines.append("")
 
         lines.append(f"#### 2.{idx}.4 Scenarios (Scenario v2)")
+        scenario_details: list[str] = []
+        if scenario_meta:
+            scenario_details.append(f"status={scenario_meta.get('status')}")
+            scenario_details.append(f"calls={scenario_meta.get('call_count')}")
+            scenario_details.append(f"expected={'yes' if scenario_meta.get('expected') else 'no'}")
+            if scenario_meta.get("triage_tier"):
+                scenario_details.append(f"triage_tier={scenario_meta.get('triage_tier')}")
+        if scenario_details:
+            lines.append(f"_Scenario diagnostics: {', '.join(scenario_details)}_")
+            lines.append("")
         _append_stage_block(lines, "scenario_v2", calls.get("scenario_v2"))
         lines.append("")
 
@@ -813,12 +967,12 @@ def main() -> None:
             print("No fc_* run_id found in forecasts_ensemble; nothing to debug.")
             return
 
-        question_types = _load_question_types(con, run_id)
-        if not question_types:
+        questions = _load_questions_for_run(con, run_id)
+        if not questions:
             print(f"No active questions found for run_id={run_id}.")
             return
 
-        markdown = build_debug_bundle_markdown(con, db_url, run_id, question_types)
+        markdown = build_debug_bundle_markdown(con, db_url, run_id, questions)
     finally:
         duckdb_io.close_db(con)
 

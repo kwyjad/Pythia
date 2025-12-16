@@ -326,24 +326,19 @@ def _load_idmc_conflict_flow_history_summary(
             "notes": "No IDMC/DTM displacement flow history found in facts_deltas.",
         }
 
-    history: list[Dict[str, Any]] = []
-    values: list[float] = []
-
+    month_to_value: Dict[str, float] = {}
     for ym_val, flow_val in rows:
         try:
             v = float(flow_val or 0.0)
         except Exception:
             v = 0.0
-
         if v == 0:
             continue
+        month_to_value[str(ym_val)] = v
 
-        ym_str = str(ym_val)
-        history.append({"ym": ym_str, "value": v})
-        values.append(v)
-
-    if not values:
-        return {
+    month_to_value, dropped_future, unparseable_keys = _sanitize_month_series(month_to_value)
+    if not month_to_value:
+        summary_empty: Dict[str, Any] = {
             "source": "IDMC",
             "history_length_months": 0,
             "recent_mean": None,
@@ -351,8 +346,20 @@ def _load_idmc_conflict_flow_history_summary(
             "trend": "uncertain",
             "last_6m_values": [],
             "data_quality": "low",
-            "notes": "IDMC displacement flows found but all are zero.",
+            "notes": "IDMC displacement flows found but all were zero or filtered out.",
         }
+        sanity_empty: Dict[str, Any] = {}
+        if dropped_future:
+            sanity_empty["dropped_future_months"] = dropped_future
+        if unparseable_keys:
+            sanity_empty["unparseable_month_keys"] = unparseable_keys
+        if sanity_empty:
+            summary_empty["_sanity"] = sanity_empty
+        return summary_empty
+
+    ordered_items = sorted(month_to_value.items())
+    history: list[Dict[str, Any]] = [{"ym": k, "value": v} for k, v in ordered_items]
+    values: list[float] = [float(v) for _k, v in ordered_items]
 
     n = len(history)
     last_6 = history[-6:]
@@ -367,7 +374,7 @@ def _load_idmc_conflict_flow_history_summary(
         elif values[-1] < values[0]:
             trend = "decreasing"
 
-    return {
+    summary: Dict[str, Any] = {
         "source": "IDMC",
         "history_length_months": n,
         "recent_mean": recent_mean,
@@ -379,6 +386,14 @@ def _load_idmc_conflict_flow_history_summary(
             "IDMC/DTM monthly displacement flows (facts_deltas) used as the conflict PA base rate."
         ),
     }
+    sanity: Dict[str, Any] = {}
+    if dropped_future:
+        sanity["dropped_future_months"] = dropped_future
+    if unparseable_keys:
+        sanity["unparseable_month_keys"] = unparseable_keys
+    if sanity:
+        summary["_sanity"] = sanity
+    return summary
 
 
 def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
@@ -456,7 +471,30 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                     "notes": "No ACLED history for this country/hazard.",
                 }
 
-            vals = [int(r[1]) for r in rows]
+            month_to_value = {str(r[0]): r[1] for r in rows}
+            month_to_value, dropped_future, unparseable_keys = _sanitize_month_series(month_to_value)
+            if not month_to_value:
+                summary_empty: Dict[str, Any] = {
+                    "source": "ACLED",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": "ACLED history was filtered out (future or invalid months).",
+                }
+                sanity_empty: Dict[str, Any] = {}
+                if dropped_future:
+                    sanity_empty["dropped_future_months"] = dropped_future
+                if unparseable_keys:
+                    sanity_empty["unparseable_month_keys"] = unparseable_keys
+                if sanity_empty:
+                    summary_empty["_sanity"] = sanity_empty
+                return summary_empty
+
+            ordered_items = sorted(month_to_value.items())
+            vals = [int(v) for _k, v in ordered_items]
             n = len(vals)
             recent = vals[-min(n, 6):]
             trend = "uncertain"
@@ -468,19 +506,34 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                 else:
                     trend = "flat"
 
-            return {
+            summary: Dict[str, Any] = {
                 "source": "ACLED",
                 "history_length_months": n,
                 "recent_mean": sum(recent) / len(recent),
                 "recent_max": max(recent),
                 "trend": trend,
                 "last_6m_values": [
-                    {"ym": rows[i][0], "value": vals[i]}
-                    for i in range(max(0, n - 6), n)
+                    {"ym": ym, "value": int(val)} for ym, val in ordered_items[-min(n, 6) :]
                 ],
                 "data_quality": "high",
                 "notes": "ACLED coverage is relatively strong for this country/hazard.",
             }
+            sanity: Dict[str, Any] = {}
+            if dropped_future:
+                sanity["dropped_future_months"] = dropped_future
+            if unparseable_keys:
+                sanity["unparseable_month_keys"] = unparseable_keys
+            if sanity:
+                summary["_sanity"] = sanity
+            return summary
+            sanity: Dict[str, Any] = {}
+            if dropped_future:
+                sanity["dropped_future_months"] = dropped_future
+            if unparseable_keys:
+                sanity["unparseable_month_keys"] = unparseable_keys
+            if sanity:
+                return_summary["_sanity"] = sanity
+            return return_summary
 
         if m == "PA" and hz in {"ACE"}:
             try:
@@ -545,7 +598,30 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                     "notes": "No reliable EM-DAT history for this country/hazard; treat base rate as unknown.",
                 }
 
-            vals = [float(r[1]) for r in rows]
+            month_to_value = {str(r[0]): r[1] for r in rows}
+            month_to_value, dropped_future, unparseable_keys = _sanitize_month_series(month_to_value)
+            if not month_to_value:
+                summary_empty = {
+                    "source": "EM-DAT",
+                    "history_length_months": 0,
+                    "recent_mean": None,
+                    "recent_max": None,
+                    "trend": "uncertain",
+                    "last_6m_values": [],
+                    "data_quality": "low",
+                    "notes": "EM-DAT history was filtered out (future or invalid months).",
+                }
+                sanity_empty: Dict[str, Any] = {}
+                if dropped_future:
+                    sanity_empty["dropped_future_months"] = dropped_future
+                if unparseable_keys:
+                    sanity_empty["unparseable_month_keys"] = unparseable_keys
+                if sanity_empty:
+                    summary_empty["_sanity"] = sanity_empty
+                return summary_empty
+
+            ordered_items = sorted(month_to_value.items())
+            vals = [float(v) for _k, v in ordered_items]
             n = len(vals)
             recent = vals[-min(n, 6):]
             trend = "uncertain"
@@ -557,19 +633,26 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                 else:
                     trend = "flat"
 
-            return {
+            summary = {
                 "source": "EM-DAT",
                 "history_length_months": n,
                 "recent_mean": sum(recent) / len(recent),
                 "recent_max": max(recent),
                 "trend": trend,
                 "last_6m_values": [
-                    {"ym": rows[i][0], "value": vals[i]}
-                    for i in range(max(0, n - 6), n)
+                    {"ym": ym, "value": float(val)} for ym, val in ordered_items[-min(n, 6) :]
                 ],
                 "data_quality": "medium",
                 "notes": "EM-DAT often only records large disasters; treat as a noisy base-rate signal.",
             }
+            sanity: Dict[str, Any] = {}
+            if dropped_future:
+                sanity["dropped_future_months"] = dropped_future
+            if unparseable_keys:
+                sanity["unparseable_month_keys"] = unparseable_keys
+            if sanity:
+                summary["_sanity"] = sanity
+            return summary
 
         return {
             "source": "NONE",
@@ -705,6 +788,70 @@ def _coerce_date(val: Any) -> Optional[date]:
         except Exception:
             return None
     return None
+
+
+def _parse_month_key(s: str) -> Optional[date]:
+    """
+    Parse a month key into a date anchored to the first of the month.
+
+    Supported formats:
+      - YYYY-MM
+      - YYYY-MM-DD (day component is discarded)
+    """
+    if not isinstance(s, str):
+        return None
+
+    text = s.strip()
+    if not text:
+        return None
+
+    try:
+        if len(text) == 7:
+            dt = datetime.strptime(text, "%Y-%m")
+            return date(dt.year, dt.month, 1)
+        dt = datetime.fromisoformat(text)
+        return date(dt.year, dt.month, 1)
+    except Exception:
+        try:
+            parts = text.split("-")
+            if len(parts) >= 2:
+                year = int(parts[0])
+                month = int(parts[1])
+                return date(year, month, 1)
+        except Exception:
+            return None
+    return None
+
+
+def _sanitize_month_series(
+    month_to_value: Dict[str, Any],
+) -> tuple[Dict[str, Any], list[str], list[str]]:
+    """
+    Remove entries with month keys later than the current month.
+
+    Returns (cleaned_dict, dropped_future_months, unparseable_month_keys).
+    """
+    now_month = datetime.utcnow().strftime("%Y-%m")
+    cleaned: Dict[str, Any] = {}
+    dropped: list[str] = []
+    unparseable: list[str] = []
+
+    for key in sorted(month_to_value.keys()):
+        val = month_to_value[key]
+        parsed = _parse_month_key(str(key))
+        if parsed is None:
+            unparseable.append(str(key))
+            cleaned[str(key)] = val
+            continue
+
+        month_key = parsed.strftime("%Y-%m")
+        if month_key > now_month:
+            dropped.append(str(key))
+            continue
+
+        cleaned[str(key)] = val
+
+    return cleaned, dropped, unparseable
 
 
 def _build_month_labels(start_date: Optional[date], horizon_months: int = 6) -> Dict[int, str]:

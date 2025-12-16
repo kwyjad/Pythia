@@ -82,10 +82,16 @@ def main() -> None:
         """
         SELECT DISTINCT q.iso3, q.hazard_code, q.metric, q.question_id
         FROM questions q
+        JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
         WHERE q.status = 'active'
+          AND fe.run_id = ?
         ORDER BY q.iso3, q.hazard_code, q.metric, q.question_id
-        """
+        """,
+        [run_id],
     ).fetchall()
+
+    hazards = sorted({row[1] for row in questions if row and row[1]})
+    iso3s = sorted({row[0] for row in questions if row and row[0]})
 
     with_spd_rows = con.execute(
         """
@@ -101,6 +107,8 @@ def main() -> None:
 
     qids_with_spd = {row[0] for row in with_spd_rows}
     print(f"\nActive questions total: {len(questions)}")
+    print(f"Hazards present: {', '.join(hazards) if hazards else '(none)'}")
+    print(f"ISO3s present: {', '.join(iso3s) if iso3s else '(none)'}")
     print(
         f"Active questions with SPD rows for run_id={run_id}: {len(qids_with_spd)}"
     )
@@ -126,18 +134,25 @@ def main() -> None:
 
     nf_stats = con.execute(
         """
-        SELECT q.iso3, q.hazard_code, q.metric, COUNT(*) AS n
-        FROM questions AS q
+        WITH q_run AS (
+            SELECT DISTINCT q.question_id, q.iso3, q.hazard_code, q.metric
+            FROM questions AS q
+            JOIN forecasts_ensemble AS f
+              ON f.question_id = q.question_id
+             AND f.run_id = ?
+            WHERE q.status = 'active'
+        )
+        SELECT qr.iso3, qr.hazard_code, qr.metric, COUNT(f.question_id) AS n
+        FROM q_run AS qr
         LEFT JOIN forecasts_ensemble AS f
           ON f.run_id = ?
-         AND f.question_id = q.question_id
+         AND f.question_id = qr.question_id
          AND f.status = 'ok'
-        WHERE q.status = 'active'
-        GROUP BY q.iso3, q.hazard_code, q.metric
+        GROUP BY qr.iso3, qr.hazard_code, qr.metric
         HAVING n = 0
-        ORDER BY q.iso3, q.hazard_code, q.metric
+        ORDER BY qr.iso3, qr.hazard_code, qr.metric
         """,
-        [run_id],
+        [run_id, run_id],
     ).fetchall()
 
     print("\nActive questions with no SPD rows:")
