@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -396,23 +397,56 @@ def _load_llm_calls_for_question(
 
     hs_rows: list[dict[str, Any]] = []
 
+    iso3_up = (iso3 or "").upper()
+    hazard_up = (hazard_code or "").upper()
+
+    hs_queries: list[tuple[str, list[Any]]] = []
     if hs_run_id:
-        hs_rows = _fetch_llm_rows(
-            con,
-            """
-            SELECT *
-            FROM llm_calls
-            WHERE phase = 'hs_triage'
-              AND hs_run_id = ?
-            ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
-            LIMIT 1
-            """,
-            [hs_run_id],
+        hs_queries.append(
+            (
+                """
+                SELECT *
+                FROM llm_calls
+                WHERE phase = 'hs_triage'
+                  AND hs_run_id = ?
+                  AND iso3 = ?
+                  AND hazard_code = ?
+                ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
+                LIMIT 1
+                """,
+                [hs_run_id, iso3_up, hazard_up],
+            )
+        )
+        hs_queries.append(
+            (
+                """
+                SELECT *
+                FROM llm_calls
+                WHERE phase = 'hs_triage'
+                  AND hs_run_id = ?
+                  AND iso3 = ?
+                ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
+                LIMIT 1
+                """,
+                [hs_run_id, iso3_up],
+            )
+        )
+        hs_queries.append(
+            (
+                """
+                SELECT *
+                FROM llm_calls
+                WHERE phase = 'hs_triage'
+                  AND hs_run_id = ?
+                ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
+                LIMIT 1
+                """,
+                [hs_run_id],
+            )
         )
 
-    if not hs_rows:
-        hs_rows = _fetch_llm_rows(
-            con,
+    hs_queries.append(
+        (
             """
             SELECT *
             FROM llm_calls
@@ -422,12 +456,12 @@ def _load_llm_calls_for_question(
             ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
             LIMIT 1
             """,
-            [iso3, hazard_code],
+            [iso3_up, hazard_up],
         )
+    )
 
-    if not hs_rows:
-        hs_rows = _fetch_llm_rows(
-            con,
+    hs_queries.append(
+        (
             """
             SELECT *
             FROM llm_calls
@@ -436,8 +470,14 @@ def _load_llm_calls_for_question(
             ORDER BY COALESCE(timestamp, CURRENT_TIMESTAMP) DESC
             LIMIT 1
             """,
-            [iso3],
+            [iso3_up],
         )
+    )
+
+    for query, params in hs_queries:
+        hs_rows = _fetch_llm_rows(con, query, params)
+        if hs_rows:
+            break
 
     if hs_rows:
         row = hs_rows[0]
@@ -457,6 +497,8 @@ def _load_llm_calls_for_question(
             "response_text": row.get("response_text") or "",
             "error_text": row.get("error_text") or "",
             "usage_json": usage_json,
+            "expected_iso3": iso3,
+            "expected_hazard_code": hazard_code,
         }
     else:
         triage_rows = _fetch_llm_rows(
@@ -508,6 +550,8 @@ def _load_llm_calls_for_question(
                 "response_text": json.dumps(triage_payload, ensure_ascii=False, indent=2),
                 "error_text": "",
                 "usage_json": "{}",
+                "expected_iso3": iso3,
+                "expected_hazard_code": hazard_code,
             }
 
     return calls
@@ -629,6 +673,61 @@ def _load_spd_status(con: duckdb.DuckDBPyConnection, run_id: str, question_id: s
     return row[0] if row and row[0] else None
 
 
+def _extract_iso3_from_hs_prompt(prompt_text: str) -> tuple[str, str]:
+    prompt_iso3 = ""
+    prompt_label = ""
+    if not prompt_text:
+        return prompt_iso3, prompt_label
+
+    match = re.search(r"assessing\s+([^()]+?)\s*\(\s*([A-Z]{3})\s*\)", prompt_text, flags=re.I)
+    if match:
+        prompt_label = match.group(1).strip()
+        prompt_iso3 = match.group(2).upper()
+
+    if not prompt_iso3:
+        json_match = re.search(r'"country"\s*:\s*"([A-Z]{3})"', prompt_text, flags=re.I)
+        if json_match:
+            prompt_iso3 = json_match.group(1).upper()
+
+    return prompt_iso3, prompt_label
+
+
+def _hs_metadata_warnings(call: Dict[str, Any]) -> list[str]:
+    prompt_iso3, prompt_label = _extract_iso3_from_hs_prompt(call.get("prompt_text") or "")
+    logged_iso3 = str(call.get("iso3") or "").upper()
+    expected_iso3 = str(call.get("expected_iso3") or "").upper()
+    hazard_logged = str(call.get("hazard_code") or "").upper()
+    hazard_expected = str(call.get("expected_hazard_code") or "").upper()
+
+    warnings: list[str] = []
+
+    if prompt_iso3 and (
+        (logged_iso3 and prompt_iso3 != logged_iso3)
+        or (expected_iso3 and prompt_iso3 != expected_iso3)
+    ):
+        pieces: list[str] = []
+        if prompt_label:
+            pieces.append(f"prompt country `{prompt_label}` ({prompt_iso3})")
+        else:
+            pieces.append(f"prompt ISO3 `{prompt_iso3}`")
+        if logged_iso3:
+            pieces.append(f"logged ISO3 `{logged_iso3}`")
+        if expected_iso3 and expected_iso3 != logged_iso3:
+            pieces.append(f"question ISO3 `{expected_iso3}`")
+        warnings.append("- Warning: HS prompt location mismatch: " + "; ".join(pieces) + ".")
+    elif expected_iso3 and logged_iso3 and expected_iso3 != logged_iso3:
+        warnings.append(
+            f"- Warning: HS logged ISO3 `{logged_iso3}` differs from question ISO3 `{expected_iso3}`."
+        )
+
+    if hazard_expected and hazard_logged and hazard_expected != hazard_logged:
+        warnings.append(
+            f"- Warning: HS hazard mismatch (logged `{hazard_logged}` vs question `{hazard_expected}`)."
+        )
+
+    return warnings
+
+
 def _append_stage_block(lines: List[str], phase: str, call: Dict[str, Any] | None) -> None:
     if call is None:
         lines.append(f"_No LLM call recorded for phase `{phase}`._")
@@ -651,6 +750,13 @@ def _append_stage_block(lines: List[str], phase: str, call: Dict[str, Any] | Non
         lines.append(f"- Hazard: `{call.get('hazard_code')}`")
     if call.get("metric"):
         lines.append(f"- Metric: `{call.get('metric')}`")
+
+    if call.get("phase") == "hs_triage":
+        warnings = _hs_metadata_warnings(call)
+        if warnings:
+            lines.append("")
+            lines.append("_HS metadata warnings:_")
+            lines.extend(warnings)
 
     usage_raw = call.get("usage_json") or "{}"
     try:

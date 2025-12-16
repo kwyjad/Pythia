@@ -204,6 +204,7 @@ async def _run_scenario_for_question(
             prompt_key="scenario.v2",
             prompt_version="1.0.0",
             component="ScenarioWriter",
+            run_id=run_id,
         )
 
     text: str = ""

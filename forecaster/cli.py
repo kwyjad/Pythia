@@ -888,8 +888,11 @@ from .providers import (
     _PROVIDER_STATES,
     _get_or_client,
     call_chat_ms,
+    disabled_providers_for_run,
+    is_provider_disabled_for_run,
     llm_semaphore,
     estimate_cost_usd,
+    reset_provider_failures_for_run,
 )
 from .ensemble import (
     EnsembleResult,
@@ -2042,7 +2045,7 @@ def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
     return bool(triage.get("need_full_spd", False))
 
 
-async def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+async def _call_research_model(prompt: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the research LLM call for v2 pipeline."""
 
     ms = ModelSpec(
@@ -2061,6 +2064,7 @@ async def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Option
             prompt_key="research.v2",
             prompt_version="1.0.0",
             component="Researcher",
+            run_id=run_id,
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -2071,7 +2075,7 @@ async def _call_research_model(prompt: str) -> tuple[str, Dict[str, Any], Option
     return text, usage, error, ms
 
 
-async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for v2 pipeline."""
 
     ms = ModelSpec(
@@ -2081,11 +2085,11 @@ async def _call_spd_model(prompt: str) -> tuple[str, Dict[str, Any], Optional[st
         active=True,
         purpose="spd_v2",
     )
-    return await _call_spd_model_for_spec(ms, prompt)
+    return await _call_spd_model_for_spec(ms, prompt, run_id=run_id)
 
 
 async def _call_spd_model_for_spec(
-    ms: ModelSpec, prompt: str
+    ms: ModelSpec, prompt: str, *, run_id: str | None = None
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for a given model spec."""
 
@@ -2098,6 +2102,7 @@ async def _call_spd_model_for_spec(
             prompt_key="spd.v2",
             prompt_version="1.0.0",
             component="Forecaster",
+            run_id=run_id,
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -2109,7 +2114,7 @@ async def _call_spd_model_for_spec(
 
 
 async def _call_spd_members_v2(
-    prompt: str, specs: list[ModelSpec]
+    prompt: str, specs: list[ModelSpec], *, run_id: str | None = None
 ) -> tuple[
     list[dict[str, list[float]]],
     dict[str, object],
@@ -2123,21 +2128,27 @@ async def _call_spd_members_v2(
       per_model_spds: list of {month: [probs]} dicts (may be empty per model)
       aggregated_usage: summed tokens/cost, max elapsed across models
       raw_calls: [{"model_spec", "text", "usage", "error"}]
-      ensemble_meta: {"n_models_active", "n_models_ok", "failed_providers", "partial_ensemble"}
+      ensemble_meta: {"n_models_active", "n_models_called", "n_models_ok", "failed_providers", "partial_ensemble", "skipped_providers"}
     """
 
-    specs_used = [ms for ms in specs if ms.active]
+    specs_active = [ms for ms in specs if ms.active]
+    skipped_providers = sorted(
+        {ms.provider for ms in specs_active if is_provider_disabled_for_run(ms.provider, run_id)}
+    )
+    specs_used = [ms for ms in specs_active if ms.provider not in skipped_providers]
     ensemble_meta = {
-        "n_models_active": len(specs_used),
+        "n_models_active": len(specs_active),
+        "n_models_called": len(specs_used),
         "n_models_ok": 0,
         "failed_providers": [],
-        "partial_ensemble": False,
+        "partial_ensemble": bool(skipped_providers),
+        "skipped_providers": skipped_providers,
     }
 
     if not specs_used:
         return [], {}, [], ensemble_meta
 
-    tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs_used]
+    tasks = [_call_spd_model_for_spec(ms, prompt, run_id=run_id) for ms in specs_used]
     call_results = await asyncio.gather(*tasks)
 
     per_model_spds: list[dict[str, list[float]]] = []
@@ -2222,10 +2233,12 @@ async def _call_spd_members_v2(
     failed_providers = sorted({provider for provider, ok in model_success if not ok and provider})
     n_models_ok = sum(1 for _, ok in model_success if ok)
     ensemble_meta = {
-        "n_models_active": len(specs_used),
+        "n_models_active": len(specs_active),
+        "n_models_called": len(specs_used),
         "n_models_ok": n_models_ok,
         "failed_providers": failed_providers,
-        "partial_ensemble": n_models_ok < len(specs_used),
+        "partial_ensemble": n_models_ok < len(specs_active),
+        "skipped_providers": skipped_providers,
     }
 
     return per_model_spds, aggregated_usage, raw_calls, ensemble_meta
@@ -2412,7 +2425,7 @@ async def _call_spd_bayesmc_v2(
       - spd_obj: {"spds": {month_key: {"probs": [...]}}}
       - aggregated_usage: aggregated usage across members
       - raw_calls: list of member call summaries (model_spec, text, usage, error)
-      - ensemble_meta: {"n_models_active", "n_models_ok", "failed_providers", "partial_ensemble"}
+      - ensemble_meta: {"n_models_active", "n_models_called", "n_models_ok", "failed_providers", "partial_ensemble", "skipped_providers"}
 
     BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
     to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
@@ -2423,14 +2436,16 @@ async def _call_spd_bayesmc_v2(
     if not specs_used:
         ensemble_meta: dict[str, object] = {
             "n_models_active": 0,
+            "n_models_called": 0,
             "n_models_ok": 0,
             "failed_providers": [],
             "partial_ensemble": False,
+            "skipped_providers": disabled_providers_for_run(run_id),
         }
         return {}, {}, [], ensemble_meta
 
     per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
-        prompt, specs_used
+        prompt, specs_used, run_id=run_id
     )
 
     spd_obj, _diag = _build_bayesmc_spd_obj(
@@ -2449,8 +2464,16 @@ async def _call_spd_bayesmc_v2(
 def _format_ensemble_meta(ensemble_meta: dict[str, object]) -> str:
     n_models_active = int(ensemble_meta.get("n_models_active") or 0)
     n_models_ok = int(ensemble_meta.get("n_models_ok") or 0)
+    n_models_called = int(ensemble_meta.get("n_models_called") or n_models_active)
     failed = ensemble_meta.get("failed_providers") or []
-    return f"ensemble_meta: ok={n_models_ok}/{n_models_active} failed={failed}"
+    skipped = ensemble_meta.get("skipped_providers") or []
+    parts = [f"ok={n_models_ok}/{n_models_active}"]
+    if n_models_called != n_models_active:
+        parts.append(f"called={n_models_called}")
+    if skipped:
+        parts.append(f"skipped={skipped}")
+    parts.append(f"failed={failed}")
+    return "ensemble_meta: " + " ".join(parts)
 
 
 def _append_ensemble_meta(reason: str, ensemble_meta: str) -> str:
@@ -2696,7 +2719,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             model_info={},
         )
 
-        text, usage, error, ms = await _call_research_model(prompt)
+        text, usage, error, ms = await _call_research_model(prompt, run_id=run_id)
 
         await log_forecaster_llm_call(
             run_id=run_id,
@@ -2984,7 +3007,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
             try:
                 per_model_spds, aggregated_usage, raw_calls, ensemble_meta = (
-                    await _call_spd_members_v2(prompt, specs_active)
+                    await _call_spd_members_v2(prompt, specs_active, run_id=run_id)
                 )
                 spd_mean = aggregate_spd_v2_mean(per_model_spds)
                 spd_v2 = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
@@ -3087,7 +3110,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
 
             per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
-                prompt, specs_active
+                prompt, specs_active, run_id=run_id
             )
 
             logged_any_spd_call = False
@@ -4920,6 +4943,7 @@ async def run_job(
 
     run_id = _istamp()
     os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
+    reset_provider_failures_for_run(run_id)
     print("----------------------------------------------------------------------------------------")
 
     run_summaries: List[QuestionRunSummary] = []
@@ -5354,6 +5378,8 @@ def main() -> None:
             return
 
         run_id = f"fc_{int(time.time())}"
+        os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
+        reset_provider_failures_for_run(run_id)
         print(f"[v2] run_id={run_id} | questions={len(questions)}")
 
         async def _run_v2_pipeline_async() -> None:

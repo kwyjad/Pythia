@@ -71,13 +71,19 @@ def log_hs_llm_call(
     if temperature is not None and "temperature" not in usage_dict:
         usage_dict["temperature"] = temperature
 
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
+
+    if hs_run_id:
+        usage_dict.setdefault("hs_run_id", hs_run_id)
+    usage_dict.setdefault("iso3", iso3_up)
+    if hz_up:
+        usage_dict.setdefault("hazard_code", hz_up)
+
     try:
         usage_json = json.dumps(usage_dict, ensure_ascii=False)
     except Exception:  # noqa: BLE001
         usage_json = "{}"
-
-    iso3_up = (iso3 or "").upper().strip()
-    hz_up = (hazard_code or "").upper().strip()
 
     model_name = getattr(model_spec, "name", None) or getattr(model_spec, "model_id", None)
     provider = getattr(model_spec, "provider", None)
