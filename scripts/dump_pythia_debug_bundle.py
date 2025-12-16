@@ -181,17 +181,30 @@ def _load_triage_entry(
             cache[key] = None
         return None
 
-    rows = _fetch_llm_rows(
-        con,
-        """
-        SELECT *
-        FROM hs_triage
-        WHERE run_id = ? AND iso3 = ? AND hazard_code = ?
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        [hs_run_id, iso3, hazard_code],
-    )
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT *
+            FROM hs_triage
+            WHERE run_id = ? AND iso3 = ? AND hazard_code = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [hs_run_id, iso3, hazard_code],
+        )
+    except duckdb.CatalogException:
+        rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT *
+            FROM hs_triage
+            WHERE run_id = ? AND iso3 = ? AND hazard_code = ?
+            ORDER BY rowid DESC
+            LIMIT 1
+            """,
+            [hs_run_id, iso3, hazard_code],
+        )
     entry = rows[0] if rows else None
     if cache is not None:
         cache[key] = entry
