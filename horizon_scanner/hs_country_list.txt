@@ -1,2 +1,3 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
 Somalia
+Ethiopia
