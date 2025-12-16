@@ -131,7 +131,9 @@ def _ensure_table_and_columns(
 def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the hs_triage table exists for HS v2 triage outputs."""
 
-    con.execute(
+    _ensure_table_and_columns(
+        con,
+        "hs_triage",
         """
         CREATE TABLE IF NOT EXISTS hs_triage (
             run_id TEXT NOT NULL,
@@ -146,14 +148,29 @@ def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
             scenario_stub TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        """
+        """,
+        {
+            "run_id": "TEXT",
+            "iso3": "TEXT",
+            "hazard_code": "TEXT",
+            "tier": "TEXT",
+            "triage_score": "DOUBLE",
+            "need_full_spd": "BOOLEAN",
+            "drivers_json": "TEXT",
+            "regime_shifts_json": "TEXT",
+            "data_quality_json": "TEXT",
+            "scenario_stub": "TEXT",
+            "created_at": "TIMESTAMP",
+        },
     )
 
 
 def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the question_research table exists for Researcher v2 outputs."""
 
-    con.execute(
+    _ensure_table_and_columns(
+        con,
+        "question_research",
         """
         CREATE TABLE IF NOT EXISTS question_research (
             run_id TEXT NOT NULL,
@@ -164,14 +181,25 @@ def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
             research_json TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        """
+        """,
+        {
+            "run_id": "TEXT",
+            "question_id": "TEXT",
+            "iso3": "TEXT",
+            "hazard_code": "TEXT",
+            "metric": "TEXT",
+            "research_json": "TEXT",
+            "created_at": "TIMESTAMP",
+        },
     )
 
 
 def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the scenarios table exists for Scenario Writer outputs."""
 
-    con.execute(
+    _ensure_table_and_columns(
+        con,
+        "scenarios",
         """
         CREATE TABLE IF NOT EXISTS scenarios (
             run_id TEXT NOT NULL,
@@ -184,7 +212,18 @@ def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
             text TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        """
+        """,
+        {
+            "run_id": "TEXT",
+            "iso3": "TEXT",
+            "hazard_code": "TEXT",
+            "metric": "TEXT",
+            "scenario_type": "TEXT",
+            "bucket_label": "TEXT",
+            "probability": "DOUBLE",
+            "text": "TEXT",
+            "created_at": "TIMESTAMP",
+        },
     )
 
 
