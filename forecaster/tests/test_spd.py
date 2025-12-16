@@ -670,7 +670,7 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
         }
     }
 
-    async def fake_call_spd_model_for_spec(ms, prompt):
+    async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
         return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
 
     monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
@@ -763,7 +763,7 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
     ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
     monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1])
 
-    async def fake_call_spd_model_for_spec(ms, prompt):
+    async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
         return json.dumps({"note": "test: no spds key"}), {"total_tokens": 5, "elapsed_ms": 3}, None, ms
 
     monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
@@ -841,7 +841,7 @@ def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     months = ["2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]
     fake_spd = {"spds": {m: {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]} for m in months}}
 
-    async def fake_call_spd_model_for_spec(ms, prompt):
+    async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
         return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
 
     monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)

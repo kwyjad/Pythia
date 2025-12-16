@@ -2089,7 +2089,7 @@ async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[st
 
 
 async def _call_spd_model_for_spec(
-    ms: ModelSpec, prompt: str, *, run_id: str | None = None
+    ms: ModelSpec, prompt: str, *, run_id: str | None = None, **_kwargs
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for a given model spec."""
 
