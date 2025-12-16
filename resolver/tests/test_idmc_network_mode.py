@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Tests covering IDMC network mode selection."""
 from __future__ import annotations
 
@@ -226,4 +231,3 @@ def test_idmc_cli_plumbs_helix_id(monkeypatch, tmp_path):
     payload = captured[-1]
     assert payload["network_mode"] == "live"
     assert payload["http_status_counts"] == {"2xx": 1, "4xx": 0, "5xx": 0}
-

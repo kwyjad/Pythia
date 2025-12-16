@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 # io_logs.py
 # =============================================================================
 # Forecaster logging utilities:
@@ -543,4 +548,3 @@ def write_human_markdown(*args, **kwargs) -> str:
     md_path = md_dir / f"Q{question_id}.{paths.human_ext}"
     md_path.write_text(content, encoding="utf-8")
     return str(md_path)
-

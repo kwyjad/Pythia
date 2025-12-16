@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Local helper to run DTM ingestion and export into DuckDB.
 
 This script wraps the existing DTM connector and export_facts pipeline to make

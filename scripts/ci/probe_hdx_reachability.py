@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Reachability probe for the HDX IDMC dataset."""
 
 from __future__ import annotations
@@ -257,4 +262,3 @@ def main() -> int:
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
     raise SystemExit(main())
-

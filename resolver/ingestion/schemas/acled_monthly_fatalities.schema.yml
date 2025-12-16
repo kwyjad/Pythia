@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 version: 1
 name: acled_monthly_fatalities
 description: Monthly ACLED fatalities aggregated by ISO3 country code.

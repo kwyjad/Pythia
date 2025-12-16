@@ -1,3 +1,8 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
 """Compatibility facade for the EM-DAT connector used in Resolver tests.
 
 This module focuses on the subset of behaviour exercised by the unit tests:
