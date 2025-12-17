@@ -3,10 +3,20 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-from fastapi import FastAPI, Depends, Body, Query, HTTPException
-from typing import List, Optional
+import json
+from typing import Any, Dict, List, Optional
+
 import duckdb, pandas as pd
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
+
 from pythia.api.auth import require_token
+from pythia.api.models import (
+    ContextBundle,
+    ForecastBundle,
+    HsBundle,
+    LlmCallsBundle,
+    QuestionBundleResponse,
+)
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 
@@ -16,6 +26,156 @@ app = FastAPI(title="Pythia API", version="1.0.0")
 def _con():
     db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
     return duckdb.connect(db_url, read_only=True)
+
+
+def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
+    row = con.execute(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)",
+        [table],
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _safe_json_load(value: Any) -> Any:
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _apply_json_fields(row: Dict[str, Any], fields: List[str]) -> Dict[str, Any]:
+    out = dict(row)
+    for field in fields:
+        if field in out:
+            out[field] = _safe_json_load(out[field])
+    return out
+
+
+def _fetch_one(con: duckdb.DuckDBPyConnection, sql: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    df = con.execute(sql, params).fetchdf()
+    if df.empty:
+        return None
+    return df.to_dict(orient="records")[0]
+
+
+def _resolve_question_row(
+    con: duckdb.DuckDBPyConnection, question_id: str, hs_run_id: Optional[str]
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"question_id": question_id}
+    sql = """
+      SELECT q.*, h.generated_at
+      FROM questions q
+      LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
+      WHERE q.question_id = :question_id
+    """
+    if hs_run_id:
+        sql += " AND q.hs_run_id = :hs_run_id"
+        params["hs_run_id"] = hs_run_id
+    sql += " ORDER BY h.generated_at DESC NULLS LAST LIMIT 1"
+
+    df = con.execute(sql, params).fetchdf()
+    if df.empty:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return df.to_dict(orient="records")[0]
+
+
+def _resolve_forecaster_run_id(
+    con: duckdb.DuckDBPyConnection, question_id: str, forecaster_run_id: Optional[str]
+) -> Optional[str]:
+    if forecaster_run_id:
+        return forecaster_run_id
+    df = con.execute(
+        """
+        SELECT run_id
+        FROM forecasts_ensemble
+        WHERE question_id = ?
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        [question_id],
+    ).fetchdf()
+    if df.empty:
+        return None
+    return df["run_id"].iloc[0]
+
+
+def _build_llm_calls_bundle(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    question_id: str,
+    hs_run_id: Optional[str],
+    forecaster_run_id: Optional[str],
+    iso3: str,
+    hazard_code: str,
+    include_llm_calls: bool,
+    include_transcripts: bool,
+    limit_llm_calls: int,
+) -> LlmCallsBundle:
+    if not include_llm_calls:
+        return LlmCallsBundle(included=False, transcripts_included=False, rows=[], by_phase={})
+
+    if not _table_exists(con, "llm_calls"):
+        return LlmCallsBundle(
+            included=True,
+            transcripts_included=include_transcripts,
+            rows=[],
+            by_phase={},
+        )
+
+    filters: List[str] = []
+    params: Dict[str, Any] = {"limit": limit_llm_calls}
+
+    if forecaster_run_id:
+        filters.append(
+            "(run_id = :forecaster_run_id AND question_id = :question_id AND phase IN ('research_v2','spd_v2','scenario_v2'))"
+        )
+        params["forecaster_run_id"] = forecaster_run_id
+        params["question_id"] = question_id
+
+    if hs_run_id and iso3 and hazard_code:
+        filters.append(
+            "(hs_run_id = :hs_run_id AND iso3 = :iso3 AND hazard_code = :hazard_code AND phase = 'hs_triage')"
+        )
+        params["hs_run_id"] = hs_run_id
+        params["iso3"] = iso3
+        params["hazard_code"] = hazard_code
+
+    if not filters:
+        return LlmCallsBundle(
+            included=True, transcripts_included=include_transcripts, rows=[], by_phase={}
+        )
+
+    sql = f"""
+      SELECT *
+      FROM llm_calls
+      WHERE {' OR '.join(filters)}
+      ORDER BY timestamp DESC NULLS LAST
+      LIMIT :limit
+    """
+    df = con.execute(sql, params).fetchdf()
+
+    cleaned_rows: List[Dict[str, Any]] = []
+    by_phase: Dict[str, List[Dict[str, Any]]] = {}
+    for row in df.to_dict(orient="records"):
+        parsed = _apply_json_fields(row, ["parsed_json", "usage_json"])
+        if not include_transcripts:
+            parsed.pop("prompt_text", None)
+            parsed.pop("response_text", None)
+        cleaned_rows.append(parsed)
+        phase = parsed.get("phase")
+        if phase:
+            by_phase.setdefault(phase, []).append(parsed)
+
+    return LlmCallsBundle(
+        included=True,
+        transcripts_included=include_transcripts,
+        rows=cleaned_rows,
+        by_phase=by_phase,
+    )
 
 
 def _latest_questions_view(
@@ -179,6 +339,216 @@ def get_questions(
     sql += " ORDER BY target_month, iso3, hazard_code, metric"
     df = con.execute(sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
+
+
+@app.get("/v1/question_bundle")
+def get_question_bundle(
+    question_id: str = Query(..., description="Question identifier"),
+    hs_run_id: Optional[str] = Query(None, description="Optional HS run override"),
+    forecaster_run_id: Optional[str] = Query(None, description="Optional forecaster run override"),
+    include_llm_calls: bool = Query(False, description="Include llm_calls rows"),
+    include_transcripts: bool = Query(False, description="Include prompt/response text in llm_calls"),
+    limit_llm_calls: int = Query(200, ge=1, le=2000, description="Max llm_calls rows to return"),
+    _=Depends(require_token),
+):
+    con = _con()
+
+    question_row = _resolve_question_row(con, question_id, hs_run_id)
+    question = _apply_json_fields(question_row, ["scenario_ids_json", "pythia_metadata_json"])
+
+    resolved_hs_run_id = hs_run_id or question.get("hs_run_id")
+    iso3 = (question.get("iso3") or "").upper()
+    hazard_code = (question.get("hazard_code") or "").upper()
+
+    scenario_ids_raw = _safe_json_load(question.get("scenario_ids_json") or [])
+    scenario_ids: List[str] = scenario_ids_raw if isinstance(scenario_ids_raw, list) else []
+
+    hs_run = (
+        _fetch_one(con, "SELECT * FROM hs_runs WHERE hs_run_id = :hs_run_id", {"hs_run_id": resolved_hs_run_id})
+        if resolved_hs_run_id
+        else None
+    )
+
+    triage = None
+    if resolved_hs_run_id and iso3 and hazard_code:
+        triage_row = _fetch_one(
+            con,
+            """
+            SELECT *
+            FROM hs_triage
+            WHERE run_id = :hs_run_id AND iso3 = :iso3 AND hazard_code = :hazard_code
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            {"hs_run_id": resolved_hs_run_id, "iso3": iso3, "hazard_code": hazard_code},
+        )
+        if triage_row:
+            triage = _apply_json_fields(triage_row, ["drivers_json", "regime_shifts_json", "data_quality_json"])
+
+    country_report = None
+    if resolved_hs_run_id and iso3:
+        report_row = _fetch_one(
+            con,
+            """
+            SELECT *
+            FROM hs_country_reports
+            WHERE hs_run_id = :hs_run_id AND iso3 = :iso3
+            LIMIT 1
+            """,
+            {"hs_run_id": resolved_hs_run_id, "iso3": iso3},
+        )
+        if report_row:
+            country_report = _apply_json_fields(report_row, ["sources_json"])
+
+    scenarios: List[Dict[str, Any]] = []
+    if resolved_hs_run_id and scenario_ids:
+        placeholders = ",".join(["?"] * len(scenario_ids))
+        df = con.execute(
+            f"""
+            SELECT *
+            FROM hs_scenarios
+            WHERE hs_run_id = ? AND scenario_id IN ({placeholders})
+            """,
+            [resolved_hs_run_id, *scenario_ids],
+        ).fetchdf()
+        scenario_rows = [_apply_json_fields(r, ["scenario_json"]) for r in df.to_dict(orient="records")]
+        order = {sid: idx for idx, sid in enumerate(scenario_ids)}
+        scenarios = sorted(scenario_rows, key=lambda r: order.get(r.get("scenario_id"), len(order)))
+
+    resolved_forecaster_run_id = _resolve_forecaster_run_id(con, question_id, forecaster_run_id)
+
+    research = None
+    ensemble_spd: List[Dict[str, Any]] = []
+    raw_spd: List[Dict[str, Any]] = []
+    scenario_writer: List[Dict[str, Any]] = []
+    if resolved_forecaster_run_id:
+        research_row = _fetch_one(
+            con,
+            """
+            SELECT *
+            FROM question_research
+            WHERE run_id = :run_id AND question_id = :question_id
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            {"run_id": resolved_forecaster_run_id, "question_id": question_id},
+        )
+        if research_row:
+            research = _apply_json_fields(research_row, ["research_json"])
+
+        ensemble_df = con.execute(
+            """
+            SELECT *
+            FROM forecasts_ensemble
+            WHERE run_id = :run_id AND question_id = :question_id
+            ORDER BY month_index, bucket_index, model_name
+            """,
+            {"run_id": resolved_forecaster_run_id, "question_id": question_id},
+        ).fetchdf()
+        ensemble_spd = ensemble_df.to_dict(orient="records")
+
+        raw_df = con.execute(
+            """
+            SELECT *
+            FROM forecasts_raw
+            WHERE run_id = :run_id AND question_id = :question_id
+            ORDER BY model_name, month_index, bucket_index
+            """,
+            {"run_id": resolved_forecaster_run_id, "question_id": question_id},
+        ).fetchdf()
+        raw_spd = [_apply_json_fields(r, ["spd_json"]) for r in raw_df.to_dict(orient="records")]
+
+        scenario_df = con.execute(
+            """
+            SELECT *
+            FROM scenarios
+            WHERE run_id = :run_id AND iso3 = :iso3 AND hazard_code = :hazard_code AND metric = :metric
+            ORDER BY scenario_type, bucket_label
+            """,
+            {
+                "run_id": resolved_forecaster_run_id,
+                "iso3": iso3,
+                "hazard_code": hazard_code,
+                "metric": question.get("metric"),
+            },
+        ).fetchdf()
+        scenario_writer = scenario_df.to_dict(orient="records")
+
+    question_context = None
+    if resolved_forecaster_run_id and _table_exists(con, "question_context"):
+        question_context = _fetch_one(
+            con,
+            """
+            SELECT *
+            FROM question_context
+            WHERE question_id = :question_id AND run_id = :run_id
+            ORDER BY COALESCE(snapshot_end_month, snapshot_start_month) DESC NULLS LAST
+            LIMIT 1
+            """,
+            {"question_id": question_id, "run_id": resolved_forecaster_run_id},
+        )
+
+    if not question_context and _table_exists(con, "question_context"):
+        question_context = _fetch_one(
+            con,
+            """
+            SELECT *
+            FROM question_context
+            WHERE question_id = :question_id
+            ORDER BY COALESCE(snapshot_end_month, snapshot_start_month) DESC NULLS LAST
+            LIMIT 1
+            """,
+            {"question_id": question_id},
+        )
+
+    if question_context:
+        question_context = _apply_json_fields(question_context, ["pa_history_json", "context_json"])
+
+    resolutions: List[Dict[str, Any]] = []
+    if _table_exists(con, "resolutions"):
+        res_df = con.execute(
+            """
+            SELECT *
+            FROM resolutions
+            WHERE question_id = :question_id
+            ORDER BY observed_month
+            """,
+            {"question_id": question_id},
+        ).fetchdf()
+        resolutions = res_df.to_dict(orient="records")
+
+    llm_calls_bundle = _build_llm_calls_bundle(
+        con,
+        question_id=question_id,
+        hs_run_id=resolved_hs_run_id,
+        forecaster_run_id=resolved_forecaster_run_id,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        include_llm_calls=include_llm_calls,
+        include_transcripts=include_transcripts,
+        limit_llm_calls=limit_llm_calls,
+    )
+
+    response = QuestionBundleResponse(
+        question=question,
+        hs=HsBundle(
+            hs_run=hs_run,
+            triage=triage,
+            scenario_ids=scenario_ids,
+            scenarios=scenarios,
+            country_report=country_report,
+        ),
+        forecast=ForecastBundle(
+            forecaster_run_id=resolved_forecaster_run_id,
+            research=research,
+            ensemble_spd=ensemble_spd,
+            raw_spd=raw_spd,
+            scenario_writer=scenario_writer,
+        ),
+        context=ContextBundle(question_context=question_context, resolutions=resolutions),
+        llm_calls=llm_calls_bundle,
+    )
+    return response.model_dump()
 
 
 @app.get("/v1/calibration/weights")
