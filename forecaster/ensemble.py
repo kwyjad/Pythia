@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 import numpy as np
 
-from .providers import ModelSpec, llm_semaphore, call_chat_ms, estimate_cost_usd
+from .providers import ModelSpec, call_chat_ms, estimate_cost_usd
 from .llm_logging import log_forecaster_llm_call
 from pythia.db.schema import connect as pythia_connect
 
