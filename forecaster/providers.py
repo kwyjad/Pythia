@@ -59,7 +59,25 @@ class ModelSpec:
     purpose: Optional[str] = None
 
 
-llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
+_MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "4")))
+_LLM_SEMAPHORES: Dict[int, asyncio.Semaphore] = {}
+_HTTP_CLIENTS_BY_LOOP: Dict[int, httpx.AsyncClient] = {}
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    sem = _LLM_SEMAPHORES.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(_MAX_LLM_CONCURRENCY)
+        _LLM_SEMAPHORES[key] = sem
+    return sem
+
+
+def get_llm_semaphore() -> asyncio.Semaphore:
+    """Return a semaphore scoped to the current event loop."""
+
+    return _get_llm_semaphore()
 
 
 # ---------------------------------------------------------------------------
@@ -316,16 +334,16 @@ _ANTHROPIC_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
 _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "2048") or 2048)
 
 
-_http_client: Optional[httpx.AsyncClient] = None
-
-
 def _get_or_client() -> httpx.AsyncClient:
     """Return a shared async HTTP client for provider calls."""
 
-    global _http_client
-    if _http_client is None:
-        _http_client = httpx.AsyncClient(timeout=30.0)
-    return _http_client
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    client = _HTTP_CLIENTS_BY_LOOP.get(key)
+    if client is None:
+        client = httpx.AsyncClient(timeout=30.0)
+        _HTTP_CLIENTS_BY_LOOP[key] = client
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -765,10 +783,25 @@ async def call_chat_ms(
     error: Optional[str] = None
 
     try:
-        async with llm_semaphore:
+        async with _get_llm_semaphore():
             result = await asyncio.to_thread(_call_provider_sync, ms.provider, prompt, ms.model_id, temperature)
     except Exception as exc:  # pragma: no cover - unexpected runtime errors
-        error = f"provider call error: {exc}"
+        loop_id: Optional[int] = None
+        sem_id: Optional[int] = None
+        try:
+            loop = asyncio.get_running_loop()
+            loop_id = id(loop)
+            sem = _get_llm_semaphore()
+            sem_id = id(sem)
+        except Exception:
+            pass
+        loop_info = ""
+        if loop_id is not None:
+            loop_info = f" [loop_id={loop_id}"
+            if sem_id is not None:
+                loop_info += f" sem_id={sem_id}"
+            loop_info += "]"
+        error = f"provider call error: {exc}{loop_info}"
 
     if result is None:
         result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error or "unknown error")

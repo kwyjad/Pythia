@@ -890,7 +890,7 @@ from .providers import (
     call_chat_ms,
     disabled_providers_for_run,
     is_provider_disabled_for_run,
-    llm_semaphore,
+    get_llm_semaphore,
     estimate_cost_usd,
     reset_provider_failures_for_run,
 )
@@ -3984,7 +3984,7 @@ async def _run_one_question_body(
                         except Exception:
                             profile_models = {}
                     default_gtmc1_model = profile_models.get("openai", "gpt-5.1-pro")
-                    async with llm_semaphore:
+                    async with get_llm_semaphore():
                         resp = await client.chat.completions.create(
                             model=os.getenv("GTMC1_MODEL_ID", default_gtmc1_model),
                             messages=[{"role": "user", "content": prompt}],
