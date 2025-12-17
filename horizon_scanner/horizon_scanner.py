@@ -59,6 +59,12 @@ EMDAT_SHOCK_MAP = {
     "TC": "tropical_cyclone",
     "HW": "heat_wave",
 }
+COUNTRY_ALIASES = {
+    "democratic republic of congo": "COD",
+    "drc": "COD",
+    "congo (drc)": "COD",
+    "congo, dem. rep.": "COD",
+}
 
 
 def _resolve_hs_model() -> str:
@@ -88,24 +94,35 @@ def _load_country_registry() -> Tuple[Dict[str, str], Dict[str, str]]:
                 name_to_iso3[name.lower()] = iso3
     except Exception:
         logger.exception("Failed to read country registry from %s", COUNTRIES_CSV)
+
+    for alias, iso3 in COUNTRY_ALIASES.items():
+        if iso3 in iso3_to_name:
+            name_to_iso3.setdefault(alias, iso3)
+        else:
+            logger.warning("Skipping country alias %r -> %s (iso3 not in registry)", alias, iso3)
     return iso3_to_name, name_to_iso3
 
 
-def _resolve_country(raw: str, iso3_to_name: Dict[str, str], name_to_iso3: Dict[str, str]) -> Tuple[str, str]:
+def _resolve_country(
+    raw: str, iso3_to_name: Dict[str, str], name_to_iso3: Dict[str, str]
+) -> Tuple[str, str, str | None]:
     candidate = (raw or "").strip()
     if not candidate:
-        return "", ""
+        return "", "", "empty"
 
     upper = candidate.upper()
-    if len(upper) == 3 and upper in iso3_to_name:
-        return iso3_to_name[upper], upper
+    if len(upper) == 3:
+        if upper in iso3_to_name:
+            return iso3_to_name[upper], upper, None
+        return candidate, "", "invalid_iso3"
 
     lower = candidate.lower()
     if lower in name_to_iso3:
         iso3 = name_to_iso3[lower]
-        return iso3_to_name.get(iso3, candidate), iso3
+        if iso3 in iso3_to_name:
+            return iso3_to_name[iso3], iso3, None
 
-    return candidate, upper[:3]
+    return candidate, "", "unknown_name"
 
 
 def _build_hazard_catalog() -> Dict[str, str]:
@@ -373,7 +390,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
         con.close()
 
 
-def _load_country_list(provided: list[str] | None) -> list[Tuple[str, str]]:
+def _load_country_list(provided: list[str] | None) -> Tuple[list[Tuple[str, str]], int]:
     iso3_to_name, name_to_iso3 = _load_country_registry()
 
     if provided:
@@ -384,13 +401,24 @@ def _load_country_list(provided: list[str] | None) -> list[Tuple[str, str]]:
             raw_countries = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
     resolved: list[Tuple[str, str]] = []
+    skipped_unknown = 0
     for raw in raw_countries:
-        name, iso3 = _resolve_country(raw, iso3_to_name, name_to_iso3)
-        if not iso3:
-            logger.warning("Skipping empty country entry for %r", raw)
+        name, iso3, error = _resolve_country(raw, iso3_to_name, name_to_iso3)
+        if iso3:
+            resolved.append((name, iso3))
             continue
-        resolved.append((name, iso3))
-    return resolved
+
+        skipped_unknown += 1
+        if error == "empty":
+            logger.warning("HS country resolver: skipping empty country entry for %r", raw)
+        elif error == "invalid_iso3":
+            logger.warning("HS country resolver: skipping unknown ISO3 code %r (not in registry)", raw)
+        elif error == "unknown_name":
+            logger.warning("HS country resolver: skipping unknown country name %r (not in registry)", raw)
+        else:
+            logger.warning("HS country resolver: skipping country entry %r (unrecognized)", raw)
+
+    return resolved, skipped_unknown
 
 
 def main(countries: list[str] | None = None):
@@ -402,9 +430,14 @@ def main(countries: list[str] | None = None):
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
 
-    country_entries = _load_country_list(countries)
+    country_entries, skipped_unknown = _load_country_list(countries)
     if not country_entries:
         logger.warning("No countries supplied to Horizon Scanner; exiting.")
+        if skipped_unknown:
+            logger.warning(
+                "HS country resolver skipped %d unknown/invalid entries; see warnings above for details",
+                skipped_unknown,
+            )
         return
 
     logger.info("Processing %d countries with max %d workers", len(country_entries), HS_MAX_WORKERS)
@@ -429,7 +462,11 @@ def main(countries: list[str] | None = None):
     except Exception as exc:  # pragma: no cover - best-effort logging
         logger.warning("Failed to log hs_run %s: %s", run_id, exc)
 
-    logger.info("Horizon Scanner triage run complete for %d countries", len(country_entries))
+    logger.info(
+        "Horizon Scanner triage run complete for %d countries (skipped %d unknown/invalid entries)",
+        len(country_entries),
+        skipped_unknown,
+    )
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ usage, latency, and estimated cost so we can monitor spend across runs.
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -47,6 +48,7 @@ class ProviderResult:
     cost_usd: float
     model_id: str
     error: Optional[str] = None
+    retry_after: Optional[float] = None
 
 
 @dataclass
@@ -62,6 +64,16 @@ class ModelSpec:
 _MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "4")))
 _LLM_SEMAPHORES: Dict[int, asyncio.Semaphore] = {}
 _HTTP_CLIENTS_BY_LOOP: Dict[int, httpx.AsyncClient] = {}
+
+
+def _parse_retry_after(raw: Optional[str]) -> Optional[float]:
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+        return max(0.0, value)
+    except Exception:
+        return None
 
 
 def _get_llm_semaphore() -> asyncio.Semaphore:
@@ -497,6 +509,7 @@ def call_openai(prompt: str, model: str, temperature: float) -> ProviderResult:
         payload = {}
 
     if not resp.ok:
+        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
         message = ""
         if isinstance(payload, dict):
             err = payload.get("error")
@@ -506,7 +519,14 @@ def call_openai(prompt: str, model: str, temperature: float) -> ProviderResult:
                 message = err
         if not message:
             message = resp.text[:400]
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"OpenAI HTTP {resp.status_code}: {message}")
+        return ProviderResult(
+            "",
+            usage_to_dict(None),
+            0.0,
+            model,
+            error=f"OpenAI HTTP {resp.status_code}: {message}",
+            retry_after=retry_after,
+        )
 
     text = ""
     if isinstance(payload, dict):
@@ -545,6 +565,7 @@ def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResul
         payload = {}
 
     if not resp.ok:
+        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
         message = ""
         if isinstance(payload, dict):
             message = payload.get("error", {}).get("message") if isinstance(payload.get("error"), dict) else payload.get("error")
@@ -552,7 +573,14 @@ def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResul
                 message = ""
         if not message:
             message = resp.text[:400]
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"Anthropic HTTP {resp.status_code}: {message}")
+        return ProviderResult(
+            "",
+            usage_to_dict(None),
+            0.0,
+            model,
+            error=f"Anthropic HTTP {resp.status_code}: {message}",
+            retry_after=retry_after,
+        )
 
     text = ""
     if isinstance(payload, dict):
@@ -594,6 +622,7 @@ def call_google(prompt: str, model: str, temperature: float) -> ProviderResult:
         payload = {}
 
     if resp.status_code != 200:
+        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
         message = ""
         if isinstance(payload, dict):
             error_obj = payload.get("error", {})
@@ -603,7 +632,14 @@ def call_google(prompt: str, model: str, temperature: float) -> ProviderResult:
                 message = error_obj
         if not message:
             message = resp.text[:400]
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"Gemini HTTP {resp.status_code}: {message}")
+        return ProviderResult(
+            "",
+            usage_to_dict(None),
+            0.0,
+            model,
+            error=f"Gemini HTTP {resp.status_code}: {message}",
+            retry_after=retry_after,
+        )
 
     text = ""
     if isinstance(payload, dict):
@@ -639,6 +675,7 @@ def call_xai(prompt: str, model: str, temperature: float) -> ProviderResult:
             payload = {}
 
     if not resp.ok:
+        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
         message = ""
         if isinstance(payload, dict):
             err = payload.get("error")
@@ -658,7 +695,14 @@ def call_xai(prompt: str, model: str, temperature: float) -> ProviderResult:
                         break
         if not message:
             message = resp.text[:400]
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"xAI HTTP {resp.status_code}: {message}")
+        return ProviderResult(
+            "",
+            usage_to_dict(None),
+            0.0,
+            model,
+            error=f"xAI HTTP {resp.status_code}: {message}",
+            retry_after=retry_after,
+        )
 
     text = ""
     if isinstance(payload, dict):
@@ -693,6 +737,68 @@ def _call_provider_sync(provider: str, prompt: str, model: str, temperature: flo
     if p in {"xai", "grok"}:
         return call_xai(prompt, model, temperature)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
+
+
+def _extract_status_code(error: str) -> Optional[int]:
+    patterns = (
+        r"HTTP\s*(\d{3})",
+        r"status(?:\s*code)?\s*(\d{3})",
+    )
+    for pat in patterns:
+        match = re.search(pat, error, flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+    return None
+
+
+def _should_retry_provider_error(error: Optional[str], retry_after_hint: Optional[float] = None) -> tuple[bool, Optional[float]]:
+    if not error:
+        return False, None
+
+    lower_err = error.lower()
+    transient_keywords = (
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection aborted",
+        "remote end closed",
+        "temporarily unavailable",
+        "transport error",
+        "connection closed without response",
+    )
+    for kw in transient_keywords:
+        if kw in lower_err:
+            return True, retry_after_hint
+
+    status_code = _extract_status_code(error)
+    if status_code == 429:
+        return True, retry_after_hint
+    if status_code is not None and 500 <= status_code < 600:
+        return True, retry_after_hint
+
+    return False, None
+
+
+def _format_provider_exception(exc: Exception) -> str:
+    loop_id: Optional[int] = None
+    sem_id: Optional[int] = None
+    try:
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        sem = _get_llm_semaphore()
+        sem_id = id(sem)
+    except Exception:
+        pass
+    loop_info = ""
+    if loop_id is not None:
+        loop_info = f" [loop_id={loop_id}"
+        if sem_id is not None:
+            loop_info += f" sem_id={sem_id}"
+        loop_info += "]"
+    return f"provider call error: {exc}{loop_info}"
 
 
 # ---------------------------------------------------------------------------
@@ -779,34 +885,36 @@ async def call_chat_ms(
         )
 
     start = time.time()
+    max_attempts = max(1, int(os.getenv("PYTHIA_LLM_RETRIES", "3") or 3))
+    attempt = 0
     result: Optional[ProviderResult] = None
     error: Optional[str] = None
 
-    try:
-        async with _get_llm_semaphore():
-            result = await asyncio.to_thread(_call_provider_sync, ms.provider, prompt, ms.model_id, temperature)
-    except Exception as exc:  # pragma: no cover - unexpected runtime errors
-        loop_id: Optional[int] = None
-        sem_id: Optional[int] = None
+    while attempt < max_attempts:
+        attempt += 1
         try:
-            loop = asyncio.get_running_loop()
-            loop_id = id(loop)
-            sem = _get_llm_semaphore()
-            sem_id = id(sem)
-        except Exception:
-            pass
-        loop_info = ""
-        if loop_id is not None:
-            loop_info = f" [loop_id={loop_id}"
-            if sem_id is not None:
-                loop_info += f" sem_id={sem_id}"
-            loop_info += "]"
-        error = f"provider call error: {exc}{loop_info}"
+            async with _get_llm_semaphore():
+                result = await asyncio.to_thread(
+                    _call_provider_sync, ms.provider, prompt, ms.model_id, temperature
+                )
+        except Exception as exc:  # pragma: no cover - unexpected runtime errors
+            error = _format_provider_exception(exc)
+            result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)
+        else:
+            error = result.error if result and result.error else None
+
+        retry_after_hint = result.retry_after if result else None
+        should_retry, retry_after = _should_retry_provider_error(error, retry_after_hint)
+        if not should_retry or attempt >= max_attempts:
+            break
+
+        backoff = retry_after if retry_after is not None else min(20.0, 2 ** (attempt - 1))
+        await asyncio.sleep(backoff)
 
     if result is None:
         result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error or "unknown error")
-    elif result.error:
-        error = result.error
+
+    error = result.error if result and result.error else None
 
     elapsed_ms = int((time.time() - start) * 1000)
     usage = result.usage or usage_to_dict(None)
