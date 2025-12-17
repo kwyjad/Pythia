@@ -36,6 +36,25 @@ def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
     return bool(row and row[0])
 
 
+def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
+    df = con.execute(
+        """
+        SELECT LOWER(column_name) AS column_name
+        FROM information_schema.columns
+        WHERE LOWER(table_name) = LOWER(?)
+        """,
+        [table],
+    ).fetchdf()
+    if df.empty:
+        return set()
+    return set(df["column_name"].tolist())
+
+
+def _table_has_columns(con: duckdb.DuckDBPyConnection, table: str, required: List[str]) -> bool:
+    cols = _table_columns(con, table)
+    return set(c.lower() for c in required).issubset(cols)
+
+
 def _safe_json_load(value: Any) -> Any:
     if value is None or isinstance(value, (dict, list)):
         return value
@@ -67,7 +86,7 @@ def _resolve_question_row(
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {"question_id": question_id}
     sql = """
-      SELECT q.*, h.generated_at
+      SELECT q.*, COALESCE(h.created_at, h.generated_at) AS hs_run_created_at
       FROM questions q
       LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
       WHERE q.question_id = :question_id
@@ -75,7 +94,7 @@ def _resolve_question_row(
     if hs_run_id:
         sql += " AND q.hs_run_id = :hs_run_id"
         params["hs_run_id"] = hs_run_id
-    sql += " ORDER BY h.generated_at DESC NULLS LAST LIMIT 1"
+    sql += " ORDER BY hs_run_created_at DESC NULLS LAST, q.hs_run_id DESC LIMIT 1"
 
     df = con.execute(sql, params).fetchdf()
     if df.empty:
@@ -121,15 +140,25 @@ def _build_llm_calls_bundle(
     if not _table_exists(con, "llm_calls"):
         return LlmCallsBundle(
             included=True,
-            transcripts_included=include_transcripts,
+            transcripts_included=False,
             rows=[],
             by_phase={},
         )
 
+    available_columns = _table_columns(con, "llm_calls")
+    if not available_columns:
+        return LlmCallsBundle(included=True, transcripts_included=False, rows=[], by_phase={})
+
     filters: List[str] = []
     params: Dict[str, Any] = {"limit": limit_llm_calls}
+    transcripts_available = {"prompt_text", "response_text"}.issubset(available_columns)
+    transcripts_included = include_transcripts and transcripts_available
 
     if forecaster_run_id:
+        if not _table_has_columns(con, "llm_calls", ["run_id", "question_id", "phase"]):
+            return LlmCallsBundle(
+                included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
+            )
         filters.append(
             "(run_id = :forecaster_run_id AND question_id = :question_id AND phase IN ('research_v2','spd_v2','scenario_v2'))"
         )
@@ -137,6 +166,10 @@ def _build_llm_calls_bundle(
         params["question_id"] = question_id
 
     if hs_run_id and iso3 and hazard_code:
+        if not _table_has_columns(con, "llm_calls", ["hs_run_id", "iso3", "hazard_code", "phase"]):
+            return LlmCallsBundle(
+                included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
+            )
         filters.append(
             "(hs_run_id = :hs_run_id AND iso3 = :iso3 AND hazard_code = :hazard_code AND phase = 'hs_triage')"
         )
@@ -146,23 +179,33 @@ def _build_llm_calls_bundle(
 
     if not filters:
         return LlmCallsBundle(
-            included=True, transcripts_included=include_transcripts, rows=[], by_phase={}
+            included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
         )
 
+    select_columns = sorted(available_columns)
+    order_fields: List[str] = []
+    if "timestamp" in available_columns:
+        order_fields.append("timestamp DESC NULLS LAST")
+    elif "created_at" in available_columns:
+        order_fields.append("created_at DESC NULLS LAST")
+    if "call_id" in available_columns:
+        order_fields.append("call_id DESC")
+
     sql = f"""
-      SELECT *
+      SELECT {', '.join(select_columns)}
       FROM llm_calls
       WHERE {' OR '.join(filters)}
-      ORDER BY timestamp DESC NULLS LAST
-      LIMIT :limit
     """
+    if order_fields:
+        sql += " ORDER BY " + ", ".join(order_fields)
+    sql += " LIMIT :limit"
     df = con.execute(sql, params).fetchdf()
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
     for row in df.to_dict(orient="records"):
         parsed = _apply_json_fields(row, ["parsed_json", "usage_json"])
-        if not include_transcripts:
+        if not transcripts_included:
             parsed.pop("prompt_text", None)
             parsed.pop("response_text", None)
         cleaned_rows.append(parsed)
@@ -172,7 +215,7 @@ def _build_llm_calls_bundle(
 
     return LlmCallsBundle(
         included=True,
-        transcripts_included=include_transcripts,
+        transcripts_included=transcripts_included,
         rows=cleaned_rows,
         by_phase=by_phase,
     )
@@ -436,23 +479,41 @@ def get_question_bundle(
         if research_row:
             research = _apply_json_fields(research_row, ["research_json"])
 
+        ensemble_order_clause = "ORDER BY month_index, bucket_index, model_name"
+        if _table_has_columns(con, "forecasts_ensemble", ["horizon_m", "class_bin"]):
+            ensemble_order_clause = "ORDER BY horizon_m, class_bin, model_name"
         ensemble_df = con.execute(
-            """
+            f"""
             SELECT *
             FROM forecasts_ensemble
             WHERE run_id = :run_id AND question_id = :question_id
-            ORDER BY month_index, bucket_index, model_name
+            {ensemble_order_clause}
             """,
             {"run_id": resolved_forecaster_run_id, "question_id": question_id},
         ).fetchdf()
         ensemble_spd = ensemble_df.to_dict(orient="records")
 
+        raw_order_fields: List[str] = []
+        if _table_has_columns(con, "forecasts_raw", ["horizon_m"]):
+            raw_order_fields.append("horizon_m")
+        elif _table_has_columns(con, "forecasts_raw", ["month_index"]):
+            raw_order_fields.append("month_index")
+        if _table_has_columns(con, "forecasts_raw", ["class_bin"]):
+            raw_order_fields.append("class_bin")
+        elif _table_has_columns(con, "forecasts_raw", ["bucket_index"]):
+            raw_order_fields.append("bucket_index")
+        if _table_has_columns(con, "forecasts_raw", ["model_name"]):
+            raw_order_fields.append("model_name")
+        raw_order_clause = ""
+        if raw_order_fields:
+            raw_order_clause = " ORDER BY " + ", ".join(raw_order_fields)
+
         raw_df = con.execute(
-            """
+            f"""
             SELECT *
             FROM forecasts_raw
             WHERE run_id = :run_id AND question_id = :question_id
-            ORDER BY model_name, month_index, bucket_index
+            {raw_order_clause}
             """,
             {"run_id": resolved_forecaster_run_id, "question_id": question_id},
         ).fetchdf()

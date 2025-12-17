@@ -16,7 +16,6 @@ from pythia.api.app import app
 def _write_config(tmp_path: Path, db_path: Path, token: str) -> Path:
     cfg = {
         "app": {"db_url": f"duckdb:///{db_path}"},
-        "security": {"api_tokens": [token], "api_token_header": "X-Pythia-Token"},
     }
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -24,13 +23,15 @@ def _write_config(tmp_path: Path, db_path: Path, token: str) -> Path:
 
 
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestClient, None, None]:
+def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[str, str], None, None]:
     db_path = tmp_path / "bundle.duckdb"
     con = duckdb.connect(str(db_path), read_only=False)
     con.execute(
         """
-        CREATE TABLE hs_runs (hs_run_id TEXT, generated_at TIMESTAMP);
-        INSERT INTO hs_runs VALUES ('hs-old', TIMESTAMP '2024-01-01'), ('hs-new', TIMESTAMP '2024-02-01');
+        CREATE TABLE hs_runs (hs_run_id TEXT, generated_at TIMESTAMP, created_at TIMESTAMP);
+        INSERT INTO hs_runs VALUES
+          ('hs-old', TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-01'),
+          ('hs-new', TIMESTAMP '2024-02-01', TIMESTAMP '2024-02-01');
         CREATE TABLE hs_triage (
             run_id TEXT, iso3 TEXT, hazard_code TEXT, tier TEXT, triage_score DOUBLE, created_at TIMESTAMP,
             drivers_json TEXT, regime_shifts_json TEXT, data_quality_json TEXT
@@ -85,6 +86,14 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestCli
           ('f-new', 'Q1', '2025-06', '{"ctx":"new"}', '{"pa":2}');
         CREATE TABLE resolutions (question_id TEXT, observed_month TEXT, value DOUBLE);
         INSERT INTO resolutions VALUES ('Q1', '2025-01', 12.0);
+        CREATE TABLE llm_calls (
+            call_id TEXT, run_id TEXT, hs_run_id TEXT, question_id TEXT, phase TEXT, prompt_text TEXT,
+            response_text TEXT, parsed_json TEXT, usage_json TEXT, timestamp TIMESTAMP, iso3 TEXT,
+            hazard_code TEXT
+        );
+        INSERT INTO llm_calls VALUES
+          ('c1', 'f-new', NULL, 'Q1', 'research_v2', 'prompt', 'response', '{"foo":1}', '{"bar":2}', now(), NULL, NULL),
+          ('c2', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt', 'hs response', '{"note":"triage"}', '{"usage":1}', now(), 'KEN', 'DR');
         """
     )
     con.close()
@@ -92,14 +101,24 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[TestCli
     token = "secret-token"
     config_path = _write_config(tmp_path, db_path, token)
     monkeypatch.setenv("PYTHIA_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("PYTHIA_API_TOKEN", token)
     pythia_config.load.cache_clear()
 
-    headers = {"X-Pythia-Token": token}
-    client = TestClient(app, headers=headers)
     try:
-        yield client
+        yield {"token": token}
     finally:
         pythia_config.load.cache_clear()
+        monkeypatch.delenv("PYTHIA_API_TOKEN", raising=False)
+
+
+@pytest.fixture()
+def client(api_env: dict[str, str]) -> TestClient:
+    return TestClient(app, headers={"Authorization": f"Bearer {api_env['token']}"})
+
+
+@pytest.fixture()
+def unauthorized_client(api_env: dict[str, str]) -> TestClient:
+    return TestClient(app)
 
 
 def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
@@ -114,3 +133,40 @@ def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
     assert data["forecast"]["research"]["run_id"] == "f-new"
     assert data["context"]["question_context"]["run_id"] == "f-new"
     assert data["llm_calls"]["included"] is False
+
+
+def test_question_bundle_requires_auth(unauthorized_client: TestClient) -> None:
+    resp = unauthorized_client.get("/v1/question_bundle", params={"question_id": "Q1"})
+    assert resp.status_code == 401
+
+
+def test_question_bundle_accepts_legacy_header(api_env: dict[str, str]) -> None:
+    client = TestClient(app, headers={"X-Pythia-Token": api_env["token"]})
+    resp = client.get("/v1/question_bundle", params={"question_id": "Q1"})
+    assert resp.status_code == 200
+
+
+def test_question_bundle_llm_calls_toggle(client: TestClient) -> None:
+    resp = client.get(
+        "/v1/question_bundle",
+        params={"question_id": "Q1", "include_llm_calls": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["llm_calls"]["included"] is True
+    assert data["llm_calls"]["transcripts_included"] is False
+    assert len(data["llm_calls"]["rows"]) == 2
+    assert all("prompt_text" not in row for row in data["llm_calls"]["rows"])
+
+
+def test_question_bundle_llm_calls_with_transcripts(client: TestClient) -> None:
+    resp = client.get(
+        "/v1/question_bundle",
+        params={"question_id": "Q1", "include_llm_calls": True, "include_transcripts": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["llm_calls"]["transcripts_included"] is True
+    assert any("prompt_text" in row for row in data["llm_calls"]["rows"])

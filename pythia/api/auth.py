@@ -3,8 +3,9 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
+import os
+
 from fastapi import Header, HTTPException, Request
-from pythia.config import load as load_cfg
 
 
 def _extract_header(request: Request, header_name: str) -> str | None:
@@ -12,17 +13,33 @@ def _extract_header(request: Request, header_name: str) -> str | None:
     return request.headers.get(header_name) or request.headers.get(header_name.lower())
 
 
+def _env_token() -> str | None:
+    return os.getenv("PYTHIA_API_TOKEN") or os.getenv("PYTHIA_API_KEY")
+
+
+def _extract_bearer(value: str | None) -> str | None:
+    if not value:
+        return None
+    if not value.lower().startswith("bearer "):
+        return None
+    token = value.split(" ", 1)[1].strip()
+    return token or None
+
+
 def require_token(
-    request: Request, x_pythia_token: str | None = Header(default=None, convert_underscores=False)
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_pythia_token: str | None = Header(default=None, convert_underscores=False),
 ):
-    cfg = load_cfg() or {}
-    security_cfg = cfg.get("security") or {}
-    want = set(security_cfg.get("api_tokens") or [])
-    header_name = security_cfg.get("api_token_header") or "X-Pythia-Token"
+    expected = _env_token()
 
-    provided = x_pythia_token or _extract_header(request, header_name) or _extract_header(
-        request, "X-Pythia-Token"
-    )
+    # If no token is configured, allow requests (useful for local dev/testing).
+    if not expected:
+        return
 
-    if not provided or provided not in want:
+    provided = _extract_bearer(authorization) or _extract_bearer(_extract_header(request, "Authorization"))
+    if not provided:
+        provided = x_pythia_token or _extract_header(request, "X-Pythia-Token")
+
+    if provided != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
