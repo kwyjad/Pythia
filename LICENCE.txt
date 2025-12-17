@@ -1,0 +1,272 @@
+Pythia Non-Commercial Public License
+Version 1.0
+
+Copyright (c) 2025 Kevin Wyjad
+
+1. Definitions
+
+1.1. "Software" means the Pythia codebase and any associated files
+distributed by the Licensor under this License, including any
+modifications or derivative works made by you or others.
+
+1.2. "Licensor" means Kevin Wyjad.
+
+1.3. "You" (or "your") means any person or entity exercising rights
+under this License.
+
+1.4. "Non-Commercial Use" means any use of the Software that:
+
+    (a) is not intended for or directed toward commercial advantage
+        or monetary compensation; and
+
+    (b) does not involve, and is not intended to lead to, the
+        development, operation, or enhancement of a product or
+        service that is offered for sale, license, subscription,
+        paid consulting, or other commercial benefit.
+
+    Non-Commercial Use specifically includes, for example:
+
+        • academic research, teaching, student projects, and
+          publications conducted by universities and other
+          not-for-profit educational institutions;
+
+        • internal use by United Nations entities, intergovernmental
+          organizations, and international financial institutions
+          (including, without limitation, the World Bank Group,
+          regional development banks, and UN specialized agencies)
+          where such use supports their public-interest, development,
+          or humanitarian mandates and is not carried out for profit;
+
+        • internal use by non-profit, charitable, or humanitarian
+          organizations (including NGOs, Red Cross / Red Crescent
+          societies, and similar) in support of public-interest or
+          humanitarian programmes;
+
+        • internal use by public-sector institutions and government
+          agencies in support of non-commercial public policy,
+          preparedness, or humanitarian activities;
+
+        • personal learning, experimentation, and non-commercial
+          research by individuals.
+
+    The fact that a user or organization has a budget, receives
+    grants or public funding, or pays salaries does not by itself
+    make a use "Commercial". The key question is whether the Software
+    is being used to deliver or support a product or service that is
+    sold or otherwise monetized, or to generate profit or commercial
+    competitive advantage.
+
+1.5. "Commercial Use" means any use of the Software that is not
+Non-Commercial Use, including (without limitation):
+
+    (a) using the Software, or a work based on it, as part of any
+        product or service that is sold, licensed, or otherwise
+        monetized, whether directly (e.g. a paid software product,
+        SaaS platform, API, or data service) or indirectly (e.g.
+        bundled into a paid consulting engagement);
+
+    (b) using the Software to deliver, support, or enhance consulting,
+        integration, analytics, or other professional services for
+        which fees are charged, including when the main sale is a
+        service contract rather than the Software itself;
+
+    (c) using the Software in systems whose primary purpose is to
+        generate revenue, reduce commercial costs, or provide
+        competitive advantage for a for-profit business, including
+        internal tools used to support commercial operations.
+
+If you are unsure whether your use is Commercial Use, you must treat
+it as Commercial Use and seek a separate written license from the
+Licensor at: kevin.wyjad@gmail
+
+1.6. "Modified Version" means any work that is based on or derived
+from the Software under applicable copyright law, including any
+modifications, translations, adaptations, or combinations with other
+code, other than mere aggregation on a storage or distribution
+medium.
+
+
+2. Grant of License for Non-Commercial Use
+
+Subject to your full compliance with this License, the Licensor grants
+you a worldwide, royalty-free, non-exclusive license, solely for
+Non-Commercial Use, to:
+
+    (a) use and run the Software;
+    (b) reproduce the Software;
+    (c) create Modified Versions of the Software; and
+    (d) distribute the Software and Modified Versions, in source or
+        object form, to third parties, under the conditions set out
+        below.
+
+
+3. Copyleft and Source-Code Availability
+
+3.1. Same License. If you distribute the Software or any Modified
+Version to any third party in any form (including as part of a hosted
+service that is accessible outside your organization), you must
+license the entire work that is based on the Software under this same
+License. You may not add terms that further restrict the rights
+granted by this License.
+
+3.2. Source Code. If you distribute the Software or a Modified
+Version, you must make the complete corresponding source code of the
+distributed version available to all recipients, at no charge beyond
+reasonable costs of distribution (if any). This source code must be
+provided under this same License.
+
+3.3. Notices. You must:
+
+    (a) retain all copyright notices, attributions, and references
+        to this License in the Software and any Modified Version;
+
+    (b) clearly mark any files you have changed with a notice of
+        your changes and the date of change; and
+
+    (c) acknowledge the original project in documentation or
+        notices as follows (or in a substantially similar form):
+
+        "This work is based on Pythia, developed by Kevin Wyjad
+        and contributors."
+
+3.4. Mere Aggregation. Merely aggregating the Software with separate
+and independent works on a storage or distribution medium, without
+combining or integrating them into a single program, does not create
+a Modified Version and does not subject those separate works to this
+License.
+
+
+4. Commercial Use Requires Separate Agreement
+
+4.1. No Commercial Rights. This License does not grant you any rights
+to Commercial Use of the Software or any Modified Version. All
+Commercial Use is expressly excluded from the scope of this License.
+
+4.2. Separate Commercial License. Any Commercial Use of the Software
+or a Modified Version requires a separate written agreement signed by
+the Licensor. For commercial licensing inquiries, contact:
+
+    kevin.wyjad@gmail
+
+4.3. Breach. Any Commercial Use of the Software or a Modified Version
+without such a separate written agreement constitutes a material
+breach of this License and automatically terminates your rights under
+this License.
+
+
+5. Contributions and Patents
+
+5.1. Contributions. If you submit code or other material to the
+Licensor for inclusion in the Software ("Contributions"), you grant
+the Licensor a perpetual, worldwide, non-exclusive, royalty-free
+license to use, reproduce, modify, and distribute your Contributions
+as part of the Software under this License and any future versions
+or alternative licenses that the Licensor may adopt.
+
+5.2. Patent Grant (Non-Commercial Only). To the extent you own or
+control patent claims that would be infringed by your Contributions
+alone or by their combination with the Software, you grant to the
+Licensor and all recipients of the Software a perpetual, worldwide,
+non-exclusive, royalty-free license to practice those patent claims
+solely as necessary to use, modify, and distribute the Software for
+Non-Commercial Use under this License.
+
+5.3. Patent Retaliation. If you initiate patent litigation alleging
+that the Software or a Modified Version infringes a patent, your
+rights under this License terminate immediately.
+
+
+6. Trademarks
+
+This License does not grant you any rights in any names, logos, or
+trademarks of the Licensor or the Pythia project.
+
+
+7. Warranty Disclaimer
+
+The Software is provided "as is". To the maximum extent permitted by
+applicable law, the Licensor makes no representations or warranties
+of any kind, express or implied, including but not limited to any
+warranties of merchantability, fitness for a particular purpose,
+non-infringement, or that the Software will be error-free or secure.
+You use the Software at your own risk.
+
+
+8. Limitation of Liability
+
+To the maximum extent permitted by applicable law, in no event will
+the Licensor or any contributor be liable for any indirect, special,
+incidental, consequential, or punitive damages, or any loss of data,
+profits, or revenue, arising out of or in connection with the use of
+or inability to use the Software, even if advised of the possibility
+of such damages. Any direct liability shall be limited to the amount,
+if any, you paid to the Licensor for a license to use the Software. 
+Use at your own risk. This is experimental forecasting software. It 
+does not give god-like views of the future. It might be absolute rubbish.
+Probably its wrong most of the time. Use some common sense. 
+
+
+9. Termination
+
+9.1. Automatic Termination. This License terminates automatically if
+you fail to comply with any of its terms.
+
+9.2. Effect of Termination. Upon termination, you must cease all use,
+reproduction, and distribution of the Software and any Modified
+Versions. Termination does not affect the rights of any third parties
+who received the Software or Modified Versions from you, provided
+they remain in full compliance with this License.
+
+9.3. Reinstatement. The Licensor may, at their sole discretion, offer
+to reinstate your rights under this License if you cure the breach
+within a reasonable time.
+
+
+10. Miscellaneous
+
+10.1. Severability. If any provision of this License is held
+unenforceable, the remaining provisions will remain in full force
+and effect.
+
+10.2. Governing Law. This License is governed by the laws of
+[TBD JURISDICTION], excluding its conflict-of-law rules. If you do
+not specify a jurisdiction, the laws of the Licensor’s country of
+residence at the time of distribution shall apply.
+
+10.3. New Versions. The Licensor may publish new versions of this
+License from time to time. Each version will be given a distinguishing
+version number. You may continue to use any version you originally
+received, or you may choose to adopt a later version published by the
+Licensor.
+
+
+11. Collaboration and Contact
+
+11.1. Collaboration Interest. The Licensor is particularly interested
+in collaboration with:
+
+    • United Nations entities and other multilateral organizations
+      working on humanitarian action, anticipatory action, and risk
+      analysis;
+
+    • international financial institutions (including multilateral
+      development banks) exploring risk-informed financing,
+      preparedness, and anticipatory instruments;
+
+    • non-governmental organizations and other humanitarian actors
+      using forecasting or risk analytics for preparedness and
+      response; and
+
+    • academic researchers working on forecasting, humanitarian data,
+      and related fields.
+
+11.2. Contact. If you are using Pythia in academic, humanitarian, or
+public-interest projects, or are interested in joint work, research,
+or co-authorship, you are strongly encouraged (but not legally
+required) to contact the Licensor at:
+
+    kevin.wyjad@gmail
+
+This section is intended to encourage collaboration and does not
+create additional legal obligations beyond those elsewhere in this
+License.
