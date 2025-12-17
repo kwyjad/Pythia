@@ -31,7 +31,7 @@ from resolver.ingestion.utils.io import (
     resolve_ingestion_window,
     resolve_output_path,
 )
-from resolver.ingestion.utils.iso_normalize import to_iso3
+from resolver.ingestion.utils.iso_normalize import resolve_iso3, to_iso3
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -611,10 +611,10 @@ def _prepare_dataframe(
     fatalities_keys = keys.get("fatalities", [])
     notes_keys = keys.get("notes", [])
 
-    iso_lookup = {str(row.iso3).strip().upper(): str(row.country_name)
-                  for row in countries.itertuples(index=False)}
-    name_lookup = {str(row.country_name).strip().lower(): str(row.iso3).strip().upper()
-                   for row in countries.itertuples(index=False)}
+    iso_lookup = {
+        str(row.iso3).strip().upper(): str(row.country_name)
+        for row in countries.itertuples(index=False)
+    }
 
     rows: List[Dict[str, Any]] = []
     for record in records:
@@ -623,9 +623,16 @@ def _prepare_dataframe(
         if not month:
             continue
         iso = str(_extract_first(record, iso_keys) or "").strip().upper()
-        if not iso:
-            country_name = str(_extract_first(record, country_keys) or "").strip()
-            iso = name_lookup.get(country_name.lower(), "") if country_name else ""
+
+        # If explicit iso field isn't usable, fall back to robust alias/name resolution.
+        if not iso or iso not in iso_lookup:
+            resolved, _reason = resolve_iso3(
+                record,
+                aliases=None,
+                name_keys=tuple(country_keys) if country_keys else None,
+            )
+            iso = (resolved or "").strip().upper()
+
         if not iso or iso not in iso_lookup:
             continue
         country_name = iso_lookup[iso]

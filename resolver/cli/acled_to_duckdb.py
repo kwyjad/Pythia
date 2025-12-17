@@ -415,6 +415,35 @@ def run(argv: Sequence[str] | None = None) -> int:
     }
     _write_cli_frame_diag(diag_payload)
 
+    iso_counts_df = pd.DataFrame(columns=["iso3", "count"])
+    cod_present = False
+    if not frame.empty and "iso3" in frame.columns:
+        iso_series = (
+            frame["iso3"]
+            .astype("string")
+            .str.strip()
+            .str.upper()
+        )
+        iso_series = iso_series[~iso_series.isna() & (iso_series != "")]
+        cod_present = "COD" in set(iso_series)
+        if not iso_series.empty:
+            iso_counts_df = (
+                iso_series.to_frame(name="iso3")
+                .groupby("iso3", as_index=False)
+                .size()
+                .rename(columns={"size": "count"})
+                .sort_values(["count", "iso3"], ascending=[False, True])
+                .head(10)
+            )
+
+    print("ACLED CLI — top ISO3 counts (first 10):")
+    if iso_counts_df.empty:
+        print(" - (no iso3 values)")
+    else:
+        for record in iso_counts_df.itertuples(index=False):
+            print(f" - {record.iso3}: {int(record.count)}")
+    print(f" - COD present: {'yes' if cod_present else 'no'}")
+
     diagnostics_block = [
         "",
         "### ACLED CLI diagnostics",
@@ -434,6 +463,21 @@ def run(argv: Sequence[str] | None = None) -> int:
     else:
         diagnostics_block.append("- Preview: (no grouped rows)")
     summary_lines.extend(diagnostics_block)
+
+    iso_counts_block = [
+        "",
+        "#### ISO3 counts (top 10)",
+        f"- COD present: {'yes' if cod_present else 'no'}",
+    ]
+    if iso_counts_df.empty:
+        iso_counts_block.append("- ISO3 counts: (no iso3 values)")
+    else:
+        iso_counts_block.append("")
+        iso_counts_block.append("| iso3 | count |")
+        iso_counts_block.append("| --- | --- |")
+        for record in iso_counts_df.itertuples(index=False):
+            iso_counts_block.append(f"| {record.iso3} | {int(record.count)} |")
+    summary_lines.extend(iso_counts_block)
 
     if frame.empty:
         meta_rel = _relpath(ACLED_CLI_FETCH_META_PATH)

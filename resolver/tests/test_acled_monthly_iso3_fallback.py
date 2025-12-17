@@ -12,6 +12,7 @@ from typing import Any, Dict
 import pandas as pd
 import pytest
 
+from resolver.ingestion import acled_client as acled_client_module
 from resolver.ingestion.acled_client import ACLEDClient
 
 
@@ -88,3 +89,31 @@ def test_acled_existing_iso3_preserved(monkeypatch: pytest.MonkeyPatch):
     row = monthly.iloc[0]
     assert row["iso3"] == "KEN"
     assert row["fatalities"] == 3
+
+
+def test_prepare_dataframe_resolves_cod_alias():
+    config = {
+        "keys": {
+            "iso3": ["iso3"],
+            "country": ["country"],
+            "date": ["event_date"],
+            "event_type": ["event_type"],
+            "fatalities": ["fatalities"],
+            "notes": [],
+        }
+    }
+    countries = pd.DataFrame(
+        {"iso3": ["COD"], "country_name": ["Democratic Republic of the Congo"]}
+    )
+    records = [
+        {
+            "event_date": "2025-01-15",
+            "country": "Democratic Republic of the Congo",
+            "fatalities": 7,
+        }
+    ]
+
+    frame = acled_client_module._prepare_dataframe(records, config, countries)
+
+    assert not frame.empty
+    assert frame.loc[0, "iso3"] == "COD"
