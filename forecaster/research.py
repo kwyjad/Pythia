@@ -557,7 +557,9 @@ def _rank_and_filter_items(items: List[Dict[str, Any]], anchors: Dict[str, List[
 # COMPOSE THE RESEARCH BRIEF (Gemini only for research)
 # =============================================================================
 
-async def _compose_research_via_gemini(prompt_text: str, *, model: str | None = None) -> tuple[str, str, dict, dict, str]:
+async def _compose_research_via_gemini(
+    prompt_text: str, *, model: str | None = None, run_id: str | None = None
+) -> tuple[str, str, dict, dict, str]:
     """
     Returns (text, used_model_id, usage_dict, request_body, resolved_model).
     Never references undefined 'body'; always returns a body dict.
@@ -584,6 +586,7 @@ async def _compose_research_via_gemini(prompt_text: str, *, model: str | None = 
             prompt_key="research.compose",
             prompt_version="1.0.0",
             component="Researcher",
+            run_id=run_id,
         )
         if error:
             _set_research_error(error)
@@ -751,7 +754,7 @@ async def run_research_async(
     async def _call_llm(prompt_text: str, **kwargs) -> tuple[str, Dict[str, Any]]:
         nonlocal req_body, used_llm, research_model
         text, model_id, usage, body, resolved_model = await _compose_research_via_gemini(
-            prompt_text, model=research_model
+            prompt_text, model=research_model, run_id=run_id
         )
         req_body = body
         used_llm = model_id or used_llm

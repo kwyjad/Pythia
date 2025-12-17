@@ -63,6 +63,58 @@ llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
 
 
 # ---------------------------------------------------------------------------
+# Provider failure tracking (per run)
+# ---------------------------------------------------------------------------
+
+_PROVIDER_FAILURE_THRESHOLD = int(os.getenv("PROVIDER_FAILURE_THRESHOLD", "2") or 2)
+_RUN_PROVIDER_FAILURES: Dict[str, Dict[str, int]] = {}
+_RUN_PROVIDER_DISABLED: Dict[str, set[str]] = {}
+
+
+def _resolve_run_key(run_id: str | None = None) -> str:
+    for candidate in (
+        run_id,
+        os.getenv("PYTHIA_FORECASTER_RUN_ID"),
+        os.getenv("PYTHIA_HS_RUN_ID"),
+        os.getenv("PYTHIA_UI_RUN_ID"),
+    ):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    return "default"
+
+
+def reset_provider_failures_for_run(run_id: str | None = None) -> None:
+    key = _resolve_run_key(run_id)
+    _RUN_PROVIDER_FAILURES.pop(key, None)
+    _RUN_PROVIDER_DISABLED.pop(key, None)
+
+
+def _note_provider_failure(provider: str, run_id: str | None = None) -> int:
+    key = _resolve_run_key(run_id)
+    run_failures = _RUN_PROVIDER_FAILURES.setdefault(key, {})
+    count = int(run_failures.get(provider, 0)) + 1
+    run_failures[provider] = count
+    if count >= _PROVIDER_FAILURE_THRESHOLD:
+        _RUN_PROVIDER_DISABLED.setdefault(key, set()).add(provider)
+    return count
+
+
+def _provider_failures_for_run(provider: str, run_id: str | None = None) -> int:
+    key = _resolve_run_key(run_id)
+    return int(_RUN_PROVIDER_FAILURES.get(key, {}).get(provider, 0))
+
+
+def is_provider_disabled_for_run(provider: str, run_id: str | None = None) -> bool:
+    key = _resolve_run_key(run_id)
+    return provider in _RUN_PROVIDER_DISABLED.get(key, set())
+
+
+def disabled_providers_for_run(run_id: str | None = None) -> List[str]:
+    key = _resolve_run_key(run_id)
+    return sorted(_RUN_PROVIDER_DISABLED.get(key, set()))
+
+
+# ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
@@ -691,11 +743,22 @@ async def call_chat_ms(
     prompt_key: str = "forecaster.forecast",
     prompt_version: Optional[str] = None,
     component: str = "Forecaster",
+    run_id: str | None = None,
 ) -> tuple[str, Dict[str, int], str]:
     """Call the configured provider for a model spec and return (text, usage, error)."""
 
     if not ms.active:
         return "", usage_to_dict(None), f"provider {ms.provider} inactive"
+
+    run_key = _resolve_run_key(run_id)
+    if is_provider_disabled_for_run(ms.provider, run_key):
+        usage = usage_to_dict(None)
+        usage["provider_disabled_after_failures"] = True
+        usage["provider_failures_in_run"] = _provider_failures_for_run(ms.provider, run_key)
+        return "", usage, (
+            f"provider {ms.provider} disabled after {_PROVIDER_FAILURE_THRESHOLD} failures"
+            f" for run {run_key}"
+        )
 
     start = time.time()
     result: Optional[ProviderResult] = None
@@ -727,6 +790,10 @@ async def call_chat_ms(
     )
 
     if error:
+        failure_count = _note_provider_failure(ms.provider, run_key)
+        usage["provider_failures_in_run"] = failure_count
+        if is_provider_disabled_for_run(ms.provider, run_key):
+            usage["provider_disabled_after_failures"] = True
         return "", usage, error
     return result.text or "", usage, ""
 

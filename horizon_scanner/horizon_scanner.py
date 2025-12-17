@@ -25,7 +25,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from forecaster.providers import GEMINI_MODEL_ID, ModelSpec, call_chat_ms, estimate_cost_usd
+from forecaster.providers import (
+    GEMINI_MODEL_ID,
+    ModelSpec,
+    call_chat_ms,
+    estimate_cost_usd,
+    reset_provider_failures_for_run,
+)
 from horizon_scanner.db_writer import (
     BLOCKED_HAZARDS,
     HAZARD_CONFIG,
@@ -223,7 +229,7 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
         con.close()
 
 
-async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, ModelSpec]:
+async def _call_hs_model(prompt_text: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     spec = ModelSpec(
         name="Gemini",
         provider="google",
@@ -239,6 +245,7 @@ async def _call_hs_model(prompt_text: str) -> tuple[str, Dict[str, Any], str, Mo
             prompt_key="hs.triage.v2",
             prompt_version="1.0.0",
             component="HorizonScanner",
+            run_id=run_id,
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -265,7 +272,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
         )
 
         call_start = time.time()
-        text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt))
+        text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt, run_id=run_id))
         usage = usage or {}
         usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
 
@@ -393,6 +400,7 @@ def main(countries: list[str] | None = None):
     start_time = datetime.utcnow()
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
+    reset_provider_failures_for_run(run_id)
 
     country_entries = _load_country_list(countries)
     if not country_entries:
