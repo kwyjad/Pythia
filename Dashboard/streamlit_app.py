@@ -110,14 +110,14 @@ def _http_get(url: str, token: str = "") -> bytes:
 
 
 def _api_get(path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, object]:
-    headers = {"X-Pythia-Token": API_TOKEN} if API_TOKEN else {}
+    headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
     r = requests.get(API_BASE + path, params=params, headers=headers)
     r.raise_for_status()
     return r.json()
 
 
 def _api_post(path: str, payload: Dict[str, object]) -> Dict[str, object]:
-    headers = {"X-Pythia-Token": API_TOKEN} if API_TOKEN else {}
+    headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
     r = requests.post(API_BASE + path, json=payload, headers=headers)
     r.raise_for_status()
     return r.json()
