@@ -188,11 +188,40 @@ jobs:
           FOUND_RUN_ID=""
           FOUND_CREATED_AT=""
 
+          download_artifact_with_retries() {
+            local run_id="$1"
+            local artifact_name="$2"
+            local out_dir="$3"
+            local max_attempts="${4:-6}"
+
+            local attempt=1
+            while [ "$attempt" -le "$max_attempts" ]; do
+              echo "Downloading artifact '${artifact_name}' from run ${run_id} (attempt ${attempt}/${max_attempts})"
+
+              # avoid partial/old contents
+              rm -rf "${out_dir}/pythia-resolver-db" || true
+
+              if gh run download "$run_id" -n "$artifact_name" --dir "$out_dir"; then
+                echo "Download OK."
+                return 0
+              fi
+
+              rc=$?
+              sleep_seconds=$(( 5 * attempt * attempt ))  # 5, 20, 45, 80, 125...
+              echo "Download failed (exit=${rc}). Sleeping ${sleep_seconds}s before retry..."
+              sleep "${sleep_seconds}"
+              attempt=$((attempt + 1))
+            done
+
+            echo "ERROR: Failed to download artifact '${artifact_name}' from run ${run_id} after ${max_attempts} attempts."
+            return 1
+          }
+
           while IFS=',' read -r CREATED RUN_ID LABEL; do
             echo "Attempting canonical DB download from ${LABEL} (run ${RUN_ID}, created ${CREATED})"
             rm -rf data/pythia-resolver-db
             rm -f data/resolver.duckdb
-            if ! gh run download "$RUN_ID" -n pythia-resolver-db --dir data; then
+            if ! download_artifact_with_retries "$RUN_ID" "pythia-resolver-db" data 6; then
               echo "Download failed for run ${RUN_ID}; trying next candidate."
               continue
             fi
