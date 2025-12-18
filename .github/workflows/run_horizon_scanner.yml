@@ -28,6 +28,11 @@ on:
         required: false
         default: ""
         type: string
+      db_artifact_name:
+        description: "Artifact name to download from db_run_id (default: pythia-resolver-db). Use pythia-resolver-db-reset for bootstrap runs."
+        required: false
+        default: "pythia-resolver-db"
+        type: string
 
 # --- Job Definition ---
 jobs:
@@ -128,6 +133,8 @@ jobs:
           rm -rf data/pythia-resolver-db
 
           OVERRIDE_RUN_ID="${{ github.event.inputs.db_run_id }}"
+          DB_ARTIFACT_NAME_INPUT="${{ github.event.inputs.db_artifact_name }}"
+          DB_ARTIFACT_NAME="${DB_ARTIFACT_NAME_INPUT:-pythia-resolver-db}"
 
           if [ -n "$OVERRIDE_RUN_ID" ]; then
             if ! echo "$OVERRIDE_RUN_ID" | grep -Eq '^[0-9]+$'; then
@@ -135,12 +142,20 @@ jobs:
               exit 1
             fi
 
+            DB_RUN_ID="$OVERRIDE_RUN_ID"
+            DB_SOURCE="override"
             {
               echo "DB_RUN_ID=$OVERRIDE_RUN_ID"
               echo "DB_SOURCE=override"
               echo "DB_CREATED_AT=manual-override"
+              echo "DB_ARTIFACT_NAME=${DB_ARTIFACT_NAME}"
             } >> "$GITHUB_ENV"
-            echo "DB selection: source=override run_id=$OVERRIDE_RUN_ID"
+            echo "DB selection: source=override run_id=$OVERRIDE_RUN_ID artifact=${DB_ARTIFACT_NAME}"
+          fi
+
+          if [ -z "${DB_ARTIFACT_NAME:-}" ]; then
+            DB_ARTIFACT_NAME="pythia-resolver-db"
+            echo "DB_ARTIFACT_NAME=pythia-resolver-db" >> "$GITHUB_ENV"
           fi
 
           if [ -z "${DB_RUN_ID:-}" ]; then
@@ -166,21 +181,32 @@ jobs:
             BACKFILL_CREATED=$(echo "$BACKFILL_LINE" | cut -d',' -f1 || true)
 
             if [ -n "$PIPELINE_RUN_ID" ]; then
+              DB_ARTIFACT_NAME="pythia-resolver-db"
+              DB_RUN_ID="$PIPELINE_RUN_ID"
+              DB_SOURCE="pipeline"
               {
                 echo "DB_RUN_ID=$PIPELINE_RUN_ID"
                 echo "DB_SOURCE=pipeline"
                 echo "DB_CREATED_AT=$PIPELINE_CREATED"
+                echo "DB_ARTIFACT_NAME=pythia-resolver-db"
               } >> "$GITHUB_ENV"
               echo "DB selection: source=pipeline run_id=$PIPELINE_RUN_ID"
             elif [ -n "$BACKFILL_RUN_ID" ]; then
+              DB_ARTIFACT_NAME="pythia-resolver-db"
+              DB_RUN_ID="$BACKFILL_RUN_ID"
+              DB_SOURCE="backfill"
               {
                 echo "DB_RUN_ID=$BACKFILL_RUN_ID"
                 echo "DB_SOURCE=backfill"
                 echo "DB_CREATED_AT=$BACKFILL_CREATED"
+                echo "DB_ARTIFACT_NAME=pythia-resolver-db"
               } >> "$GITHUB_ENV"
               echo "DB selection: source=backfill run_id=$BACKFILL_RUN_ID"
             else
+              DB_ARTIFACT_NAME="pythia-resolver-db"
+              DB_SOURCE="fresh"
               echo "DB_SOURCE=fresh" >> "$GITHUB_ENV"
+              echo "DB_ARTIFACT_NAME=pythia-resolver-db" >> "$GITHUB_ENV"
               echo "DB selection: source=fresh run_id=<none>"
             fi
           fi
@@ -190,12 +216,12 @@ jobs:
             exit 1
           fi
 
-          echo "DB download: source=${DB_SOURCE:-unknown} run_id=${DB_RUN_ID}"
+          echo "DB download: source=${DB_SOURCE:-unknown} run_id=${DB_RUN_ID} artifact=${DB_ARTIFACT_NAME:-pythia-resolver-db}"
 
           rm -rf data/pythia-resolver-db
           rm -f data/resolver.duckdb
 
-          if ! gh run download "$DB_RUN_ID" -n pythia-resolver-db --dir data; then
+          if ! gh run download "$DB_RUN_ID" -n "${DB_ARTIFACT_NAME:-pythia-resolver-db}" --dir data; then
             echo "ERROR: Download failed for run ${DB_RUN_ID}."
             exit 1
           fi
@@ -269,24 +295,16 @@ jobs:
 
       - name: Create questions from latest HS triage run
         env:
-          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
           set -e
           echo "Creating questions from hs_triage into resolver.duckdb..."
-          python -m scripts.create_questions_from_triage --db duckdb:///data/resolver.duckdb
-
-      - name: Create demo questions in resolver.duckdb (disabled)
-        run: |
-          set -e
-          echo "Demo questions disabled; skipping inserts."
-          python -m scripts.create_demo_questions --db duckdb:///data/resolver.duckdb
-        env:
-          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          python -m scripts.create_questions_from_triage --db "${PYTHIA_DB_URL}"
 
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Run Forecaster (Pythia mode on HS questions)
         env:
-          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
           PYTHIA_LLM_PROFILE: prod
           PYTHIA_SPD_V2_WRITE_BOTH: "1"
 
@@ -309,7 +327,7 @@ jobs:
 
       - name: Verify Forecaster wrote both aggregation methods
         env:
-          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
           set -e
           python - <<'PY'
@@ -317,7 +335,7 @@ jobs:
 
           from resolver.db import duckdb_io
 
-          db_url = os.environ.get("PYTHIA_DB_URL", "duckdb:///data/resolver.duckdb")
+          db_url = os.environ["PYTHIA_DB_URL"]
 
           con = duckdb_io.get_db(db_url)
           try:
@@ -375,19 +393,21 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
         continue-on-error: true
         env:
-          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
           PYTHONPATH: ${{ github.workspace }}
         run: |
           set -e
           mkdir -p debug/eval
           python scripts/evaluate_spd_aggregations.py \
-            --db duckdb:///data/resolver.duckdb \
+            --db "${PYTHIA_DB_URL}" \
             --model-names ensemble_mean_v2,ensemble_bayesmc_v2 \
             --out-dir debug/eval
           ls -la debug/eval
 
       # Step 8: Diagnostics – DuckDB validation
       - name: Diagnostics — DuckDB
+        env:
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
           set -e
           echo "=== Post-run diagnostics ==="
@@ -402,17 +422,17 @@ jobs:
             echo "WARNING: DuckDB database $DB_PATH not found."
           fi
 
-          python scripts/post_run_diagnostics.py --db duckdb:///data/resolver.duckdb
+          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}"
 
       - name: Pythia v2 run summary
         run: |
           set -e
           python -m scripts.dump_pythia_v2_run_summary
         env:
-          PYTHIA_DB_URL: duckdb:///data/resolver.duckdb
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
 
       - name: Dump unified Pythia v2 debug bundle
-        run: python -m scripts.dump_pythia_debug_bundle --db duckdb:///data/resolver.duckdb
+        run: python -m scripts.dump_pythia_debug_bundle --db "${{ env.RESOLVER_DB_URL }}"
 
       - name: Upload unified debug bundle artifact
         uses: actions/upload-artifact@v4
