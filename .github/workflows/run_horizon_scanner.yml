@@ -249,7 +249,7 @@ jobs:
             from pythia.db.schema import ensure_schema
             ensure_schema()
             print("ensure_schema(): OK")
-            PY
+PY
           fi
 
           python -m scripts.ci.db_signature write \
