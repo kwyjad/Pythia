@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
-      PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
       SIGNATURE_OPTIONAL_TABLES: scenarios
       CANONICAL_DB_READY: "false"
@@ -249,7 +249,7 @@ jobs:
             from pythia.db.schema import ensure_schema
             ensure_schema()
             print("ensure_schema(): OK")
-            PY
+PY
           fi
 
           python -m scripts.ci.db_signature write \
