@@ -245,11 +245,7 @@ jobs:
           # Bootstrap-only: if we're starting from a fresh reset DB, ensure Pythia schema tables exist before signature check.
           if [ "${DB_ARTIFACT_NAME:-pythia-resolver-db}" = "pythia-resolver-db-reset" ]; then
             echo "Bootstrap DB detected (${DB_ARTIFACT_NAME}); ensuring Pythia schema tables exist before signature check."
-            PYTHIA_DB_URL="${RESOLVER_DB_URL}" python - <<'PY'
-            from pythia.db.schema import ensure_schema
-            ensure_schema()
-            print("ensure_schema(): OK")
-          PY
+            PYTHIA_DB_URL="${RESOLVER_DB_URL}" python -c "from pythia.db.schema import ensure_schema; ensure_schema(); print('ensure_schema(): OK')"
           fi
 
           python -m scripts.ci.db_signature write \
@@ -341,64 +337,7 @@ jobs:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
           set -e
-          python - <<'PY'
-          import os
-
-          from resolver.db import duckdb_io
-
-          db_url = os.environ["PYTHIA_DB_URL"]
-
-          con = duckdb_io.get_db(db_url)
-          try:
-              # show latest run_id
-              run_id = con.execute("SELECT max(run_id) FROM forecasts_ensemble").fetchone()[0]
-              print("latest_run_id:", run_id)
-
-              rows = con.execute(
-                  """
-                  SELECT model_name, count(*) as n
-                  FROM forecasts_ensemble
-                  WHERE run_id = ?
-                  GROUP BY 1
-                  ORDER BY n DESC
-                  """,
-                  [run_id],
-              ).fetchall()
-
-              print("model_name counts:", rows)
-
-              # Fail if we don't see BOTH expected model names
-              names = {r[0] for r in rows}
-              needed = {"ensemble_mean_v2", "ensemble_bayesmc_v2"}
-              missing = needed - names
-              if missing:
-                  raise SystemExit(
-                      f"Missing expected model_names in forecasts_ensemble: {missing}"
-                  )
-
-              pairs = con.execute(
-                  """
-                  SELECT question_id,
-                         SUM(CASE WHEN model_name='ensemble_mean_v2' THEN 1 ELSE 0 END) AS n_mean,
-                         SUM(CASE WHEN model_name='ensemble_bayesmc_v2' THEN 1 ELSE 0 END) AS n_bmc
-                  FROM forecasts_ensemble
-                  WHERE run_id = ?
-                  GROUP BY 1
-                  HAVING n_mean = 0 OR n_bmc = 0
-                  LIMIT 20
-                  """,
-                  [run_id],
-              ).fetchall()
-
-              if pairs:
-                  raise SystemExit(
-                      f"Some questions missing one aggregation method (showing up to 20): {pairs}"
-                  )
-
-              print("OK: both aggregation methods present.")
-          finally:
-              duckdb_io.close_db(con)
-          PY
+          python -m scripts.ci.verify_forecaster_aggregations --db "${PYTHIA_DB_URL}"
 
       - name: Evaluate SPD aggregations (Brier + log score)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
