@@ -182,6 +182,12 @@ jobs:
           fi
 
           sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
+
+          FOUND=0
+          FOUND_SOURCE=""
+          FOUND_RUN_ID=""
+          FOUND_CREATED_AT=""
+
           while IFS=',' read -r CREATED RUN_ID LABEL; do
             echo "Attempting canonical DB download from ${LABEL} (run ${RUN_ID}, created ${CREATED})"
             rm -rf data/pythia-resolver-db
@@ -221,28 +227,34 @@ jobs:
             fi
 
             if [ -f diagnostics/db_signature_before.json ]; then
-            {
-              echo "CANONICAL_DB_READY=true"
-              echo "CANONICAL_DB_SOURCE=${LABEL}"
-              echo "CANONICAL_DB_RUN_ID=${RUN_ID}"
-              echo "CANONICAL_CREATED_AT=${CREATED}"
-            } >> "$GITHUB_ENV"
-            echo "Baseline signature written to diagnostics/db_signature_before.json"
-            break
-          else
-            echo "Signature missing after validating run ${RUN_ID}; trying next candidate."
-          fi
+              FOUND=1
+              FOUND_SOURCE="${LABEL}"
+              FOUND_RUN_ID="${RUN_ID}"
+              FOUND_CREATED_AT="${CREATED}"
+              echo "Baseline signature written to diagnostics/db_signature_before.json"
+              break
+            else
+              echo "Signature missing after validating run ${RUN_ID}; trying next candidate."
+            fi
           done < "${CANDIDATES_FILE}.sorted"
-          if [ "${CANONICAL_DB_READY:-false}" != "true" ]; then
+          if [ "${FOUND}" -ne 1 ]; then
             echo "ERROR: Could not find a valid canonical resolver.duckdb with required tables; run run_horizon_scanner.yml once to seed HS tables, or rerun with reset_db=true to bootstrap."
             exit 1
           fi
+
+          {
+            echo "CANONICAL_DB_READY=true"
+            echo "CANONICAL_DB_SOURCE=${FOUND_SOURCE}"
+            echo "CANONICAL_DB_RUN_ID=${FOUND_RUN_ID}"
+            echo "CANONICAL_CREATED_AT=${FOUND_CREATED_AT}"
+          } >> "$GITHUB_ENV"
+
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/db_signature_before.json ]; then
             {
               echo "### Canonical DB signature (before run)"
-              echo "- Source workflow: ${CANONICAL_DB_SOURCE}"
-              echo "- Run ID: ${CANONICAL_DB_RUN_ID}"
-              echo "- Created: ${CANONICAL_CREATED_AT}"
+              echo "- Source workflow: ${FOUND_SOURCE}"
+              echo "- Run ID: ${FOUND_RUN_ID}"
+              echo "- Created: ${FOUND_CREATED_AT}"
               echo "- Signature file: diagnostics/db_signature_before.json"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
