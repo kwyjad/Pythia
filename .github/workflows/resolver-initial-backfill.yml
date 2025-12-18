@@ -206,8 +206,11 @@ jobs:
               cp "$SRC" data/resolver.duckdb
             fi
 
-            # shellcheck disable=SC2026
-            python -c "import json, os, sys, pathlib, duckdb; db_path='data/resolver.duckdb'; required=[t.strip() for t in os.environ.get('SIGNATURE_REQUIRED_TABLES','').split(',') if t.strip()]; optional=[t.strip() for t in os.environ.get('SIGNATURE_OPTIONAL_TABLES','').split(',') if t.strip()]; if not os.path.isfile(db_path): sys.exit('resolver.duckdb missing after download'); con=duckdb.connect(db_path); tables=sorted(r[0] for r in con.execute('SHOW TABLES').fetchall()); counts={t:int(con.execute(f\"SELECT COUNT(*) FROM {t}\").fetchone()[0]) if t in tables else None for t in required+optional}; con.close(); missing=[t for t in required if counts.get(t) is None]; if missing: sys.exit('Missing required tables: ' + str(missing)); signature={'db_path':str(pathlib.Path(db_path).resolve()),'size_bytes':os.path.getsize(db_path),'tables':tables,'required_counts':{t:counts.get(t) for t in required},'optional_counts':{t:counts.get(t) for t in optional}}; os.makedirs('diagnostics', exist_ok=True); json.dump(signature, open('diagnostics/db_signature_before.json','w',encoding='utf-8'), indent=2, sort_keys=True); print('DB size (bytes):', signature['size_bytes']); print('Tables:', ', '.join(signature['tables'])); print('Required row counts:'); [print('  - %s: %s' % (t, signature['required_counts'][t])) for t in required]; print('Optional row counts:'); [print('  - %s: %s' % (t, signature['optional_counts'][t])) for t in optional]"
+            python -m scripts.ci.db_signature write \
+              --db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_before.json
 
             if [ -f diagnostics/db_signature_before.json ]; then
             {
@@ -774,8 +777,12 @@ jobs:
           OPTIONAL_TABLES: ${{ env.SIGNATURE_OPTIONAL_TABLES }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2026
-          python -c "import json, os, sys, pathlib, duckdb; required=[t.strip() for t in os.environ.get('REQUIRED_TABLES','').split(',') if t.strip()]; optional=[t.strip() for t in os.environ.get('OPTIONAL_TABLES','').split(',') if t.strip()]; before_path='diagnostics/db_signature_before.json'; db_path=os.environ.get('BACKFILL_DB_PATH','data/resolver.duckdb'); if not os.path.isfile(before_path): sys.exit(f'Baseline signature not found: {before_path}'); if not os.path.isfile(db_path): sys.exit(f'Database not found at {db_path}'); with open(before_path,'r',encoding='utf-8') as f: before=json.load(f); con=duckdb.connect(db_path); tables=sorted(r[0] for r in con.execute('SHOW TABLES').fetchall()); counts={t:int(con.execute(f\"SELECT COUNT(*) FROM {t}\").fetchone()[0]) if t in tables else None for t in required+optional}; con.close(); missing=[t for t in required if counts.get(t) is None]; regressing=[(t, before.get('required_counts',{}).get(t), counts.get(t)) for t in required if before.get('required_counts',{}).get(t) is not None and counts.get(t) is not None and counts.get(t) < before.get('required_counts',{}).get(t)]; if missing: sys.exit('Missing required tables after backfill: ' + str(missing)); if regressing: sys.exit('Required tables regressed: ' + ', '.join(f'{t}: {after} < {before}' for t,before,after in regressing)); signature={'db_path':str(pathlib.Path(db_path).resolve()),'size_bytes':os.path.getsize(db_path),'tables':tables,'required_counts':{t:counts.get(t) for t in required},'optional_counts':{t:counts.get(t) for t in optional}}; os.makedirs('diagnostics', exist_ok=True); json.dump(signature, open('diagnostics/db_signature_after.json','w',encoding='utf-8'), indent=2, sort_keys=True); print('DB size (bytes):', signature['size_bytes']); print('Required row counts (after):'); [print('  - %s: %s' % (t, signature['required_counts'][t])) for t in required]; print('Optional row counts (after):'); [print('  - %s: %s' % (t, signature['optional_counts'][t])) for t in optional]"
+          python -m scripts.ci.db_signature compare \
+            --before diagnostics/db_signature_before.json \
+            --after-db "${BACKFILL_DB_PATH}" \
+            --required "${REQUIRED_TABLES}" \
+            --optional "${OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_after.json
 
           echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
           echo "signature_ok=true" >> "$GITHUB_OUTPUT"
