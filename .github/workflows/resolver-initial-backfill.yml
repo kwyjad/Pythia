@@ -218,6 +218,12 @@ jobs:
           }
 
           while IFS=',' read -r CREATED RUN_ID LABEL; do
+            if [ "$LABEL" = "Horizon Scanner Triage" ]; then
+              SOURCE_KIND="pipeline"
+            else
+              SOURCE_KIND="backfill"
+            fi
+
             echo "Attempting canonical DB download from ${LABEL} (run ${RUN_ID}, created ${CREATED})"
             rm -rf data/pythia-resolver-db
             rm -f data/resolver.duckdb
@@ -257,7 +263,7 @@ jobs:
 
             if [ -f diagnostics/db_signature_before.json ]; then
               FOUND=1
-              FOUND_SOURCE="${LABEL}"
+              FOUND_SOURCE="${SOURCE_KIND}"
               FOUND_RUN_ID="${RUN_ID}"
               FOUND_CREATED_AT="${CREATED}"
               echo "Baseline signature written to diagnostics/db_signature_before.json"
