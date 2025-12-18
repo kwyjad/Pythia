@@ -137,91 +137,6 @@ jobs:
           DB_ARTIFACT_NAME_INPUT="${{ github.event.inputs.db_artifact_name }}"
           DB_ARTIFACT_NAME="${DB_ARTIFACT_NAME_INPUT:-pythia-resolver-db}"
 
-          if [ -n "$OVERRIDE_RUN_ID" ]; then
-            if ! echo "$OVERRIDE_RUN_ID" | grep -Eq '^[0-9]+$'; then
-              echo "ERROR: db_run_id must be a numeric Actions run id from /actions/runs/<id>. Got: '$OVERRIDE_RUN_ID'"
-              exit 1
-            fi
-
-            DB_RUN_ID="$OVERRIDE_RUN_ID"
-            DB_SOURCE="override"
-            {
-              echo "DB_RUN_ID=$OVERRIDE_RUN_ID"
-              echo "DB_SOURCE=override"
-              echo "DB_CREATED_AT=manual-override"
-              echo "DB_ARTIFACT_NAME=${DB_ARTIFACT_NAME}"
-            } >> "$GITHUB_ENV"
-            echo "DB selection: source=override run_id=$OVERRIDE_RUN_ID artifact=${DB_ARTIFACT_NAME}"
-          fi
-
-          if [ -z "${DB_ARTIFACT_NAME:-}" ]; then
-            DB_ARTIFACT_NAME="pythia-resolver-db"
-            echo "DB_ARTIFACT_NAME=pythia-resolver-db" >> "$GITHUB_ENV"
-          fi
-
-          if [ -z "${DB_RUN_ID:-}" ]; then
-            CANDIDATES_FILE=$(mktemp)
-            gh run list \
-              --workflow "Horizon Scanner Triage" \
-              --branch main \
-              --status success \
-              --json databaseId,createdAt \
-              --limit 1 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
-            gh run list \
-              --workflow "Resolver — Initial Backfill" \
-              --branch main \
-              --status success \
-              --json databaseId,createdAt \
-              --limit 1 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
-
-            PIPELINE_LINE=$(grep "Horizon Scanner Triage" "${CANDIDATES_FILE}" | head -n 1 || true)
-            BACKFILL_LINE=$(grep "Resolver — Initial Backfill" "${CANDIDATES_FILE}" | head -n 1 || true)
-            PIPELINE_RUN_ID=$(echo "$PIPELINE_LINE" | cut -d',' -f2 || true)
-            BACKFILL_RUN_ID=$(echo "$BACKFILL_LINE" | cut -d',' -f2 || true)
-            PIPELINE_CREATED=$(echo "$PIPELINE_LINE" | cut -d',' -f1 || true)
-            BACKFILL_CREATED=$(echo "$BACKFILL_LINE" | cut -d',' -f1 || true)
-
-            if [ -n "$PIPELINE_RUN_ID" ]; then
-              DB_ARTIFACT_NAME="pythia-resolver-db"
-              DB_RUN_ID="$PIPELINE_RUN_ID"
-              DB_SOURCE="pipeline"
-              {
-                echo "DB_RUN_ID=$PIPELINE_RUN_ID"
-                echo "DB_SOURCE=pipeline"
-                echo "DB_CREATED_AT=$PIPELINE_CREATED"
-                echo "DB_ARTIFACT_NAME=pythia-resolver-db"
-              } >> "$GITHUB_ENV"
-              echo "DB selection: source=pipeline run_id=$PIPELINE_RUN_ID"
-            elif [ -n "$BACKFILL_RUN_ID" ]; then
-              DB_ARTIFACT_NAME="pythia-resolver-db"
-              DB_RUN_ID="$BACKFILL_RUN_ID"
-              DB_SOURCE="backfill"
-              {
-                echo "DB_RUN_ID=$BACKFILL_RUN_ID"
-                echo "DB_SOURCE=backfill"
-                echo "DB_CREATED_AT=$BACKFILL_CREATED"
-                echo "DB_ARTIFACT_NAME=pythia-resolver-db"
-              } >> "$GITHUB_ENV"
-              echo "DB selection: source=backfill run_id=$BACKFILL_RUN_ID"
-            else
-              DB_ARTIFACT_NAME="pythia-resolver-db"
-              DB_SOURCE="fresh"
-              echo "DB_SOURCE=fresh" >> "$GITHUB_ENV"
-              echo "DB_ARTIFACT_NAME=pythia-resolver-db" >> "$GITHUB_ENV"
-              echo "DB selection: source=fresh run_id=<none>"
-            fi
-          fi
-
-          if [ -z "${DB_RUN_ID:-}" ]; then
-            echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found; refusing to start without canonical DB."
-            exit 1
-          fi
-
-          echo "DB download: source=${DB_SOURCE:-unknown} run_id=${DB_RUN_ID} artifact=${DB_ARTIFACT_NAME:-pythia-resolver-db}"
-
-          rm -rf data/pythia-resolver-db
-          rm -f data/resolver.duckdb
-
           download_artifact_with_retries() {
             local run_id="$1"
             local artifact_name="$2"
@@ -251,8 +166,110 @@ jobs:
             return 1
           }
 
-          if ! download_artifact_with_retries "$DB_RUN_ID" "${DB_ARTIFACT_NAME:-pythia-resolver-db}" data 6; then
+          if [ -n "$OVERRIDE_RUN_ID" ]; then
+            if ! echo "$OVERRIDE_RUN_ID" | grep -Eq '^[0-9]+$'; then
+              echo "ERROR: db_run_id must be a numeric Actions run id from /actions/runs/<id>. Got: '$OVERRIDE_RUN_ID'"
+              exit 1
+            fi
+
+            DB_RUN_ID="$OVERRIDE_RUN_ID"
+            DB_SOURCE="override"
+            DB_CREATED_AT="manual-override"
+          fi
+
+          if [ -z "${DB_ARTIFACT_NAME:-}" ]; then
+            DB_ARTIFACT_NAME="pythia-resolver-db"
+          fi
+
+          if [ -z "${DB_RUN_ID:-}" ]; then
+            CANDIDATES_FILE=$(mktemp)
+            gh run list \
+              --workflow "Horizon Scanner Triage" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Resolver — Initial Backfill" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+
+            if [ ! -s "${CANDIDATES_FILE}" ]; then
+              echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found; refusing to start without canonical DB."
+              exit 1
+            fi
+
+            sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
+
+            FOUND=0
+
+            while IFS=',' read -r CREATED RUN_ID LABEL; do
+              DB_RUN_ID="$RUN_ID"
+              DB_CREATED_AT="$CREATED"
+              if [ "$LABEL" = "Horizon Scanner Triage" ]; then
+                DB_SOURCE="pipeline"
+              else
+                DB_SOURCE="backfill"
+              fi
+
+              DB_ARTIFACT_NAME="pythia-resolver-db"
+
+              rm -rf data/pythia-resolver-db
+              rm -f data/resolver.duckdb
+
+              if ! download_artifact_with_retries "$DB_RUN_ID" "$DB_ARTIFACT_NAME" data 6; then
+                echo "Download failed for run ${DB_RUN_ID}; trying next candidate."
+                continue
+              fi
+
+              if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+                SRC="data/pythia-resolver-db/resolver.duckdb"
+              else
+                SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+              fi
+
+              if [ -z "${SRC}" ]; then
+                echo "resolver.duckdb not found in downloaded artifact from ${DB_RUN_ID}; trying next candidate."
+                continue
+              fi
+
+              if [ "$SRC" != "data/resolver.duckdb" ]; then
+                cp "$SRC" data/resolver.duckdb
+              fi
+
+              if python -m scripts.ci.db_signature write \
+                  --db data/resolver.duckdb \
+                  --required "${SIGNATURE_REQUIRED_TABLES}" \
+                  --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+                  --out diagnostics/db_signature_before.json; then
+                FOUND=1
+                break
+              else
+                rc=$?
+                echo "Candidate rejected (exit ${rc}); missing required tables or invalid signature. Trying next candidate."
+                rm -f diagnostics/db_signature_before.json
+              fi
+            done < "${CANDIDATES_FILE}.sorted"
+
+            if [ "${FOUND}" -ne 1 ]; then
+              echo "ERROR: No valid canonical DB found after checking Horizon Scanner and Resolver — Initial Backfill runs."
+              exit 1
+            fi
+          fi
+
+          if [ -z "${DB_RUN_ID:-}" ]; then
+            echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found; refusing to start without canonical DB."
             exit 1
+          fi
+
+          if [ -n "$OVERRIDE_RUN_ID" ]; then
+            rm -rf data/pythia-resolver-db
+            rm -f data/resolver.duckdb
+            if ! download_artifact_with_retries "$DB_RUN_ID" "${DB_ARTIFACT_NAME:-pythia-resolver-db}" data 6; then
+              exit 1
+            fi
           fi
 
           if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
@@ -282,18 +299,25 @@ jobs:
             --optional "${SIGNATURE_OPTIONAL_TABLES}" \
             --out diagnostics/db_signature_before.json
 
-          if [ -f diagnostics/db_signature_before.json ]; then
-            {
-              echo "CANONICAL_DB_READY=true"
-              echo "CANONICAL_DB_SOURCE=${DB_SOURCE:-unknown}"
-              echo "CANONICAL_DB_RUN_ID=${DB_RUN_ID}"
-              echo "CANONICAL_CREATED_AT=${DB_CREATED_AT:-manual}"
-            } >> "$GITHUB_ENV"
-            echo "Baseline signature written to diagnostics/db_signature_before.json"
-          else
+          if [ ! -f diagnostics/db_signature_before.json ]; then
             echo "ERROR: Signature missing after validating run ${DB_RUN_ID}."
             exit 1
           fi
+
+          {
+            echo "CANONICAL_DB_READY=true"
+            echo "CANONICAL_DB_SOURCE=${DB_SOURCE:-unknown}"
+            echo "CANONICAL_DB_RUN_ID=${DB_RUN_ID}"
+            echo "CANONICAL_CREATED_AT=${DB_CREATED_AT:-manual}"
+            echo "DB_RUN_ID=${DB_RUN_ID}"
+            echo "DB_SOURCE=${DB_SOURCE:-unknown}"
+            echo "DB_CREATED_AT=${DB_CREATED_AT:-manual}"
+            echo "DB_ARTIFACT_NAME=${DB_ARTIFACT_NAME:-pythia-resolver-db}"
+          } >> "$GITHUB_ENV"
+          CANONICAL_DB_SOURCE="${DB_SOURCE:-unknown}"
+          CANONICAL_DB_RUN_ID="${DB_RUN_ID}"
+          CANONICAL_CREATED_AT="${DB_CREATED_AT:-manual}"
+          echo "Baseline signature written to diagnostics/db_signature_before.json"
 
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/db_signature_before.json ]; then
             {
@@ -304,6 +328,8 @@ jobs:
               echo "- Signature file: diagnostics/db_signature_before.json"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+          echo "DB selection: source=${DB_SOURCE:-unknown} run_id=${DB_RUN_ID} created=${DB_CREATED_AT:-manual} artifact=${DB_ARTIFACT_NAME:-pythia-resolver-db}"
 
       # Step 5: Diagnostics – confirm GEMINI_API_KEY is present
       - name: Diagnostics — GEMINI_API_KEY presence
