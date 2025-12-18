@@ -168,13 +168,13 @@ jobs:
             --branch main \
             --status success \
             --json databaseId,createdAt \
-            --limit 1 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
           gh run list \
             --workflow "Resolver — Initial Backfill" \
             --branch main \
             --status success \
             --json databaseId,createdAt \
-            --limit 1 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
             echo "ERROR: No prior successful Horizon Scanner or Resolver — Initial Backfill runs found; cannot build canonical DB."
@@ -206,11 +206,19 @@ jobs:
               cp "$SRC" data/resolver.duckdb
             fi
 
-            python -m scripts.ci.db_signature write \
-              --db data/resolver.duckdb \
-              --required "${SIGNATURE_REQUIRED_TABLES}" \
-              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
-              --out diagnostics/db_signature_before.json
+            # Validate candidate DB signature; if it fails, try next candidate instead of aborting
+            if python -m scripts.ci.db_signature write \
+                --db data/resolver.duckdb \
+                --required "${SIGNATURE_REQUIRED_TABLES}" \
+                --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+                --out diagnostics/db_signature_before.json; then
+              echo "Candidate signature OK."
+            else
+              rc=$?
+              echo "Candidate rejected (exit ${rc}); missing required tables or invalid signature. Trying next candidate."
+              rm -f diagnostics/db_signature_before.json
+              continue
+            fi
 
             if [ -f diagnostics/db_signature_before.json ]; then
             {
@@ -226,7 +234,7 @@ jobs:
           fi
           done < "${CANDIDATES_FILE}.sorted"
           if [ "${CANONICAL_DB_READY:-false}" != "true" ]; then
-            echo "ERROR: Could not find a valid canonical resolver.duckdb with required tables; aborting."
+            echo "ERROR: Could not find a valid canonical resolver.duckdb with required tables; run run_horizon_scanner.yml once to seed HS tables, or rerun with reset_db=true to bootstrap."
             exit 1
           fi
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/db_signature_before.json ]; then
