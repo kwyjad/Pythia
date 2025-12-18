@@ -9,9 +9,13 @@
 from __future__ import annotations
 
 import argparse
+import re
 from typing import Iterable, Sequence, Tuple
 
 from resolver.db import duckdb_io
+
+
+_TS_RE = re.compile(r"(\d+)$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,16 +30,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_latest_run_id(con: duckdb_io.duckdb.DuckDBPyConnection) -> int:
-    row = con.execute("SELECT max(run_id) FROM forecasts_ensemble").fetchone()
-    run_id = row[0] if row else None
-    if run_id is None:
+def _run_id_key(run_id: str) -> tuple[int, str]:
+    match = _TS_RE.search(run_id or "")
+    if not match:
+        return (-1, run_id or "")
+    return (int(match.group(1)), run_id)
+
+
+def get_latest_run_id(con: duckdb_io.duckdb.DuckDBPyConnection) -> str:
+    columns = [row[1] for row in con.execute("PRAGMA table_info('forecasts_ensemble')").fetchall()]
+    for column in ("created_at", "timestamp", "created_time", "created_time_iso", "ts"):
+        if column in columns:
+            row = con.execute(
+                f"SELECT run_id FROM forecasts_ensemble WHERE run_id IS NOT NULL ORDER BY {column} DESC LIMIT 1"
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+
+    rows = con.execute(
+        "SELECT DISTINCT run_id FROM forecasts_ensemble WHERE run_id IS NOT NULL"
+    ).fetchall()
+    run_ids = [str(row[0]) for row in rows if row and row[0]]
+    if not run_ids:
         raise SystemExit("No forecasts_ensemble.run_id values found; Forecaster has not written ensembles yet.")
-    return int(run_id)
+    return max(run_ids, key=_run_id_key)
 
 
 def get_model_counts(
-    con: duckdb_io.duckdb.DuckDBPyConnection, run_id: int
+    con: duckdb_io.duckdb.DuckDBPyConnection, run_id: str
 ) -> Sequence[Tuple[str, int]]:
     rows: Iterable[Tuple[str, int]] = con.execute(
         """
@@ -51,7 +73,7 @@ def get_model_counts(
 
 
 def find_missing_questions(
-    con: duckdb_io.duckdb.DuckDBPyConnection, run_id: int
+    con: duckdb_io.duckdb.DuckDBPyConnection, run_id: str
 ) -> Sequence[Tuple[int, int, int]]:
     rows: Iterable[Tuple[int, int, int]] = con.execute(
         """
