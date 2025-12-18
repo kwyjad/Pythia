@@ -23,6 +23,11 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
+      db_run_id:
+        description: "Optional: force canonical DB from Actions run ID (/actions/runs/<id>) containing artifact 'pythia-resolver-db'"
+        required: false
+        default: ""
+        type: string
 
 # --- Job Definition ---
 jobs:
@@ -30,6 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
+      SIGNATURE_OPTIONAL_TABLES: scenarios
+      CANONICAL_DB_READY: "false"
+      CANONICAL_DB_RUN_ID: ""
+      CANONICAL_DB_SOURCE: ""
+      CANONICAL_CREATED_AT: ""
+      SIGNATURE_OK: "false"
+      DB_SOURCE: ""
 
     steps:
       # Step 1: Check out the repository's code
@@ -45,78 +58,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh auth status
-
-      - name: Select resolver DB artifact
-        id: select_resolver_db
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PIPELINE_RUN_ID=$(gh run list \
-            --workflow "${{ github.workflow }}" \
-            --branch main \
-            --status success \
-            --json databaseId \
-            --limit 1 \
-            --jq '.[0].databaseId' || true)
-
-          BACKFILL_RUN_ID=$(gh run list \
-            --workflow "Resolver — Initial Backfill" \
-            --branch main \
-            --status success \
-            --json databaseId \
-            --limit 1 \
-            --jq '.[0].databaseId' || true)
-
-          if [ -n "$PIPELINE_RUN_ID" ]; then
-            echo "Using DB from latest pipeline run: $PIPELINE_RUN_ID"
-            echo "DB_RUN_ID=$PIPELINE_RUN_ID" >> "$GITHUB_ENV"
-          elif [ -n "$BACKFILL_RUN_ID" ]; then
-            echo "No pipeline DB found; falling back to backfill run: $BACKFILL_RUN_ID"
-            echo "DB_RUN_ID=$BACKFILL_RUN_ID" >> "$GITHUB_ENV"
-          else
-            echo "No existing DB artifacts found; HS will run on a fresh DB."
-          fi
-
-      - name: Download canonical resolver DB
-        if: env.DB_RUN_ID != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p data
-
-          echo "Downloading pythia-resolver-db from run $DB_RUN_ID ..."
-          gh run download "$DB_RUN_ID" -n pythia-resolver-db --dir data
-
-          echo "Downloaded artifacts:"
-          ls -R data
-
-          # Canonical layout: data/pythia-resolver-db/resolver.duckdb
-          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-            SRC="data/pythia-resolver-db/resolver.duckdb"
-          else
-            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-          fi
-
-          if [ -n "$SRC" ]; then
-            echo "Found resolver DB at $SRC"
-            # Only copy if SRC != canonical path
-            if [ "$SRC" != "data/resolver.duckdb" ]; then
-              cp "$SRC" data/resolver.duckdb
-            else
-              echo "DB already at canonical path data/resolver.duckdb; no copy needed."
-            fi
-          fi
-
-          if [ ! -f data/resolver.duckdb ]; then
-            echo "WARNING: resolver.duckdb not found in pythia-resolver-db; HS will run on a fresh DB."
-          else
-            echo "Using canonical DB at data/resolver.duckdb"
-          fi
-
-          if [ -n "${DB_RUN_ID:-}" ] && [ ! -f data/resolver.duckdb ]; then
-            echo "ERROR: Expected to download resolver.duckdb from artifact run $DB_RUN_ID but did not find it."
-            exit 1
-          fi
 
       # Step 2: Set up Python
       - name: Set up Python 3.10
@@ -175,6 +116,130 @@ jobs:
             exit 1
           fi
           pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB with signature guardrail
+        id: canonical_download
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p data diagnostics
+          rm -f diagnostics/db_signature_before.json
+          rm -rf data/pythia-resolver-db
+
+          OVERRIDE_RUN_ID="${{ github.event.inputs.db_run_id }}"
+
+          if [ -n "$OVERRIDE_RUN_ID" ]; then
+            if ! echo "$OVERRIDE_RUN_ID" | grep -Eq '^[0-9]+$'; then
+              echo "ERROR: db_run_id must be a numeric Actions run id from /actions/runs/<id>. Got: '$OVERRIDE_RUN_ID'"
+              exit 1
+            fi
+
+            {
+              echo "DB_RUN_ID=$OVERRIDE_RUN_ID"
+              echo "DB_SOURCE=override"
+              echo "DB_CREATED_AT=manual-override"
+            } >> "$GITHUB_ENV"
+            echo "DB selection: source=override run_id=$OVERRIDE_RUN_ID"
+          fi
+
+          if [ -z "${DB_RUN_ID:-}" ]; then
+            CANDIDATES_FILE=$(mktemp)
+            gh run list \
+              --workflow "Horizon Scanner Triage" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 1 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Resolver — Initial Backfill" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 1 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+
+            PIPELINE_LINE=$(grep "Horizon Scanner Triage" "${CANDIDATES_FILE}" | head -n 1 || true)
+            BACKFILL_LINE=$(grep "Resolver — Initial Backfill" "${CANDIDATES_FILE}" | head -n 1 || true)
+            PIPELINE_RUN_ID=$(echo "$PIPELINE_LINE" | cut -d',' -f2 || true)
+            BACKFILL_RUN_ID=$(echo "$BACKFILL_LINE" | cut -d',' -f2 || true)
+            PIPELINE_CREATED=$(echo "$PIPELINE_LINE" | cut -d',' -f1 || true)
+            BACKFILL_CREATED=$(echo "$BACKFILL_LINE" | cut -d',' -f1 || true)
+
+            if [ -n "$PIPELINE_RUN_ID" ]; then
+              {
+                echo "DB_RUN_ID=$PIPELINE_RUN_ID"
+                echo "DB_SOURCE=pipeline"
+                echo "DB_CREATED_AT=$PIPELINE_CREATED"
+              } >> "$GITHUB_ENV"
+              echo "DB selection: source=pipeline run_id=$PIPELINE_RUN_ID"
+            elif [ -n "$BACKFILL_RUN_ID" ]; then
+              {
+                echo "DB_RUN_ID=$BACKFILL_RUN_ID"
+                echo "DB_SOURCE=backfill"
+                echo "DB_CREATED_AT=$BACKFILL_CREATED"
+              } >> "$GITHUB_ENV"
+              echo "DB selection: source=backfill run_id=$BACKFILL_RUN_ID"
+            else
+              echo "DB_SOURCE=fresh" >> "$GITHUB_ENV"
+              echo "DB selection: source=fresh run_id=<none>"
+            fi
+          fi
+
+          if [ -z "${DB_RUN_ID:-}" ]; then
+            echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found; refusing to start without canonical DB."
+            exit 1
+          fi
+
+          echo "DB download: source=${DB_SOURCE:-unknown} run_id=${DB_RUN_ID}"
+
+          rm -rf data/pythia-resolver-db
+          rm -f data/resolver.duckdb
+
+          if ! gh run download "$DB_RUN_ID" -n pythia-resolver-db --dir data; then
+            echo "ERROR: Download failed for run ${DB_RUN_ID}."
+            exit 1
+          fi
+
+          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+            SRC="data/pythia-resolver-db/resolver.duckdb"
+          else
+            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+          fi
+
+          if [ -z "${SRC}" ]; then
+            echo "ERROR: resolver.duckdb not found in downloaded artifact from ${DB_RUN_ID}."
+            exit 1
+          fi
+
+          if [ "$SRC" != "data/resolver.duckdb" ]; then
+            cp "$SRC" data/resolver.duckdb
+          fi
+
+          # shellcheck disable=SC2026
+          python -c "import json, os, sys, duckdb; db_path='data/resolver.duckdb'; required=[t.strip() for t in os.environ.get('SIGNATURE_REQUIRED_TABLES','').split(',') if t.strip()]; optional=[t.strip() for t in os.environ.get('SIGNATURE_OPTIONAL_TABLES','').split(',') if t.strip()];\nif not os.path.isfile(db_path):\n    sys.exit('resolver.duckdb missing after download');\ncon=duckdb.connect(db_path);\ntry:\n    tables=sorted(r[0] for r in con.execute('SHOW TABLES').fetchall());\n    counts={};\n    for table in required+optional:\n        counts[table]=int(con.execute(f\"SELECT COUNT(*) FROM {table}\").fetchone()[0]) if table in tables else None\nfinally:\n    con.close();\nmissing=[t for t in required if counts.get(t) is None];\nif missing:\n    sys.exit(f'Missing required tables: {missing}');\nsignature={'db_path':os.path.abspath(db_path),'size_bytes':os.path.getsize(db_path),'tables':tables,'required_counts':{t:counts.get(t) for t in required},'optional_counts':{t:counts.get(t) for t in optional}};\nos.makedirs('diagnostics', exist_ok=True);\nout_path='diagnostics/db_signature_before.json';\nwith open(out_path,'w',encoding='utf-8') as f: json.dump(signature,f,indent=2,sort_keys=True);\nprint(f\"DB size (bytes): {signature['size_bytes']}\");\nprint('Tables:', ', '.join(signature['tables']));\nprint('Required row counts:');\nfor table in required:\n    print(f'  - {table}: {signature['"'"'required_counts'"'"'][table]}');\nprint('Optional row counts:');\nfor table in optional:\n    print(f'  - {table}: {signature['"'"'optional_counts'"'"'][table]}')"
+
+          if [ -f diagnostics/db_signature_before.json ]; then
+            {
+              echo "CANONICAL_DB_READY=true"
+              echo "CANONICAL_DB_SOURCE=${DB_SOURCE:-unknown}"
+              echo "CANONICAL_DB_RUN_ID=${DB_RUN_ID}"
+              echo "CANONICAL_CREATED_AT=${DB_CREATED_AT:-manual}"
+            } >> "$GITHUB_ENV"
+            echo "Baseline signature written to diagnostics/db_signature_before.json"
+          else
+            echo "ERROR: Signature missing after validating run ${DB_RUN_ID}."
+            exit 1
+          fi
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/db_signature_before.json ]; then
+            {
+              echo "### Canonical DB signature (before HS run)"
+              echo "- Source workflow: ${CANONICAL_DB_SOURCE}"
+              echo "- Run ID: ${CANONICAL_DB_RUN_ID}"
+              echo "- Created: ${CANONICAL_CREATED_AT}"
+              echo "- Signature file: diagnostics/db_signature_before.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Step 5: Diagnostics – confirm GEMINI_API_KEY is present
       - name: Diagnostics — GEMINI_API_KEY presence
@@ -360,8 +425,31 @@ jobs:
           path: debug/eval/*
           if-no-files-found: warn
 
+      - name: Compare DB signature after HS run
+        id: signature_after
+        if: env.CANONICAL_DB_READY == 'true'
+        env:
+          REQUIRED_TABLES: ${{ env.SIGNATURE_REQUIRED_TABLES }}
+          OPTIONAL_TABLES: ${{ env.SIGNATURE_OPTIONAL_TABLES }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2026
+          python -c "import json, os, sys, duckdb; required=[t.strip() for t in os.environ.get('REQUIRED_TABLES','').split(',') if t.strip()]; optional=[t.strip() for t in os.environ.get('OPTIONAL_TABLES','').split(',') if t.strip()]; before_path='diagnostics/db_signature_before.json'; db_path='data/resolver.duckdb';\nif not os.path.isfile(before_path):\n    sys.exit(f'Baseline signature not found: {before_path}');\nif not os.path.isfile(db_path):\n    sys.exit(f'Database not found at {db_path}');\nwith open(before_path,'r',encoding='utf-8') as f: before=json.load(f);\ncon=duckdb.connect(db_path);\ntry:\n    tables=sorted(r[0] for r in con.execute('SHOW TABLES').fetchall());\n    counts={};\n    for table in required+optional:\n        counts[table]=int(con.execute(f\"SELECT COUNT(*) FROM {table}\").fetchone()[0]) if table in tables else None\nfinally:\n    con.close();\nmissing=[t for t in required if counts.get(t) is None];\nif missing:\n    sys.exit(f'Missing required tables after HS run: {missing}');\nregressing=[];\nfor table in required:\n    before_count=before.get('required_counts',{}).get(table);\n    after_count=counts.get(table);\n    if before_count is not None and after_count is not None and after_count < before_count:\n        regressing.append((table,before_count,after_count));\nif regressing:\n    lines=', '.join(f'{t}: {after} < {before}' for t,before,after in regressing);\n    sys.exit(f'Required tables regressed: {lines}');\nsignature={'db_path':os.path.abspath(db_path),'size_bytes':os.path.getsize(db_path),'tables':tables,'required_counts':{t:counts.get(t) for t in required},'optional_counts':{t:counts.get(t) for t in optional}};\nos.makedirs('diagnostics', exist_ok=True);\nafter_path='diagnostics/db_signature_after.json';\nwith open(after_path,'w',encoding='utf-8') as f: json.dump(signature,f,indent=2,sort_keys=True);\nprint(f\"DB size (bytes): {signature['size_bytes']}\");\nprint('Required row counts (after):');\nfor table in required:\n    print(f'  - {table}: {signature['"'"'required_counts'"'"'][table]}');\nprint('Optional row counts (after):');\nfor table in optional:\n    print(f'  - {table}: {signature['"'"'optional_counts'"'"'][table]}')"
+
+          echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
+          echo "signature_ok=true" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Canonical DB signature (after HS run)"
+              echo "- Source workflow: ${CANONICAL_DB_SOURCE}"
+              echo "- Run ID: ${CANONICAL_DB_RUN_ID}"
+              echo "- Signature file: diagnostics/db_signature_after.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload canonical resolver DB
-        if: success()
+        if: success() && env.CANONICAL_DB_READY == 'true' && steps.signature_after.outputs.signature_ok == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
