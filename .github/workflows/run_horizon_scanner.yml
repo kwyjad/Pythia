@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
       SIGNATURE_OPTIONAL_TABLES: scenarios
       CANONICAL_DB_READY: "false"
@@ -239,6 +240,16 @@ jobs:
 
           if [ "$SRC" != "data/resolver.duckdb" ]; then
             cp "$SRC" data/resolver.duckdb
+          fi
+
+          # Bootstrap-only: if we're starting from a fresh reset DB, ensure Pythia schema tables exist before signature check.
+          if [ "${DB_ARTIFACT_NAME:-pythia-resolver-db}" = "pythia-resolver-db-reset" ]; then
+            echo "Bootstrap DB detected (${DB_ARTIFACT_NAME}); ensuring Pythia schema tables exist before signature check."
+            PYTHIA_DB_URL="${RESOLVER_DB_URL}" python - <<'PY'
+            from pythia.db.schema import ensure_schema
+            ensure_schema()
+            print("ensure_schema(): OK")
+          PY
           fi
 
           python -m scripts.ci.db_signature write \
