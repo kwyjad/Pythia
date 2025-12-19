@@ -41,6 +41,10 @@ jobs:
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_LLM_CONCURRENCY: "12"
+      HS_MAX_WORKERS: "6"
+      FORECASTER_RESEARCH_MAX_WORKERS: "6"
+      FORECASTER_SPD_MAX_WORKERS: "6"
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
       SIGNATURE_OPTIONAL_TABLES: scenarios
       CANONICAL_DB_READY: "false"
@@ -363,6 +367,25 @@ jobs:
           python -m scripts.create_questions_from_triage --db "${PYTHIA_DB_URL}"
 
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
+      - name: Diagnostics — Forecaster provider activation & ensemble composition
+        env:
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          PYTHIA_DEBUG_MODELS: "1"
+          PYTHIA_LLM_PROFILE: prod
+
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python scripts/print_forecaster_ensemble.py | tee diagnostics/forecaster_ensemble.txt
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/forecaster_ensemble.txt ]; then
+            cat diagnostics/forecaster_ensemble.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Run Forecaster (Pythia mode on HS questions)
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
@@ -438,11 +461,22 @@ jobs:
       - name: Dump unified Pythia v2 debug bundle
         run: python -m scripts.dump_pythia_debug_bundle --db "${{ env.RESOLVER_DB_URL }}"
 
+      - name: Diagnostics — LLM latency p50/p95 by phase/provider/model
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python -m scripts.ci.llm_latency_summary --db "${RESOLVER_DB_URL}" | tee diagnostics/llm_latency_summary.md
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/llm_latency_summary.md ]; then
+            cat diagnostics/llm_latency_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload unified debug bundle artifact
         uses: actions/upload-artifact@v4
         with:
           name: pythia-debug-bundle
-          path: debug/pytia_debug_bundle__*.md
+          path: |
+            debug/pytia_debug_bundle__*.md
+            diagnostics/llm_latency_summary.md
 
       - name: Upload evaluation artifacts
         if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'

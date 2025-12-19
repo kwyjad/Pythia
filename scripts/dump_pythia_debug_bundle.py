@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import duckdb
+from forecaster.providers import DEFAULT_ENSEMBLE, _PROVIDER_STATES, default_ensemble_summary
+from pythia.llm_profiles import get_current_models, get_current_profile
 from resolver.db import duckdb_io
 
 try:
@@ -112,6 +114,111 @@ def _get_bucket_labels_for_question(question: Dict[str, Any]) -> List[str]:
     if metric == "FATALITIES":
         return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
     return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
+
+
+def _provider_activation_snapshot_lines() -> list[str]:
+    lines: list[str] = []
+    lines.append(f"PYTHIA_DEBUG_MODELS={os.getenv('PYTHIA_DEBUG_MODELS', '')}")
+    try:
+        llm_profile = get_current_profile()
+    except Exception:
+        llm_profile = "unknown"
+    lines.append(f"PYTHIA_LLM_PROFILE={llm_profile}")
+
+    try:
+        profile_models = get_current_models()
+    except Exception:
+        profile_models = {}
+
+    if profile_models:
+        lines.append("LLM profile models:")
+        for name in sorted(profile_models):
+            lines.append(f"- {name}: {profile_models.get(name)}")
+    else:
+        lines.append("LLM profile models: (none)")
+
+    lines.append(f"DEFAULT_ENSEMBLE size={len(DEFAULT_ENSEMBLE)}")
+    lines.append(f"DEFAULT_ENSEMBLE summary: {default_ensemble_summary()}")
+
+    lines.append("")
+    lines.append("| provider | enabled | model_id | key_present | active | env_key | weight |")
+    lines.append("|----------|---------|----------|-------------|--------|---------|--------|")
+    for provider in sorted(_PROVIDER_STATES.keys()):
+        state = _PROVIDER_STATES.get(provider, {})
+        enabled = str(bool(state.get("enabled"))).lower()
+        model_id = state.get("model") or ""
+        key_present = str(bool(state.get("api_key"))).lower()
+        active = str(bool(state.get("active"))).lower()
+        env_key = state.get("env_key") or ""
+        weight = state.get("weight")
+        weight_val = f"{float(weight):.2f}" if isinstance(weight, (int, float)) else ""
+        lines.append(
+            f"| {provider} | {enabled} | {model_id} | {key_present} | {active} | {env_key} | {weight_val} |"
+        )
+    return lines
+
+
+def _load_forecasts_raw_counts(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> list[dict[str, Any]]:
+    return _fetch_llm_rows(
+        con,
+        """
+        SELECT model_name, COUNT(*) AS n_rows
+        FROM forecasts_raw
+        WHERE run_id = ?
+        GROUP BY 1
+        ORDER BY n_rows DESC, model_name
+        """,
+        [run_id],
+    )
+
+
+def _load_llm_call_counts(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict[str, Any]]:
+    return _fetch_llm_rows(
+        con,
+        """
+        SELECT component, phase, model_name,
+               COUNT(*) AS n_calls,
+               SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_ok
+        FROM llm_calls
+        WHERE forecaster_run_id = ?
+        GROUP BY 1, 2, 3
+        ORDER BY component, phase, n_calls DESC, model_name
+        """,
+        [run_id],
+    )
+
+
+def _provider_output_notes(forecast_rows: list[dict[str, Any]]) -> list[str]:
+    counts_by_model = {row.get("model_name"): int(row.get("n_rows", 0) or 0) for row in forecast_rows}
+    notes: list[str] = []
+    for provider in sorted(_PROVIDER_STATES.keys()):
+        state = _PROVIDER_STATES.get(provider, {})
+        enabled = bool(state.get("enabled"))
+        model_id = str(state.get("model") or "")
+        key_present = bool(state.get("api_key"))
+        active = bool(state.get("active"))
+        reasons: list[str] = []
+        if not enabled:
+            reasons.append("disabled")
+        if not model_id:
+            reasons.append("missing model")
+        if not key_present:
+            reasons.append("missing key")
+        if not active:
+            reason_label = ", ".join(reasons) if reasons else "inactive"
+            notes.append(f"- Provider {provider}: inactive (reason: {reason_label})")
+            continue
+        row_count = counts_by_model.get(model_id, 0)
+        if row_count > 0:
+            notes.append(f"- Provider {provider}: active with {row_count} forecasts_raw rows")
+        else:
+            notes.append(
+                "- Provider "
+                f"{provider}: active but produced 0 forecasts_raw rows (investigate failures; see llm_calls table)"
+            )
+    return notes
 
 
 def _load_ensemble_spd_for_question(
@@ -861,6 +968,10 @@ def build_debug_bundle_markdown(
             }
         )
     scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
+    provider_activation_lines = _provider_activation_snapshot_lines()
+    forecasts_raw_counts = _load_forecasts_raw_counts(con, run_id)
+    llm_call_counts = _load_llm_call_counts(con, run_id)
+    provider_notes = _provider_output_notes(forecasts_raw_counts)
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
     lines.append("")
@@ -921,6 +1032,43 @@ def build_debug_bundle_markdown(
             f"{row.get('metric')} | {row.get('hs_run_id')} | {row.get('triage_tier') or ''} | "
             f"{row.get('status')} | {row.get('call_count')} |"
         )
+    lines.append("")
+
+    lines.append("### 1.4 Provider activation snapshot")
+    lines.append("")
+    lines.extend(provider_activation_lines)
+    lines.append("")
+
+    lines.append("### 1.5 Per-model evidence")
+    lines.append("")
+    lines.append("#### 1.5.1 forecasts_raw model writes")
+    lines.append("")
+    lines.append("| model_name | n_rows |")
+    lines.append("|------------|--------|")
+    if forecasts_raw_counts:
+        for row in forecasts_raw_counts:
+            lines.append(f"| {row.get('model_name')} | {row.get('n_rows')} |")
+    else:
+        lines.append("| (none) | 0 |")
+    lines.append("")
+
+    lines.append("#### 1.5.2 llm_calls model calls")
+    lines.append("")
+    lines.append("| component | phase | model_name | n_calls | n_ok |")
+    lines.append("|-----------|-------|------------|--------|------|")
+    if llm_call_counts:
+        for row in llm_call_counts:
+            lines.append(
+                f"| {row.get('component')} | {row.get('phase')} | {row.get('model_name')} | "
+                f"{row.get('n_calls')} | {row.get('n_ok')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | 0 | 0 |")
+    lines.append("")
+
+    lines.append("#### 1.5.3 Provider output status")
+    lines.append("")
+    lines.extend(provider_notes)
     lines.append("")
 
     lines.append("## 2. Question Types")
