@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set, Tuple
 
 import duckdb
 from forecaster.providers import DEFAULT_ENSEMBLE, _PROVIDER_STATES, default_ensemble_summary
@@ -34,6 +34,51 @@ def _fetch_llm_rows(
     desc = cur.description or []
     col_names = [d[0] for d in desc]
     return [dict(zip(col_names, row)) for row in rows]
+
+
+def _llm_calls_columns(con: duckdb.DuckDBPyConnection) -> Set[str]:
+    try:
+        rows = con.execute("PRAGMA table_info('llm_calls')").fetchall()
+    except Exception:
+        return set()
+
+    cols: Set[str] = set()
+    for row in rows:
+        if len(row) > 1 and row[1]:
+            cols.add(str(row[1]))
+    return cols
+
+
+def _llm_calls_filter_predicate(
+    columns: Set[str],
+    run_id: str,
+    question_ids: List[str],
+) -> Tuple[str | None, list[Any], str | None]:
+    """
+    Select a run-scoped predicate for llm_calls based on available columns.
+
+    Priority:
+      1. forecaster_run_id
+      2. run_id
+      3. meta_run_id
+      4. question_id (if provided)
+    """
+
+    if "forecaster_run_id" in columns:
+        return "forecaster_run_id = ?", [run_id], None
+
+    if "run_id" in columns:
+        return "run_id = ?", [run_id], None
+
+    if "meta_run_id" in columns:
+        return "meta_run_id = ?", [run_id], None
+
+    qids = [str(q) for q in question_ids if q]
+    if "question_id" in columns and qids:
+        placeholders = ", ".join(["?"] * len(qids))
+        return f"question_id IN ({placeholders})", qids, None
+
+    return None, [], "llm_calls not run-scoped; skipping per-run llm call counts."
 
 
 def _build_usage_json_from_row(row: dict[str, Any]) -> str:
@@ -174,20 +219,29 @@ def _load_forecasts_raw_counts(
     )
 
 
-def _load_llm_call_counts(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict[str, Any]]:
-    return _fetch_llm_rows(
+def _load_llm_call_counts(
+    con: duckdb.DuckDBPyConnection, run_id: str, question_ids: List[str]
+) -> tuple[list[dict[str, Any]], str | None]:
+    columns = _llm_calls_columns(con)
+    predicate, params, skip_note = _llm_calls_filter_predicate(columns, run_id, question_ids)
+
+    if not predicate:
+        return [], skip_note
+
+    rows = _fetch_llm_rows(
         con,
-        """
+        f"""
         SELECT component, phase, model_name,
                COUNT(*) AS n_calls,
                SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_ok
         FROM llm_calls
-        WHERE forecaster_run_id = ?
+        WHERE {predicate}
         GROUP BY 1, 2, 3
         ORDER BY component, phase, n_calls DESC, model_name
         """,
-        [run_id],
+        params,
     )
+    return rows, None
 
 
 def _provider_output_notes(forecast_rows: list[dict[str, Any]]) -> list[str]:
@@ -927,7 +981,12 @@ def build_debug_bundle_markdown(
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     hs_run_id_for_costs = _resolve_hs_run_id_for_forecast(con, run_id)
-    usage_by_phase = _aggregate_usage_by_phase(con, run_id, hs_run_id_for_costs)
+    usage_by_phase_warning: str | None = None
+    try:
+        usage_by_phase = _aggregate_usage_by_phase(con, run_id, hs_run_id_for_costs)
+    except Exception as exc:  # pragma: no cover - defensive
+        usage_by_phase = {}
+        usage_by_phase_warning = f"Error aggregating llm_calls usage: {exc}"
     triage_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
 
     hazards = sorted(
@@ -970,7 +1029,15 @@ def build_debug_bundle_markdown(
     scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
     provider_activation_lines = _provider_activation_snapshot_lines()
     forecasts_raw_counts = _load_forecasts_raw_counts(con, run_id)
-    llm_call_counts = _load_llm_call_counts(con, run_id)
+    llm_call_counts: list[dict[str, Any]] = []
+    llm_calls_skip_note: str | None = None
+    try:
+        llm_call_counts, llm_calls_skip_note = _load_llm_call_counts(
+            con, run_id, [str(q.get("question_id")) for q in questions]
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        llm_calls_skip_note = f"Error loading llm_calls: {exc}"
+        llm_call_counts = []
     provider_notes = _provider_output_notes(forecasts_raw_counts)
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
@@ -1003,6 +1070,9 @@ def build_debug_bundle_markdown(
 
     lines.append("### 1.2 Cost by Phase")
     lines.append("")
+    if usage_by_phase_warning:
+        lines.append(f"_Note: {usage_by_phase_warning}_")
+        lines.append("")
     lines.append("| phase | prompt_tokens | completion_tokens | total_tokens | total_cost_usd |")
     lines.append("|-------|---------------|-------------------|--------------|----------------|")
     for phase, agg in sorted(usage_by_phase.items()):
@@ -1054,6 +1124,10 @@ def build_debug_bundle_markdown(
 
     lines.append("#### 1.5.2 llm_calls model calls")
     lines.append("")
+    if llm_calls_skip_note:
+        lines.append(f"_Note: {llm_calls_skip_note}_")
+        lines.append("")
+
     lines.append("| component | phase | model_name | n_calls | n_ok |")
     lines.append("|-----------|-------|------------|--------|------|")
     if llm_call_counts:
@@ -1113,9 +1187,12 @@ def build_debug_bundle_markdown(
         lines.append(f"- Wording: {wording}")
         lines.append("")
 
-        calls = _load_llm_calls_for_question(
-            con, run_id, qid, iso3_val, hz_val, hs_run_id
-        )
+        try:
+            calls = _load_llm_calls_for_question(con, run_id, qid, iso3_val, hz_val, hs_run_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            calls = {}
+            lines.append(f"_Note: unable to load llm_calls for this question ({exc})._")
+            lines.append("")
 
         lines.append(f"#### 2.{idx}.1 Horizon Scanner (HS)")
         _append_stage_block(lines, "hs_triage", calls.get("hs_triage"))
