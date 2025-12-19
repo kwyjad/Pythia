@@ -8,6 +8,8 @@ from __future__ import annotations
 import pytest
 
 duckdb = pytest.importorskip("duckdb")
+if getattr(duckdb, "__pythia_stub__", False):
+    pytest.skip("duckdb not installed", allow_module_level=True)
 
 from pythia.db import schema as db_schema
 from pythia.db.schema import ensure_schema
@@ -29,6 +31,7 @@ def test_ensure_schema_creates_tables(tmp_path, monkeypatch):
         forecasts_raw_cols = _columns(con, "forecasts_raw")
 
         assert {"hs_run_id", "generated_at", "countries_json"}.issubset(hs_runs_cols)
+        assert {"requested_countries_json", "skipped_entries_json"}.issubset(hs_runs_cols)
         assert {"run_id", "question_id", "model_name", "probability"}.issubset(
             forecasts_raw_cols
         )

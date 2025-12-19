@@ -17,6 +17,7 @@ import duckdb
 from forecaster.providers import DEFAULT_ENSEMBLE, _PROVIDER_STATES, default_ensemble_summary
 from pythia.llm_profiles import get_current_models, get_current_profile
 from resolver.db import duckdb_io
+from scripts.ci.llm_latency_summary import render_latency_markdown
 
 try:
     from forecaster.prompts import _bucket_labels_for_question  # type: ignore
@@ -39,6 +40,19 @@ def _fetch_llm_rows(
 def _llm_calls_columns(con: duckdb.DuckDBPyConnection) -> Set[str]:
     try:
         rows = con.execute("PRAGMA table_info('llm_calls')").fetchall()
+    except Exception:
+        return set()
+
+    cols: Set[str] = set()
+    for row in rows:
+        if len(row) > 1 and row[1]:
+            cols.add(str(row[1]))
+    return cols
+
+
+def _hs_runs_columns(con: duckdb.DuckDBPyConnection) -> Set[str]:
+    try:
+        rows = con.execute("PRAGMA table_info('hs_runs')").fetchall()
     except Exception:
         return set()
 
@@ -217,6 +231,90 @@ def _load_forecasts_raw_counts(
         """,
         [run_id],
     )
+
+
+def _load_forecasts_ensemble_counts(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> list[dict[str, Any]]:
+    return _fetch_llm_rows(
+        con,
+        """
+        SELECT model_name, COUNT(*) AS n_rows
+        FROM forecasts_ensemble
+        WHERE run_id = ?
+        GROUP BY 1
+        ORDER BY n_rows DESC, model_name
+        """,
+        [run_id],
+    )
+
+
+def _load_hs_run_metadata(
+    con: duckdb.DuckDBPyConnection, hs_run_id: str | None
+) -> dict[str, Any] | None:
+    if not hs_run_id:
+        return None
+
+    cols = _hs_runs_columns(con)
+    if not cols:
+        return None
+
+    select_cols = [
+        col
+        for col in (
+            "hs_run_id",
+            "generated_at",
+            "git_sha",
+            "config_profile",
+            "countries_json",
+            "requested_countries_json",
+            "skipped_entries_json",
+        )
+        if col in cols
+    ]
+
+    if not select_cols:
+        return None
+
+    row = con.execute(
+        f"""
+        SELECT {", ".join(select_cols)}
+        FROM hs_runs
+        WHERE hs_run_id = ?
+        ORDER BY COALESCE(generated_at, CURRENT_TIMESTAMP) DESC
+        LIMIT 1
+        """,
+        [hs_run_id],
+    ).fetchone()
+
+    if not row:
+        return None
+
+    data = dict(zip(select_cols, row))
+    parsed: dict[str, Any] = {
+        "hs_run_id": data.get("hs_run_id"),
+        "generated_at": data.get("generated_at"),
+        "git_sha": data.get("git_sha"),
+        "config_profile": data.get("config_profile"),
+        "countries": [],
+        "requested_countries": [],
+        "skipped_entries": [],
+    }
+
+    for key, target in [
+        ("countries_json", "countries"),
+        ("requested_countries_json", "requested_countries"),
+        ("skipped_entries_json", "skipped_entries"),
+    ]:
+        raw_val = data.get(key)
+        if raw_val is None or key not in data:
+            continue
+        try:
+            parsed[target] = json.loads(raw_val)
+        except Exception:
+            continue
+
+    return parsed
 
 
 def _load_llm_call_counts(
@@ -1029,6 +1127,7 @@ def build_debug_bundle_markdown(
     scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
     provider_activation_lines = _provider_activation_snapshot_lines()
     forecasts_raw_counts = _load_forecasts_raw_counts(con, run_id)
+    forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, run_id)
     llm_call_counts: list[dict[str, Any]] = []
     llm_calls_skip_note: str | None = None
     try:
@@ -1039,11 +1138,80 @@ def build_debug_bundle_markdown(
         llm_calls_skip_note = f"Error loading llm_calls: {exc}"
         llm_call_counts = []
     provider_notes = _provider_output_notes(forecasts_raw_counts)
+    latency_block = render_latency_markdown(con)
+    hs_manifest = _load_hs_run_metadata(con, hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None))
+    question_ids = sorted([str(q.get("question_id")) for q in questions if q.get("question_id")])
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
     lines.append("")
     lines.append(f"_Generated at {now}_")
     lines.append("")
+    lines.extend(latency_block.splitlines())
+    lines.append("")
+
+    manifest_hs_run_id = hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None)
+    requested_countries = (
+        (hs_manifest or {}).get("requested_countries") if hs_manifest is not None else []
+    ) or []
+    resolved_countries = (
+        (hs_manifest or {}).get("countries") if hs_manifest is not None else list(iso3s)
+    ) or list(iso3s)
+    resolved_countries_sorted = sorted({str(c) for c in resolved_countries if c})
+    skipped_entries = ((hs_manifest or {}).get("skipped_entries") if hs_manifest else []) or []
+
+    lines.append("## Run manifest")
+    lines.append("")
+    lines.append(f"- Forecast run_id: `{run_id}`")
+    lines.append(f"- HS run_id: `{manifest_hs_run_id or 'unknown'}`")
+    lines.append(
+        "- Requested countries (as provided): "
+        + (", ".join(requested_countries) if requested_countries else "(none)")
+    )
+    lines.append(
+        "- Resolved ISO3 list: "
+        + (", ".join(resolved_countries_sorted) if resolved_countries_sorted else "(none)")
+    )
+    lines.append(f"- Total questions: `{len(question_ids)}`")
+    lines.append("- Question IDs: " + (", ".join(question_ids) if question_ids else "(none)"))
+    lines.append("")
+    lines.append("### Skipped country entries")
+    lines.append("")
+    lines.append("| raw | normalized | reason |")
+    lines.append("| --- | --- | --- |")
+    if skipped_entries:
+        for entry in sorted(
+            skipped_entries,
+            key=lambda e: (str(e.get("raw") or ""), str(e.get("normalized") or "")),
+        ):
+            lines.append(
+                f"| {entry.get('raw', '')} | {entry.get('normalized', '')} | {entry.get('reason', '')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) |")
+    lines.append("")
+    lines.append("### Forecast rows by model")
+    lines.append("")
+    lines.append("#### forecasts_ensemble")
+    lines.append("")
+    lines.append("| model_name | n_rows |")
+    lines.append("|------------|--------|")
+    if forecasts_ensemble_counts:
+        for row in forecasts_ensemble_counts:
+            lines.append(f"| {row.get('model_name')} | {row.get('n_rows')} |")
+    else:
+        lines.append("| (none) | 0 |")
+    lines.append("")
+    lines.append("#### forecasts_raw")
+    lines.append("")
+    lines.append("| model_name | n_rows |")
+    lines.append("|------------|--------|")
+    if forecasts_raw_counts:
+        for row in forecasts_raw_counts:
+            lines.append(f"| {row.get('model_name')} | {row.get('n_rows')} |")
+    else:
+        lines.append("| (none) | 0 |")
+    lines.append("")
+
     lines.append("## 1. Overview")
     lines.append("")
     lines.append(f"- Database URL: `{db_url}`")

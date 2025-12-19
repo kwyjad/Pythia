@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Tuple
 
 import duckdb
 from resolver.db import duckdb_io
@@ -58,58 +58,93 @@ def _query_latency(
     return con.execute(
         """
         SELECT
-          phase,
-          CASE
-            WHEN lower(model_name) LIKE 'gpt-%' THEN 'openai'
-            WHEN lower(model_name) LIKE 'claude-%' THEN 'anthropic'
-            WHEN lower(model_name) LIKE 'gemini-%' THEN 'google'
-            WHEN lower(model_name) LIKE 'grok-%' THEN 'xai'
-            ELSE 'unknown'
-          END AS provider,
-          model_name,
+          COALESCE(phase, '') AS phase,
+          COALESCE(provider, '') AS provider,
+          COALESCE(model_id, '') AS model_id,
           COUNT(*) AS n_calls,
-          quantile_cont(latency_ms, 0.5) AS p50_ms,
-          quantile_cont(latency_ms, 0.95) AS p95_ms,
-          avg(latency_ms) AS avg_ms
+          quantile_cont(elapsed_ms, 0.5) AS p50_ms,
+          quantile_cont(elapsed_ms, 0.95) AS p95_ms,
+          avg(elapsed_ms) AS avg_ms
         FROM llm_calls
-        WHERE success = TRUE
-          AND latency_ms IS NOT NULL
+        WHERE elapsed_ms IS NOT NULL
+          AND (error_text IS NULL OR error_text = '')
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
         """
     ).fetchall()
 
 
-def _print_markdown_table(rows: Sequence[Tuple[str, str, str, int, float, float, float]]) -> None:
-    print("### LLM latency p50/p95 by phase/provider/model")
-    print("| phase | provider | model_name | n_calls | p50_ms | p95_ms | avg_ms |")
-    print("| --- | --- | --- | --- | --- | --- | --- |")
-    if not rows:
-        print("| (none) | (none) | (none) | 0 | 0 | 0 | 0 |")
-        return
-    for phase, provider, model_name, n_calls, p50_ms, p95_ms, avg_ms in rows:
-        print(
-            f"| {phase} | {provider} | {model_name} | "
-            f"{int(n_calls)} | {p50_ms:.2f} | {p95_ms:.2f} | {avg_ms:.2f} |"
+def _table_info_markdown(con: duckdb.DuckDBPyConnection) -> List[str]:
+    try:
+        info_rows = con.execute("PRAGMA table_info('llm_calls')").fetchall()
+    except Exception as exc:  # pragma: no cover - defensive
+        return [f"_Unable to read llm_calls schema: {exc}_"]
+
+    lines = [
+        "",
+        "PRAGMA table_info('llm_calls'):",
+        "",
+        "| cid | name | type | notnull | dflt_value | pk |",
+        "| --- | ---- | ---- | ------- | ---------- | -- |",
+    ]
+    if info_rows:
+        for row in info_rows:
+            cid, name, col_type, notnull, dflt_value, pk = row
+            lines.append(f"| {cid} | {name} | {col_type} | {notnull} | {dflt_value} | {pk} |")
+    else:
+        lines.append("| (none) | (none) | (none) | (none) | (none) | (none) |")
+    return lines
+
+
+def render_latency_markdown(con: duckdb.DuckDBPyConnection) -> str:
+    required_cols = {"elapsed_ms", "phase", "provider", "model_id", "error_text"}
+    lines: List[str] = []
+
+    lines.append("### LLM latency p50/p95 (phase/provider/model_id)")
+    lines.append("")
+
+    table_missing = not _table_exists(con, "llm_calls")
+    if table_missing:
+        lines.append("_llm_calls table not found; latency summary unavailable._")
+        lines.extend(_table_info_markdown(con))
+        return "\n".join(lines)
+
+    if not _has_columns(con, "llm_calls", required_cols):
+        cols = con.execute("PRAGMA table_info('llm_calls')").fetchall()
+        present = {str(row[1]).lower() for row in cols}
+        missing_cols = sorted(required_cols - present)
+        lines.append("_llm_calls is missing required columns: " + ", ".join(missing_cols) + "_")
+        lines.extend(_table_info_markdown(con))
+        return "\n".join(lines)
+
+    rows = _query_latency(con)
+    lines.append("| phase | provider | model_id | n_calls | p50_ms | p95_ms | avg_ms |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    if rows:
+        for phase, provider, model_id, n_calls, p50_ms, p95_ms, avg_ms in rows:
+            lines.append(
+                f"| {phase} | {provider} | {model_id} | "
+                f"{int(n_calls)} | {p50_ms:.2f} | {p95_ms:.2f} | {avg_ms:.2f} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | 0 | 0 | 0 | 0 |")
+        lines.append("")
+        lines.append(
+            "_Note: No llm_calls rows with elapsed_ms and empty error_text; see schema below._"
         )
+        lines.extend(_table_info_markdown(con))
+    return "\n".join(lines)
 
 
 def main() -> None:
     args = _parse_args()
     con = duckdb_io.get_db(args.db)
     try:
-        if not _table_exists(con, "llm_calls"):
-            raise SystemExit("llm_calls table not found.")
-        required_cols = {"latency_ms", "phase", "model_name", "success"}
-        if not _has_columns(con, "llm_calls", required_cols):
-            missing = ", ".join(sorted(required_cols))
-            raise SystemExit(f"llm_calls is missing required columns: {missing}")
-
-        rows = _query_latency(con)
+        markdown = render_latency_markdown(con)
     finally:
         duckdb_io.close_db(con)
 
-    _print_markdown_table(rows)
+    print(markdown)
 
 
 if __name__ == "__main__":

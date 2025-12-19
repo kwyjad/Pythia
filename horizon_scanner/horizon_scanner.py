@@ -21,6 +21,7 @@ import os
 import sys
 import re
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -66,7 +67,31 @@ _COUNTRY_ALIASES = {
     "drc": "COD",
     "congo (drc)": "COD",
     "congo, dem. rep.": "COD",
+    "cote d'ivoire": "CIV",
+    "cote divoire": "CIV",
+    "cote d’ivoire": "CIV",
 }
+
+
+def _norm_country_key(raw: str) -> str:
+    """Normalise a country key for robust matching.
+
+    - Lowercase
+    - Strip diacritics
+    - Replace non-alphanumeric characters with spaces
+    - Collapse whitespace
+    """
+
+    if raw is None:
+        return ""
+
+    normalized = unicodedata.normalize("NFKD", str(raw))
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = re.sub(r"([a-z])([A-Z])", r"\1 \2", normalized)
+    normalized = normalized.lower()
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 
 def _resolve_hs_model() -> str:
@@ -93,13 +118,13 @@ def _load_country_registry() -> Tuple[Dict[str, str], Dict[str, str]]:
                 if not name or not iso3:
                     continue
                 iso3_to_name[iso3] = name
-                name_to_iso3[name.lower()] = iso3
+                name_to_iso3[_norm_country_key(name)] = iso3
     except Exception:
         logger.exception("Failed to read country registry from %s", COUNTRIES_CSV)
 
     for alias, iso3 in _COUNTRY_ALIASES.items():
         if iso3 in iso3_to_name:
-            name_to_iso3.setdefault(alias, iso3)
+            name_to_iso3.setdefault(_norm_country_key(alias), iso3)
         else:
             logger.warning("Skipping country alias %r -> %s (iso3 not in registry)", alias, iso3)
     return iso3_to_name, name_to_iso3
@@ -111,10 +136,10 @@ def _resolve_country(
     if not raw:
         return candidate, None
 
-    lower = raw.lower()
+    normalized = _norm_country_key(raw)
 
-    if lower in _COUNTRY_ALIASES:
-        iso3 = _COUNTRY_ALIASES[lower]
+    if normalized in name_to_iso3:
+        iso3 = name_to_iso3[normalized]
         return iso3_to_name.get(iso3, raw), iso3
 
     if len(raw) == 3 and raw.isalpha():
@@ -122,10 +147,6 @@ def _resolve_country(
         if iso3 in iso3_to_name:
             return iso3_to_name[iso3], iso3
         return raw, None
-
-    if lower in name_to_iso3:
-        iso3 = name_to_iso3[lower]
-        return iso3_to_name.get(iso3, raw), iso3
 
     return raw, None
 
@@ -395,7 +416,9 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
         con.close()
 
 
-def _load_country_list(provided: list[str] | None) -> Tuple[list[Tuple[str, str]], int]:
+def _load_country_list(
+    provided: list[str] | None,
+) -> Tuple[list[Tuple[str, str]], list[dict[str, str]], list[str]]:
     iso3_to_name, name_to_iso3 = _load_country_registry()
 
     if provided:
@@ -406,22 +429,28 @@ def _load_country_list(provided: list[str] | None) -> Tuple[list[Tuple[str, str]
             raw_countries = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
     resolved: list[Tuple[str, str]] = []
-    skipped_entries: list[str] = []
+    skipped_entries: list[dict[str, str]] = []
     for raw in raw_countries:
         name, iso3 = _resolve_country(raw, iso3_to_name, name_to_iso3)
         if iso3:
             resolved.append((name, iso3))
         else:
-            skipped_entries.append(raw)
+            skipped_entries.append(
+                {
+                    "raw": raw,
+                    "normalized": _norm_country_key(raw),
+                    "reason": "not_found",
+                }
+            )
 
     if skipped_entries:
         logger.warning(
             "HS country resolver: skipped %d unknown/invalid entries: %s",
             len(skipped_entries),
-            skipped_entries,
+            [entry.get("raw", "") for entry in skipped_entries],
         )
 
-    return resolved, len(skipped_entries)
+    return resolved, skipped_entries, raw_countries
 
 
 def main(countries: list[str] | None = None):
@@ -433,13 +462,13 @@ def main(countries: list[str] | None = None):
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
 
-    country_entries, skipped_unknown = _load_country_list(countries)
+    country_entries, skipped_entries, requested_countries = _load_country_list(countries)
     if not country_entries:
         logger.warning("No countries supplied to Horizon Scanner; exiting.")
-        if skipped_unknown:
+        if skipped_entries:
             logger.warning(
                 "HS country resolver skipped %d unknown/invalid entries; see warnings above for details",
-                skipped_unknown,
+                len(skipped_entries),
             )
         return
 
@@ -461,14 +490,21 @@ def main(countries: list[str] | None = None):
     try:
         git_sha = os.getenv("GITHUB_SHA") or ""
         config_profile = os.getenv("PYTHIA_CONFIG_PROFILE", "default")
-        log_hs_run_to_db(run_id, iso3_list, git_sha=git_sha, config_profile=config_profile)
+        log_hs_run_to_db(
+            run_id,
+            iso3_list,
+            git_sha=git_sha,
+            config_profile=config_profile,
+            requested_countries=requested_countries,
+            skipped_entries=skipped_entries,
+        )
     except Exception as exc:  # pragma: no cover - best-effort logging
         logger.warning("Failed to log hs_run %s: %s", run_id, exc)
 
     logger.info(
         "Horizon Scanner triage run complete for %d countries (skipped %d unknown/invalid entries)",
         len(country_entries),
-        skipped_unknown,
+        len(skipped_entries),
     )
 
 
