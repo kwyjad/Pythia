@@ -1,6 +1,5 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
 Egypt
-Estonia
 Ethiopia
 Haiti
 Iran
@@ -9,3 +8,4 @@ Italy
 Kenya
 Lebanon
 Libya
+Madagascar
