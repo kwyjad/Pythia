@@ -61,3 +61,65 @@ def test_log_hs_llm_call_records_hs_triage(monkeypatch: pytest.MonkeyPatch, tmp_
 
     usage_loaded = json.loads(usage_json)
     assert usage_loaded.get("elapsed_ms") == 42
+
+
+def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    db_path = tmp_path / "hs_llm_call.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = connect(read_only=False)
+    try:
+        ensure_schema(con)
+    finally:
+        con.close()
+
+    from horizon_scanner import horizon_scanner
+    from forecaster.providers import ModelSpec
+
+    triage_payload = {
+        "hazards": {
+            "FL": {
+                "tier": "priority",
+                "triage_score": 0.82,
+                "drivers": [],
+                "regime_shifts": [],
+                "data_quality": {},
+            },
+            "DR": {
+                "tier": "watchlist",
+                "triage_score": 0.55,
+                "drivers": [],
+                "regime_shifts": [],
+                "data_quality": {},
+            },
+        }
+    }
+    response_text = f"```json\n{json.dumps(triage_payload)}\n```"
+    usage = {"elapsed_ms": 120, "total_tokens": 10}
+
+    async def _fake_call(prompt_text: str, *, run_id: str | None = None):
+        return response_text, usage, None, ModelSpec(name="Test", provider="test", model_id="test-model")
+
+    monkeypatch.setattr(horizon_scanner, "_call_hs_model", _fake_call)
+
+    horizon_scanner._run_hs_for_country("hs_test", "ETH", "Ethiopia")
+
+    con = connect(read_only=False)
+    try:
+        llm_rows = con.execute(
+            "SELECT phase, iso3, hazard_code FROM llm_calls WHERE phase = 'hs_triage'"
+        ).fetchall()
+        triage_rows = con.execute(
+            "SELECT hazard_code FROM hs_triage WHERE run_id = ? ORDER BY hazard_code", ["hs_test"]
+        ).fetchall()
+    finally:
+        con.close()
+
+    assert len(llm_rows) == 1, "Expected one hs_triage llm_calls row per country"
+    phase, iso3, hazard_code = llm_rows[0]
+    assert phase == "hs_triage"
+    assert iso3 == "ETH"
+    assert hazard_code == ""
+
+    hazard_codes = [row[0] for row in triage_rows]
+    assert hazard_codes == ["DR", "FL"]

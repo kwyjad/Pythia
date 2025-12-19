@@ -361,42 +361,30 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
                         )
 
         hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
-        if hazards_dict:
-            for hz_code in hazards_dict.keys():
-                hz_code_up = (hz_code or "").upper().strip()
-                log_hs_llm_call(
-                    hs_run_id=run_id,
-                    iso3=iso3_up,
-                    hazard_code=hz_code_up,
-                    model_spec=model_spec,
-                    prompt_text=prompt,
-                    response_text=text or "",
-                    usage=usage,
-                    error_text=log_error_text,
-                )
-                logger.info(
-                    "HS logged triage call: hs_run_id=%s iso3=%s hazard=%s",
-                    run_id,
-                    iso3_up,
-                    hz_code_up,
-                )
-        else:
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code="",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text or "",
-                usage=usage,
-                error_text=log_error_text,
-            )
-            logger.info(
-                "HS logged triage call: hs_run_id=%s iso3=%s hazard=%s (no hazards in triage JSON)",
-                run_id,
-                iso3_up,
-                "",
-            )
+        hazard_codes = sorted({(hz_code or "").upper().strip() for hz_code in hazards_dict.keys()})
+        logger.info(
+            "HS triage hazards for %s: %d returned [%s]",
+            iso3_up,
+            len(hazard_codes),
+            ", ".join(hazard_codes) if hazard_codes else "",
+        )
+
+        log_hs_llm_call(
+            hs_run_id=run_id,
+            iso3=iso3_up,
+            hazard_code="",
+            model_spec=model_spec,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage,
+            error_text=log_error_text,
+        )
+        logger.info(
+            "HS logged triage call: hs_run_id=%s iso3=%s hazard=%s",
+            run_id,
+            iso3_up,
+            "",
+        )
 
         if log_error_text:
             logger.error("HS triage error for %s: %s", iso3_up, log_error_text)
