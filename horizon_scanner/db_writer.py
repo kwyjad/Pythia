@@ -383,20 +383,40 @@ def log_hs_run_to_db(
     iso3_list: list[str],
     git_sha: str | None,
     config_profile: str,
+    requested_countries: list[str] | None = None,
+    skipped_entries: list[dict] | None = None,
 ) -> None:
     con = connect(read_only=False)
     ensure_schema(con)
 
     countries_json = json.dumps(sorted(set(iso3_list)))
+    requested_json = json.dumps(requested_countries or [])
+    skipped_entries_json = json.dumps(skipped_entries or [], ensure_ascii=False)
     now = datetime.utcnow()
 
     con.execute("DELETE FROM hs_runs WHERE hs_run_id = ?;", [hs_run_id])
     con.execute(
         """
-        INSERT INTO hs_runs (hs_run_id, generated_at, git_sha, config_profile, countries_json)
-        VALUES (?, ?, ?, ?, ?);
+        INSERT INTO hs_runs (
+            hs_run_id,
+            generated_at,
+            git_sha,
+            config_profile,
+            countries_json,
+            requested_countries_json,
+            skipped_entries_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?);
         """,
-        [hs_run_id, now, git_sha or "", config_profile, countries_json],
+        [
+            hs_run_id,
+            now,
+            git_sha or "",
+            config_profile,
+            countries_json,
+            requested_json,
+            skipped_entries_json,
+        ],
     )
     con.close()
 

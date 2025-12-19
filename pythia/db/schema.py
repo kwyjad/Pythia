@@ -312,7 +312,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 generated_at TIMESTAMP,
                 git_sha TEXT,
                 config_profile TEXT,
-                countries_json TEXT
+                countries_json TEXT,
+                requested_countries_json TEXT,
+                skipped_entries_json TEXT
             );
             """,
             {
@@ -321,6 +323,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "git_sha": "TEXT",
                 "config_profile": "TEXT",
                 "countries_json": "TEXT",
+                "requested_countries_json": "TEXT",
+                "skipped_entries_json": "TEXT",
             },
         )
 
