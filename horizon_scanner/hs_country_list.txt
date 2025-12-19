@@ -1,2 +1,11 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
-Cote d'Ivoire
+Egypt
+Estonia
+Ethiopia
+Haiti
+Iran
+Iraq
+Italy
+Kenya
+Lebanon
+Libya
