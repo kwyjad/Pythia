@@ -2516,7 +2516,7 @@ async def _call_spd_bayesmc_v2(
     BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
     to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
     """
-    specs = specs or SPD_ENSEMBLE
+    specs = specs or DEFAULT_ENSEMBLE
     specs_used = [ms for ms in specs if ms.active]
 
     if not specs_used:
@@ -3370,6 +3370,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 question_id=qid,
                 hs_run_id=hs_run_id,
                 target_month=target_month,
+                specs=list(DEFAULT_ENSEMBLE),
             )
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
             text = json.dumps(spd_obj)
@@ -3385,15 +3386,20 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
             # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
             if int((ensemble_meta or {}).get("n_models_ok") or 0) < 2:
-                first_text = ""
-                if raw_texts:
-                    first_text = raw_texts[0]
-                elif text:
-                    first_text = str(text)
+                if raw_texts and raw_texts[0].strip():
+                    _write_spd_raw_text(run_id, qid, "missing_spds", raw_texts[0])
+                    reason = "missing spds"
+                else:
+                    diag = {
+                        "status": "no_active_models_or_no_calls",
+                        "reason": "BayesMC had <2 ok models and no raw model text captured",
+                        "n_raw_calls": len(raw_calls or []),
+                        "ensemble_meta": ensemble_meta or {},
+                    }
+                    _write_spd_raw_text(run_id, qid, "no_active_models", json.dumps(diag))
+                    reason = "no active ensemble models"
 
-                _write_spd_raw_text(run_id, qid, "missing_spds", first_text)
-
-                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
+                reason = _append_ensemble_meta(reason, ensemble_meta_str)
                 _record_no_forecast(
                     run_id,
                     qid,
