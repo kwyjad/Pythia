@@ -239,6 +239,10 @@ MODEL_PRICING: dict[tuple[str, str], dict[str, float]] = {
         "input_per_million": 1.25,
         "output_per_million": 5.0,
     },
+    ("google", "gemini-3-flash-preview"): {
+        "input_per_million": 0.50,
+        "output_per_million": 3.0,
+    },
     ("google", "gemini-2.5-flash-lite"): {
         "input_per_million": 0.15,
         "output_per_million": 0.60,

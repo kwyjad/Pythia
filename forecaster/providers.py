@@ -268,6 +268,7 @@ _FORECASTER_PROMPT_VERSION = str(_forecaster_cfg.get("prompt_version", "1.0.0"))
 
 _PROVIDER_STATES: Dict[str, Dict[str, Any]] = {}
 _MODEL_SPECS: List[ModelSpec] = []
+_BLOCKED_PROVIDERS: set[str] = set()
 
 for provider_name, cfg_entry in _provider_config.items():
     env_key = str(cfg_entry.get("env_key", "")).strip()
@@ -300,7 +301,28 @@ for provider_name, cfg_entry in _provider_config.items():
 
 
 KNOWN_MODELS: List[str] = [spec.name for spec in _MODEL_SPECS]
-DEFAULT_ENSEMBLE: List[ModelSpec] = [spec for spec in _MODEL_SPECS if spec.active]
+
+
+def _parse_blocked_providers() -> set[str]:
+    raw = os.getenv("PYTHIA_BLOCK_PROVIDERS", "") or ""
+    blocked: set[str] = set()
+    for part in raw.split(","):
+        p = part.strip().lower()
+        if p:
+            blocked.add(p)
+    return blocked
+
+
+_BLOCKED_PROVIDERS = _parse_blocked_providers()
+
+
+def _apply_provider_block(specs: List[ModelSpec]) -> List[ModelSpec]:
+    if not _BLOCKED_PROVIDERS:
+        return list(specs)
+    return [spec for spec in specs if spec.provider not in _BLOCKED_PROVIDERS]
+
+
+DEFAULT_ENSEMBLE: List[ModelSpec] = _apply_provider_block([spec for spec in _MODEL_SPECS if spec.active])
 
 
 def summarize_model_specs(specs: List[ModelSpec]) -> str:
@@ -320,6 +342,89 @@ def default_ensemble_summary() -> str:
 
     return summarize_model_specs(DEFAULT_ENSEMBLE)
 
+
+# SPD ensemble helpers
+def _make_model_spec(provider: str, model_id: str, *, purpose: Optional[str] = None) -> ModelSpec:
+    provider_l = (provider or "").strip().lower()
+    cfg = _provider_config.get(provider_l, {})
+    name = _provider_display_name(provider_l, model_id, cfg)
+    state = _PROVIDER_STATES.get(provider_l, {})
+    weight = float(state.get("weight", 1.0) or 1.0)
+    api_key_present = bool(state.get("api_key"))
+    enabled_flag = bool(state.get("enabled"))
+    active = bool(api_key_present and enabled_flag and model_id)
+    return ModelSpec(
+        name=name,
+        provider=provider_l,
+        model_id=model_id,
+        weight=weight,
+        active=active,
+        purpose=purpose,
+    )
+
+
+def parse_ensemble_specs(spec_str: str | None) -> List[ModelSpec]:
+    """
+    Parse a comma-separated provider:model_id list into ModelSpecs.
+
+    Each ModelSpec is active only if the provider has an API key configured and a
+    non-empty model_id. Duplicate providers are allowed.
+    """
+
+    if not spec_str:
+        return []
+
+    specs: List[ModelSpec] = []
+    for raw_part in spec_str.split(","):
+        part = raw_part.strip()
+        if not part or ":" not in part:
+            continue
+        provider, model_id = part.split(":", 1)
+        provider = provider.strip().lower()
+        model_id = model_id.strip()
+        if not provider or not model_id:
+            continue
+        specs.append(_make_model_spec(provider, model_id))
+
+    return _apply_provider_block(specs)
+
+
+def _build_spd_default_ensemble() -> List[ModelSpec]:
+    """
+    Build the default SPD ensemble.
+
+    Includes OpenAI + Anthropic + two Gemini entries (pro + flash) when available,
+    with provider blocks applied.
+    """
+
+    specs: List[ModelSpec] = []
+
+    # Reuse existing default specs when present for OpenAI/Anthropic/Google.
+    for provider in ("openai", "anthropic", "google"):
+        for ms in _MODEL_SPECS:
+            if ms.provider == provider:
+                specs.append(ModelSpec(**ms.__dict__))
+                break
+
+    # Ensure both Gemini models are present for SPD diversity.
+    specs.append(_make_model_spec("google", "gemini-3-pro-preview"))
+    specs.append(_make_model_spec("google", "gemini-3-flash-preview"))
+
+    # Deduplicate identical provider+model_id combos while preserving order.
+    seen: set[tuple[str, str]] = set()
+    deduped: List[ModelSpec] = []
+    for ms in specs:
+        key = (ms.provider, ms.model_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ms)
+
+    return _apply_provider_block(deduped)
+
+
+SPD_ENSEMBLE_OVERRIDE: List[ModelSpec] = parse_ensemble_specs(os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", ""))
+SPD_ENSEMBLE: List[ModelSpec] = SPD_ENSEMBLE_OVERRIDE or _build_spd_default_ensemble()
 
 # backwards-compatible aliases reused elsewhere in the forecaster package
 _OPENAI_STATE = _PROVIDER_STATES.get("openai", {})
@@ -378,6 +483,8 @@ MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = {
     # Production / frontier models
     "gpt-5.1": (0.00125, 0.01000),
     "openai/gpt-5.1": (0.00125, 0.01000),
+    "gemini-3-flash-preview": (0.00050, 0.00300),
+    "google/gemini-3-flash-preview": (0.00050, 0.00300),
     "gemini-3-pro-preview": (0.00200, 0.01200),
     "google/gemini-3-pro-preview": (0.00200, 0.01200),
     "claude-opus-4-5-20251101": (0.00500, 0.02500),

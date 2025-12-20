@@ -886,6 +886,7 @@ from .providers import (
     GEMINI_MODEL_ID,
     ModelSpec,
     _PROVIDER_STATES,
+    SPD_ENSEMBLE,
     _get_or_client,
     call_chat_ms,
     disabled_providers_for_run,
@@ -2078,12 +2079,18 @@ async def _call_research_model(prompt: str, *, run_id: str | None = None) -> tup
 async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for v2 pipeline."""
 
-    ms = ModelSpec(
-        name="Gemini",
-        provider="google",
-        model_id=GEMINI_MODEL_ID,
-        active=True,
-        purpose="spd_v2",
+    ms_default: ModelSpec | None = None
+    for candidate in SPD_ENSEMBLE:
+        if getattr(candidate, "active", False):
+            ms_default = candidate
+            break
+        if ms_default is None:
+            ms_default = candidate
+
+    ms = (
+        ModelSpec(**ms_default.__dict__)
+        if ms_default is not None
+        else ModelSpec(name="Gemini", provider="google", model_id=GEMINI_MODEL_ID, active=True, purpose="spd_v2")
     )
     return await _call_spd_model_for_spec(ms, prompt, run_id=run_id)
 
@@ -2251,7 +2258,7 @@ async def _call_spd_ensemble_v2(
 ) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
     """Thin wrapper around the current SPD v2 call path for diagnostics."""
 
-    specs = specs or DEFAULT_ENSEMBLE
+    specs = specs or SPD_ENSEMBLE
 
     tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
     if not tasks:
@@ -2430,7 +2437,7 @@ async def _call_spd_bayesmc_v2(
     BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
     to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
     """
-    specs = specs or DEFAULT_ENSEMBLE
+    specs = specs or SPD_ENSEMBLE
     specs_used = [ms for ms in specs if ms.active]
 
     if not specs_used:
@@ -2960,14 +2967,14 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         write_both = os.getenv("PYTHIA_SPD_V2_WRITE_BOTH", "0") == "1"
 
         if dual_run:
-            specs = list(DEFAULT_ENSEMBLE)
+            specs = list(SPD_ENSEMBLE)
             specs_used_summary = _specs_summary(specs)
             specs_active = [ms for ms in specs if getattr(ms, "active", False)]
             n_active_specs = len(specs_active)
             if not specs or n_active_specs == 0:
                 diff = {
                     "error": "no_active_models",
-                    "reason": "DEFAULT_ENSEMBLE has no active model specs",
+                    "reason": "SPD_ENSEMBLE has no active model specs",
                     "n_specs": len(specs),
                     "n_active_specs": n_active_specs,
                     "providers": _provider_debug_snapshot(),
@@ -3085,7 +3092,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         raw_calls: list[dict[str, object]] = []
 
         if write_both:
-            specs = list(DEFAULT_ENSEMBLE)
+            specs = list(SPD_ENSEMBLE)
             specs_active = [ms for ms in specs if getattr(ms, "active", False)]
 
             if not specs_active:
@@ -3556,8 +3563,13 @@ def _load_calibration_advice_db(
         except Exception:
             pass
 
-def _choose_weights_for_question(calib: Dict[str, Any], class_primary: str, qtype: str) -> Tuple[Dict[str, float], str]:
-    model_names = [ms.name for ms in DEFAULT_ENSEMBLE]
+def _choose_weights_for_question(
+    calib: Dict[str, Any],
+    class_primary: str,
+    qtype: str,
+    ensemble_specs: List[ModelSpec] | None = None,
+) -> Tuple[Dict[str, float], str]:
+    model_names = [ms.name for ms in (ensemble_specs or DEFAULT_ENSEMBLE)]
     # 1) class-conditional
     try:
         by_class = calib.get("by_class", {})
@@ -4113,21 +4125,22 @@ async def _run_one_question_body(
             main_prompt = build_numeric_prompt(title, str(units or ""), description, research_text, criteria)
     
         # ------------------ 5) Ensemble calls (WITH research) -----------------------
+        ensemble_specs = SPD_ENSEMBLE if qtype == "spd" else DEFAULT_ENSEMBLE
         t0 = time.time()
         if qtype == "binary":
-            ens_res = await run_ensemble_binary(main_prompt, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_binary(main_prompt, ensemble_specs)
         elif qtype == "multiple_choice":
-            ens_res = await run_ensemble_mcq(main_prompt, n_options, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_mcq(main_prompt, n_options, ensemble_specs)
         elif qtype == "spd":
             ens_res = await run_ensemble_spd(
                 main_prompt,
-                DEFAULT_ENSEMBLE,
+                ensemble_specs,
                 run_id=run_id,
                 question_id=str(question_id),
                 hs_run_id=hs_run_id,
             )
         else:
-            ens_res = await run_ensemble_numeric(main_prompt, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_numeric(main_prompt, ensemble_specs)
         t_ensemble_ms = _ms(t0)
     
         # ------------------ 6) Choose calibration weights & aggregate ---------------
@@ -4142,7 +4155,10 @@ async def _run_one_question_body(
 
         if not calib_weights_map:
             calib_weights_map, weights_profile = _choose_weights_for_question(
-                _load_calibration_weights_file(), class_primary=class_primary, qtype=qtype
+                _load_calibration_weights_file(),
+                class_primary=class_primary,
+                qtype=qtype,
+                ensemble_specs=ensemble_specs,
             )
     
         # MAIN aggregation (with optional GTMC1 for binary)
@@ -4296,12 +4312,16 @@ async def _run_one_question_body(
         # only for schema continuity and weight-comparison diagnostics.
         if qtype == "binary":
             v_nogtmc1, _ = aggregate_binary(ens_res, None, calib_weights_map)
-            v_uniform, _ = aggregate_binary(ens_res, gtmc1_signal if gtmc1_active else None, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_uniform, _ = aggregate_binary(
+                ens_res,
+                gtmc1_signal if gtmc1_active else None,
+                {m.name: 1.0 for m in ensemble_specs},
+            )
             v_simple = _simple_average_binary(ens_res.members)
         elif qtype == "multiple_choice":
             v_nogtmc1_vec, _ = aggregate_mcq(ens_res, n_options, calib_weights_map)
             v_nogtmc1 = {options[i]: v_nogtmc1_vec[i] for i in range(n_options)} if n_options else {}
-            v_uniform_vec, _ = aggregate_mcq(ens_res, n_options, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_uniform_vec, _ = aggregate_mcq(ens_res, n_options, {m.name: 1.0 for m in ensemble_specs})
             v_uniform = {options[i]: v_uniform_vec[i] for i in range(n_options)} if n_options else {}
             v_simple_vec = _simple_average_mcq(ens_res.members, n_options)
             v_simple = {options[i]: v_simple_vec[i] for i in range(n_options)} if (n_options and v_simple_vec) else {}
@@ -4313,13 +4333,13 @@ async def _run_one_question_body(
             )
             v_uniform, ev_uniform, _ = aggregate_spd(
                 ens_res,
-                weights={m.name: 1.0 for m in DEFAULT_ENSEMBLE},
+                weights={m.name: 1.0 for m in ensemble_specs},
                 bucket_centroids=bucket_centroids,
             )
             v_simple = v_nogtmc1
         else:
             v_nogtmc1, _ = aggregate_numeric(ens_res, calib_weights_map)
-            v_uniform, _ = aggregate_numeric(ens_res, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_uniform, _ = aggregate_numeric(ens_res, {m.name: 1.0 for m in ensemble_specs})
             v_simple = _simple_average_numeric(ens_res.members) or {}
     
         # ------------------ 8) Ablation pass: NO RESEARCH ---------------------------
@@ -4330,24 +4350,24 @@ async def _run_one_question_body(
             ab_simple = final_main
         elif qtype == "binary":
             ab_prompt = build_binary_prompt(title, description, "", criteria)
-            ens_res_ab = await run_ensemble_binary(ab_prompt, DEFAULT_ENSEMBLE)
+            ens_res_ab = await run_ensemble_binary(ab_prompt, ensemble_specs)
             ab_main, _ = aggregate_binary(ens_res_ab, None, calib_weights_map)
-            ab_uniform, _ = aggregate_binary(ens_res_ab, None, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            ab_uniform, _ = aggregate_binary(ens_res_ab, None, {m.name: 1.0 for m in ensemble_specs})
             ab_simple = _simple_average_binary(ens_res_ab.members)
         elif qtype == "multiple_choice":
             ab_prompt = build_mcq_prompt(title, options, description, "", criteria)
-            ens_res_ab = await run_ensemble_mcq(ab_prompt, n_options, DEFAULT_ENSEMBLE)
+            ens_res_ab = await run_ensemble_mcq(ab_prompt, n_options, ensemble_specs)
             ab_vec, _ = aggregate_mcq(ens_res_ab, n_options, calib_weights_map)
             ab_main = {options[i]: ab_vec[i] for i in range(n_options)} if n_options else {}
-            ab_uniform_vec, _ = aggregate_mcq(ens_res_ab, n_options, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            ab_uniform_vec, _ = aggregate_mcq(ens_res_ab, n_options, {m.name: 1.0 for m in ensemble_specs})
             ab_uniform = {options[i]: ab_uniform_vec[i] for i in range(n_options)} if n_options else {}
             ab_simple_vec = _simple_average_mcq(ens_res_ab.members, n_options)
             ab_simple = {options[i]: ab_simple_vec[i] for i in range(n_options)} if (n_options and ab_simple_vec) else {}
         else:
             ab_prompt = build_numeric_prompt(title, str(units or ""), description, "", criteria)
-            ens_res_ab = await run_ensemble_numeric(ab_prompt, DEFAULT_ENSEMBLE)
+            ens_res_ab = await run_ensemble_numeric(ab_prompt, ensemble_specs)
             ab_main, _ = aggregate_numeric(ens_res_ab, calib_weights_map)
-            ab_uniform, _ = aggregate_numeric(ens_res_ab, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            ab_uniform, _ = aggregate_numeric(ens_res_ab, {m.name: 1.0 for m in ensemble_specs})
             ab_simple = _simple_average_numeric(ens_res_ab.members) or {}
     
         # ------------------ 9) Build ONE wide CSV row and write it ------------------
@@ -4363,7 +4383,7 @@ async def _run_one_question_body(
             "weights_profile": "class_calibration",
             "llm_models_json": [
                 {"name": ms.name, "provider": ms.provider, "model_id": ms.model_id, "weight": ms.weight}
-                for ms in DEFAULT_ENSEMBLE
+                for ms in ensemble_specs
             ],
     
             # Question metadata
@@ -4415,7 +4435,7 @@ async def _run_one_question_body(
         )
     
         # Per-model outputs
-        for i, ms in enumerate(DEFAULT_ENSEMBLE):
+        for i, ms in enumerate(ensemble_specs):
             mo: Optional[MemberOutput] = None
             if isinstance(ens_res, EnsembleResult) and i < len(ens_res.members):
                 mo = ens_res.members[i]
