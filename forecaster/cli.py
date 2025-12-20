@@ -720,8 +720,17 @@ def _record_no_forecast(
     reason: str,
     *,
     model_name: str = "ensemble",
+    raw_debug_written: bool = False,
+    raw_debug_tag: str | None = None,
+    raw_debug_text: str | None = None,
 ) -> None:
     """Persist a no-forecast outcome with an explanation."""
+
+    if (not raw_debug_written) and raw_debug_tag and raw_debug_text is not None:
+        try:
+            _write_spd_raw_text(run_id, question_id, raw_debug_tag, raw_debug_text)
+        except Exception:
+            pass
 
     con = connect(read_only=False)
     try:
@@ -3349,6 +3358,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     metric,
                     reason_bm,
                     model_name="ensemble_bayesmc_v2",
+                    raw_debug_written=True,
                 )
 
             return
@@ -3392,6 +3402,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     metric,
                     reason,
                     model_name="ensemble_bayesmc_v2",
+                    raw_debug_written=True,
                 )
                 return
 
@@ -3431,6 +3442,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     metric,
                     reason,
                     model_name="ensemble_bayesmc_v2",
+                    raw_debug_written=True,
                 )
                 return
 
@@ -3532,7 +3544,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 qid,
                 raw_path,
             )
-            _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+            _record_no_forecast(
+                run_id,
+                qid,
+                iso3,
+                hz,
+                metric,
+                "missing spds",
+                raw_debug_written=True,
+            )
             return
 
         spds = spd_obj.get("spds") or {}
