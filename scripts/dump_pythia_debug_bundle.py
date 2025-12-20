@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 import duckdb
-from forecaster.providers import DEFAULT_ENSEMBLE, _PROVIDER_STATES, default_ensemble_summary
-from pythia.llm_profiles import get_current_models, get_current_profile
+from forecaster.providers import DEFAULT_ENSEMBLE
 from resolver.db import duckdb_io
 from scripts.ci.llm_latency_summary import render_latency_markdown
 
@@ -50,6 +49,75 @@ def _llm_calls_columns(con: duckdb.DuckDBPyConnection) -> Set[str]:
     return cols
 
 
+def _build_in_clause(values: list[str]) -> tuple[str, list[str]]:
+    cleaned = [str(v) for v in values if str(v)]
+    if not cleaned:
+        return "", []
+    placeholders = ", ".join(["?"] * len(cleaned))
+    return f"({placeholders})", cleaned
+
+
+def _forecast_llm_filter(
+    columns: Set[str], run_id: str, question_ids: list[str]
+) -> tuple[str | None, list[Any], str]:
+    if "meta_run_id" in columns:
+        return "meta_run_id = ?", [run_id], "meta_run_id"
+    if "forecaster_run_id" in columns:
+        return "forecaster_run_id = ?", [run_id], "forecaster_run_id"
+    if "run_id" in columns:
+        return "run_id = ?", [run_id], "run_id"
+    if "question_id" in columns and question_ids:
+        clause, params = _build_in_clause(question_ids)
+        if clause:
+            return f"question_id IN {clause}", params, "question_id list"
+    return None, [], "none"
+
+
+def _hs_llm_filter(columns: Set[str], hs_run_id: str | None, iso3s: list[str]) -> tuple[str | None, list[Any], str]:
+    if "hs_run_id" in columns and hs_run_id:
+        return "hs_run_id = ?", [hs_run_id], "hs_run_id"
+    if "iso3" in columns and iso3s:
+        clause, params = _build_in_clause(iso3s)
+        if clause:
+            return f"iso3 IN {clause}", params, "iso3 list"
+    if "phase" in columns:
+        return "phase = 'hs_triage'", [], "phase_only"
+    return None, [], "none"
+
+
+def _combined_llm_filter(
+    columns: Set[str],
+    run_id: str,
+    hs_run_id: str | None,
+    question_ids: list[str],
+    iso3s: list[str],
+) -> tuple[str | None, list[Any], str]:
+    forecast_pred, forecast_params, forecast_strategy = _forecast_llm_filter(columns, run_id, question_ids)
+    hs_pred, hs_params, hs_strategy = _hs_llm_filter(columns, hs_run_id, iso3s)
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    strategy_parts: list[str] = []
+
+    if forecast_pred:
+        clauses.append(f"({forecast_pred})")
+        params.extend(forecast_params)
+        strategy_parts.append(f"forecast:{forecast_strategy}")
+
+    if hs_pred:
+        if "phase" not in hs_pred.lower():
+            clauses.append(f"(phase = 'hs_triage' AND {hs_pred})")
+        else:
+            clauses.append(f"({hs_pred})")
+        params.extend(hs_params)
+        strategy_parts.append(f"hs:{hs_strategy}")
+
+    if not clauses:
+        return None, [], "none"
+
+    return " OR ".join(clauses), params, "; ".join(strategy_parts)
+
+
 def _hs_runs_columns(con: duckdb.DuckDBPyConnection) -> Set[str]:
     try:
         rows = con.execute("PRAGMA table_info('hs_runs')").fetchall()
@@ -61,38 +129,6 @@ def _hs_runs_columns(con: duckdb.DuckDBPyConnection) -> Set[str]:
         if len(row) > 1 and row[1]:
             cols.add(str(row[1]))
     return cols
-
-
-def _llm_calls_filter_predicate(
-    columns: Set[str],
-    run_id: str,
-    question_ids: List[str],
-) -> Tuple[str | None, list[Any], str | None]:
-    """
-    Select a run-scoped predicate for llm_calls based on available columns.
-
-    Priority:
-      1. forecaster_run_id
-      2. run_id
-      3. meta_run_id
-      4. question_id (if provided)
-    """
-
-    if "forecaster_run_id" in columns:
-        return "forecaster_run_id = ?", [run_id], None
-
-    if "run_id" in columns:
-        return "run_id = ?", [run_id], None
-
-    if "meta_run_id" in columns:
-        return "meta_run_id = ?", [run_id], None
-
-    qids = [str(q) for q in question_ids if q]
-    if "question_id" in columns and qids:
-        placeholders = ", ".join(["?"] * len(qids))
-        return f"question_id IN ({placeholders})", qids, None
-
-    return None, [], "llm_calls not run-scoped; skipping per-run llm call counts."
 
 
 def _build_usage_json_from_row(row: dict[str, Any]) -> str:
@@ -173,48 +209,6 @@ def _get_bucket_labels_for_question(question: Dict[str, Any]) -> List[str]:
     if metric == "FATALITIES":
         return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
     return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
-
-
-def _provider_activation_snapshot_lines() -> list[str]:
-    lines: list[str] = []
-    lines.append(f"PYTHIA_DEBUG_MODELS={os.getenv('PYTHIA_DEBUG_MODELS', '')}")
-    try:
-        llm_profile = get_current_profile()
-    except Exception:
-        llm_profile = "unknown"
-    lines.append(f"PYTHIA_LLM_PROFILE={llm_profile}")
-
-    try:
-        profile_models = get_current_models()
-    except Exception:
-        profile_models = {}
-
-    if profile_models:
-        lines.append("LLM profile models:")
-        for name in sorted(profile_models):
-            lines.append(f"- {name}: {profile_models.get(name)}")
-    else:
-        lines.append("LLM profile models: (none)")
-
-    lines.append(f"DEFAULT_ENSEMBLE size={len(DEFAULT_ENSEMBLE)}")
-    lines.append(f"DEFAULT_ENSEMBLE summary: {default_ensemble_summary()}")
-
-    lines.append("")
-    lines.append("| provider | enabled | model_id | key_present | active | env_key | weight |")
-    lines.append("|----------|---------|----------|-------------|--------|---------|--------|")
-    for provider in sorted(_PROVIDER_STATES.keys()):
-        state = _PROVIDER_STATES.get(provider, {})
-        enabled = str(bool(state.get("enabled"))).lower()
-        model_id = state.get("model") or ""
-        key_present = str(bool(state.get("api_key"))).lower()
-        active = str(bool(state.get("active"))).lower()
-        env_key = state.get("env_key") or ""
-        weight = state.get("weight")
-        weight_val = f"{float(weight):.2f}" if isinstance(weight, (int, float)) else ""
-        lines.append(
-            f"| {provider} | {enabled} | {model_id} | {key_present} | {active} | {env_key} | {weight_val} |"
-        )
-    return lines
 
 
 def _load_forecasts_raw_counts(
@@ -317,60 +311,121 @@ def _load_hs_run_metadata(
     return parsed
 
 
+def _load_hs_triage_summary(
+    con: duckdb.DuckDBPyConnection, hs_run_id: str | None
+) -> tuple[list[dict[str, Any]], int]:
+    if not hs_run_id:
+        return [], 0
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT iso3, COUNT(*) AS n_hazards, LIST(DISTINCT hazard_code) AS hazards
+            FROM hs_triage
+            WHERE run_id = ?
+            GROUP BY iso3
+            ORDER BY iso3
+            """,
+            [hs_run_id],
+        )
+    except Exception:
+        rows = []
+
+    total = sum(int(row.get("n_hazards") or 0) for row in rows)
+    # Normalize hazards list to sorted comma-separated strings for deterministic output
+    for row in rows:
+        hazards = row.get("hazards") or []
+        if isinstance(hazards, str):
+            try:
+                hazards = json.loads(hazards)
+            except Exception:
+                hazards = [hazards]
+        hazards_list = sorted({str(h).upper() for h in hazards if h})
+        row["hazards_sorted"] = hazards_list
+    return rows, total
+
+
 def _load_llm_call_counts(
-    con: duckdb.DuckDBPyConnection, run_id: str, question_ids: List[str]
-) -> tuple[list[dict[str, Any]], str | None]:
-    columns = _llm_calls_columns(con)
-    predicate, params, skip_note = _llm_calls_filter_predicate(columns, run_id, question_ids)
-
+    con: duckdb.DuckDBPyConnection,
+    predicate: str | None,
+    params: list[Any],
+) -> list[dict[str, Any]]:
     if not predicate:
-        return [], skip_note
+        return []
 
-    rows = _fetch_llm_rows(
+    return _fetch_llm_rows(
         con,
         f"""
-        SELECT component, phase, model_name,
-               COUNT(*) AS n_calls,
-               SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_ok
+        SELECT
+            COALESCE(phase, '') AS phase,
+            COALESCE(provider, '') AS provider,
+            COALESCE(model_id, '') AS model_id,
+            COUNT(*) AS n_calls,
+            SUM(CASE WHEN error_text IS NULL OR error_text = '' THEN 0 ELSE 1 END) AS n_errors
         FROM llm_calls
         WHERE {predicate}
         GROUP BY 1, 2, 3
-        ORDER BY component, phase, n_calls DESC, model_name
+        ORDER BY 1, 2, 3
         """,
         params,
     )
-    return rows, None
 
 
-def _provider_output_notes(forecast_rows: list[dict[str, Any]]) -> list[str]:
-    counts_by_model = {row.get("model_name"): int(row.get("n_rows", 0) or 0) for row in forecast_rows}
-    notes: list[str] = []
-    for provider in sorted(_PROVIDER_STATES.keys()):
-        state = _PROVIDER_STATES.get(provider, {})
-        enabled = bool(state.get("enabled"))
-        model_id = str(state.get("model") or "")
-        key_present = bool(state.get("api_key"))
-        active = bool(state.get("active"))
-        reasons: list[str] = []
-        if not enabled:
-            reasons.append("disabled")
-        if not model_id:
-            reasons.append("missing model")
-        if not key_present:
-            reasons.append("missing key")
-        if not active:
-            reason_label = ", ".join(reasons) if reasons else "inactive"
-            notes.append(f"- Provider {provider}: inactive (reason: {reason_label})")
-            continue
-        row_count = counts_by_model.get(model_id, 0)
-        if row_count > 0:
-            notes.append(f"- Provider {provider}: active with {row_count} forecasts_raw rows")
+def _load_llm_error_summary(
+    con: duckdb.DuckDBPyConnection,
+    predicate: str | None,
+    params: list[Any],
+) -> list[dict[str, Any]]:
+    if not predicate:
+        return []
+
+    return _fetch_llm_rows(
+        con,
+        f"""
+        SELECT
+            COALESCE(phase, '') AS phase,
+            COALESCE(provider, '') AS provider,
+            COALESCE(model_id, '') AS model_id,
+            COUNT(*) AS n_errors
+        FROM llm_calls
+        WHERE {predicate}
+          AND error_text IS NOT NULL
+          AND error_text <> ''
+        GROUP BY 1, 2, 3
+        ORDER BY 1, 2, 3
+        """,
+        params,
+    )
+
+
+def _ensemble_participation_summary(
+    forecasts_raw_counts: list[dict[str, Any]],
+) -> list[str]:
+    present = {row.get("model_name"): int(row.get("n_rows", 0) or 0) for row in forecasts_raw_counts}
+    lines: list[str] = []
+    if present:
+        for model_name in sorted(present):
+            lines.append(f"- Model `{model_name}` wrote {present[model_name]} forecasts_raw rows.")
+    else:
+        lines.append("- No forecasts_raw rows found for this run.")
+
+    expected = [spec for spec in DEFAULT_ENSEMBLE if getattr(spec, "model_id", "")]
+    missing = [
+        spec for spec in expected if spec.model_id not in present and getattr(spec, "active", False)
+    ]
+    if expected:
+        lines.append(f"- Expected ensemble size: {len(expected)} (DEFAULT_ENSEMBLE).")
+        if missing:
+            for spec in sorted(missing, key=lambda s: (s.provider, s.model_id)):
+                lines.append(
+                    f"  - Missing forecasts_raw rows for provider `{spec.provider}` model `{spec.model_id}`."
+                )
         else:
-            notes.append(
-                "- Provider "
-                f"{provider}: active but produced 0 forecasts_raw rows (investigate failures; see llm_calls table)"
-            )
-    return notes
+            lines.append("- All active DEFAULT_ENSEMBLE models produced forecasts_raw rows.")
+    else:
+        lines.append("- DEFAULT_ENSEMBLE is empty or not configured; skipping expected-model check.")
+    return lines
 
 
 def _load_ensemble_spd_for_question(
@@ -1125,31 +1180,11 @@ def build_debug_bundle_markdown(
             }
         )
     scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
-    provider_activation_lines = _provider_activation_snapshot_lines()
     forecasts_raw_counts = _load_forecasts_raw_counts(con, run_id)
     forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, run_id)
-    llm_call_counts: list[dict[str, Any]] = []
-    llm_calls_skip_note: str | None = None
-    try:
-        llm_call_counts, llm_calls_skip_note = _load_llm_call_counts(
-            con, run_id, [str(q.get("question_id")) for q in questions]
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        llm_calls_skip_note = f"Error loading llm_calls: {exc}"
-        llm_call_counts = []
-    provider_notes = _provider_output_notes(forecasts_raw_counts)
-    latency_block = render_latency_markdown(con)
-    hs_manifest = _load_hs_run_metadata(con, hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None))
-    question_ids = sorted([str(q.get("question_id")) for q in questions if q.get("question_id")])
-
-    lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
-    lines.append("")
-    lines.append(f"_Generated at {now}_")
-    lines.append("")
-    lines.extend(latency_block.splitlines())
-    lines.append("")
-
     manifest_hs_run_id = hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None)
+    hs_manifest = _load_hs_run_metadata(con, manifest_hs_run_id)
+    question_ids = sorted([str(q.get("question_id")) for q in questions if q.get("question_id")])
     requested_countries = (
         (hs_manifest or {}).get("requested_countries") if hs_manifest is not None else []
     ) or []
@@ -1158,9 +1193,41 @@ def build_debug_bundle_markdown(
     ) or list(iso3s)
     resolved_countries_sorted = sorted({str(c) for c in resolved_countries if c})
     skipped_entries = ((hs_manifest or {}).get("skipped_entries") if hs_manifest else []) or []
+    hs_triage_rows, n_hazards_triaged_total = _load_hs_triage_summary(con, manifest_hs_run_id)
+    n_questions_by_hazard: dict[str, int] = {}
+    n_questions_by_iso3: dict[str, int] = {}
+    for q in questions:
+        hz = (q.get("hazard_code") or "").upper()
+        iso_val = (q.get("iso3") or "").upper()
+        if hz:
+            n_questions_by_hazard[hz] = n_questions_by_hazard.get(hz, 0) + 1
+        if iso_val:
+            n_questions_by_iso3[iso_val] = n_questions_by_iso3.get(iso_val, 0) + 1
+
+    llm_columns = _llm_calls_columns(con)
+    predicate, params, predicate_strategy = _combined_llm_filter(
+        llm_columns, run_id, manifest_hs_run_id, question_ids, resolved_countries_sorted
+    )
+    llm_call_counts: list[dict[str, Any]] = []
+    llm_calls_skip_note: str | None = None
+    llm_error_rows: list[dict[str, Any]] = []
+    try:
+        llm_call_counts = _load_llm_call_counts(con, predicate, params)
+        llm_error_rows = _load_llm_error_summary(con, predicate, params)
+    except Exception as exc:  # pragma: no cover - defensive
+        llm_calls_skip_note = f"Error loading llm_calls: {exc}"
+        llm_call_counts = []
+        llm_error_rows = []
+    latency_block = render_latency_markdown(con, predicate, params, predicate_strategy)
+
+    lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
+    lines.append("")
+    lines.append(f"_Generated at {now}_")
+    lines.append("")
 
     lines.append("## Run manifest")
     lines.append("")
+    lines.append(f"- Database URL: `{db_url}`")
     lines.append(f"- Forecast run_id: `{run_id}`")
     lines.append(f"- HS run_id: `{manifest_hs_run_id or 'unknown'}`")
     lines.append(
@@ -1168,11 +1235,29 @@ def build_debug_bundle_markdown(
         + (", ".join(requested_countries) if requested_countries else "(none)")
     )
     lines.append(
-        "- Resolved ISO3 list: "
+        "- Resolved ISO3s (authoritative): "
         + (", ".join(resolved_countries_sorted) if resolved_countries_sorted else "(none)")
     )
-    lines.append(f"- Total questions: `{len(question_ids)}`")
-    lines.append("- Question IDs: " + (", ".join(question_ids) if question_ids else "(none)"))
+    lines.append(f"- Skipped country entries: `{len(skipped_entries)}`")
+    lines.append(f"- n_countries_resolved: `{len(resolved_countries_sorted)}`")
+    lines.append(f"- n_questions_total: `{len(question_ids)}`")
+    lines.append(
+        "- n_questions_by_hazard_code: "
+        + (
+            ", ".join(f"{hz}:{n_questions_by_hazard[hz]}" for hz in sorted(n_questions_by_hazard))
+            if n_questions_by_hazard
+            else "(none)"
+        )
+    )
+    lines.append(
+        "- n_questions_by_iso3: "
+        + (
+            ", ".join(f"{iso3}:{n_questions_by_iso3[iso3]}" for iso3 in sorted(n_questions_by_iso3))
+            if n_questions_by_iso3
+            else "(none)"
+        )
+    )
+    lines.append(f"- n_hazards_triaged_total: `{n_hazards_triaged_total}`")
     lines.append("")
     lines.append("### Skipped country entries")
     lines.append("")
@@ -1188,6 +1273,67 @@ def build_debug_bundle_markdown(
             )
     else:
         lines.append("| (none) | (none) | (none) |")
+    lines.append("")
+    lines.append("### Hazards triaged by country")
+    lines.append("")
+    lines.append("| iso3 | n_hazards | hazards |")
+    lines.append("| ---- | --------- | -------- |")
+    if hs_triage_rows:
+        for row in hs_triage_rows:
+            hazards_list = row.get("hazards_sorted") or []
+            lines.append(
+                f"| {row.get('iso3')} | {row.get('n_hazards')} | "
+                f"{', '.join(hazards_list) if hazards_list else ''} |"
+            )
+    else:
+        lines.append("| (none) | 0 | (none) |")
+    lines.append("")
+    lines.append("### Question list")
+    lines.append("")
+    lines.append(f"- Total questions: `{len(question_ids)}`")
+    lines.append("- Question IDs: " + (", ".join(question_ids) if question_ids else "(none)"))
+    lines.append("")
+    lines.append("| question_id | iso3 | hazard | metric | target_month | wording |")
+    lines.append("| ----------- | ---- | ------ | ------ | ------------ | ------- |")
+    if questions:
+        for q in sorted(
+            questions,
+            key=lambda r: (
+                str(r.get("iso3") or ""),
+                str(r.get("hazard_code") or ""),
+                str(r.get("metric") or ""),
+                str(r.get("question_id") or ""),
+            ),
+        ):
+            lines.append(
+                f"| {q.get('question_id')} | {q.get('iso3')} | {q.get('hazard_code')} | "
+                f"{q.get('metric')} | {q.get('target_month')} | "
+                f"{(q.get('wording') or '').strip()} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | (none) | (none) | (none) |")
+    lines.append("")
+    lines.append("### Question counts by hazard_code")
+    lines.append("")
+    lines.append("| hazard_code | n_questions |")
+    lines.append("| ----------- | ----------- |")
+    if n_questions_by_hazard:
+        for hz in sorted(n_questions_by_hazard):
+            lines.append(f"| {hz} | {n_questions_by_hazard[hz]} |")
+    else:
+        lines.append("| (none) | 0 |")
+    lines.append("")
+    lines.append("### Question counts by ISO3")
+    lines.append("")
+    lines.append("| iso3 | n_questions |")
+    lines.append("| ---- | ------------ |")
+    if n_questions_by_iso3:
+        for iso_val in sorted(n_questions_by_iso3):
+            lines.append(f"| {iso_val} | {n_questions_by_iso3[iso_val]} |")
+    else:
+        lines.append("| (none) | 0 |")
+    lines.append("")
+    lines.extend(latency_block.splitlines())
     lines.append("")
     lines.append("### Forecast rows by model")
     lines.append("")
@@ -1214,8 +1360,6 @@ def build_debug_bundle_markdown(
 
     lines.append("## 1. Overview")
     lines.append("")
-    lines.append(f"- Database URL: `{db_url}`")
-    lines.append(f"- Run ID: `{run_id}`")
     lines.append(f"- Question types included (by hazard_code, metric): {len(questions)}")
     lines.append(f"- Hazards present: {', '.join(hazards) if hazards else '(none)'}")
     lines.append(f"- ISO3s present: {', '.join(iso3s) if iso3s else '(none)'}")
@@ -1272,14 +1416,37 @@ def build_debug_bundle_markdown(
         )
     lines.append("")
 
-    lines.append("### 1.4 Provider activation snapshot")
+    lines.append("### 1.4 LLM calls by phase/provider/model_id (this run)")
     lines.append("")
-    lines.extend(provider_activation_lines)
+    if llm_calls_skip_note:
+        lines.append(f"_Note: {llm_calls_skip_note}_")
+        lines.append("")
+    lines.append("| phase | provider | model_id | n_calls | n_errors |")
+    lines.append("| ----- | -------- | -------- | ------- | -------- |")
+    if llm_call_counts:
+        for row in llm_call_counts:
+            lines.append(
+                f"| {row.get('phase')} | {row.get('provider')} | {row.get('model_id')} | "
+                f"{row.get('n_calls')} | {row.get('n_errors')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | 0 | 0 |")
     lines.append("")
 
-    lines.append("### 1.5 Per-model evidence")
+    lines.append("### 1.5 LLM error summary (this run)")
     lines.append("")
-    lines.append("#### 1.5.1 forecasts_raw model writes")
+    lines.append("| phase | provider | model_id | n_errors |")
+    lines.append("| ----- | -------- | -------- | -------- |")
+    if llm_error_rows:
+        for row in llm_error_rows:
+            lines.append(
+                f"| {row.get('phase')} | {row.get('provider')} | {row.get('model_id')} | {row.get('n_errors')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | 0 |")
+    lines.append("")
+
+    lines.append("### 1.6 forecasts_raw model writes (DB truth)")
     lines.append("")
     lines.append("| model_name | n_rows |")
     lines.append("|------------|--------|")
@@ -1290,27 +1457,9 @@ def build_debug_bundle_markdown(
         lines.append("| (none) | 0 |")
     lines.append("")
 
-    lines.append("#### 1.5.2 llm_calls model calls")
+    lines.append("### 1.7 Ensemble participation summary")
     lines.append("")
-    if llm_calls_skip_note:
-        lines.append(f"_Note: {llm_calls_skip_note}_")
-        lines.append("")
-
-    lines.append("| component | phase | model_name | n_calls | n_ok |")
-    lines.append("|-----------|-------|------------|--------|------|")
-    if llm_call_counts:
-        for row in llm_call_counts:
-            lines.append(
-                f"| {row.get('component')} | {row.get('phase')} | {row.get('model_name')} | "
-                f"{row.get('n_calls')} | {row.get('n_ok')} |"
-            )
-    else:
-        lines.append("| (none) | (none) | (none) | 0 | 0 |")
-    lines.append("")
-
-    lines.append("#### 1.5.3 Provider output status")
-    lines.append("")
-    lines.extend(provider_notes)
+    lines.extend(_ensemble_participation_summary(forecasts_raw_counts))
     lines.append("")
 
     lines.append("## 2. Question Types")

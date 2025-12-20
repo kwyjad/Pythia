@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Sequence, Tuple
 
 import duckdb
 from resolver.db import duckdb_io
@@ -54,6 +54,8 @@ def _has_columns(
 
 def _query_latency(
     con: duckdb.DuckDBPyConnection,
+    predicate: str,
+    params: Sequence,
 ) -> List[Tuple[str, str, str, int, float, float, float]]:
     return con.execute(
         """
@@ -68,9 +70,13 @@ def _query_latency(
         FROM llm_calls
         WHERE elapsed_ms IS NOT NULL
           AND (error_text IS NULL OR error_text = '')
+          AND ({predicate})
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
-        """
+        """.format(
+            predicate=predicate or "1=1"
+        ),
+        params,
     ).fetchall()
 
 
@@ -96,7 +102,12 @@ def _table_info_markdown(con: duckdb.DuckDBPyConnection) -> List[str]:
     return lines
 
 
-def render_latency_markdown(con: duckdb.DuckDBPyConnection) -> str:
+def render_latency_markdown(
+    con: duckdb.DuckDBPyConnection,
+    predicate: str | None = None,
+    params: Sequence | None = None,
+    strategy_label: str | None = None,
+) -> str:
     required_cols = {"elapsed_ms", "phase", "provider", "model_id", "error_text"}
     lines: List[str] = []
 
@@ -117,7 +128,19 @@ def render_latency_markdown(con: duckdb.DuckDBPyConnection) -> str:
         lines.extend(_table_info_markdown(con))
         return "\n".join(lines)
 
-    rows = _query_latency(con)
+    params = list(params or [])
+    predicate_sql = predicate or "1=1"
+    total_rows = con.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0]
+    filtered_rows = (
+        con.execute(f"SELECT COUNT(*) FROM llm_calls WHERE {predicate_sql}", params).fetchone()[0]
+        if predicate
+        else total_rows
+    )
+    rows = _query_latency(con, predicate_sql, params)
+    if strategy_label:
+        lines.append(f"_Filter strategy: {strategy_label}_")
+        lines.append("")
+
     lines.append("| phase | provider | model_id | n_calls | p50_ms | p95_ms | avg_ms |")
     lines.append("| --- | --- | --- | --- | --- | --- | --- |")
     if rows:
@@ -130,8 +153,14 @@ def render_latency_markdown(con: duckdb.DuckDBPyConnection) -> str:
         lines.append("| (none) | (none) | (none) | 0 | 0 | 0 | 0 |")
         lines.append("")
         lines.append(
-            "_Note: No llm_calls rows with elapsed_ms and empty error_text; see schema below._"
+            "_Note: No llm_calls rows matched; see diagnostics below for context and schema._"
         )
+        lines.append("")
+        lines.append(f"- Total llm_calls rows: {total_rows}")
+        lines.append(f"- Rows after filter: {filtered_rows}")
+        if strategy_label:
+            lines.append(f"- Filter strategy: {strategy_label}")
+        lines.append("")
         lines.extend(_table_info_markdown(con))
     return "\n".join(lines)
 
