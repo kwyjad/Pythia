@@ -61,7 +61,7 @@ class ModelSpec:
     purpose: Optional[str] = None
 
 
-_MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "4")))
+_MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "18")))
 _LLM_SEMAPHORES: Dict[int, asyncio.Semaphore] = {}
 _HTTP_CLIENTS_BY_LOOP: Dict[int, httpx.AsyncClient] = {}
 
