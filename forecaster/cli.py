@@ -2524,6 +2524,14 @@ async def _call_spd_bayesmc_v2(
     per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
         prompt, specs_used, run_id=run_id
     )
+    member_raw_by_model_id: dict[str, str] = {}
+    for rc in raw_calls:
+        try:
+            ms = rc.get("model_spec")
+            if isinstance(ms, ModelSpec):
+                member_raw_by_model_id[ms.model_id] = str(rc.get("text") or "")
+        except Exception:
+            continue
 
     spd_obj, _diag = _build_bayesmc_spd_obj(
         per_model_spds, target_month=target_month, specs_used=specs_used
@@ -2578,16 +2586,16 @@ def _attach_ensemble_meta(spd_obj: dict[str, object], ensemble_meta: dict[str, o
         spd_obj["human_explanation"] = suffix
 
 
-def _write_spd_raw_debug_text(run_id: str, question_id: str, suffix: str, raw_text: str) -> Path:
+def _write_spd_raw_text(run_id: str, question_id: str, tag: str, raw_text: str) -> Path:
     out_dir = Path("debug") / "spd_raw"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{run_id}__{question_id}_{suffix}.txt"
+    out_path = out_dir / f"{run_id}__{question_id}_{tag}.txt"
     out_path.write_text(raw_text or "", encoding="utf-8")
     return out_path
 
 
 def _write_spd_raw_debug(run_id: str, qid: str, suffix: str, text: str) -> Path:
-    return _write_spd_raw_debug_text(run_id, qid, suffix, text)
+    return _write_spd_raw_text(run_id, qid, suffix, text)
 
 
 def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
@@ -3321,11 +3329,18 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     if missing_months:
                         reason_bm = f"BayesMC produced insufficient month coverage; missing_months={missing_months}"
                 raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict) and rc.get("text")]
-                debug_payload = raw_texts[0] if raw_texts else json.dumps(diag_bm or {})
+                debug_payload = json.dumps(
+                    {
+                        "missing_months": missing_months,
+                        "bayesmc_diag": diag_bm,
+                    }
+                )
+                if not debug_payload and raw_texts:
+                    debug_payload = raw_texts[0]
                 if missing_months:
-                    _write_spd_raw_debug_text(run_id, qid, "insufficient_month_coverage", debug_payload)
+                    _write_spd_raw_text(run_id, qid, "insufficient_month_coverage", debug_payload)
                 else:
-                    _write_spd_raw_debug_text(run_id, qid, "missing_spds", debug_payload)
+                    _write_spd_raw_text(run_id, qid, "missing_spds", debug_payload)
                 _record_no_forecast(
                     run_id,
                     qid,
@@ -3366,7 +3381,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 elif text:
                     first_text = str(text)
 
-                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+                _write_spd_raw_text(run_id, qid, "missing_spds", first_text)
 
                 reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
                 _record_no_forecast(
@@ -3391,15 +3406,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     missing_months = bayesmc_diag.get("missing_months") or []
                 if missing_months:
                     reason = f"BayesMC produced insufficient month coverage; missing_months={missing_months}"
-                    _write_spd_raw_debug_text(
+                    diag_text = json.dumps(
+                        {
+                            "missing_months": missing_months,
+                            "bayesmc_diag": bayesmc_diag,
+                        }
+                    )
+                    _write_spd_raw_text(
                         run_id,
                         qid,
                         "insufficient_month_coverage",
-                        first_text or json.dumps(bayesmc_diag),
+                        diag_text if diag_text else first_text,
                     )
                 else:
                     reason = "missing spds"
-                    _write_spd_raw_debug_text(run_id, qid, "missing_spds", first_text)
+                    _write_spd_raw_text(run_id, qid, "missing_spds", first_text)
 
                 reason = _append_ensemble_meta(reason, ensemble_meta_str)
                 _record_no_forecast(
@@ -3505,7 +3526,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             first_text = text or ""
             if raw_calls:
                 first_text = str(raw_calls[0].get("text") or "")
-            raw_path = _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+            raw_path = _write_spd_raw_text(run_id, qid, "missing_spds", first_text)
             LOG.error(
                 "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
                 qid,
