@@ -611,6 +611,7 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
     monkeypatch.chdir(tmp_path)
 
     monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
 
     # Enable BayesMC path
     monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
@@ -680,22 +681,32 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
 
     # Ensure BayesMC path has active specs to call
     monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms1, ms2])
 
     asyncio.run(cli._run_spd_for_question("run_bayesmc_ok", question_row))
 
     con = duckdb.connect(str(db_path))
     try:
-        # Ensure ensemble write happened
-        row = con.execute(
+        # Ensure ensemble write happened under BayesMC model name
+        ok_count = con.execute(
             """
-            SELECT status
+            SELECT COUNT(*)
             FROM forecasts_ensemble
-            WHERE run_id = ? AND question_id = ?
+            WHERE run_id = ? AND question_id = ? AND model_name = 'ensemble_bayesmc_v2' AND status = 'ok'
             """,
             ["run_bayesmc_ok", "Q_BAYESMC_OK"],
-        ).fetchone()
-        assert row is not None
-        assert (row[0] or "").lower() == "ok"
+        ).fetchone()[0]
+        assert ok_count > 0
+
+        no_forecast_count = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name = 'ensemble_bayesmc_v2' AND status = 'no_forecast'
+            """,
+            ["run_bayesmc_ok", "Q_BAYESMC_OK"],
+        ).fetchone()[0]
+        assert no_forecast_count == 0
 
         # Ensure at least one spd_v2 llm call was logged
         llm_count = con.execute(
@@ -789,6 +800,77 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
     raw_path = Path("debug/spd_raw") / "run_bayesmc_missing__Q_BAYESMC_MISSING_missing_spds.txt"
     assert raw_path.exists()
     assert "no spds key" in raw_path.read_text(encoding="utf-8").lower()
+
+
+def test_bayesmc_month_mapping_preserves_calendar_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+
+    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+
+    def _fake_bmc(per_model_spds, n_buckets, prior_alpha, weights_by_model, model_names):
+        return (
+            {
+                "2025-12": probs,
+                "2026-01": probs,
+                "2026-02": probs,
+                "2026-03": probs,
+                "2026-04": probs,
+                "2026-05": probs,
+            },
+            {"status": "ok"},
+        )
+
+    monkeypatch.setattr(cli, "aggregate_spd_v2_bayesmc", _fake_bmc)
+
+    ms = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    spd_obj, diag = cli._build_bayesmc_spd_obj(
+        [{}],
+        target_month="2025-12",
+        specs_used=[ms],
+    )
+
+    assert diag.get("status") == "ok"
+    assert set(spd_obj.get("spds", {}).keys()) == {
+        "2025-12",
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+    }
+
+
+def test_bayesmc_month_mapping_offsets_to_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+
+    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+
+    def _fake_bmc(per_model_spds, n_buckets, prior_alpha, weights_by_model, model_names):
+        return (
+            {f"month_{i}": probs for i in range(6)},
+            {"status": "ok"},
+        )
+
+    monkeypatch.setattr(cli, "aggregate_spd_v2_bayesmc", _fake_bmc)
+
+    ms = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    spd_obj, diag = cli._build_bayesmc_spd_obj(
+        [{}],
+        target_month="2025-12",
+        specs_used=[ms],
+    )
+
+    assert diag.get("status") == "ok"
+    assert set(spd_obj.get("spds", {}).keys()) == {
+        "2025-12",
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+    }
 
 
 @pytest.mark.db

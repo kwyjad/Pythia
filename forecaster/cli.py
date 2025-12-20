@@ -2373,6 +2373,58 @@ def _month_label_from_target(target_month: str, month_index: int) -> str | None:
     return f"{year:04d}-{month:02d}"
 
 
+def _is_calendar_month_key(key: str) -> bool:
+    try:
+        import re as _re  # local import to keep global imports minimal
+
+        return bool(_re.match(r"^\d{4}-\d{2}$", str(key).strip()))
+    except Exception:
+        return False
+
+
+def _parse_month_offset_key(key: str) -> int | None:
+    """
+    Parse month offset keys like 'month_0', 'month_1', 'm0', 'm1'.
+    Returns the integer offset or None if not recognized.
+    """
+    if not isinstance(key, str):
+        return None
+    k = key.strip().lower()
+    if k.startswith("month_") and k[6:].isdigit():
+        try:
+            return int(k[6:])
+        except Exception:
+            return None
+    if k.startswith("m") and k[1:].isdigit():
+        try:
+            return int(k[1:])
+        except Exception:
+            return None
+    return None
+
+
+def _add_months(ym: str, offset: int) -> str:
+    """Return YYYY-MM shifted by offset months (offset can be negative)."""
+    parts = str(ym or "").split("-")
+    if len(parts) != 2:
+        return ""
+    try:
+        y = int(parts[0])
+        m = int(parts[1])
+    except Exception:
+        return ""
+    total_months = (y * 12 + (m - 1)) + int(offset)
+    year = total_months // 12
+    month = (total_months % 12) + 1
+    return f"{year:04d}-{month:02d}"
+
+
+def _expected_months(target_month: str, n: int = 6) -> list[str]:
+    if not target_month:
+        return []
+    return [_add_months(target_month, i) for i in range(n)]
+
+
 def _build_bayesmc_spd_obj(
     per_model_spds: list[dict[str, list[float]]],
     *,
@@ -2394,21 +2446,39 @@ def _build_bayesmc_spd_obj(
         diag.setdefault("status", "no_evidence_all_months")
         return {}, diag
 
-    expected_months: list[str] = []
-    if target_month:
-        for i in range(6):
-            label = _month_label_from_target(target_month, i)
-            if label:
-                expected_months.append(label)
+    keys = list(spd_by_month.keys())
+    normalized: dict[str, list[float]] = {}
 
-    if expected_months:
-        missing_months = [m for m in expected_months if m not in spd_by_month]
+    if keys and all(_is_calendar_month_key(k) for k in keys):
+        normalized = dict(spd_by_month)
+    elif any(_parse_month_offset_key(k) is not None for k in keys):
+        if not target_month:
+            diag["status"] = "missing_target_month"
+            return {}, diag
+        for k, vec in spd_by_month.items():
+            offset = _parse_month_offset_key(k)
+            if offset is None:
+                continue
+            ym = _add_months(target_month, offset)
+            if ym:
+                normalized[ym] = vec
+        for k, vec in spd_by_month.items():
+            if _is_calendar_month_key(k):
+                normalized[str(k)] = vec
+    else:
+        diag["status"] = "unknown_month_labels"
+        diag["sample_keys"] = sorted([str(k) for k in keys][:5])
+        return {}, diag
+
+    if target_month:
+        expected_months = _expected_months(target_month, 6)
+        missing_months = [m for m in expected_months if m not in normalized]
         if missing_months:
             diag["status"] = "insufficient_month_coverage"
             diag["missing_months"] = missing_months
             return {}, diag
 
-    spd_obj: dict[str, object] = {"spds": {m: {"probs": vec} for m, vec in spd_by_month.items()}}
+    spd_obj: dict[str, object] = {"spds": {m: {"probs": vec} for m, vec in normalized.items()}}
     spd_obj["bayesmc_diag"] = diag
 
     return spd_obj, diag
@@ -3272,7 +3342,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
 
                 reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
-                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    reason,
+                    model_name="ensemble_bayesmc_v2",
+                )
                 return
 
             if not spd_obj:
@@ -3282,7 +3360,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
 
                 reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
-                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    reason,
+                    model_name="ensemble_bayesmc_v2",
+                )
                 return
 
             logged_any_spd_call = False
@@ -3406,6 +3492,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             spd_obj,
             resolution_source=resolution_source,
             usage=usage or {},
+            model_name="ensemble_bayesmc_v2" if use_bayesmc else "ensemble",
         )
 
     except Exception:
