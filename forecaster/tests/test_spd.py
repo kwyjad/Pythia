@@ -873,6 +873,94 @@ def test_bayesmc_month_mapping_offsets_to_calendar(monkeypatch: pytest.MonkeyPat
     }
 
 
+def test_bayesmc_missing_months_records_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_bayesmc_missing_months.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_BAYESMC_MISSING_MONTHS",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test DR PA missing months",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_BAYESMC_MISSING_MONTHS"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    fake_spd = {
+        "spds": {
+            "month_0": {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]},
+            "month_1": {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]},
+        }
+    }
+
+    async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
+        return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
+
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms1, ms2])
+
+    asyncio.run(cli._run_spd_for_question("run_bayesmc_missing_months", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            """
+            SELECT status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name = 'ensemble_bayesmc_v2'
+            """,
+            ["run_bayesmc_missing_months", "Q_BAYESMC_MISSING_MONTHS"],
+        ).fetchone()
+        assert row is not None
+        status, reason = row
+        assert status == "no_forecast"
+        assert "missing_months" in (reason or "")
+        assert "2026-02" in (reason or "")
+    finally:
+        con.close()
+
+    raw_path = Path("debug/spd_raw") / "run_bayesmc_missing_months__Q_BAYESMC_MISSING_MONTHS_insufficient_month_coverage.txt"
+    assert raw_path.exists()
+    assert "month_0" in raw_path.read_text(encoding="utf-8")
+
+
 @pytest.mark.db
 def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
