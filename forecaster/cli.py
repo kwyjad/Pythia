@@ -3338,7 +3338,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 if missing_months:
                     fallback_diag["missing_months"] = missing_months
                 explanation_parts = [
-                    "BayesMC produced no SPD; wrote mean SPD as fallback.",
+                    "fallback_to_mean: BayesMC produced no SPD; wrote mean SPD as fallback.",
                     f"bayesmc_status={fallback_diag.get('original_bayesmc_status')}",
                 ]
                 if missing_months:
