@@ -357,9 +357,46 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
+          mkdir -p diagnostics
           echo "=== Running horizon_scanner.horizon_scanner as a module ==="
-          python -m horizon_scanner.horizon_scanner
+          python -m horizon_scanner.horizon_scanner | tee diagnostics/hs_stdout.txt
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          if [ -z "${HS_RUN_ID}" ]; then
+            echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
+            exit 1
+          fi
+          {
+            echo "HS_RUN_ID=${HS_RUN_ID}"
+            echo "HS_RESOLVED_ISO3S=${HS_RESOLVED_ISO3S}"
+          } >> "$GITHUB_ENV"
+          {
+            echo "HS_RUN_ID=${HS_RUN_ID}"
+            echo "HS_RESOLVED_ISO3S=${HS_RESOLVED_ISO3S}"
+          } >> "$GITHUB_OUTPUT"
           echo "=== horizon_scanner.horizon_scanner completed ==="
+
+      - name: Assert HS triage outputs
+        id: assert_hs_triage
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          HS_RESOLVED_ISO3S: ${{ env.HS_RESOLVED_ISO3S }}
+          HS_MODEL_ID: ${{ env.HS_MODEL_ID }}
+        run: |
+          set -e
+          python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage triage
+
+      - name: Upload HS triage diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hs-triage-diagnostics
+          path: |
+            diagnostics/hs_assertion.md
+            diagnostics/hs_stdout.txt
+            debug/hs_triage_raw/*
+          if-no-files-found: warn
 
       - name: Create questions from latest HS triage run
         env:
@@ -369,8 +406,30 @@ jobs:
           echo "Creating questions from hs_triage into resolver.duckdb..."
           python -m scripts.create_questions_from_triage --db "${PYTHIA_DB_URL}"
 
+      - name: Assert HS questions outputs
+        id: assert_hs_questions
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          HS_RESOLVED_ISO3S: ${{ env.HS_RESOLVED_ISO3S }}
+          HS_MODEL_ID: ${{ env.HS_MODEL_ID }}
+        run: |
+          set -e
+          python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage questions
+
+      - name: Upload HS question diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hs-question-diagnostics
+          path: |
+            diagnostics/hs_assertion.md
+            diagnostics/hs_stdout.txt
+          if-no-files-found: warn
+
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Diagnostics — Forecaster provider activation & ensemble composition
+        if: ${{ success() }}
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
           PYTHIA_DEBUG_MODELS: "1"
@@ -390,6 +449,7 @@ jobs:
           fi
 
       - name: Run Forecaster (Pythia mode on HS questions)
+        if: ${{ success() }}
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
           PYTHIA_LLM_PROFILE: prod
@@ -402,6 +462,7 @@ jobs:
           MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
         run: |
           set -e
+          mkdir -p diagnostics
           echo "=== Running Forecaster in Pythia mode on active HS questions ==="
           # No limit: forecast all questions from the current HS epoch.
           # Use a batch size to keep per-batch concurrency manageable for large epochs.
@@ -409,10 +470,22 @@ jobs:
             --mode pythia \
             --limit 0 \
             --batch-size 100 \
-            --purpose hs_pipeline
+            --purpose hs_pipeline | tee diagnostics/forecaster_stdout.txt
+          FORECASTER_RUN_ID=$(grep -Eo 'run_id=fc_[0-9]+' diagnostics/forecaster_stdout.txt | tail -n 1 | cut -d= -f2)
+          if [ -n "${FORECASTER_RUN_ID}" ]; then
+            {
+              echo "FORECASTER_RUN_ID=${FORECASTER_RUN_ID}"
+            } >> "$GITHUB_ENV"
+            {
+              echo "FORECASTER_RUN_ID=${FORECASTER_RUN_ID}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "WARNING: Forecaster run id not detected in output."
+          fi
           echo "=== Forecaster (Pythia mode) completed ==="
 
       - name: Verify Forecaster wrote both aggregation methods
+        if: ${{ success() }}
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
@@ -462,13 +535,34 @@ jobs:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
 
       - name: Dump unified Pythia v2 debug bundle
-        run: python -m scripts.dump_pythia_debug_bundle --db "${{ env.RESOLVER_DB_URL }}"
-
-      - name: Diagnostics — LLM latency p50/p95 by phase/provider/model
+        if: ${{ success() }}
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          FORECASTER_RUN_ID: ${{ env.FORECASTER_RUN_ID }}
         run: |
           set -e
           mkdir -p diagnostics
-          python -m scripts.ci.llm_latency_summary --db "${RESOLVER_DB_URL}" | tee diagnostics/llm_latency_summary.md
+          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
+            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}"
+          else
+            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}"
+          fi
+          BUNDLE_PATH=$(find debug -maxdepth 1 -type f -name "pytia_debug_bundle__*.md" -print | sort | tail -n 1 || true)
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "${BUNDLE_PATH}" ]; then
+            cat "${BUNDLE_PATH}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Diagnostics — LLM latency p50/p95 by phase/provider/model
+        if: ${{ success() }}
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          FORECASTER_RUN_ID: ${{ env.FORECASTER_RUN_ID }}
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python -m scripts.ci.llm_latency_summary --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}" | tee diagnostics/llm_latency_summary.md
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/llm_latency_summary.md ]; then
             cat diagnostics/llm_latency_summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
