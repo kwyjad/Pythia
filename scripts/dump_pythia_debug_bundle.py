@@ -573,9 +573,19 @@ def _parse_args() -> argparse.Namespace:
         help="DuckDB URL (e.g. duckdb:///data/resolver.duckdb)",
     )
     parser.add_argument(
+        "--hs-run-id",
+        required=True,
+        help="HS run id to include in the bundle (e.g. hs_20240101T000000).",
+    )
+    parser.add_argument(
+        "--forecaster-run-id",
+        default=None,
+        help="Optional Forecaster run id (e.g. fc_17648...). If omitted, build a triage-only bundle.",
+    )
+    parser.add_argument(
         "--run-id",
         default=None,
-        help="Forecast run_id (e.g. fc_17648...). If omitted, use latest fc_* in forecasts_ensemble.",
+        help="Deprecated alias for --forecaster-run-id.",
     )
     parser.add_argument(
         "--output-dir",
@@ -604,6 +614,16 @@ def _select_run_id(con: duckdb.DuckDBPyConnection, explicit: str | None) -> str 
         """,
     ).fetchone()
     return row[0] if row and row[0] else None
+
+
+def _forecast_run_exists(con: duckdb.DuckDBPyConnection, run_id: str) -> bool:
+    row = con.execute(
+        """
+        SELECT COUNT(*) FROM forecasts_ensemble WHERE run_id = ?
+        """,
+        [run_id],
+    ).fetchone()
+    return bool(row and row[0])
 
 
 def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict[str, Any]]:
@@ -1124,19 +1144,134 @@ def _append_stage_block(lines: List[str], phase: str, call: Dict[str, Any] | Non
         lines.append("_No error reported for this call._")
 
 
+def build_triage_only_bundle_markdown(
+    con: duckdb.DuckDBPyConnection, db_url: str, hs_run_id: str
+) -> str:
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    hs_manifest = _load_hs_run_metadata(con, hs_run_id)
+    resolved_countries = (hs_manifest or {}).get("countries") if hs_manifest else []
+    requested_countries = (hs_manifest or {}).get("requested_countries") if hs_manifest else []
+    skipped_entries = (hs_manifest or {}).get("skipped_entries") if hs_manifest else []
+    resolved_countries_sorted = sorted({str(c) for c in (resolved_countries or []) if c})
+
+    hs_triage_rows, n_hazards_triaged_total = _load_hs_triage_summary(con, hs_run_id)
+
+    llm_columns = _llm_calls_columns(con)
+    predicate, params, predicate_strategy = _hs_llm_filter(
+        llm_columns, hs_run_id, resolved_countries_sorted
+    )
+    if not predicate:
+        predicate = "phase = 'hs_triage'"
+        params = []
+        predicate_strategy = "phase_only"
+
+    llm_call_counts = _load_llm_call_counts(con, predicate, params)
+    llm_error_rows = _load_llm_error_summary(con, predicate, params)
+    latency_block = render_latency_markdown(con, predicate, params, strategy_label=predicate_strategy)
+
+    lines: List[str] = []
+    lines.append(f"# Pythia v2 Debug Bundle — HS run {hs_run_id}")
+    lines.append("")
+    lines.append(f"_Generated at {now}_")
+    lines.append("")
+    lines.append("## Run manifest")
+    lines.append("")
+    lines.append(f"- Database URL: `{db_url}`")
+    lines.append(f"- HS run_id: `{hs_run_id}`")
+    lines.append("- Forecaster run_id: (none; triage-only bundle)")
+    lines.append(
+        "- Requested countries (as provided): "
+        + (", ".join(requested_countries) if requested_countries else "(none)")
+    )
+    lines.append(
+        "- Resolved ISO3s (authoritative): "
+        + (", ".join(resolved_countries_sorted) if resolved_countries_sorted else "(none)")
+    )
+    lines.append(f"- Skipped country entries: `{len(skipped_entries or [])}`")
+    lines.append(f"- n_countries_resolved: `{len(resolved_countries_sorted)}`")
+    lines.append(f"- n_hazards_triaged_total: `{n_hazards_triaged_total}`")
+    lines.append("")
+    lines.append("### Skipped country entries")
+    lines.append("")
+    lines.append("| raw | normalized | reason |")
+    lines.append("| --- | --- | --- |")
+    if skipped_entries:
+        for entry in sorted(
+            skipped_entries,
+            key=lambda e: (str(e.get("raw") or ""), str(e.get("normalized") or "")),
+        ):
+            lines.append(
+                f"| {entry.get('raw', '')} | {entry.get('normalized', '')} | {entry.get('reason', '')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) |")
+    lines.append("")
+
+    lines.append("### Hazards triaged by country")
+    lines.append("")
+    lines.append("| iso3 | n_hazards | hazards |")
+    lines.append("| ---- | --------- | -------- |")
+    if hs_triage_rows:
+        for row in hs_triage_rows:
+            hazards_list = row.get("hazards_sorted") or []
+            lines.append(
+                f"| {row.get('iso3')} | {row.get('n_hazards')} | "
+                f"{', '.join(hazards_list) if hazards_list else ''} |"
+            )
+    else:
+        lines.append("| (none) | 0 | (none) |")
+    lines.append("")
+
+    lines.append("### LLM calls by phase/provider/model_id (hs_run only)")
+    lines.append("")
+    lines.append("| phase | provider | model_id | n_calls | n_errors |")
+    lines.append("| ----- | -------- | -------- | ------- | -------- |")
+    if llm_call_counts:
+        for row in llm_call_counts:
+            lines.append(
+                f"| {row.get('phase')} | {row.get('provider')} | {row.get('model_id')} | "
+                f"{row.get('n_calls')} | {row.get('n_errors')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | 0 | 0 |")
+    lines.append("")
+
+    lines.append("### LLM error summary (hs_run only)")
+    lines.append("")
+    lines.append("| phase | provider | model_id | n_errors |")
+    lines.append("| ----- | -------- | -------- | -------- |")
+    if llm_error_rows:
+        for row in llm_error_rows:
+            lines.append(
+                f"| {row.get('phase')} | {row.get('provider')} | {row.get('model_id')} | {row.get('n_errors')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | 0 |")
+    lines.append("")
+
+    lines.append("### Latency (hs_run only)")
+    lines.append("")
+    lines.append(latency_block)
+    lines.append("")
+    lines.append("_No forecaster run detected for this HS run._")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_debug_bundle_markdown(
     con: duckdb.DuckDBPyConnection,
     db_url: str,
-    run_id: str,
+    forecaster_run_id: str,
+    hs_run_id: str | None,
     questions: list[dict[str, Any]],
 ) -> str:
     lines: List[str] = []
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    hs_run_id_for_costs = _resolve_hs_run_id_for_forecast(con, run_id)
+    hs_run_id_for_costs = hs_run_id or _resolve_hs_run_id_for_forecast(con, forecaster_run_id)
     usage_by_phase_warning: str | None = None
     try:
-        usage_by_phase = _aggregate_usage_by_phase(con, run_id, hs_run_id_for_costs)
+        usage_by_phase = _aggregate_usage_by_phase(con, forecaster_run_id, hs_run_id_for_costs)
     except Exception as exc:  # pragma: no cover - defensive
         usage_by_phase = {}
         usage_by_phase_warning = f"Error aggregating llm_calls usage: {exc}"
@@ -1155,11 +1290,11 @@ def build_debug_bundle_markdown(
         iso3 = q.get("iso3") or ""
         hz = q.get("hazard_code") or ""
         metric = q.get("metric") or ""
-        hs_run_id = q.get("hs_run_id") or hs_run_id_for_costs or run_id
+        hs_run_id = q.get("hs_run_id") or hs_run_id_for_costs
         triage_entry = _load_triage_entry(con, hs_run_id, iso3, hz, cache=triage_cache)
         triage_tier = (triage_entry or {}).get("tier")
         expected, reason = _scenario_expected(hz, metric, triage_entry)
-        call_count = _load_scenario_call_count(con, run_id, str(qid))
+        call_count = _load_scenario_call_count(con, forecaster_run_id, str(qid))
         if call_count > 0:
             status = "generated"
         elif not expected:
@@ -1180,8 +1315,8 @@ def build_debug_bundle_markdown(
             }
         )
     scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
-    forecasts_raw_counts = _load_forecasts_raw_counts(con, run_id)
-    forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, run_id)
+    forecasts_raw_counts = _load_forecasts_raw_counts(con, forecaster_run_id)
+    forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, forecaster_run_id)
     manifest_hs_run_id = hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None)
     hs_manifest = _load_hs_run_metadata(con, manifest_hs_run_id)
     question_ids = sorted([str(q.get("question_id")) for q in questions if q.get("question_id")])
@@ -1206,7 +1341,7 @@ def build_debug_bundle_markdown(
 
     llm_columns = _llm_calls_columns(con)
     predicate, params, predicate_strategy = _combined_llm_filter(
-        llm_columns, run_id, manifest_hs_run_id, question_ids, resolved_countries_sorted
+        llm_columns, forecaster_run_id, manifest_hs_run_id, question_ids, resolved_countries_sorted
     )
     llm_call_counts: list[dict[str, Any]] = []
     llm_calls_skip_note: str | None = None
@@ -1220,7 +1355,7 @@ def build_debug_bundle_markdown(
         llm_error_rows = []
     latency_block = render_latency_markdown(con, predicate, params, predicate_strategy)
 
-    lines.append(f"# Pythia v2 Debug Bundle — Run {run_id}")
+    lines.append(f"# Pythia v2 Debug Bundle — Run {forecaster_run_id}")
     lines.append("")
     lines.append(f"_Generated at {now}_")
     lines.append("")
@@ -1228,7 +1363,7 @@ def build_debug_bundle_markdown(
     lines.append("## Run manifest")
     lines.append("")
     lines.append(f"- Database URL: `{db_url}`")
-    lines.append(f"- Forecast run_id: `{run_id}`")
+    lines.append(f"- Forecast run_id: `{forecaster_run_id}`")
     lines.append(f"- HS run_id: `{manifest_hs_run_id or 'unknown'}`")
     lines.append(
         "- Requested countries (as provided): "
@@ -1477,12 +1612,12 @@ def build_debug_bundle_markdown(
         wording = question.get("wording")
 
         triage_entry = _load_triage_entry(
-            con, hs_run_id or hs_run_id_for_costs or run_id, iso3_val, hz_val, cache=triage_cache
+            con, hs_run_id or hs_run_id_for_costs, iso3_val, hz_val, cache=triage_cache
         )
         triage_tier = (triage_entry or {}).get("tier") or _load_triage_tier(
-            con, hs_run_id or run_id, iso3_val, hz_val
+            con, hs_run_id or hs_run_id_for_costs, iso3_val, hz_val
         )
-        spd_status = _load_spd_status(con, run_id, qid)
+        spd_status = _load_spd_status(con, forecaster_run_id, qid)
         scenario_meta = scenario_status_by_qid.get(qid) or {}
 
         section_label = f"{iso3_val} / {hz_val} / {metric_val}"
@@ -1505,7 +1640,9 @@ def build_debug_bundle_markdown(
         lines.append("")
 
         try:
-            calls = _load_llm_calls_for_question(con, run_id, qid, iso3_val, hz_val, hs_run_id)
+            calls = _load_llm_calls_for_question(
+                con, forecaster_run_id, qid, iso3_val, hz_val, hs_run_id
+            )
         except Exception as exc:  # pragma: no cover - defensive
             calls = {}
             lines.append(f"_Note: unable to load llm_calls for this question ({exc})._")
@@ -1566,7 +1703,7 @@ def build_debug_bundle_markdown(
             WHERE run_id = ? AND question_id = ?
             ORDER BY month_index, bucket_index
             """,
-            [run_id, qid],
+            [forecaster_run_id, qid],
         ).fetchall()
 
         if not ensemble_rows:
@@ -1582,7 +1719,7 @@ def build_debug_bundle_markdown(
                 lines.append("_No ensemble SPD rows found for this question/run._")
                 lines.append("")
             else:
-                ensemble = _load_ensemble_spd_for_question(con, run_id, qid, centroids)
+                ensemble = _load_ensemble_spd_for_question(con, forecaster_run_id, qid, centroids)
                 lines.append("##### Ensemble SPD and EV by Month")
                 lines.append("")
                 bucket_count = max(len(bucket_labels), 1)
@@ -1621,25 +1758,32 @@ def main() -> None:
     if db_path not in {":memory:"}:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
+    hs_run_id = args.hs_run_id
+    forecaster_run_id = args.forecaster_run_id or args.run_id
+
     con = duckdb_io.get_db(db_url)
     try:
-        run_id = _select_run_id(con, args.run_id)
-        if not run_id:
-            print("No fc_* run_id found in forecasts_ensemble; nothing to debug.")
-            return
-
-        questions = _load_questions_for_run(con, run_id)
-        if not questions:
-            print(f"No active questions found for run_id={run_id}.")
-            return
-
-        markdown = build_debug_bundle_markdown(con, db_url, run_id, questions)
+        if forecaster_run_id:
+            if not _forecast_run_exists(con, forecaster_run_id):
+                raise SystemExit(
+                    f"Forecaster run_id {forecaster_run_id} not found in forecasts_ensemble; cannot build debug bundle."
+                )
+            questions = _load_questions_for_run(con, forecaster_run_id)
+            if not questions:
+                raise SystemExit(f"No active questions found for run_id={forecaster_run_id}.")
+            markdown = build_debug_bundle_markdown(
+                con, db_url, forecaster_run_id, hs_run_id, questions
+            )
+            out_run_id = forecaster_run_id
+        else:
+            markdown = build_triage_only_bundle_markdown(con, db_url, hs_run_id)
+            out_run_id = hs_run_id
     finally:
         duckdb_io.close_db(con)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"pytia_debug_bundle__{run_id}.md"
+    out_path = out_dir / f"pytia_debug_bundle__{out_run_id}.md"
     out_path.write_text(markdown, encoding="utf-8")
     print(f"Wrote Pythia debug bundle to {out_path}")
 

@@ -21,6 +21,14 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help='Database URL, e.g. "duckdb:///data/resolver.duckdb".',
     )
+    parser.add_argument(
+        "--hs-run-id",
+        help="If provided, scope HS triage latency to this hs_run_id (phase = hs_triage).",
+    )
+    parser.add_argument(
+        "--forecaster-run-id",
+        help="If provided, scope Research/Scenario/SPD latency to this forecaster run id.",
+    )
     return parser.parse_args()
 
 
@@ -104,8 +112,8 @@ def _table_info_markdown(con: duckdb.DuckDBPyConnection) -> List[str]:
 
 def render_latency_markdown(
     con: duckdb.DuckDBPyConnection,
-    predicate: str | None = None,
-    params: Sequence | None = None,
+    predicate: str,
+    params: Sequence,
     strategy_label: str | None = None,
 ) -> str:
     required_cols = {"elapsed_ms", "phase", "provider", "model_id", "error_text"}
@@ -165,11 +173,33 @@ def render_latency_markdown(
     return "\n".join(lines)
 
 
+def _build_predicate(args: argparse.Namespace) -> tuple[str, list[str], str]:
+    clauses: list[str] = []
+    params: list[str] = []
+    strategy_parts: list[str] = []
+
+    if args.hs_run_id:
+        clauses.append("(phase = 'hs_triage' AND hs_run_id = ?)")
+        params.append(args.hs_run_id)
+        strategy_parts.append("hs_run_id")
+
+    if args.forecaster_run_id:
+        clauses.append("(phase <> 'hs_triage' AND run_id = ?)")
+        params.append(args.forecaster_run_id)
+        strategy_parts.append("run_id")
+
+    if not clauses:
+        raise SystemExit("At least one of --hs-run-id or --forecaster-run-id is required.")
+
+    return " OR ".join(clauses), params, ", ".join(strategy_parts)
+
+
 def main() -> None:
     args = _parse_args()
+    predicate, params, strategy_label = _build_predicate(args)
     con = duckdb_io.get_db(args.db)
     try:
-        markdown = render_latency_markdown(con)
+        markdown = render_latency_markdown(con, predicate, params, strategy_label=strategy_label)
     finally:
         duckdb_io.close_db(con)
 

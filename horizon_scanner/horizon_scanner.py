@@ -24,7 +24,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, TypedDict
 
 from forecaster.providers import (
     GEMINI_MODEL_ID,
@@ -272,7 +272,15 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
         con.close()
 
 
-async def _call_hs_model(prompt_text: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], str, ModelSpec]:
+class _TriageCallResult(TypedDict):
+    iso3: str
+    error_text: str | None
+    response_text: str
+
+
+async def _call_hs_model(
+    prompt_text: str, *, run_id: str | None = None
+) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     spec = ModelSpec(
         name="Gemini",
         provider="google",
@@ -299,7 +307,7 @@ async def _call_hs_model(prompt_text: str, *, run_id: str | None = None) -> tupl
     return text, usage, error, spec
 
 
-def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
+def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCallResult:
     con = pythia_connect(read_only=False)
     try:
         iso3_up = (iso3 or "").upper()
@@ -388,7 +396,11 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
 
         if log_error_text:
             logger.error("HS triage error for %s: %s", iso3_up, log_error_text)
-            return
+            return {
+                "iso3": iso3_up,
+                "error_text": log_error_text,
+                "response_text": text or "",
+            }
 
         _write_hs_triage(run_id, iso3_up, triage)
 
@@ -400,6 +412,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> None:
             usage.get("total_tokens"),
             cost or 0.0,
         )
+        return {"iso3": iso3_up, "error_text": None, "response_text": text or ""}
     finally:
         con.close()
 
@@ -458,9 +471,13 @@ def main(countries: list[str] | None = None):
                 "HS country resolver skipped %d unknown/invalid entries; see warnings above for details",
                 len(skipped_entries),
             )
+        print(f"HS_RUN_ID={run_id}")
+        print("HS_RESOLVED_ISO3S=")
         return
 
     logger.info("Processing %d countries with max %d workers", len(country_entries), HS_MAX_WORKERS)
+
+    triage_failures: list[_TriageCallResult] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=HS_MAX_WORKERS) as pool:
         futures = [
@@ -470,7 +487,9 @@ def main(countries: list[str] | None = None):
 
         for fut in concurrent.futures.as_completed(futures):
             try:
-                fut.result()
+                result = fut.result()
+                if result and result.get("error_text"):
+                    triage_failures.append(result)
             except Exception:
                 logger.exception("HS triage failed for one country")
 
@@ -494,6 +513,23 @@ def main(countries: list[str] | None = None):
         len(country_entries),
         len(skipped_entries),
     )
+
+    if triage_failures:
+        diagnostics_dir = Path("diagnostics")
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        failures_path = diagnostics_dir / f"hs_triage_failures__{run_id}.json"
+        try:
+            failures_path.write_text(
+                json.dumps(sorted(triage_failures, key=lambda r: r.get("iso3", "")), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info("Wrote HS triage failure diagnostics to %s", failures_path)
+        except Exception:  # pragma: no cover - best-effort
+            logger.exception("Failed to write HS triage failure diagnostics")
+
+    resolved_iso3s = sorted({iso3 for iso3 in iso3_list})
+    print(f"HS_RUN_ID={run_id}")
+    print(f"HS_RESOLVED_ISO3S={','.join(resolved_iso3s)}")
 
 
 if __name__ == "__main__":
