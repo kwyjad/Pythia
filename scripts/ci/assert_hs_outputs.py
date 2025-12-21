@@ -45,6 +45,10 @@ def _excerpt(text: str, limit: int = 400) -> str:
     return snippet
 
 
+def _escape_md_cell(text: str) -> str:
+    return (text or "").replace("|", "\\|")
+
+
 def _load_hs_manifest(
     con,
     hs_run_id: str,
@@ -93,9 +97,12 @@ def _render_llm_rows(rows: Iterable[tuple]) -> list[str]:
     found = False
     for iso3, error_text, elapsed_ms, provider, model_id, response_text in rows:
         found = True
+        excerpt = _excerpt(response_text or "", 800)
+        excerpt = _escape_md_cell(excerpt)
+        error_cell = _escape_md_cell(error_text)
         lines.append(
-            f"| {iso3 or ''} | {error_text or ''} | {elapsed_ms or ''} | "
-            f"{provider or ''} | {model_id or ''} | {_excerpt(response_text or '', 800).replace('|', '\\|')} |"
+            f"| {iso3 or ''} | {error_cell} | {elapsed_ms or ''} | "
+            f"{provider or ''} | {model_id or ''} | {excerpt} |"
         )
     if not found:
         lines.append("| (none) | (none) | (none) | (none) | (none) | (none) |")
