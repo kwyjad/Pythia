@@ -548,7 +548,7 @@ jobs:
           else
             python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}"
           fi
-          BUNDLE_PATH=$(ls debug/pytia_debug_bundle__*.md 2>/dev/null | tail -n 1 || true)
+          BUNDLE_PATH=$(find debug -maxdepth 1 -type f -name "pytia_debug_bundle__*.md" -print | sort | tail -n 1 || true)
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "${BUNDLE_PATH}" ]; then
             cat "${BUNDLE_PATH}" >> "$GITHUB_STEP_SUMMARY"
           fi
