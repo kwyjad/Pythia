@@ -720,8 +720,17 @@ def _record_no_forecast(
     reason: str,
     *,
     model_name: str = "ensemble",
+    raw_debug_written: bool = False,
+    raw_debug_tag: str | None = None,
+    raw_debug_text: str | None = None,
 ) -> None:
     """Persist a no-forecast outcome with an explanation."""
+
+    if (not raw_debug_written) and raw_debug_tag and raw_debug_text is not None:
+        try:
+            _write_spd_raw_text(run_id, question_id, raw_debug_tag, raw_debug_text)
+        except Exception:
+            pass
 
     con = connect(read_only=False)
     try:
@@ -886,6 +895,7 @@ from .providers import (
     GEMINI_MODEL_ID,
     ModelSpec,
     _PROVIDER_STATES,
+    SPD_ENSEMBLE,
     _get_or_client,
     call_chat_ms,
     disabled_providers_for_run,
@@ -2078,12 +2088,18 @@ async def _call_research_model(prompt: str, *, run_id: str | None = None) -> tup
 async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for v2 pipeline."""
 
-    ms = ModelSpec(
-        name="Gemini",
-        provider="google",
-        model_id=GEMINI_MODEL_ID,
-        active=True,
-        purpose="spd_v2",
+    ms_default: ModelSpec | None = None
+    for candidate in SPD_ENSEMBLE:
+        if getattr(candidate, "active", False):
+            ms_default = candidate
+            break
+        if ms_default is None:
+            ms_default = candidate
+
+    ms = (
+        ModelSpec(**ms_default.__dict__)
+        if ms_default is not None
+        else ModelSpec(name="Gemini", provider="google", model_id=GEMINI_MODEL_ID, active=True, purpose="spd_v2")
     )
     return await _call_spd_model_for_spec(ms, prompt, run_id=run_id)
 
@@ -2251,7 +2267,7 @@ async def _call_spd_ensemble_v2(
 ) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
     """Thin wrapper around the current SPD v2 call path for diagnostics."""
 
-    specs = specs or DEFAULT_ENSEMBLE
+    specs = specs or SPD_ENSEMBLE
 
     tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
     if not tasks:
@@ -2366,6 +2382,58 @@ def _month_label_from_target(target_month: str, month_index: int) -> str | None:
     return f"{year:04d}-{month:02d}"
 
 
+def _is_calendar_month_key(key: str) -> bool:
+    try:
+        import re as _re  # local import to keep global imports minimal
+
+        return bool(_re.match(r"^\d{4}-\d{2}$", str(key).strip()))
+    except Exception:
+        return False
+
+
+def _parse_month_offset_key(key: str) -> int | None:
+    """
+    Parse month offset keys like 'month_0', 'month_1', 'm0', 'm1'.
+    Returns the integer offset or None if not recognized.
+    """
+    if not isinstance(key, str):
+        return None
+    k = key.strip().lower()
+    if k.startswith("month_") and k[6:].isdigit():
+        try:
+            return int(k[6:])
+        except Exception:
+            return None
+    if k.startswith("m") and k[1:].isdigit():
+        try:
+            return int(k[1:])
+        except Exception:
+            return None
+    return None
+
+
+def _add_months(ym: str, offset: int) -> str:
+    """Return YYYY-MM shifted by offset months (offset can be negative)."""
+    parts = str(ym or "").split("-")
+    if len(parts) != 2:
+        return ""
+    try:
+        y = int(parts[0])
+        m = int(parts[1])
+    except Exception:
+        return ""
+    total_months = (y * 12 + (m - 1)) + int(offset)
+    year = total_months // 12
+    month = (total_months % 12) + 1
+    return f"{year:04d}-{month:02d}"
+
+
+def _expected_months(target_month: str, n: int = 6) -> list[str]:
+    if not target_month:
+        return []
+    return [_add_months(target_month, i) for i in range(n)]
+
+
 def _build_bayesmc_spd_obj(
     per_model_spds: list[dict[str, list[float]]],
     *,
@@ -2387,21 +2455,39 @@ def _build_bayesmc_spd_obj(
         diag.setdefault("status", "no_evidence_all_months")
         return {}, diag
 
-    expected_months: list[str] = []
-    if target_month:
-        for i in range(6):
-            label = _month_label_from_target(target_month, i)
-            if label:
-                expected_months.append(label)
+    keys = list(spd_by_month.keys())
+    normalized: dict[str, list[float]] = {}
 
-    if expected_months:
-        missing_months = [m for m in expected_months if m not in spd_by_month]
+    if keys and all(_is_calendar_month_key(k) for k in keys):
+        normalized = dict(spd_by_month)
+    elif any(_parse_month_offset_key(k) is not None for k in keys):
+        if not target_month:
+            diag["status"] = "missing_target_month"
+            return {}, diag
+        for k, vec in spd_by_month.items():
+            offset = _parse_month_offset_key(k)
+            if offset is None:
+                continue
+            ym = _add_months(target_month, offset)
+            if ym:
+                normalized[ym] = vec
+        for k, vec in spd_by_month.items():
+            if _is_calendar_month_key(k):
+                normalized[str(k)] = vec
+    else:
+        diag["status"] = "unknown_month_labels"
+        diag["sample_keys"] = sorted([str(k) for k in keys][:5])
+        return {}, diag
+
+    if target_month:
+        expected_months = _expected_months(target_month, 6)
+        missing_months = [m for m in expected_months if m not in normalized]
         if missing_months:
             diag["status"] = "insufficient_month_coverage"
             diag["missing_months"] = missing_months
             return {}, diag
 
-    spd_obj: dict[str, object] = {"spds": {m: {"probs": vec} for m, vec in spd_by_month.items()}}
+    spd_obj: dict[str, object] = {"spds": {m: {"probs": vec} for m, vec in normalized.items()}}
     spd_obj["bayesmc_diag"] = diag
 
     return spd_obj, diag
@@ -2447,10 +2533,22 @@ async def _call_spd_bayesmc_v2(
     per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
         prompt, specs_used, run_id=run_id
     )
+    member_raw_by_model_id: dict[str, str] = {}
+    for rc in raw_calls:
+        try:
+            ms = rc.get("model_spec")
+            if isinstance(ms, ModelSpec):
+                member_raw_by_model_id[ms.model_id] = str(rc.get("text") or "")
+        except Exception:
+            continue
 
     spd_obj, _diag = _build_bayesmc_spd_obj(
         per_model_spds, target_month=target_month, specs_used=specs_used
     )
+    try:
+        ensemble_meta["bayesmc_diag"] = _diag
+    except Exception:
+        pass
 
     if spd_obj:
         _attach_ensemble_meta(spd_obj, ensemble_meta)
@@ -2497,12 +2595,16 @@ def _attach_ensemble_meta(spd_obj: dict[str, object], ensemble_meta: dict[str, o
         spd_obj["human_explanation"] = suffix
 
 
+def _write_spd_raw_text(run_id: str, question_id: str, tag: str, raw_text: str) -> Path:
+    out_dir = Path("debug") / "spd_raw"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{run_id}__{question_id}_{tag}.txt"
+    out_path.write_text(raw_text or "", encoding="utf-8")
+    return out_path
+
+
 def _write_spd_raw_debug(run_id: str, qid: str, suffix: str, text: str) -> Path:
-    raw_dir = Path("debug/spd_raw")
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = raw_dir / f"{run_id}__{qid}_{suffix}.txt"
-    raw_path.write_text(text or "", encoding="utf-8")
-    return raw_path
+    return _write_spd_raw_text(run_id, qid, suffix, text)
 
 
 def _calls_summary(calls: list[dict[str, object]]) -> list[str]:
@@ -2591,6 +2693,32 @@ def _spd_side_status(
         "n_active_specs": len(active_specs),
         "n_months": len(vecs),
     }
+
+
+def _has_v2_spds(spd_obj: dict[str, object] | None) -> bool:
+    """Return True if the SPD v2 payload has any usable month vectors."""
+
+    vecs = _spd_v2_to_month_vectors(spd_obj)
+    return bool(vecs)
+
+
+def _select_spd_specs_for_run() -> tuple[list[ModelSpec], str]:
+    """
+    Choose active SPD specs, preferring SPD_ENSEMBLE but falling back to DEFAULT_ENSEMBLE.
+    Returns (active_specs, source_label).
+    """
+
+    specs = list(SPD_ENSEMBLE)
+    active = [ms for ms in specs if getattr(ms, "active", False)]
+    if active:
+        return active, "SPD_ENSEMBLE"
+
+    specs = list(DEFAULT_ENSEMBLE)
+    active = [ms for ms in specs if getattr(ms, "active", False)]
+    if active:
+        return active, "DEFAULT_ENSEMBLE"
+
+    return [], "none"
 
 
 def _spd_v2_to_month_vectors(spd_obj: dict[str, object] | None) -> dict[str, list[float]]:
@@ -2960,16 +3088,28 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         write_both = os.getenv("PYTHIA_SPD_V2_WRITE_BOTH", "0") == "1"
 
         if dual_run:
-            specs = list(DEFAULT_ENSEMBLE)
-            specs_used_summary = _specs_summary(specs)
-            specs_active = [ms for ms in specs if getattr(ms, "active", False)]
+            specs_active, specs_source = _select_spd_specs_for_run()
+            specs_used_summary = _specs_summary(specs_active)
             n_active_specs = len(specs_active)
-            if not specs or n_active_specs == 0:
+            specs_source_len = (
+                len(SPD_ENSEMBLE)
+                if specs_source == "SPD_ENSEMBLE"
+                else len(DEFAULT_ENSEMBLE)
+                if specs_source == "DEFAULT_ENSEMBLE"
+                else len(SPD_ENSEMBLE) + len(DEFAULT_ENSEMBLE)
+            )
+            if not specs_active:
+                reason = (
+                    f"{specs_source} has no active model specs"
+                    if specs_source != "none"
+                    else "SPD_ENSEMBLE and DEFAULT_ENSEMBLE have no active model specs"
+                )
                 diff = {
                     "error": "no_active_models",
-                    "reason": "DEFAULT_ENSEMBLE has no active model specs",
-                    "n_specs": len(specs),
+                    "reason": reason,
+                    "n_specs": specs_source_len,
                     "n_active_specs": n_active_specs,
+                    "specs_source": specs_source,
                     "providers": _provider_debug_snapshot(),
                 }
                 payload = {
@@ -2986,7 +3126,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         "usage": {},
                         "status_info": {
                             "status": "no_active_models",
-                            "reason": "spec list empty or inactive",
+                            "reason": reason,
                             "n_calls": 0,
                             "n_active_specs": n_active_specs,
                         },
@@ -2996,11 +3136,12 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         "usage": {},
                         "status_info": {
                             "status": "no_active_models",
-                            "reason": "spec list empty or inactive",
+                            "reason": reason,
                             "n_calls": 0,
                             "n_active_specs": n_active_specs,
                         },
                     },
+                    "specs_source": specs_source,
                     "diff": diff,
                 }
                 _write_spd_compare_artifact(run_id, qid, payload)
@@ -3085,17 +3226,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         raw_calls: list[dict[str, object]] = []
 
         if write_both:
-            specs = list(DEFAULT_ENSEMBLE)
-            specs_active = [ms for ms in specs if getattr(ms, "active", False)]
+            specs_active, specs_source = _select_spd_specs_for_run()
 
             if not specs_active:
+                reason = (
+                    f"no active ensemble models ({specs_source})"
+                    if specs_source != "none"
+                    else "no active ensemble models (SPD_ENSEMBLE and DEFAULT_ENSEMBLE inactive)"
+                )
                 _record_no_forecast(
                     run_id,
                     qid,
                     iso3,
                     hz,
                     metric,
-                    "no active ensemble models",
+                    reason,
                     model_name="ensemble_mean_v2",
                 )
                 _record_no_forecast(
@@ -3104,7 +3249,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     iso3,
                     hz,
                     metric,
-                    "no active ensemble models",
+                    reason,
                     model_name="ensemble_bayesmc_v2",
                 )
                 return
@@ -3112,6 +3257,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
                 prompt, specs_active, run_id=run_id
             )
+
+            raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
+            debug_written = False
 
             logged_any_spd_call = False
             for call in raw_calls:
@@ -3160,41 +3308,64 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
 
             ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
-
-            if int(ensemble_meta.get("n_models_ok") or 0) < 2:
-                reason = _append_ensemble_meta("insufficient ensemble coverage", ensemble_meta_str)
-                _record_no_forecast(
-                    run_id,
-                    qid,
-                    iso3,
-                    hz,
-                    metric,
-                    reason,
-                    model_name="ensemble_mean_v2",
-                )
-                _record_no_forecast(
-                    run_id,
-                    qid,
-                    iso3,
-                    hz,
-                    metric,
-                    reason,
-                    model_name="ensemble_bayesmc_v2",
-                )
-                return
+            if specs_source:
+                ensemble_meta_str = f"{ensemble_meta_str} | specs_source={specs_source}"
 
             spd_mean = aggregate_spd_v2_mean(per_model_spds)
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
-            _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
+            if _has_v2_spds(spd_mean_obj):
+                _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
                 per_model_spds, target_month=target_month, specs_used=specs_active
             )
-            if spd_bm_obj:
+            if _has_v2_spds(spd_bm_obj):
                 spd_bm_obj.setdefault("bayesmc_diag", diag_bm)
                 _attach_ensemble_meta(spd_bm_obj, ensemble_meta)
 
-            if spd_mean_obj:
+            missing_months: list[str] = []
+            if isinstance(diag_bm, dict):
+                missing_months = diag_bm.get("missing_months") or []
+
+            mean_has_spds = _has_v2_spds(spd_mean_obj)
+            bayesmc_has_spds = _has_v2_spds(spd_bm_obj)
+
+            if not bayesmc_has_spds and mean_has_spds:
+                fallback_diag: dict[str, object] = {
+                    "status": "fallback_to_mean",
+                    "original_bayesmc_status": diag_bm.get("status") if isinstance(diag_bm, dict) else None,
+                }
+                if missing_months:
+                    fallback_diag["missing_months"] = missing_months
+                explanation_parts = [
+                    "BayesMC produced no SPD; wrote mean SPD as fallback.",
+                    f"bayesmc_status={fallback_diag.get('original_bayesmc_status')}",
+                ]
+                if missing_months:
+                    explanation_parts.append(f"missing_months={missing_months}")
+                spd_bm_obj = {
+                    "spds": spd_mean_obj.get("spds"),
+                    "bayesmc_diag": fallback_diag,
+                    "human_explanation": " ".join(explanation_parts),
+                }
+                _attach_ensemble_meta(spd_bm_obj, ensemble_meta)
+                bayesmc_has_spds = _has_v2_spds(spd_bm_obj)
+
+            debug_tag = "insufficient_month_coverage" if missing_months else "missing_spds"
+            debug_payload = raw_texts[0] if raw_texts else ""
+            if not debug_payload:
+                debug_payload = json.dumps(
+                    {
+                        "missing_months": missing_months,
+                        "bayesmc_diag": diag_bm,
+                        "ensemble_meta": ensemble_meta,
+                    }
+                )
+
+            insufficient_coverage = int(ensemble_meta.get("n_models_ok") or 0) < 2
+            coverage_reason = "insufficient ensemble coverage" if insufficient_coverage else "missing spds"
+
+            if mean_has_spds:
                 _write_spd_outputs(
                     run_id,
                     question_row,
@@ -3204,7 +3375,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_mean_v2",
                 )
             else:
-                reason_mean = _append_ensemble_meta("missing spds", ensemble_meta_str)
+                reason_mean = _append_ensemble_meta(coverage_reason, ensemble_meta_str)
+                _write_spd_raw_text(run_id, qid, debug_tag, debug_payload)
+                debug_written = True
                 _record_no_forecast(
                     run_id,
                     qid,
@@ -3213,13 +3386,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     metric,
                     reason_mean,
                     model_name="ensemble_mean_v2",
+                    raw_debug_written=debug_written,
                 )
 
-            reason_bm = "missing spds"
-            if isinstance(diag_bm, dict):
-                reason_bm = str(diag_bm.get("status") or reason_bm)
-
-            if spd_bm_obj:
+            if bayesmc_has_spds:
                 _write_spd_outputs(
                     run_id,
                     question_row,
@@ -3229,7 +3399,14 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_bayesmc_v2",
                 )
             else:
+                reason_bm = coverage_reason
+                tag = debug_tag
+                if missing_months:
+                    reason_bm = f"BayesMC produced insufficient month coverage; missing_months={missing_months}"
+                    tag = "insufficient_month_coverage"
                 reason_bm = _append_ensemble_meta(reason_bm, ensemble_meta_str)
+                _write_spd_raw_text(run_id, qid, tag, debug_payload)
+                debug_written = True
                 _record_no_forecast(
                     run_id,
                     qid,
@@ -3238,44 +3415,101 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     metric,
                     reason_bm,
                     model_name="ensemble_bayesmc_v2",
+                    raw_debug_written=debug_written,
                 )
 
             return
 
         if use_bayesmc:
+            specs_active, specs_source = _select_spd_specs_for_run()
             spd_obj, usage, raw_calls, ensemble_meta = await _call_spd_bayesmc_v2(
                 prompt,
                 run_id=run_id,
                 question_id=qid,
                 hs_run_id=hs_run_id,
                 target_month=target_month,
+                specs=specs_active,
             )
+            raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
             text = json.dumps(spd_obj)
 
             ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
+            if specs_source:
+                ensemble_meta_str = f"{ensemble_meta_str} | specs_source={specs_source}"
+            bayesmc_diag = {}
+            try:
+                diag_from_meta = ensemble_meta.get("bayesmc_diag")
+                if isinstance(diag_from_meta, dict):
+                    bayesmc_diag = diag_from_meta
+            except Exception:
+                bayesmc_diag = {}
 
             # If BayesMC yields no SPD months, treat as missing spds (same contract as v2 path).
             if int((ensemble_meta or {}).get("n_models_ok") or 0) < 2:
-                first_text = ""
-                if raw_calls:
-                    first_text = str(raw_calls[0].get("text") or "")
-                elif text:
-                    first_text = str(text)
+                if raw_texts and raw_texts[0].strip():
+                    _write_spd_raw_text(run_id, qid, "missing_spds", raw_texts[0])
+                    reason = "missing spds"
+                else:
+                    diag = {
+                        "status": "no_active_models_or_no_calls",
+                        "reason": "BayesMC had <2 ok models and no raw model text captured",
+                        "n_raw_calls": len(raw_calls or []),
+                        "ensemble_meta": ensemble_meta or {},
+                    }
+                    _write_spd_raw_text(run_id, qid, "no_active_models", json.dumps(diag))
+                    reason = "no active ensemble models"
 
-                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
-
-                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
-                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
+                reason = _append_ensemble_meta(reason, ensemble_meta_str)
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    reason,
+                    model_name="ensemble_bayesmc_v2",
+                    raw_debug_written=True,
+                )
                 return
 
             if not spd_obj:
                 first_text = ""
-                if raw_calls:
-                    first_text = str(raw_calls[0].get("text") or "")
-                _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+                if raw_texts:
+                    first_text = raw_texts[0]
+                elif text:
+                    first_text = str(text)
+                missing_months = []
+                if isinstance(bayesmc_diag, dict):
+                    missing_months = bayesmc_diag.get("missing_months") or []
+                if missing_months:
+                    reason = f"BayesMC produced insufficient month coverage; missing_months={missing_months}"
+                    diag_text = json.dumps(
+                        {
+                            "missing_months": missing_months,
+                            "bayesmc_diag": bayesmc_diag,
+                        }
+                    )
+                    _write_spd_raw_text(
+                        run_id,
+                        qid,
+                        "insufficient_month_coverage",
+                        diag_text if diag_text else first_text,
+                    )
+                else:
+                    reason = "missing spds"
+                    _write_spd_raw_text(run_id, qid, "missing_spds", first_text)
 
-                reason = _append_ensemble_meta("missing spds", ensemble_meta_str)
-                _record_no_forecast(run_id, qid, iso3, hz, metric, reason)
+                reason = _append_ensemble_meta(reason, ensemble_meta_str)
+                _record_no_forecast(
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    reason,
+                    model_name="ensemble_bayesmc_v2",
+                    raw_debug_written=True,
+                )
                 return
 
             logged_any_spd_call = False
@@ -3370,13 +3604,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             first_text = text or ""
             if raw_calls:
                 first_text = str(raw_calls[0].get("text") or "")
-            raw_path = _write_spd_raw_debug(run_id, qid, "missing_spds", first_text)
+            raw_path = _write_spd_raw_text(run_id, qid, "missing_spds", first_text)
             LOG.error(
                 "SPD JSON missing 'spds' key for %s (saved raw text to %s)",
                 qid,
                 raw_path,
             )
-            _record_no_forecast(run_id, qid, iso3, hz, metric, "missing spds")
+            _record_no_forecast(
+                run_id,
+                qid,
+                iso3,
+                hz,
+                metric,
+                "missing spds",
+                raw_debug_written=True,
+            )
             return
 
         spds = spd_obj.get("spds") or {}
@@ -3399,6 +3641,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             spd_obj,
             resolution_source=resolution_source,
             usage=usage or {},
+            model_name="ensemble_bayesmc_v2" if use_bayesmc else "ensemble",
         )
 
     except Exception:
@@ -3556,8 +3799,13 @@ def _load_calibration_advice_db(
         except Exception:
             pass
 
-def _choose_weights_for_question(calib: Dict[str, Any], class_primary: str, qtype: str) -> Tuple[Dict[str, float], str]:
-    model_names = [ms.name for ms in DEFAULT_ENSEMBLE]
+def _choose_weights_for_question(
+    calib: Dict[str, Any],
+    class_primary: str,
+    qtype: str,
+    ensemble_specs: List[ModelSpec] | None = None,
+) -> Tuple[Dict[str, float], str]:
+    model_names = [ms.name for ms in (ensemble_specs or DEFAULT_ENSEMBLE)]
     # 1) class-conditional
     try:
         by_class = calib.get("by_class", {})
@@ -4113,21 +4361,22 @@ async def _run_one_question_body(
             main_prompt = build_numeric_prompt(title, str(units or ""), description, research_text, criteria)
     
         # ------------------ 5) Ensemble calls (WITH research) -----------------------
+        ensemble_specs = SPD_ENSEMBLE if qtype == "spd" else DEFAULT_ENSEMBLE
         t0 = time.time()
         if qtype == "binary":
-            ens_res = await run_ensemble_binary(main_prompt, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_binary(main_prompt, ensemble_specs)
         elif qtype == "multiple_choice":
-            ens_res = await run_ensemble_mcq(main_prompt, n_options, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_mcq(main_prompt, n_options, ensemble_specs)
         elif qtype == "spd":
             ens_res = await run_ensemble_spd(
                 main_prompt,
-                DEFAULT_ENSEMBLE,
+                ensemble_specs,
                 run_id=run_id,
                 question_id=str(question_id),
                 hs_run_id=hs_run_id,
             )
         else:
-            ens_res = await run_ensemble_numeric(main_prompt, DEFAULT_ENSEMBLE)
+            ens_res = await run_ensemble_numeric(main_prompt, ensemble_specs)
         t_ensemble_ms = _ms(t0)
     
         # ------------------ 6) Choose calibration weights & aggregate ---------------
@@ -4142,7 +4391,10 @@ async def _run_one_question_body(
 
         if not calib_weights_map:
             calib_weights_map, weights_profile = _choose_weights_for_question(
-                _load_calibration_weights_file(), class_primary=class_primary, qtype=qtype
+                _load_calibration_weights_file(),
+                class_primary=class_primary,
+                qtype=qtype,
+                ensemble_specs=ensemble_specs,
             )
     
         # MAIN aggregation (with optional GTMC1 for binary)
@@ -4296,12 +4548,16 @@ async def _run_one_question_body(
         # only for schema continuity and weight-comparison diagnostics.
         if qtype == "binary":
             v_nogtmc1, _ = aggregate_binary(ens_res, None, calib_weights_map)
-            v_uniform, _ = aggregate_binary(ens_res, gtmc1_signal if gtmc1_active else None, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_uniform, _ = aggregate_binary(
+                ens_res,
+                gtmc1_signal if gtmc1_active else None,
+                {m.name: 1.0 for m in ensemble_specs},
+            )
             v_simple = _simple_average_binary(ens_res.members)
         elif qtype == "multiple_choice":
             v_nogtmc1_vec, _ = aggregate_mcq(ens_res, n_options, calib_weights_map)
             v_nogtmc1 = {options[i]: v_nogtmc1_vec[i] for i in range(n_options)} if n_options else {}
-            v_uniform_vec, _ = aggregate_mcq(ens_res, n_options, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_uniform_vec, _ = aggregate_mcq(ens_res, n_options, {m.name: 1.0 for m in ensemble_specs})
             v_uniform = {options[i]: v_uniform_vec[i] for i in range(n_options)} if n_options else {}
             v_simple_vec = _simple_average_mcq(ens_res.members, n_options)
             v_simple = {options[i]: v_simple_vec[i] for i in range(n_options)} if (n_options and v_simple_vec) else {}
@@ -4313,13 +4569,13 @@ async def _run_one_question_body(
             )
             v_uniform, ev_uniform, _ = aggregate_spd(
                 ens_res,
-                weights={m.name: 1.0 for m in DEFAULT_ENSEMBLE},
+                weights={m.name: 1.0 for m in ensemble_specs},
                 bucket_centroids=bucket_centroids,
             )
             v_simple = v_nogtmc1
         else:
             v_nogtmc1, _ = aggregate_numeric(ens_res, calib_weights_map)
-            v_uniform, _ = aggregate_numeric(ens_res, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            v_uniform, _ = aggregate_numeric(ens_res, {m.name: 1.0 for m in ensemble_specs})
             v_simple = _simple_average_numeric(ens_res.members) or {}
     
         # ------------------ 8) Ablation pass: NO RESEARCH ---------------------------
@@ -4330,24 +4586,24 @@ async def _run_one_question_body(
             ab_simple = final_main
         elif qtype == "binary":
             ab_prompt = build_binary_prompt(title, description, "", criteria)
-            ens_res_ab = await run_ensemble_binary(ab_prompt, DEFAULT_ENSEMBLE)
+            ens_res_ab = await run_ensemble_binary(ab_prompt, ensemble_specs)
             ab_main, _ = aggregate_binary(ens_res_ab, None, calib_weights_map)
-            ab_uniform, _ = aggregate_binary(ens_res_ab, None, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            ab_uniform, _ = aggregate_binary(ens_res_ab, None, {m.name: 1.0 for m in ensemble_specs})
             ab_simple = _simple_average_binary(ens_res_ab.members)
         elif qtype == "multiple_choice":
             ab_prompt = build_mcq_prompt(title, options, description, "", criteria)
-            ens_res_ab = await run_ensemble_mcq(ab_prompt, n_options, DEFAULT_ENSEMBLE)
+            ens_res_ab = await run_ensemble_mcq(ab_prompt, n_options, ensemble_specs)
             ab_vec, _ = aggregate_mcq(ens_res_ab, n_options, calib_weights_map)
             ab_main = {options[i]: ab_vec[i] for i in range(n_options)} if n_options else {}
-            ab_uniform_vec, _ = aggregate_mcq(ens_res_ab, n_options, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            ab_uniform_vec, _ = aggregate_mcq(ens_res_ab, n_options, {m.name: 1.0 for m in ensemble_specs})
             ab_uniform = {options[i]: ab_uniform_vec[i] for i in range(n_options)} if n_options else {}
             ab_simple_vec = _simple_average_mcq(ens_res_ab.members, n_options)
             ab_simple = {options[i]: ab_simple_vec[i] for i in range(n_options)} if (n_options and ab_simple_vec) else {}
         else:
             ab_prompt = build_numeric_prompt(title, str(units or ""), description, "", criteria)
-            ens_res_ab = await run_ensemble_numeric(ab_prompt, DEFAULT_ENSEMBLE)
+            ens_res_ab = await run_ensemble_numeric(ab_prompt, ensemble_specs)
             ab_main, _ = aggregate_numeric(ens_res_ab, calib_weights_map)
-            ab_uniform, _ = aggregate_numeric(ens_res_ab, {m.name: 1.0 for m in DEFAULT_ENSEMBLE})
+            ab_uniform, _ = aggregate_numeric(ens_res_ab, {m.name: 1.0 for m in ensemble_specs})
             ab_simple = _simple_average_numeric(ens_res_ab.members) or {}
     
         # ------------------ 9) Build ONE wide CSV row and write it ------------------
@@ -4363,7 +4619,7 @@ async def _run_one_question_body(
             "weights_profile": "class_calibration",
             "llm_models_json": [
                 {"name": ms.name, "provider": ms.provider, "model_id": ms.model_id, "weight": ms.weight}
-                for ms in DEFAULT_ENSEMBLE
+                for ms in ensemble_specs
             ],
     
             # Question metadata
@@ -4415,7 +4671,7 @@ async def _run_one_question_body(
         )
     
         # Per-model outputs
-        for i, ms in enumerate(DEFAULT_ENSEMBLE):
+        for i, ms in enumerate(ensemble_specs):
             mo: Optional[MemberOutput] = None
             if isinstance(ens_res, EnsembleResult) and i < len(ens_res.members):
                 mo = ens_res.members[i]

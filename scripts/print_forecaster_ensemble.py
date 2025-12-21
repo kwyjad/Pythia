@@ -8,8 +8,12 @@ import sys
 
 from forecaster.providers import (
     DEFAULT_ENSEMBLE,
+    SPD_ENSEMBLE,
+    SPD_ENSEMBLE_OVERRIDE,
     _PROVIDER_STATES,
+    _BLOCKED_PROVIDERS,
     default_ensemble_summary,
+    summarize_model_specs,
 )
 from pythia.llm_profiles import get_current_models, get_current_profile
 
@@ -30,6 +34,14 @@ if __name__ == "__main__":
 
     print(f"DEFAULT_ENSEMBLE size={len(DEFAULT_ENSEMBLE)}")
     print(default_ensemble_summary())
+    if _BLOCKED_PROVIDERS:
+        print(f"Blocked providers: {', '.join(sorted(_BLOCKED_PROVIDERS))}")
+
+    if SPD_ENSEMBLE_OVERRIDE:
+        print(f"SPD ensemble override size={len(SPD_ENSEMBLE_OVERRIDE)}")
+        print("SPD_ENSEMBLE_SPECS override applied.")
+    print(f"SPD_ENSEMBLE size={len(SPD_ENSEMBLE)}")
+    print(summarize_model_specs(SPD_ENSEMBLE))
 
     print("Provider states:")
     for name in sorted(_PROVIDER_STATES.keys()):

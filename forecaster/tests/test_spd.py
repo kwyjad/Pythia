@@ -611,6 +611,7 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
     monkeypatch.chdir(tmp_path)
 
     monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
 
     # Enable BayesMC path
     monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
@@ -680,22 +681,32 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
 
     # Ensure BayesMC path has active specs to call
     monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms1, ms2])
 
     asyncio.run(cli._run_spd_for_question("run_bayesmc_ok", question_row))
 
     con = duckdb.connect(str(db_path))
     try:
-        # Ensure ensemble write happened
-        row = con.execute(
+        # Ensure ensemble write happened under BayesMC model name
+        ok_count = con.execute(
             """
-            SELECT status
+            SELECT COUNT(*)
             FROM forecasts_ensemble
-            WHERE run_id = ? AND question_id = ?
+            WHERE run_id = ? AND question_id = ? AND model_name = 'ensemble_bayesmc_v2' AND status = 'ok'
             """,
             ["run_bayesmc_ok", "Q_BAYESMC_OK"],
-        ).fetchone()
-        assert row is not None
-        assert (row[0] or "").lower() == "ok"
+        ).fetchone()[0]
+        assert ok_count > 0
+
+        no_forecast_count = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name = 'ensemble_bayesmc_v2' AND status = 'no_forecast'
+            """,
+            ["run_bayesmc_ok", "Q_BAYESMC_OK"],
+        ).fetchone()[0]
+        assert no_forecast_count == 0
 
         # Ensure at least one spd_v2 llm call was logged
         llm_count = con.execute(
@@ -791,6 +802,270 @@ def test_spd_bayesmc_flag_missing_spds_records_reason_and_raw(
     assert "no spds key" in raw_path.read_text(encoding="utf-8").lower()
 
 
+def test_bayesmc_month_mapping_preserves_calendar_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+
+    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+
+    def _fake_bmc(per_model_spds, n_buckets, prior_alpha, weights_by_model, model_names):
+        return (
+            {
+                "2025-12": probs,
+                "2026-01": probs,
+                "2026-02": probs,
+                "2026-03": probs,
+                "2026-04": probs,
+                "2026-05": probs,
+            },
+            {"status": "ok"},
+        )
+
+    monkeypatch.setattr(cli, "aggregate_spd_v2_bayesmc", _fake_bmc)
+
+    ms = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    spd_obj, diag = cli._build_bayesmc_spd_obj(
+        [{}],
+        target_month="2025-12",
+        specs_used=[ms],
+    )
+
+    assert diag.get("status") == "ok"
+    assert set(spd_obj.get("spds", {}).keys()) == {
+        "2025-12",
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+    }
+
+
+def test_bayesmc_month_mapping_offsets_to_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+
+    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+
+    def _fake_bmc(per_model_spds, n_buckets, prior_alpha, weights_by_model, model_names):
+        return (
+            {f"month_{i}": probs for i in range(6)},
+            {"status": "ok"},
+        )
+
+    monkeypatch.setattr(cli, "aggregate_spd_v2_bayesmc", _fake_bmc)
+
+    ms = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    spd_obj, diag = cli._build_bayesmc_spd_obj(
+        [{}],
+        target_month="2025-12",
+        specs_used=[ms],
+    )
+
+    assert diag.get("status") == "ok"
+    assert set(spd_obj.get("spds", {}).keys()) == {
+        "2025-12",
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+    }
+
+
+def test_bayesmc_missing_months_records_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_bayesmc_missing_months.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_BAYESMC_MISSING_MONTHS",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test DR PA missing months",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_BAYESMC_MISSING_MONTHS"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    fake_spd = {
+        "spds": {
+            "month_0": {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]},
+            "month_1": {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]},
+        }
+    }
+
+    async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
+        return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
+
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms1, ms2])
+
+    asyncio.run(cli._run_spd_for_question("run_bayesmc_missing_months", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            """
+            SELECT status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name = 'ensemble_bayesmc_v2'
+            """,
+            ["run_bayesmc_missing_months", "Q_BAYESMC_MISSING_MONTHS"],
+        ).fetchone()
+        assert row is not None
+        status, reason = row
+        assert status == "no_forecast"
+        assert "missing_months" in (reason or "")
+        assert "2026-02" in (reason or "")
+    finally:
+        con.close()
+
+    raw_path = Path("debug/spd_raw") / "run_bayesmc_missing_months__Q_BAYESMC_MISSING_MONTHS_insufficient_month_coverage.txt"
+    assert raw_path.exists()
+    assert "month_0" in raw_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.db
+def test_spd_write_both_missing_spds_writes_debug_and_no_forecast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "1")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_write_both_missing_spds.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_WRITE_BOTH_MISSING_SPDS",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test write_both missing SPDs",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_WRITE_BOTH_MISSING_SPDS"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms1, ms2])
+
+    async def fake_call_spd_members_v2(_prompt: str, specs: list[ModelSpec], *, run_id: str | None = None):
+        raw_calls = [
+            {
+                "model_spec": specs[0] if specs else None,
+                "text": json.dumps({"note": "missing spds for bayesmc"}),
+                "usage": {"total_tokens": 5},
+                "error": None,
+            }
+        ]
+        usage = {"total_tokens": 5}
+        ensemble_meta = {
+            "n_models_active": len(specs),
+            "n_models_called": len(specs),
+            "n_models_ok": 0,
+            "failed_providers": [ms.provider for ms in specs],
+            "partial_ensemble": True,
+            "skipped_providers": [],
+        }
+        per_model_spds = [{} for _ in specs]
+        return per_model_spds, usage, raw_calls, ensemble_meta
+
+    monkeypatch.setattr(cli, "_call_spd_members_v2", fake_call_spd_members_v2)
+
+    asyncio.run(cli._run_spd_for_question("run_write_both_missing_spds", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            """
+            SELECT model_name, status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ?
+            ORDER BY model_name
+            """,
+            ["run_write_both_missing_spds", "Q_WRITE_BOTH_MISSING_SPDS"],
+        ).fetchall()
+        assert rows
+        statuses = {name: status for name, status, _ in rows}
+        explanations = {name: (reason or "") for name, _, reason in rows}
+        assert statuses.get("ensemble_mean_v2") == "no_forecast"
+        assert statuses.get("ensemble_bayesmc_v2") == "no_forecast"
+        assert "insufficient ensemble coverage" in explanations.get("ensemble_mean_v2", "").lower()
+        assert "insufficient ensemble coverage" in explanations.get("ensemble_bayesmc_v2", "").lower()
+    finally:
+        con.close()
+
+    raw_path = Path("debug/spd_raw") / "run_write_both_missing_spds__Q_WRITE_BOTH_MISSING_SPDS_missing_spds.txt"
+    assert raw_path.exists()
+    assert "missing spds" in raw_path.read_text(encoding="utf-8").lower()
+
+
 @pytest.mark.db
 def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
@@ -879,6 +1154,250 @@ def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             ["run_write_both", "Q_WRITE_BOTH"],
         ).fetchone()[0]
         assert llm_calls == 2
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_spd_write_both_falls_back_to_default_ensemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "1")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_write_both_fallback.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_WRITE_BOTH_FALLBACK",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test write_both default fallback",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_WRITE_BOTH_FALLBACK"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    ms_inactive = ModelSpec(
+        name="OpenAI",
+        provider="openai",
+        model_id="gpt-test",
+        active=False,
+        purpose="spd_v2",
+    )
+    ms_default = ModelSpec(
+        name="Google",
+        provider="google",
+        model_id="gemini-test",
+        active=True,
+        purpose="spd_v2",
+    )
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms_inactive])
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms_default])
+
+    captured_specs: list[list[ModelSpec]] = []
+
+    async def fake_call_spd_members_v2(
+        _prompt: str, specs: list[ModelSpec], *, run_id: str | None = None
+    ):
+        captured_specs.append(specs)
+        spd_vec = [0.1, 0.2, 0.3, 0.2, 0.2]
+        per_model_spds = [{"2025-12": spd_vec} for _ in specs]
+        raw_calls = [
+            {
+                "model_spec": ms,
+                "text": json.dumps({"spds": {"2025-12": {"probs": spd_vec}}}),
+                "usage": {"total_tokens": 5},
+                "error": None,
+            }
+            for ms in specs
+        ]
+        usage = {"total_tokens": 5 * len(specs)}
+        ensemble_meta = {
+            "n_models_active": len(specs),
+            "n_models_called": len(specs),
+            "n_models_ok": len(specs),
+            "failed_providers": [],
+            "partial_ensemble": False,
+            "skipped_providers": [],
+        }
+        return per_model_spds, usage, raw_calls, ensemble_meta
+
+    monkeypatch.setattr(cli, "_call_spd_members_v2", fake_call_spd_members_v2)
+
+    asyncio.run(cli._run_spd_for_question("run_write_both_fallback", question_row))
+
+    assert captured_specs and captured_specs[0] == [ms_default]
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            """
+            SELECT model_name, COUNT(*) AS n_rows, MIN(status), MAX(status)
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name IN ('ensemble_mean_v2','ensemble_bayesmc_v2')
+            GROUP BY model_name
+            ORDER BY model_name
+            """,
+            ["run_write_both_fallback", "Q_WRITE_BOTH_FALLBACK"],
+        ).fetchall()
+
+        assert len(rows) == 2
+        for _, count, status_min, status_max in rows:
+            assert count > 0
+            assert status_min == "ok"
+            assert status_max == "ok"
+
+        llm_calls = con.execute(
+            """
+            SELECT COUNT(*) FROM llm_calls
+            WHERE run_id = ? AND question_id = ? AND call_type = 'spd_v2'
+            """,
+            ["run_write_both_fallback", "Q_WRITE_BOTH_FALLBACK"],
+        ).fetchone()[0]
+        assert llm_calls == len(captured_specs[0])
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_spd_write_both_variants_bayesmc_fallback_to_mean_when_missing_months(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "1")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_bayesmc_fallback.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_BAYESMC_FALLBACK",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test BayesMC fallback to mean",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_BAYESMC_FALLBACK"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    full_months = [
+        "2025-12",
+        "2026-01",
+        "2026-02",
+        "2026-03",
+        "2026-04",
+        "2026-05",
+    ]
+    per_model_spds = [{m: [0.2, 0.2, 0.2, 0.2, 0.2] for m in full_months}]
+
+    async def fake_call_spd_members_v2(_prompt: str, specs: list[ModelSpec], *, run_id: str | None = None):
+        raw_calls = [
+            {
+                "model_spec": specs[0] if specs else None,
+                "text": json.dumps({"spds": per_model_spds[0]}),
+                "usage": {"total_tokens": 5},
+                "error": None,
+            }
+        ]
+        usage = {"total_tokens": 5}
+        ensemble_meta = {
+            "n_models_active": len(specs),
+            "n_models_called": len(specs),
+            "n_models_ok": len(specs),
+            "failed_providers": [],
+            "partial_ensemble": False,
+            "skipped_providers": [],
+        }
+        return per_model_spds, usage, raw_calls, ensemble_meta
+
+    def fake_bayesmc_aggregate(_per_model_spds, **_kwargs):
+        return {}, {"status": "insufficient_month_coverage", "missing_months": ["2026-05"]}
+
+    monkeypatch.setattr(cli, "_call_spd_members_v2", fake_call_spd_members_v2)
+    monkeypatch.setattr(cli, "aggregate_spd_v2_bayesmc", fake_bayesmc_aggregate)
+
+    ms1 = ModelSpec(name="OpenAI", provider="openai", model_id="gpt-test", active=True, purpose="spd_v2")
+    ms2 = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms1, ms2])
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms1, ms2])
+
+    asyncio.run(cli._run_spd_for_question("run_bayesmc_fallback", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            """
+            SELECT model_name, status, human_explanation
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ?
+            ORDER BY model_name
+            """,
+            ["run_bayesmc_fallback", "Q_BAYESMC_FALLBACK"],
+        ).fetchall()
+
+        statuses = {name: status for name, status, _ in rows}
+        explanations = {name: (explanation or "") for name, _, explanation in rows}
+
+        assert statuses.get("ensemble_mean_v2") == "ok"
+        assert statuses.get("ensemble_bayesmc_v2") == "ok"
+        assert "fallback_to_mean" in explanations.get("ensemble_bayesmc_v2", "")
+        assert "missing_months" in explanations.get("ensemble_bayesmc_v2", "")
     finally:
         con.close()
 

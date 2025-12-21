@@ -189,7 +189,7 @@ async def _run_scenario_for_question(
     ms = ModelSpec(
         name="Gemini",
         provider="google",
-        model_id=os.getenv("PYTHIA_SCENARIO_MODEL_ID", "gemini-3-pro-preview"),
+        model_id=os.getenv("PYTHIA_SCENARIO_MODEL_ID", "gemini-3-flash-preview"),
         active=True,
         purpose="scenario_v2",
     )

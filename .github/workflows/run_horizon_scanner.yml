@@ -45,6 +45,9 @@ jobs:
       HS_MAX_WORKERS: "6"
       FORECASTER_RESEARCH_MAX_WORKERS: "6"
       FORECASTER_SPD_MAX_WORKERS: "6"
+      HS_MODEL_ID: gemini-3-flash-preview
+      PYTHIA_BLOCK_PROVIDERS: xai
+      PYTHIA_SPD_ENSEMBLE_SPECS: openai:gpt-5.1,anthropic:claude-opus-4-5-20251101,google:gemini-3-pro-preview,google:gemini-3-flash-preview
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
       SIGNATURE_OPTIONAL_TABLES: scenarios
       CANONICAL_DB_READY: "false"
