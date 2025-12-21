@@ -2702,6 +2702,25 @@ def _has_v2_spds(spd_obj: dict[str, object] | None) -> bool:
     return bool(vecs)
 
 
+def _select_spd_specs_for_run() -> tuple[list[ModelSpec], str]:
+    """
+    Choose active SPD specs, preferring SPD_ENSEMBLE but falling back to DEFAULT_ENSEMBLE.
+    Returns (active_specs, source_label).
+    """
+
+    specs = list(SPD_ENSEMBLE)
+    active = [ms for ms in specs if getattr(ms, "active", False)]
+    if active:
+        return active, "SPD_ENSEMBLE"
+
+    specs = list(DEFAULT_ENSEMBLE)
+    active = [ms for ms in specs if getattr(ms, "active", False)]
+    if active:
+        return active, "DEFAULT_ENSEMBLE"
+
+    return [], "none"
+
+
 def _spd_v2_to_month_vectors(spd_obj: dict[str, object] | None) -> dict[str, list[float]]:
     """
     Convert SPD v2 object {"spds": {month: {"probs": [...]}}} into {month: [..]}.
@@ -3069,16 +3088,28 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         write_both = os.getenv("PYTHIA_SPD_V2_WRITE_BOTH", "0") == "1"
 
         if dual_run:
-            specs = list(SPD_ENSEMBLE)
-            specs_used_summary = _specs_summary(specs)
-            specs_active = [ms for ms in specs if getattr(ms, "active", False)]
+            specs_active, specs_source = _select_spd_specs_for_run()
+            specs_used_summary = _specs_summary(specs_active)
             n_active_specs = len(specs_active)
-            if not specs or n_active_specs == 0:
+            specs_source_len = (
+                len(SPD_ENSEMBLE)
+                if specs_source == "SPD_ENSEMBLE"
+                else len(DEFAULT_ENSEMBLE)
+                if specs_source == "DEFAULT_ENSEMBLE"
+                else len(SPD_ENSEMBLE) + len(DEFAULT_ENSEMBLE)
+            )
+            if not specs_active:
+                reason = (
+                    f"{specs_source} has no active model specs"
+                    if specs_source != "none"
+                    else "SPD_ENSEMBLE and DEFAULT_ENSEMBLE have no active model specs"
+                )
                 diff = {
                     "error": "no_active_models",
-                    "reason": "SPD_ENSEMBLE has no active model specs",
-                    "n_specs": len(specs),
+                    "reason": reason,
+                    "n_specs": specs_source_len,
                     "n_active_specs": n_active_specs,
+                    "specs_source": specs_source,
                     "providers": _provider_debug_snapshot(),
                 }
                 payload = {
@@ -3095,7 +3126,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         "usage": {},
                         "status_info": {
                             "status": "no_active_models",
-                            "reason": "spec list empty or inactive",
+                            "reason": reason,
                             "n_calls": 0,
                             "n_active_specs": n_active_specs,
                         },
@@ -3105,11 +3136,12 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         "usage": {},
                         "status_info": {
                             "status": "no_active_models",
-                            "reason": "spec list empty or inactive",
+                            "reason": reason,
                             "n_calls": 0,
                             "n_active_specs": n_active_specs,
                         },
                     },
+                    "specs_source": specs_source,
                     "diff": diff,
                 }
                 _write_spd_compare_artifact(run_id, qid, payload)
@@ -3194,17 +3226,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         raw_calls: list[dict[str, object]] = []
 
         if write_both:
-            specs = list(SPD_ENSEMBLE)
-            specs_active = [ms for ms in specs if getattr(ms, "active", False)]
+            specs_active, specs_source = _select_spd_specs_for_run()
 
             if not specs_active:
+                reason = (
+                    f"no active ensemble models ({specs_source})"
+                    if specs_source != "none"
+                    else "no active ensemble models (SPD_ENSEMBLE and DEFAULT_ENSEMBLE inactive)"
+                )
                 _record_no_forecast(
                     run_id,
                     qid,
                     iso3,
                     hz,
                     metric,
-                    "no active ensemble models",
+                    reason,
                     model_name="ensemble_mean_v2",
                 )
                 _record_no_forecast(
@@ -3213,7 +3249,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     iso3,
                     hz,
                     metric,
-                    "no active ensemble models",
+                    reason,
                     model_name="ensemble_bayesmc_v2",
                 )
                 return
@@ -3272,6 +3308,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
 
             ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
+            if specs_source:
+                ensemble_meta_str = f"{ensemble_meta_str} | specs_source={specs_source}"
 
             spd_mean = aggregate_spd_v2_mean(per_model_spds)
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
@@ -3383,18 +3421,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             return
 
         if use_bayesmc:
+            specs_active, specs_source = _select_spd_specs_for_run()
             spd_obj, usage, raw_calls, ensemble_meta = await _call_spd_bayesmc_v2(
                 prompt,
                 run_id=run_id,
                 question_id=qid,
                 hs_run_id=hs_run_id,
                 target_month=target_month,
-                specs=list(DEFAULT_ENSEMBLE),
+                specs=specs_active,
             )
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
             text = json.dumps(spd_obj)
 
             ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
+            if specs_source:
+                ensemble_meta_str = f"{ensemble_meta_str} | specs_source={specs_source}"
             bayesmc_diag = {}
             try:
                 diag_from_meta = ensemble_meta.get("bayesmc_diag")

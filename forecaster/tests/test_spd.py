@@ -1159,6 +1159,135 @@ def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.db
+def test_spd_write_both_falls_back_to_default_ensemble(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "1")
+    monkeypatch.setenv("PYTHIA_SPD_V2_USE_BAYESMC", "1")
+
+    db_path = tmp_path / "spd_write_both_fallback.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, scenario_ids_json, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date, wording, status, pythia_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "Q_WRITE_BOTH_FALLBACK",
+                "",
+                "[]",
+                "ETH",
+                "DR",
+                "PA",
+                "2025-12",
+                None,
+                None,
+                "Test write_both default fallback",
+                "active",
+                None,
+            ],
+        )
+        question_row = con.execute(
+            "SELECT * FROM questions WHERE question_id = ?",
+            ["Q_WRITE_BOTH_FALLBACK"],
+        ).fetchone()
+    finally:
+        con.close()
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+
+    ms_inactive = ModelSpec(
+        name="OpenAI",
+        provider="openai",
+        model_id="gpt-test",
+        active=False,
+        purpose="spd_v2",
+    )
+    ms_default = ModelSpec(
+        name="Google",
+        provider="google",
+        model_id="gemini-test",
+        active=True,
+        purpose="spd_v2",
+    )
+    monkeypatch.setattr(cli, "SPD_ENSEMBLE", [ms_inactive])
+    monkeypatch.setattr(cli, "DEFAULT_ENSEMBLE", [ms_default])
+
+    captured_specs: list[list[ModelSpec]] = []
+
+    async def fake_call_spd_members_v2(
+        _prompt: str, specs: list[ModelSpec], *, run_id: str | None = None
+    ):
+        captured_specs.append(specs)
+        spd_vec = [0.1, 0.2, 0.3, 0.2, 0.2]
+        per_model_spds = [{"2025-12": spd_vec} for _ in specs]
+        raw_calls = [
+            {
+                "model_spec": ms,
+                "text": json.dumps({"spds": {"2025-12": {"probs": spd_vec}}}),
+                "usage": {"total_tokens": 5},
+                "error": None,
+            }
+            for ms in specs
+        ]
+        usage = {"total_tokens": 5 * len(specs)}
+        ensemble_meta = {
+            "n_models_active": len(specs),
+            "n_models_called": len(specs),
+            "n_models_ok": len(specs),
+            "failed_providers": [],
+            "partial_ensemble": False,
+            "skipped_providers": [],
+        }
+        return per_model_spds, usage, raw_calls, ensemble_meta
+
+    monkeypatch.setattr(cli, "_call_spd_members_v2", fake_call_spd_members_v2)
+
+    asyncio.run(cli._run_spd_for_question("run_write_both_fallback", question_row))
+
+    assert captured_specs and captured_specs[0] == [ms_default]
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            """
+            SELECT model_name, COUNT(*) AS n_rows, MIN(status), MAX(status)
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id = ? AND model_name IN ('ensemble_mean_v2','ensemble_bayesmc_v2')
+            GROUP BY model_name
+            ORDER BY model_name
+            """,
+            ["run_write_both_fallback", "Q_WRITE_BOTH_FALLBACK"],
+        ).fetchall()
+
+        assert len(rows) == 2
+        for _, count, status_min, status_max in rows:
+            assert count > 0
+            assert status_min == "ok"
+            assert status_max == "ok"
+
+        llm_calls = con.execute(
+            """
+            SELECT COUNT(*) FROM llm_calls
+            WHERE run_id = ? AND question_id = ? AND call_type = 'spd_v2'
+            """,
+            ["run_write_both_fallback", "Q_WRITE_BOTH_FALLBACK"],
+        ).fetchone()[0]
+        assert llm_calls == len(captured_specs[0])
+    finally:
+        con.close()
+
+
+@pytest.mark.db
 def test_spd_write_both_variants_bayesmc_fallback_to_mean_when_missing_months(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
