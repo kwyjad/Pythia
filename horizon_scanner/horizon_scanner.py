@@ -221,6 +221,36 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
     return features
 
 
+def _parse_hs_triage_json(raw: str) -> dict[str, Any]:
+    """Parse HS triage output, preferring unfenced JSON but allowing fences."""
+
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("empty response")
+
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    fenced_json = re.search(r"```json\s*(.*?)\s*```", s, flags=re.S | re.I)
+    if fenced_json:
+        return json.loads(fenced_json.group(1).strip())
+
+    fenced_any = re.search(r"```\s*(.*?)\s*```", s, flags=re.S)
+    if fenced_any:
+        return json.loads(fenced_any.group(1).strip())
+
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return json.loads(s[start : end + 1])
+
+    raise json.JSONDecodeError("could not locate JSON object", s, 0)
+
+
 def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
     con = pythia_connect(read_only=False)
     try:
@@ -338,35 +368,21 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             if not raw:
                 log_error_text = "empty response"
             else:
-                fence_match = re.search(r"```json\s*(.*?)\s*```", raw, flags=re.S)
-                if not fence_match:
+                try:
+                    triage = _parse_hs_triage_json(raw)
+                    hazards_dict = triage.get("hazards") or {}
+                except Exception as exc:  # noqa: BLE001
                     debug_dir = Path("debug/hs_triage_raw")
                     debug_dir.mkdir(parents=True, exist_ok=True)
                     raw_path = debug_dir / f"{run_id}__{iso3}.txt"
                     raw_path.write_text(text or "", encoding="utf-8")
-                    log_error_text = "missing JSON fences"
+                    log_error_text = f"triage parse failed: {type(exc).__name__}: {exc}"
                     logger.error(
-                        "HS triage response missing JSON fences for %s; raw saved to %s",
+                        "HS triage parse failed for %s: %s (raw saved to %s)",
                         iso3_up,
+                        exc,
                         raw_path,
                     )
-                else:
-                    payload = fence_match.group(1).strip()
-                    try:
-                        triage = json.loads(payload)
-                        hazards_dict = triage.get("hazards") or {}
-                    except json.JSONDecodeError as exc:
-                        debug_dir = Path("debug/hs_triage_raw")
-                        debug_dir.mkdir(parents=True, exist_ok=True)
-                        raw_path = debug_dir / f"{run_id}__{iso3}.txt"
-                        raw_path.write_text(text or "", encoding="utf-8")
-                        log_error_text = f"json decode failed: {exc}"
-                        logger.error(
-                            "HS triage JSON decode failed for %s: %s (raw saved to %s)",
-                            iso3_up,
-                            exc,
-                            raw_path,
-                        )
 
         hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
         hazard_codes = sorted({(hz_code or "").upper().strip() for hz_code in hazards_dict.keys()})

@@ -385,6 +385,7 @@ jobs:
           HS_MODEL_ID: ${{ env.HS_MODEL_ID }}
         run: |
           set -e
+          python -m py_compile scripts/ci/assert_hs_outputs.py
           python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage triage
 
       - name: Upload HS triage diagnostics
@@ -415,6 +416,7 @@ jobs:
           HS_MODEL_ID: ${{ env.HS_MODEL_ID }}
         run: |
           set -e
+          python -m py_compile scripts/ci/assert_hs_outputs.py
           python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage questions
 
       - name: Upload HS question diagnostics
