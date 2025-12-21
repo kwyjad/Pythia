@@ -1339,13 +1339,16 @@ def _write_spd_raw_to_db(
         return
 
     try:
-        con.execute(
-            "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ?;",
-            [run_id, question_id],
-        )
-
         for m in ens_res.members:
             model_name = getattr(m, "name", "")
+            try:
+                con.execute(
+                    "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+                    [run_id, question_id, model_name],
+                )
+            except Exception:
+                pass
+
             ok = bool(getattr(m, "ok", False))
             elapsed_ms = getattr(m, "elapsed_ms", 0) or 0
             cost_usd = getattr(m, "cost_usd", 0.0) or 0.0
@@ -1456,13 +1459,10 @@ def _write_spd_members_v2_to_db(
     """Persist SPD v2 member SPDs into forecasts_raw without touching ensemble rows."""
 
     qid = str(question_row.get("question_id") or "")
-    iso3 = str(question_row.get("iso3") or "").upper()
     hz = str(question_row.get("hazard_code") or "").upper()
     metric = str(question_row.get("metric") or "").upper()
     class_bins = _spd_class_bins_for(metric, hz)
     bucket_count = len(class_bins)
-
-    model_names = [getattr(ms, "name", "") for ms in specs if getattr(ms, "name", "")]
 
     try:
         con = connect(read_only=False)
@@ -1471,24 +1471,61 @@ def _write_spd_members_v2_to_db(
         print(f"[warn] Failed to open DB for SPD member write (question_id={qid}): {type(exc).__name__}: {exc}")
         return
 
-    try:
-        if model_names:
-            placeholders = ",".join(["?"] * len(model_names))
-            con.execute(
-                f"DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name IN ({placeholders});",
-                [run_id, qid, *model_names],
-            )
+    def _model_for_index(i: int) -> ModelSpec | None:
+        try:
+            rc = raw_calls[i]
+            ms = rc.get("model_spec") if isinstance(rc, dict) else None
+            if isinstance(ms, ModelSpec):
+                return ms
+        except Exception:
+            pass
+        if 0 <= i < len(specs):
+            return specs[i]
+        return None
 
-        for idx, (ms, model_spd, raw_call) in enumerate(
-            zip(specs, per_model_spds, raw_calls)
-        ):
+    def _month_indices(spd: dict[str, list[float]]) -> list[tuple[int, str]]:
+        parsed = []
+        for key in spd.keys():
+            if isinstance(key, str) and key.startswith("month_"):
+                try:
+                    idx = int(key.split("_", 1)[1])
+                    parsed.append((idx, key))
+                    continue
+                except Exception:
+                    pass
+            dt = _parse_month_key(str(key))
+            if dt:
+                parsed.append((int(dt.strftime("%Y%m")), key))
+            else:
+                parsed.append((0, key))
+        parsed.sort(key=lambda t: (t[0], str(t[1])))
+        numbered = []
+        for new_idx, (_score, key) in enumerate(parsed[:6], start=1):
+            numbered.append((new_idx, key))
+        return numbered
+
+    try:
+        for idx, model_spd in enumerate(per_model_spds):
+            ms = _model_for_index(idx)
             model_name = getattr(ms, "name", f"model_{idx}")
-            usage = raw_call.get("usage") if isinstance(raw_call, dict) else {}
+            usage = {}
+            try:
+                usage = raw_calls[idx].get("usage") if isinstance(raw_calls[idx], dict) else {}
+            except Exception:
+                usage = {}
             elapsed_ms = int((usage or {}).get("elapsed_ms") or 0)
             cost_usd = float((usage or {}).get("cost_usd") or 0.0)
             prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
             completion_tokens = int((usage or {}).get("completion_tokens") or 0)
             total_tokens = int((usage or {}).get("total_tokens") or prompt_tokens + completion_tokens or 0)
+
+            try:
+                con.execute(
+                    "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+                    [run_id, qid, model_name],
+                )
+            except Exception:
+                pass
 
             if not isinstance(model_spd, dict) or not model_spd:
                 con.execute(
@@ -1514,15 +1551,16 @@ def _write_spd_members_v2_to_db(
                 )
                 continue
 
-            month_keys = sorted(model_spd.keys())[:6]
             spd_json_payload: dict[str, object] = {
                 "resolution_source": resolution_source,
                 "member_source": "spd_v2_member_call",
                 "spds": {},
             }
-            for month_index, month_key in enumerate(month_keys, start=1):
+            for month_index, month_key in _month_indices(model_spd):
                 probs_raw = model_spd.get(month_key) or []
                 probs_vec = sanitize_mcq_vector(list(probs_raw), n_options=bucket_count)
+                if len(probs_vec) != bucket_count:
+                    probs_vec = [1.0 / bucket_count] * bucket_count
                 spd_json_payload["spds"][month_key] = {"probs": probs_vec}
                 for bucket_index, prob in enumerate(probs_vec[:bucket_count], start=1):
                     con.execute(
