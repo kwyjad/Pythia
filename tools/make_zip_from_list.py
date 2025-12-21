@@ -34,12 +34,12 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
-    ".github/workflows/run_horizon_scanner.yml",
-    "forecaster/research.py",
     "forecaster/cli.py",
     "forecaster/providers.py",
-    "horizon_scanner/horizon_scanner.py",
-    "horizon_scanner/db_writer.py",
+    "forecaster/ensemble.py",
+    "forecaster/tests/test_spd.py",
+    "forecaster/llm_logging.py",
+    "forecaster/aggregate.py",
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
