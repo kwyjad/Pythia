@@ -2695,6 +2695,13 @@ def _spd_side_status(
     }
 
 
+def _has_v2_spds(spd_obj: dict[str, object] | None) -> bool:
+    """Return True if the SPD v2 payload has any usable month vectors."""
+
+    vecs = _spd_v2_to_month_vectors(spd_obj)
+    return bool(vecs)
+
+
 def _spd_v2_to_month_vectors(spd_obj: dict[str, object] | None) -> dict[str, list[float]]:
     """
     Convert SPD v2 object {"spds": {month: {"probs": [...]}}} into {month: [..]}.
@@ -3266,73 +3273,46 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
             ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
 
-            if int(ensemble_meta.get("n_models_ok") or 0) < 2:
-                debug_payload = raw_texts[0] if raw_texts else ""
-                if not debug_payload:
-                    debug_payload = json.dumps(
-                        {
-                            "status": "insufficient_ensemble_coverage",
-                            "ensemble_meta": ensemble_meta,
-                        }
-                    )
-                _write_spd_raw_text(run_id, qid, "missing_spds", debug_payload)
-                debug_written = True
-
-                reason = _append_ensemble_meta("insufficient ensemble coverage", ensemble_meta_str)
-                _record_no_forecast(
-                    run_id,
-                    qid,
-                    iso3,
-                    hz,
-                    metric,
-                    reason,
-                    model_name="ensemble_mean_v2",
-                    raw_debug_written=debug_written,
-                )
-                _record_no_forecast(
-                    run_id,
-                    qid,
-                    iso3,
-                    hz,
-                    metric,
-                    reason,
-                    model_name="ensemble_bayesmc_v2",
-                    raw_debug_written=debug_written,
-                )
-                return
-
             spd_mean = aggregate_spd_v2_mean(per_model_spds)
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
-            _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
+            if _has_v2_spds(spd_mean_obj):
+                _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
                 per_model_spds, target_month=target_month, specs_used=specs_active
             )
-            if spd_bm_obj:
+            if _has_v2_spds(spd_bm_obj):
                 spd_bm_obj.setdefault("bayesmc_diag", diag_bm)
                 _attach_ensemble_meta(spd_bm_obj, ensemble_meta)
-            elif spd_mean_obj and isinstance(spd_mean_obj.get("spds"), dict) and spd_mean_obj.get("spds"):
+
+            missing_months: list[str] = []
+            if isinstance(diag_bm, dict):
+                missing_months = diag_bm.get("missing_months") or []
+
+            mean_has_spds = _has_v2_spds(spd_mean_obj)
+            bayesmc_has_spds = _has_v2_spds(spd_bm_obj)
+
+            if not bayesmc_has_spds and mean_has_spds:
                 fallback_diag: dict[str, object] = {
                     "status": "fallback_to_mean",
                     "original_bayesmc_status": diag_bm.get("status") if isinstance(diag_bm, dict) else None,
                 }
-                if isinstance(diag_bm, dict) and diag_bm.get("missing_months"):
-                    fallback_diag["missing_months"] = diag_bm.get("missing_months")
+                if missing_months:
+                    fallback_diag["missing_months"] = missing_months
                 explanation_parts = [
                     "BayesMC produced no SPD; wrote mean SPD as fallback.",
                     f"bayesmc_status={fallback_diag.get('original_bayesmc_status')}",
                 ]
-                if fallback_diag.get("missing_months"):
-                    explanation_parts.append(f"missing_months={fallback_diag.get('missing_months')}")
+                if missing_months:
+                    explanation_parts.append(f"missing_months={missing_months}")
                 spd_bm_obj = {
                     "spds": spd_mean_obj.get("spds"),
                     "bayesmc_diag": fallback_diag,
                     "human_explanation": " ".join(explanation_parts),
                 }
+                _attach_ensemble_meta(spd_bm_obj, ensemble_meta)
+                bayesmc_has_spds = _has_v2_spds(spd_bm_obj)
 
-            missing_months = []
-            if isinstance(diag_bm, dict):
-                missing_months = diag_bm.get("missing_months") or []
             debug_tag = "insufficient_month_coverage" if missing_months else "missing_spds"
             debug_payload = raw_texts[0] if raw_texts else ""
             if not debug_payload:
@@ -3343,12 +3323,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         "ensemble_meta": ensemble_meta,
                     }
                 )
-            debug_written = False
 
-            mean_spds = spd_mean_obj.get("spds") if isinstance(spd_mean_obj, dict) else {}
-            bm_spds = spd_bm_obj.get("spds") if isinstance(spd_bm_obj, dict) else {}
+            insufficient_coverage = int(ensemble_meta.get("n_models_ok") or 0) < 2
+            coverage_reason = "insufficient ensemble coverage" if insufficient_coverage else "missing spds"
 
-            if mean_spds:
+            if mean_has_spds:
                 _write_spd_outputs(
                     run_id,
                     question_row,
@@ -3358,7 +3337,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_mean_v2",
                 )
             else:
-                reason_mean = _append_ensemble_meta("missing spds", ensemble_meta_str)
+                reason_mean = _append_ensemble_meta(coverage_reason, ensemble_meta_str)
                 _write_spd_raw_text(run_id, qid, debug_tag, debug_payload)
                 debug_written = True
                 _record_no_forecast(
@@ -3372,13 +3351,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     raw_debug_written=debug_written,
                 )
 
-            reason_bm = "missing spds"
-            if isinstance(diag_bm, dict):
-                reason_bm = str(diag_bm.get("status") or reason_bm)
-                if (diag_bm.get("status") == "insufficient_month_coverage") and diag_bm.get("missing_months"):
-                    reason_bm = f"insufficient_month_coverage missing_months={diag_bm.get('missing_months')}"
-
-            if bm_spds:
+            if bayesmc_has_spds:
                 _write_spd_outputs(
                     run_id,
                     question_row,
@@ -3388,10 +3361,13 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_name="ensemble_bayesmc_v2",
                 )
             else:
-                reason_bm = _append_ensemble_meta(reason_bm, ensemble_meta_str)
+                reason_bm = coverage_reason
+                tag = debug_tag
                 if missing_months:
                     reason_bm = f"BayesMC produced insufficient month coverage; missing_months={missing_months}"
-                _write_spd_raw_text(run_id, qid, debug_tag, debug_payload)
+                    tag = "insufficient_month_coverage"
+                reason_bm = _append_ensemble_meta(reason_bm, ensemble_meta_str)
+                _write_spd_raw_text(run_id, qid, tag, debug_payload)
                 debug_written = True
                 _record_no_forecast(
                     run_id,
