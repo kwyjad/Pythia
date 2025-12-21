@@ -1451,7 +1451,7 @@ def _write_spd_members_v2_to_db(
     *,
     run_id: str,
     question_row: Any,
-    specs: list[ModelSpec],
+    specs_used: list[ModelSpec],
     per_model_spds: list[dict[str, list[float]]],
     raw_calls: list[dict[str, object]],
     resolution_source: str,
@@ -1479,8 +1479,8 @@ def _write_spd_members_v2_to_db(
                 return ms
         except Exception:
             pass
-        if 0 <= i < len(specs):
-            return specs[i]
+        if 0 <= i < len(specs_used):
+            return specs_used[i]
         return None
 
     def _month_indices(spd: dict[str, list[float]]) -> list[tuple[int, str]]:
@@ -1556,7 +1556,13 @@ def _write_spd_members_v2_to_db(
                 "member_source": "spd_v2_member_call",
                 "spds": {},
             }
-            for month_index, month_key in _month_indices(model_spd):
+            ordered_months = _month_indices(model_spd)
+            if len(ordered_months) < 6:
+                next_idx = len(ordered_months) + 1
+                while len(ordered_months) < 6:
+                    ordered_months.append((next_idx, f"month_{next_idx}"))
+                    next_idx += 1
+            for month_index, month_key in ordered_months[:6]:
                 probs_raw = model_spd.get(month_key) or []
                 probs_vec = sanitize_mcq_vector(list(probs_raw), n_options=bucket_count)
                 if len(probs_vec) != bucket_count:
@@ -3087,6 +3093,14 @@ def _write_spd_outputs(
 
     con = connect(read_only=False)
     try:
+        con.execute(
+            "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+            [run_id, qid, model_name],
+        )
+        con.execute(
+            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+            [run_id, qid, model_name],
+        )
         for month_idx, (month_label, payload) in enumerate(sorted(spds.items()), start=1):
             probs = payload.get("probs") if isinstance(payload, dict) else None
             if not probs:
@@ -3433,7 +3447,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _write_spd_members_v2_to_db(
                     run_id=run_id,
                     question_row=rec,
-                    specs=member_specs_snapshot or specs_active,
+                    specs_used=member_specs_snapshot or specs_active,
                     per_model_spds=member_spds_snapshot or per_model_spds,
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
@@ -3621,7 +3635,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _write_spd_members_v2_to_db(
                     run_id=run_id,
                     question_row=rec,
-                    specs=member_specs_snapshot or specs_used_bm,
+                    specs_used=member_specs_snapshot or specs_used_bm,
                     per_model_spds=member_spds_snapshot or per_model_spds_bm,
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
