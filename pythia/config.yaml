@@ -23,6 +23,16 @@ researcher:
   prompt_version: "1.0.0"
   web_search: true
   sources: ["news","metaculus","manifold"]
+  web_research:
+    enabled: false                 # mirror of PYTHIA_WEB_RESEARCH_ENABLED
+    backend: "gemini"              # gemini|exa|perplexity|auto
+    max_results: 10
+    timeout_sec: 60
+    recency_days: 120
+    cache: true
+    include_structural: true
+    budget_usd_per_run: null       # hard cap; null = unlimited
+    max_calls_per_question: null   # hard cap; null = unlimited
 
 llm:
   # Active profile for all LLM-using components: "test" (cheap) or "prod" (frontier).

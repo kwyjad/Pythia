@@ -176,12 +176,7 @@ except Exception:
 
 
 # Hazard codes for which GTMC1 is relevant (adjust as needed for your schema)
-CONFLICT_HAZARD_CODES = {
-    "CONFLICT",
-    "POLITICAL_VIOLENCE",
-    "CIVIL_CONFLICT",
-    "URBAN_CONFLICT",
-}
+CONFLICT_HAZARD_CODES = {"ACE", "ACO"}
 
 # SPD buckets for Pythia PA/PIN forecasts (order must match prompts & aggregation)
 SPD_CLASS_BINS_PA = [
@@ -1344,13 +1339,16 @@ def _write_spd_raw_to_db(
         return
 
     try:
-        con.execute(
-            "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ?;",
-            [run_id, question_id],
-        )
-
         for m in ens_res.members:
             model_name = getattr(m, "name", "")
+            try:
+                con.execute(
+                    "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+                    [run_id, question_id, model_name],
+                )
+            except Exception:
+                pass
+
             ok = bool(getattr(m, "ok", False))
             elapsed_ms = getattr(m, "elapsed_ms", 0) or 0
             cost_usd = getattr(m, "cost_usd", 0.0) or 0.0
@@ -1440,6 +1438,168 @@ def _count_spd_rows(run_id: str, question_id: str) -> tuple[int, int]:
         except Exception:
             pass
 
+
+def _spd_class_bins_for(metric: str, hazard_code: str) -> list[str]:
+    metric_up = (metric or "").upper()
+    hz_up = (hazard_code or "").upper()
+    if metric_up == "FATALITIES" and (hz_up.startswith("CONFLICT") or hz_up in CONFLICT_HAZARD_CODES):
+        return SPD_CLASS_BINS_FATALITIES
+    return SPD_CLASS_BINS_PA
+
+
+def _write_spd_members_v2_to_db(
+    *,
+    run_id: str,
+    question_row: Any,
+    specs_used: list[ModelSpec],
+    per_model_spds: list[dict[str, list[float]]],
+    raw_calls: list[dict[str, object]],
+    resolution_source: str,
+) -> None:
+    """Persist SPD v2 member SPDs into forecasts_raw without touching ensemble rows."""
+
+    qid = str(question_row.get("question_id") or "")
+    hz = str(question_row.get("hazard_code") or "").upper()
+    metric = str(question_row.get("metric") or "").upper()
+    class_bins = _spd_class_bins_for(metric, hz)
+    bucket_count = len(class_bins)
+
+    try:
+        con = connect(read_only=False)
+        ensure_schema(con)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] Failed to open DB for SPD member write (question_id={qid}): {type(exc).__name__}: {exc}")
+        return
+
+    def _model_for_index(i: int) -> ModelSpec | None:
+        try:
+            rc = raw_calls[i]
+            ms = rc.get("model_spec") if isinstance(rc, dict) else None
+            if isinstance(ms, ModelSpec):
+                return ms
+        except Exception:
+            pass
+        if 0 <= i < len(specs_used):
+            return specs_used[i]
+        return None
+
+    def _month_indices(spd: dict[str, list[float]]) -> list[tuple[int, str]]:
+        parsed = []
+        for key in spd.keys():
+            if isinstance(key, str) and key.startswith("month_"):
+                try:
+                    idx = int(key.split("_", 1)[1])
+                    parsed.append((idx, key))
+                    continue
+                except Exception:
+                    pass
+            dt = _parse_month_key(str(key))
+            if dt:
+                parsed.append((int(dt.strftime("%Y%m")), key))
+            else:
+                parsed.append((0, key))
+        parsed.sort(key=lambda t: (t[0], str(t[1])))
+        numbered = []
+        for new_idx, (_score, key) in enumerate(parsed[:6], start=1):
+            numbered.append((new_idx, key))
+        return numbered
+
+    try:
+        for idx, model_spd in enumerate(per_model_spds):
+            ms = _model_for_index(idx)
+            model_name = getattr(ms, "name", f"model_{idx}")
+            usage = {}
+            try:
+                usage = raw_calls[idx].get("usage") if isinstance(raw_calls[idx], dict) else {}
+            except Exception:
+                usage = {}
+            elapsed_ms = int((usage or {}).get("elapsed_ms") or 0)
+            cost_usd = float((usage or {}).get("cost_usd") or 0.0)
+            prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
+            completion_tokens = int((usage or {}).get("completion_tokens") or 0)
+            total_tokens = int((usage or {}).get("total_tokens") or prompt_tokens + completion_tokens or 0)
+
+            try:
+                con.execute(
+                    "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+                    [run_id, qid, model_name],
+                )
+            except Exception:
+                pass
+
+            if not isinstance(model_spd, dict) or not model_spd:
+                con.execute(
+                    """
+                    INSERT INTO forecasts_raw (
+                        run_id, question_id, model_name, month_index, bucket_index,
+                        probability, ok, elapsed_ms, cost_usd, prompt_tokens,
+                        completion_tokens, total_tokens, status, spd_json, human_explanation
+                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?)
+                    """,
+                    [
+                        run_id,
+                        qid,
+                        model_name,
+                        elapsed_ms,
+                        cost_usd,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        json.dumps({"resolution_source": resolution_source, "spds": {}, "member_source": "spd_v2_member_call"}),
+                        "No SPD returned for this model.",
+                    ],
+                )
+                continue
+
+            spd_json_payload: dict[str, object] = {
+                "resolution_source": resolution_source,
+                "member_source": "spd_v2_member_call",
+                "spds": {},
+            }
+            ordered_months = _month_indices(model_spd)
+            if len(ordered_months) < 6:
+                next_idx = len(ordered_months) + 1
+                while len(ordered_months) < 6:
+                    ordered_months.append((next_idx, f"month_{next_idx}"))
+                    next_idx += 1
+            for month_index, month_key in ordered_months[:6]:
+                probs_raw = model_spd.get(month_key) or []
+                probs_vec = sanitize_mcq_vector(list(probs_raw), n_options=bucket_count)
+                if len(probs_vec) != bucket_count:
+                    probs_vec = [1.0 / bucket_count] * bucket_count
+                spd_json_payload["spds"][month_key] = {"probs": probs_vec}
+                for bucket_index, prob in enumerate(probs_vec[:bucket_count], start=1):
+                    con.execute(
+                        """
+                        INSERT INTO forecasts_raw (
+                            run_id, question_id, model_name, month_index, bucket_index,
+                            probability, ok, elapsed_ms, cost_usd, prompt_tokens,
+                            completion_tokens, total_tokens, status, spd_json, human_explanation
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL)
+                        """,
+                        [
+                            run_id,
+                            qid,
+                            model_name,
+                            month_index,
+                            bucket_index,
+                            float(prob),
+                            True,
+                            elapsed_ms,
+                            cost_usd,
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            json.dumps(spd_json_payload),
+                        ],
+                    )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] Failed to write SPD member rows for q={qid}: {exc}")
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 def _load_emdat_pa_history(
     iso3: str,
@@ -2502,7 +2662,12 @@ async def _call_spd_bayesmc_v2(
     target_month: str | None = None,
     specs: list[ModelSpec] | None = None,
 ) -> tuple[
-    dict[str, object], dict[str, object], list[dict[str, object]], dict[str, object]
+    dict[str, object],
+    dict[str, object],
+    list[dict[str, object]],
+    dict[str, object],
+    list[dict[str, list[float]]],
+    list[ModelSpec],
 ]:
     """
     BayesMC-backed SPD v2 bridge.
@@ -2528,7 +2693,7 @@ async def _call_spd_bayesmc_v2(
             "partial_ensemble": False,
             "skipped_providers": disabled_providers_for_run(run_id),
         }
-        return {}, {}, [], ensemble_meta
+        return {}, {}, [], ensemble_meta, [], []
 
     per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
         prompt, specs_used, run_id=run_id
@@ -2554,9 +2719,9 @@ async def _call_spd_bayesmc_v2(
         _attach_ensemble_meta(spd_obj, ensemble_meta)
 
     if not spd_obj:
-        return {}, aggregated_usage, raw_calls, ensemble_meta
+        return {}, aggregated_usage, raw_calls, ensemble_meta, per_model_spds, specs_used
 
-    return spd_obj, aggregated_usage, raw_calls, ensemble_meta
+    return spd_obj, aggregated_usage, raw_calls, ensemble_meta, per_model_spds, specs_used
 
 
 def _format_ensemble_meta(ensemble_meta: dict[str, object]) -> str:
@@ -2928,6 +3093,14 @@ def _write_spd_outputs(
 
     con = connect(read_only=False)
     try:
+        con.execute(
+            "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+            [run_id, qid, model_name],
+        )
+        con.execute(
+            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+            [run_id, qid, model_name],
+        )
         for month_idx, (month_label, payload) in enumerate(sorted(spds.items()), start=1):
             probs = payload.get("probs") if isinstance(payload, dict) else None
             if not probs:
@@ -3045,6 +3218,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
     _maybe_log_default_ensemble()
 
     rec = _normalize_question_row_for_spd(question_row)
+    member_spds_snapshot: list[dict[str, list[float]]] | None = None
+    member_specs_snapshot: list[ModelSpec] | None = None
+    member_raw_calls_snapshot: list[dict[str, object]] | None = None
+    members_written = False
 
     qid = rec.get("question_id")
     iso3 = (rec.get("iso3") or "").upper()
@@ -3150,6 +3327,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 per_model_spds, aggregated_usage, raw_calls, ensemble_meta = (
                     await _call_spd_members_v2(prompt, specs_active, run_id=run_id)
                 )
+                if member_spds_snapshot is None:
+                    member_spds_snapshot = per_model_spds
+                    member_specs_snapshot = specs_active
+                    member_raw_calls_snapshot = raw_calls
                 spd_mean = aggregate_spd_v2_mean(per_model_spds)
                 spd_v2 = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
                 _attach_ensemble_meta(spd_v2, ensemble_meta)
@@ -3228,7 +3409,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         if write_both:
             specs_active, specs_source = _select_spd_specs_for_run()
 
-            if not specs_active:
+            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
+                prompt, specs_active, run_id=run_id
+            )
+            if member_spds_snapshot is None:
+                member_spds_snapshot = per_model_spds
+                member_specs_snapshot = specs_active
+                member_raw_calls_snapshot = raw_calls
+
+            if (not raw_calls) and (not per_model_spds):
                 reason = (
                     f"no active ensemble models ({specs_source})"
                     if specs_source != "none"
@@ -3254,9 +3443,27 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
                 return
 
-            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
-                prompt, specs_active, run_id=run_id
-            )
+            specs_used_for_bayesmc = specs_active
+            if not specs_used_for_bayesmc and raw_calls:
+                inferred: list[ModelSpec] = []
+                for rc in raw_calls:
+                    ms = rc.get("model_spec") if isinstance(rc, dict) else None
+                    if isinstance(ms, ModelSpec):
+                        inferred.append(ms)
+                if inferred:
+                    specs_used_for_bayesmc = inferred
+                    specs_source = "inferred_from_raw_calls"
+
+            if not members_written:
+                _write_spd_members_v2_to_db(
+                    run_id=run_id,
+                    question_row=rec,
+                    specs_used=member_specs_snapshot or specs_active,
+                    per_model_spds=member_spds_snapshot or per_model_spds,
+                    raw_calls=member_raw_calls_snapshot or raw_calls,
+                    resolution_source=resolution_source,
+                )
+                members_written = True
 
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
             debug_written = False
@@ -3317,7 +3524,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
-                per_model_spds, target_month=target_month, specs_used=specs_active
+                per_model_spds, target_month=target_month, specs_used=specs_used_for_bayesmc
             )
             if _has_v2_spds(spd_bm_obj):
                 spd_bm_obj.setdefault("bayesmc_diag", diag_bm)
@@ -3422,7 +3629,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
 
         if use_bayesmc:
             specs_active, specs_source = _select_spd_specs_for_run()
-            spd_obj, usage, raw_calls, ensemble_meta = await _call_spd_bayesmc_v2(
+            spd_obj, usage, raw_calls, ensemble_meta, per_model_spds_bm, specs_used_bm = await _call_spd_bayesmc_v2(
                 prompt,
                 run_id=run_id,
                 question_id=qid,
@@ -3430,6 +3637,21 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 target_month=target_month,
                 specs=specs_active,
             )
+            if member_spds_snapshot is None:
+                member_spds_snapshot = per_model_spds_bm
+                member_specs_snapshot = specs_used_bm
+                member_raw_calls_snapshot = raw_calls
+
+            if not members_written:
+                _write_spd_members_v2_to_db(
+                    run_id=run_id,
+                    question_row=rec,
+                    specs_used=member_specs_snapshot or specs_used_bm,
+                    per_model_spds=member_spds_snapshot or per_model_spds_bm,
+                    raw_calls=member_raw_calls_snapshot or raw_calls,
+                    resolution_source=resolution_source,
+                )
+                members_written = True
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
             text = json.dumps(spd_obj)
 

@@ -168,6 +168,26 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
     con = pythia_connect(read_only=True)
     features: Dict[str, Any] = {"iso3": iso3}
 
+    def _trend_from(values: list[float]) -> str:
+        if len(values) >= 2:
+            if values[-1] > values[0]:
+                return "up"
+            if values[-1] < values[0]:
+                return "down"
+        return "flat"
+
+    def _last_values(series: list[tuple[str, float]], limit: int = 6) -> list[dict[str, float]]:
+        tail = series[-limit:]
+        return [{"ym": ym, "value": val} for ym, val in tail]
+
+    def _coerce_ym(raw_ym: Any) -> str:
+        try:
+            if hasattr(raw_ym, "isoformat"):
+                return raw_ym.isoformat()
+        except Exception:
+            pass
+        return str(raw_ym)
+
     # Conflict/fatalities base-rate features
     try:
         rows = con.execute(
@@ -213,9 +233,108 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
         }
 
     # TODO: similar minimalist blocks for IDMC, EM-DAT if you want them
-    # For now, return at least the conflict bundle, plus a stub:
-    features.setdefault("displacement", {"notes": "Not implemented"})
-    features.setdefault("natural_hazards", {"notes": "Not implemented"})
+    # Displacement flows (IDMC/DTM, facts_deltas)
+    try:
+        displacement_rows = con.execute(
+            """
+            SELECT ym, SUM(
+                CASE
+                    WHEN lower(metric) = 'new_displacements' THEN COALESCE(value_new, 0)
+                    WHEN lower(metric) = 'idp_displacement_new_dtm' THEN COALESCE(value_new, 0)
+                    WHEN lower(metric) = 'idp_displacement_flow_idmc' THEN COALESCE(value_new, 0)
+                    ELSE 0
+                END
+            ) AS flow_value
+            FROM facts_deltas
+            WHERE upper(iso3) = ?
+              AND lower(series_semantics) = 'new'
+              AND lower(metric) IN (
+                'new_displacements',
+                'idp_displacement_new_dtm',
+                'idp_displacement_flow_idmc'
+              )
+            GROUP BY ym
+            ORDER BY ym
+            """,
+            [iso3],
+        ).fetchall()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.warning("Resolver displacement features failed for %s: %s", iso3, exc)
+        displacement_rows = None
+
+    if displacement_rows:
+        disp_series: list[tuple[str, float]] = []
+        for ym_val, flow_val in displacement_rows:
+            try:
+                disp_series.append((_coerce_ym(ym_val), float(flow_val or 0.0)))
+            except Exception:
+                continue
+        values_only = [v for _ym, v in disp_series]
+        features["displacement"] = {
+            "source": "IDMC/DTM",
+            "history_length": len(disp_series),
+            "recent_mean": sum(values_only[-6:]) / len(values_only[-6:]) if values_only[-6:] else None,
+            "recent_max": max(values_only) if values_only else None,
+            "trend": _trend_from(values_only),
+            "last_6_values": _last_values(disp_series),
+            "data_quality": "medium",
+            "notes": "IDMC/DTM monthly displacement flows from facts_deltas (noisy, often sparse).",
+        }
+    else:
+        features["displacement"] = {
+            "source": "IDMC/DTM",
+            "history_length": 0,
+            "data_quality": "low",
+            "notes": "No IDMC/DTM flows in DB for this country (common).",
+        }
+
+    # Natural hazards (EM-DAT PA)
+    features["natural_hazards"] = {}
+    for hz_code, shock_type in EMDAT_SHOCK_MAP.items():
+        try:
+            emdat_rows = con.execute(
+                """
+                SELECT ym, pa
+                FROM emdat_pa
+                WHERE upper(iso3) = ? AND lower(shock_type) = ?
+                ORDER BY ym
+                """,
+                [iso3, shock_type],
+            ).fetchall()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning(
+                "Resolver EM-DAT features failed for %s/%s: %s",
+                iso3,
+                hz_code,
+                exc,
+            )
+            emdat_rows = None
+
+        if emdat_rows:
+            nh_series: list[tuple[str, float]] = []
+            for ym_val, pa_val in emdat_rows:
+                try:
+                    nh_series.append((_coerce_ym(ym_val), float(pa_val or 0.0)))
+                except Exception:
+                    continue
+            values_only = [v for _ym, v in nh_series]
+            features["natural_hazards"][hz_code] = {
+                "source": "EM-DAT",
+                "history_length": len(nh_series),
+                "recent_mean": sum(values_only[-6:]) / len(values_only[-6:]) if values_only[-6:] else None,
+                "recent_max": max(values_only) if values_only else None,
+                "trend": _trend_from(values_only),
+                "last_6_values": _last_values(nh_series),
+                "data_quality": "medium",
+                "notes": "EM-DAT PA history (often sparse or missing for some hazards).",
+            }
+        else:
+            features["natural_hazards"][hz_code] = {
+                "source": "EM-DAT",
+                "history_length": 0,
+                "data_quality": "low",
+                "notes": "No EM-DAT PA history for this hazard/country (common).",
+            }
 
     con.close()
     return features
@@ -252,6 +371,7 @@ def _parse_hs_triage_json(raw: str) -> dict[str, Any]:
 
 
 def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
+    allowed_hazards = set(_build_hazard_catalog().keys())
     con = pythia_connect(read_only=False)
     try:
         hazards = triage.get("hazards") or {}
@@ -267,6 +387,15 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
                 logger.info(
                     "HS triage: skipping ACO hazard for %s; ACE is the canonical conflict hazard.",
                     iso3_up,
+                )
+                continue
+
+            if hz_up not in allowed_hazards:
+                logger.info(
+                    "HS triage: ignoring unknown hazard code from model | run_id=%s iso3=%s hazard=%s",
+                    run_id,
+                    iso3_up,
+                    hz_up,
                 )
                 continue
 

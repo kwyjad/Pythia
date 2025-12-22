@@ -97,16 +97,6 @@ HAZARD_CONFIG = {
     },
 }
 
-for _alias in ["CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"]:
-    HAZARD_CONFIG.setdefault(
-        _alias,
-        {
-            "label": "Armed Conflict",
-            "class": "Conflict",
-            "question_types": ["acled_fatalities", "conflict_displacement"],
-        },
-    )
-
 DISPLACEMENT_TEMPLATES = {
     "acled_fatalities": (
         "How many battle-related fatalities will ACLED record in {country_name} "
@@ -134,7 +124,7 @@ BLOCKED_HAZARDS: set[str] = {
     "ACO",
 } | {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
 ALLOWED = set(HAZARD_CONFIG.keys())
-CONFLICT_HAZARDS = {"CONFLICT", "POLITICAL_VIOLENCE", "CIVIL_CONFLICT", "URBAN_CONFLICT"}
+CONFLICT_HAZARDS = {"ACE", "ACO"}
 
 
 def _to_target_month(today: date, months_ahead: int) -> str:

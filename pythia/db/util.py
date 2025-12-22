@@ -9,6 +9,8 @@ import uuid
 from typing import Mapping, Any
 
 import duckdb
+import json
+from datetime import datetime
 
 
 def write_llm_call(
@@ -65,5 +67,67 @@ def write_llm_call(
             hs_run_id,
             ui_run_id,
             forecaster_run_id,
+        ],
+    )
+
+
+def log_web_research_call(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    component: str,
+    phase: str,
+    provider: str,
+    model_name: str,
+    model_id: str,
+    run_id: str | None,
+    question_id: str | None,
+    prompt_text: str,
+    response_text: str,
+    parsed_json: Mapping[str, Any] | None,
+    usage: Mapping[str, Any] | None,
+    elapsed_ms: int,
+    error_text: str | None,
+    success: bool,
+    hs_run_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+    metric: str | None = None,
+) -> None:
+    """Best-effort logger for web research calls into llm_calls."""
+
+    usage_json = json.dumps(usage or {}, ensure_ascii=False)
+    conn.execute(
+        """
+        INSERT INTO llm_calls (
+            call_id, run_id, hs_run_id, question_id, call_type, phase,
+            model_name, provider, model_id, prompt_text, response_text, parsed_json,
+            usage_json, elapsed_ms, prompt_tokens, completion_tokens, total_tokens,
+            cost_usd, error_text, timestamp, iso3, hazard_code, metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            str(uuid.uuid4()),
+            run_id,
+            hs_run_id,
+            question_id,
+            "web_research",
+            phase,
+            model_name,
+            provider,
+            model_id,
+            prompt_text,
+            response_text,
+            json.dumps(parsed_json or {}, ensure_ascii=False),
+            usage_json,
+            int(elapsed_ms),
+            0,
+            0,
+            0,
+            0.0,
+            error_text,
+            datetime.utcnow(),
+            iso3,
+            hazard_code,
+            metric,
         ],
     )
