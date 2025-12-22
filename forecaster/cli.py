@@ -3409,7 +3409,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         if write_both:
             specs_active, specs_source = _select_spd_specs_for_run()
 
-            if not specs_active:
+            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
+                prompt, specs_active, run_id=run_id
+            )
+            if member_spds_snapshot is None:
+                member_spds_snapshot = per_model_spds
+                member_specs_snapshot = specs_active
+                member_raw_calls_snapshot = raw_calls
+
+            if (not raw_calls) and (not per_model_spds):
                 reason = (
                     f"no active ensemble models ({specs_source})"
                     if specs_source != "none"
@@ -3435,13 +3443,16 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
                 return
 
-            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
-                prompt, specs_active, run_id=run_id
-            )
-            if member_spds_snapshot is None:
-                member_spds_snapshot = per_model_spds
-                member_specs_snapshot = specs_active
-                member_raw_calls_snapshot = raw_calls
+            specs_used_for_bayesmc = specs_active
+            if not specs_used_for_bayesmc and raw_calls:
+                inferred: list[ModelSpec] = []
+                for rc in raw_calls:
+                    ms = rc.get("model_spec") if isinstance(rc, dict) else None
+                    if isinstance(ms, ModelSpec):
+                        inferred.append(ms)
+                if inferred:
+                    specs_used_for_bayesmc = inferred
+                    specs_source = "inferred_from_raw_calls"
 
             if not members_written:
                 _write_spd_members_v2_to_db(
@@ -3513,7 +3524,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
-                per_model_spds, target_month=target_month, specs_used=specs_active
+                per_model_spds, target_month=target_month, specs_used=specs_used_for_bayesmc
             )
             if _has_v2_spds(spd_bm_obj):
                 spd_bm_obj.setdefault("bayesmc_diag", diag_bm)
