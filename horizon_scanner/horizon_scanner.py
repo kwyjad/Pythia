@@ -36,11 +36,13 @@ from forecaster.providers import (
 from horizon_scanner.db_writer import (
     BLOCKED_HAZARDS,
     HAZARD_CONFIG,
+    log_hs_country_reports_to_db,
     log_hs_run_to_db,
 )
 from horizon_scanner.prompts import build_hs_triage_prompt
 from horizon_scanner.llm_logging import log_hs_llm_call
 from pythia.db.schema import connect as pythia_connect, ensure_schema
+from pythia.web_research import fetch_evidence_pack
 
 # Ensure package imports resolve when executed as a script
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -92,6 +94,79 @@ def _norm_country_key(raw: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
+
+
+def _build_hs_evidence_query(country_name: str, iso3: str) -> str:
+    """Build a grounded web-research query for HS triage."""
+
+    name = country_name or iso3
+    return (
+        f"{name} ({iso3}) humanitarian risk outlook — fetch grounded recent signals (last 120 days) "
+        "across conflict, displacement, disasters, food security, and political stability. "
+        "Also include concise structural drivers (max 8 lines) as background context."
+    )
+
+
+def _render_evidence_markdown(pack: dict[str, Any]) -> str:
+    structural = (pack.get("structural_context") or "(none)").strip()
+    recent_signals = pack.get("recent_signals") or []
+    sources = pack.get("sources") or []
+
+    lines = ["# Evidence pack", ""]
+    lines.append(f"Query: {pack.get('query', '')}")
+    if pack.get("recency_days"):
+        lines.append(f"Recency window: last {pack.get('recency_days')} days")
+    lines.append(f"Grounded: {bool(pack.get('grounded'))}")
+    lines.append("")
+    lines.append("Structural context (background only):")
+    lines.append(structural if structural else "(none)")
+    lines.append("")
+    lines.append("Recent signals (last window):")
+    if recent_signals:
+        for sig in recent_signals:
+            lines.append(f"- {sig}")
+    else:
+        lines.append("- (none)")
+    lines.append("")
+    lines.append("Sources:")
+    if sources:
+        for src in sources:
+            title = src.get("title") or src.get("url") or "(untitled)"
+            url = src.get("url") or ""
+            lines.append(f"- {title} — {url}")
+    else:
+        lines.append("- (none)")
+    return "\n".join(lines)
+
+
+def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str) -> dict[str, Any] | None:
+    if os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") != "1":
+        return None
+
+    try:
+        query = _build_hs_evidence_query(country_name, iso3)
+        pack = fetch_evidence_pack(query, purpose="hs_country_report", run_id=run_id)
+    except Exception as exc:  # noqa: BLE001 - defensive around web research
+        logger.warning("HS web research failed for %s: %s", iso3, exc)
+        return None
+
+    pack = dict(pack or {})
+    markdown = _render_evidence_markdown(pack)
+    try:
+        log_hs_country_reports_to_db(
+            run_id,
+            {
+                iso3.upper(): {
+                    "markdown": markdown,
+                    "sources": pack.get("sources") or [],
+                }
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to persist HS evidence pack for %s: %s", iso3, exc)
+
+    pack["markdown"] = markdown
+    return pack
 
 
 def _resolve_hs_model() -> str:
@@ -473,12 +548,14 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         logger.info("Running HS triage for %s (%s)", country_name, iso3_up)
         resolver_features = _build_resolver_features_for_country(iso3)
         hazard_catalog = _build_hazard_catalog()
+        evidence_pack = _maybe_build_country_evidence_pack(run_id, iso3_up, country_name)
         prompt = build_hs_triage_prompt(
             country_name=country_name,
             iso3=iso3_up,
             hazard_catalog=hazard_catalog,
             resolver_features=resolver_features,
             model_info={},
+            evidence_pack=evidence_pack,
         )
 
         call_start = time.time()

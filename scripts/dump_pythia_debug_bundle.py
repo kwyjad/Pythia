@@ -57,6 +57,33 @@ def _build_in_clause(values: list[str]) -> tuple[str, list[str]]:
     return f"({placeholders})", cleaned
 
 
+def _load_self_search_stats(
+    con: duckdb.DuckDBPyConnection, predicate: str | None, params: list[Any]
+) -> dict[str, int]:
+    sql = "SELECT response_text FROM llm_calls WHERE phase = 'forecast_web_research'"
+    if predicate:
+        sql += f" AND ({predicate})"
+    rows = con.execute(sql, params).fetchall()
+    requests = len(rows)
+    sources = 0
+    for row in rows:
+        resp = None
+        if isinstance(row, tuple):
+            resp = row[0]
+        elif isinstance(row, list):
+            resp = row[0] if row else None
+        elif isinstance(row, dict):
+            resp = row.get("response_text")
+        try:
+            data = json.loads(resp or "{}")
+            srcs = data.get("sources") or []
+            if isinstance(srcs, list):
+                sources += len(srcs)
+        except Exception:
+            continue
+    return {"requests": requests, "sources": sources}
+
+
 def _forecast_llm_filter(
     columns: Set[str], run_id: str, question_ids: list[str]
 ) -> tuple[str | None, list[Any], str]:
@@ -1346,13 +1373,17 @@ def build_debug_bundle_markdown(
     llm_call_counts: list[dict[str, Any]] = []
     llm_calls_skip_note: str | None = None
     llm_error_rows: list[dict[str, Any]] = []
+    self_search_stats = {"requests": 0, "sources": 0}
+    self_search_warning: str | None = None
     try:
         llm_call_counts = _load_llm_call_counts(con, predicate, params)
         llm_error_rows = _load_llm_error_summary(con, predicate, params)
+        self_search_stats = _load_self_search_stats(con, predicate, params)
     except Exception as exc:  # pragma: no cover - defensive
         llm_calls_skip_note = f"Error loading llm_calls: {exc}"
         llm_call_counts = []
         llm_error_rows = []
+        self_search_warning = llm_calls_skip_note
     latency_block = render_latency_markdown(con, predicate, params, predicate_strategy)
 
     lines.append(f"# Pythia v2 Debug Bundle — Run {forecaster_run_id}")
@@ -1595,6 +1626,17 @@ def build_debug_bundle_markdown(
     lines.append("### 1.7 Ensemble participation summary")
     lines.append("")
     lines.extend(_ensemble_participation_summary(forecasts_raw_counts))
+    lines.append("")
+
+    lines.append("### 1.8 Self-search (forecast_web_research) summary")
+    lines.append("")
+    if self_search_warning:
+        lines.append(f"_Note: {self_search_warning}_")
+        lines.append("")
+    lines.append("| metric | value |")
+    lines.append("| --- | --- |")
+    lines.append(f"| self_search_requests_count | {self_search_stats.get('requests', 0)} |")
+    lines.append(f"| self_search_sources_count | {self_search_stats.get('sources', 0)} |")
     lines.append("")
 
     lines.append("## 2. Question Types")

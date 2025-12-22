@@ -50,7 +50,17 @@ import numpy as np
 from pathlib import Path
 from pythia.db.schema import connect, ensure_schema
 from pythia.db.schema import connect as pythia_connect
+from pythia.web_research import fetch_evidence_pack
 from forecaster.hs_utils import load_hs_triage_entry
+from forecaster.self_search import (
+    append_evidence_to_prompt,
+    combine_usage,
+    extract_self_search_query,
+    run_self_search,
+    self_search_enabled,
+    self_search_limits,
+    trim_sources,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -2204,6 +2214,68 @@ def _load_research_json(run_id: str, question_id: str) -> Optional[Dict[str, Any
     finally:
         con.close()
 
+def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[str, Any]]:
+    """Load HS country evidence pack (markdown + sources) from DuckDB."""
+
+    iso3_up = (iso3 or "").upper()
+    if not hs_run_id or not iso3_up:
+        return None
+
+    con = connect(read_only=False)
+    try:
+        ensure_schema(con)
+        row = con.execute(
+            """
+            SELECT report_markdown, sources_json
+            FROM hs_country_reports
+            WHERE hs_run_id = ? AND iso3 = ?
+            LIMIT 1
+            """,
+            [hs_run_id, iso3_up],
+        ).fetchone()
+    finally:
+        con.close()
+
+    if not row:
+        return None
+
+    markdown = row[0] or ""
+    sources_raw = row[1] or "[]"
+    try:
+        sources = json.loads(sources_raw)
+    except Exception:
+        sources = []
+
+    return {
+        "markdown": markdown,
+        "sources": sources if isinstance(sources, list) else [],
+        "structural_context": "",
+        "recent_signals": [],
+        "grounded": bool(sources),
+    }
+
+
+def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> str:
+    iso3 = (question_row.get("iso3") or "").upper()
+    hazard = (question_row.get("hazard_code") or "").upper()
+    metric = (question_row.get("metric") or "").upper()
+
+    hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
+    target_month = question_row.get("target_month") or ""
+    window_end = question_row.get("window_end_date") or ""
+
+    timeframe = ""
+    if target_month:
+        timeframe = f" starting {target_month}"
+    elif window_end:
+        timeframe = f" through {window_end}"
+
+    return (
+        f"{iso3} {hazard_label} {metric} outlook{timeframe} — gather recent signals (last 120 days) "
+        "and concise structural drivers (max 8 lines). "
+        f"Question focus: {wording or ''}"
+    )
+
 
 def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
     iso3 = (question_row.get("iso3") or "").upper()
@@ -2265,9 +2337,16 @@ async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[st
 
 
 async def _call_spd_model_for_spec(
-    ms: ModelSpec, prompt: str, *, run_id: str | None = None, **_kwargs
+    ms: ModelSpec,
+    prompt: str,
+    *,
+    run_id: str | None = None,
+    question_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+    **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
-    """Async wrapper for the SPD LLM call for a given model spec."""
+    """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
 
     start = time.time()
     try:
@@ -2286,11 +2365,87 @@ async def _call_spd_model_for_spec(
 
     usage = dict(usage or {})
     usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
-    return text, usage, error, ms
+
+    query = extract_self_search_query(text or "")
+    max_calls, max_sources = self_search_limits()
+
+    if not query:
+        return text, usage, error, ms
+
+    if not self_search_enabled() or max_calls <= 0:
+        usage["self_search"] = {
+            "attempted": False,
+            "requested": True,
+            "succeeded": False,
+            "query": query,
+            "reason": "self_search_disabled",
+        }
+        return text, usage, error or "self_search_disabled", ms
+
+    self_search_meta: dict[str, Any] = {
+        "attempted": True,
+        "requested": True,
+        "query": query,
+        "succeeded": False,
+        "n_sources": 0,
+    }
+
+    evidence_pack: dict[str, Any] | None = None
+    try:
+        raw_pack = run_self_search(
+            query,
+            run_id=run_id,
+            question_id=question_id,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            purpose="forecast_self_search",
+        )
+        evidence_pack = trim_sources(raw_pack or {}, max_sources)
+        self_search_meta["succeeded"] = not evidence_pack.get("error")
+        self_search_meta["n_sources"] = len(evidence_pack.get("sources") or [])
+    except Exception as exc:  # noqa: BLE001
+        evidence_pack = {"error": str(exc)}
+        self_search_meta["succeeded"] = False
+        self_search_meta["error"] = str(exc)
+
+    usage["self_search"] = self_search_meta
+
+    prompt_with_evidence = append_evidence_to_prompt(prompt, evidence_pack or {})
+
+    try:
+        text2, usage2, error2 = await call_chat_ms(
+            ms,
+            prompt_with_evidence,
+            temperature=0.2,
+            prompt_key="spd.v2.self_search",
+            prompt_version="1.0.0",
+            component="Forecaster",
+            run_id=run_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        elapsed_ms = int((time.time() - start) * 1000)
+        self_search_meta["succeeded"] = False
+        return text, usage, f"self_search_call_error: {exc}", ms
+
+    usage2 = dict(usage2 or {})
+    usage2.setdefault("elapsed_ms", int((time.time() - start) * 1000))
+    usage2["self_search"] = self_search_meta
+
+    query_second = extract_self_search_query(text2 or "")
+    if query_second:
+        return text2, combine_usage(usage, usage2), "self_search_second_request", ms
+
+    return text2, combine_usage(usage, usage2), error2, ms
 
 
 async def _call_spd_members_v2(
-    prompt: str, specs: list[ModelSpec], *, run_id: str | None = None
+    prompt: str,
+    specs: list[ModelSpec],
+    *,
+    run_id: str | None = None,
+    question_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
 ) -> tuple[
     list[dict[str, list[float]]],
     dict[str, object],
@@ -2324,7 +2479,17 @@ async def _call_spd_members_v2(
     if not specs_used:
         return [], {}, [], ensemble_meta
 
-    tasks = [_call_spd_model_for_spec(ms, prompt, run_id=run_id) for ms in specs_used]
+    tasks = [
+        _call_spd_model_for_spec(
+            ms,
+            prompt,
+            run_id=run_id,
+            question_id=question_id,
+            iso3=iso3,
+            hazard_code=hazard_code,
+        )
+        for ms in specs_used
+    ]
     call_results = await asyncio.gather(*tasks)
 
     per_model_spds: list[dict[str, list[float]]] = []
@@ -2661,6 +2826,8 @@ async def _call_spd_bayesmc_v2(
     hs_run_id: str | None,
     target_month: str | None = None,
     specs: list[ModelSpec] | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -2696,7 +2863,12 @@ async def _call_spd_bayesmc_v2(
         return {}, {}, [], ensemble_meta, [], []
 
     per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
-        prompt, specs_used, run_id=run_id
+        prompt,
+        specs_used,
+        run_id=run_id,
+        question_id=question_id,
+        iso3=iso3,
+        hazard_code=hazard_code,
     )
     member_raw_by_model_id: dict[str, str] = {}
     for rc in raw_calls:
@@ -2998,6 +3170,27 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
         history_summary = _build_history_summary(iso3, hz, metric)
         resolver_features = history_summary
 
+        hs_evidence_pack: dict[str, Any] | None = None
+        question_evidence_pack: dict[str, Any] | None = None
+        if os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1":
+            try:
+                hs_evidence_pack = _load_hs_country_evidence_pack(hs_run_id, iso3)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("HS evidence pack load failed for %s: %s", iso3, exc)
+                hs_evidence_pack = None
+
+            try:
+                question_query = _build_question_evidence_query(question_row, wording)
+                question_evidence_pack = fetch_evidence_pack(
+                    question_query,
+                    purpose="research_v2_question",
+                    run_id=run_id,
+                    question_id=qid,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
+                question_evidence_pack = None
+
         prompt = build_research_prompt_v2(
             question={
                 "question_id": qid,
@@ -3010,6 +3203,8 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             hs_triage_entry=hs_entry,
             resolver_features=resolver_features,
             model_info={},
+            evidence_pack=hs_evidence_pack,
+            question_evidence_pack=question_evidence_pack,
         )
 
         text, usage, error, ms = await _call_research_model(prompt, run_id=run_id)
@@ -3047,6 +3242,13 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
                 raw_path,
             )
             return
+        if not isinstance(research, dict):
+            research = {"note": "invalid_research_payload"}
+
+        sources_val = research.get("sources")
+        sources_list = sources_val if isinstance(sources_val, list) else []
+        research["sources"] = sources_list
+        research["grounded"] = bool(sources_list)
         con = connect(read_only=False)
         try:
             con.execute(
@@ -3240,6 +3442,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json = {
                 "note": "missing_research_v2",
                 "base_rate_hint": "Use Resolver history + HS triage + model prior.",
+                "sources": [],
+                "grounded": False,
             }
 
         target_months = rec.get("target_months") or rec.get("target_month")
@@ -3325,7 +3529,14 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
             try:
                 per_model_spds, aggregated_usage, raw_calls, ensemble_meta = (
-                    await _call_spd_members_v2(prompt, specs_active, run_id=run_id)
+                    await _call_spd_members_v2(
+                        prompt,
+                        specs_active,
+                        run_id=run_id,
+                        question_id=qid,
+                        iso3=iso3,
+                        hazard_code=hz,
+                    )
                 )
                 if member_spds_snapshot is None:
                     member_spds_snapshot = per_model_spds
@@ -3410,7 +3621,12 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             specs_active, specs_source = _select_spd_specs_for_run()
 
             per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
-                prompt, specs_active, run_id=run_id
+                prompt,
+                specs_active,
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
             )
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds
@@ -3636,6 +3852,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 hs_run_id=hs_run_id,
                 target_month=target_month,
                 specs=specs_active,
+                iso3=iso3,
+                hazard_code=hz,
             )
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds_bm
