@@ -46,7 +46,7 @@ jobs:
       FORECASTER_RESEARCH_MAX_WORKERS: "6"
       FORECASTER_SPD_MAX_WORKERS: "6"
       PYTHIA_WEB_RESEARCH_ENABLED: "1"
-      PYTHIA_WEB_RESEARCH_BACKEND: gemini
+      PYTHIA_WEB_RESEARCH_BACKEND: auto
       PYTHIA_WEB_RESEARCH_RECENCY_DAYS: "120"
       PYTHIA_WEB_RESEARCH_INCLUDE_STRUCTURAL: "1"
       PYTHIA_FORECASTER_SELF_SEARCH: "1"
@@ -583,6 +583,8 @@ jobs:
           path: |
             debug/pytia_debug_bundle__*.md
             diagnostics/llm_latency_summary.md
+            diagnostics/db_signature_before.json
+            diagnostics/db_signature_after.json
 
       - name: Upload evaluation artifacts
         if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'

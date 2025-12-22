@@ -829,6 +829,18 @@ def merge_evidence_packs(
         if len(merged_sources) >= max_sources:
             break
 
+    merged_unverified = []
+    seen_unverified: set[str] = set(seen_urls)
+    for src in (hs_pack.get("unverified_sources") or []) + (question_pack.get("unverified_sources") or []):
+        if not isinstance(src, dict):
+            continue
+        url = (src.get("url") or "").strip()
+        if url and url not in seen_unverified:
+            merged_unverified.append(src)
+            seen_unverified.add(url)
+        if len(merged_unverified) >= max_sources:
+            break
+
     hs_struct = _trim_structural(hs_pack.get("structural_context", ""), 8)
     q_struct = _trim_structural(question_pack.get("structural_context", ""), 8)
     structural_context = "\n".join([part for part in (hs_struct, q_struct) if part]).strip()
@@ -851,6 +863,7 @@ def merge_evidence_packs(
         "structural_context": structural_context,
         "recent_signals": combined_signals,
         "sources": merged_sources,
+        "unverified_sources": merged_unverified,
         "grounded": grounded,
     }
 
@@ -945,7 +958,7 @@ def build_research_prompt_v2(
         + "Emphasise major deviations from the historical base rate only when strongly supported by evidence.\n\n"
         + "Return a single JSON object:\n\n"
         + RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA
-        + "\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`. Set `grounded` to true only when at least one real URL remains after validation.\n\n"
+        + "\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`. Set `grounded` to true only when at least one real URL remains after validation. Your `grounded` value will be overridden unless those URLs are verified by the system.\n\n"
         + "Do not include any text outside the JSON."
     )
     parts.append(tasks_block)

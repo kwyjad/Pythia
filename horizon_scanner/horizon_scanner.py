@@ -101,7 +101,7 @@ def _build_hs_evidence_query(country_name: str, iso3: str) -> str:
 
     name = country_name or iso3
     return (
-        f"{name} ({iso3}) humanitarian risk outlook — fetch grounded recent signals (last 120 days) "
+        f"{name} ({iso3}) humanitarian risk outlook - fetch grounded recent signals (last 120 days) "
         "across conflict, displacement, disasters, food security, and political stability. "
         "Also include concise structural drivers (max 8 lines) as background context."
     )

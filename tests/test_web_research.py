@@ -88,6 +88,7 @@ def test_budget_guard_blocks_followup_calls(monkeypatch, tmp_path):
 def test_fetch_via_gemini_parses_grounding(monkeypatch):
     monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_MODEL_ID", "gemini-3-pro-preview")
 
     class FakeResponse:
         status_code = 200
@@ -154,3 +155,201 @@ def test_fetch_via_gemini_parses_grounding(monkeypatch):
     assert pack.structural_context.startswith("Line 1")
     assert pack.recent_signals == ["Signal 1", "Signal 2"]
     assert pack.debug.get("usage", {}).get("total_tokens") == 30
+    assert "gemini-3-pro-preview" in pack.debug.get("attempted_models", [])
+    assert pack.debug.get("selected_model_id") == "gemini-3-pro-preview"
+    assert pack.unverified_sources == []
+
+
+def test_fetch_via_gemini_preserves_recent_signals_without_structural(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "candidates": [
+                    {
+                        "groundingMetadata": {
+                            "groundingSupports": [
+                                {"support": {"sourceUrl": "https://example.com", "title": "Example"}}
+                            ],
+                            "webSearchQueries": ["example"],
+                        },
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "structural_context": "Background line 1",
+                                            "recent_signals": ["Signal A", "Signal B"],
+                                        }
+                                    )
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "usageMetadata": {},
+            }
+
+    monkeypatch.setattr(web_research.gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    pack = web_research.gemini_grounding.fetch_via_gemini(
+        "test query",
+        recency_days=120,
+        include_structural=False,
+        timeout_sec=30,
+        max_results=5,
+    )
+
+    assert pack.structural_context == ""
+    assert pack.recent_signals == ["Signal A", "Signal B"]
+    assert pack.grounded is True
+
+
+def test_fetch_via_gemini_extracts_unverified_urls(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": "Here are some leads: https://example.com/a and also https://example.com/b ."
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(web_research.gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    pack = web_research.gemini_grounding.fetch_via_gemini(
+        "test query",
+        recency_days=120,
+        include_structural=True,
+        timeout_sec=30,
+        max_results=5,
+    )
+
+    assert pack.grounded is False
+    assert pack.sources == []
+    assert [src.url for src in pack.unverified_sources] == ["https://example.com/a", "https://example.com/b"]
+    assert pack.debug.get("unverified_url_count") == 2
+
+
+def test_web_research_logging_uses_provider_and_model(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    called = {}
+
+    class FakeConn:
+        def close(self):
+            pass
+
+    def fake_connect(read_only: bool = False):
+        return FakeConn()
+
+    def fake_log_call(conn, **kwargs):
+        called.update(kwargs)
+
+    fake_pack = web_research.EvidencePack(query="q", recency_days=120, backend="gemini")
+    fake_pack.debug = {
+        "provider": "google",
+        "selected_model_id": "gemini-3-flash-preview",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost_usd": 0.25},
+    }
+
+    monkeypatch.setattr(web_research, "connect", fake_connect)
+    monkeypatch.setattr(web_research, "ensure_schema", lambda conn: None)
+    monkeypatch.setattr(web_research, "log_web_research_call", fake_log_call)
+
+    web_research._log_web_research(
+        fake_pack,
+        purpose="hs",
+        run_id="run1",
+        question_id="Q1",
+        start_ms=int(time.time() * 1000),
+        cached=False,
+        success=True,
+    )
+
+    assert called.get("provider") == "google"
+    assert called.get("model_id") == "gemini-3-flash-preview"
+    assert called.get("model_name") == "Gemini Grounding"
+
+
+def test_budget_guard_records_actual_cost(monkeypatch):
+    BudgetGuard._STATE = {}
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_BUDGET_USD_PER_RUN", "1")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_CACHE", "0")
+
+    fake_pack = web_research.EvidencePack(query="q", recency_days=120, backend="gemini")
+    fake_pack.debug = {"usage": {"cost_usd": 2.0}}
+
+    def fake_fetch(**kwargs):
+        return fake_pack
+
+    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", fake_fetch)
+    monkeypatch.setattr(web_research, "_log_web_research", lambda *args, **kwargs: None)
+
+    first = web_research.fetch_evidence_pack("query one", purpose="hs", run_id="budget-run", question_id="Q1")
+    assert first["error"] is None
+
+    second = web_research.fetch_evidence_pack("query two", purpose="hs", run_id="budget-run", question_id="Q1")
+    assert second["error"]["type"] == "budget_exceeded"
+
+
+def test_auto_backend_uses_fallback_when_configured(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_BACKEND", "auto")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_FALLBACK_BACKEND", "exa")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_CACHE", "0")
+
+    gemini_pack = web_research.EvidencePack(query="q", recency_days=120, backend="gemini")
+    gemini_pack.error = {"type": "grounding_missing", "message": "no grounding"}
+    gemini_pack.grounded = False
+
+    fallback_pack = web_research.EvidencePack(query="q", recency_days=120, backend="exa")
+    fallback_pack.grounded = True
+    fallback_pack.sources = [web_research.EvidenceSource(title="Example", url="https://example.com")]
+
+    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+    monkeypatch.setattr(web_research, "_fetch_via_exa", lambda *args, **kwargs: fallback_pack)
+
+    pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto", question_id="Q-auto")
+
+    assert pack["backend"] == "exa"
+    assert pack["grounded"] is True
+    assert pack["sources"][0]["url"] == "https://example.com"
+    assert pack["debug"].get("auto_primary_backend") == "gemini"
+    assert pack["debug"].get("auto_fallback_backend") == "exa"
+
+
+def test_auto_backend_without_fallback_sets_error(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_BACKEND", "auto")
+    monkeypatch.delenv("PYTHIA_WEB_RESEARCH_FALLBACK_BACKEND", raising=False)
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_CACHE", "0")
+
+    gemini_pack = web_research.EvidencePack(query="q", recency_days=120, backend="gemini")
+    gemini_pack.error = {"type": "grounding_missing", "message": "no grounding"}
+    gemini_pack.grounded = False
+
+    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+
+    pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto", question_id="Q-auto")
+
+    assert pack["backend"] == "gemini"
+    assert pack["grounded"] is False
+    assert pack["error"]["type"] == "no_backend_available"
+    assert pack["debug"].get("auto_fallback_backend") is None

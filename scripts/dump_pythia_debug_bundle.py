@@ -176,6 +176,16 @@ def _provenance_markdown(
     counts_after: dict[str, int | None],
     db_stats: dict[str, Any],
 ) -> List[str]:
+    def _signature_section(path: str, label: str) -> list[str]:
+        p = Path(path)
+        if not p.exists():
+            return [f"- {label}: missing ({path})"]
+        try:
+            content = p.read_text(encoding="utf-8")
+        except Exception as exc:  # pragma: no cover - defensive
+            return [f"- {label}: unable to read {path}: {exc}"]
+        return [f"- {label}: {path}", "```json", content, "```"]
+
     lines: List[str] = []
     lines.append("### DB provenance and rowcounts")
     lines.append("")
@@ -192,6 +202,10 @@ def _provenance_markdown(
         before = counts_before.get(tbl)
         after = counts_after.get(tbl)
         lines.append(f"| {tbl} | {before if before is not None else 'n/a'} | {after if after is not None else 'n/a'} |")
+    lines.append("")
+    lines.append("#### Signature files")
+    lines.extend(_signature_section("diagnostics/db_signature_before.json", "db_signature_before"))
+    lines.extend(_signature_section("diagnostics/db_signature_after.json", "db_signature_after"))
     lines.append("")
     return lines
 
@@ -276,11 +290,16 @@ def _load_web_research_summaries(
                     hs_rows.append(
                         {
                             "iso3": iso3,
-                            "grounded": bool(grounded),
-                            "n_sources": len(sources) if isinstance(sources, list) else 0,
-                            "top_urls": _extract_urls(sources),
+                            "grounded": bool(grounded) or bool(sources),
+                            "n_verified": len(sources) if isinstance(sources, list) else 0,
+                            "n_unverified": 0,
+                            "top_verified_urls": _extract_urls(sources),
+                            "top_unverified_urls": [],
                             "groundingSupports_count": dbg.get("groundingSupports_count", 0),
                             "groundingChunks_count": dbg.get("groundingChunks_count", 0),
+                            "attempted_models": dbg.get("attempted_models") or [],
+                            "used_attempt": dbg.get("used_attempt"),
+                            "last_errors": dbg.get("last_errors") or [],
                         }
                     )
             except Exception:
@@ -305,15 +324,23 @@ def _load_web_research_summaries(
                     except Exception:
                         pack = {}
                     sources = pack.get("sources") or []
+                    unverified = pack.get("unverified_sources") or []
                     dbg = pack.get("debug") or {}
+                    verified_urls = _extract_urls(sources)
+                    unverified_urls = _extract_urls(unverified)
                     q_rows.append(
                         {
                             "question_id": qid,
                             "grounded": bool(pack.get("grounded")) or bool(sources),
-                            "n_sources": len(sources) if isinstance(sources, list) else 0,
-                            "top_urls": _extract_urls(sources),
+                            "n_verified": len(sources) if isinstance(sources, list) else 0,
+                            "n_unverified": len(unverified) if isinstance(unverified, list) else 0,
+                            "top_verified_urls": verified_urls,
+                            "top_unverified_urls": unverified_urls,
                             "groundingSupports_count": dbg.get("groundingSupports_count", 0),
                             "groundingChunks_count": dbg.get("groundingChunks_count", 0),
+                            "attempted_models": dbg.get("attempted_models") or dbg.get("model_id") or [],
+                            "used_attempt": dbg.get("used_attempt"),
+                            "last_errors": dbg.get("last_errors") or [],
                         }
                     )
             except Exception:
@@ -322,11 +349,56 @@ def _load_web_research_summaries(
     return hs_rows, q_rows
 
 
+def _web_research_accounting(
+    con: duckdb.DuckDBPyConnection, forecaster_run_id: str | None, hs_run_id: str | None
+) -> dict[str, int]:
+    predicate_parts: list[str] = ["provider = 'web_research'"]
+    params: list[Any] = []
+    if forecaster_run_id:
+        predicate_parts.append("run_id = ?")
+        params.append(forecaster_run_id)
+    if hs_run_id:
+        predicate_parts.append("hs_run_id = ?")
+        params.append(hs_run_id)
+    predicate = " AND ".join(predicate_parts)
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT model_id, usage_json, error_text
+            FROM llm_calls
+            WHERE {predicate}
+            """,
+            params,
+        )
+    except Exception:
+        return {"n_calls": 0, "missing_model_id": 0, "missing_usage": 0, "missing_cost_usd": 0}
+
+    counts = {"n_calls": 0, "missing_model_id": 0, "missing_usage": 0, "missing_cost_usd": 0}
+    for row in rows:
+        counts["n_calls"] += 1
+        model_id = (row.get("model_id") or "").strip()
+        if not model_id:
+            counts["missing_model_id"] += 1
+        usage_raw = row.get("usage_json") or "{}"
+        try:
+            usage_obj = json.loads(usage_raw)
+        except Exception:
+            usage_obj = {}
+        if not usage_obj:
+            counts["missing_usage"] += 1
+        if usage_obj and usage_obj.get("total_cost_usd") in (None, 0, 0.0):
+            counts["missing_cost_usd"] += 1
+    return counts
+
+
 def _web_research_markdown(
     hs_rows: list[dict[str, Any]],
     question_rows: list[dict[str, Any]],
     *,
     web_research_enabled: bool,
+    accounting: dict[str, Any] | None = None,
 ) -> List[str]:
     lines: List[str] = []
     lines.append("### Web research evidence")
@@ -334,34 +406,45 @@ def _web_research_markdown(
     if not web_research_enabled:
         lines.append("_Web research disabled via PYTHIA_WEB_RESEARCH_ENABLED._")
         lines.append("")
+    if accounting is not None:
+        lines.append("- Web research accounting:")
+        lines.append(f"  - n_calls: `{accounting.get('n_calls', 0)}`")
+        lines.append(f"  - missing_model_id: `{accounting.get('missing_model_id', 0)}`")
+        lines.append(f"  - missing_usage: `{accounting.get('missing_usage', 0)}`")
+        lines.append(f"  - missing_cost_usd: `{accounting.get('missing_cost_usd', 0)}`")
+        lines.append("")
     lines.append("#### HS country evidence packs")
     lines.append("")
-    lines.append("| iso3 | grounded | n_sources | groundingSupports | groundingChunks | top_urls |")
-    lines.append("| ---- | -------- | --------- | ----------------- | --------------- | -------- |")
+    lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
+    lines.append("| ---- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
     if hs_rows:
         for row in sorted(hs_rows, key=lambda r: r.get("iso3") or ""):
             lines.append(
-                f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_sources')} | "
+                f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_verified')} | {row.get('n_unverified')} | "
                 f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
-                f"{', '.join(row.get('top_urls') or [])} |"
+                f"{', '.join(row.get('attempted_models') or [])} | {row.get('used_attempt') or ''} | "
+                f"{', '.join(row.get('top_verified_urls') or [])} | {', '.join(row.get('top_unverified_urls') or [])} | "
+                f"{'; '.join(row.get('last_errors') or [])} |"
             )
     else:
-        lines.append("| (none) | False | 0 | 0 | 0 | (none) |")
+        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) |")
     lines.append("")
 
     lines.append("#### Question evidence packs")
     lines.append("")
-    lines.append("| question_id | grounded | n_sources | groundingSupports | groundingChunks | top_urls |")
-    lines.append("| ----------- | -------- | --------- | ----------------- | --------------- | -------- |")
+    lines.append("| question_id | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
+    lines.append("| ----------- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
     if question_rows:
         for row in sorted(question_rows, key=lambda r: r.get("question_id") or ""):
             lines.append(
-                f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_sources')} | "
+                f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_verified')} | {row.get('n_unverified')} | "
                 f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
-                f"{', '.join(row.get('top_urls') or [])} |"
+                f"{', '.join(row.get('attempted_models') or [])} | {row.get('used_attempt') or ''} | "
+                f"{', '.join(row.get('top_verified_urls') or [])} | {', '.join(row.get('top_unverified_urls') or [])} | "
+                f"{'; '.join(row.get('last_errors') or [])} |"
             )
     else:
-        lines.append("| (none) | False | 0 | 0 | 0 | (none) |")
+        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) |")
     lines.append("")
     return lines
 
@@ -673,7 +756,6 @@ def _load_llm_call_counts(
             COUNT(*) AS n_calls,
             SUM(
                 CASE
-                    WHEN COALESCE(success, TRUE) = FALSE THEN 1
                     WHEN error_text IS NOT NULL AND error_text <> '' THEN 1
                     ELSE 0
                 END
@@ -706,8 +788,7 @@ def _load_llm_error_summary(
         FROM llm_calls
         WHERE {predicate}
           AND (
-            COALESCE(success, TRUE) = FALSE
-            OR (error_text IS NOT NULL AND error_text <> '')
+            error_text IS NOT NULL AND error_text <> ''
           )
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
@@ -1309,6 +1390,75 @@ def _aggregate_usage_by_phase(
     return out
 
 
+def _question_lifecycle_counts(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> dict[str, int]:
+    counts = {
+        "research": 0,
+        "forecast": 0,
+        "scenario": 0,
+    }
+    try:
+        research_rows = con.execute(
+            """
+            SELECT COUNT(DISTINCT question_id)
+            FROM llm_calls
+            WHERE run_id = ?
+              AND phase = 'research_v2'
+            """,
+            [run_id],
+        ).fetchone()
+        if research_rows and research_rows[0] is not None:
+            counts["research"] = int(research_rows[0])
+    except Exception:
+        counts["research"] = 0
+
+    try:
+        forecast_llm_rows = con.execute(
+            """
+            SELECT COUNT(DISTINCT question_id)
+            FROM llm_calls
+            WHERE run_id = ?
+              AND phase = 'spd_v2'
+            """,
+            [run_id],
+        ).fetchone()
+        forecast_llm = int(forecast_llm_rows[0]) if forecast_llm_rows and forecast_llm_rows[0] else 0
+    except Exception:
+        forecast_llm = 0
+
+    try:
+        forecast_rows = con.execute(
+            """
+            SELECT COUNT(DISTINCT question_id)
+            FROM forecasts_ensemble
+            WHERE run_id = ?
+            """,
+            [run_id],
+        ).fetchone()
+        forecast_tbl = int(forecast_rows[0]) if forecast_rows and forecast_rows[0] else 0
+    except Exception:
+        forecast_tbl = 0
+    counts["forecast"] = max(forecast_llm, forecast_tbl)
+
+    try:
+        scenario_rows = con.execute(
+            """
+            SELECT COUNT(DISTINCT question_id)
+            FROM llm_calls
+            WHERE run_id = ?
+              AND phase = 'scenario_v2'
+            """,
+            [run_id],
+        ).fetchone()
+        if scenario_rows and scenario_rows[0] is not None:
+            counts["scenario"] = int(scenario_rows[0])
+    except Exception:
+        counts["scenario"] = 0
+
+    return counts
+
+
 def _load_triage_tier(
     con: duckdb.DuckDBPyConnection, hs_run_id: str, iso3: str, hazard_code: str
 ) -> str | None:
@@ -1494,8 +1644,12 @@ def build_triage_only_bundle_markdown(
         con, hs_run_id, None, resolved_countries_sorted, []
     )
     web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    web_research_accounting = _web_research_accounting(con, None, hs_run_id)
     web_research_lines = _web_research_markdown(
-        hs_web_rows, question_web_rows, web_research_enabled=web_research_enabled
+        hs_web_rows,
+        question_web_rows,
+        web_research_enabled=web_research_enabled,
+        accounting=web_research_accounting,
     )
 
     llm_columns = _llm_calls_columns(con)
@@ -1688,8 +1842,12 @@ def build_debug_bundle_markdown(
         con, manifest_hs_run_id, forecaster_run_id, resolved_countries_sorted, question_ids
     )
     web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
     web_research_lines = _web_research_markdown(
-        hs_web_rows, question_web_rows, web_research_enabled=web_research_enabled
+        hs_web_rows,
+        question_web_rows,
+        web_research_enabled=web_research_enabled,
+        accounting=web_research_accounting,
     )
 
     llm_columns = _llm_calls_columns(con)
@@ -1733,6 +1891,10 @@ def build_debug_bundle_markdown(
     lines.append(f"- Skipped country entries: `{len(skipped_entries)}`")
     lines.append(f"- n_countries_resolved: `{len(resolved_countries_sorted)}`")
     lines.append(f"- n_questions_total: `{len(question_ids)}`")
+    lifecycle_counts = _question_lifecycle_counts(con, forecaster_run_id)
+    lines.append(f"- n_question_ids_researched: `{lifecycle_counts.get('research', 0)}`")
+    lines.append(f"- n_question_ids_forecasted: `{lifecycle_counts.get('forecast', 0)}`")
+    lines.append(f"- n_question_ids_scenarios: `{lifecycle_counts.get('scenario', 0)}`")
     lines.append(
         "- n_questions_by_hazard_code: "
         + (

@@ -2353,27 +2353,41 @@ def _sanitize_sources(sources: Any) -> list[str]:
     return clean
 
 
-def _enforce_grounding(research_json: Dict[str, Any], merged_pack: Dict[str, Any]) -> Dict[str, Any]:
-    """Force grounded=true only when real URLs exist."""
+def _normalize_and_enforce_grounding(research_json: Dict[str, Any], merged_pack: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize groundedness: only verified retrieval sources can set grounded=true."""
 
     research = dict(research_json or {})
     merged = merged_pack or {}
 
+    verified_urls = _sanitize_sources([s.get("url") if isinstance(s, dict) else s for s in (merged.get("sources") or [])])
+    pack_unverified = _sanitize_sources(
+        [s.get("url") if isinstance(s, dict) else s for s in (merged.get("unverified_sources") or [])]
+    )
     model_urls = _sanitize_sources(research.get("sources") or [])
-    pack_sources = merged.get("sources") or []
-    pack_urls = _sanitize_sources([s.get("url") if isinstance(s, dict) else s for s in pack_sources])
+    model_unverified = _sanitize_sources(research.get("unverified_sources") or [])
 
-    union: list[str] = []
-    for url in model_urls + pack_urls:
-        if url not in union:
-            union.append(url)
-        if len(union) >= 12:
+    unverified_urls: list[str] = []
+    for url in pack_unverified + model_urls + model_unverified:
+        if url in verified_urls or url in unverified_urls:
+            continue
+        unverified_urls.append(url)
+        if len(unverified_urls) >= 24:
             break
 
-    research["sources"] = union
-    research["grounded"] = bool(union)
+    combined_sources: list[str] = []
+    for url in verified_urls + unverified_urls:
+        if url not in combined_sources:
+            combined_sources.append(url)
+        if len(combined_sources) >= 24:
+            break
+
+    research["verified_sources"] = verified_urls
+    research["unverified_sources"] = unverified_urls
+    research["sources"] = combined_sources
+    research["grounded"] = bool(verified_urls)
     research["_grounding_enforced"] = True
-    research["_grounding_sources_count"] = len(union)
+    research["_grounding_verified_sources_count"] = len(verified_urls)
+    research["_grounding_sources_count"] = len(combined_sources)
     return research
 
 
@@ -3382,7 +3396,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
         sources_list = sources_val if isinstance(sources_val, list) else []
         research["sources"] = sources_list
         research["grounded"] = bool(sources_list)
-        research = _enforce_grounding(research, merged_evidence_pack or {})
+        research = _normalize_and_enforce_grounding(research, merged_evidence_pack or {})
         con = connect(read_only=False)
         try:
             ensure_schema(con)
