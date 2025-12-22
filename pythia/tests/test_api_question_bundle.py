@@ -40,8 +40,11 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
             'hs-new', 'KEN', 'DR', 'priority', 0.8, TIMESTAMP '2024-02-02',
             '{"drivers":["dry"]}', '{"regime":["shift"]}', '{"data":"ok"}'
         );
-        CREATE TABLE hs_country_reports (hs_run_id TEXT, iso3 TEXT, report_markdown TEXT, sources_json TEXT);
-        INSERT INTO hs_country_reports VALUES ('hs-new', 'KEN', '# report', '["source"]');
+        CREATE TABLE hs_country_reports (
+            hs_run_id TEXT, iso3 TEXT, report_markdown TEXT, sources_json TEXT,
+            grounded BOOLEAN, grounding_debug_json TEXT, structural_context TEXT, recent_signals_json TEXT
+        );
+        INSERT INTO hs_country_reports VALUES ('hs-new', 'KEN', '# report', '["source"]', TRUE, '{"groundingSupports_count":1}', 'struct', '["sig"]');
         CREATE TABLE hs_scenarios (
             hs_run_id TEXT, scenario_id TEXT, iso3 TEXT, hazard_code TEXT, scenario_title TEXT,
             scenario_markdown TEXT, scenario_json TEXT
@@ -68,10 +71,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
         INSERT INTO forecasts_raw VALUES ('f-new', 'Q1', 'm', 1, 1, 0.3, '{"spd":1}');
         CREATE TABLE question_research (
             run_id TEXT, question_id TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, research_json TEXT,
+            hs_evidence_json TEXT, question_evidence_json TEXT, merged_evidence_json TEXT,
             created_at TIMESTAMP
         );
         INSERT INTO question_research VALUES (
-            'f-new', 'Q1', 'KEN', 'DR', 'PIN', '{"base_rate":{"note":"test"}}', TIMESTAMP '2024-03-02'
+            'f-new', 'Q1', 'KEN', 'DR', 'PIN', '{"base_rate":{"note":"test"}}',
+            '{}', '{}', '{}', TIMESTAMP '2024-03-02'
         );
         CREATE TABLE scenarios (
             run_id TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, scenario_type TEXT,

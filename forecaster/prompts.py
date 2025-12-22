@@ -802,6 +802,59 @@ def build_research_prompt(
     )
 
 
+def _trim_structural(text: str, max_lines: int = 12) -> str:
+    lines = [ln.strip() for ln in str(text or "").splitlines() if str(ln or "").strip()]
+    return "\n".join(lines[:max_lines]).strip()
+
+
+def merge_evidence_packs(
+    hs_pack: Dict[str, Any] | None,
+    question_pack: Dict[str, Any] | None,
+    *,
+    max_sources: int = 12,
+    max_signals: int = 12,
+) -> Dict[str, Any]:
+    hs_pack = hs_pack or {}
+    question_pack = question_pack or {}
+
+    merged_sources = []
+    seen_urls: set[str] = set()
+    for src in (hs_pack.get("sources") or []) + (question_pack.get("sources") or []):
+        if not isinstance(src, dict):
+            continue
+        url = (src.get("url") or "").strip()
+        if url and url not in seen_urls:
+            merged_sources.append(src)
+            seen_urls.add(url)
+        if len(merged_sources) >= max_sources:
+            break
+
+    hs_struct = _trim_structural(hs_pack.get("structural_context", ""), 8)
+    q_struct = _trim_structural(question_pack.get("structural_context", ""), 8)
+    structural_context = "\n".join([part for part in (hs_struct, q_struct) if part]).strip()
+    if structural_context:
+        structural_context = _trim_structural(structural_context, 12)
+
+    combined_signals: list[str] = []
+    seen_signals: set[str] = set()
+    for sig in (hs_pack.get("recent_signals") or []) + (question_pack.get("recent_signals") or []):
+        text = str(sig or "").strip()
+        if text and text not in seen_signals:
+            combined_signals.append(text)
+            seen_signals.add(text)
+        if len(combined_signals) >= max_signals:
+            break
+
+    grounded = bool(hs_pack.get("grounded")) or bool(question_pack.get("grounded")) or bool(merged_sources)
+
+    return {
+        "structural_context": structural_context,
+        "recent_signals": combined_signals,
+        "sources": merged_sources,
+        "grounded": grounded,
+    }
+
+
 def build_research_prompt_v2(
     question: Dict[str, Any],
     hs_triage_entry: Dict[str, Any],
@@ -809,6 +862,7 @@ def build_research_prompt_v2(
     model_info: Dict[str, Any] | None = None,
     evidence_pack: Dict[str, Any] | None = None,
     question_evidence_pack: Dict[str, Any] | None = None,
+    merged_evidence: Dict[str, Any] | None = None,
 ) -> str:
     """Structured research prompt for Researcher v2."""
 
@@ -845,27 +899,7 @@ def build_research_prompt_v2(
             "   * your own knowledge of the country context.\n"
         )
 
-    hs_pack = evidence_pack or {}
-    question_pack = question_evidence_pack or {}
-
-    merged_sources = []
-    seen_urls: set[str] = set()
-    for src in (hs_pack.get("sources") or []) + (question_pack.get("sources") or []):
-        if not isinstance(src, dict):
-            continue
-        url = (src.get("url") or "").strip()
-        if url and url not in seen_urls:
-            merged_sources.append(src)
-            seen_urls.add(url)
-    if len(merged_sources) > 12:
-        merged_sources = merged_sources[:12]
-
-    merged_pack = {
-        "structural_context": hs_pack.get("structural_context") or "",
-        "recent_signals": (hs_pack.get("recent_signals") or []) + (question_pack.get("recent_signals") or []),
-        "sources": merged_sources,
-        "grounded": bool((hs_pack.get("grounded") or False) or (question_pack.get("grounded") or False)),
-    }
+    merged_pack = merged_evidence or merge_evidence_packs(evidence_pack, question_evidence_pack)
 
     merged_pack_text = _json_dumps_for_prompt(merged_pack, indent=2)
     parts: list[str] = []
@@ -911,7 +945,7 @@ def build_research_prompt_v2(
         + "Emphasise major deviations from the historical base rate only when strongly supported by evidence.\n\n"
         + "Return a single JSON object:\n\n"
         + RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA
-        + "\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`.\n\n"
+        + "\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`. Set `grounded` to true only when at least one real URL remains after validation.\n\n"
         + "Do not include any text outside the JSON."
     )
     parts.append(tasks_block)

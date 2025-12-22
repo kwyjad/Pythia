@@ -35,6 +35,8 @@ import json
 import os
 import re
 import logging
+from collections import Counter
+from urllib.parse import urlparse
 import time
 import traceback
 from collections.abc import Mapping
@@ -893,6 +895,7 @@ from .prompts import (
     build_spd_prompt_pa,
     build_research_prompt_v2,
     build_spd_prompt_v2,
+    merge_evidence_packs,
 )
 from .scenario_writer import run_scenarios_for_run
 from .providers import (
@@ -1514,10 +1517,39 @@ def _write_spd_members_v2_to_db(
             numbered.append((new_idx, key))
         return numbered
 
+    # Pre-compute safe model names to avoid collisions when providers share a label.
+    def _safe_names() -> list[str]:
+        base_names: list[str] = []
+        specs_for_index: list[ModelSpec | None] = []
+        for idx in range(len(per_model_spds)):
+            ms = _model_for_index(idx)
+            specs_for_index.append(ms)
+            base_names.append(getattr(ms, "name", f"model_{idx}"))
+        counts = Counter(base_names)
+        seen: set[str] = set()
+        safe: list[str] = []
+        for idx, base in enumerate(base_names):
+            ms = specs_for_index[idx]
+            name = base
+            if counts.get(base, 0) > 1:
+                suffix = getattr(ms, "model_id", None) or getattr(ms, "provider", None) or f"dup{idx}"
+                name = f"{base} ({suffix})"
+            # ensure uniqueness even if suffix repeats
+            dedupe_counter = 2
+            candidate = name
+            while candidate in seen:
+                candidate = f"{name}#{dedupe_counter}"
+                dedupe_counter += 1
+            seen.add(candidate)
+            safe.append(candidate)
+        return safe
+
+    safe_names_for_idx = _safe_names()
+
     try:
         for idx, model_spd in enumerate(per_model_spds):
             ms = _model_for_index(idx)
-            model_name = getattr(ms, "name", f"model_{idx}")
+            model_name = safe_names_for_idx[idx] if idx < len(safe_names_for_idx) else getattr(ms, "name", f"model_{idx}")
             usage = {}
             try:
                 usage = raw_calls[idx].get("usage") if isinstance(raw_calls[idx], dict) else {}
@@ -2226,7 +2258,7 @@ def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[s
         ensure_schema(con)
         row = con.execute(
             """
-            SELECT report_markdown, sources_json
+            SELECT report_markdown, sources_json, grounded, grounding_debug_json, structural_context, recent_signals_json
             FROM hs_country_reports
             WHERE hs_run_id = ? AND iso3 = ?
             LIMIT 1
@@ -2241,17 +2273,30 @@ def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[s
 
     markdown = row[0] or ""
     sources_raw = row[1] or "[]"
+    grounded_val = row[2] if len(row) > 2 else False
+    grounding_debug_raw = row[3] if len(row) > 3 else "{}"
+    structural_context = row[4] if len(row) > 4 else ""
+    recent_signals_raw = row[5] if len(row) > 5 else "[]"
     try:
         sources = json.loads(sources_raw)
     except Exception:
         sources = []
+    try:
+        grounding_debug = json.loads(grounding_debug_raw)
+    except Exception:
+        grounding_debug = {}
+    try:
+        recent_signals = json.loads(recent_signals_raw)
+    except Exception:
+        recent_signals = []
 
     return {
         "markdown": markdown,
         "sources": sources if isinstance(sources, list) else [],
-        "structural_context": "",
-        "recent_signals": [],
-        "grounded": bool(sources),
+        "structural_context": structural_context or "",
+        "recent_signals": recent_signals if isinstance(recent_signals, list) else [],
+        "grounded": bool(grounded_val) or bool(sources),
+        "debug": grounding_debug if isinstance(grounding_debug, dict) else {},
     }
 
 
@@ -2275,6 +2320,61 @@ def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> st
         "and concise structural drivers (max 8 lines). "
         f"Question focus: {wording or ''}"
     )
+
+
+def _sanitize_sources(sources: Any) -> list[str]:
+    """Return a deduped, order-stable list of real URLs."""
+
+    clean: list[str] = []
+    if not sources:
+        return clean
+
+    placeholders = {"...", "url", "url1", "url2", "url3"}
+    for src in sources:
+        if isinstance(src, dict):
+            url = src.get("url") or ""
+        else:
+            url = src
+        url = str(url or "").strip()
+        if not url or url in placeholders:
+            continue
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if not host:
+            continue
+        if any(bad in host for bad in ("example.com", "example.org", "localhost", "placeholder")):
+            continue
+        if host in {"127.0.0.1", "0.0.0.0"}:
+            continue
+        if url not in clean:
+            clean.append(url)
+    return clean
+
+
+def _enforce_grounding(research_json: Dict[str, Any], merged_pack: Dict[str, Any]) -> Dict[str, Any]:
+    """Force grounded=true only when real URLs exist."""
+
+    research = dict(research_json or {})
+    merged = merged_pack or {}
+
+    model_urls = _sanitize_sources(research.get("sources") or [])
+    pack_sources = merged.get("sources") or []
+    pack_urls = _sanitize_sources([s.get("url") if isinstance(s, dict) else s for s in pack_sources])
+
+    union: list[str] = []
+    for url in model_urls + pack_urls:
+        if url not in union:
+            union.append(url)
+        if len(union) >= 12:
+            break
+
+    research["sources"] = union
+    research["grounded"] = bool(union)
+    research["_grounding_enforced"] = True
+    research["_grounding_sources_count"] = len(union)
+    return research
 
 
 def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
@@ -3213,13 +3313,15 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
                 question_query = _build_question_evidence_query(question_row, wording)
                 question_evidence_pack = fetch_evidence_pack(
                     question_query,
-                    purpose="research_v2_question",
+                    purpose="research_question_pack",
                     run_id=run_id,
                     question_id=qid,
                 )
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
                 question_evidence_pack = None
+
+        merged_evidence_pack = merge_evidence_packs(hs_evidence_pack, question_evidence_pack)
 
         prompt = build_research_prompt_v2(
             question={
@@ -3235,6 +3337,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             model_info={},
             evidence_pack=hs_evidence_pack,
             question_evidence_pack=question_evidence_pack,
+            merged_evidence=merged_evidence_pack,
         )
 
         text, usage, error, ms = await _call_research_model(prompt, run_id=run_id)
@@ -3279,15 +3382,27 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
         sources_list = sources_val if isinstance(sources_val, list) else []
         research["sources"] = sources_list
         research["grounded"] = bool(sources_list)
+        research = _enforce_grounding(research, merged_evidence_pack or {})
         con = connect(read_only=False)
         try:
+            ensure_schema(con)
             con.execute(
                 """
                 INSERT INTO question_research
-                  (run_id, question_id, iso3, hazard_code, metric, research_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                  (run_id, question_id, iso3, hazard_code, metric, research_json, hs_evidence_json, question_evidence_json, merged_evidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [run_id, qid, iso3, hz, metric, _json_dumps_for_db(research)],
+                [
+                    run_id,
+                    qid,
+                    iso3,
+                    hz,
+                    metric,
+                    _json_dumps_for_db(research),
+                    _json_dumps_for_db(hs_evidence_pack or {}),
+                    _json_dumps_for_db(question_evidence_pack or {}),
+                    _json_dumps_for_db(merged_evidence_pack or {}),
+                ],
             )
         finally:
             con.close()

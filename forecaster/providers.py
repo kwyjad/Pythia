@@ -225,6 +225,12 @@ def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any]) ->
     base = base_names.get(provider, provider.title())
     if not model_id:
         return base
+    if provider == "google":
+        mid = model_id.lower()
+        if "flash" in mid:
+            return "Gemini Flash"
+        if "pro" in mid:
+            return "Gemini Pro"
     return f"{base}-{model_id.replace('/', '-')}"
 
 

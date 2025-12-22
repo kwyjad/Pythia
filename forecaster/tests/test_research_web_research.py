@@ -34,10 +34,18 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
     )
     con.execute(
         """
-        INSERT INTO hs_country_reports (hs_run_id, iso3, report_markdown, sources_json)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO hs_country_reports (hs_run_id, iso3, report_markdown, sources_json, grounded, structural_context, recent_signals_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        ["hs-run", "KEN", "# report", json.dumps([{"title": "hs", "url": "http://hs.com"}])],
+        [
+            "hs-run",
+            "KEN",
+            "# report",
+            json.dumps([{"title": "hs", "url": "http://hs.com"}]),
+            True,
+            "HS structural",
+            json.dumps(["hs-signal"]),
+        ],
     )
     con.close()
 
@@ -55,8 +63,17 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
         payload = {"sources": ["http://question.com", "http://hs.com"], "grounded": True}
         return json.dumps(payload), {"total_tokens": 5}, None
 
+    captured_prompts: list[str] = []
+    real_build = cli.build_research_prompt_v2
+
+    def capture_prompt(*args, **kwargs):
+        prompt_text = real_build(*args, **kwargs)
+        captured_prompts.append(prompt_text)
+        return prompt_text
+
     monkeypatch.setattr(cli, "fetch_evidence_pack", fake_fetch_evidence_pack)
     monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)
+    monkeypatch.setattr(cli, "build_research_prompt_v2", capture_prompt)
 
     question_row = {
         "question_id": "Q1",
@@ -72,7 +89,7 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
 
     con_check = connect(read_only=True)
     row = con_check.execute(
-        "SELECT research_json FROM question_research WHERE run_id = ? AND question_id = ?",
+        "SELECT research_json, hs_evidence_json, question_evidence_json, merged_evidence_json FROM question_research WHERE run_id = ? AND question_id = ?",
         ["fc-run", "Q1"],
     ).fetchone()
     con_check.close()
@@ -81,3 +98,35 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
     research_obj = json.loads(row[0])
     assert research_obj.get("grounded") is True
     assert "http://question.com" in (research_obj.get("sources") or [])
+    assert captured_prompts and "http://question.com" in captured_prompts[0]
+    assert "http://hs.com" in captured_prompts[0]
+    hs_evidence = json.loads(row[1])
+    question_evidence = json.loads(row[2])
+    merged_evidence = json.loads(row[3])
+    assert hs_evidence.get("sources")
+    assert question_evidence.get("sources")
+    assert any("question.com" in src.get("url", "") for src in merged_evidence.get("sources", []))
+
+
+def test_enforce_grounding_drops_placeholders() -> None:
+    research = {"sources": ["..."], "grounded": True}
+    merged_pack: dict[str, object] = {"sources": []}
+
+    enforced = cli._enforce_grounding(research, merged_pack)
+
+    assert enforced["grounded"] is False
+    assert enforced["sources"] == []
+    assert enforced["_grounding_enforced"] is True
+    assert enforced["_grounding_sources_count"] == 0
+
+
+def test_enforce_grounding_uses_pack_sources() -> None:
+    research = {"sources": [], "grounded": False}
+    merged_pack = {"sources": [{"url": "http://hs.com"}, {"url": "https://question.com"}]}
+
+    enforced = cli._enforce_grounding(research, merged_pack)
+
+    assert enforced["grounded"] is True
+    assert len(enforced["sources"]) == 2
+    assert "http://hs.com" in enforced["sources"]
+    assert "https://question.com" in enforced["sources"]

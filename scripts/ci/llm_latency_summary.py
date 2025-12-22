@@ -88,6 +88,30 @@ def _query_latency(
     ).fetchall()
 
 
+def _top_slow_calls(
+    con: duckdb.DuckDBPyConnection,
+    predicate: str,
+    params: Sequence,
+    limit: int = 10,
+) -> List[Tuple[str, str, str, str, int]]:
+    return con.execute(
+        f"""
+        SELECT
+          COALESCE(phase, '') AS phase,
+          COALESCE(provider, '') AS provider,
+          COALESCE(model_id, '') AS model_id,
+          COALESCE(question_id, '') AS question_id,
+          COALESCE(elapsed_ms, 0) AS elapsed_ms
+        FROM llm_calls
+        WHERE elapsed_ms IS NOT NULL
+          AND ({predicate})
+        ORDER BY elapsed_ms DESC
+        LIMIT {int(limit)}
+        """,
+        params,
+    ).fetchall()
+
+
 def _table_info_markdown(con: duckdb.DuckDBPyConnection) -> List[str]:
     try:
         info_rows = con.execute("PRAGMA table_info('llm_calls')").fetchall()
@@ -145,6 +169,7 @@ def render_latency_markdown(
         else total_rows
     )
     rows = _query_latency(con, predicate_sql, params)
+    slow_rows = _top_slow_calls(con, predicate_sql, params)
     if strategy_label:
         lines.append(f"_Filter strategy: {strategy_label}_")
         lines.append("")
@@ -170,6 +195,19 @@ def render_latency_markdown(
             lines.append(f"- Filter strategy: {strategy_label}")
         lines.append("")
         lines.extend(_table_info_markdown(con))
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append("Top slow LLM calls (elapsed_ms desc):")
+    lines.append("")
+    lines.append("| phase | provider | model_id | question_id | elapsed_ms |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    if slow_rows:
+        for phase, provider, model_id, question_id, elapsed_ms in slow_rows:
+            lines.append(f"| {phase} | {provider} | {model_id} | {question_id} | {elapsed_ms} |")
+    else:
+        lines.append("| (none) | (none) | (none) | (none) | 0 |")
+
     return "\n".join(lines)
 
 

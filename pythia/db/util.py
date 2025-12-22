@@ -95,7 +95,25 @@ def log_web_research_call(
 ) -> None:
     """Best-effort logger for web research calls into llm_calls."""
 
-    usage_json = json.dumps(usage or {}, ensure_ascii=False)
+    usage_dict = usage or {}
+    try:
+        prompt_tokens = int(usage_dict.get("prompt_tokens", 0))
+    except Exception:
+        prompt_tokens = 0
+    try:
+        completion_tokens = int(usage_dict.get("completion_tokens", 0))
+    except Exception:
+        completion_tokens = 0
+    try:
+        total_tokens = int(usage_dict.get("total_tokens", 0) or (prompt_tokens + completion_tokens))
+    except Exception:
+        total_tokens = prompt_tokens + completion_tokens
+    try:
+        cost_usd = float(usage_dict.get("cost_usd", 0.0))
+    except Exception:
+        cost_usd = 0.0
+
+    usage_json = json.dumps(usage_dict or {}, ensure_ascii=False)
     conn.execute(
         """
         INSERT INTO llm_calls (
@@ -120,10 +138,10 @@ def log_web_research_call(
             json.dumps(parsed_json or {}, ensure_ascii=False),
             usage_json,
             int(elapsed_ms),
-            0,
-            0,
-            0,
-            0.0,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cost_usd,
             error_text,
             datetime.utcnow(),
             iso3,

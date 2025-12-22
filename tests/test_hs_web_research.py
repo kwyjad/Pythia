@@ -49,7 +49,7 @@ def test_hs_country_report_persisted_when_web_research_enabled(monkeypatch: pyte
     con = connect(read_only=False)
     ensure_schema(con)
     rows = con.execute(
-        "SELECT report_markdown, sources_json FROM hs_country_reports WHERE hs_run_id = ? AND iso3 = ?",
+        "SELECT report_markdown, sources_json, grounded, grounding_debug_json, structural_context, recent_signals_json FROM hs_country_reports WHERE hs_run_id = ? AND iso3 = ?",
         ["hs-run", "KEN"],
     ).fetchall()
     con.close()
@@ -57,3 +57,8 @@ def test_hs_country_report_persisted_when_web_research_enabled(monkeypatch: pyte
     assert len(rows) == 1
     stored_sources = json.loads(rows[0][1])
     assert stored_sources and stored_sources[0]["url"] == "http://example.com"
+    assert rows[0][2] is True
+    debug = json.loads(rows[0][3])
+    assert isinstance(debug, dict)
+    assert "struct" in (rows[0][4] or "")
+    assert "signal-a" in json.loads(rows[0][5])[0]

@@ -179,6 +179,9 @@ def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
             hazard_code TEXT NOT NULL,
             metric TEXT NOT NULL,
             research_json TEXT NOT NULL,
+            hs_evidence_json TEXT,
+            question_evidence_json TEXT,
+            merged_evidence_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
@@ -189,6 +192,9 @@ def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
             "hazard_code": "TEXT",
             "metric": "TEXT",
             "research_json": "TEXT",
+            "hs_evidence_json": "TEXT",
+            "question_evidence_json": "TEXT",
+            "merged_evidence_json": "TEXT",
             "created_at": "TIMESTAMP",
         },
     )
@@ -369,7 +375,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 hs_run_id TEXT,
                 iso3 TEXT,
                 report_markdown TEXT,
-                sources_json TEXT
+                sources_json TEXT,
+                grounded BOOLEAN,
+                grounding_debug_json TEXT,
+                structural_context TEXT,
+                recent_signals_json TEXT
             );
             """,
             {
@@ -377,6 +387,67 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "iso3": "TEXT",
                 "report_markdown": "TEXT",
                 "sources_json": "TEXT",
+                "grounded": "BOOLEAN",
+                "grounding_debug_json": "TEXT",
+                "structural_context": "TEXT",
+                "recent_signals_json": "TEXT",
+            },
+        )
+
+        _ensure_table_and_columns(
+            con,
+            "run_provenance",
+            """
+            CREATE TABLE IF NOT EXISTS run_provenance (
+                run_id TEXT,
+                hs_run_id TEXT,
+                forecaster_run_id TEXT,
+                artifact_run_id TEXT,
+                artifact_workflow TEXT,
+                artifact_name TEXT,
+                db_sha256 TEXT,
+                db_size_bytes BIGINT,
+                facts_resolved_before BIGINT,
+                facts_resolved_after BIGINT,
+                facts_deltas_before BIGINT,
+                facts_deltas_after BIGINT,
+                snapshots_before BIGINT,
+                snapshots_after BIGINT,
+                hs_triage_before BIGINT,
+                hs_triage_after BIGINT,
+                questions_before BIGINT,
+                questions_after BIGINT,
+                forecasts_raw_before BIGINT,
+                forecasts_raw_after BIGINT,
+                forecasts_ensemble_before BIGINT,
+                forecasts_ensemble_after BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            {
+                "run_id": "TEXT",
+                "hs_run_id": "TEXT",
+                "forecaster_run_id": "TEXT",
+                "artifact_run_id": "TEXT",
+                "artifact_workflow": "TEXT",
+                "artifact_name": "TEXT",
+                "db_sha256": "TEXT",
+                "db_size_bytes": "BIGINT",
+                "facts_resolved_before": "BIGINT",
+                "facts_resolved_after": "BIGINT",
+                "facts_deltas_before": "BIGINT",
+                "facts_deltas_after": "BIGINT",
+                "snapshots_before": "BIGINT",
+                "snapshots_after": "BIGINT",
+                "hs_triage_before": "BIGINT",
+                "hs_triage_after": "BIGINT",
+                "questions_before": "BIGINT",
+                "questions_after": "BIGINT",
+                "forecasts_raw_before": "BIGINT",
+                "forecasts_raw_after": "BIGINT",
+                "forecasts_ensemble_before": "BIGINT",
+                "forecasts_ensemble_after": "BIGINT",
+                "created_at": "TIMESTAMP",
             },
         )
 
