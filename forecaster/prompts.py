@@ -85,6 +85,37 @@ _CAL_PREFIX = (
 )
 
 
+RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA = """
+```json
+{
+  "base_rate": {
+    "qualitative_summary": "...",
+    "resolver_support": {
+      "recent_level": "low|medium|high",
+      "trend": "up|down|flat|uncertain",
+      "data_quality": "low|medium|high",
+      "notes": "..."
+    },
+    "external_support": {
+      "consensus": "increasing|decreasing|mixed|uncertain",
+      "data_quality": "low|medium|high",
+      "recent_analyses": ["..."]
+    }
+  },
+  "update_signals": [
+    {"description": "...", "direction": "up|down|unclear", "confidence": 0.7, "timeframe_months": 6, "sources": ["..."]}
+  ],
+  "regime_shift_signals": [
+    {"description": "...", "likelihood": "low|medium|high", "timeframe_months": 3, "sources": ["..."]}
+  ],
+  "data_gaps": ["..."],
+  "sources": ["url1", "url2"],
+  "grounded": true
+}
+```
+""".strip()
+
+
 def build_scoring_resolution_block(
     *,
     hazard_code: str,
@@ -837,7 +868,55 @@ def build_research_prompt_v2(
     }
 
     merged_pack_text = _json_dumps_for_prompt(merged_pack, indent=2)
-    return f"""You are a humanitarian risk analyst.\nYour task is to prepare machine-focused research for the forecaster.\n\nQuestion:\n- Country: {iso3}\n- Hazard: {hazard}\n- Metric: {metric}\n- Resolution dataset: {resolution_source}\n\nQuestion metadata:\n```json\n{_json_dumps_for_prompt(question, indent=2)}\n```\n\nNatural-language question:\n\"{wording}\"\n\nResolver history (noisy, incomplete base-rate data):\n```json\n{_json_dumps_for_prompt(resolver_features, indent=2)}\n```\n\nHS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n\n```json\n{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n```\n\nMerged evidence (HS country pack + question-specific web research; prioritize recent signals, structural context is background only):\n```json\n{merged_pack_text}\n```\n\nModel/data notes:\n```json\n{_json_dumps_for_prompt(model_info, indent=2)}\n```\n\nUse Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n{di_note}Your tasks:\n\n{base_rate_task}2. Identify key update signals for the next 6 months that would push risk up or down.\n3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n4. Note important data gaps and uncertainties.\n\nEmphasise major deviations from the historical base rate only when strongly supported by evidence.\n\nReturn a single JSON object:\n\n```json\n{{\n  \"base_rate\": {\n    \"qualitative_summary\": \"...\",\n    \"resolver_support\": {\n      \"recent_level\": \"low|medium|high\",\n      \"trend\": \"up|down|flat|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"notes\": \"...\"\n    },\n    \"external_support\": {\n      \"consensus\": \"increasing|decreasing|mixed|uncertain\",\n      \"data_quality\": \"low|medium|high\",\n      \"recent_analyses\": [\"...\"]\n    }\n  },\n  \"update_signals\": [\n    {\"description\": \"...\", \"direction\": \"up|down|unclear\", \"confidence\": 0.7, \"timeframe_months\": 6, \"sources\": [\"...\"]}\n  ],\n  \"regime_shift_signals\": [\n  {\"description\": \"...\", \"likelihood\": \"low|medium|high\", \"timeframe_months\": 3, \"sources\": [\"...\"]}\n  ],\n  \"data_gaps\": [\"...\"],\n  \"sources\": [\"url1\", \"url2\"],\n  \"grounded\": true\n}\n```\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`.\n\nDo not include any text outside the JSON.\n"""
+    parts: list[str] = []
+    parts.append("You are a humanitarian risk analyst.")
+    parts.append("Your task is to prepare machine-focused research for the forecaster.\n")
+
+    parts.append(
+        "Question:\n"
+        f"- Country: {iso3}\n"
+        f"- Hazard: {hazard}\n"
+        f"- Metric: {metric}\n"
+        f"- Resolution dataset: {resolution_source}\n"
+    )
+
+    parts.append("Question metadata:\n```json\n" + _json_dumps_for_prompt(question, indent=2) + "\n```")
+    parts.append("Natural-language question:\n" + f"\"{wording}\"")
+    parts.append(
+        "Resolver history (noisy, incomplete base-rate data):\n```json\n"
+        + _json_dumps_for_prompt(resolver_features, indent=2)
+        + "\n```"
+    )
+    parts.append(
+        "HS triage (tier, triage_score, drivers, regime_shifts, data_quality):\n```json\n"
+        + _json_dumps_for_prompt(hs_triage_entry, indent=2)
+        + "\n```"
+    )
+
+    parts.append(
+        "Merged evidence (HS country pack + question-specific web research; prioritize recent signals, structural context is background only):\n"
+        "```json\n" + merged_pack_text + "\n```"
+    )
+
+    parts.append("Model/data notes:\n```json\n" + _json_dumps_for_prompt(model_info, indent=2) + "\n```")
+
+    tasks_block = (
+        "Use Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n"
+        + di_note
+        + "Your tasks:\n\n"
+        + base_rate_task
+        + "2. Identify key update signals for the next 6 months that would push risk up or down.\n"
+        + "3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n"
+        + "4. Note important data gaps and uncertainties.\n\n"
+        + "Emphasise major deviations from the historical base rate only when strongly supported by evidence.\n\n"
+        + "Return a single JSON object:\n\n"
+        + RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA
+        + "\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`.\n\n"
+        + "Do not include any text outside the JSON."
+    )
+    parts.append(tasks_block)
+
+    return "\n\n".join(parts) + "\n"
 
 def _bucket_labels_for_question(question: Dict[str, Any]) -> list[str]:
     """Return the correct 5 bucket labels for this question based on metric/hazard."""
