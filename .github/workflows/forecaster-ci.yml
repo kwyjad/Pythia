@@ -64,6 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_WEB_RESEARCH_ENABLED: "0"
 
     steps:
       - name: Checkout repository

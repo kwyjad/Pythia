@@ -143,15 +143,35 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
     if os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") != "1":
         return None
 
+    pack: dict[str, Any] | None = None
     try:
         query = _build_hs_evidence_query(country_name, iso3)
-        pack = fetch_evidence_pack(query, purpose="hs_country_report", run_id=run_id)
+        pack = dict(fetch_evidence_pack(query, purpose="hs_country_report", run_id=run_id) or {})
     except Exception as exc:  # noqa: BLE001 - defensive around web research
         logger.warning("HS web research failed for %s: %s", iso3, exc)
-        return None
+        pack = {
+            "query": query if "query" in locals() else iso3,
+            "recency_days": 120,
+            "grounded": False,
+            "sources": [],
+            "structural_context": "",
+            "recent_signals": [],
+            "debug": {"error": f"{exc}"},
+        }
 
     pack = dict(pack or {})
     markdown = _render_evidence_markdown(pack)
+    debug = pack.get("debug") or {}
+    grounding_debug = {
+        "groundingSupports_count": debug.get("groundingSupports_count", 0),
+        "groundingChunks_count": debug.get("groundingChunks_count", 0),
+        "webSearchQueries_len": len(debug.get("webSearchQueries") or []),
+    }
+    pack["grounding_debug"] = grounding_debug
+    pack["grounded"] = bool(pack.get("grounded"))
+    pack.setdefault("structural_context", "")
+    pack.setdefault("recent_signals", [])
+
     try:
         log_hs_country_reports_to_db(
             run_id,
@@ -159,6 +179,10 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
                 iso3.upper(): {
                     "markdown": markdown,
                     "sources": pack.get("sources") or [],
+                    "grounded": pack.get("grounded", False),
+                    "grounding_debug": grounding_debug,
+                    "structural_context": pack.get("structural_context") or "",
+                    "recent_signals": pack.get("recent_signals") or [],
                 }
             },
         )

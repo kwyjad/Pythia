@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
+
+import requests
 
 from pythia.web_research.types import EvidencePack, EvidenceSource
 
@@ -65,31 +68,158 @@ def fetch_via_gemini(
     timeout_sec: int,
     max_results: int,
 ) -> EvidencePack:
-    """
-    Placeholder Gemini grounding fetcher.
+    """Fetch web research evidence via Gemini with Google Search grounding."""
 
-    This function intentionally avoids making external calls in test environments.
-    In production, plug in the actual Gemini client and pass its raw response
-    through `parse_gemini_grounding_response`.
-    """
-
-    # In CI/test environments we keep this offline-safe.
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    model_id = (os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "gemini-3-flash-preview").strip()
+
+    pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
+
     if not api_key:
-        pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
+        pack.error = {"type": "missing_api_key", "message": "GEMINI_API_KEY / GOOGLE_API_KEY not set"}
         pack.debug = {"error": "missing_api_key"}
         return pack
 
-    # Real call is left as a future integration; for now return an empty grounded pack.
-    pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
-    pack.structural_context = "" if not include_structural else "Structural context unavailable (placeholder)."
-    pack.recent_signals = []
-    pack.grounded = False
+    prompt = (
+        "You are a research assistant using Google Search grounding. "
+        "Return strictly JSON with this shape:\n"
+        "{\n  \"structural_context\": \"max 8 lines\",\n"
+        "  \"recent_signals\": [\"<=8 bullets, last 120 days\"],\n  \"notes\": \"optional\"\n}"
+        "\n- Focus on authoritative, recent sources (last "
+        f"{recency_days} days).\n- Do not include URLs in the JSON text.\n"
+        f"Query: {query}"
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+    gen_cfg = {"temperature": 0.2, "maxOutputTokens": 768, "responseMimeType": "application/json"}
+
+    contents = [{"parts": [{"text": prompt}]}]
+    attempts: List[Tuple[str, Dict[str, Any]]] = [
+        (
+            "googleSearchRetrieval",
+            {
+                "contents": contents,
+                "tools": [{"googleSearchRetrieval": {}}],
+                "generationConfig": gen_cfg,
+            },
+        ),
+        (
+            "google_search",
+            {
+                "contents": contents,
+                "tools": [{"google_search": {}}],
+                "generationConfig": gen_cfg,
+            },
+        ),
+    ]
+
+    last_errors: List[str] = []
+    attempted_shapes: List[str] = []
+    response_data: Dict[str, Any] = {}
+    used_attempt = ""
+    status_code = 0
+
+    def _post(body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
+        try:
+            resp = requests.post(url, params={"key": api_key}, json=body, timeout=timeout_sec)
+            try:
+                return resp.status_code, resp.json()
+            except Exception:
+                return resp.status_code, {"error_text": (resp.text or "")[:800]}
+        except Exception as exc:  # pragma: no cover - defensive
+            return 599, {"error_text": f"exception: {exc!r}"}
+
+    for attempt_name, body in attempts:
+        attempted_shapes.append(attempt_name)
+        status_code, data = _post(body)
+        response_data = data
+        used_attempt = attempt_name
+        sources, grounded, debug_meta = parse_gemini_grounding_response(data)
+        if status_code == 200 and grounded:
+            break
+        # capture short error for debugging and try next shape
+        msg = ""
+        if isinstance(data, dict):
+            if "error" in data and isinstance(data["error"], dict):
+                msg = data["error"].get("message", "") or ""
+            if not msg:
+                msg = data.get("error_text", "")
+        if not msg:
+            msg = f"status={status_code} grounded={grounded}"
+        last_errors.append(f"{attempt_name}: {msg[:200]}")
+        if status_code == 200 and not grounded:
+            # Try next attempt shape to elicit grounding metadata
+            continue
+        if status_code != 200:
+            continue
+
+    sources, grounded, debug_meta = parse_gemini_grounding_response(response_data)
+
+    text_blob = ""
+    extra_debug: Dict[str, Any] = {}
+    for cand in (response_data.get("candidates") or []):
+        content = cand.get("content") or {}
+        for part in content.get("parts") or []:
+            t = part.get("text")
+            if t:
+                text_blob = str(t).strip()
+                break
+        if text_blob:
+            break
+
+    structural_context = ""
+    recent_signals: List[str] = []
+    if text_blob:
+        try:
+            parsed = json.loads(text_blob)
+            if include_structural:
+                structural_context = str(parsed.get("structural_context", "") or "")
+            signals_raw = parsed.get("recent_signals") or []
+            if isinstance(signals_raw, list):
+                recent_signals = [str(x) for x in signals_raw if str(x).strip()][:8]
+            if structural_context:
+                lines = structural_context.splitlines()
+                structural_context = "\n".join(lines[:8]).strip()
+            if include_structural:
+                extra_debug["notes"] = parsed.get("notes")
+        except Exception:
+            extra_debug["raw_text"] = text_blob
+
+    usage_meta = response_data.get("usageMetadata") or {}
+    usage = {
+        "prompt_tokens": int(usage_meta.get("promptTokenCount", 0) or 0),
+        "completion_tokens": int(usage_meta.get("candidatesTokenCount", 0) or 0),
+        "total_tokens": int(usage_meta.get("totalTokenCount", 0) or 0),
+    }
+    if grounded and usage["total_tokens"] == 0:
+        approx_total = max(len(prompt.split()) + len(text_blob.split()), 1)
+        usage["prompt_tokens"] = usage["prompt_tokens"] or max(len(prompt.split()), 1)
+        usage["completion_tokens"] = usage["completion_tokens"] or max(len(text_blob.split()), 1)
+        usage["total_tokens"] = approx_total
+
+    pack.sources = sources
+    pack.grounded = grounded
+    pack.structural_context = structural_context if include_structural else ""
+    pack.recent_signals = recent_signals if include_structural else []
     pack.debug = {
-        "webSearchQueries": [],
-        "groundingSupports_count": 0,
-        "groundingChunks_count": 0,
+        **debug_meta,
+        **extra_debug,
+        "attempted_shapes": attempted_shapes,
+        "used_attempt": used_attempt,
+        "status_code": status_code,
+        "usage": usage,
+        "model_id": model_id,
         "max_results": max_results,
         "fetched_at": datetime.utcnow().isoformat(),
     }
+
+    if not grounded:
+        msg = "no grounding metadata returned" if not last_errors else "; ".join(last_errors[:3])
+        pack.error = {"type": "grounding_missing", "message": msg}
+
+    if response_data.get("error"):
+        err_msg = response_data.get("error", {}).get("message")
+        if err_msg:
+            pack.error = {"type": "provider_error", "message": err_msg}
+
     return pack

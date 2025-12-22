@@ -1516,3 +1516,84 @@ def test_spd_member_writes_alongside_ensemble(tmp_path: Path, monkeypatch: pytes
     assert raw_counts.get("model_a") == 6 * len(SPD_CLASS_BINS)
     assert raw_counts.get("model_b") == 6 * len(SPD_CLASS_BINS)
     assert ensemble_count > 0
+
+
+@pytest.mark.db
+def test_spd_member_names_are_deduplicated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Member rows should retain distinct names even when specs share the same label."""
+
+    db_path = tmp_path / "spd_members_dupe.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+    monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "1")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        db_schema.ensure_schema(con)
+    finally:
+        con.close()
+
+    question_row = {
+        "question_id": "TEST_MEMBER_WRITE_DUPE",
+        "hs_run_id": "",
+        "scenario_ids_json": "[]",
+        "iso3": "ETH",
+        "hazard_code": "ACE",
+        "metric": "PA",
+        "target_month": "2025-12",
+        "window_start_date": None,
+        "window_end_date": None,
+        "wording": "Test member write dupe",
+        "status": "active",
+        "pythia_metadata_json": None,
+    }
+
+    specs = [
+        ModelSpec(name="Gemini", provider="google", model_id="gemini-3-flash-preview", active=True),
+        ModelSpec(name="Gemini", provider="google", model_id="gemini-3-pro-preview", active=True),
+    ]
+    months = {f"2025-0{i}": [1.0 / len(SPD_CLASS_BINS)] * len(SPD_CLASS_BINS) for i in range(1, 7)}
+    per_model_spds = [months, months]
+    raw_calls = [
+        {"model_spec": specs[0], "text": json.dumps({"spds": {}}), "usage": {"elapsed_ms": 10}},
+        {"model_spec": specs[1], "text": json.dumps({"spds": {}}), "usage": {"elapsed_ms": 12}},
+    ]
+
+    async def fake_call_spd_members(prompt, specs_active, *, run_id):
+        return per_model_spds, {"total_tokens": 10}, raw_calls, {
+            "n_models_active": len(specs_active),
+            "n_models_called": len(specs_active),
+            "n_models_ok": len(specs_active),
+            "failed_providers": [],
+            "partial_ensemble": False,
+            "skipped_providers": [],
+        }
+
+    async def fake_log_forecaster_call(**_kwargs):
+        return None
+
+    monkeypatch.setattr(cli, "_call_spd_members_v2", fake_call_spd_members)
+    monkeypatch.setattr(cli, "log_forecaster_llm_call", fake_log_forecaster_call)
+    monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "load_hs_triage_entry", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_build_history_summary", lambda *_args, **_kwargs: {})
+
+    asyncio.run(cli._run_spd_for_question("run-members-dupe", question_row))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        raw_counts = dict(
+            con.execute(
+                """
+                SELECT model_name, COUNT(*) FROM forecasts_raw
+                WHERE run_id=? AND question_id=? GROUP BY model_name
+                """,
+                ["run-members-dupe", "TEST_MEMBER_WRITE_DUPE"],
+            ).fetchall()
+        )
+    finally:
+        con.close()
+
+    assert "Gemini (gemini-3-flash-preview)" in raw_counts
+    assert "Gemini (gemini-3-pro-preview)" in raw_counts
+    assert raw_counts["Gemini (gemini-3-flash-preview)"] == 6 * len(SPD_CLASS_BINS)
+    assert raw_counts["Gemini (gemini-3-pro-preview)"] == 6 * len(SPD_CLASS_BINS)

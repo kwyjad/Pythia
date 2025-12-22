@@ -62,6 +62,10 @@ def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recenc
     pack.sources = [EvidenceSource(**src) for src in pack_data.get("sources", []) if isinstance(src, dict)]
     pack.error = pack_data.get("error")
     pack.retrieved_at = pack_data.get("retrieved_at", pack.retrieved_at)
+    if pack.debug and isinstance(pack.debug, dict):
+        usage = pack.debug.get("usage")
+        if isinstance(usage, dict):
+            pack.debug["usage"] = {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd") if usage.get(k) is not None}
     return pack
 
 
@@ -160,6 +164,15 @@ def _log_web_research(
             usage_json["debug"] = pack.debug
         if pack.error:
             usage_json["error"] = pack.error
+        if pack.debug and isinstance(pack.debug, dict):
+            usage = pack.debug.get("usage")
+            if isinstance(usage, dict):
+                usage_json.update({
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "total_tokens": usage.get("total_tokens", 0),
+                    "cost_usd": usage.get("cost_usd", 0.0),
+                })
 
         con = connect(read_only=False)
         ensure_schema(con)

@@ -489,6 +489,10 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> No
         markdown = payload.get("markdown") or ""
         sources = payload.get("sources") or []
         sources_json = json.dumps(sources, ensure_ascii=False)
+        grounded = bool(payload.get("grounded"))
+        grounding_debug_json = json.dumps(payload.get("grounding_debug") or {}, ensure_ascii=False)
+        structural_context = payload.get("structural_context") or ""
+        recent_signals_json = json.dumps(payload.get("recent_signals") or [], ensure_ascii=False)
 
         con.execute(
             "DELETE FROM hs_country_reports WHERE hs_run_id = ? AND iso3 = ?;",
@@ -496,10 +500,19 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> No
         )
         con.execute(
             """
-            INSERT INTO hs_country_reports (hs_run_id, iso3, report_markdown, sources_json)
-            VALUES (?, ?, ?, ?);
+            INSERT INTO hs_country_reports (hs_run_id, iso3, report_markdown, sources_json, grounded, grounding_debug_json, structural_context, recent_signals_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            [hs_run_id, iso3_norm, markdown, sources_json],
+            [
+                hs_run_id,
+                iso3_norm,
+                markdown,
+                sources_json,
+                grounded,
+                grounding_debug_json,
+                structural_context,
+                recent_signals_json,
+            ],
         )
 
     con.close()

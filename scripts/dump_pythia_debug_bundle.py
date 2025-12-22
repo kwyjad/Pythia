@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from typing import Any, Dict, List, Set, Tuple
 
 import duckdb
 from forecaster.providers import DEFAULT_ENSEMBLE
+from pythia.db import schema as pythia_schema
 from resolver.db import duckdb_io
 from scripts.ci.llm_latency_summary import render_latency_markdown
 
@@ -57,6 +59,143 @@ def _build_in_clause(values: list[str]) -> tuple[str, list[str]]:
     return f"({placeholders})", cleaned
 
 
+KEY_TABLES = [
+    "facts_resolved",
+    "facts_deltas",
+    "snapshots",
+    "hs_triage",
+    "questions",
+    "forecasts_raw",
+    "forecasts_ensemble",
+]
+
+
+def _table_count(con: duckdb.DuckDBPyConnection, table: str) -> int | None:
+    try:
+        row = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _row_counts(con: duckdb.DuckDBPyConnection, tables: list[str] | None = None) -> dict[str, int | None]:
+    counts: dict[str, int | None] = {}
+    for tbl in tables or KEY_TABLES:
+        counts[tbl] = _table_count(con, tbl)
+    return counts
+
+
+def _file_stats(db_path: str) -> dict[str, Any]:
+    stats: dict[str, Any] = {"sha256": None, "size_bytes": None, "path": db_path}
+    try:
+        p = Path(db_path)
+        if p.exists() and p.is_file():
+            stats["size_bytes"] = p.stat().st_size
+            h = hashlib.sha256()
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            stats["sha256"] = h.hexdigest()
+    except Exception:
+        return stats
+    return stats
+
+
+def _record_run_provenance(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    run_id: str | None,
+    forecaster_run_id: str | None,
+    hs_run_id: str | None,
+    artifact_run_id: str | None,
+    artifact_workflow: str | None,
+    artifact_name: str | None,
+    db_stats: dict[str, Any],
+    counts_before: dict[str, int | None],
+    counts_after: dict[str, int | None],
+) -> dict[str, Any]:
+    pythia_schema.ensure_schema(con)
+    con.execute(
+        "DELETE FROM run_provenance WHERE forecaster_run_id = ? AND hs_run_id = ?;",
+        [forecaster_run_id, hs_run_id],
+    )
+    con.execute(
+        """
+        INSERT INTO run_provenance (
+            run_id, hs_run_id, forecaster_run_id, artifact_run_id, artifact_workflow, artifact_name,
+            db_sha256, db_size_bytes,
+            facts_resolved_before, facts_resolved_after,
+            facts_deltas_before, facts_deltas_after,
+            snapshots_before, snapshots_after,
+            hs_triage_before, hs_triage_after,
+            questions_before, questions_after,
+            forecasts_raw_before, forecasts_raw_after,
+            forecasts_ensemble_before, forecasts_ensemble_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        [
+            run_id,
+            hs_run_id,
+            forecaster_run_id,
+            artifact_run_id,
+            artifact_workflow,
+            artifact_name,
+            db_stats.get("sha256"),
+            db_stats.get("size_bytes"),
+            counts_before.get("facts_resolved"),
+            counts_after.get("facts_resolved"),
+            counts_before.get("facts_deltas"),
+            counts_after.get("facts_deltas"),
+            counts_before.get("snapshots"),
+            counts_after.get("snapshots"),
+            counts_before.get("hs_triage"),
+            counts_after.get("hs_triage"),
+            counts_before.get("questions"),
+            counts_after.get("questions"),
+            counts_before.get("forecasts_raw"),
+            counts_after.get("forecasts_raw"),
+            counts_before.get("forecasts_ensemble"),
+            counts_after.get("forecasts_ensemble"),
+        ],
+    )
+    return {
+        "run_id": run_id,
+        "hs_run_id": hs_run_id,
+        "forecaster_run_id": forecaster_run_id,
+        "artifact_run_id": artifact_run_id,
+        "artifact_workflow": artifact_workflow,
+        "artifact_name": artifact_name,
+        "db_sha256": db_stats.get("sha256"),
+        "db_size_bytes": db_stats.get("size_bytes"),
+    }
+
+
+def _provenance_markdown(
+    provenance_entry: dict[str, Any],
+    counts_before: dict[str, int | None],
+    counts_after: dict[str, int | None],
+    db_stats: dict[str, Any],
+) -> List[str]:
+    lines: List[str] = []
+    lines.append("### DB provenance and rowcounts")
+    lines.append("")
+    lines.append(f"- Artifact run id: `{provenance_entry.get('artifact_run_id') or '(unknown)'}`")
+    lines.append(f"- Artifact workflow: `{provenance_entry.get('artifact_workflow') or '(unknown)'}`")
+    lines.append(f"- Artifact name: `{provenance_entry.get('artifact_name') or '(unknown)'}`")
+    lines.append(f"- DB path: `{db_stats.get('path')}`")
+    lines.append(f"- DB size (bytes): `{provenance_entry.get('db_size_bytes')}`")
+    lines.append(f"- DB sha256: `{provenance_entry.get('db_sha256')}`")
+    lines.append("")
+    lines.append("| table | before | after |")
+    lines.append("| ----- | ------ | ----- |")
+    for tbl in KEY_TABLES:
+        before = counts_before.get(tbl)
+        after = counts_after.get(tbl)
+        lines.append(f"| {tbl} | {before if before is not None else 'n/a'} | {after if after is not None else 'n/a'} |")
+    lines.append("")
+    return lines
+
+
 def _load_self_search_stats(
     con: duckdb.DuckDBPyConnection, predicate: str | None, params: list[Any]
 ) -> dict[str, int]:
@@ -82,6 +221,149 @@ def _load_self_search_stats(
         except Exception:
             continue
     return {"requests": requests, "sources": sources}
+
+
+def _extract_urls(sources: Any, limit: int = 5) -> list[str]:
+    urls: list[str] = []
+    if not sources:
+        return urls
+    for src in sources:
+        url = None
+        if isinstance(src, dict):
+            url = src.get("url")
+        else:
+            url = src
+        url = (url or "").strip()
+        if url.startswith("http") and url not in urls:
+            urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _load_web_research_summaries(
+    con: duckdb.DuckDBPyConnection,
+    hs_run_id: str | None,
+    forecaster_run_id: str | None,
+    iso3s: list[str],
+    question_ids: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    hs_rows: list[dict[str, Any]] = []
+    q_rows: list[dict[str, Any]] = []
+
+    if hs_run_id and iso3s:
+        clause, params = _build_in_clause([iso3.upper() for iso3 in iso3s])
+        if clause:
+            try:
+                hs_raw = con.execute(
+                    f"""
+                    SELECT iso3, grounded, sources_json, grounding_debug_json
+                    FROM hs_country_reports
+                    WHERE hs_run_id = ?
+                      AND upper(iso3) IN {clause}
+                    """,
+                    [hs_run_id, *params],
+                ).fetchall()
+                for iso3, grounded, sources_json, debug_json in hs_raw:
+                    try:
+                        sources = json.loads(sources_json or "[]")
+                    except Exception:
+                        sources = []
+                    try:
+                        dbg = json.loads(debug_json or "{}")
+                    except Exception:
+                        dbg = {}
+                    hs_rows.append(
+                        {
+                            "iso3": iso3,
+                            "grounded": bool(grounded),
+                            "n_sources": len(sources) if isinstance(sources, list) else 0,
+                            "top_urls": _extract_urls(sources),
+                            "groundingSupports_count": dbg.get("groundingSupports_count", 0),
+                            "groundingChunks_count": dbg.get("groundingChunks_count", 0),
+                        }
+                    )
+            except Exception:
+                hs_rows = []
+
+    if forecaster_run_id and question_ids:
+        clause, params = _build_in_clause(question_ids)
+        if clause:
+            try:
+                q_raw = con.execute(
+                    f"""
+                    SELECT question_id, question_evidence_json
+                    FROM question_research
+                    WHERE run_id = ?
+                      AND question_id IN {clause}
+                    """,
+                    [forecaster_run_id, *params],
+                ).fetchall()
+                for qid, pack_json in q_raw:
+                    try:
+                        pack = json.loads(pack_json or "{}")
+                    except Exception:
+                        pack = {}
+                    sources = pack.get("sources") or []
+                    dbg = pack.get("debug") or {}
+                    q_rows.append(
+                        {
+                            "question_id": qid,
+                            "grounded": bool(pack.get("grounded")) or bool(sources),
+                            "n_sources": len(sources) if isinstance(sources, list) else 0,
+                            "top_urls": _extract_urls(sources),
+                            "groundingSupports_count": dbg.get("groundingSupports_count", 0),
+                            "groundingChunks_count": dbg.get("groundingChunks_count", 0),
+                        }
+                    )
+            except Exception:
+                q_rows = []
+
+    return hs_rows, q_rows
+
+
+def _web_research_markdown(
+    hs_rows: list[dict[str, Any]],
+    question_rows: list[dict[str, Any]],
+    *,
+    web_research_enabled: bool,
+) -> List[str]:
+    lines: List[str] = []
+    lines.append("### Web research evidence")
+    lines.append("")
+    if not web_research_enabled:
+        lines.append("_Web research disabled via PYTHIA_WEB_RESEARCH_ENABLED._")
+        lines.append("")
+    lines.append("#### HS country evidence packs")
+    lines.append("")
+    lines.append("| iso3 | grounded | n_sources | groundingSupports | groundingChunks | top_urls |")
+    lines.append("| ---- | -------- | --------- | ----------------- | --------------- | -------- |")
+    if hs_rows:
+        for row in sorted(hs_rows, key=lambda r: r.get("iso3") or ""):
+            lines.append(
+                f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_sources')} | "
+                f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
+                f"{', '.join(row.get('top_urls') or [])} |"
+            )
+    else:
+        lines.append("| (none) | False | 0 | 0 | 0 | (none) |")
+    lines.append("")
+
+    lines.append("#### Question evidence packs")
+    lines.append("")
+    lines.append("| question_id | grounded | n_sources | groundingSupports | groundingChunks | top_urls |")
+    lines.append("| ----------- | -------- | --------- | ----------------- | --------------- | -------- |")
+    if question_rows:
+        for row in sorted(question_rows, key=lambda r: r.get("question_id") or ""):
+            lines.append(
+                f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_sources')} | "
+                f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
+                f"{', '.join(row.get('top_urls') or [])} |"
+            )
+    else:
+        lines.append("| (none) | False | 0 | 0 | 0 | (none) |")
+    lines.append("")
+    return lines
 
 
 def _forecast_llm_filter(
@@ -389,7 +671,13 @@ def _load_llm_call_counts(
             COALESCE(provider, '') AS provider,
             COALESCE(model_id, '') AS model_id,
             COUNT(*) AS n_calls,
-            SUM(CASE WHEN error_text IS NULL OR error_text = '' THEN 0 ELSE 1 END) AS n_errors
+            SUM(
+                CASE
+                    WHEN COALESCE(success, TRUE) = FALSE THEN 1
+                    WHEN error_text IS NOT NULL AND error_text <> '' THEN 1
+                    ELSE 0
+                END
+            ) AS n_errors
         FROM llm_calls
         WHERE {predicate}
         GROUP BY 1, 2, 3
@@ -417,8 +705,10 @@ def _load_llm_error_summary(
             COUNT(*) AS n_errors
         FROM llm_calls
         WHERE {predicate}
-          AND error_text IS NOT NULL
-          AND error_text <> ''
+          AND (
+            COALESCE(success, TRUE) = FALSE
+            OR (error_text IS NOT NULL AND error_text <> '')
+          )
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
         """,
@@ -618,6 +908,21 @@ def _parse_args() -> argparse.Namespace:
         "--output-dir",
         default="debug",
         help="Directory to write the markdown bundle into (default: debug/).",
+    )
+    parser.add_argument(
+        "--artifact-run-id",
+        default=os.getenv("CANONICAL_DB_RUN_ID", ""),
+        help="Source Actions run id for the DB artifact (for provenance).",
+    )
+    parser.add_argument(
+        "--artifact-workflow",
+        default=os.getenv("CANONICAL_DB_WORKFLOW", ""),
+        help="Workflow name that produced the DB artifact (for provenance).",
+    )
+    parser.add_argument(
+        "--artifact-name",
+        default=os.getenv("CANONICAL_DB_ARTIFACT_NAME", ""),
+        help="Artifact name used to download the DB (for provenance).",
     )
     return parser.parse_args()
 
@@ -1172,7 +1477,10 @@ def _append_stage_block(lines: List[str], phase: str, call: Dict[str, Any] | Non
 
 
 def build_triage_only_bundle_markdown(
-    con: duckdb.DuckDBPyConnection, db_url: str, hs_run_id: str
+    con: duckdb.DuckDBPyConnection,
+    db_url: str,
+    hs_run_id: str,
+    provenance_lines: List[str],
 ) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     hs_manifest = _load_hs_run_metadata(con, hs_run_id)
@@ -1182,6 +1490,13 @@ def build_triage_only_bundle_markdown(
     resolved_countries_sorted = sorted({str(c) for c in (resolved_countries or []) if c})
 
     hs_triage_rows, n_hazards_triaged_total = _load_hs_triage_summary(con, hs_run_id)
+    hs_web_rows, question_web_rows = _load_web_research_summaries(
+        con, hs_run_id, None, resolved_countries_sorted, []
+    )
+    web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    web_research_lines = _web_research_markdown(
+        hs_web_rows, question_web_rows, web_research_enabled=web_research_enabled
+    )
 
     llm_columns = _llm_calls_columns(con)
     predicate, params, predicate_strategy = _hs_llm_filter(
@@ -1218,6 +1533,8 @@ def build_triage_only_bundle_markdown(
     lines.append(f"- n_countries_resolved: `{len(resolved_countries_sorted)}`")
     lines.append(f"- n_hazards_triaged_total: `{n_hazards_triaged_total}`")
     lines.append("")
+    lines.extend(provenance_lines)
+    lines.extend(web_research_lines)
     lines.append("### Skipped country entries")
     lines.append("")
     lines.append("| raw | normalized | reason |")
@@ -1291,6 +1608,7 @@ def build_debug_bundle_markdown(
     forecaster_run_id: str,
     hs_run_id: str | None,
     questions: list[dict[str, Any]],
+    provenance_lines: List[str],
 ) -> str:
     lines: List[str] = []
 
@@ -1366,6 +1684,14 @@ def build_debug_bundle_markdown(
         if iso_val:
             n_questions_by_iso3[iso_val] = n_questions_by_iso3.get(iso_val, 0) + 1
 
+    hs_web_rows, question_web_rows = _load_web_research_summaries(
+        con, manifest_hs_run_id, forecaster_run_id, resolved_countries_sorted, question_ids
+    )
+    web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    web_research_lines = _web_research_markdown(
+        hs_web_rows, question_web_rows, web_research_enabled=web_research_enabled
+    )
+
     llm_columns = _llm_calls_columns(con)
     predicate, params, predicate_strategy = _combined_llm_filter(
         llm_columns, forecaster_run_id, manifest_hs_run_id, question_ids, resolved_countries_sorted
@@ -1425,6 +1751,8 @@ def build_debug_bundle_markdown(
     )
     lines.append(f"- n_hazards_triaged_total: `{n_hazards_triaged_total}`")
     lines.append("")
+    lines.extend(provenance_lines)
+    lines.extend(web_research_lines)
     lines.append("### Skipped country entries")
     lines.append("")
     lines.append("| raw | normalized | reason |")
@@ -1805,6 +2133,22 @@ def main() -> None:
 
     con = duckdb_io.get_db(db_url)
     try:
+        db_stats = _file_stats(db_path)
+        counts_after = _row_counts(con, KEY_TABLES)
+        counts_before: dict[str, int | None] = {tbl: None for tbl in KEY_TABLES}
+        provenance_entry = _record_run_provenance(
+            con,
+            run_id=forecaster_run_id or hs_run_id,
+            forecaster_run_id=forecaster_run_id,
+            hs_run_id=hs_run_id,
+            artifact_run_id=args.artifact_run_id,
+            artifact_workflow=args.artifact_workflow,
+            artifact_name=args.artifact_name,
+            db_stats=db_stats,
+            counts_before=counts_before,
+            counts_after=counts_after,
+        )
+        provenance_lines = _provenance_markdown(provenance_entry, counts_before, counts_after, db_stats)
         if forecaster_run_id:
             if not _forecast_run_exists(con, forecaster_run_id):
                 raise SystemExit(
@@ -1814,11 +2158,11 @@ def main() -> None:
             if not questions:
                 raise SystemExit(f"No active questions found for run_id={forecaster_run_id}.")
             markdown = build_debug_bundle_markdown(
-                con, db_url, forecaster_run_id, hs_run_id, questions
+                con, db_url, forecaster_run_id, hs_run_id, questions, provenance_lines
             )
             out_run_id = forecaster_run_id
         else:
-            markdown = build_triage_only_bundle_markdown(con, db_url, hs_run_id)
+            markdown = build_triage_only_bundle_markdown(con, db_url, hs_run_id, provenance_lines)
             out_run_id = hs_run_id
     finally:
         duckdb_io.close_db(con)
