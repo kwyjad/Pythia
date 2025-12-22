@@ -108,25 +108,29 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
     assert any("question.com" in src.get("url", "") for src in merged_evidence.get("sources", []))
 
 
-def test_enforce_grounding_drops_placeholders() -> None:
-    research = {"sources": ["..."], "grounded": True}
+def test_normalize_grounding_moves_model_urls_to_unverified() -> None:
+    research = {"sources": ["http://model.com"], "grounded": True}
     merged_pack: dict[str, object] = {"sources": []}
 
-    enforced = cli._enforce_grounding(research, merged_pack)
+    enforced = cli._normalize_and_enforce_grounding(research, merged_pack)
 
     assert enforced["grounded"] is False
-    assert enforced["sources"] == []
+    assert enforced["verified_sources"] == []
+    assert enforced["unverified_sources"] == ["http://model.com"]
     assert enforced["_grounding_enforced"] is True
-    assert enforced["_grounding_sources_count"] == 0
+    assert enforced["_grounding_verified_sources_count"] == 0
 
 
-def test_enforce_grounding_uses_pack_sources() -> None:
-    research = {"sources": [], "grounded": False}
-    merged_pack = {"sources": [{"url": "http://hs.com"}, {"url": "https://question.com"}]}
+def test_normalize_grounding_prefers_verified_pack_sources() -> None:
+    research = {"sources": ["http://model.com"], "grounded": False}
+    merged_pack = {
+        "sources": [{"url": "http://hs.com"}, {"url": "https://question.com"}],
+        "unverified_sources": [{"url": "http://lead.com"}],
+    }
 
-    enforced = cli._enforce_grounding(research, merged_pack)
+    enforced = cli._normalize_and_enforce_grounding(research, merged_pack)
 
     assert enforced["grounded"] is True
-    assert len(enforced["sources"]) == 2
-    assert "http://hs.com" in enforced["sources"]
-    assert "https://question.com" in enforced["sources"]
+    assert enforced["verified_sources"] == ["http://hs.com", "https://question.com"]
+    assert "http://lead.com" in enforced["unverified_sources"]
+    assert "http://model.com" in enforced["unverified_sources"]

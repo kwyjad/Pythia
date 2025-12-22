@@ -75,3 +75,11 @@ class BudgetGuard:
 
         self.state.calls = projected_calls
         self.state.cost_usd = projected_cost
+
+    def record_actual(self, *, cost_usd: float) -> None:
+        """Record actual cost after a call completes."""
+
+        try:
+            self.state.cost_usd += float(cost_usd or 0.0)
+        except Exception:
+            return

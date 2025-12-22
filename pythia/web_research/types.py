@@ -27,6 +27,7 @@ class EvidencePack:
     structural_context: str = ""
     recent_signals: List[str] = field(default_factory=list)
     sources: List[EvidenceSource] = field(default_factory=list)
+    unverified_sources: List[EvidenceSource] = field(default_factory=list)
     backend: str = "gemini"
     grounded: bool = False
     debug: Dict[str, Any] = field(default_factory=dict)
@@ -40,6 +41,7 @@ class EvidencePack:
             "structural_context": self.structural_context,
             "recent_signals": list(self.recent_signals),
             "sources": [s.__dict__ for s in self.sources],
+            "unverified_sources": [s.__dict__ for s in self.unverified_sources],
             "backend": self.backend,
             "grounded": bool(self.grounded),
             "debug": dict(self.debug or {}),

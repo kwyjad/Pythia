@@ -52,6 +52,36 @@ def _build_cache_key(query: str, recency_days: int, backend: str) -> str:
     return h.hexdigest()
 
 
+def _fetch_via_exa(query: str, *, recency_days: int, timeout_sec: int, max_results: int) -> EvidencePack:
+    """Skeleton Exa backend, opt-in via EXA_API_KEY."""
+
+    pack = EvidencePack(query=query, recency_days=recency_days, backend="exa")
+    api_key = os.getenv("EXA_API_KEY")
+    if not api_key:
+        pack.error = {"type": "missing_api_key", "message": "EXA_API_KEY not set"}
+        pack.debug = {"error": "missing_api_key"}
+        return pack
+
+    pack.error = {"type": "backend_unimplemented", "message": "Exa backend is not yet implemented"}
+    pack.debug = {"error": "backend_unimplemented"}
+    return pack
+
+
+def _fetch_via_perplexity(query: str, *, recency_days: int, timeout_sec: int, max_results: int) -> EvidencePack:
+    """Skeleton Perplexity backend, opt-in via PERPLEXITY_API_KEY."""
+
+    pack = EvidencePack(query=query, recency_days=recency_days, backend="perplexity")
+    api_key = os.getenv("PERPLEXITY_API_KEY")
+    if not api_key:
+        pack.error = {"type": "missing_api_key", "message": "PERPLEXITY_API_KEY not set"}
+        pack.debug = {"error": "missing_api_key"}
+        return pack
+
+    pack.error = {"type": "backend_unimplemented", "message": "Perplexity backend is not yet implemented"}
+    pack.debug = {"error": "backend_unimplemented"}
+    return pack
+
+
 def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recency_days: int) -> EvidencePack:
     pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
     pack_data = dict(cached or {})
@@ -60,6 +90,7 @@ def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recenc
     pack.grounded = bool(pack_data.get("grounded"))
     pack.debug = pack_data.get("debug") or {}
     pack.sources = [EvidenceSource(**src) for src in pack_data.get("sources", []) if isinstance(src, dict)]
+    pack.unverified_sources = [EvidenceSource(**src) for src in pack_data.get("unverified_sources", []) if isinstance(src, dict)]
     pack.error = pack_data.get("error")
     pack.retrieved_at = pack_data.get("retrieved_at", pack.retrieved_at)
     if pack.debug and isinstance(pack.debug, dict):
@@ -87,6 +118,7 @@ def fetch_evidence_pack(
     include_structural = os.getenv("PYTHIA_WEB_RESEARCH_INCLUDE_STRUCTURAL", "1") != "0"
     timeout_sec = _env_int("PYTHIA_WEB_RESEARCH_TIMEOUT_SEC", 60)
     max_results = _env_int("PYTHIA_WEB_RESEARCH_MAX_RESULTS", 10)
+    fallback_backend = _env_str("PYTHIA_WEB_RESEARCH_FALLBACK_BACKEND", "").lower()
 
     start_ms = int(time.time() * 1000)
     guard = BudgetGuard(run_id or "default")
@@ -118,11 +150,102 @@ def fetch_evidence_pack(
         return pack.to_dict()
 
     try:
-        if backend == "gemini":
+        if backend == "auto":
+            primary_pack = gemini_grounding.fetch_via_gemini(
+                query,
+                recency_days=recency_days,
+                include_structural=include_structural,
+                timeout_sec=timeout_sec,
+                max_results=max_results,
+            )
+            pack = primary_pack
+            fallback_attempts = []
+            should_try_fallback = primary_pack.error and primary_pack.error.get("type") == "grounding_missing"
+            if should_try_fallback and fallback_backend:
+                fallback_pack: Optional[EvidencePack] = None
+                if fallback_backend == "exa":
+                    fallback_pack = _fetch_via_exa(
+                        query,
+                        recency_days=recency_days,
+                        timeout_sec=timeout_sec,
+                        max_results=max_results,
+                    )
+                elif fallback_backend == "perplexity":
+                    fallback_pack = _fetch_via_perplexity(
+                        query,
+                        recency_days=recency_days,
+                        timeout_sec=timeout_sec,
+                        max_results=max_results,
+                    )
+                else:
+                    fallback_pack = EvidencePack(query=query, recency_days=recency_days, backend=fallback_backend)
+                    fallback_pack.error = {"type": "unsupported_backend", "message": f"backend={fallback_backend} not implemented"}
+
+                if fallback_pack:
+                    fallback_attempts.append(
+                        {
+                            "backend": fallback_pack.backend,
+                            "grounded": fallback_pack.grounded,
+                            "error": fallback_pack.error,
+                            "n_sources": len(fallback_pack.sources),
+                            "n_unverified_sources": len(getattr(fallback_pack, "unverified_sources", []) or []),
+                        }
+                    )
+                    if fallback_pack.grounded or fallback_pack.sources or getattr(fallback_pack, "unverified_sources", []):
+                        pack = fallback_pack
+                        pack.debug = {
+                            **pack.debug,
+                            "auto_primary_backend": "gemini",
+                            "auto_fallback_backend": fallback_backend,
+                            "auto_fallback_attempts": fallback_attempts,
+                            "primary_error": primary_pack.error,
+                        }
+                    else:
+                        pack = primary_pack
+                        pack.debug = {
+                            **pack.debug,
+                            "auto_primary_backend": "gemini",
+                            "auto_fallback_backend": fallback_backend,
+                            "auto_fallback_attempts": fallback_attempts,
+                            "primary_error": primary_pack.error,
+                        }
+            elif should_try_fallback and not fallback_backend:
+                pack = primary_pack
+                pack.error = {"type": "no_backend_available", "message": "gemini grounding missing; no fallback backend configured"}
+                pack.debug = {
+                    **pack.debug,
+                    "auto_primary_backend": "gemini",
+                    "auto_fallback_backend": None,
+                    "auto_fallback_attempts": fallback_attempts,
+                    "primary_error": primary_pack.error,
+                }
+            else:
+                pack = primary_pack
+                pack.debug = {
+                    **pack.debug,
+                    "auto_primary_backend": "gemini",
+                    "auto_fallback_backend": None,
+                    "primary_error": primary_pack.error,
+                }
+        elif backend == "gemini":
             pack = gemini_grounding.fetch_via_gemini(
                 query,
                 recency_days=recency_days,
                 include_structural=include_structural,
+                timeout_sec=timeout_sec,
+                max_results=max_results,
+            )
+        elif backend == "exa":
+            pack = _fetch_via_exa(
+                query,
+                recency_days=recency_days,
+                timeout_sec=timeout_sec,
+                max_results=max_results,
+            )
+        elif backend == "perplexity":
+            pack = _fetch_via_perplexity(
+                query,
+                recency_days=recency_days,
                 timeout_sec=timeout_sec,
                 max_results=max_results,
             )
@@ -135,6 +258,15 @@ def fetch_evidence_pack(
     except Exception as exc:
         pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
         pack.error = {"type": "unexpected_error", "message": str(exc)[:500]}
+
+    try:
+        usage = pack.debug.get("usage") if isinstance(pack.debug, dict) else {}
+        cost_usd = 0.0
+        if isinstance(usage, dict):
+            cost_usd = float(usage.get("cost_usd") or usage.get("total_cost_usd") or 0.0)
+        guard.record_actual(cost_usd=cost_usd)
+    except Exception:
+        pass
 
     cache_set(cache_key, pack.to_dict())
     _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=False, success=pack.error is None)
@@ -172,17 +304,28 @@ def _log_web_research(
                     "completion_tokens": usage.get("completion_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
                     "cost_usd": usage.get("cost_usd", 0.0),
+                    "total_cost_usd": usage.get("total_cost_usd", usage.get("cost_usd", 0.0)),
                 })
 
         con = connect(read_only=False)
         ensure_schema(con)
+        provider = ""
+        model_id = pack.backend or "unknown"
+        model_name = pack.backend or "unknown"
+        if isinstance(pack.debug, dict):
+            provider = str(pack.debug.get("provider") or provider)
+            model_id = str(pack.debug.get("selected_model_id") or pack.debug.get("model_id") or model_id)
+        if not provider:
+            provider = "google" if pack.backend == "gemini" else pack.backend or "unknown"
+        if pack.backend == "gemini":
+            model_name = "Gemini Grounding"
         log_web_research_call(
             con,
             component="web_research",
             phase=_resolve_phase(purpose),
-            provider="web_research",
-            model_name=pack.backend or "unknown",
-            model_id=pack.backend or "unknown",
+            provider=provider,
+            model_name=model_name,
+            model_id=model_id,
             run_id=run_id,
             question_id=question_id,
             prompt_text=pack.query,
