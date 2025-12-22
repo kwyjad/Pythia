@@ -2585,6 +2585,36 @@ async def _call_spd_members_v2(
     return per_model_spds, aggregated_usage, raw_calls, ensemble_meta
 
 
+async def _call_spd_members_v2_compat(
+    prompt: str,
+    specs: list[ModelSpec],
+    *,
+    run_id: str | None = None,
+    question_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]], dict[str, object]]:
+    """
+    Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
+    """
+
+    fn = _call_spd_members_v2
+    try:
+        sig = inspect.signature(fn)
+        kwargs: dict[str, object] = {}
+        if "run_id" in sig.parameters:
+            kwargs["run_id"] = run_id
+        if "question_id" in sig.parameters:
+            kwargs["question_id"] = question_id
+        if "iso3" in sig.parameters:
+            kwargs["iso3"] = iso3
+        if "hazard_code" in sig.parameters:
+            kwargs["hazard_code"] = hazard_code
+        return await fn(prompt, specs, **kwargs)
+    except Exception:
+        return await fn(prompt, specs, run_id=run_id)
+
+
 async def _call_spd_ensemble_v2(
     prompt: str,
     *,
@@ -2862,7 +2892,7 @@ async def _call_spd_bayesmc_v2(
         }
         return {}, {}, [], ensemble_meta, [], []
 
-    per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
+    per_model_spds, aggregated_usage, raw_calls, ensemble_meta = await _call_spd_members_v2_compat(
         prompt,
         specs_used,
         run_id=run_id,
@@ -3529,7 +3559,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 return
             try:
                 per_model_spds, aggregated_usage, raw_calls, ensemble_meta = (
-                    await _call_spd_members_v2(
+                    await _call_spd_members_v2_compat(
                         prompt,
                         specs_active,
                         run_id=run_id,
@@ -3620,7 +3650,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         if write_both:
             specs_active, specs_source = _select_spd_specs_for_run()
 
-            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2(
+            per_model_spds, usage, raw_calls, ensemble_meta = await _call_spd_members_v2_compat(
                 prompt,
                 specs_active,
                 run_id=run_id,
