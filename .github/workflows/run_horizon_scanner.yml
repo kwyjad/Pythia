@@ -45,6 +45,10 @@ jobs:
       HS_MAX_WORKERS: "6"
       FORECASTER_RESEARCH_MAX_WORKERS: "6"
       FORECASTER_SPD_MAX_WORKERS: "6"
+      PYTHIA_WEB_RESEARCH_ENABLED: "1"
+      PYTHIA_FORECASTER_SELF_SEARCH: "1"
+      PYTHIA_FORECASTER_SELF_SEARCH_MAX_CALLS_PER_MODEL: "1"
+      PYTHIA_FORECASTER_SELF_SEARCH_MAX_SOURCES: "6"
       HS_MODEL_ID: gemini-3-flash-preview
       PYTHIA_BLOCK_PROVIDERS: xai
       PYTHIA_SPD_ENSEMBLE_SPECS: openai:gpt-5.1,anthropic:claude-opus-4-5-20251101,google:gemini-3-pro-preview,google:gemini-3-flash-preview

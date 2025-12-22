@@ -18,6 +18,15 @@ from pythia.db.schema import connect
 from .hs_utils import load_hs_triage_entry
 from .llm_logging import log_forecaster_llm_call
 from .prompts import build_scenario_prompt
+from .self_search import (
+    append_evidence_to_prompt,
+    combine_usage,
+    extract_self_search_query,
+    run_self_search,
+    self_search_enabled,
+    self_search_limits,
+    trim_sources,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -208,6 +217,7 @@ async def _run_scenario_for_question(
         )
 
     text: str = ""
+    logged_prompt = prompt
     usage: Dict[str, Any] = {}
     error: Optional[str] = None
     try:
@@ -259,9 +269,65 @@ async def _run_scenario_for_question(
         LOG.exception("Scenario LLM call failed for %s", qid)
         return
 
-    elapsed_ms = int((time.time() - start) * 1000)
     usage = dict(usage or {})
-    usage.setdefault("elapsed_ms", elapsed_ms)
+    usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
+
+    query = extract_self_search_query(text or "")
+    max_calls, max_sources = self_search_limits()
+
+    if query and self_search_enabled() and max_calls > 0:
+        meta = {"attempted": True, "requested": True, "query": query, "succeeded": False}
+        try:
+            raw_pack = run_self_search(
+                query,
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                purpose="scenario_self_search",
+            )
+            pack = trim_sources(raw_pack or {}, max_sources)
+            meta["succeeded"] = not pack.get("error")
+            meta["n_sources"] = len(pack.get("sources") or [])
+            prompt_with_evidence = append_evidence_to_prompt(prompt, pack)
+        except Exception as exc:  # noqa: BLE001
+            meta["succeeded"] = False
+            meta["error"] = str(exc)
+            prompt_with_evidence = append_evidence_to_prompt(prompt, {"error": str(exc)})
+
+        usage["self_search"] = meta
+        logged_prompt = prompt_with_evidence
+
+        try:
+            text2, usage2, error2 = await call_chat_ms(
+                ms,
+                prompt_with_evidence,
+                temperature=0.4,
+                prompt_key="scenario.v2.self_search",
+                prompt_version="1.0.0",
+                component="ScenarioWriter",
+                run_id=run_id,
+            )
+            usage2 = dict(usage2 or {})
+            usage2.setdefault("elapsed_ms", int((time.time() - start) * 1000))
+            usage = combine_usage(usage, usage2)
+            error = error2
+            text = text2
+            query_second = extract_self_search_query(text or "")
+            if query_second:
+                error = "self_search_second_request"
+        except Exception as exc:  # noqa: BLE001
+            usage["self_search"]["succeeded"] = False
+            error = f"scenario_self_search_call_error: {exc}"
+    elif query and (not self_search_enabled() or max_calls <= 0):
+        usage["self_search"] = {
+            "attempted": False,
+            "requested": True,
+            "succeeded": False,
+            "query": query,
+            "reason": "self_search_disabled",
+        }
+        error = error or "self_search_disabled"
 
     await log_forecaster_llm_call(
         run_id=run_id,
@@ -270,7 +336,7 @@ async def _run_scenario_for_question(
         hazard_code=hz,
         metric=metric,
         model_spec=ms,
-        prompt_text=prompt,
+        prompt_text=logged_prompt,
         response_text=text or "",
         usage=usage,
         error_text=str(error) if error else None,
