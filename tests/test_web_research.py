@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import json
 import pytest
+import importlib
 
 duckdb = pytest.importorskip("duckdb")
 
 from pythia.web_research import web_research
 from pythia.web_research.backends.gemini_grounding import parse_gemini_grounding_response
 from pythia.web_research.budget import BudgetGuard
+
+gemini_grounding = importlib.import_module("pythia.web_research.backends.gemini_grounding")
+openai_web_search = importlib.import_module("pythia.web_research.backends.openai_web_search")
+claude_web_search = importlib.import_module("pythia.web_research.backends.claude_web_search")
 
 
 def test_parse_gemini_grounding_sets_grounded_true():
@@ -74,7 +79,7 @@ def test_budget_guard_blocks_followup_calls(monkeypatch, tmp_path):
         pack.sources = []
         return pack
 
-    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", fake_fetch)
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", fake_fetch)
 
     first = web_research.fetch_evidence_pack("query one", purpose="hs", run_id="run-budget", question_id="Q1")
     assert first["error"] is None
@@ -135,9 +140,9 @@ def test_fetch_via_gemini_parses_grounding(monkeypatch):
                 },
             }
 
-    monkeypatch.setattr(web_research.gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
 
-    pack = web_research.gemini_grounding.fetch_via_gemini(
+    pack = gemini_grounding.fetch_via_gemini(
         "test query",
         recency_days=120,
         include_structural=True,
@@ -190,9 +195,9 @@ def test_fetch_via_gemini_preserves_recent_signals_without_structural(monkeypatc
                 "usageMetadata": {},
             }
 
-    monkeypatch.setattr(web_research.gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
 
-    pack = web_research.gemini_grounding.fetch_via_gemini(
+    pack = gemini_grounding.fetch_via_gemini(
         "test query",
         recency_days=120,
         include_structural=False,
@@ -227,9 +232,9 @@ def test_fetch_via_gemini_extracts_unverified_urls(monkeypatch):
                 ]
             }
 
-    monkeypatch.setattr(web_research.gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(gemini_grounding.requests, "post", lambda *args, **kwargs: FakeResponse())
 
-    pack = web_research.gemini_grounding.fetch_via_gemini(
+    pack = gemini_grounding.fetch_via_gemini(
         "test query",
         recency_days=120,
         include_structural=True,
@@ -294,9 +299,9 @@ def test_fetch_via_openai_web_search_parses_sources(monkeypatch):
             self.kwargs = kwargs
             self.responses = FakeResponses()
 
-    monkeypatch.setattr(web_research.openai_web_search, "OpenAI", FakeClient)
+    monkeypatch.setattr(openai_web_search, "OpenAI", FakeClient)
 
-    pack = web_research.openai_web_search.fetch_via_openai_web_search(
+    pack = openai_web_search.fetch_via_openai_web_search(
         "test query",
         recency_days=120,
         include_structural=True,
@@ -363,9 +368,9 @@ def test_fetch_via_claude_web_search_parses_sources(monkeypatch):
             self.kwargs = kwargs
             self.messages = FakeMessages()
 
-    monkeypatch.setattr(web_research.claude_web_search, "Anthropic", FakeClient)
+    monkeypatch.setattr(claude_web_search, "Anthropic", FakeClient)
 
-    pack = web_research.claude_web_search.fetch_via_claude_web_search(
+    pack = claude_web_search.fetch_via_claude_web_search(
         "test query",
         recency_days=120,
         include_structural=True,
@@ -405,9 +410,9 @@ def test_auto_backend_prefers_openai_when_gemini_missing(monkeypatch):
         pack.grounded = False
         return pack
 
-    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
-    monkeypatch.setattr(web_research.openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
-    monkeypatch.setattr(web_research.claude_web_search, "fetch_via_claude_web_search", _claude_fetch)
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+    monkeypatch.setattr(openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
+    monkeypatch.setattr(claude_web_search, "fetch_via_claude_web_search", _claude_fetch)
 
     pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto-openai", question_id="Q-openai")
 
@@ -436,9 +441,9 @@ def test_auto_backend_prefers_claude_when_openai_missing(monkeypatch):
     claude_pack.grounded = True
     claude_pack.sources = [web_research.EvidenceSource(title="Claude Source", url="https://claude.example.com")]
 
-    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
-    monkeypatch.setattr(web_research.openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
-    monkeypatch.setattr(web_research.claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+    monkeypatch.setattr(openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
+    monkeypatch.setattr(claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
 
     pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto-claude", question_id="Q-claude")
 
@@ -480,9 +485,9 @@ def test_fetch_via_gemini_retries_once_when_missing_grounding(monkeypatch):
         calls.append({"url": url, "body": json})
         return FakeResponse()
 
-    monkeypatch.setattr(web_research.gemini_grounding.requests, "post", fake_post)
+    monkeypatch.setattr(gemini_grounding.requests, "post", fake_post)
 
-    pack = web_research.gemini_grounding.fetch_via_gemini(
+    pack = gemini_grounding.fetch_via_gemini(
         "test query",
         recency_days=120,
         include_structural=True,
@@ -550,7 +555,7 @@ def test_budget_guard_records_actual_cost(monkeypatch):
     def fake_fetch(**kwargs):
         return fake_pack
 
-    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", fake_fetch)
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", fake_fetch)
     monkeypatch.setattr(web_research, "_log_web_research", lambda *args, **kwargs: None)
 
     first = web_research.fetch_evidence_pack("query one", purpose="hs", run_id="budget-run", question_id="Q1")
@@ -582,9 +587,9 @@ def test_auto_backend_uses_fallback_when_configured(monkeypatch):
     fallback_pack.grounded = True
     fallback_pack.sources = [web_research.EvidenceSource(title="Example", url="https://example.com")]
 
-    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
-    monkeypatch.setattr(web_research.openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
-    monkeypatch.setattr(web_research.claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+    monkeypatch.setattr(openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
+    monkeypatch.setattr(claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
     monkeypatch.setattr(web_research, "_fetch_via_exa", lambda *args, **kwargs: fallback_pack)
 
     pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto", question_id="Q-auto")
@@ -614,9 +619,9 @@ def test_auto_backend_without_fallback_sets_error(monkeypatch):
     claude_pack.error = {"type": "grounding_missing", "message": "no sources"}
     claude_pack.grounded = False
 
-    monkeypatch.setattr(web_research.gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
-    monkeypatch.setattr(web_research.openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
-    monkeypatch.setattr(web_research.claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+    monkeypatch.setattr(openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
+    monkeypatch.setattr(claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
 
     pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto", question_id="Q-auto")
 

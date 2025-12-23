@@ -11,12 +11,12 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
+import importlib
 
 from pythia.db.schema import connect, ensure_schema
 from pythia.web_research.budget import BudgetGuard, BudgetExceededError
 from pythia.web_research.cache import get as cache_get, set as cache_set
 from pythia.web_research.types import EvidencePack, EvidenceSource
-from pythia.web_research.backends import gemini_grounding, openai_web_search, claude_web_search
 from pythia.db.util import log_web_research_call
 
 
@@ -101,6 +101,16 @@ def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recenc
     return pack
 
 
+def _load_backend_module(module_name: str):
+    try:
+        module = importlib.import_module(f"pythia.web_research.backends.{module_name}")
+        # Cache on globals for test monkeypatch compatibility
+        globals()[module_name] = module
+        return module, None
+    except ImportError as exc:
+        return None, str(exc)
+
+
 def fetch_evidence_pack(
     query: str,
     purpose: str,
@@ -170,30 +180,28 @@ def fetch_evidence_pack(
                     }
                 )
 
-            for backend_fn in (
-                lambda: gemini_grounding.fetch_via_gemini(
-                    query,
-                    recency_days=recency_days,
-                    include_structural=include_structural,
-                    timeout_sec=timeout_sec,
-                    max_results=max_results,
-                ),
-                lambda: openai_web_search.fetch_via_openai_web_search(
-                    query,
-                    recency_days=recency_days,
-                    include_structural=include_structural,
-                    timeout_sec=timeout_sec,
-                    max_results=max_results,
-                ),
-                lambda: claude_web_search.fetch_via_claude_web_search(
-                    query,
-                    recency_days=recency_days,
-                    include_structural=include_structural,
-                    timeout_sec=timeout_sec,
-                    max_results=max_results,
-                ),
+            for backend_name, module_name, func_name in (
+                ("gemini", "gemini_grounding", "fetch_via_gemini"),
+                ("openai", "openai_web_search", "fetch_via_openai_web_search"),
+                ("claude", "claude_web_search", "fetch_via_claude_web_search"),
             ):
-                candidate = backend_fn()
+                module, import_err = _load_backend_module(module_name)
+                if module is None:
+                    candidate = EvidencePack(query=query, recency_days=recency_days, backend=backend_name)
+                    candidate.error = {"type": "missing_dependency", "message": import_err or f"backend {backend_name} not available"}
+                    _record_attempt(candidate)
+                    if selected_pack is None:
+                        selected_pack = candidate
+                    continue
+
+                backend_fn = getattr(module, func_name)
+                candidate = backend_fn(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                )
                 candidate.grounded = bool(candidate.sources)
                 _record_attempt(candidate)
                 if candidate.sources:
@@ -246,29 +254,44 @@ def fetch_evidence_pack(
             if not pack.sources and not pack.error:
                 pack.error = {"type": "grounding_missing", "message": "no verified sources from any backend"}
         elif backend == "gemini":
-            pack = gemini_grounding.fetch_via_gemini(
-                query,
-                recency_days=recency_days,
-                include_structural=include_structural,
-                timeout_sec=timeout_sec,
-                max_results=max_results,
-            )
+            module, import_err = _load_backend_module("gemini_grounding")
+            if module is None:
+                pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
+                pack.error = {"type": "missing_dependency", "message": import_err or "gemini backend not available"}
+            else:
+                pack = module.fetch_via_gemini(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                )
         elif backend == "openai":
-            pack = openai_web_search.fetch_via_openai_web_search(
-                query,
-                recency_days=recency_days,
-                include_structural=include_structural,
-                timeout_sec=timeout_sec,
-                max_results=max_results,
-            )
+            module, import_err = _load_backend_module("openai_web_search")
+            if module is None:
+                pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
+                pack.error = {"type": "missing_dependency", "message": import_err or "openai backend not available"}
+            else:
+                pack = module.fetch_via_openai_web_search(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                )
         elif backend == "claude":
-            pack = claude_web_search.fetch_via_claude_web_search(
-                query,
-                recency_days=recency_days,
-                include_structural=include_structural,
-                timeout_sec=timeout_sec,
-                max_results=max_results,
-            )
+            module, import_err = _load_backend_module("claude_web_search")
+            if module is None:
+                pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
+                pack.error = {"type": "missing_dependency", "message": import_err or "claude backend not available"}
+            else:
+                pack = module.fetch_via_claude_web_search(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                )
         elif backend == "exa":
             pack = _fetch_via_exa(
                 query,

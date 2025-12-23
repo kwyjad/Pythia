@@ -10,8 +10,6 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Set
 
-from anthropic import Anthropic
-
 from pythia.web_research.types import EvidencePack, EvidenceSource
 
 
@@ -69,6 +67,13 @@ def fetch_via_claude_web_search(
     if not api_key:
         pack.error = {"type": "missing_api_key", "message": "ANTHROPIC_API_KEY not set"}
         pack.debug = {"error": "missing_api_key"}
+        return pack
+
+    try:
+        from anthropic import Anthropic  # type: ignore
+    except ImportError:
+        pack.error = {"type": "missing_dependency", "message": "pip install anthropic to enable Claude web search"}
+        pack.debug = {"error": "missing_dependency"}
         return pack
 
     model_id = (os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "claude-3-7-sonnet-20250219").strip()
