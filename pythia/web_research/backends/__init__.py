@@ -3,4 +3,4 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-__all__ = ["gemini_grounding"]
+__all__ = ["gemini_grounding", "openai_web_search", "claude_web_search"]
