@@ -9,7 +9,7 @@ import json
 import os
 from datetime import datetime
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Set
 
 import requests
 
@@ -18,27 +18,16 @@ from pythia.web_research.types import EvidencePack, EvidenceSource
 
 def _extract_sources_from_grounding(gm: Dict[str, Any]) -> List[EvidenceSource]:
     sources: List[EvidenceSource] = []
-    supports = gm.get("groundingSupports") or []
-    for support in supports:
-        src = support.get("support") or support
-        url = src.get("sourceUrl") or src.get("uri") or ""
-        title = src.get("title") or src.get("description") or url
-        publisher = src.get("publisher") or src.get("site") or ""
-        published = src.get("publishedDate") or src.get("date")
-        summary = src.get("summary") or ""
-        if url:
-            sources.append(EvidenceSource(title=title or url, url=url, publisher=publisher, date=published, summary=summary))
-
+    seen_urls: Set[str] = set()
     chunks = gm.get("groundingChunks") or []
     for chunk in chunks:
-        # groundingChunks may contain inline source urls/titles
-        url = chunk.get("sourceUrl") or ""
-        if not url:
+        web = chunk.get("web") or {}
+        url = web.get("uri") or ""
+        if not url or url in seen_urls:
             continue
-        title = chunk.get("title") or chunk.get("content") or url
-        publisher = chunk.get("publisher") or ""
-        published = chunk.get("publishedDate") or None
-        sources.append(EvidenceSource(title=title, url=url, publisher=publisher, date=published, summary=""))
+        seen_urls.add(url)
+        title = web.get("title") or url
+        sources.append(EvidenceSource(title=title, url=url, publisher="", date=None, summary=""))
 
     return sources
 
@@ -57,7 +46,7 @@ def parse_gemini_grounding_response(resp: Dict[str, Any]) -> Tuple[List[Evidence
     debug["groundingChunks_count"] = len(gm.get("groundingChunks", []))
 
     sources = _extract_sources_from_grounding(gm) if gm else []
-    grounded = bool(gm)
+    grounded = bool(gm and sources)
     return sources, grounded, debug
 
 
@@ -100,27 +89,19 @@ def fetch_via_gemini(
         f"Query: {query}"
     )
 
+    force_search_prompt = (
+        prompt
+        + "\n\nYou must use Google Search for this request. If you do not search, return { \"recent_signals\": [], \"structural_context\": \"\" }."
+    )
+
     gen_cfg = {"temperature": 0.2, "maxOutputTokens": 768, "responseMimeType": "application/json"}
 
-    contents = [{"parts": [{"text": prompt}]}]
-    attempts: List[Tuple[str, Dict[str, Any]]] = [
-        (
-            "googleSearchRetrieval",
-            {
-                "contents": contents,
-                "tools": [{"googleSearchRetrieval": {}}],
-                "generationConfig": gen_cfg,
-            },
-        ),
-        (
-            "google_search",
-            {
-                "contents": contents,
-                "tools": [{"google_search": {}}],
-                "generationConfig": gen_cfg,
-            },
-        ),
-    ]
+    def _build_body(prompt_text: str) -> Dict[str, Any]:
+        return {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": gen_cfg,
+        }
 
     last_errors: List[str] = []
     attempted_shapes: List[str] = []
@@ -130,6 +111,8 @@ def fetch_via_gemini(
     status_code = 0
     selected_model_id = ""
     provider_name = "google"
+    retry_used = False
+    retry_success = False
 
     def _post(url: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         try:
@@ -145,7 +128,12 @@ def fetch_via_gemini(
         attempted_models.append(model_id)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
 
-        for attempt_name, body in attempts:
+        for attempt_name, body in (
+            ("google_search", _build_body(prompt)),
+            ("google_search_force", _build_body(force_search_prompt)),
+        ):
+            if attempt_name == "google_search_force":
+                retry_used = True
             attempted_shapes.append(attempt_name)
             status_code, data = _post(url, body)
             response_data = data
@@ -153,6 +141,8 @@ def fetch_via_gemini(
             sources, grounded, debug_meta = parse_gemini_grounding_response(data)
             if status_code == 200 and grounded:
                 selected_model_id = model_id
+                if attempt_name == "google_search_force":
+                    retry_success = True
                 break
             # capture short error for debugging and try next shape
             msg = ""
@@ -164,13 +154,13 @@ def fetch_via_gemini(
             if not msg:
                 msg = f"status={status_code} grounded={grounded}"
             last_errors.append(f"{model_id}/{attempt_name}: {msg[:200]}")
-            if status_code == 200 and not grounded:
-                # Try next attempt shape to elicit grounding metadata
+            # Only retry when first attempt succeeded but lacked grounding metadata
+            if attempt_name == "google_search" and status_code == 200 and not grounded:
                 continue
-            if status_code != 200:
-                continue
+            # Otherwise move to next model
+            break
 
-        if grounded:
+        if status_code == 200 and grounded:
             break
 
     sources, grounded, debug_meta = parse_gemini_grounding_response(response_data)
@@ -254,6 +244,8 @@ def fetch_via_gemini(
         "provider": provider_name,
         "max_results": max_results,
         "fetched_at": datetime.utcnow().isoformat(),
+        "retry_used": retry_used,
+        "retry_success": retry_success,
     }
     if last_errors:
         pack.debug["last_errors"] = last_errors[:5]

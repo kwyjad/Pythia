@@ -854,10 +854,12 @@ def _sanitize_month_series(
 
     for key in sorted(month_to_value.keys()):
         val = month_to_value[key]
+        if str(key).strip() == "":
+            unparseable.append(str(key))
+            continue
         parsed = _parse_month_key(str(key))
         if parsed is None:
             unparseable.append(str(key))
-            cleaned[str(key)] = val
             continue
 
         month_key = parsed.strftime("%Y-%m")

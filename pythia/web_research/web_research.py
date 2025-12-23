@@ -16,7 +16,7 @@ from pythia.db.schema import connect, ensure_schema
 from pythia.web_research.budget import BudgetGuard, BudgetExceededError
 from pythia.web_research.cache import get as cache_get, set as cache_set
 from pythia.web_research.types import EvidencePack, EvidenceSource
-from pythia.web_research.backends import gemini_grounding
+from pythia.web_research.backends import gemini_grounding, openai_web_search, claude_web_search
 from pythia.db.util import log_web_research_call
 
 
@@ -85,12 +85,13 @@ def _fetch_via_perplexity(query: str, *, recency_days: int, timeout_sec: int, ma
 def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recency_days: int) -> EvidencePack:
     pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
     pack_data = dict(cached or {})
+    pack.backend = pack_data.get("backend", backend)
     pack.structural_context = pack_data.get("structural_context", "")
     pack.recent_signals = pack_data.get("recent_signals") or []
-    pack.grounded = bool(pack_data.get("grounded"))
-    pack.debug = pack_data.get("debug") or {}
     pack.sources = [EvidenceSource(**src) for src in pack_data.get("sources", []) if isinstance(src, dict)]
     pack.unverified_sources = [EvidenceSource(**src) for src in pack_data.get("unverified_sources", []) if isinstance(src, dict)]
+    pack.grounded = bool(pack.sources)
+    pack.debug = pack_data.get("debug") or {}
     pack.error = pack_data.get("error")
     pack.retrieved_at = pack_data.get("retrieved_at", pack.retrieved_at)
     if pack.debug and isinstance(pack.debug, dict):
@@ -146,22 +147,64 @@ def fetch_evidence_pack(
     cached_value = cache_get(cache_key)
     if cached_value:
         pack = _pack_from_cache(query, cached_value, backend=backend, recency_days=recency_days)
+        if isinstance(pack.debug, dict):
+            pack.debug.setdefault("attempted_backends", [pack.backend])
+            pack.debug.setdefault("selected_backend", pack.backend if pack.sources else "")
+            pack.debug.setdefault("n_verified_sources", len(pack.sources))
         _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=True, success=True)
         return pack.to_dict()
 
     try:
         if backend == "auto":
-            primary_pack = gemini_grounding.fetch_via_gemini(
-                query,
-                recency_days=recency_days,
-                include_structural=include_structural,
-                timeout_sec=timeout_sec,
-                max_results=max_results,
-            )
-            pack = primary_pack
-            fallback_attempts = []
-            should_try_fallback = primary_pack.error and primary_pack.error.get("type") == "grounding_missing"
-            if should_try_fallback and fallback_backend:
+            attempted: list[Dict[str, Any]] = []
+            selected_pack: Optional[EvidencePack] = None
+
+            def _record_attempt(p: EvidencePack) -> None:
+                attempted.append(
+                    {
+                        "backend": p.backend,
+                        "grounded": bool(p.sources),
+                        "n_sources": len(p.sources),
+                        "n_unverified_sources": len(getattr(p, "unverified_sources", []) or []),
+                        "error": p.error,
+                    }
+                )
+
+            for backend_fn in (
+                lambda: gemini_grounding.fetch_via_gemini(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                ),
+                lambda: openai_web_search.fetch_via_openai_web_search(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                ),
+                lambda: claude_web_search.fetch_via_claude_web_search(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                ),
+            ):
+                candidate = backend_fn()
+                candidate.grounded = bool(candidate.sources)
+                _record_attempt(candidate)
+                if candidate.sources:
+                    selected_pack = candidate
+                    break
+                if not selected_pack:
+                    selected_pack = candidate
+
+            pack = selected_pack
+
+            if pack and not pack.sources and fallback_backend:
                 fallback_pack: Optional[EvidencePack] = None
                 if fallback_backend == "exa":
                     fallback_pack = _fetch_via_exa(
@@ -182,53 +225,44 @@ def fetch_evidence_pack(
                     fallback_pack.error = {"type": "unsupported_backend", "message": f"backend={fallback_backend} not implemented"}
 
                 if fallback_pack:
-                    fallback_attempts.append(
-                        {
-                            "backend": fallback_pack.backend,
-                            "grounded": fallback_pack.grounded,
-                            "error": fallback_pack.error,
-                            "n_sources": len(fallback_pack.sources),
-                            "n_unverified_sources": len(getattr(fallback_pack, "unverified_sources", []) or []),
-                        }
-                    )
-                    if fallback_pack.grounded or fallback_pack.sources or getattr(fallback_pack, "unverified_sources", []):
+                    fallback_pack.grounded = bool(fallback_pack.sources)
+                    _record_attempt(fallback_pack)
+                    if fallback_pack.sources:
                         pack = fallback_pack
-                        pack.debug = {
-                            **pack.debug,
-                            "auto_primary_backend": "gemini",
-                            "auto_fallback_backend": fallback_backend,
-                            "auto_fallback_attempts": fallback_attempts,
-                            "primary_error": primary_pack.error,
-                        }
                     else:
-                        pack = primary_pack
-                        pack.debug = {
-                            **pack.debug,
-                            "auto_primary_backend": "gemini",
-                            "auto_fallback_backend": fallback_backend,
-                            "auto_fallback_attempts": fallback_attempts,
-                            "primary_error": primary_pack.error,
-                        }
-            elif should_try_fallback and not fallback_backend:
-                pack = primary_pack
-                pack.error = {"type": "no_backend_available", "message": "gemini grounding missing; no fallback backend configured"}
-                pack.debug = {
-                    **pack.debug,
-                    "auto_primary_backend": "gemini",
-                    "auto_fallback_backend": None,
-                    "auto_fallback_attempts": fallback_attempts,
-                    "primary_error": primary_pack.error,
-                }
-            else:
-                pack = primary_pack
-                pack.debug = {
-                    **pack.debug,
-                    "auto_primary_backend": "gemini",
-                    "auto_fallback_backend": None,
-                    "primary_error": primary_pack.error,
-                }
+                        pack = fallback_pack if pack is None else pack
+
+            if pack is None:
+                pack = EvidencePack(query=query, recency_days=recency_days, backend="unknown")
+                pack.error = {"type": "no_backend_available", "message": "no backend attempts were made"}
+
+            pack.debug = {
+                **(pack.debug or {}),
+                "attempted_backends": [a["backend"] for a in attempted],
+                "selected_backend": pack.backend if pack.sources else "",
+                "n_verified_sources": len(pack.sources),
+                "auto_attempts": attempted,
+            }
+            if not pack.sources and not pack.error:
+                pack.error = {"type": "grounding_missing", "message": "no verified sources from any backend"}
         elif backend == "gemini":
             pack = gemini_grounding.fetch_via_gemini(
+                query,
+                recency_days=recency_days,
+                include_structural=include_structural,
+                timeout_sec=timeout_sec,
+                max_results=max_results,
+            )
+        elif backend == "openai":
+            pack = openai_web_search.fetch_via_openai_web_search(
+                query,
+                recency_days=recency_days,
+                include_structural=include_structural,
+                timeout_sec=timeout_sec,
+                max_results=max_results,
+            )
+        elif backend == "claude":
+            pack = claude_web_search.fetch_via_claude_web_search(
                 query,
                 recency_days=recency_days,
                 include_structural=include_structural,
@@ -258,6 +292,13 @@ def fetch_evidence_pack(
     except Exception as exc:
         pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
         pack.error = {"type": "unexpected_error", "message": str(exc)[:500]}
+
+    pack.grounded = bool(pack.sources)
+    if not isinstance(pack.debug, dict):
+        pack.debug = {}
+    pack.debug.setdefault("attempted_backends", [pack.backend])
+    pack.debug.setdefault("selected_backend", pack.backend if pack.sources else "")
+    pack.debug.setdefault("n_verified_sources", len(pack.sources))
 
     try:
         usage = pack.debug.get("usage") if isinstance(pack.debug, dict) else {}
@@ -290,8 +331,14 @@ def _log_web_research(
         usage_json = {
             "grounded": bool(pack.grounded),
             "n_sources": len(pack.sources),
+            "n_verified_sources": len(pack.sources),
             "cached": cached,
         }
+        if isinstance(pack.debug, dict):
+            if "attempted_backends" in pack.debug:
+                usage_json["attempted_backends"] = pack.debug.get("attempted_backends")
+            if "selected_backend" in pack.debug:
+                usage_json["selected_backend"] = pack.debug.get("selected_backend")
         if pack.debug:
             usage_json["debug"] = pack.debug
         if pack.error:
