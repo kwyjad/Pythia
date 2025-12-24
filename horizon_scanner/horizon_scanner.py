@@ -146,7 +146,7 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
     pack: dict[str, Any] | None = None
     try:
         query = _build_hs_evidence_query(country_name, iso3)
-        pack = dict(fetch_evidence_pack(query, purpose="hs_country_report", run_id=run_id) or {})
+        pack = dict(fetch_evidence_pack(query, purpose="hs_country_report", run_id=run_id, hs_run_id=run_id) or {})
     except Exception as exc:  # noqa: BLE001 - defensive around web research
         logger.warning("HS web research failed for %s: %s", iso3, exc)
         pack = {

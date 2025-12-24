@@ -255,6 +255,27 @@ def _extract_urls(sources: Any, limit: int = 5) -> list[str]:
     return urls
 
 
+def _format_attempted_backends(attempts: Any) -> str:
+    if not attempts:
+        return "(none)"
+    formatted: list[str] = []
+    if isinstance(attempts, list):
+        for item in attempts:
+            if isinstance(item, dict):
+                backend = (item.get("backend") or "(unknown)").strip()
+                grounded = bool(item.get("grounded") or item.get("n_sources"))
+                error_obj = item.get("error")
+                error_type = ""
+                if isinstance(error_obj, dict):
+                    error_type = str(error_obj.get("type") or "")
+                formatted.append(f"{backend} → {grounded} → {error_type or 'ok'}")
+            else:
+                formatted.append(str(item))
+    else:
+        formatted.append(str(attempts))
+    return "; ".join(formatted)
+
+
 def _load_web_research_summaries(
     con: duckdb.DuckDBPyConnection,
     hs_run_id: str | None,
@@ -298,6 +319,8 @@ def _load_web_research_summaries(
                             "groundingSupports_count": dbg.get("groundingSupports_count", 0),
                             "groundingChunks_count": dbg.get("groundingChunks_count", 0),
                             "attempted_models": dbg.get("attempted_models") or [],
+                            "attempted_backends": _format_attempted_backends(dbg.get("attempted_backends")),
+                            "selected_backend": dbg.get("selected_backend") or "",
                             "used_attempt": dbg.get("used_attempt"),
                             "last_errors": dbg.get("last_errors") or [],
                         }
@@ -339,6 +362,8 @@ def _load_web_research_summaries(
                             "groundingSupports_count": dbg.get("groundingSupports_count", 0),
                             "groundingChunks_count": dbg.get("groundingChunks_count", 0),
                             "attempted_models": dbg.get("attempted_models") or dbg.get("model_id") or [],
+                            "attempted_backends": _format_attempted_backends(dbg.get("attempted_backends")),
+                            "selected_backend": dbg.get("selected_backend") or "",
                             "used_attempt": dbg.get("used_attempt"),
                             "last_errors": dbg.get("last_errors") or [],
                         }
@@ -352,14 +377,19 @@ def _load_web_research_summaries(
 def _web_research_accounting(
     con: duckdb.DuckDBPyConnection, forecaster_run_id: str | None, hs_run_id: str | None
 ) -> dict[str, int]:
-    predicate_parts: list[str] = ["provider = 'web_research'"]
+    predicate_parts: list[str] = [
+        "phase IN ('hs_web_research', 'research_web_research', 'forecast_web_research')"
+    ]
     params: list[Any] = []
+    scope_parts: list[str] = []
     if forecaster_run_id:
-        predicate_parts.append("run_id = ?")
+        scope_parts.append("run_id = ?")
         params.append(forecaster_run_id)
     if hs_run_id:
-        predicate_parts.append("hs_run_id = ?")
+        scope_parts.append("hs_run_id = ?")
         params.append(hs_run_id)
+    if scope_parts:
+        predicate_parts.append(f"({' OR '.join(scope_parts)})")
     predicate = " AND ".join(predicate_parts)
 
     try:
@@ -388,8 +418,17 @@ def _web_research_accounting(
             usage_obj = {}
         if not usage_obj:
             counts["missing_usage"] += 1
-        if usage_obj and usage_obj.get("total_cost_usd") in (None, 0, 0.0):
-            counts["missing_cost_usd"] += 1
+        if usage_obj:
+            total_tokens = int(usage_obj.get("total_tokens") or 0)
+            cost_usd = usage_obj.get("cost_usd")
+            if cost_usd is None:
+                cost_usd = usage_obj.get("total_cost_usd")
+            try:
+                cost_val = float(cost_usd or 0.0)
+            except Exception:
+                cost_val = 0.0
+            if total_tokens > 0 and cost_val == 0.0:
+                counts["missing_cost_usd"] += 1
     return counts
 
 
@@ -412,39 +451,41 @@ def _web_research_markdown(
         lines.append(f"  - missing_model_id: `{accounting.get('missing_model_id', 0)}`")
         lines.append(f"  - missing_usage: `{accounting.get('missing_usage', 0)}`")
         lines.append(f"  - missing_cost_usd: `{accounting.get('missing_cost_usd', 0)}`")
-        lines.append("")
+    lines.append("")
     lines.append("#### HS country evidence packs")
     lines.append("")
-    lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
-    lines.append("| ---- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
+    lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | attempted_backends | selected_backend | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
+    lines.append("| ---- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------------ | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
     if hs_rows:
         for row in sorted(hs_rows, key=lambda r: r.get("iso3") or ""):
             lines.append(
                 f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_verified')} | {row.get('n_unverified')} | "
                 f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
-                f"{', '.join(row.get('attempted_models') or [])} | {row.get('used_attempt') or ''} | "
+                f"{', '.join(row.get('attempted_models') or [])} | {row.get('attempted_backends') or '(none)'} | "
+                f"{row.get('selected_backend')} | {row.get('used_attempt') or ''} | "
                 f"{', '.join(row.get('top_verified_urls') or [])} | {', '.join(row.get('top_unverified_urls') or [])} | "
                 f"{'; '.join(row.get('last_errors') or [])} |"
             )
     else:
-        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) |")
+        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) | (none) | (none) |")
     lines.append("")
 
     lines.append("#### Question evidence packs")
     lines.append("")
-    lines.append("| question_id | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
-    lines.append("| ----------- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
+    lines.append("| question_id | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | attempted_backends | selected_backend | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
+    lines.append("| ----------- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------------ | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
     if question_rows:
         for row in sorted(question_rows, key=lambda r: r.get("question_id") or ""):
             lines.append(
                 f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_verified')} | {row.get('n_unverified')} | "
                 f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
-                f"{', '.join(row.get('attempted_models') or [])} | {row.get('used_attempt') or ''} | "
+                f"{', '.join(row.get('attempted_models') or [])} | {row.get('attempted_backends') or '(none)'} | "
+                f"{row.get('selected_backend')} | {row.get('used_attempt') or ''} | "
                 f"{', '.join(row.get('top_verified_urls') or [])} | {', '.join(row.get('top_unverified_urls') or [])} | "
                 f"{'; '.join(row.get('last_errors') or [])} |"
             )
     else:
-        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) |")
+        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) | (none) | (none) |")
     lines.append("")
     return lines
 
@@ -1459,6 +1500,61 @@ def _question_lifecycle_counts(
     return counts
 
 
+def _question_ids_researched_not_forecasted(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> list[str]:
+    research_ids: set[str] = set()
+    forecast_ids: set[str] = set()
+    try:
+        research_rows = con.execute(
+            """
+            SELECT DISTINCT question_id
+            FROM llm_calls
+            WHERE run_id = ?
+              AND phase = 'research_v2'
+            """,
+            [run_id],
+        ).fetchall()
+        for row in research_rows or []:
+            if row and row[0]:
+                research_ids.add(str(row[0]))
+    except Exception:
+        research_ids = set()
+
+    try:
+        forecast_llm_rows = con.execute(
+            """
+            SELECT DISTINCT question_id
+            FROM llm_calls
+            WHERE run_id = ?
+              AND phase = 'spd_v2'
+            """,
+            [run_id],
+        ).fetchall()
+        for row in forecast_llm_rows or []:
+            if row and row[0]:
+                forecast_ids.add(str(row[0]))
+    except Exception:
+        forecast_ids = set()
+
+    try:
+        forecast_tbl_rows = con.execute(
+            """
+            SELECT DISTINCT question_id
+            FROM forecasts_ensemble
+            WHERE run_id = ?
+            """,
+            [run_id],
+        ).fetchall()
+        for row in forecast_tbl_rows or []:
+            if row and row[0]:
+                forecast_ids.add(str(row[0]))
+    except Exception:
+        forecast_ids = forecast_ids
+
+    return sorted(research_ids - forecast_ids)
+
+
 def _load_triage_tier(
     con: duckdb.DuckDBPyConnection, hs_run_id: str, iso3: str, hazard_code: str
 ) -> str | None:
@@ -1746,6 +1842,14 @@ def build_triage_only_bundle_markdown(
     else:
         lines.append("| (none) | (none) | (none) | 0 |")
     lines.append("")
+    if llm_call_counts and llm_error_rows:
+        errors_from_calls = sum(int(row.get("n_errors") or 0) for row in llm_call_counts)
+        errors_from_summary = sum(int(row.get("n_errors") or 0) for row in llm_error_rows)
+        if errors_from_calls != errors_from_summary:
+            lines.append(
+                f"_Warning: LLM error summary mismatch (calls-by-phase={errors_from_calls}, summary={errors_from_summary})._"
+            )
+            lines.append("")
 
     lines.append("### Latency (hs_run only)")
     lines.append("")
@@ -1895,6 +1999,12 @@ def build_debug_bundle_markdown(
     lines.append(f"- n_question_ids_researched: `{lifecycle_counts.get('research', 0)}`")
     lines.append(f"- n_question_ids_forecasted: `{lifecycle_counts.get('forecast', 0)}`")
     lines.append(f"- n_question_ids_scenarios: `{lifecycle_counts.get('scenario', 0)}`")
+    researched_not_forecasted = _question_ids_researched_not_forecasted(con, forecaster_run_id)
+    lines.append(f"- n_question_ids_researched_not_forecasted: `{len(researched_not_forecasted)}`")
+    lines.append(
+        "- question_ids_researched_not_forecasted: "
+        + (", ".join(researched_not_forecasted) if researched_not_forecasted else "(none)")
+    )
     lines.append(
         "- n_questions_by_hazard_code: "
         + (
@@ -2101,6 +2211,14 @@ def build_debug_bundle_markdown(
     else:
         lines.append("| (none) | (none) | (none) | 0 |")
     lines.append("")
+    if llm_call_counts and llm_error_rows:
+        errors_from_calls = sum(int(row.get("n_errors") or 0) for row in llm_call_counts)
+        errors_from_summary = sum(int(row.get("n_errors") or 0) for row in llm_error_rows)
+        if errors_from_calls != errors_from_summary:
+            lines.append(
+                f"_Warning: LLM error summary mismatch (calls-by-phase={errors_from_calls}, summary={errors_from_summary})._"
+            )
+            lines.append("")
 
     lines.append("### 1.6 forecasts_raw model writes (DB truth)")
     lines.append("")

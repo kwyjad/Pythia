@@ -2403,6 +2403,10 @@ def _question_needs_spd(run_id: str, question_row: duckdb.Row) -> bool:
     return bool(triage.get("need_full_spd", False))
 
 
+def _should_run_research(run_id: str, question_row: duckdb.Row) -> bool:
+    return _question_needs_spd(run_id, question_row)
+
+
 async def _call_research_model(prompt: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the research LLM call for v2 pipeline."""
 
@@ -3332,6 +3336,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
                     purpose="research_question_pack",
                     run_id=run_id,
                     question_id=qid,
+                    hs_run_id=question_row.get("hs_run_id"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
@@ -6244,6 +6249,8 @@ def main() -> None:
             spd_sem = asyncio.Semaphore(MAX_SPD_WORKERS)
 
             async def _research_task(q: dict) -> None:
+                if not _should_run_research(run_id, q):
+                    return
                 async with research_sem:
                     await _run_research_for_question(run_id, q)
 

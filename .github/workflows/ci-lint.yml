@@ -26,5 +26,16 @@ jobs:
           file_or_dir: |
             .github/workflows
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
       - name: Actionlint
-        uses: eifinger/actionlint-action@v1
+        run: |
+          set -e
+          GOBIN="${GITHUB_WORKSPACE}/.bin"
+          export GOBIN
+          export PATH="${GOBIN}:${PATH}"
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.9
+          actionlint -color

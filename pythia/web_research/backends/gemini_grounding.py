@@ -35,12 +35,19 @@ def _extract_sources_from_grounding(gm: Dict[str, Any]) -> List[EvidenceSource]:
 def parse_gemini_grounding_response(resp: Dict[str, Any]) -> Tuple[List[EvidenceSource], bool, Dict[str, Any]]:
     """Parse a Gemini response dict for grounding metadata and sources."""
 
-    debug: Dict[str, Any] = {}
+    debug: Dict[str, Any] = {
+        "response_has_candidates": False,
+        "grounding_metadata_present": False,
+        "groundingSupports_count": 0,
+        "groundingChunks_count": 0,
+    }
     candidates = resp.get("candidates") or []
     if not candidates:
         return [], False, debug
+    debug["response_has_candidates"] = True
 
     gm = candidates[0].get("groundingMetadata") or {}
+    debug["grounding_metadata_present"] = bool(gm)
     debug["webSearchQueries"] = gm.get("webSearchQueries") or []
     debug["groundingSupports_count"] = len(gm.get("groundingSupports", []))
     debug["groundingChunks_count"] = len(gm.get("groundingChunks", []))
@@ -65,12 +72,17 @@ def fetch_via_gemini(
     model_candidates: List[str] = []
     if env_model_id:
         model_candidates.append(env_model_id)
-    for default_model in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+    for default_model in (
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+    ):
         if default_model not in model_candidates:
             model_candidates.append(default_model)
     # Fallback for safety
     if not model_candidates:
-        model_candidates.append("gemini-3-flash-preview")
+        model_candidates.append("gemini-2.5-flash")
 
     pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
 
