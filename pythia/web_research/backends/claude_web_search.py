@@ -52,6 +52,30 @@ def _parse_sources_from_content(content: List[Dict[str, Any]]) -> List[EvidenceS
     return sources
 
 
+def _extract_tool_errors(content: List[Dict[str, Any]]) -> List[str]:
+    errors: List[str] = []
+    for item in content:
+        if item.get("type") == "web_search_tool_result_error":
+            err = item.get("error") or {}
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("type") or ""
+            else:
+                msg = str(err or "")
+            if msg:
+                errors.append(msg)
+            continue
+        if item.get("type") == "tool_result" and item.get("name") == "web_search":
+            err = item.get("error")
+            if err:
+                if isinstance(err, dict):
+                    msg = err.get("message") or err.get("type") or ""
+                else:
+                    msg = str(err)
+                if msg:
+                    errors.append(msg)
+    return errors
+
+
 def fetch_via_claude_web_search(
     query: str,
     *,
@@ -108,6 +132,7 @@ def fetch_via_claude_web_search(
 
     content = data.get("content") or []
     sources = _parse_sources_from_content(content)
+    tool_errors = _extract_tool_errors(content)
     grounded = bool(sources)
 
     structural_context = ""
@@ -163,6 +188,9 @@ def fetch_via_claude_web_search(
     if provider_error_message:
         pack.debug["provider_error_message"] = provider_error_message
         pack.error = {"type": "web_search_unavailable", "message": provider_error_message}
+    elif tool_errors:
+        pack.debug["tool_errors"] = tool_errors
+        pack.error = {"type": "web_search_error", "message": "; ".join(tool_errors)[:400]}
     elif not grounded:
         pack.error = {"type": "grounding_missing", "message": "no web_search_tool_result sources returned"}
 

@@ -140,7 +140,7 @@ def _render_evidence_markdown(pack: dict[str, Any]) -> str:
 
 
 def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str) -> dict[str, Any] | None:
-    if os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") != "1":
+    if os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") != "1":
         return None
 
     pack: dict[str, Any] | None = None

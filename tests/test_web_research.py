@@ -328,6 +328,75 @@ def test_fetch_via_openai_web_search_parses_sources(monkeypatch):
     assert pack.debug.get("n_verified_sources") == 3
 
 
+def test_fetch_via_openai_web_search_parses_sources_shape_b(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_MODEL_ID", "gpt-4.1")
+
+    class FakeResponse:
+        def model_dump(self):
+            return {
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "action": {
+                            "sources": [
+                                {"url": "https://example.com/x", "title": "Example X"},
+                                {"url": "https://example.com/y", "title": "Example Y"},
+                            ]
+                        },
+                    },
+                    {
+                        "type": "message",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(
+                                        {
+                                            "structural_context": "Context line",
+                                            "recent_signals": ["Sig 1"],
+                                        }
+                                    ),
+                                }
+                            ]
+                        },
+                    },
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30, "web_search_requests": 1},
+            }
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            self.kwargs = kwargs
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(openai_web_search, "OpenAI", FakeClient)
+
+    pack = openai_web_search.fetch_via_openai_web_search(
+        "test query",
+        recency_days=120,
+        include_structural=True,
+        timeout_sec=30,
+        max_results=5,
+    )
+
+    assert pack.grounded is True
+    assert [s.url for s in pack.sources] == [
+        "https://example.com/x",
+        "https://example.com/y",
+    ]
+    assert pack.structural_context.startswith("Context line")
+    assert pack.recent_signals == ["Sig 1"]
+    assert pack.debug.get("tool_choice") == "required"
+    assert pack.debug.get("n_sources") == 2
+
+
 def test_fetch_via_claude_web_search_parses_sources(monkeypatch):
     monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
