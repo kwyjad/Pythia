@@ -39,7 +39,7 @@ def _parse_sources_from_output(output: List[Dict[str, Any]]) -> List[EvidenceSou
 
     for item in output:
         if item.get("type") == "web_search_call":
-            action = (item.get("web_search_call") or {}).get("action") or {}
+            action = (item.get("web_search_call") or {}).get("action") or item.get("action") or {}
             for src in action.get("sources") or []:
                 url = src.get("url") or src.get("uri") or ""
                 if not url or url in seen:
@@ -141,6 +141,7 @@ def fetch_via_openai_web_search(
             model=model,
             input=prompt,
             tools=[{"type": "web_search"}],
+            tool_choice="required",
             max_output_tokens=800,
             include=["web_search_call.action.sources"],
         )
@@ -182,6 +183,9 @@ def fetch_via_openai_web_search(
         "selected_model_id": used_model,
         "max_results": max_results,
         "status_code": 200 if data else 0,
+        "tool_choice": "required",
+        "n_sources": len(sources),
+        "n_verified_sources": len(sources),
         "usage": usage,
         "fetched_at": datetime.utcnow().isoformat(),
     }

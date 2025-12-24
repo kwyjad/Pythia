@@ -1740,6 +1740,8 @@ def build_triage_only_bundle_markdown(
         con, hs_run_id, None, resolved_countries_sorted, []
     )
     web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
+    spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
     web_research_accounting = _web_research_accounting(con, None, hs_run_id)
     web_research_lines = _web_research_markdown(
         hs_web_rows,
@@ -1769,6 +1771,14 @@ def build_triage_only_bundle_markdown(
     lines.append("## Run manifest")
     lines.append("")
     lines.append(f"- Database URL: `{db_url}`")
+    lines.append(
+        "- HS/Research web search enabled (PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED): "
+        f"`{hs_research_web_search}`"
+    )
+    lines.append(
+        "- SPD web search enabled (PYTHIA_SPD_WEB_SEARCH_ENABLED): "
+        f"`{spd_web_search}`"
+    )
     lines.append(f"- HS run_id: `{hs_run_id}`")
     lines.append("- Forecaster run_id: (none; triage-only bundle)")
     lines.append(
@@ -1946,6 +1956,8 @@ def build_debug_bundle_markdown(
         con, manifest_hs_run_id, forecaster_run_id, resolved_countries_sorted, question_ids
     )
     web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
+    spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
     web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
     web_research_lines = _web_research_markdown(
         hs_web_rows,
@@ -1982,6 +1994,14 @@ def build_debug_bundle_markdown(
     lines.append("## Run manifest")
     lines.append("")
     lines.append(f"- Database URL: `{db_url}`")
+    lines.append(
+        "- HS/Research web search enabled (PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED): "
+        f"`{hs_research_web_search}`"
+    )
+    lines.append(
+        "- SPD web search enabled (PYTHIA_SPD_WEB_SEARCH_ENABLED): "
+        f"`{spd_web_search}`"
+    )
     lines.append(f"- Forecast run_id: `{forecaster_run_id}`")
     lines.append(f"- HS run_id: `{manifest_hs_run_id or 'unknown'}`")
     lines.append(

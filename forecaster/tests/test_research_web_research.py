@@ -21,6 +21,7 @@ from pythia.db.schema import connect, ensure_schema
 async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "research.duckdb"
     monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+    monkeypatch.setenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "1")
     monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
 
     con = connect(read_only=False)

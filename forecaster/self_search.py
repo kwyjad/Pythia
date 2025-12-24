@@ -14,7 +14,10 @@ from pythia.web_research import fetch_evidence_pack
 
 
 def self_search_enabled() -> bool:
-    return os.getenv("PYTHIA_FORECASTER_SELF_SEARCH", "0") == "1"
+    return (
+        os.getenv("PYTHIA_FORECASTER_SELF_SEARCH", "0") == "1"
+        and os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0") == "1"
+    )
 
 
 def self_search_limits() -> Tuple[int, int]:

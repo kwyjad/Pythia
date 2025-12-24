@@ -2324,6 +2324,27 @@ def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> st
     )
 
 
+def _build_spd_web_search_query(
+    *,
+    iso3: str | None,
+    hazard_code: str | None,
+    metric: str | None,
+    target_month: str | None,
+    wording: str | None,
+) -> str:
+    iso3_val = (iso3 or "").upper()
+    hazard = (hazard_code or "").upper()
+    metric_val = (metric or "").upper()
+    hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
+    timeframe = f" starting {target_month}" if target_month else ""
+    wording_val = wording or ""
+    return (
+        f"{iso3_val} {hazard_label} {metric_val} outlook{timeframe} — gather recent signals (last 120 days) "
+        "and concise structural drivers (max 8 lines). "
+        f"Question focus: {wording_val}"
+    )
+
+
 def _sanitize_sources(sources: Any) -> list[str]:
     """Return a deduped, order-stable list of real URLs."""
 
@@ -2437,7 +2458,17 @@ async def _call_research_model(prompt: str, *, run_id: str | None = None) -> tup
     return text, usage, error, ms
 
 
-async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+async def _call_spd_model(
+    prompt: str,
+    *,
+    run_id: str | None = None,
+    question_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+    metric: str | None = None,
+    target_month: str | None = None,
+    wording: str | None = None,
+) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for v2 pipeline."""
 
     ms_default: ModelSpec | None = None
@@ -2453,7 +2484,17 @@ async def _call_spd_model(prompt: str, *, run_id: str | None = None) -> tuple[st
         if ms_default is not None
         else ModelSpec(name="Gemini", provider="google", model_id=GEMINI_MODEL_ID, active=True, purpose="spd_v2")
     )
-    return await _call_spd_model_for_spec(ms, prompt, run_id=run_id)
+    return await _call_spd_model_for_spec(
+        ms,
+        prompt,
+        run_id=run_id,
+        question_id=question_id,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        metric=metric,
+        target_month=target_month,
+        wording=wording,
+    )
 
 
 async def _call_spd_model_for_spec(
@@ -2464,15 +2505,98 @@ async def _call_spd_model_for_spec(
     question_id: str | None = None,
     iso3: str | None = None,
     hazard_code: str | None = None,
+    metric: str | None = None,
+    target_month: str | None = None,
+    wording: str | None = None,
     **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
+
+    prompt_with_evidence = prompt
+    if os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0") == "1" and ms.provider in {"openai", "anthropic"}:
+        query = _build_spd_web_search_query(
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            target_month=target_month,
+            wording=wording,
+        )
+        try:
+            recency_days = int(os.getenv("PYTHIA_WEB_RESEARCH_RECENCY_DAYS", "120"))
+        except Exception:
+            recency_days = 120
+        include_structural = os.getenv("PYTHIA_WEB_RESEARCH_INCLUDE_STRUCTURAL", "1") != "0"
+        try:
+            timeout_sec = int(os.getenv("PYTHIA_WEB_RESEARCH_TIMEOUT_SEC", "60"))
+        except Exception:
+            timeout_sec = 60
+        try:
+            max_results = int(os.getenv("PYTHIA_WEB_RESEARCH_MAX_RESULTS", "10"))
+        except Exception:
+            max_results = 10
+        _, max_sources = self_search_limits()
+        pack: dict[str, Any] | None = None
+        error_text = None
+        try:
+            if ms.provider == "openai":
+                from pythia.web_research.backends import openai_web_search
+
+                pack = openai_web_search.fetch_via_openai_web_search(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                ).to_dict()
+            elif ms.provider == "anthropic":
+                from pythia.web_research.backends import claude_web_search
+
+                pack = claude_web_search.fetch_via_claude_web_search(
+                    query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                    max_results=max_results,
+                ).to_dict()
+        except Exception as exc:  # noqa: BLE001
+            error_text = f"forecast_web_research_error: {exc}"
+            pack = {
+                "query": query,
+                "recency_days": recency_days,
+                "grounded": False,
+                "sources": [],
+                "structural_context": "",
+                "recent_signals": [],
+                "error": {"type": "exception", "message": error_text},
+            }
+
+        if pack:
+            trimmed_pack = trim_sources(pack, max_sources)
+            prompt_with_evidence = append_evidence_to_prompt(prompt, trimmed_pack)
+            usage = (pack.get("debug") or {}).get("usage") or {}
+            error_obj = pack.get("error") or {}
+            if not error_text:
+                error_text = error_obj.get("message") if isinstance(error_obj, dict) else None
+            await log_forecaster_llm_call(
+                run_id=run_id or "forecast",
+                question_id=question_id or "unknown",
+                iso3=iso3,
+                hazard_code=hazard_code,
+                metric=metric,
+                model_spec=ms,
+                prompt_text=query,
+                response_text=json.dumps(trimmed_pack, ensure_ascii=False),
+                usage=usage,
+                error_text=error_text,
+                phase="forecast_web_research",
+                call_type="forecast_web_research",
+            )
 
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
             ms,
-            prompt,
+            prompt_with_evidence,
             temperature=0.2,
             prompt_key="spd.v2",
             prompt_version="1.0.0",
@@ -2566,6 +2690,9 @@ async def _call_spd_members_v2(
     question_id: str | None = None,
     iso3: str | None = None,
     hazard_code: str | None = None,
+    metric: str | None = None,
+    target_month: str | None = None,
+    wording: str | None = None,
 ) -> tuple[
     list[dict[str, list[float]]],
     dict[str, object],
@@ -2607,6 +2734,9 @@ async def _call_spd_members_v2(
             question_id=question_id,
             iso3=iso3,
             hazard_code=hazard_code,
+            metric=metric,
+            target_month=target_month,
+            wording=wording,
         )
         for ms in specs_used
     ]
@@ -2713,6 +2843,9 @@ async def _call_spd_members_v2_compat(
     question_id: str | None = None,
     iso3: str | None = None,
     hazard_code: str | None = None,
+    metric: str | None = None,
+    target_month: str | None = None,
+    wording: str | None = None,
 ) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]], dict[str, object]]:
     """
     Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
@@ -2730,9 +2863,50 @@ async def _call_spd_members_v2_compat(
             kwargs["iso3"] = iso3
         if "hazard_code" in sig.parameters:
             kwargs["hazard_code"] = hazard_code
+        if "metric" in sig.parameters:
+            kwargs["metric"] = metric
+        if "target_month" in sig.parameters:
+            kwargs["target_month"] = target_month
+        if "wording" in sig.parameters:
+            kwargs["wording"] = wording
         return await fn(prompt, specs, **kwargs)
     except Exception:
         return await fn(prompt, specs, run_id=run_id)
+
+
+async def _call_spd_model_compat(
+    prompt: str,
+    *,
+    run_id: str | None = None,
+    question_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+    metric: str | None = None,
+    target_month: str | None = None,
+    wording: str | None = None,
+) -> tuple[str, dict[str, Any], Optional[str], ModelSpec]:
+    """
+    Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
+    """
+
+    fn = _call_spd_model
+    try:
+        sig = inspect.signature(fn)
+        kwargs: dict[str, object] = {}
+        for key, value in {
+            "run_id": run_id,
+            "question_id": question_id,
+            "iso3": iso3,
+            "hazard_code": hazard_code,
+            "metric": metric,
+            "target_month": target_month,
+            "wording": wording,
+        }.items():
+            if key in sig.parameters:
+                kwargs[key] = value
+        return await fn(prompt, **kwargs)
+    except Exception:
+        return await fn(prompt)
 
 
 async def _call_spd_ensemble_v2(
@@ -2978,6 +3152,8 @@ async def _call_spd_bayesmc_v2(
     specs: list[ModelSpec] | None = None,
     iso3: str | None = None,
     hazard_code: str | None = None,
+    metric: str | None = None,
+    wording: str | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -3019,6 +3195,9 @@ async def _call_spd_bayesmc_v2(
         question_id=question_id,
         iso3=iso3,
         hazard_code=hazard_code,
+        metric=metric,
+        target_month=target_month,
+        wording=wording,
     )
     member_raw_by_model_id: dict[str, str] = {}
     for rc in raw_calls:
@@ -3322,7 +3501,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
 
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
-        if os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1":
+        if os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1":
             try:
                 hs_evidence_pack = _load_hs_country_evidence_pack(hs_run_id, iso3)
             except Exception as exc:  # noqa: BLE001
@@ -3702,6 +3881,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         question_id=qid,
                         iso3=iso3,
                         hazard_code=hz,
+                        metric=metric,
+                        target_month=target_month,
+                        wording=wording,
                     )
                 )
                 if member_spds_snapshot is None:
@@ -3793,6 +3975,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 question_id=qid,
                 iso3=iso3,
                 hazard_code=hz,
+                metric=metric,
+                target_month=target_month,
+                wording=wording,
             )
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds
@@ -4020,6 +4205,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 specs=specs_active,
                 iso3=iso3,
                 hazard_code=hz,
+                metric=metric,
+                wording=wording,
             )
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds_bm
@@ -4165,7 +4352,16 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hs_run_id=hs_run_id,
                 )
         else:
-            text, usage, error, ms = await _call_spd_model(prompt)
+            text, usage, error, ms = await _call_spd_model_compat(
+                prompt,
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                target_month=target_month,
+                wording=wording,
+            )
 
             await log_forecaster_llm_call(
                 run_id=run_id,

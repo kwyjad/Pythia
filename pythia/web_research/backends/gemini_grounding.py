@@ -72,17 +72,9 @@ def fetch_via_gemini(
     model_candidates: List[str] = []
     if env_model_id:
         model_candidates.append(env_model_id)
-    for default_model in (
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-3-flash-preview",
-        "gemini-3-pro-preview",
-    ):
+    for default_model in ("gemini-3-flash-preview", "gemini-3-pro-preview"):
         if default_model not in model_candidates:
             model_candidates.append(default_model)
-    # Fallback for safety
-    if not model_candidates:
-        model_candidates.append("gemini-2.5-flash")
 
     pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
 
@@ -106,7 +98,7 @@ def fetch_via_gemini(
         + "\n\nYou must use Google Search for this request. If you do not search, return { \"recent_signals\": [], \"structural_context\": \"\" }."
     )
 
-    gen_cfg = {"temperature": 0.2, "maxOutputTokens": 768, "responseMimeType": "application/json"}
+    gen_cfg = {"temperature": 0.2, "maxOutputTokens": 768}
 
     def _build_body(prompt_text: str) -> Dict[str, Any]:
         return {
