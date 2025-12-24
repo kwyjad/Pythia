@@ -596,18 +596,30 @@ jobs:
 
       - name: Compare DB signature after HS run
         id: signature_after
-        if: env.CANONICAL_DB_READY == 'true'
         env:
           REQUIRED_TABLES: ${{ env.SIGNATURE_REQUIRED_TABLES }}
           OPTIONAL_TABLES: ${{ env.SIGNATURE_OPTIONAL_TABLES }}
         run: |
           set -euo pipefail
-          python -m scripts.ci.db_signature compare \
-            --before diagnostics/db_signature_before.json \
-            --after-db data/resolver.duckdb \
-            --required "${REQUIRED_TABLES}" \
-            --optional "${OPTIONAL_TABLES}" \
-            --out diagnostics/db_signature_after.json
+          if [ ! -f data/resolver.duckdb ]; then
+            echo "No resolver.duckdb found; skipping signature after."
+            exit 0
+          fi
+
+          if [ -f diagnostics/db_signature_before.json ]; then
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${REQUIRED_TABLES}" \
+              --optional "${OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json
+          else
+            python -m scripts.ci.db_signature write \
+              --db data/resolver.duckdb \
+              --required "${REQUIRED_TABLES}" \
+              --optional "${OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json
+          fi
 
           echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
           echo "signature_ok=true" >> "$GITHUB_OUTPUT"

@@ -51,6 +51,8 @@ def test_parse_gemini_grounding_sets_grounded_true():
     assert sources[0].url == "https://example.com"
     assert debug["groundingSupports_count"] == 1
     assert debug["groundingChunks_count"] == 2
+    assert debug["grounding_metadata_present"] is True
+    assert debug["response_has_candidates"] is True
 
 
 def test_budget_guard_blocks_followup_calls(monkeypatch, tmp_path):
@@ -160,6 +162,8 @@ def test_fetch_via_gemini_parses_grounding(monkeypatch):
     assert "gemini-3-pro-preview" in pack.debug.get("attempted_models", [])
     assert pack.debug.get("selected_model_id") == "gemini-3-pro-preview"
     assert pack.unverified_sources == []
+    assert pack.debug.get("grounding_metadata_present") is True
+    assert pack.debug.get("response_has_candidates") is True
 
 
 def test_fetch_via_gemini_preserves_recent_signals_without_structural(monkeypatch):
@@ -420,7 +424,8 @@ def test_auto_backend_prefers_openai_when_gemini_missing(monkeypatch):
     assert pack["grounded"] is True
     assert pack["sources"][0]["url"] == "https://example.com"
     assert pack["debug"].get("selected_backend") == "openai"
-    assert pack["debug"].get("attempted_backends") == ["gemini", "openai"]
+    attempts = pack["debug"].get("attempted_backends") or []
+    assert [a.get("backend") for a in attempts] == ["gemini", "openai"]
     assert claude_calls["count"] == 0
 
 
@@ -451,7 +456,41 @@ def test_auto_backend_prefers_claude_when_openai_missing(monkeypatch):
     assert pack["grounded"] is True
     assert pack["sources"][0]["url"] == "https://claude.example.com"
     assert pack["debug"].get("selected_backend") == "claude"
-    assert pack["debug"].get("attempted_backends") == ["gemini", "openai", "claude"]
+    attempts = pack["debug"].get("attempted_backends") or []
+    assert [a.get("backend") for a in attempts] == ["gemini", "openai", "claude"]
+
+
+def test_auto_backend_records_attempt_errors(monkeypatch):
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_BACKEND", "auto")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_CACHE", "0")
+
+    gemini_pack = web_research.EvidencePack(query="q", recency_days=120, backend="gemini")
+    gemini_pack.error = {"type": "grounding_missing", "message": "no grounding"}
+    gemini_pack.grounded = False
+
+    openai_pack = web_research.EvidencePack(query="q", recency_days=120, backend="openai")
+    openai_pack.error = {"type": "missing_api_key", "message": "OPENAI_API_KEY not set"}
+    openai_pack.grounded = False
+
+    claude_pack = web_research.EvidencePack(query="q", recency_days=120, backend="claude")
+    claude_pack.error = {"type": "missing_api_key", "message": "ANTHROPIC_API_KEY not set"}
+    claude_pack.grounded = False
+
+    monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", lambda *args, **kwargs: gemini_pack)
+    monkeypatch.setattr(openai_web_search, "fetch_via_openai_web_search", lambda *args, **kwargs: openai_pack)
+    monkeypatch.setattr(claude_web_search, "fetch_via_claude_web_search", lambda *args, **kwargs: claude_pack)
+
+    pack = web_research.fetch_evidence_pack("query", purpose="hs", run_id="run-auto-errors", question_id="Q-errors")
+
+    attempts = pack["debug"].get("attempted_backends") or []
+    assert [a.get("backend") for a in attempts] == ["gemini", "openai", "claude"]
+    assert [a.get("error", {}).get("type") if isinstance(a.get("error"), dict) else None for a in attempts] == [
+        "grounding_missing",
+        "missing_api_key",
+        "missing_api_key",
+    ]
+    assert pack["debug"].get("selected_backend") == "gemini"
 
 
 def test_fetch_via_gemini_retries_once_when_missing_grounding(monkeypatch):
@@ -501,6 +540,8 @@ def test_fetch_via_gemini_retries_once_when_missing_grounding(monkeypatch):
     assert pack.debug.get("retry_success") is False
     assert len(calls) == 2
     assert "You must use Google Search" in calls[1]["body"]["contents"][0]["parts"][0]["text"]
+    assert pack.debug.get("grounding_metadata_present") is False
+    assert pack.debug.get("response_has_candidates") is True
 
 
 def test_web_research_logging_uses_provider_and_model(monkeypatch):
@@ -533,6 +574,7 @@ def test_web_research_logging_uses_provider_and_model(monkeypatch):
         purpose="hs",
         run_id="run1",
         question_id="Q1",
+        hs_run_id="hs-run-1",
         start_ms=int(time.time() * 1000),
         cached=False,
         success=True,
@@ -598,7 +640,8 @@ def test_auto_backend_uses_fallback_when_configured(monkeypatch):
     assert pack["grounded"] is True
     assert pack["sources"][0]["url"] == "https://example.com"
     assert pack["debug"].get("selected_backend") == "exa"
-    assert pack["debug"].get("attempted_backends") == ["gemini", "openai", "claude", "exa"]
+    attempts = pack["debug"].get("attempted_backends") or []
+    assert [a.get("backend") for a in attempts] == ["gemini", "openai", "claude", "exa"]
 
 
 def test_auto_backend_without_fallback_sets_error(monkeypatch):
@@ -628,6 +671,7 @@ def test_auto_backend_without_fallback_sets_error(monkeypatch):
     assert pack["backend"] == "gemini"
     assert pack["grounded"] is False
     assert pack["error"]["type"] == "no_backend_available"
-    assert pack["debug"].get("attempted_backends") == ["gemini", "openai", "claude"]
+    attempts = pack["debug"].get("attempted_backends") or []
+    assert [a.get("backend") for a in attempts] == ["gemini", "openai", "claude"]
     assert pack["debug"].get("auto_fallback_backend") is None
-    assert pack["debug"].get("selected_backend") == ""
+    assert pack["debug"].get("selected_backend") == "gemini"

@@ -32,11 +32,18 @@ def test_hs_country_report_persisted_when_web_research_enabled(monkeypatch: pyte
 
     calls: dict[str, object] = {}
 
-    def fake_fetch_evidence_pack(query: str, purpose: str, run_id: str | None = None, question_id: str | None = None):
+    def fake_fetch_evidence_pack(
+        query: str,
+        purpose: str,
+        run_id: str | None = None,
+        question_id: str | None = None,
+        hs_run_id: str | None = None,
+    ):
         calls["query"] = query
         calls["purpose"] = purpose
         calls["run_id"] = run_id
         calls["question_id"] = question_id
+        calls["hs_run_id"] = hs_run_id
         return fake_pack
 
     monkeypatch.setattr(hs, "fetch_evidence_pack", fake_fetch_evidence_pack)

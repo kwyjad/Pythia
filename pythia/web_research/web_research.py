@@ -46,6 +46,41 @@ def _is_enabled() -> bool:
     return os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
 
 
+def _summarize_attempt(pack: EvidencePack) -> Dict[str, Any]:
+    return {
+        "backend": pack.backend,
+        "grounded": bool(pack.sources),
+        "n_sources": len(pack.sources),
+        "n_unverified_sources": len(getattr(pack, "unverified_sources", []) or []),
+        "error": pack.error,
+    }
+
+
+def _normalize_attempted_backends(value: Any, default_backend: str, pack: EvidencePack | None = None) -> list[Dict[str, Any]]:
+    attempts: list[Dict[str, Any]] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                attempts.append(
+                    {
+                        "backend": item.get("backend") or default_backend,
+                        "grounded": bool(item.get("grounded")) or bool(item.get("n_sources")),
+                        "n_sources": int(item.get("n_sources", 0) or 0),
+                        "n_unverified_sources": int(item.get("n_unverified_sources", 0) or 0),
+                        "error": item.get("error"),
+                    }
+                )
+            elif isinstance(item, str):
+                attempts.append(
+                    {"backend": item, "grounded": False, "n_sources": 0, "n_unverified_sources": 0, "error": None}
+                )
+    if not attempts and pack is not None:
+        attempts.append(_summarize_attempt(pack))
+    elif not attempts and default_backend:
+        attempts.append({"backend": default_backend, "grounded": False, "n_sources": 0, "n_unverified_sources": 0, "error": None})
+    return attempts
+
+
 def _build_cache_key(query: str, recency_days: int, backend: str) -> str:
     h = hashlib.sha256()
     h.update(f"{query}|{recency_days}|{backend}".encode("utf-8"))
@@ -98,6 +133,8 @@ def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recenc
         usage = pack.debug.get("usage")
         if isinstance(usage, dict):
             pack.debug["usage"] = {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd") if usage.get(k) is not None}
+        pack.debug["attempted_backends"] = _normalize_attempted_backends(pack.debug.get("attempted_backends"), pack.backend, pack)
+        pack.debug.setdefault("selected_backend", pack.backend if pack.sources else pack.debug.get("selected_backend") or pack.backend)
     return pack
 
 
@@ -116,6 +153,7 @@ def fetch_evidence_pack(
     purpose: str,
     run_id: Optional[str] = None,
     question_id: Optional[str] = None,
+    hs_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Unified entrypoint for web research evidence packs.
@@ -137,7 +175,7 @@ def fetch_evidence_pack(
     if not _is_enabled():
         pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
         pack.error = {"type": "disabled", "message": "web research disabled via PYTHIA_WEB_RESEARCH_ENABLED"}
-        _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=False, success=False)
+        _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=False)
         return pack.to_dict()
 
     try:
@@ -145,12 +183,12 @@ def fetch_evidence_pack(
     except BudgetExceededError as exc:
         pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
         pack.error = {"type": "budget_exceeded", "message": str(exc)}
-        _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=False, success=False)
+        _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=False)
         return pack.to_dict()
     except Exception as exc:
         pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
         pack.error = {"type": "budget_error", "message": str(exc)}
-        _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=False, success=False)
+        _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=False)
         return pack.to_dict()
 
     cache_key = _build_cache_key(query, recency_days, backend)
@@ -161,7 +199,7 @@ def fetch_evidence_pack(
             pack.debug.setdefault("attempted_backends", [pack.backend])
             pack.debug.setdefault("selected_backend", pack.backend if pack.sources else "")
             pack.debug.setdefault("n_verified_sources", len(pack.sources))
-        _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=True, success=True)
+        _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=True, success=True)
         return pack.to_dict()
 
     try:
@@ -170,15 +208,7 @@ def fetch_evidence_pack(
             selected_pack: Optional[EvidencePack] = None
 
             def _record_attempt(p: EvidencePack) -> None:
-                attempted.append(
-                    {
-                        "backend": p.backend,
-                        "grounded": bool(p.sources),
-                        "n_sources": len(p.sources),
-                        "n_unverified_sources": len(getattr(p, "unverified_sources", []) or []),
-                        "error": p.error,
-                    }
-                )
+                attempted.append(_summarize_attempt(p))
 
             for backend_name, module_name, func_name in (
                 ("gemini", "gemini_grounding", "fetch_via_gemini"),
@@ -246,8 +276,8 @@ def fetch_evidence_pack(
 
             pack.debug = {
                 **(pack.debug or {}),
-                "attempted_backends": [a["backend"] for a in attempted],
-                "selected_backend": pack.backend if pack.sources else "",
+                "attempted_backends": attempted,
+                "selected_backend": pack.backend,
                 "n_verified_sources": len(pack.sources),
                 "auto_attempts": attempted,
             }
@@ -319,8 +349,8 @@ def fetch_evidence_pack(
     pack.grounded = bool(pack.sources)
     if not isinstance(pack.debug, dict):
         pack.debug = {}
-    pack.debug.setdefault("attempted_backends", [pack.backend])
-    pack.debug.setdefault("selected_backend", pack.backend if pack.sources else "")
+    pack.debug["attempted_backends"] = _normalize_attempted_backends(pack.debug.get("attempted_backends"), pack.backend, pack)
+    pack.debug.setdefault("selected_backend", pack.backend)
     pack.debug.setdefault("n_verified_sources", len(pack.sources))
 
     try:
@@ -333,7 +363,7 @@ def fetch_evidence_pack(
         pass
 
     cache_set(cache_key, pack.to_dict())
-    _log_web_research(pack, purpose, run_id, question_id, start_ms, cached=False, success=pack.error is None)
+    _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=pack.error is None)
     return pack.to_dict()
 
 
@@ -342,6 +372,7 @@ def _log_web_research(
     purpose: str,
     run_id: Optional[str],
     question_id: Optional[str],
+    hs_run_id: Optional[str],
     start_ms: int,
     *,
     cached: bool,
@@ -397,6 +428,7 @@ def _log_web_research(
             model_name=model_name,
             model_id=model_id,
             run_id=run_id,
+            hs_run_id=hs_run_id,
             question_id=question_id,
             prompt_text=pack.query,
             response_text=json.dumps(pack.to_dict(), ensure_ascii=False),

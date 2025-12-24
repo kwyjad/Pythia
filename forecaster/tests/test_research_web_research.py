@@ -49,7 +49,13 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
     )
     con.close()
 
-    def fake_fetch_evidence_pack(query: str, purpose: str, run_id: str | None = None, question_id: str | None = None):
+    def fake_fetch_evidence_pack(
+        query: str,
+        purpose: str,
+        run_id: str | None = None,
+        question_id: str | None = None,
+        hs_run_id: str | None = None,
+    ):
         return {
             "query": query,
             "recency_days": 120,
@@ -118,6 +124,22 @@ def test_normalize_grounding_moves_model_urls_to_unverified() -> None:
     assert enforced["verified_sources"] == []
     assert enforced["unverified_sources"] == ["http://model.com"]
     assert enforced["_grounding_enforced"] is True
+
+
+def test_should_run_research_skips_when_triage_disables_spd(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_triage(*_args, **_kwargs):
+        return {"need_full_spd": False}
+
+    monkeypatch.setattr(cli, "load_hs_triage_entry", fake_triage)
+
+    question_row = {
+        "question_id": "Q1",
+        "hs_run_id": "hs-run",
+        "iso3": "KEN",
+        "hazard_code": "ACE",
+    }
+
+    assert cli._should_run_research("fc-run", question_row) is False
     assert enforced["_grounding_verified_sources_count"] == 0
 
 
