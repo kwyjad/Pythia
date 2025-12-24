@@ -2874,6 +2874,41 @@ async def _call_spd_members_v2_compat(
         return await fn(prompt, specs, run_id=run_id)
 
 
+async def _call_spd_model_compat(
+    prompt: str,
+    *,
+    run_id: str | None = None,
+    question_id: str | None = None,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+    metric: str | None = None,
+    target_month: str | None = None,
+    wording: str | None = None,
+) -> tuple[str, dict[str, Any], Optional[str], ModelSpec]:
+    """
+    Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
+    """
+
+    fn = _call_spd_model
+    try:
+        sig = inspect.signature(fn)
+        kwargs: dict[str, object] = {}
+        for key, value in {
+            "run_id": run_id,
+            "question_id": question_id,
+            "iso3": iso3,
+            "hazard_code": hazard_code,
+            "metric": metric,
+            "target_month": target_month,
+            "wording": wording,
+        }.items():
+            if key in sig.parameters:
+                kwargs[key] = value
+        return await fn(prompt, **kwargs)
+    except Exception:
+        return await fn(prompt)
+
+
 async def _call_spd_ensemble_v2(
     prompt: str,
     *,
@@ -4317,7 +4352,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hs_run_id=hs_run_id,
                 )
         else:
-            text, usage, error, ms = await _call_spd_model(
+            text, usage, error, ms = await _call_spd_model_compat(
                 prompt,
                 run_id=run_id,
                 question_id=qid,
