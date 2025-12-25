@@ -304,6 +304,8 @@ def test_fetch_via_openai_web_search_parses_sources(monkeypatch):
             self.responses = FakeResponses()
 
     monkeypatch.setattr(openai_web_search, "OpenAI", FakeClient)
+    times = iter([100.0, 100.4])
+    monkeypatch.setattr(openai_web_search.time, "time", lambda: next(times))
 
     pack = openai_web_search.fetch_via_openai_web_search(
         "test query",
@@ -318,14 +320,15 @@ def test_fetch_via_openai_web_search_parses_sources(monkeypatch):
     assert [s.url for s in pack.sources] == [
         "https://example.com/a",
         "https://example.com/b",
-        "https://example.com/c",
     ]
+    assert [s.url for s in pack.unverified_sources] == ["https://example.com/c"]
     assert pack.structural_context.startswith("Context line")
     assert pack.recent_signals == ["Sig 1"]
     assert pack.debug.get("provider") == "openai"
     assert pack.debug.get("model_id") == "gpt-4.1"
     assert pack.debug.get("usage", {}).get("web_search_requests") == 1
-    assert pack.debug.get("n_verified_sources") == 3
+    assert pack.debug.get("usage", {}).get("elapsed_ms") > 0
+    assert pack.debug.get("n_verified_sources") == 2
 
 
 def test_fetch_via_openai_web_search_parses_sources_shape_b(monkeypatch):
@@ -460,6 +463,27 @@ def test_fetch_via_claude_web_search_parses_sources(monkeypatch):
     assert pack.debug.get("model_id") == "claude-3-opus"
     assert pack.debug.get("usage", {}).get("total_tokens") == 32
     assert pack.debug.get("n_verified_sources") == 2
+
+
+def test_parse_gemini_grounding_response_from_grounding_chunks():
+    resp = {
+        "candidates": [
+            {
+                "groundingMetadata": {
+                    "groundingChunks": [
+                        {"web": {"uri": "https://example.com/a", "title": "Example A"}},
+                        {"web": {"uri": "https://example.com/b", "title": "Example B"}},
+                    ],
+                    "groundingSupports": [{"segment": "s1"}],
+                }
+            }
+        ]
+    }
+    sources, grounded, debug = gemini_grounding.parse_gemini_grounding_response(resp)
+
+    assert grounded is True
+    assert [s.url for s in sources] == ["https://example.com/a", "https://example.com/b"]
+    assert debug.get("groundingChunks_count") == 2
 
 
 def test_auto_backend_prefers_openai_when_gemini_missing(monkeypatch):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Set
 
@@ -38,6 +39,13 @@ def _parse_sources_from_content(content: List[Dict[str, Any]]) -> List[EvidenceS
                 seen.add(url)
                 title = result.get("title") or url
                 sources.append(EvidenceSource(title=title, url=url, publisher="", date=result.get("page_age")))
+        elif item.get("type") == "web_search_result":
+            url = item.get("url") or ""
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            title = item.get("title") or url
+            sources.append(EvidenceSource(title=title, url=url, publisher="", date=item.get("page_age")))
         elif item.get("type") == "tool_result":
             name = item.get("name") or ""
             if name != "web_search":
@@ -52,28 +60,37 @@ def _parse_sources_from_content(content: List[Dict[str, Any]]) -> List[EvidenceS
     return sources
 
 
-def _extract_tool_errors(content: List[Dict[str, Any]]) -> List[str]:
+def _extract_tool_errors(content: List[Dict[str, Any]]) -> tuple[list[str], list[str]]:
     errors: List[str] = []
+    codes: List[str] = []
     for item in content:
         if item.get("type") == "web_search_tool_result_error":
             err = item.get("error") or {}
             if isinstance(err, dict):
                 msg = err.get("message") or err.get("type") or ""
+                code = err.get("code") or ""
             else:
                 msg = str(err or "")
+                code = ""
             if msg:
                 errors.append(msg)
+            if code:
+                codes.append(str(code))
             continue
         if item.get("type") == "tool_result" and item.get("name") == "web_search":
             err = item.get("error")
             if err:
                 if isinstance(err, dict):
                     msg = err.get("message") or err.get("type") or ""
+                    code = err.get("code") or ""
                 else:
                     msg = str(err)
+                    code = ""
                 if msg:
                     errors.append(msg)
-    return errors
+                if code:
+                    codes.append(str(code))
+    return errors, codes
 
 
 def fetch_via_claude_web_search(
@@ -100,9 +117,12 @@ def fetch_via_claude_web_search(
         pack.debug = {"error": "missing_dependency"}
         return pack
 
-    model_id = (os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "claude-3-7-sonnet-20250219").strip()
+    model_id = (
+        os.getenv("PYTHIA_SPD_ANTHROPIC_WEB_SEARCH_MODEL_ID")
+        or "claude-sonnet-4-20250514"
+    ).strip()
     if not model_id:
-        model_id = "claude-3-7-sonnet-20250219"
+        model_id = "claude-sonnet-4-20250514"
 
     prompt = (
         "You are a research assistant using the Claude web_search tool. "
@@ -118,6 +138,7 @@ def fetch_via_claude_web_search(
     data: Dict[str, Any] = {}
     provider_error_message = None
 
+    start = time.time()
     try:
         resp = client.messages.create(
             model=model_id,
@@ -127,12 +148,23 @@ def fetch_via_claude_web_search(
             tool_choice={"type": "tool", "name": "web_search"},
         )
         data = _response_to_dict(resp)
+        if data.get("stop_reason") == "pause_turn":
+            followup = client.messages.create(
+                model=model_id,
+                max_output_tokens=800,
+                system=prompt,
+                messages=[{"role": "assistant", "content": data.get("content") or []}],
+                tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}],
+                tool_choice={"type": "tool", "name": "web_search"},
+            )
+            data = _response_to_dict(followup)
     except Exception as exc:  # pragma: no cover - network failures
         provider_error_message = str(exc)
+    elapsed_ms = int((time.time() - start) * 1000)
 
     content = data.get("content") or []
     sources = _parse_sources_from_content(content)
-    tool_errors = _extract_tool_errors(content)
+    tool_errors, tool_error_codes = _extract_tool_errors(content)
     grounded = bool(sources)
 
     structural_context = ""
@@ -169,6 +201,7 @@ def fetch_via_claude_web_search(
         "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
         "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
         "total_tokens": int(usage_raw.get("input_tokens", 0) or 0) + int(usage_raw.get("output_tokens", 0) or 0),
+        "elapsed_ms": elapsed_ms,
     }
 
     pack.sources = sources
@@ -190,7 +223,13 @@ def fetch_via_claude_web_search(
         pack.error = {"type": "web_search_unavailable", "message": provider_error_message}
     elif tool_errors:
         pack.debug["tool_errors"] = tool_errors
-        pack.error = {"type": "web_search_error", "message": "; ".join(tool_errors)[:400]}
+        if tool_error_codes:
+            pack.debug["tool_error_codes"] = tool_error_codes
+        pack.error = {
+            "type": "web_search_error",
+            "message": "; ".join(tool_errors)[:400],
+            "code": tool_error_codes[0] if tool_error_codes else None,
+        }
     elif not grounded:
         pack.error = {"type": "grounding_missing", "message": "no web_search_tool_result sources returned"}
 

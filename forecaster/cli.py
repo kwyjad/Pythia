@@ -2376,6 +2376,27 @@ def _sanitize_sources(sources: Any) -> list[str]:
     return clean
 
 
+def _render_verified_sources_block(sources: list[dict[str, Any]] | None, max_sources: int) -> str:
+    if not sources:
+        return ""
+    lines = ["", "VERIFIED SOURCES (web_search_call.action.sources):"]
+    count = 0
+    for src in sources:
+        if count >= max_sources:
+            break
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or src.get("uri") or "").strip()
+        if not url:
+            continue
+        title = str(src.get("title") or url).strip()
+        lines.append(f"- {title} — {url}")
+        count += 1
+    if count == 0:
+        return ""
+    return "\n".join(lines)
+
+
 def _normalize_and_enforce_grounding(research_json: Dict[str, Any], merged_pack: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize groundedness: only verified retrieval sources can set grounded=true."""
 
@@ -2573,6 +2594,93 @@ async def _call_spd_model_for_spec(
         if pack:
             trimmed_pack = trim_sources(pack, max_sources)
             prompt_with_evidence = append_evidence_to_prompt(prompt, trimmed_pack)
+            verified_block = _render_verified_sources_block(
+                trimmed_pack.get("sources") if isinstance(trimmed_pack, dict) else None,
+                max_sources=min(3, max_sources),
+            )
+            if verified_block:
+                prompt_with_evidence = f"{prompt_with_evidence}\n{verified_block}"
+            usage = (pack.get("debug") or {}).get("usage") or {}
+            error_obj = pack.get("error") or {}
+            if not error_text:
+                error_text = error_obj.get("message") if isinstance(error_obj, dict) else None
+            if isinstance(error_obj, dict) and error_obj.get("code"):
+                code_text = f"error_code={error_obj.get('code')}"
+                if error_text:
+                    error_text = f"{error_text} ({code_text})"
+                else:
+                    error_text = code_text
+            await log_forecaster_llm_call(
+                run_id=run_id or "forecast",
+                question_id=question_id or "unknown",
+                iso3=iso3,
+                hazard_code=hazard_code,
+                metric=metric,
+                model_spec=ms,
+                prompt_text=query,
+                response_text=json.dumps(trimmed_pack, ensure_ascii=False),
+                usage=usage,
+                error_text=error_text,
+                phase="forecast_web_research",
+                call_type="forecast_web_research",
+            )
+    if os.getenv("PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED", "0") == "1" and ms.provider == "google":
+        query = _build_spd_web_search_query(
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            target_month=target_month,
+            wording=wording,
+        )
+        try:
+            recency_days = int(os.getenv("PYTHIA_WEB_RESEARCH_RECENCY_DAYS", "120"))
+        except Exception:
+            recency_days = 120
+        include_structural = os.getenv("PYTHIA_WEB_RESEARCH_INCLUDE_STRUCTURAL", "1") != "0"
+        try:
+            timeout_sec = int(os.getenv("PYTHIA_WEB_RESEARCH_TIMEOUT_SEC", "60"))
+        except Exception:
+            timeout_sec = 60
+        try:
+            max_results = int(os.getenv("PYTHIA_WEB_RESEARCH_MAX_RESULTS", "10"))
+        except Exception:
+            max_results = 10
+        _, max_sources = self_search_limits()
+        pack: dict[str, Any] | None = None
+        error_text = None
+        try:
+            from pythia.web_research.backends import gemini_grounding
+
+            model_override = (os.getenv("PYTHIA_SPD_GOOGLE_MODEL_ID") or "gemini-2.5-pro").strip()
+            pack = gemini_grounding.fetch_via_gemini(
+                query,
+                recency_days=recency_days,
+                include_structural=include_structural,
+                timeout_sec=timeout_sec,
+                max_results=max_results,
+                model_id=model_override or None,
+            ).to_dict()
+        except Exception as exc:  # noqa: BLE001
+            error_text = f"forecast_web_research_error: {exc}"
+            pack = {
+                "query": query,
+                "recency_days": recency_days,
+                "grounded": False,
+                "sources": [],
+                "structural_context": "",
+                "recent_signals": [],
+                "error": {"type": "exception", "message": error_text},
+            }
+
+        if pack:
+            trimmed_pack = trim_sources(pack, max_sources)
+            prompt_with_evidence = append_evidence_to_prompt(prompt_with_evidence, trimmed_pack)
+            verified_block = _render_verified_sources_block(
+                trimmed_pack.get("sources") if isinstance(trimmed_pack, dict) else None,
+                max_sources=min(3, max_sources),
+            )
+            if verified_block:
+                prompt_with_evidence = f"{prompt_with_evidence}\n{verified_block}"
             usage = (pack.get("debug") or {}).get("usage") or {}
             error_obj = pack.get("error") or {}
             if not error_text:

@@ -64,11 +64,12 @@ def fetch_via_gemini(
     include_structural: bool,
     timeout_sec: int,
     max_results: int,
+    model_id: str | None = None,
 ) -> EvidencePack:
     """Fetch web research evidence via Gemini with Google Search grounding."""
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    env_model_id = (os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
+    env_model_id = (model_id or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
     model_candidates: List[str] = []
     if env_model_id:
         model_candidates.append(env_model_id)
