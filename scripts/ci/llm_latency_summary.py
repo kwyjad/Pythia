@@ -65,8 +65,9 @@ def _query_latency(
     predicate: str,
     params: Sequence,
 ) -> List[Tuple[str, str, str, int, float, float, float]]:
+    predicate_sql = predicate or "1=1"
     return con.execute(
-        """
+        f"""
         SELECT
           COALESCE(phase, '') AS phase,
           COALESCE(provider, '') AS provider,
@@ -78,12 +79,10 @@ def _query_latency(
         FROM llm_calls
         WHERE elapsed_ms IS NOT NULL
           AND (error_text IS NULL OR error_text = '')
-          AND ({predicate})
+          AND ({predicate_sql})
         GROUP BY 1, 2, 3
         ORDER BY 1, 2, 3
-        """.format(
-            predicate=predicate or "1=1"
-        ),
+        """,
         params,
     ).fetchall()
 

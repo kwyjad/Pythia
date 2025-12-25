@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 import duckdb
-from forecaster.providers import DEFAULT_ENSEMBLE
+from forecaster.providers import DEFAULT_ENSEMBLE, SPD_ENSEMBLE, estimate_cost_usd, parse_ensemble_specs
 from pythia.db import schema as pythia_schema
 from resolver.db import duckdb_io
 from scripts.ci.llm_latency_summary import render_latency_markdown
@@ -211,12 +211,17 @@ def _provenance_markdown(
 
 
 def _load_self_search_stats(
-    con: duckdb.DuckDBPyConnection, predicate: str | None, params: list[Any]
+    con: duckdb.DuckDBPyConnection,
+    predicate: str | None,
+    params: list[Any],
+    phase: str = "forecast_web_research",
 ) -> dict[str, int]:
-    sql = "SELECT response_text FROM llm_calls WHERE phase = 'forecast_web_research'"
+    sql = "SELECT response_text FROM llm_calls WHERE phase = ?"
+    query_params: list[Any] = [phase]
     if predicate:
         sql += f" AND ({predicate})"
-    rows = con.execute(sql, params).fetchall()
+        query_params.extend(params)
+    rows = con.execute(sql, query_params).fetchall()
     requests = len(rows)
     sources = 0
     for row in rows:
@@ -237,11 +242,15 @@ def _load_self_search_stats(
     return {"requests": requests, "sources": sources}
 
 
-def _load_forecast_web_research_summary(
-    con: duckdb.DuckDBPyConnection, forecaster_run_id: str | None, hs_run_id: str | None
+def _load_web_research_summary(
+    con: duckdb.DuckDBPyConnection,
+    phase: str,
+    forecaster_run_id: str | None,
+    hs_run_id: str | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    predicate_parts: list[str] = ["phase = 'forecast_web_research'"]
+    predicate_parts: list[str] = ["phase = ?"]
     params: list[Any] = []
+    params.append(phase)
     scope_parts: list[str] = []
     if forecaster_run_id:
         scope_parts.append("run_id = ?")
@@ -518,13 +527,36 @@ def _web_research_accounting(
     return counts
 
 
+def _load_spd_llm_model_ids(con: duckdb.DuckDBPyConnection, run_id: str) -> list[str]:
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT model_id
+            FROM llm_calls
+            WHERE run_id = ?
+              AND phase = 'spd_v2'
+              AND model_id IS NOT NULL
+              AND model_id <> ''
+            ORDER BY model_id
+            """,
+            [run_id],
+        ).fetchall()
+    except Exception:
+        return []
+    return [str(row[0]) for row in rows if row and row[0]]
+
+
 def _web_research_markdown(
     hs_rows: list[dict[str, Any]],
     question_rows: list[dict[str, Any]],
     *,
     web_research_enabled: bool,
-    forecast_web_research_rows: list[dict[str, Any]] | None = None,
-    forecast_web_research_failures: list[dict[str, Any]] | None = None,
+    hs_web_research_rows: list[dict[str, Any]] | None = None,
+    hs_web_research_failures: list[dict[str, Any]] | None = None,
+    research_web_research_rows: list[dict[str, Any]] | None = None,
+    research_web_research_failures: list[dict[str, Any]] | None = None,
+    self_search_rows: list[dict[str, Any]] | None = None,
+    self_search_failures: list[dict[str, Any]] | None = None,
     accounting: dict[str, Any] | None = None,
 ) -> List[str]:
     lines: List[str] = []
@@ -540,12 +572,12 @@ def _web_research_markdown(
         lines.append(f"  - missing_usage: `{accounting.get('missing_usage', 0)}`")
         lines.append(f"  - missing_cost_usd: `{accounting.get('missing_cost_usd', 0)}`")
     lines.append("")
-    lines.append("#### Forecast web-search (forecast_web_research) summary")
+    lines.append("#### HS web research (hs_web_research) summary")
     lines.append("")
     lines.append("| provider | model_id | n_calls | n_verified_sources | n_errors |")
     lines.append("| -------- | -------- | ------- | ------------------ | -------- |")
-    if forecast_web_research_rows:
-        for row in forecast_web_research_rows:
+    if hs_web_research_rows:
+        for row in hs_web_research_rows:
             lines.append(
                 f"| {row.get('provider')} | {row.get('model_id')} | {row.get('n_calls')} | "
                 f"{row.get('n_verified_sources')} | {row.get('n_errors')} |"
@@ -553,12 +585,12 @@ def _web_research_markdown(
     else:
         lines.append("| (none) | (none) | 0 | 0 | 0 |")
     lines.append("")
-    lines.append("#### Web-search failures (forecast_web_research)")
+    lines.append("#### HS web research failures (hs_web_research)")
     lines.append("")
     lines.append("| provider | model_id | error_code | error_message |")
     lines.append("| -------- | -------- | ---------- | ------------- |")
-    if forecast_web_research_failures:
-        for row in forecast_web_research_failures:
+    if hs_web_research_failures:
+        for row in hs_web_research_failures:
             lines.append(
                 f"| {row.get('provider')} | {row.get('model_id')} | {row.get('error_code') or ''} | "
                 f"{row.get('error_message') or ''} |"
@@ -566,6 +598,59 @@ def _web_research_markdown(
     else:
         lines.append("| (none) | (none) | (none) | (none) |")
     lines.append("")
+    lines.append("#### Research web research (research_web_research) summary")
+    lines.append("")
+    lines.append("| provider | model_id | n_calls | n_verified_sources | n_errors |")
+    lines.append("| -------- | -------- | ------- | ------------------ | -------- |")
+    if research_web_research_rows:
+        for row in research_web_research_rows:
+            lines.append(
+                f"| {row.get('provider')} | {row.get('model_id')} | {row.get('n_calls')} | "
+                f"{row.get('n_verified_sources')} | {row.get('n_errors')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | 0 | 0 | 0 |")
+    lines.append("")
+    lines.append("#### Research web research failures (research_web_research)")
+    lines.append("")
+    lines.append("| provider | model_id | error_code | error_message |")
+    lines.append("| -------- | -------- | ---------- | ------------- |")
+    if research_web_research_failures:
+        for row in research_web_research_failures:
+            lines.append(
+                f"| {row.get('provider')} | {row.get('model_id')} | {row.get('error_code') or ''} | "
+                f"{row.get('error_message') or ''} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | (none) |")
+    lines.append("")
+    if self_search_rows or self_search_failures:
+        lines.append("#### Forecast self-search (forecast_web_research) summary")
+        lines.append("")
+        lines.append("| provider | model_id | n_calls | n_verified_sources | n_errors |")
+        lines.append("| -------- | -------- | ------- | ------------------ | -------- |")
+        if self_search_rows:
+            for row in self_search_rows:
+                lines.append(
+                    f"| {row.get('provider')} | {row.get('model_id')} | {row.get('n_calls')} | "
+                    f"{row.get('n_verified_sources')} | {row.get('n_errors')} |"
+                )
+        else:
+            lines.append("| (none) | (none) | 0 | 0 | 0 |")
+        lines.append("")
+        lines.append("#### Forecast self-search failures (forecast_web_research)")
+        lines.append("")
+        lines.append("| provider | model_id | error_code | error_message |")
+        lines.append("| -------- | -------- | ---------- | ------------- |")
+        if self_search_failures:
+            for row in self_search_failures:
+                lines.append(
+                    f"| {row.get('provider')} | {row.get('model_id')} | {row.get('error_code') or ''} | "
+                    f"{row.get('error_message') or ''} |"
+                )
+        else:
+            lines.append("| (none) | (none) | (none) | (none) |")
+        lines.append("")
     lines.append("#### HS country evidence packs")
     lines.append("")
     lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | attempted_backends | selected_backend | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
@@ -954,8 +1039,10 @@ def _load_llm_error_summary(
 
 def _ensemble_participation_summary(
     forecasts_raw_counts: list[dict[str, Any]],
+    spd_model_ids: list[str],
 ) -> list[str]:
     present = {row.get("model_name"): int(row.get("n_rows", 0) or 0) for row in forecasts_raw_counts}
+    present_spd_models = {mid for mid in spd_model_ids if mid}
     lines: list[str] = []
     if present:
         for model_name in sorted(present):
@@ -963,21 +1050,34 @@ def _ensemble_participation_summary(
     else:
         lines.append("- No forecasts_raw rows found for this run.")
 
-    expected = [spec for spec in DEFAULT_ENSEMBLE if getattr(spec, "model_id", "")]
-    missing = [
-        spec for spec in expected if spec.model_id not in present and getattr(spec, "active", False)
-    ]
-    if expected:
-        lines.append(f"- Expected ensemble size: {len(expected)} (DEFAULT_ENSEMBLE).")
-        if missing:
-            for spec in sorted(missing, key=lambda s: (s.provider, s.model_id)):
-                lines.append(
-                    f"  - Missing forecasts_raw rows for provider `{spec.provider}` model `{spec.model_id}`."
-                )
+    spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
+    expected_specs = parse_ensemble_specs(spec_override) if spec_override else list(SPD_ENSEMBLE)
+    if not expected_specs:
+        expected_specs = [spec for spec in DEFAULT_ENSEMBLE if getattr(spec, "model_id", "")]
+
+    expected_specs = [spec for spec in expected_specs if getattr(spec, "model_id", "") and getattr(spec, "active", True)]
+    expected_names = {spec.name for spec in expected_specs if getattr(spec, "name", "")}
+    expected_model_ids = {spec.model_id for spec in expected_specs if getattr(spec, "model_id", "")}
+    missing_by_name = sorted(expected_names - set(present.keys()))
+    missing_by_model_id = sorted(expected_model_ids - present_spd_models)
+
+    if expected_specs:
+        lines.append(
+            f"- Expected ensemble size: {len(expected_specs)} "
+            f"({('PYTHIA_SPD_ENSEMBLE_SPECS' if spec_override else 'SPD_ENSEMBLE')})."
+        )
+        if missing_by_name:
+            for name in missing_by_name:
+                lines.append(f"  - Missing forecasts_raw rows for model `{name}`.")
         else:
-            lines.append("- All active DEFAULT_ENSEMBLE models produced forecasts_raw rows.")
+            lines.append("- All expected ensemble models produced forecasts_raw rows.")
+        if missing_by_model_id:
+            for model_id in missing_by_model_id:
+                lines.append(f"  - Missing spd_v2 llm_calls rows for model_id `{model_id}`.")
+        else:
+            lines.append("- All expected ensemble model_ids appear in spd_v2 llm_calls.")
     else:
-        lines.append("- DEFAULT_ENSEMBLE is empty or not configured; skipping expected-model check.")
+        lines.append("- SPD ensemble is empty or not configured; skipping expected-model check.")
     return lines
 
 
@@ -1538,9 +1638,14 @@ def _aggregate_usage_by_phase(
         phase_acc["completion_tokens"] += float(usage.get("completion_tokens") or 0.0)
         phase_acc["total_tokens"] += float(usage.get("total_tokens") or 0.0)
         # For backwards compatibility, accept either total_cost_usd or cost_usd
-        phase_acc["total_cost_usd"] += float(
-            usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0
-        )
+        cost_val = float(usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0)
+        if cost_val == 0.0:
+            total_tokens = float(usage.get("total_tokens") or 0.0)
+            if total_tokens > 0:
+                model_id = row.get("model_id") or ""
+                if model_id:
+                    cost_val = estimate_cost_usd(str(model_id), usage)
+        phase_acc["total_cost_usd"] += cost_val
 
     return out
 
@@ -1857,15 +1962,25 @@ def build_triage_only_bundle_markdown(
     hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
     spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
     web_research_accounting = _web_research_accounting(con, None, hs_run_id)
-    forecast_web_research_rows, forecast_web_research_failures = _load_forecast_web_research_summary(
-        con, None, hs_run_id
+    hs_web_research_rows, hs_web_research_failures = _load_web_research_summary(
+        con, "hs_web_research", None, hs_run_id
+    )
+    research_web_research_rows, research_web_research_failures = _load_web_research_summary(
+        con, "research_web_research", None, hs_run_id
+    )
+    self_search_rows, self_search_failures = _load_web_research_summary(
+        con, "forecast_web_research", None, hs_run_id
     )
     web_research_lines = _web_research_markdown(
         hs_web_rows,
         question_web_rows,
         web_research_enabled=web_research_enabled,
-        forecast_web_research_rows=forecast_web_research_rows,
-        forecast_web_research_failures=forecast_web_research_failures,
+        hs_web_research_rows=hs_web_research_rows,
+        hs_web_research_failures=hs_web_research_failures,
+        research_web_research_rows=research_web_research_rows,
+        research_web_research_failures=research_web_research_failures,
+        self_search_rows=self_search_rows,
+        self_search_failures=self_search_failures,
         accounting=web_research_accounting,
     )
 
@@ -2047,6 +2162,7 @@ def build_debug_bundle_markdown(
     scenario_status_by_qid = {row["question_id"]: row for row in scenario_status_rows}
     forecasts_raw_counts = _load_forecasts_raw_counts(con, forecaster_run_id)
     forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, forecaster_run_id)
+    spd_model_ids = _load_spd_llm_model_ids(con, forecaster_run_id)
     manifest_hs_run_id = hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None)
     hs_manifest = _load_hs_run_metadata(con, manifest_hs_run_id)
     question_ids = sorted([str(q.get("question_id")) for q in questions if q.get("question_id")])
@@ -2076,15 +2192,25 @@ def build_debug_bundle_markdown(
     hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
     spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
     web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
-    forecast_web_research_rows, forecast_web_research_failures = _load_forecast_web_research_summary(
-        con, forecaster_run_id, manifest_hs_run_id
+    hs_web_research_rows, hs_web_research_failures = _load_web_research_summary(
+        con, "hs_web_research", forecaster_run_id, manifest_hs_run_id
+    )
+    research_web_research_rows, research_web_research_failures = _load_web_research_summary(
+        con, "research_web_research", forecaster_run_id, manifest_hs_run_id
+    )
+    self_search_rows, self_search_failures = _load_web_research_summary(
+        con, "forecast_web_research", forecaster_run_id, manifest_hs_run_id
     )
     web_research_lines = _web_research_markdown(
         hs_web_rows,
         question_web_rows,
         web_research_enabled=web_research_enabled,
-        forecast_web_research_rows=forecast_web_research_rows,
-        forecast_web_research_failures=forecast_web_research_failures,
+        hs_web_research_rows=hs_web_research_rows,
+        hs_web_research_failures=hs_web_research_failures,
+        research_web_research_rows=research_web_research_rows,
+        research_web_research_failures=research_web_research_failures,
+        self_search_rows=self_search_rows,
+        self_search_failures=self_search_failures,
         accounting=web_research_accounting,
     )
 
@@ -2373,7 +2499,7 @@ def build_debug_bundle_markdown(
 
     lines.append("### 1.7 Ensemble participation summary")
     lines.append("")
-    lines.extend(_ensemble_participation_summary(forecasts_raw_counts))
+    lines.extend(_ensemble_participation_summary(forecasts_raw_counts, spd_model_ids))
     lines.append("")
 
     lines.append("### 1.8 Self-search (forecast_web_research) summary")
@@ -2381,7 +2507,7 @@ def build_debug_bundle_markdown(
     if self_search_warning:
         lines.append(f"_Note: {self_search_warning}_")
         lines.append("")
-    lines.append("_Note: Forecast web-search summary above is the primary signal; self-search counts are secondary._")
+    lines.append("_Note: Self-search is model-specific and may be empty when the shared retriever handles evidence._")
     lines.append("")
     lines.append("| metric | value |")
     lines.append("| --- | --- |")

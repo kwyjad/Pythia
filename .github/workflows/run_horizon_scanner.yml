@@ -41,10 +41,10 @@ jobs:
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
-      PYTHIA_LLM_CONCURRENCY: "18"
-      HS_MAX_WORKERS: "6"
-      FORECASTER_RESEARCH_MAX_WORKERS: "6"
-      FORECASTER_SPD_MAX_WORKERS: "6"
+      PYTHIA_LLM_CONCURRENCY: "32"
+      HS_MAX_WORKERS: "8"
+      FORECASTER_RESEARCH_MAX_WORKERS: "8"
+      FORECASTER_SPD_MAX_WORKERS: "8"
       PYTHIA_WEB_RESEARCH_ENABLED: "1"
       PYTHIA_RETRIEVER_ENABLED: "1"
       PYTHIA_RETRIEVER_MODEL_ID: "gemini-2.5-flash-lite"
@@ -62,6 +62,11 @@ jobs:
       HS_MODEL_ID: gemini-3-flash-preview
       PYTHIA_BLOCK_PROVIDERS: xai
       PYTHIA_SPD_ENSEMBLE_SPECS: openai:gpt-5.1,anthropic:claude-opus-4-5-20251101,google:gemini-3-pro-preview,google:gemini-3-flash-preview
+      PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
+      PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""
+      PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC: "90"
+      PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC: "120"
+      PYTHIA_GOOGLE_SPD_RETRIES: "1"
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
       SIGNATURE_OPTIONAL_TABLES: scenarios
       CANONICAL_DB_READY: "false"
@@ -614,23 +619,30 @@ jobs:
             exit 0
           fi
 
+          python -m scripts.ci.db_signature write \
+            --db data/resolver.duckdb \
+            --required "${REQUIRED_TABLES}" \
+            --optional "${OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_after.json
+
+          signature_ok="true"
+          compare_status=0
           if [ -f diagnostics/db_signature_before.json ]; then
+            set +e
             python -m scripts.ci.db_signature compare \
               --before diagnostics/db_signature_before.json \
               --after-db data/resolver.duckdb \
               --required "${REQUIRED_TABLES}" \
               --optional "${OPTIONAL_TABLES}" \
-              --out diagnostics/db_signature_after.json
-          else
-            python -m scripts.ci.db_signature write \
-              --db data/resolver.duckdb \
-              --required "${REQUIRED_TABLES}" \
-              --optional "${OPTIONAL_TABLES}" \
-              --out diagnostics/db_signature_after.json
+              --out diagnostics/db_signature_after.json || compare_status=$?
+            set -e
+            if [ "${compare_status}" -ne 0 ]; then
+              signature_ok="false"
+            fi
           fi
 
-          echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
-          echo "signature_ok=true" >> "$GITHUB_OUTPUT"
+          echo "SIGNATURE_OK=${signature_ok}" >> "$GITHUB_ENV"
+          echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
 
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {

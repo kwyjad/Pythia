@@ -634,6 +634,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             ", ".join(hazard_codes) if hazard_codes else "",
         )
 
+        usage_for_log = dict(usage or {})
+        if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
+            model_id_for_cost = getattr(model_spec, "model_id", None) or _resolve_hs_model()
+            if model_id_for_cost:
+                usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
+
         log_hs_llm_call(
             hs_run_id=run_id,
             iso3=iso3_up,
@@ -641,7 +647,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             model_spec=model_spec,
             prompt_text=prompt,
             response_text=text or "",
-            usage=usage,
+            usage=usage_for_log,
             error_text=log_error_text,
         )
         logger.info(
@@ -661,12 +667,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
 
         _write_hs_triage(run_id, iso3_up, triage)
 
-        cost = usage.get("cost_usd") or estimate_cost_usd(_resolve_hs_model(), usage)
+        cost = usage_for_log.get("cost_usd") or estimate_cost_usd(_resolve_hs_model(), usage_for_log)
         logger.info(
             "HS triage completed for %s (%s): tokens=%s cost_usd=%.4f",
             country_name,
             iso3,
-            usage.get("total_tokens"),
+            usage_for_log.get("total_tokens"),
             cost or 0.0,
         )
         return {"iso3": iso3_up, "error_text": None, "response_text": text or ""}
