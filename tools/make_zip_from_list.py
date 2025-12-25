@@ -34,18 +34,14 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
-    "pythia/config.yaml",
     "forecaster/cli.py",
     "forecaster/providers.py",
-    "pythia/web_research/web_research.py",
-    "pythia/web_research/backends/openai_web_search.py",
-    "pythia/web_research/backends/claude_web_search.py",
-    "pythia/web_research/backends/gemini_grounding.py",
     ".github/workflows/run_horizon_scanner.yml",
-    ".github/workflows/forecaster-ci.yml",
-    "forecaster/config.py",
-    "pythia/config.py",
-    "pythia/config.yaml",
+    "scripts/dump_pythia_debug_bundle.py",
+    "scripts/ci/llm_latency_summary.py",
+    "horizon_scanner/horizon_scanner.py",
+    "horizon_scanner/db_writer.py",
+    "scripts/ci/db_signature.py",
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
