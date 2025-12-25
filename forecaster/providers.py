@@ -430,7 +430,36 @@ def _build_spd_default_ensemble() -> List[ModelSpec]:
 
 
 SPD_ENSEMBLE_OVERRIDE: List[ModelSpec] = parse_ensemble_specs(os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", ""))
-SPD_ENSEMBLE: List[ModelSpec] = SPD_ENSEMBLE_OVERRIDE or _build_spd_default_ensemble()
+
+
+def _apply_spd_google_model_override(specs: List[ModelSpec]) -> List[ModelSpec]:
+    override = (os.getenv("PYTHIA_SPD_GOOGLE_MODEL_ID") or "").strip()
+    if not override:
+        return specs
+
+    updated: List[ModelSpec] = []
+    seen: set[tuple[str, str]] = set()
+    for ms in specs:
+        if ms.provider == "google":
+            ms = ModelSpec(
+                name=ms.name,
+                provider=ms.provider,
+                model_id=override,
+                weight=ms.weight,
+                active=bool(ms.active and override),
+                purpose=ms.purpose,
+            )
+        key = (ms.provider, ms.model_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        updated.append(ms)
+    return updated
+
+
+SPD_ENSEMBLE: List[ModelSpec] = _apply_spd_google_model_override(
+    SPD_ENSEMBLE_OVERRIDE or _build_spd_default_ensemble()
+)
 
 # backwards-compatible aliases reused elsewhere in the forecaster package
 _OPENAI_STATE = _PROVIDER_STATES.get("openai", {})

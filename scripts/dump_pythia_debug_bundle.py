@@ -237,6 +237,92 @@ def _load_self_search_stats(
     return {"requests": requests, "sources": sources}
 
 
+def _load_forecast_web_research_summary(
+    con: duckdb.DuckDBPyConnection, forecaster_run_id: str | None, hs_run_id: str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    predicate_parts: list[str] = ["phase = 'forecast_web_research'"]
+    params: list[Any] = []
+    scope_parts: list[str] = []
+    if forecaster_run_id:
+        scope_parts.append("run_id = ?")
+        params.append(forecaster_run_id)
+    if hs_run_id:
+        scope_parts.append("hs_run_id = ?")
+        params.append(hs_run_id)
+    if scope_parts:
+        predicate_parts.append(f"({' OR '.join(scope_parts)})")
+    predicate = " AND ".join(predicate_parts)
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT provider, model_id, response_text, error_text
+            FROM llm_calls
+            WHERE {predicate}
+            """,
+            params,
+        )
+    except Exception:
+        return [], []
+
+    counts: dict[tuple[str, str], dict[str, Any]] = {}
+    failures: list[dict[str, Any]] = []
+    for row in rows:
+        provider = str(row.get("provider") or "")
+        model_id = str(row.get("model_id") or "")
+        key = (provider, model_id)
+        entry = counts.setdefault(
+            key,
+            {"provider": provider, "model_id": model_id, "n_calls": 0, "n_errors": 0, "n_verified_sources": 0},
+        )
+        entry["n_calls"] += 1
+
+        error_text = (row.get("error_text") or "").strip()
+        response_text = row.get("response_text") or "{}"
+        error_code = ""
+        error_message = ""
+        try:
+            payload = json.loads(response_text)
+        except Exception:
+            payload = {}
+
+        sources = payload.get("sources") if isinstance(payload, dict) else None
+        if isinstance(sources, list):
+            entry["n_verified_sources"] += len(sources)
+
+        error_obj = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error_obj, dict):
+            error_code = str(error_obj.get("code") or "")
+            error_message = str(error_obj.get("message") or "")
+
+        if error_text or error_code or error_message:
+            entry["n_errors"] += 1
+            failures.append(
+                {
+                    "provider": provider,
+                    "model_id": model_id,
+                    "error_code": error_code,
+                    "error_message": error_text or error_message,
+                }
+            )
+
+    summary_rows = sorted(
+        counts.values(),
+        key=lambda r: (str(r.get("provider") or ""), str(r.get("model_id") or "")),
+    )
+    failure_rows = sorted(
+        failures,
+        key=lambda r: (
+            str(r.get("provider") or ""),
+            str(r.get("model_id") or ""),
+            str(r.get("error_code") or ""),
+            str(r.get("error_message") or ""),
+        ),
+    )
+    return summary_rows, failure_rows
+
+
 def _extract_urls(sources: Any, limit: int = 5) -> list[str]:
     urls: list[str] = []
     if not sources:
@@ -437,6 +523,8 @@ def _web_research_markdown(
     question_rows: list[dict[str, Any]],
     *,
     web_research_enabled: bool,
+    forecast_web_research_rows: list[dict[str, Any]] | None = None,
+    forecast_web_research_failures: list[dict[str, Any]] | None = None,
     accounting: dict[str, Any] | None = None,
 ) -> List[str]:
     lines: List[str] = []
@@ -451,6 +539,32 @@ def _web_research_markdown(
         lines.append(f"  - missing_model_id: `{accounting.get('missing_model_id', 0)}`")
         lines.append(f"  - missing_usage: `{accounting.get('missing_usage', 0)}`")
         lines.append(f"  - missing_cost_usd: `{accounting.get('missing_cost_usd', 0)}`")
+    lines.append("")
+    lines.append("#### Forecast web-search (forecast_web_research) summary")
+    lines.append("")
+    lines.append("| provider | model_id | n_calls | n_verified_sources | n_errors |")
+    lines.append("| -------- | -------- | ------- | ------------------ | -------- |")
+    if forecast_web_research_rows:
+        for row in forecast_web_research_rows:
+            lines.append(
+                f"| {row.get('provider')} | {row.get('model_id')} | {row.get('n_calls')} | "
+                f"{row.get('n_verified_sources')} | {row.get('n_errors')} |"
+            )
+    else:
+        lines.append("| (none) | (none) | 0 | 0 | 0 |")
+    lines.append("")
+    lines.append("#### Web-search failures (forecast_web_research)")
+    lines.append("")
+    lines.append("| provider | model_id | error_code | error_message |")
+    lines.append("| -------- | -------- | ---------- | ------------- |")
+    if forecast_web_research_failures:
+        for row in forecast_web_research_failures:
+            lines.append(
+                f"| {row.get('provider')} | {row.get('model_id')} | {row.get('error_code') or ''} | "
+                f"{row.get('error_message') or ''} |"
+            )
+    else:
+        lines.append("| (none) | (none) | (none) | (none) |")
     lines.append("")
     lines.append("#### HS country evidence packs")
     lines.append("")
@@ -1743,10 +1857,15 @@ def build_triage_only_bundle_markdown(
     hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
     spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
     web_research_accounting = _web_research_accounting(con, None, hs_run_id)
+    forecast_web_research_rows, forecast_web_research_failures = _load_forecast_web_research_summary(
+        con, None, hs_run_id
+    )
     web_research_lines = _web_research_markdown(
         hs_web_rows,
         question_web_rows,
         web_research_enabled=web_research_enabled,
+        forecast_web_research_rows=forecast_web_research_rows,
+        forecast_web_research_failures=forecast_web_research_failures,
         accounting=web_research_accounting,
     )
 
@@ -1792,6 +1911,13 @@ def build_triage_only_bundle_markdown(
     lines.append(f"- Skipped country entries: `{len(skipped_entries or [])}`")
     lines.append(f"- n_countries_resolved: `{len(resolved_countries_sorted)}`")
     lines.append(f"- n_hazards_triaged_total: `{n_hazards_triaged_total}`")
+    lines.append("")
+    lines.append("### Run scope")
+    lines.append("")
+    lines.append(
+        f"- PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: `{hs_research_web_search}`"
+    )
+    lines.append(f"- PYTHIA_SPD_WEB_SEARCH_ENABLED: `{spd_web_search}`")
     lines.append("")
     lines.extend(provenance_lines)
     lines.extend(web_research_lines)
@@ -1959,10 +2085,15 @@ def build_debug_bundle_markdown(
     hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
     spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
     web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
+    forecast_web_research_rows, forecast_web_research_failures = _load_forecast_web_research_summary(
+        con, forecaster_run_id, manifest_hs_run_id
+    )
     web_research_lines = _web_research_markdown(
         hs_web_rows,
         question_web_rows,
         web_research_enabled=web_research_enabled,
+        forecast_web_research_rows=forecast_web_research_rows,
+        forecast_web_research_failures=forecast_web_research_failures,
         accounting=web_research_accounting,
     )
 
@@ -2042,6 +2173,13 @@ def build_debug_bundle_markdown(
         )
     )
     lines.append(f"- n_hazards_triaged_total: `{n_hazards_triaged_total}`")
+    lines.append("")
+    lines.append("### Run scope")
+    lines.append("")
+    lines.append(
+        f"- PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: `{hs_research_web_search}`"
+    )
+    lines.append(f"- PYTHIA_SPD_WEB_SEARCH_ENABLED: `{spd_web_search}`")
     lines.append("")
     lines.extend(provenance_lines)
     lines.extend(web_research_lines)
@@ -2261,6 +2399,8 @@ def build_debug_bundle_markdown(
     if self_search_warning:
         lines.append(f"_Note: {self_search_warning}_")
         lines.append("")
+    lines.append("_Note: Forecast web-search summary above is the primary signal; self-search counts are secondary._")
+    lines.append("")
     lines.append("| metric | value |")
     lines.append("| --- | --- |")
     lines.append(f"| self_search_requests_count | {self_search_stats.get('requests', 0)} |")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Tuple, Set
 
@@ -38,29 +39,40 @@ def _parse_sources_from_output(output: List[Dict[str, Any]]) -> List[EvidenceSou
     seen: Set[str] = set()
 
     for item in output:
-        if item.get("type") == "web_search_call":
-            action = (item.get("web_search_call") or {}).get("action") or item.get("action") or {}
-            for src in action.get("sources") or []:
-                url = src.get("url") or src.get("uri") or ""
+        if item.get("type") != "web_search_call":
+            continue
+        action = (item.get("web_search_call") or {}).get("action") or item.get("action") or {}
+        for src in action.get("sources") or []:
+            url = src.get("url") or src.get("uri") or ""
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            title = src.get("title") or url
+            summary = src.get("summary") or ""
+            publisher = src.get("source") or ""
+            sources.append(EvidenceSource(title=title, url=url, publisher=publisher, summary=summary))
+
+    return sources
+
+
+def _parse_unverified_sources_from_output(output: List[Dict[str, Any]]) -> List[EvidenceSource]:
+    sources: List[EvidenceSource] = []
+    seen: Set[str] = set()
+
+    for item in output:
+        if item.get("type") != "message":
+            continue
+        message = item.get("message") or {}
+        for content in message.get("content") or []:
+            if content.get("type") != "output_text":
+                continue
+            for ann in content.get("annotations") or []:
+                url = ann.get("url") or ""
                 if not url or url in seen:
                     continue
                 seen.add(url)
-                title = src.get("title") or url
-                summary = src.get("summary") or ""
-                publisher = src.get("source") or ""
-                sources.append(EvidenceSource(title=title, url=url, publisher=publisher, summary=summary))
-        elif item.get("type") == "message":
-            message = item.get("message") or {}
-            for content in message.get("content") or []:
-                if content.get("type") != "output_text":
-                    continue
-                for ann in content.get("annotations") or []:
-                    url = ann.get("url") or ""
-                    if not url or url in seen:
-                        continue
-                    seen.add(url)
-                    title = ann.get("title") or url
-                    sources.append(EvidenceSource(title=title, url=url, publisher="", summary=""))
+                title = ann.get("title") or url
+                sources.append(EvidenceSource(title=title, url=url, publisher="", summary=""))
 
     return sources
 
@@ -136,7 +148,8 @@ def fetch_via_openai_web_search(
     data: Dict[str, Any] = {}
     provider_error_message = None
 
-    def _create(model: str) -> Dict[str, Any]:
+    def _create(model: str) -> tuple[Dict[str, Any], int]:
+        start = time.time()
         resp = client.responses.create(
             model=model,
             input=prompt,
@@ -145,12 +158,14 @@ def fetch_via_openai_web_search(
             max_output_tokens=800,
             include=["web_search_call.action.sources"],
         )
-        return _response_to_dict(resp)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return _response_to_dict(resp), elapsed_ms
 
+    elapsed_ms: int | None = None
     for candidate_model in (model_id, fallback_model):
         used_model = candidate_model
         try:
-            data = _create(candidate_model)
+            data, elapsed_ms = _create(candidate_model)
             break
         except Exception as exc:  # pragma: no cover - network failures
             provider_error_message = str(exc)
@@ -159,6 +174,7 @@ def fetch_via_openai_web_search(
 
     output = data.get("output") or []
     sources = _parse_sources_from_output(output)
+    unverified_sources = _parse_unverified_sources_from_output(output)
     grounded = bool(sources)
     structural_context, recent_signals, extra_debug = _parse_structured_text(output, include_structural)
 
@@ -168,13 +184,14 @@ def fetch_via_openai_web_search(
         "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
         "total_tokens": int(usage_raw.get("total_tokens", 0) or 0),
         "web_search_requests": usage_raw.get("web_search_requests"),
+        "elapsed_ms": elapsed_ms or 0,
     }
 
     pack.sources = sources
     pack.grounded = grounded
     pack.structural_context = structural_context if include_structural else ""
     pack.recent_signals = recent_signals
-    pack.unverified_sources = []
+    pack.unverified_sources = unverified_sources
 
     pack.debug = {
         **extra_debug,
