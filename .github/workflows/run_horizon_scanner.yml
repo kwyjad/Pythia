@@ -46,6 +46,9 @@ jobs:
       FORECASTER_RESEARCH_MAX_WORKERS: "6"
       FORECASTER_SPD_MAX_WORKERS: "6"
       PYTHIA_WEB_RESEARCH_ENABLED: "1"
+      PYTHIA_RETRIEVER_ENABLED: "1"
+      PYTHIA_RETRIEVER_MODEL_ID: "gemini-2.5-flash-lite"
+      PYTHIA_MODEL_SELF_SEARCH_ENABLED: "0"
       # Flip HS/Research to 1 when Gemini 3 grounding is available.
       PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "0"
       PYTHIA_SPD_WEB_SEARCH_ENABLED: "1"
@@ -599,6 +602,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Compare DB signature after HS run
+        if: always()
         id: signature_after
         env:
           REQUIRED_TABLES: ${{ env.SIGNATURE_REQUIRED_TABLES }}

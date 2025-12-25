@@ -19,6 +19,7 @@ from pythia.db.schema import connect, ensure_schema
 def test_hs_country_report_persisted_when_web_research_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "test.duckdb"
     monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+    monkeypatch.setenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "1")
     monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
 
     fake_pack = {

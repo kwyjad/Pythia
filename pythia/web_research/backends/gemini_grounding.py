@@ -70,6 +70,8 @@ def fetch_via_gemini(
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     env_model_id = (model_id or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
+    if not env_model_id and os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1":
+        env_model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
     model_candidates: List[str] = []
     if env_model_id:
         model_candidates.append(env_model_id)

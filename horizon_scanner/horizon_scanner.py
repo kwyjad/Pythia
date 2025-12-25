@@ -140,13 +140,24 @@ def _render_evidence_markdown(pack: dict[str, Any]) -> str:
 
 
 def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str) -> dict[str, Any] | None:
-    if os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") != "1":
+    retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
+    if not retriever_enabled and os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") != "1":
         return None
 
     pack: dict[str, Any] | None = None
     try:
         query = _build_hs_evidence_query(country_name, iso3)
-        pack = dict(fetch_evidence_pack(query, purpose="hs_country_report", run_id=run_id, hs_run_id=run_id) or {})
+        model_id = os.getenv("PYTHIA_RETRIEVER_MODEL_ID") if retriever_enabled else None
+        pack = dict(
+            fetch_evidence_pack(
+                query,
+                purpose="hs_country_pack",
+                run_id=run_id,
+                hs_run_id=run_id,
+                model_id=model_id or None,
+            )
+            or {}
+        )
     except Exception as exc:  # noqa: BLE001 - defensive around web research
         logger.warning("HS web research failed for %s: %s", iso3, exc)
         pack = {

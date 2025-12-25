@@ -18,6 +18,7 @@ from pythia.web_research.budget import BudgetGuard, BudgetExceededError
 from pythia.web_research.cache import get as cache_get, set as cache_set
 from pythia.web_research.types import EvidencePack, EvidenceSource
 from pythia.db.util import log_web_research_call
+from forecaster.providers import estimate_cost_usd
 
 
 class WebResearchError(Exception):
@@ -81,9 +82,10 @@ def _normalize_attempted_backends(value: Any, default_backend: str, pack: Eviden
     return attempts
 
 
-def _build_cache_key(query: str, recency_days: int, backend: str) -> str:
+def _build_cache_key(query: str, recency_days: int, backend: str, model_id: str | None) -> str:
     h = hashlib.sha256()
-    h.update(f"{query}|{recency_days}|{backend}".encode("utf-8"))
+    model_tag = model_id or ""
+    h.update(f"{query}|{recency_days}|{backend}|{model_tag}".encode("utf-8"))
     return h.hexdigest()
 
 
@@ -154,6 +156,7 @@ def fetch_evidence_pack(
     run_id: Optional[str] = None,
     question_id: Optional[str] = None,
     hs_run_id: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Unified entrypoint for web research evidence packs.
@@ -162,12 +165,19 @@ def fetch_evidence_pack(
     caps are hit, a structured error is returned.
     """
 
+    retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
+    retriever_model_id = _env_str("PYTHIA_RETRIEVER_MODEL_ID", "")
     backend = _env_str("PYTHIA_WEB_RESEARCH_BACKEND", "gemini").lower()
     recency_days = _env_int("PYTHIA_WEB_RESEARCH_RECENCY_DAYS", 120)
     include_structural = os.getenv("PYTHIA_WEB_RESEARCH_INCLUDE_STRUCTURAL", "1") != "0"
     timeout_sec = _env_int("PYTHIA_WEB_RESEARCH_TIMEOUT_SEC", 60)
     max_results = _env_int("PYTHIA_WEB_RESEARCH_MAX_RESULTS", 10)
     fallback_backend = _env_str("PYTHIA_WEB_RESEARCH_FALLBACK_BACKEND", "").lower()
+    if retriever_enabled:
+        backend = "gemini"
+        fallback_backend = ""
+        if not model_id:
+            model_id = retriever_model_id or None
 
     start_ms = int(time.time() * 1000)
     guard = BudgetGuard(run_id or "default")
@@ -191,7 +201,7 @@ def fetch_evidence_pack(
         _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=False)
         return pack.to_dict()
 
-    cache_key = _build_cache_key(query, recency_days, backend)
+    cache_key = _build_cache_key(query, recency_days, backend, model_id)
     cached_value = cache_get(cache_key)
     if cached_value:
         pack = _pack_from_cache(query, cached_value, backend=backend, recency_days=recency_days)
@@ -225,13 +235,15 @@ def fetch_evidence_pack(
                     continue
 
                 backend_fn = getattr(module, func_name)
-                candidate = backend_fn(
-                    query,
-                    recency_days=recency_days,
-                    include_structural=include_structural,
-                    timeout_sec=timeout_sec,
-                    max_results=max_results,
-                )
+                backend_kwargs = {
+                    "recency_days": recency_days,
+                    "include_structural": include_structural,
+                    "timeout_sec": timeout_sec,
+                    "max_results": max_results,
+                }
+                if backend_name == "gemini":
+                    backend_kwargs["model_id"] = model_id
+                candidate = backend_fn(query, **backend_kwargs)
                 candidate.grounded = bool(candidate.sources)
                 _record_attempt(candidate)
                 if candidate.sources:
@@ -295,6 +307,7 @@ def fetch_evidence_pack(
                     include_structural=include_structural,
                     timeout_sec=timeout_sec,
                     max_results=max_results,
+                    model_id=model_id,
                 )
         elif backend == "openai":
             module, import_err = _load_backend_module("openai_web_search")
@@ -387,6 +400,7 @@ def _log_web_research(
             "n_sources": len(pack.sources),
             "n_verified_sources": len(pack.sources),
             "cached": cached,
+            "elapsed_ms": elapsed_ms,
         }
         if isinstance(pack.debug, dict):
             if "attempted_backends" in pack.debug:
@@ -418,8 +432,12 @@ def _log_web_research(
             model_id = str(pack.debug.get("selected_model_id") or pack.debug.get("model_id") or model_id)
         if not provider:
             provider = "google" if pack.backend == "gemini" else pack.backend or "unknown"
+        if os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1" and pack.backend == "gemini":
+            model_id = model_id or os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "gemini-2.5-flash-lite"
         if pack.backend == "gemini":
             model_name = "Gemini Grounding"
+        if "cost_usd" not in usage_json or float(usage_json.get("cost_usd") or 0.0) == 0.0:
+            usage_json["cost_usd"] = estimate_cost_usd(model_id, usage_json)
         log_web_research_call(
             con,
             component="web_research",

@@ -92,3 +92,12 @@ def test_spd_ensemble_override_keeps_two_gemini_models(monkeypatch: pytest.Monke
 
     assert len(google_specs) == 2
     assert {ms.model_id for ms in google_specs} == {"gemini-3-pro-preview", "gemini-3-flash-preview"}
+
+
+def test_estimate_cost_usd_flash_lite() -> None:
+    from forecaster import providers
+
+    usage = {"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000}
+    cost = providers.estimate_cost_usd("gemini-2.5-flash-lite", usage)
+
+    assert cost == pytest.approx(0.0005)
