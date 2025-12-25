@@ -492,7 +492,10 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> No
         grounded = bool(payload.get("grounded"))
         grounding_debug_json = json.dumps(payload.get("grounding_debug") or {}, ensure_ascii=False)
         structural_context = payload.get("structural_context") or ""
-        recent_signals_json = json.dumps(payload.get("recent_signals") or [], ensure_ascii=False)
+        recent_signals = payload.get("recent_signals") or []
+        if not isinstance(recent_signals, list):
+            recent_signals = [str(recent_signals)]
+        recent_signals_json = json.dumps(recent_signals, ensure_ascii=False)
 
         con.execute(
             "DELETE FROM hs_country_reports WHERE hs_run_id = ? AND iso3 = ?;",

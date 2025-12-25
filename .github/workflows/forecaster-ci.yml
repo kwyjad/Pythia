@@ -64,6 +64,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_LLM_CONCURRENCY: "8"
+      HS_MAX_WORKERS: "4"
+      FORECASTER_RESEARCH_MAX_WORKERS: "4"
+      FORECASTER_SPD_MAX_WORKERS: "4"
       PYTHIA_WEB_RESEARCH_ENABLED: "0"
       PYTHIA_RETRIEVER_ENABLED: "0"
       PYTHIA_MODEL_SELF_SEARCH_ENABLED: "0"

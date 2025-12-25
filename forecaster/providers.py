@@ -744,17 +744,27 @@ def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResul
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
-def call_google(prompt: str, model: str, temperature: float) -> ProviderResult:
+def call_google(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    timeout: Optional[float] = None,
+    thinking_level: Optional[str] = None,
+) -> ProviderResult:
     if not _GEMINI_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing GEMINI_API_KEY")
     api_model = model.split("/", 1)[-1] if "/" in model else model
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={_GEMINI_API_KEY}"
+    generation_config: Dict[str, Any] = {"temperature": float(temperature)}
+    if thinking_level and model.lower().startswith("gemini-3-"):
+        generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": float(temperature)},
+        "generationConfig": generation_config,
     }
     try:
-        resp = requests.post(url, json=body, timeout=_GEMINI_TIMEOUT)
+        resp = requests.post(url, json=body, timeout=timeout if timeout is not None else _GEMINI_TIMEOUT)
     except Exception as exc:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"Gemini request error: {exc}")
 
@@ -868,14 +878,22 @@ def call_xai(prompt: str, model: str, temperature: float) -> ProviderResult:
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
-def _call_provider_sync(provider: str, prompt: str, model: str, temperature: float) -> ProviderResult:
+def _call_provider_sync(
+    provider: str,
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    timeout_sec: Optional[float] = None,
+    thinking_level: Optional[str] = None,
+) -> ProviderResult:
     p = (provider or "").lower()
     if p == "openai":
         return call_openai(prompt, model, temperature)
     if p == "anthropic":
         return call_anthropic(prompt, model, temperature)
     if p in {"google", "gemini"}:
-        return call_google(prompt, model, temperature)
+        return call_google(prompt, model, temperature, timeout=timeout_sec, thinking_level=thinking_level)
     if p in {"xai", "grok"}:
         return call_xai(prompt, model, temperature)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
@@ -896,14 +914,22 @@ def _extract_status_code(error: str) -> Optional[int]:
     return None
 
 
+def _is_timeout_error(error: Optional[str]) -> bool:
+    if not error:
+        return False
+    lower_err = error.lower()
+    return "timeout" in lower_err or "timed out" in lower_err
+
+
 def _should_retry_provider_error(error: Optional[str], retry_after_hint: Optional[float] = None) -> tuple[bool, Optional[float]]:
     if not error:
         return False, None
 
+    if _is_timeout_error(error):
+        return False, None
+
     lower_err = error.lower()
     transient_keywords = (
-        "timeout",
-        "timed out",
         "connection reset",
         "connection aborted",
         "remote end closed",
@@ -1027,7 +1053,27 @@ async def call_chat_ms(
         )
 
     start = time.time()
-    max_attempts = max(1, int(os.getenv("PYTHIA_LLM_RETRIES", "3") or 3))
+    spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
+    thinking_level: Optional[str] = None
+    timeout_sec: Optional[float] = None
+    if spd_google:
+        model_id_lower = ms.model_id.lower()
+        if "gemini-3-flash" in model_id_lower:
+            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
+            if not thinking_level:
+                thinking_level = None
+            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 90.0)
+        elif "gemini-3-pro" in model_id_lower:
+            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
+            if not thinking_level:
+                thinking_level = None
+            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 120.0)
+        try:
+            max_attempts = max(1, int(os.getenv("PYTHIA_GOOGLE_SPD_RETRIES", "1") or 1))
+        except Exception:
+            max_attempts = 1
+    else:
+        max_attempts = max(1, int(os.getenv("PYTHIA_LLM_RETRIES", "3") or 3))
     attempt = 0
     result: Optional[ProviderResult] = None
     error: Optional[str] = None
@@ -1037,7 +1083,13 @@ async def call_chat_ms(
         try:
             async with _get_llm_semaphore():
                 result = await asyncio.to_thread(
-                    _call_provider_sync, ms.provider, prompt, ms.model_id, temperature
+                    _call_provider_sync,
+                    ms.provider,
+                    prompt,
+                    ms.model_id,
+                    temperature,
+                    timeout_sec=timeout_sec,
+                    thinking_level=thinking_level,
                 )
         except Exception as exc:  # pragma: no cover - unexpected runtime errors
             error = _format_provider_exception(exc)
@@ -1073,6 +1125,8 @@ async def call_chat_ms(
     )
 
     if error:
+        if spd_google and _is_timeout_error(error):
+            return "", usage, error
         failure_count = _note_provider_failure(ms.provider, run_key)
         usage["provider_failures_in_run"] = failure_count
         if is_provider_disabled_for_run(ms.provider, run_key):
