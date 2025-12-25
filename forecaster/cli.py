@@ -56,8 +56,10 @@ from pythia.web_research import fetch_evidence_pack
 from forecaster.hs_utils import load_hs_triage_entry
 from forecaster.self_search import (
     append_evidence_to_prompt,
+    append_retriever_evidence_to_prompt,
     combine_usage,
     extract_self_search_query,
+    model_self_search_enabled,
     run_self_search,
     self_search_enabled,
     self_search_limits,
@@ -2248,6 +2250,59 @@ def _load_research_json(run_id: str, question_id: str) -> Optional[Dict[str, Any
     finally:
         con.close()
 
+
+def _load_question_evidence_pack(run_id: str, question_id: str) -> Optional[Dict[str, Any]]:
+    con = connect(read_only=True)
+    try:
+        row = con.execute(
+            """
+            SELECT question_evidence_json
+            FROM question_research
+            WHERE run_id = ? AND question_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [run_id, question_id],
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        return json.loads(row[0])
+    finally:
+        con.close()
+
+
+def _persist_question_evidence_pack(
+    run_id: str,
+    question_id: str,
+    iso3: str,
+    hazard_code: str,
+    metric: str,
+    question_evidence_pack: Dict[str, Any],
+) -> None:
+    con = connect(read_only=False)
+    try:
+        ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO question_research
+              (run_id, question_id, iso3, hazard_code, metric, research_json, hs_evidence_json, question_evidence_json, merged_evidence_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                run_id,
+                question_id,
+                iso3,
+                hazard_code,
+                metric,
+                _json_dumps_for_db({"note": "retriever_only"}),
+                _json_dumps_for_db({}),
+                _json_dumps_for_db(question_evidence_pack or {}),
+                _json_dumps_for_db(question_evidence_pack or {}),
+            ],
+        )
+    finally:
+        con.close()
+
 def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[str, Any]]:
     """Load HS country evidence pack (markdown + sources) from DuckDB."""
 
@@ -2322,6 +2377,78 @@ def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> st
         "and concise structural drivers (max 8 lines). "
         f"Question focus: {wording or ''}"
     )
+
+
+def _build_question_evidence_queries(
+    question_row: duckdb.Row, wording: str, hs_entry: dict[str, Any]
+) -> list[str]:
+    base_query = _build_question_evidence_query(question_row, wording)
+    tier = str(hs_entry.get("tier") or "").lower()
+    if tier != "priority":
+        return [base_query]
+
+    iso3 = (question_row.get("iso3") or "").upper()
+    hazard = (question_row.get("hazard_code") or "").upper()
+    metric = (question_row.get("metric") or "").upper()
+    hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
+    target_month = question_row.get("target_month") or ""
+    window_end = question_row.get("window_end_date") or ""
+
+    timeframe = ""
+    if target_month:
+        timeframe = f" starting {target_month}"
+    elif window_end:
+        timeframe = f" through {window_end}"
+
+    targeted_query = (
+        f"{iso3} {hazard_label} {metric} hazard-specific outlook{timeframe} — "
+        "focus on targeted drivers, regime shifts, and near-term signals."
+    )
+    return [base_query, targeted_query]
+
+
+def _retriever_enabled() -> bool:
+    return os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
+
+
+def _retriever_model_id() -> str | None:
+    model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
+    return model_id or None
+
+
+def _merge_question_evidence_packs(
+    packs: list[dict[str, Any]],
+    queries: list[str],
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for pack in packs:
+        merged = merge_evidence_packs(merged, pack, max_sources=10, max_signals=12)
+
+    recency_days = None
+    for pack in packs:
+        if pack.get("recency_days"):
+            recency_days = pack.get("recency_days")
+            break
+
+    error_obj = None
+    for pack in packs:
+        if pack.get("error"):
+            error_obj = pack.get("error")
+            break
+
+    merged_pack = {
+        "query": " | ".join(queries),
+        "recency_days": recency_days or 120,
+        "structural_context": merged.get("structural_context", ""),
+        "recent_signals": merged.get("recent_signals", []),
+        "sources": merged.get("sources", []),
+        "unverified_sources": merged.get("unverified_sources", []),
+        "grounded": merged.get("grounded", False),
+        "debug": {"retriever_queries": queries, "retriever_enabled": _retriever_enabled()},
+    }
+    if error_obj:
+        merged_pack["error"] = error_obj
+    return merged_pack
 
 
 def _build_spd_web_search_query(
@@ -2534,7 +2661,11 @@ async def _call_spd_model_for_spec(
     """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
 
     prompt_with_evidence = prompt
-    if os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0") == "1" and ms.provider in {"openai", "anthropic"}:
+    if (
+        model_self_search_enabled()
+        and os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0") == "1"
+        and ms.provider in {"openai", "anthropic"}
+    ):
         query = _build_spd_web_search_query(
             iso3=iso3,
             hazard_code=hazard_code,
@@ -2624,7 +2755,11 @@ async def _call_spd_model_for_spec(
                 phase="forecast_web_research",
                 call_type="forecast_web_research",
             )
-    if os.getenv("PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED", "0") == "1" and ms.provider == "google":
+    if (
+        model_self_search_enabled()
+        and os.getenv("PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED", "0") == "1"
+        and ms.provider == "google"
+    ):
         query = _build_spd_web_search_query(
             iso3=iso3,
             hazard_code=hazard_code,
@@ -3609,7 +3744,8 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
 
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
-        if os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1":
+        retriever_enabled = _retriever_enabled()
+        if retriever_enabled or os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1":
             try:
                 hs_evidence_pack = _load_hs_country_evidence_pack(hs_run_id, iso3)
             except Exception as exc:  # noqa: BLE001
@@ -3617,14 +3753,21 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
                 hs_evidence_pack = None
 
             try:
-                question_query = _build_question_evidence_query(question_row, wording)
-                question_evidence_pack = fetch_evidence_pack(
-                    question_query,
-                    purpose="research_question_pack",
-                    run_id=run_id,
-                    question_id=qid,
-                    hs_run_id=question_row.get("hs_run_id"),
-                )
+                question_queries = _build_question_evidence_queries(question_row, wording, hs_entry)
+                retriever_model_id = _retriever_model_id() if retriever_enabled else None
+                packs: list[dict[str, Any]] = []
+                for query in question_queries:
+                    pack = fetch_evidence_pack(
+                        query,
+                        purpose="research_question_pack",
+                        run_id=run_id,
+                        question_id=qid,
+                        hs_run_id=question_row.get("hs_run_id"),
+                        model_id=retriever_model_id,
+                    )
+                    packs.append(pack)
+                if packs:
+                    question_evidence_pack = _merge_question_evidence_packs(packs, question_queries)
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
                 question_evidence_pack = None
@@ -3902,6 +4045,37 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         target_months = rec.get("target_months") or rec.get("target_month")
         target_month = _first_target_month(target_months)
 
+        question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
+        if question_evidence_pack is None and _retriever_enabled():
+            try:
+                question_queries = _build_question_evidence_queries(rec, wording, hs_entry)
+                retriever_model_id = _retriever_model_id()
+                packs: list[dict[str, Any]] = []
+                for query in question_queries:
+                    pack = fetch_evidence_pack(
+                        query,
+                        purpose="research_question_pack",
+                        run_id=run_id,
+                        question_id=qid,
+                        hs_run_id=hs_run_id,
+                        model_id=retriever_model_id,
+                    )
+                    packs.append(pack)
+                if packs:
+                    question_evidence_pack = _merge_question_evidence_packs(packs, question_queries)
+                    if qid:
+                        _persist_question_evidence_pack(
+                            run_id,
+                            qid,
+                            iso3,
+                            hz,
+                            metric,
+                            question_evidence_pack,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("SPD retriever evidence pack fetch failed for %s: %s", qid, exc)
+                question_evidence_pack = None
+
         prompt = build_spd_prompt_v2(
             question={
                 "question_id": qid,
@@ -3916,6 +4090,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             hs_triage_entry=hs_entry,
             research_json=research_json,
         )
+        if question_evidence_pack:
+            prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
 
         dual_run = os.getenv("PYTHIA_SPD_V2_DUAL_RUN", "0") == "1"
         use_bayesmc = os.getenv("PYTHIA_SPD_V2_USE_BAYESMC", "0") == "1"

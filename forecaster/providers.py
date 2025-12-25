@@ -508,8 +508,8 @@ MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = {
     # Budget / testing models
     "gpt-5-nano": (0.00005, 0.00040),
     "openai/gpt-5-nano": (0.00005, 0.00040),
-    "gemini-2.5-flash-lite": (0.00005, 0.00015),
-    "google/gemini-2.5-flash-lite": (0.00005, 0.00015),
+    "gemini-2.5-flash-lite": (0.0001, 0.0004),
+    "google/gemini-2.5-flash-lite": (0.0001, 0.0004),
     "claude-haiku-4-5-20251001": (0.00100, 0.00500),
     "anthropic/claude-haiku-4-5-20251001": (0.00100, 0.00500),
     "grok-4-1-fast-reasoning": (0.00030, 0.00050),

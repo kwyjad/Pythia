@@ -13,10 +13,15 @@ from typing import Any, Dict, Optional, Tuple
 from pythia.web_research import fetch_evidence_pack
 
 
+def model_self_search_enabled() -> bool:
+    return os.getenv("PYTHIA_MODEL_SELF_SEARCH_ENABLED", "0") == "1"
+
+
 def self_search_enabled() -> bool:
     return (
         os.getenv("PYTHIA_FORECASTER_SELF_SEARCH", "0") == "1"
         and os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0") == "1"
+        and model_self_search_enabled()
     )
 
 
@@ -64,6 +69,15 @@ def append_evidence_to_prompt(prompt: str, evidence: Dict[str, Any]) -> str:
         f"{prompt}\n\nSELF-SEARCH RESULTS (recent signals prioritized; structural context is background only):\n"
         f"```json\n{evidence_text}\n```\n"
         "Use this evidence and return the required JSON output. Do not request more evidence again."
+    )
+
+
+def append_retriever_evidence_to_prompt(prompt: str, evidence: Dict[str, Any]) -> str:
+    evidence_text = json.dumps(evidence or {}, ensure_ascii=False, indent=2)
+    return (
+        f"{prompt}\n\nRETRIEVER EVIDENCE PACK (recent signals prioritized; structural context is background only):\n"
+        f"```json\n{evidence_text}\n```\n"
+        "Use this evidence and return the required JSON output. Do not request more evidence."
     )
 
 

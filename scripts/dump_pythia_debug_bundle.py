@@ -1879,7 +1879,7 @@ def build_triage_only_bundle_markdown(
         predicate_strategy = "phase_only"
 
     llm_call_counts = _load_llm_call_counts(con, predicate, params)
-    llm_error_rows = _load_llm_error_summary(con, predicate, params)
+    llm_error_rows = [row for row in llm_call_counts if int(row.get("n_errors") or 0) > 0]
     latency_block = render_latency_markdown(con, predicate, params, strategy_label=predicate_strategy)
 
     lines: List[str] = []
@@ -1978,15 +1978,6 @@ def build_triage_only_bundle_markdown(
     else:
         lines.append("| (none) | (none) | (none) | 0 |")
     lines.append("")
-    if llm_call_counts and llm_error_rows:
-        errors_from_calls = sum(int(row.get("n_errors") or 0) for row in llm_call_counts)
-        errors_from_summary = sum(int(row.get("n_errors") or 0) for row in llm_error_rows)
-        if errors_from_calls != errors_from_summary:
-            lines.append(
-                f"_Warning: LLM error summary mismatch (calls-by-phase={errors_from_calls}, summary={errors_from_summary})._"
-            )
-            lines.append("")
-
     lines.append("### Latency (hs_run only)")
     lines.append("")
     lines.append(latency_block)
@@ -2108,7 +2099,7 @@ def build_debug_bundle_markdown(
     self_search_warning: str | None = None
     try:
         llm_call_counts = _load_llm_call_counts(con, predicate, params)
-        llm_error_rows = _load_llm_error_summary(con, predicate, params)
+        llm_error_rows = [row for row in llm_call_counts if int(row.get("n_errors") or 0) > 0]
         self_search_stats = _load_self_search_stats(con, predicate, params)
     except Exception as exc:  # pragma: no cover - defensive
         llm_calls_skip_note = f"Error loading llm_calls: {exc}"
@@ -2369,15 +2360,6 @@ def build_debug_bundle_markdown(
     else:
         lines.append("| (none) | (none) | (none) | 0 |")
     lines.append("")
-    if llm_call_counts and llm_error_rows:
-        errors_from_calls = sum(int(row.get("n_errors") or 0) for row in llm_call_counts)
-        errors_from_summary = sum(int(row.get("n_errors") or 0) for row in llm_error_rows)
-        if errors_from_calls != errors_from_summary:
-            lines.append(
-                f"_Warning: LLM error summary mismatch (calls-by-phase={errors_from_calls}, summary={errors_from_summary})._"
-            )
-            lines.append("")
-
     lines.append("### 1.6 forecasts_raw model writes (DB truth)")
     lines.append("")
     lines.append("| model_name | n_rows |")
