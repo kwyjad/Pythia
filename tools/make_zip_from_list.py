@@ -34,24 +34,18 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
-    ".github/workflows/run_horizon_scanner.yml",
-    ".github/workflows/resolver-initial-backfill.yml",
-    ".github/workflows/inspect_resolver_duckdb.yml",
-    "horizon_scanner/horizon_scanner.py",
-    "horizon_scanner/prompts.py",
-    "scripts/ci/assert_hs_outputs.py",
-    "scripts/ci/db_signature.py",
-    "scripts/ci/llm_latency_summary.py",
-    "scripts/dump_pythia_debug_bundle.py",
+    "pythia/config.yaml",
     "forecaster/cli.py",
     "forecaster/providers.py",
-    "forecaster/bayes_mc.py",
-    "forecaster/aggregate.py",
-    "forecaster/ensemble.py",
-    "forecaster/llm_logging.py",
-    "forecaster/tests/test_spd.py",
-    "pythia/db/schema.py",
-    "pythia/db/schema.sql",
+    "pythia/web_research/web_research.py",
+    "pythia/web_research/backends/openai_web_search.py",
+    "pythia/web_research/backends/claude_web_search.py",
+    "pythia/web_research/backends/gemini_grounding.py",
+    ".github/workflows/run_horizon_scanner.yml",
+    ".github/workflows/forecaster-ci.yml",
+    "forecaster/config.py",
+    "pythia/config.py",
+    "pythia/config.yaml",
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
