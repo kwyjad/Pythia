@@ -36,6 +36,7 @@ from forecaster.providers import (
 from horizon_scanner.db_writer import (
     BLOCKED_HAZARDS,
     HAZARD_CONFIG,
+    get_expected_hs_hazards,
     log_hs_country_reports_to_db,
     log_hs_run_to_db,
 )
@@ -482,26 +483,28 @@ def _parse_hs_triage_json(raw: str) -> dict[str, Any]:
     raise json.JSONDecodeError("could not locate JSON object", s, 0)
 
 
-def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
+def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text: str | None = None) -> None:
     allowed_hazards = set(_build_hazard_catalog().keys())
+    expected_hazards = get_expected_hs_hazards()
     con = pythia_connect(read_only=False)
     try:
         hazards = triage.get("hazards") or {}
-        for hz_code, hdata in hazards.items():
-            tier = (hdata.get("tier") or "quiet").lower()
-            score = float(hdata.get("triage_score") or 0.0)
+        normalized_hazards: Dict[str, Any] = {}
+        if isinstance(hazards, dict):
+            for hz_code, hdata in hazards.items():
+                key = (hz_code or "").upper().strip()
+                if key:
+                    normalized_hazards[key] = hdata
 
+        iso3_up = (iso3 or "").upper().strip()
+        for hz_code in expected_hazards:
             hz_up = (hz_code or "").upper().strip()
-            iso3_up = (iso3 or "").upper().strip()
-
-            # Retire ACO in favour of ACE as the canonical conflict hazard code.
             if hz_up == "ACO":
                 logger.info(
                     "HS triage: skipping ACO hazard for %s; ACE is the canonical conflict hazard.",
                     iso3_up,
                 )
                 continue
-
             if hz_up not in allowed_hazards:
                 logger.info(
                     "HS triage: ignoring unknown hazard code from model | run_id=%s iso3=%s hazard=%s",
@@ -510,6 +513,33 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
                     hz_up,
                 )
                 continue
+
+            hdata = normalized_hazards.get(hz_up)
+            if not isinstance(hdata, dict):
+                hdata = {}
+
+            placeholder_reason = ""
+            if error_text:
+                placeholder_reason = error_text
+            elif not hdata:
+                placeholder_reason = "missing hazard in triage output"
+
+            if placeholder_reason:
+                tier = "quiet"
+                score = 0.0
+                drivers = []
+                regime_shifts = []
+                data_quality = {"status": "error", "error_text": placeholder_reason}
+                scenario_stub = ""
+            else:
+                tier = (hdata.get("tier") or "quiet").lower()
+                score = float(hdata.get("triage_score") or 0.0)
+                drivers = hdata.get("drivers") or []
+                regime_shifts = hdata.get("regime_shifts") or []
+                data_quality = hdata.get("data_quality") or {}
+                if not isinstance(data_quality, dict):
+                    data_quality = {"raw": data_quality}
+                scenario_stub = hdata.get("scenario_stub") or ""
 
             need_full_spd = False
             if tier == "priority" or score >= 0.7:
@@ -533,10 +563,10 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any]) -> None:
                     tier,
                     score,
                     need_full_spd,
-                    json.dumps(hdata.get("drivers") or []),
-                    json.dumps(hdata.get("regime_shifts") or []),
-                    json.dumps(hdata.get("data_quality") or {}),
-                    hdata.get("scenario_stub") or "",
+                    json.dumps(drivers),
+                    json.dumps(regime_shifts),
+                    json.dumps(data_quality),
+                    scenario_stub,
                 ],
             )
     finally:
@@ -660,6 +690,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         )
 
         if log_error_text:
+            _write_hs_triage(run_id, iso3_up, triage, error_text=log_error_text)
             logger.error("HS triage error for %s: %s", iso3_up, log_error_text)
             return {
                 "iso3": iso3_up,

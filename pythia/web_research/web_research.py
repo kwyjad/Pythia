@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
-import importlib
 
 from pythia.db.schema import connect, ensure_schema
 from pythia.web_research.budget import BudgetGuard, BudgetExceededError
@@ -150,6 +151,19 @@ def _load_backend_module(module_name: str):
         return None, str(exc)
 
 
+def _is_hs_country_pack(purpose: str) -> bool:
+    purpose_norm = (purpose or "").lower()
+    return purpose_norm == "hs_country_pack" or purpose_norm.startswith("hs_")
+
+
+def _build_hs_retry_query(query: str) -> str:
+    trimmed = query.strip()
+    trimmed = re.sub(r"^[A-Z]{3}\b\s*", "", trimmed).strip()
+    if trimmed:
+        return f"country context {trimmed} latest humanitarian situation"
+    return "country context latest humanitarian situation"
+
+
 def fetch_evidence_pack(
     query: str,
     purpose: str,
@@ -200,165 +214,223 @@ def fetch_evidence_pack(
         _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=False)
         return pack.to_dict()
 
+    is_hs_country_pack = _is_hs_country_pack(purpose)
     cache_key = _build_cache_key(query, recency_days, backend, model_id)
-    cached_value = cache_get(cache_key)
-    if cached_value:
-        pack = _pack_from_cache(query, cached_value, backend=backend, recency_days=recency_days)
-        if isinstance(pack.debug, dict):
-            pack.debug.setdefault("attempted_backends", [pack.backend])
-            pack.debug.setdefault("selected_backend", pack.backend if pack.sources else "")
-            pack.debug.setdefault("n_verified_sources", len(pack.sources))
-        _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=True, success=True)
-        return pack.to_dict()
+    if not is_hs_country_pack:
+        cached_value = cache_get(cache_key)
+        if cached_value:
+            pack = _pack_from_cache(query, cached_value, backend=backend, recency_days=recency_days)
+            if isinstance(pack.debug, dict):
+                pack.debug.setdefault("attempted_backends", [pack.backend])
+                pack.debug.setdefault("selected_backend", pack.backend if pack.sources else "")
+                pack.debug.setdefault("n_verified_sources", len(pack.sources))
+            _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=True, success=True)
+            return pack.to_dict()
 
-    try:
-        if backend == "auto":
-            attempted: list[Dict[str, Any]] = []
-            selected_pack: Optional[EvidencePack] = None
+    def _fetch_direct(fetch_query: str) -> EvidencePack:
+        try:
+            if backend == "auto":
+                attempted: list[Dict[str, Any]] = []
+                selected_pack: Optional[EvidencePack] = None
 
-            def _record_attempt(p: EvidencePack) -> None:
-                attempted.append(_summarize_attempt(p))
+                def _record_attempt(p: EvidencePack) -> None:
+                    attempted.append(_summarize_attempt(p))
 
-            for backend_name, module_name, func_name in (
-                ("gemini", "gemini_grounding", "fetch_via_gemini"),
-                ("openai", "openai_web_search", "fetch_via_openai_web_search"),
-                ("claude", "claude_web_search", "fetch_via_claude_web_search"),
-            ):
-                module, import_err = _load_backend_module(module_name)
-                if module is None:
-                    candidate = EvidencePack(query=query, recency_days=recency_days, backend=backend_name)
-                    candidate.error = {"type": "missing_dependency", "message": import_err or f"backend {backend_name} not available"}
+                for backend_name, module_name, func_name in (
+                    ("gemini", "gemini_grounding", "fetch_via_gemini"),
+                    ("openai", "openai_web_search", "fetch_via_openai_web_search"),
+                    ("claude", "claude_web_search", "fetch_via_claude_web_search"),
+                ):
+                    module, import_err = _load_backend_module(module_name)
+                    if module is None:
+                        candidate = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend_name)
+                        candidate.error = {
+                            "type": "missing_dependency",
+                            "message": import_err or f"backend {backend_name} not available",
+                        }
+                        _record_attempt(candidate)
+                        if selected_pack is None:
+                            selected_pack = candidate
+                        continue
+
+                    backend_fn = getattr(module, func_name)
+                    backend_kwargs = {
+                        "recency_days": recency_days,
+                        "include_structural": include_structural,
+                        "timeout_sec": timeout_sec,
+                        "max_results": max_results,
+                    }
+                    if backend_name == "gemini":
+                        backend_kwargs["model_id"] = model_id
+                    candidate = backend_fn(fetch_query, **backend_kwargs)
+                    candidate.grounded = bool(candidate.sources)
                     _record_attempt(candidate)
-                    if selected_pack is None:
+                    if candidate.sources:
                         selected_pack = candidate
-                    continue
+                        break
+                    if not selected_pack:
+                        selected_pack = candidate
 
-                backend_fn = getattr(module, func_name)
-                backend_kwargs = {
-                    "recency_days": recency_days,
-                    "include_structural": include_structural,
-                    "timeout_sec": timeout_sec,
-                    "max_results": max_results,
-                }
-                if backend_name == "gemini":
-                    backend_kwargs["model_id"] = model_id
-                candidate = backend_fn(query, **backend_kwargs)
-                candidate.grounded = bool(candidate.sources)
-                _record_attempt(candidate)
-                if candidate.sources:
-                    selected_pack = candidate
-                    break
-                if not selected_pack:
-                    selected_pack = candidate
+                pack = selected_pack
 
-            pack = selected_pack
-
-            if pack and not pack.sources and fallback_backend:
-                fallback_pack: Optional[EvidencePack] = None
-                if fallback_backend == "exa":
-                    fallback_pack = _fetch_via_exa(
-                        query,
-                        recency_days=recency_days,
-                        timeout_sec=timeout_sec,
-                        max_results=max_results,
-                    )
-                elif fallback_backend == "perplexity":
-                    fallback_pack = _fetch_via_perplexity(
-                        query,
-                        recency_days=recency_days,
-                        timeout_sec=timeout_sec,
-                        max_results=max_results,
-                    )
-                else:
-                    fallback_pack = EvidencePack(query=query, recency_days=recency_days, backend=fallback_backend)
-                    fallback_pack.error = {"type": "unsupported_backend", "message": f"backend={fallback_backend} not implemented"}
-
-                if fallback_pack:
-                    fallback_pack.grounded = bool(fallback_pack.sources)
-                    _record_attempt(fallback_pack)
-                    if fallback_pack.sources:
-                        pack = fallback_pack
+                if pack and not pack.sources and fallback_backend:
+                    fallback_pack: Optional[EvidencePack] = None
+                    if fallback_backend == "exa":
+                        fallback_pack = _fetch_via_exa(
+                            fetch_query,
+                            recency_days=recency_days,
+                            timeout_sec=timeout_sec,
+                            max_results=max_results,
+                        )
+                    elif fallback_backend == "perplexity":
+                        fallback_pack = _fetch_via_perplexity(
+                            fetch_query,
+                            recency_days=recency_days,
+                            timeout_sec=timeout_sec,
+                            max_results=max_results,
+                        )
                     else:
-                        pack = fallback_pack if pack is None else pack
+                        fallback_pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=fallback_backend)
+                        fallback_pack.error = {
+                            "type": "unsupported_backend",
+                            "message": f"backend={fallback_backend} not implemented",
+                        }
 
-            if pack is None:
-                pack = EvidencePack(query=query, recency_days=recency_days, backend="unknown")
-                pack.error = {"type": "no_backend_available", "message": "no backend attempts were made"}
+                    if fallback_pack:
+                        fallback_pack.grounded = bool(fallback_pack.sources)
+                        _record_attempt(fallback_pack)
+                        if fallback_pack.sources:
+                            pack = fallback_pack
+                        else:
+                            pack = fallback_pack if pack is None else pack
 
-            pack.debug = {
-                **(pack.debug or {}),
-                "attempted_backends": attempted,
-                "selected_backend": pack.backend,
-                "n_verified_sources": len(pack.sources),
-                "auto_attempts": attempted,
-            }
-            if not pack.sources and not pack.error:
-                pack.error = {"type": "grounding_missing", "message": "no verified sources from any backend"}
-        elif backend in {"gemini", "google"}:
-            module, import_err = _load_backend_module("gemini_grounding")
-            if module is None:
-                pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
-                pack.error = {"type": "missing_dependency", "message": import_err or "gemini backend not available"}
-            else:
-                pack = module.fetch_via_gemini(
-                    query,
+                if pack is None:
+                    pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend="unknown")
+                    pack.error = {"type": "no_backend_available", "message": "no backend attempts were made"}
+
+                pack.debug = {
+                    **(pack.debug or {}),
+                    "attempted_backends": attempted,
+                    "selected_backend": pack.backend,
+                    "n_verified_sources": len(pack.sources),
+                    "auto_attempts": attempted,
+                }
+                if not pack.sources and not pack.error:
+                    pack.error = {"type": "grounding_missing", "message": "no verified sources from any backend"}
+            elif backend in {"gemini", "google"}:
+                module, import_err = _load_backend_module("gemini_grounding")
+                if module is None:
+                    pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend)
+                    pack.error = {"type": "missing_dependency", "message": import_err or "gemini backend not available"}
+                else:
+                    pack = module.fetch_via_gemini(
+                        fetch_query,
+                        recency_days=recency_days,
+                        include_structural=include_structural,
+                        timeout_sec=timeout_sec,
+                        max_results=max_results,
+                        model_id=model_id,
+                    )
+                    if pack is not None:
+                        pack.backend = backend
+            elif backend == "openai":
+                module, import_err = _load_backend_module("openai_web_search")
+                if module is None:
+                    pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend)
+                    pack.error = {"type": "missing_dependency", "message": import_err or "openai backend not available"}
+                else:
+                    pack = module.fetch_via_openai_web_search(
+                        fetch_query,
+                        recency_days=recency_days,
+                        include_structural=include_structural,
+                        timeout_sec=timeout_sec,
+                        max_results=max_results,
+                    )
+            elif backend == "claude":
+                module, import_err = _load_backend_module("claude_web_search")
+                if module is None:
+                    pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend)
+                    pack.error = {"type": "missing_dependency", "message": import_err or "claude backend not available"}
+                else:
+                    pack = module.fetch_via_claude_web_search(
+                        fetch_query,
+                        recency_days=recency_days,
+                        include_structural=include_structural,
+                        timeout_sec=timeout_sec,
+                        max_results=max_results,
+                    )
+            elif backend == "exa":
+                pack = _fetch_via_exa(
+                    fetch_query,
                     recency_days=recency_days,
-                    include_structural=include_structural,
                     timeout_sec=timeout_sec,
                     max_results=max_results,
-                    model_id=model_id,
                 )
-                if pack is not None:
-                    pack.backend = backend
-        elif backend == "openai":
-            module, import_err = _load_backend_module("openai_web_search")
-            if module is None:
-                pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
-                pack.error = {"type": "missing_dependency", "message": import_err or "openai backend not available"}
-            else:
-                pack = module.fetch_via_openai_web_search(
-                    query,
+            elif backend == "perplexity":
+                pack = _fetch_via_perplexity(
+                    fetch_query,
                     recency_days=recency_days,
-                    include_structural=include_structural,
                     timeout_sec=timeout_sec,
                     max_results=max_results,
                 )
-        elif backend == "claude":
-            module, import_err = _load_backend_module("claude_web_search")
-            if module is None:
-                pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
-                pack.error = {"type": "missing_dependency", "message": import_err or "claude backend not available"}
             else:
-                pack = module.fetch_via_claude_web_search(
-                    query,
-                    recency_days=recency_days,
-                    include_structural=include_structural,
-                    timeout_sec=timeout_sec,
-                    max_results=max_results,
-                )
-        elif backend == "exa":
-            pack = _fetch_via_exa(
-                query,
-                recency_days=recency_days,
-                timeout_sec=timeout_sec,
-                max_results=max_results,
-            )
-        elif backend == "perplexity":
-            pack = _fetch_via_perplexity(
-                query,
-                recency_days=recency_days,
-                timeout_sec=timeout_sec,
-                max_results=max_results,
-            )
+                pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend)
+                pack.error = {"type": "unsupported_backend", "message": f"backend={backend} not implemented"}
+        except BudgetExceededError as exc:
+            pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend)
+            pack.error = {"type": "budget_exceeded", "message": str(exc)}
+        except Exception as exc:
+            pack = EvidencePack(query=fetch_query, recency_days=recency_days, backend=backend)
+            pack.error = {"type": "unexpected_error", "message": str(exc)[:500]}
+        return pack
+
+    pack = _fetch_direct(query)
+    if is_hs_country_pack and not pack.sources:
+        retry_query = _build_hs_retry_query(query)
+        retry_pack = _fetch_direct(retry_query)
+        if not isinstance(retry_pack.debug, dict):
+            retry_pack.debug = {}
+        retry_pack.debug["retry_attempted"] = True
+        retry_pack.debug["retry_query"] = retry_query
+        if retry_pack.sources:
+            pack = retry_pack
+            pack.debug["reason_code"] = "retry_success"
         else:
-            pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
-            pack.error = {"type": "unsupported_backend", "message": f"backend={backend} not implemented"}
-    except BudgetExceededError as exc:
-        pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
-        pack.error = {"type": "budget_exceeded", "message": str(exc)}
-    except Exception as exc:
-        pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
-        pack.error = {"type": "unexpected_error", "message": str(exc)[:500]}
+            module, import_err = _load_backend_module("gemini_grounding")
+            unverified_pack: Optional[EvidencePack] = None
+            if module is None:
+                unverified_pack = EvidencePack(query=retry_query, recency_days=recency_days, backend=backend)
+                unverified_pack.error = {
+                    "type": "missing_dependency",
+                    "message": import_err or "gemini backend not available",
+                }
+            else:
+                unverified_pack = module.fetch_unverified_summary_via_gemini(
+                    retry_query,
+                    recency_days=recency_days,
+                    include_structural=include_structural,
+                    timeout_sec=timeout_sec,
+                )
+            if unverified_pack and not unverified_pack.error:
+                if not isinstance(unverified_pack.debug, dict):
+                    unverified_pack.debug = {}
+                unverified_pack.debug["retry_attempted"] = True
+                unverified_pack.debug["retry_query"] = retry_query
+                unverified_pack.debug["reason_code"] = "verified_empty_unverified_summary"
+                pack = unverified_pack
+            else:
+                pack = retry_pack
+                if not isinstance(pack.debug, dict):
+                    pack.debug = {}
+                pack.debug["reason_code"] = "verified_empty_unverified_failed"
+                pack.debug.setdefault("retry_attempted", True)
+                pack.debug.setdefault("retry_query", retry_query)
+                if unverified_pack and unverified_pack.error:
+                    pack.debug.setdefault("unverified_summary_error", unverified_pack.error)
+
+    if is_hs_country_pack and pack.sources:
+        pack.debug = pack.debug or {}
+        pack.debug.setdefault("reason_code", "ok_verified")
 
     pack.grounded = bool(pack.sources)
     if not isinstance(pack.debug, dict):
@@ -376,7 +448,8 @@ def fetch_evidence_pack(
     except Exception:
         pass
 
-    cache_set(cache_key, pack.to_dict())
+    if not is_hs_country_pack:
+        cache_set(cache_key, pack.to_dict())
     _log_web_research(pack, purpose, run_id, question_id, hs_run_id, start_ms, cached=False, success=pack.error is None)
     return pack.to_dict()
 
@@ -408,6 +481,8 @@ def _log_web_research(
                 usage_json["attempted_backends"] = pack.debug.get("attempted_backends")
             if "selected_backend" in pack.debug:
                 usage_json["selected_backend"] = pack.debug.get("selected_backend")
+            if "reason_code" in pack.debug:
+                usage_json["reason_code"] = pack.debug.get("reason_code")
         if pack.debug:
             usage_json["debug"] = pack.debug
         if pack.error:
