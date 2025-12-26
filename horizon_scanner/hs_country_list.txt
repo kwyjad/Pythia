@@ -1,31 +1,11 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
-Liberia
-Malawi
-Malaysia
-Maldives
-Mali
-Morocco
-Nicaragua
-Poland
-Serbia
-Sri Lanka
-Suriname
-Tajikistan
-The Gambia
-Timor-Leste
-Togo
-Tunisia
-Turkmenistan
-Uganda
-Ukraine
-Uzbekistan
-Western Sahara
-Eswatini
-Mongolia
-Nepal
-Papua New Guinea
-Rwanda
-Sierra Leone
-Solomon Islands
-South Korea (Republic of)
-Vietnam
+Israel
+Kazakhstan
+Kyrgyzstan
+Laos
+Moldova
+Mozambique
+Namibia
+Panama
+Peru
+Republic of the Congo
