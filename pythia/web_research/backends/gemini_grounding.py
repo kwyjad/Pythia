@@ -72,12 +72,10 @@ def fetch_via_gemini(
     env_model_id = (model_id or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
     if not env_model_id and os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1":
         env_model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
-    model_candidates: List[str] = []
     if env_model_id:
-        model_candidates.append(env_model_id)
-    for default_model in ("gemini-3-flash-preview", "gemini-3-pro-preview"):
-        if default_model not in model_candidates:
-            model_candidates.append(default_model)
+        model_candidates = [env_model_id]
+    else:
+        model_candidates = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
 
     pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
 

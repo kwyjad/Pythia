@@ -749,7 +749,7 @@ def call_google(
     model: str,
     temperature: float,
     *,
-    timeout: Optional[float] = None,
+    timeout_sec: Optional[float] = None,
     thinking_level: Optional[str] = None,
 ) -> ProviderResult:
     if not _GEMINI_API_KEY:
@@ -757,14 +757,18 @@ def call_google(
     api_model = model.split("/", 1)[-1] if "/" in model else model
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={_GEMINI_API_KEY}"
     generation_config: Dict[str, Any] = {"temperature": float(temperature)}
-    if thinking_level and model.lower().startswith("gemini-3-"):
+    if thinking_level and api_model.lower().startswith("gemini-3-"):
         generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": generation_config,
     }
     try:
-        resp = requests.post(url, json=body, timeout=timeout if timeout is not None else _GEMINI_TIMEOUT)
+        resp = requests.post(
+            url,
+            json=body,
+            timeout=timeout_sec if timeout_sec is not None else _GEMINI_TIMEOUT,
+        )
     except Exception as exc:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"Gemini request error: {exc}")
 
@@ -893,7 +897,7 @@ def _call_provider_sync(
     if p == "anthropic":
         return call_anthropic(prompt, model, temperature)
     if p in {"google", "gemini"}:
-        return call_google(prompt, model, temperature, timeout=timeout_sec, thinking_level=thinking_level)
+        return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
     if p in {"xai", "grok"}:
         return call_xai(prompt, model, temperature)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
@@ -1082,7 +1086,7 @@ async def call_chat_ms(
         attempt += 1
         try:
             async with _get_llm_semaphore():
-                result = await asyncio.to_thread(
+                call_task = asyncio.to_thread(
                     _call_provider_sync,
                     ms.provider,
                     prompt,
@@ -1091,6 +1095,13 @@ async def call_chat_ms(
                     timeout_sec=timeout_sec,
                     thinking_level=thinking_level,
                 )
+                if timeout_sec is not None:
+                    result = await asyncio.wait_for(call_task, timeout=timeout_sec)
+                else:
+                    result = await call_task
+        except asyncio.TimeoutError:
+            error = f"timeout after {timeout_sec}s"
+            result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)
         except Exception as exc:  # pragma: no cover - unexpected runtime errors
             error = _format_provider_exception(exc)
             result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)

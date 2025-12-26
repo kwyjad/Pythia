@@ -651,6 +651,11 @@ def _web_research_markdown(
         else:
             lines.append("| (none) | (none) | (none) | (none) |")
         lines.append("")
+    else:
+        lines.append("#### Forecast self-search (forecast_web_research)")
+        lines.append("")
+        lines.append("_No forecast_web_research calls recorded for this run._")
+        lines.append("")
     lines.append("#### HS country evidence packs")
     lines.append("")
     lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | attempted_backends | selected_backend | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
@@ -1051,9 +1056,11 @@ def _ensemble_participation_summary(
         lines.append("- No forecasts_raw rows found for this run.")
 
     spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
-    expected_specs = parse_ensemble_specs(spec_override) if spec_override else list(SPD_ENSEMBLE)
-    if not expected_specs:
-        expected_specs = [spec for spec in DEFAULT_ENSEMBLE if getattr(spec, "model_id", "")]
+    expected_specs = (
+        parse_ensemble_specs(spec_override)
+        if spec_override
+        else [spec for spec in DEFAULT_ENSEMBLE if getattr(spec, "model_id", "")]
+    )
 
     expected_specs = [spec for spec in expected_specs if getattr(spec, "model_id", "") and getattr(spec, "active", True)]
     expected_names = {spec.name for spec in expected_specs if getattr(spec, "name", "")}
@@ -1064,7 +1071,7 @@ def _ensemble_participation_summary(
     if expected_specs:
         lines.append(
             f"- Expected ensemble size: {len(expected_specs)} "
-            f"({('PYTHIA_SPD_ENSEMBLE_SPECS' if spec_override else 'SPD_ENSEMBLE')})."
+            f"({('PYTHIA_SPD_ENSEMBLE_SPECS' if spec_override else 'DEFAULT_ENSEMBLE')})."
         )
         if missing_by_name:
             for name in missing_by_name:
@@ -1634,15 +1641,21 @@ def _aggregate_usage_by_phase(
                 "total_cost_usd": 0.0,
             },
         )
-        phase_acc["prompt_tokens"] += float(usage.get("prompt_tokens") or 0.0)
-        phase_acc["completion_tokens"] += float(usage.get("completion_tokens") or 0.0)
-        phase_acc["total_tokens"] += float(usage.get("total_tokens") or 0.0)
+        prompt_tokens = float(usage.get("prompt_tokens") or 0.0)
+        completion_tokens = float(usage.get("completion_tokens") or 0.0)
+        total_tokens = float(usage.get("total_tokens") or 0.0)
+        if total_tokens == 0.0 and (prompt_tokens or completion_tokens):
+            total_tokens = prompt_tokens + completion_tokens
+            usage = dict(usage)
+            usage["total_tokens"] = total_tokens
+        phase_acc["prompt_tokens"] += prompt_tokens
+        phase_acc["completion_tokens"] += completion_tokens
+        phase_acc["total_tokens"] += total_tokens
         # For backwards compatibility, accept either total_cost_usd or cost_usd
         cost_val = float(usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0)
         if cost_val == 0.0:
-            total_tokens = float(usage.get("total_tokens") or 0.0)
             if total_tokens > 0:
-                model_id = row.get("model_id") or ""
+                model_id = row.get("model_id") or row.get("model") or ""
                 if model_id:
                     cost_val = estimate_cost_usd(str(model_id), usage)
         phase_acc["total_cost_usd"] += cost_val
@@ -1959,8 +1972,11 @@ def build_triage_only_bundle_markdown(
         con, hs_run_id, None, resolved_countries_sorted, []
     )
     web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
     hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
     spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
+    hs_web_research_active = retriever_enabled or hs_research_web_search == "1"
+    research_web_research_active = retriever_enabled or hs_research_web_search == "1"
     web_research_accounting = _web_research_accounting(con, None, hs_run_id)
     hs_web_research_rows, hs_web_research_failures = _load_web_research_summary(
         con, "hs_web_research", None, hs_run_id
@@ -2009,6 +2025,9 @@ def build_triage_only_bundle_markdown(
         "- HS/Research web search enabled (PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED): "
         f"`{hs_research_web_search}`"
     )
+    lines.append(f"- Retriever enabled (PYTHIA_RETRIEVER_ENABLED): `{int(retriever_enabled)}`")
+    lines.append(f"- HS web research active (flag or retriever): `{int(hs_web_research_active)}`")
+    lines.append(f"- Research web research active (flag or retriever): `{int(research_web_research_active)}`")
     lines.append(
         "- SPD web search enabled (PYTHIA_SPD_WEB_SEARCH_ENABLED): "
         f"`{spd_web_search}`"
@@ -2032,6 +2051,9 @@ def build_triage_only_bundle_markdown(
     lines.append(
         f"- PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: `{hs_research_web_search}`"
     )
+    lines.append(f"- PYTHIA_RETRIEVER_ENABLED: `{int(retriever_enabled)}`")
+    lines.append(f"- HS web research active (flag or retriever): `{int(hs_web_research_active)}`")
+    lines.append(f"- Research web research active (flag or retriever): `{int(research_web_research_active)}`")
     lines.append(f"- PYTHIA_SPD_WEB_SEARCH_ENABLED: `{spd_web_search}`")
     lines.append("")
     lines.extend(provenance_lines)
@@ -2189,8 +2211,11 @@ def build_debug_bundle_markdown(
         con, manifest_hs_run_id, forecaster_run_id, resolved_countries_sorted, question_ids
     )
     web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
     hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
     spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
+    hs_web_research_active = retriever_enabled or hs_research_web_search == "1"
+    research_web_research_active = retriever_enabled or hs_research_web_search == "1"
     web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
     hs_web_research_rows, hs_web_research_failures = _load_web_research_summary(
         con, "hs_web_research", forecaster_run_id, manifest_hs_run_id
@@ -2246,6 +2271,9 @@ def build_debug_bundle_markdown(
         "- HS/Research web search enabled (PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED): "
         f"`{hs_research_web_search}`"
     )
+    lines.append(f"- Retriever enabled (PYTHIA_RETRIEVER_ENABLED): `{int(retriever_enabled)}`")
+    lines.append(f"- HS web research active (flag or retriever): `{int(hs_web_research_active)}`")
+    lines.append(f"- Research web research active (flag or retriever): `{int(research_web_research_active)}`")
     lines.append(
         "- SPD web search enabled (PYTHIA_SPD_WEB_SEARCH_ENABLED): "
         f"`{spd_web_search}`"
@@ -2296,6 +2324,9 @@ def build_debug_bundle_markdown(
     lines.append(
         f"- PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: `{hs_research_web_search}`"
     )
+    lines.append(f"- PYTHIA_RETRIEVER_ENABLED: `{int(retriever_enabled)}`")
+    lines.append(f"- HS web research active (flag or retriever): `{int(hs_web_research_active)}`")
+    lines.append(f"- Research web research active (flag or retriever): `{int(research_web_research_active)}`")
     lines.append(f"- PYTHIA_SPD_WEB_SEARCH_ENABLED: `{spd_web_search}`")
     lines.append("")
     lines.extend(provenance_lines)
