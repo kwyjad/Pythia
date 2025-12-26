@@ -37,12 +37,9 @@ DEFAULT_FILE_LIST = [
     "pythia/web_research/web_research.py",
     "pythia/web_research/backends/gemini_grounding.py",
     "horizon_scanner/horizon_scanner.py",
+    "horizon_scanner/prompts.py",
     "horizon_scanner/db_writer.py",
     "scripts/dump_pythia_debug_bundle.py",
-    ".github/workflows/run_horizon_scanner.yml",
-    "forecaster/cli.py",
-    "pythia/db/schema.py",
-    "forecaster/providers.py",
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"

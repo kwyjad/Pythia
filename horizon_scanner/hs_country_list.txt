@@ -1,11 +1,31 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
-Israel
 Kazakhstan
 Kyrgyzstan
-Laos
 Moldova
 Mozambique
 Namibia
-Panama
-Peru
 Republic of the Congo
+South Africa
+Tanzania
+Thailand
+Cameroon
+Central African Republic
+China
+El Salvador
+Georgia
+Ghana
+Jordan
+Kosovo
+Liberia
+Malawi
+Mali
+Nicaragua
+Poland
+Serbia
+Tajikistan
+The Gambia
+Togo
+Uganda
+Ukraine
+Uzbekistan
+Laos
