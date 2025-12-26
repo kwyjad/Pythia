@@ -15,6 +15,9 @@ import requests
 
 from pythia.web_research.types import EvidencePack, EvidenceSource
 
+DEFAULT_GEMINI_CANDIDATES = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
+MAX_SIGNAL_LINES = 8
+
 
 def _extract_sources_from_grounding(gm: Dict[str, Any]) -> List[EvidenceSource]:
     sources: List[EvidenceSource] = []
@@ -30,6 +33,40 @@ def _extract_sources_from_grounding(gm: Dict[str, Any]) -> List[EvidenceSource]:
         sources.append(EvidenceSource(title=title, url=url, publisher="", date=None, summary=""))
 
     return sources
+
+
+def _extract_json_blob(text_blob: str) -> Dict[str, Any] | None:
+    try:
+        parsed = json.loads(text_blob)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    start = text_blob.find("{")
+    end = text_blob.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        parsed = json.loads(text_blob[start : end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _extract_bullet_signals(text_blob: str) -> List[str]:
+    signals: List[str] = []
+    for line in text_blob.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("-", "*", "•")):
+            cleaned = stripped.lstrip("-*•").strip()
+            if cleaned:
+                signals.append(cleaned)
+        if len(signals) >= MAX_SIGNAL_LINES:
+            break
+    return signals
 
 
 def parse_gemini_grounding_response(resp: Dict[str, Any]) -> Tuple[List[EvidenceSource], bool, Dict[str, Any]]:
@@ -72,10 +109,7 @@ def fetch_via_gemini(
     env_model_id = (model_id or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
     if not env_model_id and os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1":
         env_model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
-    if env_model_id:
-        model_candidates = [env_model_id]
-    else:
-        model_candidates = ["gemini-3-flash-preview", "gemini-3-pro-preview"]
+    model_candidates = [env_model_id] if env_model_id else list(DEFAULT_GEMINI_CANDIDATES)
 
     pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
 
@@ -186,20 +220,22 @@ def fetch_via_gemini(
     recent_signals: List[str] = []
     unverified_sources: List[EvidenceSource] = []
     if text_blob:
-        try:
-            parsed = json.loads(text_blob)
+        parsed = _extract_json_blob(text_blob)
+        if parsed:
             if include_structural:
                 structural_context = str(parsed.get("structural_context", "") or "")
             signals_raw = parsed.get("recent_signals") or []
             if isinstance(signals_raw, list):
-                recent_signals = [str(x) for x in signals_raw if str(x).strip()][:8]
+                recent_signals = [str(x) for x in signals_raw if str(x).strip()][:MAX_SIGNAL_LINES]
             if structural_context:
                 lines = structural_context.splitlines()
-                structural_context = "\n".join(lines[:8]).strip()
+                structural_context = "\n".join(lines[:MAX_SIGNAL_LINES]).strip()
             if include_structural:
                 extra_debug["notes"] = parsed.get("notes")
-        except Exception:
+        else:
             extra_debug["raw_text"] = text_blob
+            if not recent_signals:
+                recent_signals = _extract_bullet_signals(text_blob)
         if not grounded:
             urls = re.findall(r"https?://[^\s\]\"')>]+", text_blob)
             seen: set[str] = set()

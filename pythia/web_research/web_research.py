@@ -174,9 +174,9 @@ def fetch_evidence_pack(
     max_results = _env_int("PYTHIA_WEB_RESEARCH_MAX_RESULTS", 10)
     fallback_backend = _env_str("PYTHIA_WEB_RESEARCH_FALLBACK_BACKEND", "").lower()
     if retriever_enabled:
-        backend = "google"
+        backend = "gemini"
         fallback_backend = ""
-        model_id = retriever_model_id or None
+        model_id = retriever_model_id
 
     start_ms = int(time.time() * 1000)
     guard = BudgetGuard(run_id or "default")
