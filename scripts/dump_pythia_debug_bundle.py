@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
 import duckdb
+import pandas as pd
 from forecaster.providers import SPD_ENSEMBLE, estimate_cost_usd, parse_ensemble_specs
 from pythia.db import schema as pythia_schema
 from resolver.db import duckdb_io
@@ -560,6 +561,227 @@ def _percentile(values: list[float], pct: float) -> float | None:
     return float(ordered[idx])
 
 
+def _expected_spd_model_ids() -> list[str]:
+    spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
+    specs = parse_ensemble_specs(spec_override) if spec_override else SPD_ENSEMBLE
+    model_ids = [spec.model_id for spec in specs if getattr(spec, "model_id", "")]
+    return sorted({mid for mid in model_ids if mid})
+
+
+def _compute_question_run_metrics(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    questions: list[dict[str, Any]],
+) -> None:
+    if not questions:
+        return
+
+    pythia_schema.ensure_schema(con)
+    llm_columns = _llm_calls_columns(con)
+    question_ids = sorted({str(q.get("question_id")) for q in questions if q.get("question_id")})
+    if not question_ids:
+        return
+
+    in_clause, in_params = _build_in_clause(question_ids)
+    if not in_clause:
+        return
+
+    base_rows: dict[str, dict[str, Any]] = {}
+    for q in questions:
+        qid = q.get("question_id")
+        if not qid:
+            continue
+        base_rows[str(qid)] = {
+            "run_id": run_id,
+            "question_id": str(qid),
+            "iso3": q.get("iso3"),
+            "hazard_code": q.get("hazard_code"),
+            "metric": q.get("metric"),
+            "started_at_utc": None,
+            "finished_at_utc": None,
+            "wall_ms": None,
+            "compute_ms": None,
+            "queue_ms": None,
+            "cost_usd": None,
+            "n_spd_models_expected": None,
+            "n_spd_models_ok": None,
+            "missing_model_ids_json": None,
+            "phase_max_ms_json": None,
+            "phase_cost_usd_json": None,
+        }
+
+    run_params = [run_id, *in_params]
+
+    if "timestamp" in llm_columns:
+        wall_rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT
+                question_id,
+                MIN(timestamp) AS started_at_utc,
+                MAX(timestamp) AS finished_at_utc,
+                CAST(
+                    date_diff('millisecond', MIN(timestamp), MAX(timestamp))
+                    AS BIGINT
+                ) AS wall_ms
+            FROM llm_calls
+            WHERE run_id = ?
+              AND question_id IN {in_clause}
+              AND timestamp IS NOT NULL
+            GROUP BY question_id
+            """,
+            run_params,
+        )
+        for row in wall_rows:
+            qid = str(row.get("question_id") or "")
+            if qid not in base_rows:
+                continue
+            base_rows[qid]["started_at_utc"] = row.get("started_at_utc")
+            base_rows[qid]["finished_at_utc"] = row.get("finished_at_utc")
+            base_rows[qid]["wall_ms"] = row.get("wall_ms")
+
+    phase_types = ["research_v2", "research_web_research", "spd_v2", "scenario_v2"]
+    phase_max_by_qid: dict[str, dict[str, int]] = {}
+    if "elapsed_ms" in llm_columns and "call_type" in llm_columns:
+        phase_in_clause, phase_params = _build_in_clause(phase_types)
+        if phase_in_clause:
+            phase_rows = _fetch_llm_rows(
+                con,
+                f"""
+                SELECT
+                    question_id,
+                    call_type,
+                    MAX(elapsed_ms) AS max_elapsed_ms
+                FROM llm_calls
+                WHERE run_id = ?
+                  AND question_id IN {in_clause}
+                  AND call_type IN {phase_in_clause}
+                  AND elapsed_ms IS NOT NULL
+                GROUP BY question_id, call_type
+                """,
+                [run_id, *in_params, *phase_params],
+            )
+            for row in phase_rows:
+                qid = str(row.get("question_id") or "")
+                call_type = str(row.get("call_type") or "")
+                if not qid or not call_type:
+                    continue
+                entry = phase_max_by_qid.setdefault(qid, {})
+                entry[call_type] = int(row.get("max_elapsed_ms") or 0)
+
+    cost_by_qid: dict[str, float] = {}
+    cost_by_phase_by_qid: dict[str, dict[str, float]] = {}
+    if "cost_usd" in llm_columns:
+        cost_rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT question_id, SUM(cost_usd) AS cost_usd
+            FROM llm_calls
+            WHERE run_id = ?
+              AND question_id IN {in_clause}
+              AND cost_usd IS NOT NULL
+            GROUP BY question_id
+            """,
+            run_params,
+        )
+        for row in cost_rows:
+            qid = str(row.get("question_id") or "")
+            if not qid:
+                continue
+            cost_by_qid[qid] = float(row.get("cost_usd") or 0.0)
+
+        if "call_type" in llm_columns:
+            phase_in_clause, phase_params = _build_in_clause(phase_types)
+            if phase_in_clause:
+                phase_cost_rows = _fetch_llm_rows(
+                    con,
+                    f"""
+                    SELECT question_id, call_type, SUM(cost_usd) AS cost_usd
+                    FROM llm_calls
+                    WHERE run_id = ?
+                      AND question_id IN {in_clause}
+                      AND call_type IN {phase_in_clause}
+                      AND cost_usd IS NOT NULL
+                    GROUP BY question_id, call_type
+                    """,
+                    [run_id, *in_params, *phase_params],
+                )
+                for row in phase_cost_rows:
+                    qid = str(row.get("question_id") or "")
+                    call_type = str(row.get("call_type") or "")
+                    if not qid or not call_type:
+                        continue
+                    entry = cost_by_phase_by_qid.setdefault(qid, {})
+                    entry[call_type] = float(row.get("cost_usd") or 0.0)
+
+    expected_model_ids = _expected_spd_model_ids()
+    present_by_qid: dict[str, set[str]] = {}
+    if expected_model_ids and "call_type" in llm_columns and "model_id" in llm_columns:
+        error_filter = ""
+        if "error_text" in llm_columns:
+            error_filter = "AND (error_text IS NULL OR error_text = '')"
+        spd_rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT question_id, model_id
+            FROM llm_calls
+            WHERE run_id = ?
+              AND question_id IN {in_clause}
+              AND call_type = 'spd_v2'
+              AND model_id IS NOT NULL
+              AND model_id <> ''
+              {error_filter}
+            """,
+            run_params,
+        )
+        for row in spd_rows:
+            qid = str(row.get("question_id") or "")
+            model_id = str(row.get("model_id") or "")
+            if not qid or not model_id:
+                continue
+            present_by_qid.setdefault(qid, set()).add(model_id)
+
+    rows_to_upsert: list[dict[str, Any]] = []
+    for qid, row in sorted(base_rows.items()):
+        phase_max = phase_max_by_qid.get(qid, {})
+        compute_ms = (
+            sum(int(val or 0) for val in phase_max.values()) if phase_max else None
+        )
+        wall_ms = row.get("wall_ms")
+        queue_ms = None
+        if wall_ms is not None and compute_ms is not None:
+            try:
+                queue_ms = max(int(wall_ms) - int(compute_ms), 0)
+            except Exception:
+                queue_ms = None
+        phase_costs = cost_by_phase_by_qid.get(qid, {})
+
+        row["compute_ms"] = compute_ms
+        row["queue_ms"] = queue_ms
+        if qid in cost_by_qid:
+            row["cost_usd"] = cost_by_qid[qid]
+
+        if expected_model_ids:
+            present = present_by_qid.get(qid, set())
+            missing = sorted(set(expected_model_ids) - present)
+            row["n_spd_models_expected"] = len(expected_model_ids)
+            row["n_spd_models_ok"] = len(set(expected_model_ids) & present)
+            row["missing_model_ids_json"] = json.dumps(missing)
+
+        if phase_max:
+            row["phase_max_ms_json"] = json.dumps(phase_max, sort_keys=True)
+        if phase_costs:
+            row["phase_cost_usd_json"] = json.dumps(phase_costs, sort_keys=True)
+
+        rows_to_upsert.append(row)
+
+    if not rows_to_upsert:
+        return
+
+    frame = pd.DataFrame(rows_to_upsert)
+    duckdb_io.upsert_dataframe(con, "question_run_metrics", frame, keys=["run_id", "question_id"])
+
+
 def _load_question_run_metrics(
     con: duckdb.DuckDBPyConnection, run_id: str
 ) -> list[dict[str, Any]]:
@@ -573,8 +795,14 @@ def _load_question_run_metrics(
                 hazard_code,
                 metric,
                 wall_ms,
+                compute_ms,
+                queue_ms,
                 cost_usd,
-                missing_model_ids_json
+                missing_model_ids_json,
+                n_spd_models_expected,
+                n_spd_models_ok,
+                phase_max_ms_json,
+                phase_cost_usd_json
             FROM question_run_metrics
             WHERE run_id = ?
             """,
@@ -2318,6 +2546,11 @@ def build_debug_bundle_markdown(
     forecasts_raw_counts = _load_forecasts_raw_counts(con, forecaster_run_id)
     forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, forecaster_run_id)
     spd_model_ids = _load_spd_llm_model_ids(con, forecaster_run_id)
+    question_run_metrics_warning: str | None = None
+    try:
+        _compute_question_run_metrics(con, forecaster_run_id, questions)
+    except Exception as exc:  # pragma: no cover - defensive
+        question_run_metrics_warning = f"Error computing question_run_metrics: {exc}"
     question_run_metrics = _load_question_run_metrics(con, forecaster_run_id)
     manifest_hs_run_id = hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None)
     hs_manifest = _load_hs_run_metadata(con, manifest_hs_run_id)
@@ -2551,10 +2784,23 @@ def build_debug_bundle_markdown(
     lines.append("")
     lines.append("### Question run metrics")
     lines.append("")
+    if question_run_metrics_warning:
+        lines.append(f"_Note: {question_run_metrics_warning}_")
+        lines.append("")
     wall_values = [
         float(row.get("wall_ms"))
         for row in question_run_metrics
         if row.get("wall_ms") is not None
+    ]
+    compute_values = [
+        float(row.get("compute_ms"))
+        for row in question_run_metrics
+        if row.get("compute_ms") is not None
+    ]
+    queue_values = [
+        float(row.get("queue_ms"))
+        for row in question_run_metrics
+        if row.get("queue_ms") is not None
     ]
     cost_values = [
         float(row.get("cost_usd"))
@@ -2563,12 +2809,28 @@ def build_debug_bundle_markdown(
     ]
     wall_median = _percentile(wall_values, 50)
     wall_p95 = _percentile(wall_values, 95)
+    compute_median = _percentile(compute_values, 50)
+    compute_p95 = _percentile(compute_values, 95)
+    queue_median = _percentile(queue_values, 50)
+    queue_p95 = _percentile(queue_values, 95)
     cost_median = _percentile(cost_values, 50)
     cost_p95 = _percentile(cost_values, 95)
     lines.append("| metric | value |")
     lines.append("| ------ | ----- |")
     lines.append(f"| wall_ms_median | {int(wall_median) if wall_median is not None else 0} |")
     lines.append(f"| wall_ms_p95 | {int(wall_p95) if wall_p95 is not None else 0} |")
+    lines.append(
+        f"| compute_ms_median | {int(compute_median) if compute_median is not None else 0} |"
+    )
+    lines.append(
+        f"| compute_ms_p95 | {int(compute_p95) if compute_p95 is not None else 0} |"
+    )
+    lines.append(
+        f"| queue_ms_median | {int(queue_median) if queue_median is not None else 0} |"
+    )
+    lines.append(
+        f"| queue_ms_p95 | {int(queue_p95) if queue_p95 is not None else 0} |"
+    )
     lines.append(f"| cost_usd_median | {cost_median:.4f} |" if cost_median is not None else "| cost_usd_median | 0.0000 |")
     lines.append(f"| cost_usd_p95 | {cost_p95:.4f} |" if cost_p95 is not None else "| cost_usd_p95 | 0.0000 |")
     lines.append("")
@@ -2587,6 +2849,46 @@ def build_debug_bundle_markdown(
         )[:10]:
             lines.append(
                 f"| {row.get('question_id')} | {int(row.get('wall_ms') or 0)} | "
+                f"{row.get('iso3') or ''} | {row.get('hazard_code') or ''} | {row.get('metric') or ''} |"
+            )
+    else:
+        lines.append("| (none) | 0 | (none) | (none) | (none) |")
+    lines.append("")
+
+    lines.append("#### Top 10 slowest questions by compute_ms")
+    lines.append("")
+    lines.append("| question_id | compute_ms | iso3 | hazard_code | metric |")
+    lines.append("| ----------- | ---------- | ---- | ----------- | ------ |")
+    if question_run_metrics:
+        for row in sorted(
+            question_run_metrics,
+            key=lambda r: (
+                -(float(r.get("compute_ms") or 0.0)),
+                str(r.get("question_id") or ""),
+            ),
+        )[:10]:
+            lines.append(
+                f"| {row.get('question_id')} | {int(row.get('compute_ms') or 0)} | "
+                f"{row.get('iso3') or ''} | {row.get('hazard_code') or ''} | {row.get('metric') or ''} |"
+            )
+    else:
+        lines.append("| (none) | 0 | (none) | (none) | (none) |")
+    lines.append("")
+
+    lines.append("#### Top 10 slowest questions by queue_ms")
+    lines.append("")
+    lines.append("| question_id | queue_ms | iso3 | hazard_code | metric |")
+    lines.append("| ----------- | -------- | ---- | ----------- | ------ |")
+    if question_run_metrics:
+        for row in sorted(
+            question_run_metrics,
+            key=lambda r: (
+                -(float(r.get("queue_ms") or 0.0)),
+                str(r.get("question_id") or ""),
+            ),
+        )[:10]:
+            lines.append(
+                f"| {row.get('question_id')} | {int(row.get('queue_ms') or 0)} | "
                 f"{row.get('iso3') or ''} | {row.get('hazard_code') or ''} | {row.get('metric') or ''} |"
             )
     else:
@@ -2615,8 +2917,6 @@ def build_debug_bundle_markdown(
 
     lines.append("#### Questions with missing SPD model_ids")
     lines.append("")
-    lines.append("| question_id | missing_model_ids |")
-    lines.append("| ----------- | ------------------ |")
     missing_rows: list[dict[str, Any]] = []
     for row in question_run_metrics:
         raw = row.get("missing_model_ids_json") or "[]"
@@ -2631,6 +2931,10 @@ def build_debug_bundle_markdown(
                     "missing_model_ids": parsed,
                 }
             )
+    lines.append(f"- Questions with missing SPD model contributions: `{len(missing_rows)}`")
+    lines.append("")
+    lines.append("| question_id | missing_model_ids |")
+    lines.append("| ----------- | ------------------ |")
     if missing_rows:
         for row in sorted(missing_rows, key=lambda r: str(r.get("question_id") or "")):
             missing_ids = row.get("missing_model_ids") or []
