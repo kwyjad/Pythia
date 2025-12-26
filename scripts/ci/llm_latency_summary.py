@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Sequence, Tuple
 
 import duckdb
 from resolver.db import duckdb_io
@@ -63,7 +63,7 @@ def _has_columns(
 def _query_latency(
     con: duckdb.DuckDBPyConnection,
     predicate: str,
-    params: Sequence,
+    params: Sequence[Any],
 ) -> List[Tuple[str, str, str, int, float, float, float]]:
     predicate_sql = predicate or "1=1"
     return con.execute(
@@ -90,7 +90,7 @@ def _query_latency(
 def _top_slow_calls(
     con: duckdb.DuckDBPyConnection,
     predicate: str,
-    params: Sequence,
+    params: Sequence[Any],
     limit: int = 10,
 ) -> List[Tuple[str, str, str, str, int]]:
     return con.execute(

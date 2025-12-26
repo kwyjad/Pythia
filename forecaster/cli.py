@@ -2444,7 +2444,7 @@ def _country_label(iso3: str | None) -> str:
     name = _load_country_names().get(iso3_val)
     if name:
         return f"{name} ({iso3_val})"
-    return iso3_val
+    return f"Unknown Country ({iso3_val})"
 
 
 def _merge_question_evidence_packs(
