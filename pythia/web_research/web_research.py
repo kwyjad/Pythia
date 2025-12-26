@@ -174,10 +174,9 @@ def fetch_evidence_pack(
     max_results = _env_int("PYTHIA_WEB_RESEARCH_MAX_RESULTS", 10)
     fallback_backend = _env_str("PYTHIA_WEB_RESEARCH_FALLBACK_BACKEND", "").lower()
     if retriever_enabled:
-        backend = "gemini"
+        backend = "google"
         fallback_backend = ""
-        if not model_id:
-            model_id = retriever_model_id or None
+        model_id = retriever_model_id or None
 
     start_ms = int(time.time() * 1000)
     guard = BudgetGuard(run_id or "default")
@@ -295,7 +294,7 @@ def fetch_evidence_pack(
             }
             if not pack.sources and not pack.error:
                 pack.error = {"type": "grounding_missing", "message": "no verified sources from any backend"}
-        elif backend == "gemini":
+        elif backend in {"gemini", "google"}:
             module, import_err = _load_backend_module("gemini_grounding")
             if module is None:
                 pack = EvidencePack(query=query, recency_days=recency_days, backend=backend)
@@ -309,6 +308,8 @@ def fetch_evidence_pack(
                     max_results=max_results,
                     model_id=model_id,
                 )
+                if pack is not None:
+                    pack.backend = backend
         elif backend == "openai":
             module, import_err = _load_backend_module("openai_web_search")
             if module is None:
@@ -431,10 +432,10 @@ def _log_web_research(
             provider = str(pack.debug.get("provider") or provider)
             model_id = str(pack.debug.get("selected_model_id") or pack.debug.get("model_id") or model_id)
         if not provider:
-            provider = "google" if pack.backend == "gemini" else pack.backend or "unknown"
-        if os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1" and pack.backend == "gemini":
+            provider = "google" if pack.backend in {"gemini", "google"} else pack.backend or "unknown"
+        if os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1" and pack.backend in {"gemini", "google"}:
             model_id = model_id or os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "gemini-2.5-flash-lite"
-        if pack.backend == "gemini":
+        if pack.backend in {"gemini", "google"}:
             model_name = "Gemini Grounding"
         if "cost_usd" not in usage_json or float(usage_json.get("cost_usd") or 0.0) == 0.0:
             usage_json["cost_usd"] = estimate_cost_usd(model_id, usage_json)

@@ -32,7 +32,13 @@ def parse_table_list(csv_str: str | None) -> list[str]:
     return [item.strip() for item in csv_str.split(",") if item.strip()]
 
 
-def compute_signature(db_path: str | os.PathLike[str], required: Iterable[str], optional: Iterable[str]) -> dict:
+def compute_signature(
+    db_path: str | os.PathLike[str],
+    required: Iterable[str],
+    optional: Iterable[str],
+    *,
+    allow_missing_required: bool = False,
+) -> dict:
     db_file = Path(db_path)
     if not db_file.is_file():
         raise FileNotFoundError(f"Database not found at {db_file}")
@@ -52,7 +58,7 @@ def compute_signature(db_path: str | os.PathLike[str], required: Iterable[str], 
         duckdb_io.close_db(conn)
 
     missing = [table for table in required_list if counts.get(table) is None]
-    if missing:
+    if missing and not allow_missing_required:
         raise MissingRequiredTablesError(missing)
 
     signature = {
@@ -62,6 +68,8 @@ def compute_signature(db_path: str | os.PathLike[str], required: Iterable[str], 
         "required_counts": {table: counts.get(table) for table in required_list},
         "optional_counts": {table: counts.get(table) for table in optional_list},
     }
+    if missing:
+        signature["missing_required"] = missing
     return signature
 
 
@@ -89,6 +97,8 @@ def print_signature(signature: dict, required: Iterable[str], optional: Iterable
     optional_list = list(optional)
     print(f"DB size (bytes): {signature['size_bytes']}")
     print(f"Tables ({len(signature['tables'])}): {', '.join(signature['tables'])}")
+    if signature.get("missing_required"):
+        print(f"Missing required tables: {', '.join(signature['missing_required'])}")
     print("Required row counts:")
     for table in required_list:
         print(f"  - {table}: {signature['required_counts'].get(table)}")
@@ -138,10 +148,20 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "compare":
             before = _load_signature(args.before)
-            after_signature = compute_signature(args.after_db, required, optional)
+            after_signature = compute_signature(
+                args.after_db,
+                required,
+                optional,
+                allow_missing_required=True,
+            )
             write_signature(after_signature, args.out)
             regressions = compare_signatures(before, after_signature, required)
             print_signature(after_signature, required, optional)
+            if after_signature.get("missing_required"):
+                sys.stderr.write(
+                    "Missing required tables: " + ", ".join(after_signature["missing_required"]) + "\n"
+                )
+                return EXIT_MISSING_REQUIRED
             if regressions:
                 sys.stderr.write("Required tables regressed: " + ", ".join(regressions) + "\n")
                 return EXIT_REGRESSION

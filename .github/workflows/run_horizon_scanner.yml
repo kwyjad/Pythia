@@ -574,38 +574,6 @@ jobs:
             cat "${BUNDLE_PATH}" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Diagnostics — LLM latency p50/p95 by phase/provider/model
-        if: ${{ success() }}
-        env:
-          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
-          HS_RUN_ID: ${{ env.HS_RUN_ID }}
-          FORECASTER_RUN_ID: ${{ env.FORECASTER_RUN_ID }}
-        run: |
-          set -e
-          mkdir -p diagnostics
-          python -m scripts.ci.llm_latency_summary --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}" | tee diagnostics/llm_latency_summary.md
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/llm_latency_summary.md ]; then
-            cat diagnostics/llm_latency_summary.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload unified debug bundle artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-debug-bundle
-          path: |
-            debug/pytia_debug_bundle__*.md
-            diagnostics/llm_latency_summary.md
-            diagnostics/db_signature_before.json
-            diagnostics/db_signature_after.json
-
-      - name: Upload evaluation artifacts
-        if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-eval
-          path: debug/eval/*
-          if-no-files-found: warn
-
       - name: Compare DB signature after HS run
         if: always()
         id: signature_after
@@ -652,6 +620,38 @@ jobs:
               echo "- Signature file: diagnostics/db_signature_after.json"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Diagnostics — LLM latency p50/p95 by phase/provider/model
+        if: ${{ success() }}
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          FORECASTER_RUN_ID: ${{ env.FORECASTER_RUN_ID }}
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python -m scripts.ci.llm_latency_summary --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}" | tee diagnostics/llm_latency_summary.md
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/llm_latency_summary.md ]; then
+            cat diagnostics/llm_latency_summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload unified debug bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-debug-bundle
+          path: |
+            debug/pytia_debug_bundle__*.md
+            diagnostics/llm_latency_summary.md
+            diagnostics/db_signature_before.json
+            diagnostics/db_signature_after.json
+
+      - name: Upload evaluation artifacts
+        if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-eval
+          path: debug/eval/*
+          if-no-files-found: warn
 
       - name: Upload canonical resolver DB
         if: success() && env.CANONICAL_DB_READY == 'true' && steps.signature_after.outputs.signature_ok == 'true'

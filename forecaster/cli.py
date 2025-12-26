@@ -29,6 +29,8 @@ WHAT THIS FILE DOES (high level, in plain English)
 
 import argparse
 import asyncio
+import csv
+import functools
 import importlib
 import importlib.util
 import json
@@ -70,6 +72,7 @@ LOG = logging.getLogger(__name__)
 
 MAX_RESEARCH_WORKERS = int(os.getenv("FORECASTER_RESEARCH_MAX_WORKERS", "6"))
 MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "6"))
+COUNTRIES_CSV = Path(__file__).resolve().parents[1] / "resolver" / "data" / "countries.csv"
 
 
 _DEFAULT_ENSEMBLE_LOGGED = False
@@ -2372,8 +2375,9 @@ def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> st
     elif window_end:
         timeframe = f" through {window_end}"
 
+    country = _country_label(iso3)
     return (
-        f"{iso3} {hazard_label} {metric} outlook{timeframe} — gather recent signals (last 120 days) "
+        f"{country} {hazard_label} {metric} outlook{timeframe} — gather recent signals (last 120 days) "
         "and concise structural drivers (max 8 lines). "
         f"Question focus: {wording or ''}"
     )
@@ -2400,8 +2404,9 @@ def _build_question_evidence_queries(
     elif window_end:
         timeframe = f" through {window_end}"
 
+    country = _country_label(iso3)
     targeted_query = (
-        f"{iso3} {hazard_label} {metric} hazard-specific outlook{timeframe} — "
+        f"{country} {hazard_label} {metric} hazard-specific outlook{timeframe} — "
         "focus on targeted drivers, regime shifts, and near-term signals."
     )
     return [base_query, targeted_query]
@@ -2414,6 +2419,32 @@ def _retriever_enabled() -> bool:
 def _retriever_model_id() -> str | None:
     model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
     return model_id or None
+
+
+@functools.lru_cache(maxsize=1)
+def _load_country_names() -> dict[str, str]:
+    names: dict[str, str] = {}
+    try:
+        with COUNTRIES_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                iso3 = (row.get("iso3") or "").strip().upper()
+                name = (row.get("country_name") or "").strip()
+                if iso3 and name:
+                    names[iso3] = name
+    except Exception:
+        return {}
+    return names
+
+
+def _country_label(iso3: str | None) -> str:
+    iso3_val = (iso3 or "").strip().upper()
+    if not iso3_val:
+        return ""
+    name = _load_country_names().get(iso3_val)
+    if name:
+        return f"{name} ({iso3_val})"
+    return iso3_val
 
 
 def _merge_question_evidence_packs(
@@ -2465,8 +2496,9 @@ def _build_spd_web_search_query(
     hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
     timeframe = f" starting {target_month}" if target_month else ""
     wording_val = wording or ""
+    country = _country_label(iso3_val)
     return (
-        f"{iso3_val} {hazard_label} {metric_val} outlook{timeframe} — gather recent signals (last 120 days) "
+        f"{country} {hazard_label} {metric_val} outlook{timeframe} — gather recent signals (last 120 days) "
         "and concise structural drivers (max 8 lines). "
         f"Question focus: {wording_val}"
     )
@@ -2659,6 +2691,16 @@ async def _call_spd_model_for_spec(
     **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
+
+    if ms.purpose != "spd_v2":
+        ms = ModelSpec(
+            name=ms.name,
+            provider=ms.provider,
+            model_id=ms.model_id,
+            weight=ms.weight,
+            active=ms.active,
+            purpose="spd_v2",
+        )
 
     prompt_with_evidence = prompt
     if (
@@ -3763,7 +3805,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
                         run_id=run_id,
                         question_id=qid,
                         hs_run_id=question_row.get("hs_run_id"),
-                        model_id=retriever_model_id,
+                        model_id=retriever_model_id if retriever_enabled else None,
                     )
                     packs.append(pack)
                 if packs:
@@ -4058,7 +4100,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         run_id=run_id,
                         question_id=qid,
                         hs_run_id=hs_run_id,
-                        model_id=retriever_model_id,
+                        model_id=retriever_model_id if _retriever_enabled() else None,
                     )
                     packs.append(pack)
                 if packs:
