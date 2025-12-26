@@ -200,6 +200,46 @@ def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _ensure_question_run_metrics_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the question_run_metrics table exists for per-question metrics."""
+
+    _ensure_table_and_columns(
+        con,
+        "question_run_metrics",
+        """
+        CREATE TABLE IF NOT EXISTS question_run_metrics (
+            run_id TEXT NOT NULL,
+            question_id TEXT NOT NULL,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            started_at_utc TIMESTAMP,
+            finished_at_utc TIMESTAMP,
+            wall_ms BIGINT,
+            cost_usd DOUBLE,
+            n_spd_models_expected INTEGER,
+            n_spd_models_ok INTEGER,
+            missing_model_ids_json TEXT,
+            PRIMARY KEY (run_id, question_id)
+        );
+        """,
+        {
+            "run_id": "TEXT",
+            "question_id": "TEXT",
+            "iso3": "TEXT",
+            "hazard_code": "TEXT",
+            "metric": "TEXT",
+            "started_at_utc": "TIMESTAMP",
+            "finished_at_utc": "TIMESTAMP",
+            "wall_ms": "BIGINT",
+            "cost_usd": "DOUBLE",
+            "n_spd_models_expected": "INTEGER",
+            "n_spd_models_ok": "INTEGER",
+            "missing_model_ids_json": "TEXT",
+        },
+    )
+
+
 def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the scenarios table exists for Scenario Writer outputs."""
 
@@ -393,6 +433,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "recent_signals_json": "TEXT",
             },
         )
+
+        _ensure_question_run_metrics_table(con)
 
         _ensure_table_and_columns(
             con,

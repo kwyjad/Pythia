@@ -125,6 +125,11 @@ BLOCKED_HAZARDS: set[str] = {
 } | {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
 ALLOWED = set(HAZARD_CONFIG.keys())
 CONFLICT_HAZARDS = {"ACE", "ACO"}
+EXPECTED_HS_HAZARDS = ["ACE", "DI", "DR", "FL", "HW", "TC"]
+
+
+def get_expected_hs_hazards() -> list[str]:
+    return list(EXPECTED_HS_HAZARDS)
 
 
 def _to_target_month(today: date, months_ahead: int) -> str:

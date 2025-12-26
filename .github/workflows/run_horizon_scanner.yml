@@ -407,6 +407,43 @@ jobs:
           python -m py_compile scripts/ci/assert_hs_outputs.py
           python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage triage
 
+      - name: Warn on missing HS triage rows
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          HS_RESOLVED_ISO3S: ${{ env.HS_RESOLVED_ISO3S }}
+        run: |
+          python - <<'PY'
+          import os
+          from resolver.db import duckdb_io
+          expected = ["ACE", "DI", "DR", "FL", "HW", "TC"]
+          db_url = os.environ.get("RESOLVER_DB_URL", "")
+          hs_run_id = os.environ.get("HS_RUN_ID", "")
+          iso3_raw = os.environ.get("HS_RESOLVED_ISO3S", "")
+          iso3s = [iso3.strip().upper() for iso3 in iso3_raw.split(",") if iso3.strip()]
+          missing = []
+          if db_url and hs_run_id and iso3s:
+              con = duckdb_io.get_db(db_url)
+              try:
+                  rows = con.execute(
+                      "SELECT upper(iso3) AS iso3, upper(hazard_code) AS hazard_code "
+                      "FROM hs_triage WHERE run_id = ?",
+                      [hs_run_id],
+                  ).fetchall()
+              finally:
+                  duckdb_io.close_db(con)
+              present = {}
+              for iso3, hazard in rows:
+                  if iso3 and hazard:
+                      present.setdefault(iso3, set()).add(hazard)
+              for iso3 in sorted(set(iso3s)):
+                  for hazard in expected:
+                      if hazard not in present.get(iso3, set()):
+                          missing.append((iso3, hazard))
+          if missing:
+              print(f"::warning::HS triage missing {len(missing)} hazard rows (see debug bundle section).")
+          PY
+
       - name: Upload HS triage diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

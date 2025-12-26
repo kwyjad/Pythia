@@ -917,6 +917,7 @@ from .providers import (
     is_provider_disabled_for_run,
     get_llm_semaphore,
     estimate_cost_usd,
+    parse_ensemble_specs,
     reset_provider_failures_for_run,
 )
 from .ensemble import (
@@ -4880,6 +4881,13 @@ def _load_calibration_weights_db(
             pass
 
 
+def _expected_spd_model_ids() -> list[str]:
+    spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
+    specs = parse_ensemble_specs(spec_override) if spec_override else SPD_ENSEMBLE
+    model_ids = sorted({spec.model_id for spec in specs if getattr(spec, "model_id", "")})
+    return list(model_ids)
+
+
 def _load_calibration_advice_db(
     hazard_code: str,
     metric: str,
@@ -6769,18 +6777,104 @@ def main() -> None:
         async def _run_v2_pipeline_async() -> None:
             research_sem = asyncio.Semaphore(MAX_RESEARCH_WORKERS)
             spd_sem = asyncio.Semaphore(MAX_SPD_WORKERS)
+            question_start_ms: dict[str, int] = {}
+            expected_model_ids = _expected_spd_model_ids()
+
+            def _record_question_run_metrics(q: dict, *, start_ms: int) -> None:
+                qid = str(q.get("question_id") or "")
+                if not qid:
+                    return
+                finished_at = datetime.utcnow()
+                wall_ms = int(time.time() * 1000) - int(start_ms)
+                started_at = datetime.utcfromtimestamp(start_ms / 1000.0)
+                cost_usd = 0.0
+                ok_model_ids: list[str] = []
+                con = pythia_connect(read_only=False)
+                try:
+                    ensure_schema(con)
+                    row = con.execute(
+                        """
+                        SELECT COALESCE(SUM(cost_usd), 0.0)
+                        FROM llm_calls
+                        WHERE run_id = ? AND question_id = ?
+                        """,
+                        [run_id, qid],
+                    ).fetchone()
+                    if row:
+                        cost_usd = float(row[0] or 0.0)
+                    ok_rows = con.execute(
+                        """
+                        SELECT DISTINCT model_id
+                        FROM llm_calls
+                        WHERE run_id = ?
+                          AND question_id = ?
+                          AND call_type = 'spd_v2'
+                          AND (error_text IS NULL OR error_text = '')
+                          AND model_id IS NOT NULL
+                          AND model_id <> ''
+                        ORDER BY model_id
+                        """,
+                        [run_id, qid],
+                    ).fetchall()
+                    ok_model_ids = [str(r[0]) for r in ok_rows if r and r[0]]
+                    missing_model_ids = sorted(set(expected_model_ids) - set(ok_model_ids))
+                    con.execute(
+                        "DELETE FROM question_run_metrics WHERE run_id = ? AND question_id = ?",
+                        [run_id, qid],
+                    )
+                    con.execute(
+                        """
+                        INSERT INTO question_run_metrics (
+                            run_id, question_id, iso3, hazard_code, metric,
+                            started_at_utc, finished_at_utc, wall_ms, cost_usd,
+                            n_spd_models_expected, n_spd_models_ok, missing_model_ids_json
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            run_id,
+                            qid,
+                            (q.get("iso3") or ""),
+                            (q.get("hazard_code") or ""),
+                            (q.get("metric") or ""),
+                            started_at,
+                            finished_at,
+                            wall_ms,
+                            cost_usd,
+                            len(expected_model_ids),
+                            len(ok_model_ids),
+                            json.dumps(missing_model_ids, ensure_ascii=False),
+                        ],
+                    )
+                finally:
+                    con.close()
 
             async def _research_task(q: dict) -> None:
+                qid = str(q.get("question_id") or "")
+                if qid and qid not in question_start_ms:
+                    question_start_ms[qid] = int(time.time() * 1000)
                 if not _should_run_research(run_id, q):
                     return
                 async with research_sem:
                     await _run_research_for_question(run_id, q)
 
             async def _spd_task(q: dict) -> None:
+                qid = str(q.get("question_id") or "")
+                if qid and qid not in question_start_ms:
+                    question_start_ms[qid] = int(time.time() * 1000)
                 if not _question_needs_spd(run_id, q):
+                    start_ms = question_start_ms.get(qid or "")
+                    if start_ms is not None:
+                        _record_question_run_metrics(q, start_ms=start_ms)
                     return
                 async with spd_sem:
                     await _run_spd_for_question(run_id, q)
+                if not qid:
+                    return
+                start_ms = question_start_ms.get(qid)
+                if start_ms is None:
+                    return
+                _record_question_run_metrics(q, start_ms=start_ms)
 
             if args.batch_size and args.batch_size > 0:
                 batch_size = max(1, args.batch_size)

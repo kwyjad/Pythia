@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import datetime
@@ -68,6 +69,7 @@ KEY_TABLES = [
     "forecasts_raw",
     "forecasts_ensemble",
 ]
+EXPECTED_HS_HAZARDS = ["ACE", "DI", "DR", "FL", "HW", "TC"]
 
 
 def _table_count(con: duckdb.DuckDBPyConnection, table: str) -> int | None:
@@ -418,6 +420,7 @@ def _load_web_research_summaries(
                             "selected_backend": dbg.get("selected_backend") or "",
                             "used_attempt": dbg.get("used_attempt"),
                             "last_errors": dbg.get("last_errors") or [],
+                            "reason_code": dbg.get("reason_code"),
                         }
                     )
             except Exception:
@@ -544,6 +547,40 @@ def _load_spd_llm_model_ids(con: duckdb.DuckDBPyConnection, run_id: str) -> list
     except Exception:
         return []
     return [str(row[0]) for row in rows if row and row[0]]
+
+
+def _percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = int(math.ceil((pct / 100.0) * len(ordered))) - 1
+    idx = max(0, min(len(ordered) - 1, rank))
+    return float(ordered[idx])
+
+
+def _load_question_run_metrics(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> list[dict[str, Any]]:
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT
+                question_id,
+                iso3,
+                hazard_code,
+                metric,
+                wall_ms,
+                cost_usd,
+                missing_model_ids_json
+            FROM question_run_metrics
+            WHERE run_id = ?
+            """,
+            [run_id],
+        )
+    except Exception:
+        return []
+    return rows
 
 
 def _web_research_markdown(
@@ -677,6 +714,23 @@ def _web_research_markdown(
             )
     else:
         lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) | (none) | (none) |")
+    lines.append("")
+
+    lines.append("#### HS country packs with 0 verified sources")
+    lines.append("")
+    lines.append("| iso3 | reason_code |")
+    lines.append("| ---- | ----------- |")
+    zero_verified = []
+    if hs_rows:
+        for row in sorted(hs_rows, key=lambda r: r.get("iso3") or ""):
+            if int(row.get("n_verified") or 0) == 0:
+                zero_verified.append(row)
+    if zero_verified:
+        for row in zero_verified:
+            reason_code = row.get("reason_code") or ""
+            lines.append(f"| {row.get('iso3')} | {reason_code} |")
+    else:
+        lines.append("| (none) | (none) |")
     lines.append("")
 
     lines.append("#### Question evidence packs")
@@ -986,6 +1040,42 @@ def _load_hs_triage_summary(
         hazards_list = sorted({str(h).upper() for h in hazards if h})
         row["hazards_sorted"] = hazards_list
     return rows, total
+
+
+def _load_missing_hs_triage_combos(
+    con: duckdb.DuckDBPyConnection,
+    hs_run_id: str | None,
+    iso3s: list[str],
+) -> list[dict[str, str]]:
+    if not hs_run_id or not iso3s:
+        return []
+
+    try:
+        rows = con.execute(
+            """
+            SELECT iso3, hazard_code
+            FROM hs_triage
+            WHERE run_id = ?
+            """,
+            [hs_run_id],
+        ).fetchall()
+    except Exception:
+        return []
+
+    present: dict[str, set[str]] = {}
+    for iso3, hazard_code in rows:
+        iso3_up = str(iso3 or "").upper()
+        hz_up = str(hazard_code or "").upper()
+        if not iso3_up or not hz_up:
+            continue
+        present.setdefault(iso3_up, set()).add(hz_up)
+
+    missing: list[dict[str, str]] = []
+    for iso3 in sorted({str(code).upper() for code in iso3s if code}):
+        for hazard_code in EXPECTED_HS_HAZARDS:
+            if hazard_code not in present.get(iso3, set()):
+                missing.append({"iso3": iso3, "hazard_code": hazard_code})
+    return missing
 
 
 def _load_llm_call_counts(
@@ -1972,6 +2062,9 @@ def build_triage_only_bundle_markdown(
     resolved_countries_sorted = sorted({str(c) for c in (resolved_countries or []) if c})
 
     hs_triage_rows, n_hazards_triaged_total = _load_hs_triage_summary(con, hs_run_id)
+    missing_hs_triage = _load_missing_hs_triage_combos(
+        con, hs_run_id, resolved_countries_sorted
+    )
     hs_web_rows, question_web_rows = _load_web_research_summaries(
         con, hs_run_id, None, resolved_countries_sorted, []
     )
@@ -2100,6 +2193,28 @@ def build_triage_only_bundle_markdown(
         lines.append("| (none) | 0 | (none) |")
     lines.append("")
 
+    lines.append("### Missing HS triage combos")
+    lines.append("")
+    lines.append("| iso3 | hazard_code |")
+    lines.append("| ---- | ----------- |")
+    if missing_hs_triage:
+        for row in missing_hs_triage:
+            lines.append(f"| {row.get('iso3')} | {row.get('hazard_code')} |")
+    else:
+        lines.append("| (none) | (none) |")
+    lines.append("")
+
+    lines.append("### Missing HS triage combos")
+    lines.append("")
+    lines.append("| iso3 | hazard_code |")
+    lines.append("| ---- | ----------- |")
+    if missing_hs_triage:
+        for row in missing_hs_triage:
+            lines.append(f"| {row.get('iso3')} | {row.get('hazard_code')} |")
+    else:
+        lines.append("| (none) | (none) |")
+    lines.append("")
+
     lines.append("### LLM calls by phase/provider/model_id (hs_run only)")
     lines.append("")
     lines.append("| phase | provider | model_id | n_calls | n_errors |")
@@ -2196,6 +2311,7 @@ def build_debug_bundle_markdown(
     forecasts_raw_counts = _load_forecasts_raw_counts(con, forecaster_run_id)
     forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, forecaster_run_id)
     spd_model_ids = _load_spd_llm_model_ids(con, forecaster_run_id)
+    question_run_metrics = _load_question_run_metrics(con, forecaster_run_id)
     manifest_hs_run_id = hs_run_id_for_costs or (hs_run_ids[0] if hs_run_ids else None)
     hs_manifest = _load_hs_run_metadata(con, manifest_hs_run_id)
     question_ids = sorted([str(q.get("question_id")) for q in questions if q.get("question_id")])
@@ -2208,6 +2324,9 @@ def build_debug_bundle_markdown(
     resolved_countries_sorted = sorted({str(c) for c in resolved_countries if c})
     skipped_entries = ((hs_manifest or {}).get("skipped_entries") if hs_manifest else []) or []
     hs_triage_rows, n_hazards_triaged_total = _load_hs_triage_summary(con, manifest_hs_run_id)
+    missing_hs_triage = _load_missing_hs_triage_combos(
+        con, manifest_hs_run_id, resolved_countries_sorted
+    )
     n_questions_by_hazard: dict[str, int] = {}
     n_questions_by_iso3: dict[str, int] = {}
     for q in questions:
@@ -2422,6 +2541,96 @@ def build_debug_bundle_markdown(
             lines.append(f"| {iso_val} | {n_questions_by_iso3[iso_val]} |")
     else:
         lines.append("| (none) | 0 |")
+    lines.append("")
+    lines.append("### Question run metrics")
+    lines.append("")
+    wall_values = [
+        float(row.get("wall_ms"))
+        for row in question_run_metrics
+        if row.get("wall_ms") is not None
+    ]
+    cost_values = [
+        float(row.get("cost_usd"))
+        for row in question_run_metrics
+        if row.get("cost_usd") is not None
+    ]
+    wall_median = _percentile(wall_values, 50)
+    wall_p95 = _percentile(wall_values, 95)
+    cost_median = _percentile(cost_values, 50)
+    cost_p95 = _percentile(cost_values, 95)
+    lines.append("| metric | value |")
+    lines.append("| ------ | ----- |")
+    lines.append(f"| wall_ms_median | {int(wall_median) if wall_median is not None else 0} |")
+    lines.append(f"| wall_ms_p95 | {int(wall_p95) if wall_p95 is not None else 0} |")
+    lines.append(f"| cost_usd_median | {cost_median:.4f} |" if cost_median is not None else "| cost_usd_median | 0.0000 |")
+    lines.append(f"| cost_usd_p95 | {cost_p95:.4f} |" if cost_p95 is not None else "| cost_usd_p95 | 0.0000 |")
+    lines.append("")
+
+    lines.append("#### Top 10 slowest questions")
+    lines.append("")
+    lines.append("| question_id | wall_ms | iso3 | hazard_code | metric |")
+    lines.append("| ----------- | ------- | ---- | ----------- | ------ |")
+    if question_run_metrics:
+        for row in sorted(
+            question_run_metrics,
+            key=lambda r: (
+                -(float(r.get("wall_ms") or 0.0)),
+                str(r.get("question_id") or ""),
+            ),
+        )[:10]:
+            lines.append(
+                f"| {row.get('question_id')} | {int(row.get('wall_ms') or 0)} | "
+                f"{row.get('iso3') or ''} | {row.get('hazard_code') or ''} | {row.get('metric') or ''} |"
+            )
+    else:
+        lines.append("| (none) | 0 | (none) | (none) | (none) |")
+    lines.append("")
+
+    lines.append("#### Top 10 most expensive questions")
+    lines.append("")
+    lines.append("| question_id | cost_usd | iso3 | hazard_code | metric |")
+    lines.append("| ----------- | -------- | ---- | ----------- | ------ |")
+    if question_run_metrics:
+        for row in sorted(
+            question_run_metrics,
+            key=lambda r: (
+                -(float(r.get("cost_usd") or 0.0)),
+                str(r.get("question_id") or ""),
+            ),
+        )[:10]:
+            lines.append(
+                f"| {row.get('question_id')} | {float(row.get('cost_usd') or 0.0):.4f} | "
+                f"{row.get('iso3') or ''} | {row.get('hazard_code') or ''} | {row.get('metric') or ''} |"
+            )
+    else:
+        lines.append("| (none) | 0.0000 | (none) | (none) | (none) |")
+    lines.append("")
+
+    lines.append("#### Questions with missing SPD model_ids")
+    lines.append("")
+    lines.append("| question_id | missing_model_ids |")
+    lines.append("| ----------- | ------------------ |")
+    missing_rows: list[dict[str, Any]] = []
+    for row in question_run_metrics:
+        raw = row.get("missing_model_ids_json") or "[]"
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else list(raw)
+        except Exception:
+            parsed = []
+        if parsed:
+            missing_rows.append(
+                {
+                    "question_id": row.get("question_id"),
+                    "missing_model_ids": parsed,
+                }
+            )
+    if missing_rows:
+        for row in sorted(missing_rows, key=lambda r: str(r.get("question_id") or "")):
+            missing_ids = row.get("missing_model_ids") or []
+            missing_str = ", ".join(str(mid) for mid in missing_ids)
+            lines.append(f"| {row.get('question_id')} | {missing_str} |")
+    else:
+        lines.append("| (none) | (none) |")
     lines.append("")
     lines.extend(latency_block.splitlines())
     lines.append("")
