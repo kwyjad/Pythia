@@ -129,7 +129,7 @@ EXPECTED_HS_HAZARDS = ["ACE", "DI", "DR", "FL", "HW", "TC"]
 
 
 def get_expected_hs_hazards() -> list[str]:
-    return list(EXPECTED_HS_HAZARDS)
+    return sorted(EXPECTED_HS_HAZARDS)
 
 
 def _to_target_month(today: date, months_ahead: int) -> str:
