@@ -415,6 +415,8 @@ def _load_web_research_summaries(
                             "top_unverified_urls": [],
                             "groundingSupports_count": dbg.get("groundingSupports_count", 0),
                             "groundingChunks_count": dbg.get("groundingChunks_count", 0),
+                            "n_sources_after": dbg.get("n_sources_after"),
+                            "n_signals_after": dbg.get("n_signals_after"),
                             "attempted_models": dbg.get("attempted_models") or [],
                             "attempted_backends": _format_attempted_backends(dbg.get("attempted_backends")),
                             "selected_backend": dbg.get("selected_backend") or "",
@@ -700,20 +702,25 @@ def _web_research_markdown(
         lines.append("")
     lines.append("#### HS country evidence packs")
     lines.append("")
-    lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | attempted_models | attempted_backends | selected_backend | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
-    lines.append("| ---- | -------- | ---------- | ------------- | ----------------- | --------------- | ---------------- | ------------------ | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
+    lines.append("| iso3 | grounded | n_verified | n_unverified | groundingSupports | groundingChunks | n_sources_after | n_signals_after | reason_code | attempted_models | attempted_backends | selected_backend | used_attempt | top_verified_urls | top_unverified_urls | last_errors |")
+    lines.append("| ---- | -------- | ---------- | ------------- | ----------------- | --------------- | --------------- | --------------- | ----------- | ---------------- | ------------------ | ---------------- | ------------ | ----------------- | ------------------- | ----------- |")
     if hs_rows:
         for row in sorted(hs_rows, key=lambda r: r.get("iso3") or ""):
             lines.append(
                 f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_verified')} | {row.get('n_unverified')} | "
                 f"{row.get('groundingSupports_count')} | {row.get('groundingChunks_count')} | "
+                f"{row.get('n_sources_after') if row.get('n_sources_after') is not None else ''} | "
+                f"{row.get('n_signals_after') if row.get('n_signals_after') is not None else ''} | "
+                f"{row.get('reason_code') or ''} | "
                 f"{', '.join(row.get('attempted_models') or [])} | {row.get('attempted_backends') or '(none)'} | "
                 f"{row.get('selected_backend')} | {row.get('used_attempt') or ''} | "
                 f"{', '.join(row.get('top_verified_urls') or [])} | {', '.join(row.get('top_unverified_urls') or [])} | "
                 f"{'; '.join(row.get('last_errors') or [])} |"
             )
     else:
-        lines.append("| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) | (none) | (none) |")
+        lines.append(
+            "| (none) | False | 0 | 0 | 0 | 0 | (none) | (none) | (none) | (none) | (none) | (none) | (none) | (none) | (none) | (none) |"
+        )
     lines.append("")
 
     lines.append("#### HS country packs with 0 verified sources")

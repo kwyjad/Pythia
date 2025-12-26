@@ -227,6 +227,8 @@ def fetch_via_gemini(
             signals_raw = parsed.get("recent_signals") or []
             if isinstance(signals_raw, list):
                 recent_signals = [str(x) for x in signals_raw if str(x).strip()][:MAX_SIGNAL_LINES]
+            if not recent_signals:
+                recent_signals = _extract_bullet_signals(text_blob)
             if structural_context:
                 lines = structural_context.splitlines()
                 structural_context = "\n".join(lines[:MAX_SIGNAL_LINES]).strip()

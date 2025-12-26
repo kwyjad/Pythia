@@ -43,6 +43,7 @@ jobs:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_LLM_CONCURRENCY: "32"
       HS_MAX_WORKERS: "8"
+      HS_TEMPERATURE: "0.0"
       FORECASTER_RESEARCH_MAX_WORKERS: "8"
       FORECASTER_SPD_MAX_WORKERS: "8"
       PYTHIA_WEB_RESEARCH_ENABLED: "1"
