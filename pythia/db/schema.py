@@ -216,10 +216,14 @@ def _ensure_question_run_metrics_table(con: duckdb.DuckDBPyConnection) -> None:
             started_at_utc TIMESTAMP,
             finished_at_utc TIMESTAMP,
             wall_ms BIGINT,
+            compute_ms BIGINT,
+            queue_ms BIGINT,
             cost_usd DOUBLE,
             n_spd_models_expected INTEGER,
             n_spd_models_ok INTEGER,
             missing_model_ids_json TEXT,
+            phase_max_ms_json TEXT,
+            phase_cost_usd_json TEXT,
             PRIMARY KEY (run_id, question_id)
         );
         """,
@@ -232,10 +236,14 @@ def _ensure_question_run_metrics_table(con: duckdb.DuckDBPyConnection) -> None:
             "started_at_utc": "TIMESTAMP",
             "finished_at_utc": "TIMESTAMP",
             "wall_ms": "BIGINT",
+            "compute_ms": "BIGINT",
+            "queue_ms": "BIGINT",
             "cost_usd": "DOUBLE",
             "n_spd_models_expected": "INTEGER",
             "n_spd_models_ok": "INTEGER",
             "missing_model_ids_json": "TEXT",
+            "phase_max_ms_json": "TEXT",
+            "phase_cost_usd_json": "TEXT",
         },
     )
 
