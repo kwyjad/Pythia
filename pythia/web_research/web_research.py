@@ -125,7 +125,11 @@ def _pack_from_cache(query: str, cached: Dict[str, Any], *, backend: str, recenc
     pack_data = dict(cached or {})
     pack.backend = pack_data.get("backend", backend)
     pack.structural_context = pack_data.get("structural_context", "")
-    pack.recent_signals = pack_data.get("recent_signals") or []
+    recent_signals = pack_data.get("recent_signals") or []
+    if isinstance(recent_signals, list):
+        pack.recent_signals = [str(sig) for sig in recent_signals if str(sig).strip()]
+    else:
+        pack.recent_signals = []
     pack.sources = [EvidenceSource(**src) for src in pack_data.get("sources", []) if isinstance(src, dict)]
     pack.unverified_sources = [EvidenceSource(**src) for src in pack_data.get("unverified_sources", []) if isinstance(src, dict)]
     pack.grounded = bool(pack.sources)

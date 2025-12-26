@@ -55,7 +55,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 HS_MAX_WORKERS = int(os.getenv("HS_MAX_WORKERS", "6"))
-HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.3"))
+HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
+HS_PRIORITY_THRESHOLD = float(os.getenv("PYTHIA_HS_PRIORITY_THRESHOLD", "0.70"))
+HS_WATCHLIST_THRESHOLD = float(os.getenv("PYTHIA_HS_WATCHLIST_THRESHOLD", "0.40"))
+HS_HYSTERESIS_BAND = float(os.getenv("PYTHIA_HS_HYSTERESIS_BAND", "0.05"))
+HS_EVIDENCE_MAX_SOURCES = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SOURCES", "8"))
+HS_EVIDENCE_MAX_SIGNALS = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SIGNALS", "8"))
 COUNTRIES_CSV = REPO_ROOT / "resolver" / "data" / "countries.csv"
 EMDAT_SHOCK_MAP = {
     "FL": "flood",
@@ -142,6 +147,13 @@ def _render_evidence_markdown(pack: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _sort_sources_by_url(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _url_key(src: dict[str, Any]) -> str:
+        return str(src.get("url") or "").strip()
+
+    return sorted(sources, key=_url_key)
+
+
 def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str) -> dict[str, Any] | None:
     retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
     if not retriever_enabled and os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") != "1":
@@ -174,12 +186,29 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
         }
 
     pack = dict(pack or {})
+    sources_raw = pack.get("sources") or []
+    sources_list = [src for src in sources_raw if isinstance(src, dict)]
+    signals_raw = pack.get("recent_signals") or []
+    signals_list = [str(sig) for sig in signals_raw if str(sig).strip()]
+
+    sources_before = len(sources_list)
+    signals_before = len(signals_list)
+    sources_list = _sort_sources_by_url(sources_list)[:HS_EVIDENCE_MAX_SOURCES]
+    signals_list = signals_list[:HS_EVIDENCE_MAX_SIGNALS]
+    pack["sources"] = sources_list
+    pack["recent_signals"] = signals_list
+
     markdown = _render_evidence_markdown(pack)
     debug = pack.get("debug") or {}
     grounding_debug = {
         "groundingSupports_count": debug.get("groundingSupports_count", 0),
         "groundingChunks_count": debug.get("groundingChunks_count", 0),
         "webSearchQueries_len": len(debug.get("webSearchQueries") or []),
+        "n_sources_before": sources_before,
+        "n_sources_after": len(sources_list),
+        "n_signals_before": signals_before,
+        "n_signals_after": len(signals_list),
+        "reason_code": debug.get("reason_code"),
     }
     pack["grounding_debug"] = grounding_debug
     pack["grounded"] = bool(pack.get("grounded"))
@@ -483,6 +512,89 @@ def _parse_hs_triage_json(raw: str) -> dict[str, Any]:
     raise json.JSONDecodeError("could not locate JSON object", s, 0)
 
 
+def _coerce_score(raw: Any) -> float:
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _coerce_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[str] = []
+    for item in raw:
+        value = str(item).strip()
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
+def _short_error(raw: str | None, limit: int = 200) -> str:
+    if not raw:
+        return ""
+    text = str(raw).strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _merge_unique(values_a: list[str], values_b: list[str], limit: int = 6) -> list[str]:
+    merged = sorted({value for value in values_a + values_b if value})
+    return merged[:limit]
+
+
+def _build_pass_hazards(
+    hazards_raw: Dict[str, Any],
+    expected_hazards: list[str],
+) -> Dict[str, Dict[str, Any]]:
+    normalized: Dict[str, Any] = {}
+    if isinstance(hazards_raw, dict):
+        for hz_code, hdata in hazards_raw.items():
+            key = (hz_code or "").upper().strip()
+            if key:
+                normalized[key] = hdata if isinstance(hdata, dict) else {}
+
+    pass_hazards: Dict[str, Dict[str, Any]] = {}
+    for hz_code in expected_hazards:
+        hdata = normalized.get(hz_code) if isinstance(normalized.get(hz_code), dict) else None
+        if not hdata:
+            pass_hazards[hz_code] = {
+                "score": 0.0,
+                "drivers": [],
+                "regime_shifts": [],
+                "data_quality": {"status": "missing_in_model_output"},
+                "scenario_stub": "",
+            }
+            continue
+
+        data_quality = hdata.get("data_quality") or {}
+        if not isinstance(data_quality, dict):
+            data_quality = {"raw": data_quality}
+
+        pass_hazards[hz_code] = {
+            "score": _coerce_score(hdata.get("triage_score")),
+            "drivers": _coerce_list(hdata.get("drivers")),
+            "regime_shifts": _coerce_list(hdata.get("regime_shifts")),
+            "data_quality": data_quality,
+            "scenario_stub": str(hdata.get("scenario_stub") or ""),
+        }
+
+    return pass_hazards
+
+
+def tier_from_score(score: float) -> str:
+    if score >= HS_PRIORITY_THRESHOLD + HS_HYSTERESIS_BAND:
+        return "priority"
+    if score >= HS_PRIORITY_THRESHOLD - HS_HYSTERESIS_BAND:
+        return "watchlist"
+    if score >= HS_WATCHLIST_THRESHOLD + HS_HYSTERESIS_BAND:
+        return "watchlist"
+    if score >= HS_WATCHLIST_THRESHOLD - HS_HYSTERESIS_BAND:
+        return "quiet"
+    return "quiet"
+
+
 def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text: str | None = None) -> None:
     allowed_hazards = set(_build_hazard_catalog().keys())
     expected_hazards = get_expected_hs_hazards()
@@ -525,14 +637,12 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 placeholder_reason = "missing hazard in triage output"
 
             if placeholder_reason:
-                tier = "quiet"
                 score = 0.0
                 drivers = []
                 regime_shifts = []
                 data_quality = {"status": "error", "error_text": placeholder_reason}
                 scenario_stub = ""
             else:
-                tier = (hdata.get("tier") or "quiet").lower()
                 score = float(hdata.get("triage_score") or 0.0)
                 drivers = hdata.get("drivers") or []
                 regime_shifts = hdata.get("regime_shifts") or []
@@ -541,11 +651,8 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                     data_quality = {"raw": data_quality}
                 scenario_stub = hdata.get("scenario_stub") or ""
 
-            need_full_spd = False
-            if tier == "priority" or score >= 0.7:
-                need_full_spd = True
-            elif tier == "watchlist" and 0.4 <= score < 0.7:
-                need_full_spd = True
+            tier = tier_from_score(score)
+            need_full_spd = tier in {"priority", "watchlist"}
 
             con.execute(
                 """
@@ -625,90 +732,138 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             evidence_pack=evidence_pack,
         )
 
-        call_start = time.time()
-        text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt, run_id=run_id))
-        usage = usage or {}
-        usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
+        pass_results: list[dict[str, Any]] = []
+        for pass_idx in (1, 2):
+            call_start = time.time()
+            text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt, run_id=run_id))
+            usage = usage or {}
+            usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
 
-        log_error_text: str | None = None
-        triage: Dict[str, Any] = {}
-        hazards_dict: Dict[str, Any] = {}
+            log_error_text: str | None = None
+            triage: Dict[str, Any] = {}
+            hazards_dict: Dict[str, Any] = {}
+            parse_ok = True
 
-        if error:
-            log_error_text = str(error)
-        else:
-            raw = (text or "").strip()
-            if not raw:
-                log_error_text = "empty response"
+            if error:
+                log_error_text = str(error)
+                parse_ok = False
             else:
-                try:
-                    triage = _parse_hs_triage_json(raw)
-                    hazards_dict = triage.get("hazards") or {}
-                except Exception as exc:  # noqa: BLE001
-                    debug_dir = Path("debug/hs_triage_raw")
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                    raw_path = debug_dir / f"{run_id}__{iso3}.txt"
-                    raw_path.write_text(text or "", encoding="utf-8")
-                    log_error_text = f"triage parse failed: {type(exc).__name__}: {exc}"
-                    logger.error(
-                        "HS triage parse failed for %s: %s (raw saved to %s)",
-                        iso3_up,
-                        exc,
-                        raw_path,
-                    )
+                raw = (text or "").strip()
+                if not raw:
+                    log_error_text = "empty response"
+                    parse_ok = False
+                else:
+                    try:
+                        triage = _parse_hs_triage_json(raw)
+                        hazards_dict = triage.get("hazards") or {}
+                    except Exception as exc:  # noqa: BLE001
+                        debug_dir = Path("debug/hs_triage_raw")
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        raw_path = debug_dir / f"{run_id}__{iso3}__pass{pass_idx}.txt"
+                        raw_path.write_text(text or "", encoding="utf-8")
+                        log_error_text = f"triage parse failed: {type(exc).__name__}: {exc}"
+                        parse_ok = False
+                        logger.error(
+                            "HS triage parse failed for %s pass %s: %s (raw saved to %s)",
+                            iso3_up,
+                            pass_idx,
+                            exc,
+                            raw_path,
+                        )
 
-        hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
-        hazard_codes = sorted({(hz_code or "").upper().strip() for hz_code in hazards_dict.keys()})
-        logger.info(
-            "HS triage hazards for %s: %d returned [%s]",
-            iso3_up,
-            len(hazard_codes),
-            ", ".join(hazard_codes) if hazard_codes else "",
-        )
+            hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
+            hazard_codes = sorted({(hz_code or "").upper().strip() for hz_code in hazards_dict.keys()})
+            logger.info(
+                "HS triage hazards for %s pass %s: %d returned [%s]",
+                iso3_up,
+                pass_idx,
+                len(hazard_codes),
+                ", ".join(hazard_codes) if hazard_codes else "",
+            )
 
-        usage_for_log = dict(usage or {})
-        if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
-            model_id_for_cost = getattr(model_spec, "model_id", None) or _resolve_hs_model()
-            if model_id_for_cost:
-                usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
+            usage_for_log = dict(usage or {})
+            if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
+                model_id_for_cost = getattr(model_spec, "model_id", None) or _resolve_hs_model()
+                if model_id_for_cost:
+                    usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
 
-        log_hs_llm_call(
-            hs_run_id=run_id,
-            iso3=iso3_up,
-            hazard_code="",
-            model_spec=model_spec,
-            prompt_text=prompt,
-            response_text=text or "",
-            usage=usage_for_log,
-            error_text=log_error_text,
-        )
-        logger.info(
-            "HS logged triage call: hs_run_id=%s iso3=%s hazard=%s",
-            run_id,
-            iso3_up,
-            "",
-        )
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3_up,
+                hazard_code=f"pass_{pass_idx}",
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage_for_log,
+                error_text=log_error_text,
+            )
+            logger.info(
+                "HS logged triage call: hs_run_id=%s iso3=%s hazard=pass_%s",
+                run_id,
+                iso3_up,
+                pass_idx,
+            )
 
-        if log_error_text:
-            _write_hs_triage(run_id, iso3_up, triage, error_text=log_error_text)
-            logger.error("HS triage error for %s: %s", iso3_up, log_error_text)
-            return {
-                "iso3": iso3_up,
-                "error_text": log_error_text,
-                "response_text": text or "",
+            pass_results.append(
+                {
+                    "text": text or "",
+                    "usage": usage_for_log,
+                    "triage": triage,
+                    "hazards": hazards_dict,
+                    "error_text": log_error_text,
+                    "parse_ok": parse_ok,
+                }
+            )
+
+        expected_hazards = list(hazard_catalog.keys())
+        pass_one = _build_pass_hazards(pass_results[0]["hazards"], expected_hazards)
+        pass_two = _build_pass_hazards(pass_results[1]["hazards"], expected_hazards)
+
+        combined_hazards: Dict[str, Any] = {}
+        for hz_code in expected_hazards:
+            score1 = pass_one[hz_code]["score"]
+            score2 = pass_two[hz_code]["score"]
+            avg_score = (score1 + score2) / 2
+            combined_hazards[hz_code] = {
+                "triage_score": avg_score,
+                "drivers": _merge_unique(pass_one[hz_code]["drivers"], pass_two[hz_code]["drivers"]),
+                "regime_shifts": _merge_unique(
+                    pass_one[hz_code]["regime_shifts"],
+                    pass_two[hz_code]["regime_shifts"],
+                ),
+                "data_quality": {
+                    "score_pass1": score1,
+                    "score_pass2": score2,
+                    "parse_ok1": bool(pass_results[0]["parse_ok"]),
+                    "parse_ok2": bool(pass_results[1]["parse_ok"]),
+                    "error1": _short_error(pass_results[0]["error_text"]),
+                    "error2": _short_error(pass_results[1]["error_text"]),
+                    "pass1": pass_one[hz_code]["data_quality"],
+                    "pass2": pass_two[hz_code]["data_quality"],
+                },
+                "scenario_stub": pass_one[hz_code]["scenario_stub"] or pass_two[hz_code]["scenario_stub"],
             }
 
+        triage = {"country": iso3_up, "hazards": combined_hazards}
         _write_hs_triage(run_id, iso3_up, triage)
 
-        cost = usage_for_log.get("cost_usd") or estimate_cost_usd(_resolve_hs_model(), usage_for_log)
+        overall_error = None
+        if not pass_results[0]["parse_ok"] and not pass_results[1]["parse_ok"]:
+            overall_error = "triage parse failed for both passes"
+            logger.error("HS triage error for %s: %s", iso3_up, overall_error)
+
+        total_tokens = sum(result["usage"].get("total_tokens") or 0 for result in pass_results)
+        total_cost = sum(result["usage"].get("cost_usd") or 0.0 for result in pass_results)
         logger.info(
             "HS triage completed for %s (%s): tokens=%s cost_usd=%.4f",
             country_name,
             iso3,
-            usage_for_log.get("total_tokens"),
-            cost or 0.0,
+            total_tokens,
+            total_cost,
         )
-        return {"iso3": iso3_up, "error_text": None, "response_text": text or ""}
+
+        response_text = "\n\n".join([result["text"] for result in pass_results if result["text"]])
+        return {"iso3": iso3_up, "error_text": overall_error, "response_text": response_text}
     finally:
         con.close()
 
