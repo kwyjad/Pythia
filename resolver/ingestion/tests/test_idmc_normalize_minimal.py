@@ -40,6 +40,8 @@ def test_idmc_normalize_happy_and_drops():
         "value",
         "series_semantics",
         "source",
+        "ym",
+        "record_id",
     }
     assert (tidy["iso3"].isin(["SDN", "COD"])).all()
     assert set(tidy["metric"].unique()) == {"new_displacements"}

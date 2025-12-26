@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import calendar
 import logging
+import re
 from datetime import datetime
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -20,6 +21,50 @@ FLOW_METRIC_NAME = "new_displacements"
 FLOW_SERIES_SEMANTICS = "new"
 HDX_PREAGG_COLUMN = "__hdx_preaggregated__"
 LOGGER = logging.getLogger(__name__)
+YM_REGEX = re.compile(r"^\d{4}-\d{2}$")
+
+
+def derive_ym(record: Mapping[str, object]) -> Optional[str]:
+    """Derive a YYYY-MM string from a date-like record payload."""
+
+    date_candidates = (
+        "as_of_date",
+        "displacement_date",
+        "displacement_start_date",
+        "displacement_end_date",
+        "event_date",
+        "date",
+        "month",
+    )
+    for key in date_candidates:
+        value = record.get(key)
+        if value is None or pd.isna(value):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        parsed = pd.to_datetime(text, errors="coerce", utc=False)
+        if pd.isna(parsed):
+            continue
+        ym_value = f"{parsed.year:04d}-{parsed.month:02d}"
+        if YM_REGEX.match(ym_value):
+            return ym_value
+
+    year_value = record.get("year") or record.get("Year")
+    month_value = record.get("month") or record.get("Month")
+    if year_value is None or month_value is None:
+        return None
+    try:
+        year = int(str(year_value).strip())
+        month = int(str(month_value).strip())
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= month <= 12):
+        return None
+    ym_value = f"{year:04d}-{month:02d}"
+    if YM_REGEX.match(ym_value):
+        return ym_value
+    return None
 
 
 def _coerce_month_end(values: pd.Series) -> pd.Series:
@@ -116,6 +161,56 @@ def _normalize_iso(series: pd.Series) -> pd.Series:
         return iso if iso else pd.NA
 
     return series.apply(clean)
+
+
+def _ensure_ym(frame: pd.DataFrame) -> pd.Series:
+    ym_series = (
+        frame["ym"].astype("string").fillna("").str.strip()
+        if "ym" in frame.columns
+        else pd.Series([""] * len(frame), index=frame.index, dtype="string")
+    )
+    if "as_of_date" in frame.columns:
+        as_of_series = pd.to_datetime(frame["as_of_date"], errors="coerce", utc=False)
+        ym_from_asof = as_of_series.dt.strftime("%Y-%m")
+        ym_series = ym_series.mask(ym_series == "", ym_from_asof)
+
+    missing = ym_series.isna() | ym_series.astype(str).str.strip().eq("")
+    if missing.any():
+        derived = frame.loc[missing].apply(lambda row: derive_ym(row.to_dict()), axis=1)
+        ym_series = ym_series.astype("object")
+        ym_series.loc[missing] = derived
+        ym_series = ym_series.astype("string")
+
+    valid = ym_series.str.match(YM_REGEX)
+    return ym_series.where(valid)
+
+
+def _ensure_record_id(frame: pd.DataFrame) -> pd.Series:
+    candidate_columns = [
+        "record_id",
+        "source_id",
+        "event_id",
+        "id",
+        "url",
+        "source_url",
+    ]
+    candidate = _first_non_null(frame, candidate_columns)
+    candidate = candidate.astype("string").fillna("").str.strip()
+
+    def _series_or_empty(name: str) -> pd.Series:
+        if name in frame.columns:
+            return frame[name].astype("string").fillna("").str.strip()
+        return pd.Series([""] * len(frame), index=frame.index, dtype="string")
+
+    iso = _series_or_empty("iso3")
+    metric = _series_or_empty("metric")
+    ym = _series_or_empty("ym")
+    source = _series_or_empty("source")
+    value = frame["value"] if "value" in frame.columns else pd.Series([pd.NA] * len(frame), index=frame.index)
+    value_text = value.astype("string").fillna("").str.strip()
+
+    fallback = iso + "-" + metric + "-" + ym + "-" + value_text + "-" + source
+    return candidate.where(candidate != "", fallback)
 
 
 def _normalize_monthly_flow(
@@ -468,12 +563,19 @@ def normalize_all(
                     "value": pd.Series(dtype=pd.Int64Dtype()),
                     "series_semantics": pd.Series(dtype="string"),
                     "source": pd.Series(dtype="string"),
+                    "ym": pd.Series(dtype="string"),
+                    "record_id": pd.Series(dtype="string"),
                 }
             ),
             aggregate_drops,
         )
 
-    return pd.concat(tidy_frames, ignore_index=True), aggregate_drops
+    combined = pd.concat(tidy_frames, ignore_index=True)
+    combined = combined.copy()
+    combined["ym"] = _ensure_ym(combined)
+    combined["record_id"] = _ensure_record_id(combined)
+
+    return combined, aggregate_drops
 
 
 def maybe_map_hazards(

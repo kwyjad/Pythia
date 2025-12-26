@@ -37,6 +37,8 @@ def test_idmc_normalize_idu_fields():
         "value",
         "series_semantics",
         "source",
+        "ym",
+        "record_id",
     ]
     assert len(tidy) == 2
     assert set(tidy["iso3"]) == {"SDN", "COD"}

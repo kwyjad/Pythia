@@ -40,6 +40,8 @@ api:
             "value": pd.Series(dtype=pd.Int64Dtype()),
             "series_semantics": pd.Series(dtype="string"),
             "source": pd.Series(dtype="string"),
+            "ym": pd.Series(dtype="string"),
+            "record_id": pd.Series(dtype="string"),
         }
     )
 
@@ -111,6 +113,8 @@ def test_cli_populates_series_semantics(monkeypatch: pytest.MonkeyPatch, stubbed
                     "value": 5,
                     "source": "idmc_idu",
                     "series_semantics": pd.NA,
+                    "ym": "2024-01",
+                    "record_id": "AFG-new_displacements-2024-01-5-idmc_idu",
                 }
             ]
         )

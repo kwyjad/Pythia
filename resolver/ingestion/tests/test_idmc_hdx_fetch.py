@@ -195,6 +195,8 @@ def test_idmc_helix_fallback(
                 "value": [7],
                 "series_semantics": FLOW_SERIES_SEMANTICS,
                 "source": "idmc_gidd",
+                "ym": ["2024-01"],
+                "record_id": ["AFG-new_displacements-2024-01-7-idmc_gidd"],
                 client.HDX_PREAGG_COLUMN: False,
             }
         )
@@ -330,6 +332,8 @@ def test_summary_zero_reason_codes(monkeypatch: pytest.MonkeyPatch, cfg: config.
                 "value": [11],
                 "series_semantics": FLOW_SERIES_SEMANTICS,
                 "source": "idmc_gidd",
+                "ym": ["2024-02"],
+                "record_id": ["PAK-new_displacements-2024-02-11-idmc_gidd"],
                 client.HDX_PREAGG_COLUMN: False,
             }
         )

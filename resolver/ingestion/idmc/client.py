@@ -162,6 +162,32 @@ def _request_path(url: str) -> str:
     return parts.path
 
 
+def _series_or_empty(frame: pd.DataFrame, name: str) -> pd.Series:
+    if name in frame.columns:
+        return frame[name]
+    return pd.Series([pd.NA] * len(frame), index=frame.index)
+
+
+def _ensure_flow_export_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS))
+    working = frame.copy()
+    if "ym" not in working.columns:
+        if "as_of_date" in working.columns:
+            as_of = pd.to_datetime(working["as_of_date"], errors="coerce", utc=False)
+            working["ym"] = as_of.dt.strftime("%Y-%m")
+        else:
+            working["ym"] = pd.NA
+    if "record_id" not in working.columns:
+        iso = _series_or_empty(working, "iso3").astype("string").fillna("").str.strip()
+        metric = _series_or_empty(working, "metric").astype("string").fillna("").str.strip()
+        ym = _series_or_empty(working, "ym").astype("string").fillna("").str.strip()
+        source = _series_or_empty(working, "source").astype("string").fillna("").str.strip()
+        value = _series_or_empty(working, "value").astype("string").fillna("").str.strip()
+        working["record_id"] = iso + "-" + metric + "-" + ym + "-" + value + "-" + source
+    return working
+
+
 def _env_timeout(name: str, default: float, *, aliases: Iterable[str] = ()) -> float:
     for candidate in (name, *aliases):
         raw = os.getenv(candidate)
@@ -1910,6 +1936,7 @@ def _hdx_prepare_monthly_flow(
         return empty
 
     aggregated["value"] = aggregated["value"].astype(pd.Int64Dtype())
+    aggregated = _ensure_flow_export_columns(aggregated)
     aggregated[HDX_PREAGG_COLUMN] = True
     return aggregated.loc[:, list(FLOW_EXPORT_COLUMNS) + [HDX_PREAGG_COLUMN]]
 
@@ -1956,6 +1983,7 @@ def _normalise_fallback_monthly_flow(
         result["series_semantics"] = FLOW_SERIES_SEMANTICS
         result["source"] = source_tag
         result["value"] = result["value"].round().astype(pd.Int64Dtype())
+        result = _ensure_flow_export_columns(result)
         if HDX_PREAGG_COLUMN not in result.columns:
             result[HDX_PREAGG_COLUMN] = True
         else:
@@ -2018,6 +2046,7 @@ def _normalise_fallback_monthly_flow(
     aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
     aggregated["source"] = source_tag
     aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
+    aggregated = _ensure_flow_export_columns(aggregated)
     aggregated[HDX_PREAGG_COLUMN] = True
     return aggregated.loc[:, canonical_columns]
 
@@ -2075,6 +2104,7 @@ def _normalise_helix_last180_monthly(
     aggregated["series_semantics"] = FLOW_SERIES_SEMANTICS
     aggregated["source"] = "idmc_idu"
     aggregated["value"] = aggregated["value"].round().astype(pd.Int64Dtype())
+    aggregated = _ensure_flow_export_columns(aggregated)
     aggregated[HDX_PREAGG_COLUMN] = False
     return aggregated.loc[:, canonical_columns]
 
@@ -2092,9 +2122,9 @@ def _hdx_filter(
     if frame.empty:
         return pd.DataFrame(columns=list(FLOW_EXPORT_COLUMNS))
 
-    has_canonical_columns = all(column in frame.columns for column in FLOW_EXPORT_COLUMNS)
-    if HDX_PREAGG_COLUMN in frame.columns or has_canonical_columns:
-        working = frame.copy()
+    working = _ensure_flow_export_columns(frame)
+    has_canonical_columns = all(column in working.columns for column in FLOW_EXPORT_COLUMNS)
+    if HDX_PREAGG_COLUMN in working.columns or has_canonical_columns:
         if "iso3" in working.columns and iso_batches:
             allowed = {
                 code.strip().upper()

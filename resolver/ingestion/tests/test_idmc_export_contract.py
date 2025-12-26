@@ -60,6 +60,8 @@ def test_build_resolution_ready_facts_contract():
     assert (facts["source"] == "IDMC").all()
     assert not facts.duplicated(["iso3", "as_of_date", "metric"]).any()
     assert (facts["value"] >= 0).all()
+    assert facts["ym"].astype(str).str.match(r"\d{4}-\d{2}").all()
+    assert facts["record_id"].astype(str).str.strip().ne("").all()
 
     expected = facts.sort_values(["iso3", "as_of_date"]).reset_index(drop=True)
     actual = facts.sort_values(["iso3", "as_of_date"]).reset_index(drop=True)
