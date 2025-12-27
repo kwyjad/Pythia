@@ -4,12 +4,15 @@
 # See the LICENSE file in the project root for details.
 
 import json
+import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import duckdb, pandas as pd
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
 
 from pythia.api.auth import require_admin_token
+from pythia.api.db_sync import DbSyncError, get_cached_manifest, maybe_sync_latest_db
 from pythia.api.models import (
     ContextBundle,
     ForecastBundle,
@@ -21,11 +24,30 @@ from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 
 app = FastAPI(title="Pythia API", version="1.0.0")
+logger = logging.getLogger(__name__)
 
 
 def _con():
     db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
+    db_path = Path(db_url)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        maybe_sync_latest_db()
+    except DbSyncError as exc:
+        if not db_path.exists():
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("DB sync failed: %s", exc)
+    if not db_path.exists():
+        raise HTTPException(status_code=503, detail="DB not available yet")
     return duckdb.connect(db_url, read_only=True)
+
+
+@app.on_event("startup")
+def _startup_sync():
+    try:
+        maybe_sync_latest_db()
+    except DbSyncError as exc:
+        logger.warning("DB sync failed during startup: %s", exc)
 
 
 def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -288,6 +310,19 @@ def _latest_questions_view(
 @app.get("/v1/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/v1/version")
+def api_version() -> Dict[str, Any]:
+    try:
+        manifest = maybe_sync_latest_db()
+    except DbSyncError as exc:
+        manifest = get_cached_manifest()
+        if not manifest:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not manifest:
+        raise HTTPException(status_code=503, detail="Manifest not available yet")
+    return manifest
 
 
 @app.post("/v1/run")
