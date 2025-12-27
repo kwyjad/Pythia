@@ -45,9 +45,12 @@ jobs:
             echo "${JSON}" | jq -r '.artifacts[]? | "\(.name)\tID=\(.id)\tEXPIRED=\(.expired)\tSIZE=\(.size_in_bytes)"' || true
 
             ART_ID="$(echo "${JSON}" | jq -r --arg NAME "${ARTIFACT_NAME}" '.artifacts[]? | select(.name==$NAME) | .id' | head -n 1)"
-            if [ -n "${ART_ID}" ] && [ "${ART_ID}" != "null" ]; then
+            ART_URL="$(echo "${JSON}" | jq -r --arg NAME "${ARTIFACT_NAME}" '.artifacts[]? | select(.name==$NAME) | .archive_download_url' | head -n 1)"
+            if [ -n "${ART_ID}" ] && [ "${ART_ID}" != "null" ] && [ -n "${ART_URL}" ] && [ "${ART_URL}" != "null" ]; then
               echo "Found artifact id: ${ART_ID}"
+              echo "Found archive_download_url: ${ART_URL}"
               echo "artifact_id=${ART_ID}" >> "$GITHUB_OUTPUT"
+              echo "archive_download_url=${ART_URL}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
@@ -57,25 +60,34 @@ jobs:
           echo "::error::Artifact '${ARTIFACT_NAME}' not found for run ${RUN_ID} after retries."
           exit 1
 
-      - name: Download DB artifact zip by id
+      - name: Download DB artifact zip (curl + archive_download_url)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ARTIFACT_ID: ${{ steps.wait_artifact.outputs.artifact_id }}
+          ARCHIVE_URL: ${{ steps.wait_artifact.outputs.archive_download_url }}
         run: |
           set -euo pipefail
           mkdir -p downloaded_artifact
-          echo "Downloading artifact id ${ARTIFACT_ID} as zip..."
-          # Download as binary zip to stdout; redirect to file (works across gh versions)
-          gh api \
-            -H "Accept: application/octet-stream" \
-            "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
-            --silent > artifact.zip
+          echo "Downloading artifact zip from archive_download_url..."
+          echo "${ARCHIVE_URL}"
+
+          # Download zip; follow redirects (GitHub returns a redirect to blob storage)
+          curl -sSL -L \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${ARCHIVE_URL}" \
+            -o artifact.zip
           if [ ! -s artifact.zip ]; then
             echo "::error::artifact.zip is empty; download failed."
             exit 1
           fi
-          ls -lh artifact.zip
+
+          # Verify it’s actually a zip (catches HTML/JSON error bodies)
+          if ! unzip -tq artifact.zip >/dev/null 2>&1; then
+            echo "::error::artifact.zip is not a valid zip. Showing first 40 lines:"
+            head -n 40 artifact.zip || true
+            exit 1
+          fi
+
           unzip -q artifact.zip -d downloaded_artifact
           echo "Downloaded artifact contents:"
           find downloaded_artifact -maxdepth 4 -type f -print || true
