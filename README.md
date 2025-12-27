@@ -1,82 +1,180 @@
 # Pythia
 
-Pythia is an end-to-end AI forecasting system for humanitarian questions. It scans countries for emerging hazards, turns triage into forecastable questions, runs an ensemble of LLM forecasters (SPD and scenario prompts plus BayesMC aggregation), and records forecasts, research, and diagnostics in a DuckDB-backed workspace.
+Pythia is an end-to-end AI forecasting system for humanitarian questions. It scans countries for emerging hazards, turns triage into forecastable questions, runs an LLM ensemble to produce Subjective Probability Distributions (SPD), and stores forecasts, research, and diagnostics in a DuckDB-backed system of record.
 
 ## System at a glance
-- Horizon Scanner (HS) triages countries and hazards, storing `hs_runs`, `hs_triage`, and scenario rows in DuckDB.
-- Question builder turns triage outputs into structured questions and research prompts stored in `questions` and `question_research`.
-- Forecaster loads active questions, fans out SPD/scenario prompts to the active LLM ensemble, and writes both per-model (`forecasts_raw`) and ensemble (`forecasts_ensemble`) rows.
-- Optional BayesMC aggregation and dual-compare runs emit side-by-side SPD JSON for diagnostics.
-- Resolver tables in DuckDB keep historical questions, forecasts, research, UI runs, and provenance so downstream scoring or dashboards can query one location.
+- **System of record**: DuckDB (`PYTHIA_DB_URL` / `app.db_url`) holds all HS triage, questions, research, forecasts, and diagnostics.
+- **Resolver → HS → Questions → Research → SPD/Scenario → DuckDB**: resolver facts and base rates flow into Horizon Scanner; HS produces triage and questions; shared retriever packs evidence; Research v2 drafts structured briefs; Forecaster writes SPD ensembles and scenarios back to DuckDB.
 
-## Components
-- **Horizon Scanner (HS)**: `horizon_scanner/horizon_scanner.py` performs triage over a country list (from `hs_country_list.txt` or API callers), writes `hs_triage`, and logs runs in `hs_runs`/`hs_scenarios`.
-- **Question generation**: HS triage plus `question_research` rows feed the question builder that populates the `questions` table with wording, hazard, metric, and target month windows.
-- **Forecaster (SPD + scenarios)**: `forecaster/cli.py --mode pythia` loads active questions, runs SPD v2 prompts (with optional scenario infill), captures per-model results in `forecasts_raw`, and aggregates into `forecasts_ensemble`. Research ablations and GTMC1 checks remain logged for diagnostics.
-- **Resolver (DuckDB)**: `pythia/db/schema.py` owns the DuckDB schema (`questions`, `forecasts_raw`, `forecasts_ensemble`, `question_context`, `llm_calls`, etc.) and ensures tables exist for local runs and CI workflows.
-- **Calibrator / scoring**: `pythia/tools/calibration_loop.py` runs post-forecast calibration when enough resolved questions exist; scoring workflows consume DuckDB outputs.
-- **UI / artifacts**: Pipeline runs update `ui_runs` for API/UI triggers and leave SPD compare JSON under `debug/spd_compare_smoke` (smoke) or `debug/spd_compare_tests` (unit-test captures).
+## Architecture
+- **Resolver (facts + base rates)**: Resolver tables in DuckDB (`facts_resolved`, `facts_deltas`, `snapshots`) provide historical context for triage, research, and scoring. The schema is defined in [`pythia/db/schema.py`](pythia/db/schema.py).
+- **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`, `hs_triage`, and scenario rows, and seeds `question_research` + `questions`.
+- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs that are re-used across SPD and research prompts (reducing cost and stabilizing sources). Retriever defaults to `gemini-2.5-flash-lite` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
+- **Research v2**: Research prompts generate structured briefs that separate verified vs unverified sources, backed by `question_research` and `llm_calls`.
+- **Forecaster SPD v2 ensemble**: `python -m forecaster.cli --mode pythia` runs SPD v2 prompts across the active ensemble and writes per-model outputs (`forecasts_raw`) and aggregated results (`forecasts_ensemble`). BayesMC aggregation is optional and produces fallback metadata.
+- **Scenarios (priority-only)**: When an ensemble SPD is available, scenarios can be generated for priority questions and written back to DuckDB.
+- **Logging & diagnostics**: `llm_calls`, `question_run_metrics`, and debug bundles capture per-question timing and provenance. Debug bundles are produced by [`scripts/dump_pythia_debug_bundle.py`](scripts/dump_pythia_debug_bundle.py).
 
 ## Quickstart (local)
-1. **Install dependencies**
-   ```bash
-   python -m venv .venv && source .venv/bin/activate
-   pip install -r python_library_requirements.txt
-   ```
-2. **Set config and secrets**
-   - Edit `pythia/config.yaml` (or export `PYTHIA_LLM_PROFILE`) to choose the active LLM profile and DB URL.
-   - Export provider API keys (for example `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`) and any Horizon Scanner model overrides.
-3. **Ensure the DuckDB schema exists**
-   ```bash
-   python - <<'PY'
-   from pythia.db.schema import ensure_schema
-   ensure_schema()
-   print("schema ready")
-   PY
-   ```
-4. **Run Horizon Scanner triage** (writes HS tables and new questions)
-   ```bash
-   PYTHIA_LLM_PROFILE=test python -m horizon_scanner.horizon_scanner
-   ```
-5. **Run the forecaster on active questions**
-   ```bash
-   PYTHIA_LLM_PROFILE=test python -m forecaster.cli --mode pythia --limit 20 --purpose local_smoke
-   ```
-6. **Inspect outputs**
-   - DuckDB lives at `PYTHIA_DB_URL` or `app.db_url` (default `duckdb:///data/resolver.duckdb`).
-   - Forecast and HS diagnostics live under `debug/` and `logs/` when enabled.
 
-## How to run
-- **HS + question creation**: call `python -m horizon_scanner.horizon_scanner` directly or trigger the `run_horizon_scanner.yml` workflow. By default HS reads `hs_country_list.txt`; to override, import and call `horizon_scanner.horizon_scanner.main(["KEN","ETH"] )` from a small helper script.
-- **Forecaster SPD/scenario runs**: invoke `python -m forecaster.cli --mode pythia` with `--limit` to bound question count. Use `PYTHIA_DEBUG_SPD=1` for verbose logs and `PYTHIA_SPD_HARD_FAIL=1` to surface SPD exceptions.
-- **Resolver/DB workflows**: `pythia/db/schema.ensure_schema()` is idempotent; `pythia/db/util.write_llm_call` records all provider calls. When backfilling or scoring, point tools at the same DuckDB URL so tables (`questions`, `forecasts_*`, `hs_*`, `llm_calls`, `ui_runs`) stay in sync.
+### 1) Clone + install
+```bash
+git clone <YOUR_REPO_URL>
+cd Pythia
+python -m venv .venv
+source .venv/bin/activate
+pip install -r python_library_requirements.txt
+```
+
+### 2) Configure the DB and profile
+- Set the DuckDB URL (or use the default in [`pythia/config.yaml`](pythia/config.yaml)).
+```bash
+export PYTHIA_DB_URL="duckdb:///data/resolver.duckdb"
+export PYTHIA_LLM_PROFILE="test"  # test or prod
+```
+
+### 3) Ensure the schema exists
+```bash
+python - <<'PY'
+from pythia.db.schema import ensure_schema
+ensure_schema()
+print("schema ready")
+PY
+```
+
+### 4) Run Horizon Scanner on a short list
+- Default list: [`horizon_scanner/hs_country_list.txt`](horizon_scanner/hs_country_list.txt)
+- For a small smoke run, edit the list or pass a short list in a helper script.
+```bash
+PYTHIA_LLM_PROFILE=test python -m horizon_scanner.horizon_scanner
+```
+
+### 5) Run the forecaster (limit work)
+```bash
+PYTHIA_LLM_PROFILE=test python -m forecaster.cli --mode pythia --limit 20 --purpose local_smoke
+```
+
+### 6) Inspect outputs
+- **DuckDB**: open the database at `PYTHIA_DB_URL` (`app.db_url` default is `duckdb:///data/resolver.duckdb`).
+- **Debug bundle** (optional):
+```bash
+python -m scripts.dump_pythia_debug_bundle \
+  --db "${PYTHIA_DB_URL}" \
+  --hs-run-id "<HS_RUN_ID>" \
+  --forecaster-run-id "<FORECASTER_RUN_ID>"
+```
+- Bundles default to `debug/pytia_debug_bundle__<run_id>.md` (note: filename uses `pytia_`).
+
+## Starter runs
+
+### 1-country smoke run
+```bash
+# Update horizon_scanner/hs_country_list.txt to a single ISO3, e.g. "KEN"
+PYTHIA_LLM_PROFILE=test python -m horizon_scanner.horizon_scanner
+PYTHIA_LLM_PROFILE=test python -m forecaster.cli --mode pythia --limit 5 --purpose smoke_1_country
+```
+
+### 10-country run (bounded)
+```bash
+# Trim hs_country_list.txt to 10 ISO3 codes
+PYTHIA_LLM_PROFILE=test python -m horizon_scanner.horizon_scanner
+PYTHIA_LLM_PROFILE=test python -m forecaster.cli --mode pythia --limit 50 --purpose smoke_10_countries
+```
+
+### Bounding work
+- **Question count**: `--limit N`
+- **HS triage**: lower tiers or reduce country list (`hs_country_list.txt`)
+- **Scenarios**: scenario generation only runs when ensemble SPD exists; use priority filters upstream.
 
 ## Configuration
-- The canonical config lives at `pythia/config.yaml`.
-- `app.db_url` selects the DuckDB location; `PYTHIA_DB_URL` overrides it at runtime.
-- `llm.profile` chooses the default model bundle; override with `PYTHIA_LLM_PROFILE` to swap between `test` and `prod` profiles.
-- **Provider activation**: a provider becomes active only when `forecaster.providers` marks it `enabled`, a `model` id is present (from config or the current profile), **and** the expected API key env var is non-empty. Missing any of the three disables the provider for that run.
-- Hazard, HS, and researcher prompt versions are configured in `pythia/config.yaml`; HS respects `HS_MAX_WORKERS`, `HS_TEMPERATURE`, and DuckDB URL settings.
 
-## CI / Workflows
-- **Forecaster CI — SPD** (`.github/workflows/forecaster-ci.yml`): runs SPD unit tests by default; optional workflow-dispatch inputs enable dual-compare or BayesMC write paths. Smoke runs upload compare JSON under `debug/spd_compare_smoke`, and test captures land in `debug/spd_compare_tests` artifacts.
-- **Core pipeline workflow** (`run_horizon_scanner.yml`): executes HS and forecaster end-to-end against the configured DuckDB. It is not part of the fast unit-test gate but is the source of fresh questions and ensemble forecasts.
-- **Resolver-focused workflows** (`resolver-ci.yml`, `resolver-ci-fast.yml`, `resolver-ci-nightly.yml`): keep DuckDB schema and ingestion/tests healthy; they do not download SPD artifacts.
-- Smoke/diagnostic artifacts from CI live under `debug/` and `dist/diagnostics-*` in workflow artifacts for later inspection.
+### Canonical config
+- [`pythia/config.yaml`](pythia/config.yaml) is the authoritative configuration.
+- There is no `pythia/config.py`; all runtime defaults live in the YAML + env vars.
+- `app.db_url` defines DuckDB; `PYTHIA_DB_URL` overrides at runtime.
+- `llm.profile` selects the default model bundle; override with `PYTHIA_LLM_PROFILE`.
 
-## Ensemble / BayesMC
-- **SPD v2 ensemble**: default SPD prompts call all active providers and aggregate into `forecasts_ensemble`.
-- **BayesMC aggregation**: when `PYTHIA_SPD_V2_USE_BAYESMC=1`, SPD v2 uses BayesMC to fuse member distributions and attaches `ensemble_meta` diagnostics.
-- **Dual compare**: set `PYTHIA_SPD_V2_DUAL_RUN=1` to run both the default ensemble and BayesMC paths; compare JSON is written to `debug/spd_compare_smoke` (smoke) or collected from pytest into `debug/spd_compare_tests`.
+### Key env vars
+- **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
+- **Concurrency**:
+  - `PYTHIA_LLM_CONCURRENCY` (global LLM call cap)
+  - `HS_MAX_WORKERS`
+  - `FORECASTER_RESEARCH_MAX_WORKERS`
+  - `FORECASTER_SPD_MAX_WORKERS`
+- **Retriever / web research**:
+  - `PYTHIA_WEB_RESEARCH_ENABLED=1`
+  - `PYTHIA_WEB_RESEARCH_BACKEND=gemini|openai|claude|auto`
+  - `PYTHIA_WEB_RESEARCH_RECENCY_DAYS`, `PYTHIA_WEB_RESEARCH_TIMEOUT_SEC`, `PYTHIA_WEB_RESEARCH_MAX_RESULTS`
+  - **Shared retriever**: `PYTHIA_RETRIEVER_ENABLED=1` and optional `PYTHIA_RETRIEVER_MODEL_ID` (default `gemini-2.5-flash-lite`).
+- **SPD tuning / timeouts (Gemini 3)**:
+  - `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH`, `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO`
+  - `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC`, `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`
+  - `PYTHIA_GOOGLE_SPD_RETRIES`
+- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.1,google:gemini-3-flash-preview`).
 
-## Debugging
-- **No active models**: check `PYTHIA_LLM_PROFILE`, `forecaster.providers` config, and provider API key env vars; SPD will skip providers without all three.
-- **Missing artifacts**: ensure `PYTHIA_SPD_COMPARE_DIR` points to a writable directory when dual-compare is enabled; CI smoke sets it to `debug/spd_compare_smoke`.
-- **Secrets not wired**: HS and forecaster respect the same provider env vars; runs without keys fall back to inactive providers and may yield empty ensembles.
-- **DuckDB path issues**: confirm `PYTHIA_DB_URL` or `app.db_url` points to a writable location; `ensure_schema()` is safe to rerun.
+## Running in GitHub Actions
+
+### Workflows
+- **Production pipeline**: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml) runs HS + forecaster end-to-end.
+- **Forecaster CI**: [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml) covers SPD unit tests and optional compare artifacts.
+
+### Canonical DB artifacts + signature guardrails
+- Workflow downloads the canonical DB artifact (`pythia-resolver-db` by default), appends new HS + forecaster rows, and uploads the updated DB as a new artifact.
+- It validates a **signature** (`scripts/ci/db_signature.py`) and writes:
+  - `diagnostics/db_signature_before.json`
+  - `diagnostics/db_signature_after.json`
+- If signature validation fails, the workflow rejects the candidate DB and tries the next run. A missing/failed signature is a hard-stop; confirm required tables exist or re-run with a reset DB artifact for bootstrap runs.
+
+### Artifact outputs
+- **Debug bundle**: `debug/pytia_debug_bundle__<run_id>.md` (artifact)
+- **SPD compare JSON**: `debug/spd_compare_smoke` or `debug/spd_compare_tests`
+- **Diagnostics**: `diagnostics/` (DB signatures, compare JSON, latency summaries)
+
+## GitHub Secrets setup
+
+| Secret | Used by | Required for |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | Forecaster SPD ensemble | OpenAI models in ensemble |
+| `GEMINI_API_KEY` | HS, retriever, forecaster | Gemini models (HS + SPD + retriever) |
+| `ANTHROPIC_API_KEY` | Forecaster SPD ensemble | Anthropic models |
+| `XAI_API_KEY` | Forecaster SPD ensemble | XAI models |
+| `EXA_API_KEY` | Web research | Exa backend (optional) |
+| `PERPLEXITY_API_KEY` | Web research | Perplexity backend (optional) |
+| `GITHUB_TOKEN` | Actions | Artifact download + summary updates |
+
+**Minimum set for full pipeline**: `GEMINI_API_KEY` + at least one of (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`). Missing keys disable their providers, and the run proceeds with a partial ensemble.
+
+## Operational notes
+- **Partial ensembles are expected**: providers can timeout; the ensemble uses available members and records `ensemble_meta`.
+- **Timeouts cap tail risk**: per-provider timeouts are enforced; increase them only if needed.
+- **Shared retriever**: evidence packs are cached and reused to stabilize sources and reduce cost.
+- **HS triage always writes**: HS stores triage outputs even if no questions are produced.
+
+## Known limitations and challenges
+- **Gemini 3 grounding**: grounding support for Gemini 3 preview is subject to provider support and may lag until early 2026.
+- **Retriever fallback**: if retriever calls fail, research can fall back to unverified sources.
+- **EM-DAT sparsity**: historical data gaps can reduce base-rate strength.
+- **IDMC month-key issue**: occasionally inconsistent month keys are tolerated and cleaned downstream.
+- **Occasional “200 but ungrounded”**: some web search calls can return success without verified sources.
+
+## Troubleshooting
+- **No questions generated**: HS may mark all tiers quiet. Check `hs_triage` in DuckDB and confirm your country list (`horizon_scanner/hs_country_list.txt`) and `hazards_allowed` in config.
+- **No active models**: verify `PYTHIA_LLM_PROFILE`, `forecaster.providers` config, and provider API keys.
+- **Debug bundle too large for step summary**: artifacts still exist under `debug/` even if GitHub Step Summary truncates.
+- **Slow runs**: Gemini tails can dominate latency. Tune `PYTHIA_LLM_CONCURRENCY`, `FORECASTER_*_MAX_WORKERS`, and SPD timeouts.
+- **Interpreting question_run_metrics**: `question_run_metrics` (if present) records wall-clock vs compute vs queue time per question; see `scripts/dump_pythia_debug_bundle.py`.
+
+## Cross-links
+- Config: [`pythia/config.yaml`](pythia/config.yaml)
+- Horizon Scanner: [`horizon_scanner/horizon_scanner.py`](horizon_scanner/horizon_scanner.py)
+- HS country list: [`horizon_scanner/hs_country_list.txt`](horizon_scanner/hs_country_list.txt)
+- Forecaster CLI: [`forecaster/cli.py`](forecaster/cli.py)
+- Schema: [`pythia/db/schema.py`](pythia/db/schema.py)
+- Debug bundle script: [`scripts/dump_pythia_debug_bundle.py`](scripts/dump_pythia_debug_bundle.py)
+- Workflows: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml), [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml)
 
 ## Contributing
-See [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards and workflow notes. Archived READMEs now live under [docs/archive/README_INDEX.md](docs/archive/README_INDEX.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards and workflow notes. Archived READMEs live in [docs/archive/README_INDEX.md](docs/archive/README_INDEX.md).
 
 ## License
 This repository follows the licensing terms bundled with the codebase (see `LICENSE` if present or repository metadata).
