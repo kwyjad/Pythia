@@ -694,6 +694,7 @@ async def _call_hs_model(
         provider="google",
         model_id=_resolve_hs_model(),
         active=True,
+        purpose="hs_triage",
     )
     start = time.time()
     try:
