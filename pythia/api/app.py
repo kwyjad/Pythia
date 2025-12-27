@@ -71,22 +71,41 @@ def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
 
 
 def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
-    df = con.execute(
-        """
-        SELECT LOWER(column_name) AS column_name
-        FROM information_schema.columns
-        WHERE LOWER(table_name) = LOWER(?)
-        """,
-        [table],
-    ).fetchdf()
-    if df.empty:
+    try:
+        df = con.execute(f"PRAGMA table_info('{table}')").fetchdf()
+    except Exception:
         return set()
-    return set(df["column_name"].tolist())
+    if df.empty or "name" not in df.columns:
+        return set()
+    return set(df["name"].astype(str).str.lower().tolist())
+
+
+def _pick_col(cols: set[str], candidates: List[str]) -> Optional[str]:
+    for candidate in candidates:
+        if candidate.lower() in cols:
+            return candidate
+    return None
 
 
 def _table_has_columns(con: duckdb.DuckDBPyConnection, table: str, required: List[str]) -> bool:
     cols = _table_columns(con, table)
     return set(c.lower() for c in required).issubset(cols)
+
+
+def _safe_count_distinct(
+    con: duckdb.DuckDBPyConnection, table: str, col_candidates: List[str]
+) -> int:
+    if not _table_exists(con, table):
+        return 0
+    cols = _table_columns(con, table)
+    column = _pick_col(cols, col_candidates)
+    if not column:
+        return 0
+    try:
+        row = con.execute(f"SELECT COUNT(DISTINCT {column}) AS n FROM {table}").fetchone()
+    except Exception:
+        return 0
+    return int(row[0]) if row else 0
 
 
 def _safe_json_load(value: Any) -> Any:
@@ -1091,33 +1110,38 @@ def diagnostics_summary():
     """
     con = _con()
 
-    q_counts = con.execute(
-        "SELECT status, COUNT(*) AS n FROM questions GROUP BY status"
-    ).fetchdf().to_dict(orient="records")
+    try:
+        q_counts = con.execute(
+            "SELECT status, COUNT(*) AS n FROM questions GROUP BY status"
+        ).fetchdf().to_dict(orient="records")
+    except Exception:
+        q_counts = []
 
-    q_with_forecast = (
-        con.execute("SELECT COUNT(DISTINCT question_id) AS n FROM forecasts_ensemble").fetchone()[0]
-        if _table_exists(con, "forecasts_ensemble")
-        else 0
-    )
-
-    q_with_resolutions = (
-        con.execute("SELECT COUNT(DISTINCT question_id) AS n FROM resolutions").fetchone()[0]
-        if _table_exists(con, "resolutions")
-        else 0
-    )
-
-    q_with_scores = (
-        con.execute("SELECT COUNT(DISTINCT question_id) AS n FROM scores").fetchone()[0]
-        if _table_exists(con, "scores")
-        else 0
-    )
+    q_with_forecast = _safe_count_distinct(con, "forecasts_ensemble", ["question_id"])
+    q_with_resolutions = _safe_count_distinct(con, "resolutions", ["question_id"])
+    q_with_scores = _safe_count_distinct(con, "scores", ["question_id"])
 
     hs_row = None
     if _table_exists(con, "hs_runs"):
-        hs_row = con.execute(
-            "SELECT run_id, created_at, meta FROM hs_runs ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
+        hs_cols = _table_columns(con, "hs_runs")
+        hs_id_col = _pick_col(hs_cols, ["run_id", "hs_run_id"])
+        hs_time_col = _pick_col(hs_cols, ["created_at", "finished_at", "started_at"])
+        hs_meta_col = _pick_col(
+            hs_cols,
+            ["meta", "meta_json", "requested_countries_json", "countries_json"],
+        )
+        if hs_id_col and hs_time_col:
+            meta_select = f"{hs_meta_col} AS meta" if hs_meta_col else "NULL AS meta"
+            hs_row = con.execute(
+                f"""
+                SELECT {hs_id_col} AS run_id,
+                       {hs_time_col} AS created_at,
+                       {meta_select}
+                FROM hs_runs
+                ORDER BY {hs_time_col} DESC NULLS LAST
+                LIMIT 1
+                """
+            ).fetchone()
     if hs_row:
         latest_hs = {
             "run_id": hs_row[0],
@@ -1129,9 +1153,17 @@ def diagnostics_summary():
 
     cal_row = None
     if _table_exists(con, "calibration_weights"):
-        cal_row = con.execute(
-            "SELECT as_of_month, MAX(created_at) FROM calibration_weights GROUP BY as_of_month ORDER BY as_of_month DESC LIMIT 1"
-        ).fetchone()
+        cal_cols = _table_columns(con, "calibration_weights")
+        if {"as_of_month", "created_at"}.issubset(cal_cols):
+            cal_row = con.execute(
+                """
+                SELECT as_of_month, MAX(created_at)
+                FROM calibration_weights
+                GROUP BY as_of_month
+                ORDER BY as_of_month DESC
+                LIMIT 1
+                """
+            ).fetchone()
     if cal_row:
         latest_calibration = {
             "as_of_month": cal_row[0],
