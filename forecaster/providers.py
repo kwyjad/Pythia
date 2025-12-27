@@ -1058,8 +1058,14 @@ async def call_chat_ms(
 
     start = time.time()
     spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
+    hs_triage = ms.purpose == "hs_triage"
     thinking_level: Optional[str] = None
     timeout_sec: Optional[float] = None
+    hs_timeout_sec: Optional[float] = None
+    hs_max_retry_after_sec: Optional[float] = None
+    hs_fail_fast_on_retry_after = False
+    hs_max_attempts: Optional[int] = None
+    hs_usage: Dict[str, Any] = {}
     if spd_google:
         model_id_lower = ms.model_id.lower()
         if "gemini-3-flash" in model_id_lower:
@@ -1078,6 +1084,25 @@ async def call_chat_ms(
             max_attempts = 1
     else:
         max_attempts = max(1, int(os.getenv("PYTHIA_LLM_RETRIES", "3") or 3))
+    if hs_triage:
+        try:
+            hs_max_attempts = max(1, int(os.getenv("PYTHIA_HS_LLM_MAX_ATTEMPTS", "1") or 1))
+        except Exception:
+            hs_max_attempts = 1
+        try:
+            hs_max_retry_after_sec = max(
+                0.0, float(os.getenv("PYTHIA_HS_LLM_MAX_RETRY_AFTER_SEC", "10") or 10)
+            )
+        except Exception:
+            hs_max_retry_after_sec = 10.0
+        hs_fail_fast_on_retry_after = os.getenv("PYTHIA_HS_LLM_FAIL_FAST_ON_RETRY_AFTER", "1") == "1"
+        if ms.provider == "google":
+            hs_timeout_sec = _resolve_timeout("PYTHIA_HS_GEMINI_TIMEOUT_SEC", None, 60.0)
+            timeout_sec = hs_timeout_sec
+        if hs_max_attempts is not None:
+            max_attempts = min(max_attempts, hs_max_attempts)
+        if hs_timeout_sec is not None:
+            hs_usage["hs_timeout_sec"] = hs_timeout_sec
     attempt = 0
     result: Optional[ProviderResult] = None
     error: Optional[str] = None
@@ -1110,10 +1135,24 @@ async def call_chat_ms(
 
         retry_after_hint = result.retry_after if result else None
         should_retry, retry_after = _should_retry_provider_error(error, retry_after_hint)
+        if hs_triage and retry_after_hint is not None:
+            hs_usage["retry_after_hint_sec"] = retry_after_hint
+            if hs_max_retry_after_sec is not None and retry_after_hint > hs_max_retry_after_sec:
+                hs_usage["retry_after_capped"] = True
+                if hs_fail_fast_on_retry_after:
+                    hs_usage["retry_after_used_sec"] = 0.0
+                    should_retry = False
+                else:
+                    retry_after = hs_max_retry_after_sec
         if not should_retry or attempt >= max_attempts:
             break
 
         backoff = retry_after if retry_after is not None else min(20.0, 2 ** (attempt - 1))
+        if hs_triage and hs_max_retry_after_sec is not None:
+            if backoff > hs_max_retry_after_sec:
+                backoff = hs_max_retry_after_sec
+                hs_usage["retry_after_capped"] = True
+            hs_usage["retry_after_used_sec"] = backoff
         await asyncio.sleep(backoff)
 
     if result is None:
@@ -1123,6 +1162,8 @@ async def call_chat_ms(
 
     elapsed_ms = int((time.time() - start) * 1000)
     usage = result.usage or usage_to_dict(None)
+    if hs_usage:
+        usage.update(hs_usage)
     cost = result.cost_usd if result.cost_usd else estimate_cost_usd(ms.model_id, usage)
     _log_llm_call(
         component=component,
