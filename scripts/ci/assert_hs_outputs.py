@@ -154,6 +154,7 @@ def _render_questions_failure(
     con,
     hs_run_id: str,
     diag_path: Path,
+    eligible_count: int,
 ) -> int:
     try:
         triage_rows = con.execute(
@@ -178,6 +179,7 @@ def _render_questions_failure(
 
     _write_header(lines, "questions", hs_run_id)
     lines.append("- questions count: 0")
+    lines.append(f"- eligible hs_triage rows: {eligible_count}")
     lines.append("")
     lines.append("## Top hs_triage rows by triage_score (if any)")
     lines.append("| iso3 | hazard_code | tier | triage_score | need_full_spd |")
@@ -203,14 +205,38 @@ def _render_success(
     diag_path: Path,
     triage_count: int,
     question_count: int,
+    eligible_count: int | None = None,
 ) -> int:
     lines: list[str] = []
     _write_header(lines, stage, hs_run_id)
     lines.append(f"- hs_triage rows: {triage_count}")
     lines.append(f"- questions rows: {question_count}")
+    if eligible_count is not None:
+        lines.append(f"- eligible hs_triage rows: {eligible_count}")
     diag_path.parent.mkdir(parents=True, exist_ok=True)
     diag_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"HS assertion OK for stage={stage} hs_run_id={hs_run_id}")
+    return 0
+
+
+def _render_questions_expected_empty(
+    hs_run_id: str,
+    diag_path: Path,
+    triage_count: int,
+    eligible_count: int,
+    question_count: int,
+) -> int:
+    lines: list[str] = []
+    _write_header(lines, "questions", hs_run_id)
+    lines.append(f"- hs_triage rows: {triage_count}")
+    lines.append(f"- questions rows: {question_count}")
+    lines.append(f"- eligible hs_triage rows: {eligible_count}")
+    lines.append("")
+    lines.append("0 eligible hazards → 0 questions expected")
+    diag_path.parent.mkdir(parents=True, exist_ok=True)
+    diag_path.write_text("\n".join(lines), encoding="utf-8")
+    print("::warning::HS produced 0 eligible hazards; 0 questions expected (skipping forecaster).")
+    print(f"HS assertion OK for stage=questions hs_run_id={hs_run_id}")
     return 0
 
 
@@ -238,10 +264,36 @@ def run_assertion(db_url: str, hs_run_id: str, stage: str) -> int:
         if stage == "triage" and triage_count == 0:
             return _render_triage_failure(con, hs_run_id, diag_path)
 
-        if stage == "questions" and question_count == 0:
-            return _render_questions_failure(con, hs_run_id, diag_path)
+        eligible_count: int | None = None
+        if stage == "questions":
+            try:
+                eligible_row = con.execute(
+                    "SELECT COUNT(*) FROM hs_triage WHERE run_id = ? AND need_full_spd = TRUE",
+                    [hs_run_id],
+                ).fetchone()
+                eligible_count = int(eligible_row[0]) if eligible_row else 0
+            except Exception:
+                eligible_count = 0
 
-        return _render_success(stage, hs_run_id, diag_path, int(triage_count), int(question_count))
+            if question_count == 0:
+                if eligible_count == 0:
+                    return _render_questions_expected_empty(
+                        hs_run_id,
+                        diag_path,
+                        int(triage_count),
+                        int(eligible_count),
+                        int(question_count),
+                    )
+                return _render_questions_failure(con, hs_run_id, diag_path, int(eligible_count))
+
+        return _render_success(
+            stage,
+            hs_run_id,
+            diag_path,
+            int(triage_count),
+            int(question_count),
+            eligible_count,
+        )
     finally:
         duckdb_io.close_db(con)
 

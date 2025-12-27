@@ -476,6 +476,34 @@ jobs:
           python -m py_compile scripts/ci/assert_hs_outputs.py
           python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage questions
 
+      - name: Capture HS question count
+        if: ${{ success() }}
+        env:
+          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+        run: |
+          set -e
+          python - <<'PY'
+          import os
+
+          from resolver.db import duckdb_io
+
+          db_url = os.environ["RESOLVER_DB_URL"]
+          hs_run_id = os.environ["HS_RUN_ID"]
+          con = duckdb_io.get_db(db_url)
+          try:
+              row = con.execute(
+                  "SELECT COUNT(*) FROM questions WHERE hs_run_id = ?", [hs_run_id]
+              ).fetchone()
+              count = int(row[0]) if row else 0
+          finally:
+              duckdb_io.close_db(con)
+
+          print(f"HS_QUESTION_COUNT={count}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"HS_QUESTION_COUNT={count}\n")
+          PY
+
       - name: Upload HS question diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -484,11 +512,12 @@ jobs:
           path: |
             diagnostics/hs_assertion.md
             diagnostics/hs_stdout.txt
+            debug/hs_triage_raw/*
           if-no-files-found: warn
 
       # Step 7: Run Forecaster on newly written HS questions (Pythia mode)
       - name: Diagnostics — Forecaster provider activation & ensemble composition
-        if: ${{ success() }}
+        if: ${{ success() && env.HS_QUESTION_COUNT != '0' }}
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
           PYTHIA_DEBUG_MODELS: "1"
@@ -508,7 +537,7 @@ jobs:
           fi
 
       - name: Run Forecaster (Pythia mode on HS questions)
-        if: ${{ success() }}
+        if: ${{ success() && env.HS_QUESTION_COUNT != '0' }}
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
           PYTHIA_LLM_PROFILE: prod
@@ -544,7 +573,7 @@ jobs:
           echo "=== Forecaster (Pythia mode) completed ==="
 
       - name: Verify Forecaster wrote both aggregation methods
-        if: ${{ success() }}
+        if: ${{ success() && env.HS_QUESTION_COUNT != '0' }}
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
@@ -552,7 +581,7 @@ jobs:
           python -m scripts.ci.verify_forecaster_aggregations --db "${PYTHIA_DB_URL}"
 
       - name: Evaluate SPD aggregations (Brier + log score)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true' && env.HS_QUESTION_COUNT != '0' }}
         continue-on-error: true
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
