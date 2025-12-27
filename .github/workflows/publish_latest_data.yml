@@ -1,0 +1,134 @@
+name: Publish Latest Data (Release)
+
+on:
+  workflow_run:
+    workflows:
+      - "Horizon Scanner Triage"
+      - "Resolver — Initial Backfill"
+    types: [completed]
+
+permissions:
+  contents: write   # needed to upload release assets
+  actions: read     # needed to download artifacts from workflow_run
+
+concurrency:
+  group: pythia-publish-latest-data
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_TAG: pythia-data-latest
+      DB_ARTIFACT_NAME: pythia-resolver-db
+
+    steps:
+      - name: Download canonical DB artifact from triggering run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: ${{ env.DB_ARTIFACT_NAME }}
+          path: downloaded_artifact
+
+      - name: Locate resolver.duckdb
+        id: locate_db
+        run: |
+          set -euo pipefail
+          echo "Downloaded artifact contents:"
+          find downloaded_artifact -maxdepth 4 -type f -print || true
+
+          DB_PATH="$(find downloaded_artifact -type f -name '*.duckdb' | head -n 1 || true)"
+          if [ -z "${DB_PATH}" ]; then
+            echo "ERROR: No .duckdb found inside artifact '${DB_ARTIFACT_NAME}'."
+            exit 1
+          fi
+
+          echo "Found DB at: ${DB_PATH}"
+          mkdir -p data_out
+          cp -f "${DB_PATH}" data_out/resolver.duckdb
+
+          echo "db_path=data_out/resolver.duckdb" >> "$GITHUB_OUTPUT"
+
+      - name: Compute DB sha256
+        id: sha
+        run: |
+          set -euo pipefail
+          SHA="$(sha256sum data_out/resolver.duckdb | awk '{print $1}')"
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build manifest.json (best-effort hs_run_id)
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip >/dev/null
+          pip install duckdb >/dev/null
+
+          python - <<'PY'
+          import json, os, datetime
+          import duckdb
+
+          db_path = "data_out/resolver.duckdb"
+          event = {
+            "created_utc": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "source_workflow": os.environ.get("GITHUB_WORKFLOW", ""),
+            "source_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+            "source_created_at": os.environ.get("GITHUB_EVENT_WORKFLOW_RUN_CREATED_AT", ""),
+            "head_sha": os.environ.get("GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA", ""),
+            "release_tag": os.environ.get("RELEASE_TAG", ""),
+            "db_asset": "resolver.duckdb",
+            "db_sha256": os.environ.get("DB_SHA256", ""),
+            "latest_hs_run_id": None,
+            "latest_hs_created_at": None,
+          }
+
+          # Try to read latest HS run from DB if table exists
+          try:
+            con = duckdb.connect(db_path, read_only=True)
+            try:
+              # hs_runs is expected in your pipeline DB
+              row = con.execute(
+                "SELECT run_id, created_at FROM hs_runs ORDER BY created_at DESC LIMIT 1"
+              ).fetchone()
+              if row:
+                event["latest_hs_run_id"] = row[0]
+                event["latest_hs_created_at"] = str(row[1])
+            finally:
+              con.close()
+          except Exception:
+            # best-effort only; leave nulls
+            pass
+
+          with open("data_out/manifest.json", "w", encoding="utf-8") as f:
+            json.dump(event, f, indent=2, sort_keys=True)
+
+          print("Wrote data_out/manifest.json")
+          PY
+        env:
+          DB_SHA256: ${{ steps.sha.outputs.sha256 }}
+          GITHUB_EVENT_WORKFLOW_RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+          GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Ensure release exists (create if missing)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} exists."
+          else
+            echo "Creating release ${RELEASE_TAG}..."
+            gh release create "${RELEASE_TAG}" --title "Pythia – Latest Data" --notes "Automated latest-data release."
+          fi
+
+      - name: Upload resolver.duckdb + manifest.json to release (overwrite)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ls -lh data_out || true
+          gh release upload "${RELEASE_TAG}" \
+            data_out/resolver.duckdb \
+            data_out/manifest.json \
+            --clobber
