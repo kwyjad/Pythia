@@ -25,12 +25,53 @@ jobs:
       DB_ARTIFACT_NAME: pythia-resolver-db
 
     steps:
-      - name: Download canonical DB artifact from triggering run
-        uses: actions/download-artifact@v4
-        with:
-          run-id: ${{ github.event.workflow_run.id }}
-          name: ${{ env.DB_ARTIFACT_NAME }}
-          path: downloaded_artifact
+      - name: Wait for DB artifact to be visible (retry)
+        id: wait_artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_NAME: ${{ env.DB_ARTIFACT_NAME }}
+        run: |
+          set -euo pipefail
+          echo "Triggering workflow run id: ${RUN_ID}"
+          echo "Looking for artifact: ${ARTIFACT_NAME}"
+
+          for attempt in $(seq 1 12); do
+            echo "Attempt ${attempt}/12: listing artifacts for run ${RUN_ID}"
+            JSON="$(gh api -H "Accept: application/vnd.github+json" "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts")"
+
+            # Print what GitHub thinks exists (for debugging)
+            echo "${JSON}" | jq -r '.artifacts[]? | "\(.name)\tID=\(.id)\tEXPIRED=\(.expired)\tSIZE=\(.size_in_bytes)"' || true
+
+            ART_ID="$(echo "${JSON}" | jq -r --arg NAME "${ARTIFACT_NAME}" '.artifacts[]? | select(.name==$NAME) | .id' | head -n 1)"
+            if [ -n "${ART_ID}" ] && [ "${ART_ID}" != "null" ]; then
+              echo "Found artifact id: ${ART_ID}"
+              echo "artifact_id=${ART_ID}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::Artifact '${ARTIFACT_NAME}' not found for run ${RUN_ID} after retries."
+          exit 1
+
+      - name: Download DB artifact zip by id
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_ID: ${{ steps.wait_artifact.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloaded_artifact
+          echo "Downloading artifact id ${ARTIFACT_ID} as zip..."
+          gh api -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output artifact.zip
+          unzip -q artifact.zip -d downloaded_artifact
+          echo "Downloaded artifact contents:"
+          find downloaded_artifact -maxdepth 4 -type f -print || true
 
       - name: Locate resolver.duckdb
         id: locate_db
