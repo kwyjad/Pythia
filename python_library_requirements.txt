@@ -8,3 +8,5 @@ requests
 numpy
 openai
 python-docx
+fastapi>=0.110,<1
+uvicorn[standard]>=0.30,<1
