@@ -51,11 +51,23 @@ def _startup_sync():
 
 
 def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
-    row = con.execute(
-        "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)",
-        [table],
-    ).fetchone()
-    return bool(row and row[0])
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)",
+            [table],
+        ).fetchone()
+        return bool(row and row[0])
+    except Exception:
+        pass
+
+    try:
+        df = con.execute("PRAGMA show_tables").fetchdf()
+    except Exception:
+        return False
+    if df.empty:
+        return False
+    first_col = df.columns[0]
+    return df[first_col].astype(str).str.lower().eq(table.lower()).any()
 
 
 def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
@@ -938,6 +950,8 @@ def get_forecasts_history(
 @app.get("/v1/resolutions")
 def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
     con = _con()
+    if not _table_exists(con, "resolutions"):
+        return {"rows": []}
     qsql = "SELECT question_id FROM questions WHERE iso3=? AND target_month=? AND metric=?"
     qids = [r[0] for r in con.execute(qsql, [iso3.upper(), month, metric]).fetchall()]
     if not qids:
@@ -1081,21 +1095,29 @@ def diagnostics_summary():
         "SELECT status, COUNT(*) AS n FROM questions GROUP BY status"
     ).fetchdf().to_dict(orient="records")
 
-    q_with_forecast = con.execute(
-        "SELECT COUNT(DISTINCT question_id) AS n FROM forecasts_ensemble"
-    ).fetchone()[0]
+    q_with_forecast = (
+        con.execute("SELECT COUNT(DISTINCT question_id) AS n FROM forecasts_ensemble").fetchone()[0]
+        if _table_exists(con, "forecasts_ensemble")
+        else 0
+    )
 
-    q_with_resolutions = con.execute(
-        "SELECT COUNT(DISTINCT question_id) AS n FROM resolutions"
-    ).fetchone()[0]
+    q_with_resolutions = (
+        con.execute("SELECT COUNT(DISTINCT question_id) AS n FROM resolutions").fetchone()[0]
+        if _table_exists(con, "resolutions")
+        else 0
+    )
 
-    q_with_scores = con.execute(
-        "SELECT COUNT(DISTINCT question_id) AS n FROM scores"
-    ).fetchone()[0]
+    q_with_scores = (
+        con.execute("SELECT COUNT(DISTINCT question_id) AS n FROM scores").fetchone()[0]
+        if _table_exists(con, "scores")
+        else 0
+    )
 
-    hs_row = con.execute(
-        "SELECT run_id, created_at, meta FROM hs_runs ORDER BY created_at DESC LIMIT 1"
-    ).fetchone()
+    hs_row = None
+    if _table_exists(con, "hs_runs"):
+        hs_row = con.execute(
+            "SELECT run_id, created_at, meta FROM hs_runs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
     if hs_row:
         latest_hs = {
             "run_id": hs_row[0],
@@ -1105,9 +1127,11 @@ def diagnostics_summary():
     else:
         latest_hs = None
 
-    cal_row = con.execute(
-        "SELECT as_of_month, MAX(created_at) FROM calibration_weights GROUP BY as_of_month ORDER BY as_of_month DESC LIMIT 1"
-    ).fetchone()
+    cal_row = None
+    if _table_exists(con, "calibration_weights"):
+        cal_row = con.execute(
+            "SELECT as_of_month, MAX(created_at) FROM calibration_weights GROUP BY as_of_month ORDER BY as_of_month DESC LIMIT 1"
+        ).fetchone()
     if cal_row:
         latest_calibration = {
             "as_of_month": cal_row[0],
