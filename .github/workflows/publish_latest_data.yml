@@ -23,6 +23,8 @@ jobs:
     env:
       RELEASE_TAG: pythia-data-latest
       DB_ARTIFACT_NAME: pythia-resolver-db
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Wait for DB artifact to be visible (retry)
@@ -171,24 +173,27 @@ jobs:
           GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
 
       - name: Ensure release exists (create if missing)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+          echo "Repo: ${GH_REPO}"
+          echo "Release tag: ${RELEASE_TAG}"
+
+          if gh release view "${RELEASE_TAG}" -R "${GH_REPO}" >/dev/null 2>&1; then
             echo "Release ${RELEASE_TAG} exists."
           else
             echo "Creating release ${RELEASE_TAG}..."
-            gh release create "${RELEASE_TAG}" --title "Pythia – Latest Data" --notes "Automated latest-data release."
+            gh release create "${RELEASE_TAG}" \
+              -R "${GH_REPO}" \
+              --title "Pythia – Latest Data" \
+              --notes "Automated latest-data release."
           fi
 
       - name: Upload resolver.duckdb + manifest.json to release (overwrite)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ls -lh data_out || true
           gh release upload "${RELEASE_TAG}" \
+            -R "${GH_REPO}" \
             data_out/resolver.duckdb \
             data_out/manifest.json \
             --clobber
