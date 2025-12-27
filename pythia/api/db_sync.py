@@ -143,6 +143,17 @@ def get_cached_manifest() -> Optional[Dict[str, Any]]:
     return _merge_manifest_with_latest_runs(dict(_LAST_MANIFEST))
 
 
+def get_cached_latest_hs() -> Optional[Dict[str, Any]]:
+    manifest = get_cached_manifest()
+    if not manifest:
+        return None
+    run_id = manifest.get("latest_hs_run_id")
+    created_at = manifest.get("latest_hs_created_at")
+    if not run_id and not created_at:
+        return None
+    return {"run_id": run_id, "created_at": created_at, "meta": None}
+
+
 def _merge_manifest_with_latest_runs(manifest: Dict[str, Any]) -> Dict[str, Any]:
     if not _LATEST_RUNS:
         return manifest
