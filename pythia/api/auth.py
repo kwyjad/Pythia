@@ -26,6 +26,17 @@ def _extract_bearer(value: str | None) -> str | None:
     return token or None
 
 
+def _provided_token(
+    request: Request,
+    authorization: str | None,
+    x_pythia_token: str | None,
+) -> str | None:
+    provided = _extract_bearer(authorization) or _extract_bearer(_extract_header(request, "Authorization"))
+    if not provided:
+        provided = x_pythia_token or _extract_header(request, "X-Pythia-Token")
+    return provided
+
+
 def require_token(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -37,9 +48,23 @@ def require_token(
     if not expected:
         return
 
-    provided = _extract_bearer(authorization) or _extract_bearer(_extract_header(request, "Authorization"))
-    if not provided:
-        provided = x_pythia_token or _extract_header(request, "X-Pythia-Token")
+    provided = _provided_token(request, authorization, x_pythia_token)
+
+    if provided != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_admin_token(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_pythia_token: str | None = Header(default=None, convert_underscores=False),
+):
+    expected = _env_token()
+
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin token not configured")
+
+    provided = _provided_token(request, authorization, x_pythia_token)
 
     if provided != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
