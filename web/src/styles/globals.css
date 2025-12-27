@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-950 text-slate-100;
+}
+
+main {
+  @apply mx-auto w-full max-w-6xl px-6 py-8;
+}
+
+a {
+  @apply text-sky-300 hover:text-sky-200;
+}
+
+table {
+  @apply w-full border-collapse;
+}
+
+thead {
+  @apply bg-slate-900;
+}
+
+thead th {
+  @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-400;
+}
+
+tbody td {
+  @apply border-t border-slate-800 px-4 py-3 text-sm;
+}

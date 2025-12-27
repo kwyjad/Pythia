@@ -8,11 +8,19 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import os
+
 import duckdb, pandas as pd
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from pythia.api.auth import require_admin_token
-from pythia.api.db_sync import DbSyncError, get_cached_manifest, maybe_sync_latest_db
+from pythia.api.db_sync import (
+    DbSyncError,
+    get_cached_latest_hs,
+    get_cached_manifest,
+    maybe_sync_latest_db,
+)
 from pythia.api.models import (
     ContextBundle,
     ForecastBundle,
@@ -24,6 +32,19 @@ from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 
 app = FastAPI(title="Pythia API", version="1.0.0")
+cors_origins_env = os.getenv("PYTHIA_CORS_ALLOW_ORIGINS", "*").strip()
+cors_origins = (
+    ["*"]
+    if cors_origins_env in ("", "*")
+    else [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins or ["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 logger = logging.getLogger(__name__)
 
 
@@ -1121,35 +1142,35 @@ def diagnostics_summary():
     q_with_resolutions = _safe_count_distinct(con, "resolutions", ["question_id"])
     q_with_scores = _safe_count_distinct(con, "scores", ["question_id"])
 
-    hs_row = None
-    if _table_exists(con, "hs_runs"):
-        hs_cols = _table_columns(con, "hs_runs")
-        hs_id_col = _pick_col(hs_cols, ["run_id", "hs_run_id"])
-        hs_time_col = _pick_col(hs_cols, ["created_at", "finished_at", "started_at"])
-        hs_meta_col = _pick_col(
-            hs_cols,
-            ["meta", "meta_json", "requested_countries_json", "countries_json"],
-        )
-        if hs_id_col and hs_time_col:
-            meta_select = f"{hs_meta_col} AS meta" if hs_meta_col else "NULL AS meta"
-            hs_row = con.execute(
-                f"""
-                SELECT {hs_id_col} AS run_id,
-                       {hs_time_col} AS created_at,
-                       {meta_select}
-                FROM hs_runs
-                ORDER BY {hs_time_col} DESC NULLS LAST
-                LIMIT 1
-                """
-            ).fetchone()
-    if hs_row:
-        latest_hs = {
-            "run_id": hs_row[0],
-            "created_at": hs_row[1],
-            "meta": hs_row[2],
-        }
-    else:
-        latest_hs = None
+    latest_hs = get_cached_latest_hs()
+    if latest_hs is None:
+        hs_row = None
+        if _table_exists(con, "hs_runs"):
+            hs_cols = _table_columns(con, "hs_runs")
+            hs_id_col = _pick_col(hs_cols, ["run_id", "hs_run_id"])
+            hs_time_col = _pick_col(hs_cols, ["created_at", "finished_at", "started_at"])
+            hs_meta_col = _pick_col(
+                hs_cols,
+                ["meta", "meta_json", "requested_countries_json", "countries_json"],
+            )
+            if hs_id_col and hs_time_col:
+                meta_select = f"{hs_meta_col} AS meta" if hs_meta_col else "NULL AS meta"
+                hs_row = con.execute(
+                    f"""
+                    SELECT {hs_id_col} AS run_id,
+                           {hs_time_col} AS created_at,
+                           {meta_select}
+                    FROM hs_runs
+                    ORDER BY {hs_time_col} DESC NULLS LAST
+                    LIMIT 1
+                    """
+                ).fetchone()
+        if hs_row:
+            latest_hs = {
+                "run_id": hs_row[0],
+                "created_at": hs_row[1],
+                "meta": hs_row[2],
+            }
 
     cal_row = None
     if _table_exists(con, "calibration_weights"):
