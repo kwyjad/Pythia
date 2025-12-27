@@ -66,9 +66,16 @@ jobs:
           set -euo pipefail
           mkdir -p downloaded_artifact
           echo "Downloading artifact id ${ARTIFACT_ID} as zip..."
-          gh api -H "Accept: application/vnd.github+json" \
+          # Download as binary zip to stdout; redirect to file (works across gh versions)
+          gh api \
+            -H "Accept: application/octet-stream" \
             "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
-            --output artifact.zip
+            --silent > artifact.zip
+          if [ ! -s artifact.zip ]; then
+            echo "::error::artifact.zip is empty; download failed."
+            exit 1
+          fi
+          ls -lh artifact.zip
           unzip -q artifact.zip -d downloaded_artifact
           echo "Downloaded artifact contents:"
           find downloaded_artifact -maxdepth 4 -type f -print || true
