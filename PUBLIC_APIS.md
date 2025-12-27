@@ -2,10 +2,19 @@
 
 ## FastAPI (pythia.api)
 
-- **Authentication**: Protected endpoints expect `Authorization: Bearer <token>`.
-  - Server token is sourced from `PYTHIA_API_TOKEN` (preferred) or `PYTHIA_API_KEY` (legacy fallback).
-  - Legacy header `X-Pythia-Token` is still accepted for backwards compatibility.
-  - If no token environment variable is set, auth is disabled (for local development only).
+- **Authentication**
+  - **Public (no auth)**: All read-only `GET` endpoints are public, including:
+    - `/v1/diagnostics/summary`
+    - `/v1/risk_index`, `/v1/rankings`
+    - `/v1/questions`, `/v1/question_bundle`, `/v1/ui_runs/{ui_run_id}`
+    - `/v1/forecasts/*`, `/v1/resolutions`
+    - `/v1/llm/costs`, `/v1/llm/costs/summary`
+    - `/v1/calibration/weights`, `/v1/calibration/advice`
+  - **Admin (token required)**: Action endpoints (e.g., `POST /v1/run`).
+    - Server token is sourced from `PYTHIA_API_TOKEN` (preferred) or `PYTHIA_API_KEY` (legacy fallback).
+    - Legacy header `X-Pythia-Token` is still accepted for backwards compatibility.
+    - If no token environment variable is set, admin endpoints fail closed with
+      `503 Admin token not configured`.
 - `GET /v1/question_bundle`
   - Query params: `question_id` (required), `hs_run_id`, `forecaster_run_id`, `include_llm_calls` (bool, default false), `include_transcripts` (bool, default false), `limit_llm_calls` (int, default 200).
   - Returns a bundle containing: the question row, HS run/scenarios/country report, ensemble SPD rows plus per-model SPD rows, question context/resolutions, and optional `llm_calls` (including transcripts only when requested).

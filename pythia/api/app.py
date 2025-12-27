@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import duckdb, pandas as pd
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
 
-from pythia.api.auth import require_token
+from pythia.api.auth import require_admin_token
 from pythia.api.models import (
     ContextBundle,
     ForecastBundle,
@@ -291,14 +291,14 @@ def health():
 
 
 @app.post("/v1/run")
-def start_run(payload: dict = Body(...), _=Depends(require_token)):
+def start_run(payload: dict = Body(...), _=Depends(require_admin_token)):
     countries = payload.get("countries") or []
     run_id = enqueue_run(countries)
     return {"accepted": True, "run_id": run_id}
 
 
 @app.get("/v1/ui_runs/{ui_run_id}")
-def get_ui_run(ui_run_id: str, _=Depends(require_token)):
+def get_ui_run(ui_run_id: str):
     """
     Return status for a given ui_run_id created by /v1/run.
 
@@ -326,7 +326,6 @@ def get_questions(
     status: Optional[str] = Query(None),
     run_id: Optional[str] = Query(None),
     latest_only: bool = Query(False),
-    _=Depends(require_token),
 ):
     con = _con()
     params = {}
@@ -392,7 +391,6 @@ def get_question_bundle(
     include_llm_calls: bool = Query(False, description="Include llm_calls rows"),
     include_transcripts: bool = Query(False, description="Include prompt/response text in llm_calls"),
     limit_llm_calls: int = Query(200, ge=1, le=2000, description="Max llm_calls rows to return"),
-    _=Depends(require_token),
 ):
     con = _con()
 
@@ -617,7 +615,6 @@ def get_calibration_weights(
     hazard_code: Optional[str] = Query(None),
     metric: Optional[str] = Query(None),
     as_of_month: Optional[str] = Query(None, description="YYYY-MM; if omitted, use latest"),
-    _=Depends(require_token),
 ):
     """
     Return calibration weights per model for the given hazard_code/metric/as_of_month.
@@ -700,7 +697,6 @@ def get_calibration_advice(
     hazard_code: Optional[str] = Query(None),
     metric: Optional[str] = Query(None),
     as_of_month: Optional[str] = Query(None, description="YYYY-MM; if omitted, use latest"),
-    _=Depends(require_token),
 ):
     """
     Return calibration advice text per (hazard_code, metric, as_of_month).
@@ -777,7 +773,6 @@ def get_forecasts_ensemble(
     target_month: Optional[str] = Query(None),
     horizon_m: Optional[int] = Query(None),
     latest_only: bool = Query(True),
-    _=Depends(require_token),
 ):
     con = _con()
     params = {}
@@ -864,7 +859,6 @@ def get_forecasts_history(
     hazard_code: str = Query(...),
     metric: str = Query(...),
     target_month: str = Query(...),
-    _=Depends(require_token),
 ):
     """
     Return all historical ensemble forecasts for a given question concept
@@ -907,7 +901,7 @@ def get_forecasts_history(
 
 
 @app.get("/v1/resolutions")
-def list_resolutions(iso3: str, month: str, metric: str = "PIN", _=Depends(require_token)):
+def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
     con = _con()
     qsql = "SELECT question_id FROM questions WHERE iso3=? AND target_month=? AND metric=?"
     qids = [r[0] for r in con.execute(qsql, [iso3.upper(), month, metric]).fetchall()]
@@ -927,7 +921,6 @@ def get_risk_index(
     target_month: str = Query(..., description="Target month 'YYYY-MM'"),
     horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
-    _=Depends(require_token),
 ):
     """
     Country-level risk index for a given metric/target_month/horizon.
@@ -996,7 +989,7 @@ def get_risk_index(
 
 
 @app.get("/v1/rankings")
-def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(require_token)):
+def rankings(month: str, metric: str = "PIN", normalize: bool = True):
     con = _con()
     sql = """
     WITH ev AS (
@@ -1036,7 +1029,7 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True, _=Depends(
 
 
 @app.get("/v1/diagnostics/summary")
-def diagnostics_summary(_=Depends(require_token)):
+def diagnostics_summary():
     """
     Return a high-level summary of Pythia's state:
 
@@ -1104,7 +1097,6 @@ def llm_costs(
     model: str | None = Query(None),
     since: str | None = Query(None),
     limit: int = Query(200, ge=1, le=5000),
-    _=Depends(require_token),
 ):
     """
     Return recent LLM call cost/usage rows from llm_calls.
@@ -1154,7 +1146,6 @@ def llm_costs_summary(
         description="Comma-separated list of grouping fields: any of 'component','model_name','llm_profile','hs_run_id','ui_run_id','forecaster_run_id'",
     ),
     limit: int = Query(1000, ge=1, le=5000),
-    _=Depends(require_token),
 ):
     """
     Summarise LLM usage and cost from llm_calls.

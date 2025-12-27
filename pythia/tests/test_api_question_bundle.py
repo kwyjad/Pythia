@@ -140,9 +140,9 @@ def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
     assert data["llm_calls"]["included"] is False
 
 
-def test_question_bundle_requires_auth(unauthorized_client: TestClient) -> None:
+def test_question_bundle_is_public(unauthorized_client: TestClient) -> None:
     resp = unauthorized_client.get("/v1/question_bundle", params={"question_id": "Q1"})
-    assert resp.status_code == 401
+    assert resp.status_code == 200
 
 
 def test_question_bundle_accepts_legacy_header(api_env: dict[str, str]) -> None:
