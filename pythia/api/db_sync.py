@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from pythia.config import load as load_cfg
+from resolver.db import duckdb_io
 
 _DEFAULT_DB_ASSET = "resolver.duckdb"
 _DEFAULT_MANIFEST_ASSET = "manifest.json"
@@ -23,6 +24,7 @@ _DEFAULT_SYNC_INTERVAL_S = 60
 
 _LAST_MANIFEST: Optional[Dict[str, Any]] = None
 _LAST_SYNC_AT: Optional[float] = None
+_LATEST_RUNS: Optional[Dict[str, Any]] = None
 _SYNC_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
@@ -138,11 +140,129 @@ def download_db_atomic(dest_path: Path) -> None:
 def get_cached_manifest() -> Optional[Dict[str, Any]]:
     if _LAST_MANIFEST is None:
         return None
-    return dict(_LAST_MANIFEST)
+    return _merge_manifest_with_latest_runs(dict(_LAST_MANIFEST))
+
+
+def _merge_manifest_with_latest_runs(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    if not _LATEST_RUNS:
+        return manifest
+    merged = dict(manifest)
+    merged.update(_LATEST_RUNS)
+    return merged
+
+
+def _db_url_from_path(db_path: Path) -> str:
+    return f"duckdb:///{db_path}"
+
+
+def _table_exists(conn: "duckdb_io.duckdb.DuckDBPyConnection", table: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.tables
+        WHERE table_schema = 'main' AND table_name = ?
+        """,
+        [table],
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _table_columns(conn: "duckdb_io.duckdb.DuckDBPyConnection", table: str) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'main' AND table_name = ?
+        """,
+        [table],
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _pick_column(columns: set[str], candidates: list[str]) -> Optional[str]:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def _fetch_latest_run(
+    conn: "duckdb_io.duckdb.DuckDBPyConnection",
+    table: str,
+    id_candidates: list[str],
+    time_candidates: list[str],
+    where_clause: str = "",
+) -> Optional[Dict[str, Any]]:
+    if not _table_exists(conn, table):
+        return None
+    columns = _table_columns(conn, table)
+    id_col = _pick_column(columns, id_candidates)
+    time_col = _pick_column(columns, time_candidates)
+    if not id_col or not time_col:
+        return None
+    where_sql = f"WHERE {where_clause}" if where_clause else ""
+    row = conn.execute(
+        f"""
+        SELECT {id_col} AS run_id,
+               {time_col} AS created_at
+        FROM {table}
+        {where_sql}
+        ORDER BY {time_col} DESC NULLS LAST
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    return {"run_id": row[0], "created_at": row[1]}
+
+
+def _refresh_latest_runs(db_path: Path) -> None:
+    global _LATEST_RUNS
+    try:
+        conn = duckdb_io.get_db(_db_url_from_path(db_path))
+    except Exception as exc:
+        logger.warning("Failed to open DuckDB for latest run introspection: %s", exc)
+        return
+    try:
+        latest: Dict[str, Any] = {}
+        hs_latest = _fetch_latest_run(
+            conn,
+            "hs_runs",
+            ["run_id", "hs_run_id"],
+            ["created_at", "finished_at", "started_at", "generated_at"],
+        )
+        if hs_latest:
+            latest["latest_hs_run_id"] = hs_latest["run_id"]
+            latest["latest_hs_created_at"] = hs_latest["created_at"]
+
+        forecast_latest = _fetch_latest_run(
+            conn,
+            "llm_calls",
+            ["forecaster_run_id"],
+            ["created_at"],
+            where_clause="forecaster_run_id IS NOT NULL",
+        )
+        if not forecast_latest:
+            forecast_latest = _fetch_latest_run(
+                conn,
+                "forecasts_raw",
+                ["run_id"],
+                ["created_at"],
+            )
+        if forecast_latest:
+            latest["latest_forecast_run_id"] = forecast_latest["run_id"]
+            latest["latest_forecast_created_at"] = forecast_latest["created_at"]
+
+        _LATEST_RUNS = latest
+    except Exception as exc:
+        logger.warning("Failed to introspect latest runs: %s", exc)
+    finally:
+        duckdb_io.close_db(conn)
 
 
 def maybe_sync_latest_db() -> Optional[Dict[str, Any]]:
     global _LAST_MANIFEST, _LAST_SYNC_AT
+    global _LATEST_RUNS
 
     dest_path = _db_path_from_config()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +288,9 @@ def maybe_sync_latest_db() -> Optional[Dict[str, Any]]:
 
         if should_download:
             download_db_atomic(dest_path)
+
+        if should_download or _LATEST_RUNS is None:
+            _refresh_latest_runs(dest_path)
 
         _LAST_MANIFEST = dict(manifest)
         return get_cached_manifest()
