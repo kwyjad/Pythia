@@ -1435,6 +1435,21 @@ def get_risk_index(
             df[col] = None
 
     rows = _rows_from_df(df)
+    # Back-compat: keep the v1 keys the frontend expects.
+    for row in rows:
+        # Prefer existing values if present, otherwise map from new names.
+        if row.get("expected_value") is None:
+            if row.get("total") is not None:
+                row["expected_value"] = row["total"]
+            elif row.get("eiv_total") is not None:
+                row["expected_value"] = row["eiv_total"]
+
+        if row.get("per_capita") is None:
+            if row.get("total_pc") is not None:
+                row["per_capita"] = row["total_pc"]
+            elif row.get("eiv_total_pc") is not None:
+                row["per_capita"] = row["eiv_total_pc"]
+
     for row in rows:
         row["country_name"] = _country_name(row.get("iso3", "")) or ""
 
