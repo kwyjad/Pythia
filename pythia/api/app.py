@@ -393,6 +393,64 @@ def _resolve_latest_questions_columns(
     return q_run_col, h_run_col, hs_timestamp_expr
 
 
+def _resolve_forecasts_ensemble_columns(
+    con: duckdb.DuckDBPyConnection,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Returns (horizon_col, bucket_col, prob_col)
+    - horizon_col: 'horizon_m' or 'month_index'
+    - bucket_col:  'class_bin' or 'bucket_index'
+    - prob_col:    'probability' (required)
+    """
+    if not _table_exists(con, "forecasts_ensemble"):
+        return None, None, None
+    cols = _table_columns(con, "forecasts_ensemble")
+    horizon_col = _pick_col(cols, ["horizon_m", "month_index"])
+    bucket_col = _pick_col(cols, ["class_bin", "bucket_index"])
+    prob_col = _pick_col(cols, ["probability"])
+    return horizon_col, bucket_col, prob_col
+
+
+def _latest_forecasted_target_month(
+    con: duckdb.DuckDBPyConnection, metric_upper: str, horizon_col: str, horizon_m: int
+) -> Optional[str]:
+    if not _table_exists(con, "questions") or not _table_exists(con, "forecasts_ensemble"):
+        return None
+    row = _execute(
+        con,
+        f"""
+        SELECT MAX(q.target_month) AS target_month
+        FROM forecasts_ensemble fe
+        JOIN questions q ON q.question_id = fe.question_id
+        WHERE UPPER(q.metric) = :metric
+          AND fe.{horizon_col} = :horizon_m
+        """,
+        {"metric": metric_upper, "horizon_m": horizon_m},
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _latest_available_horizon(
+    con: duckdb.DuckDBPyConnection, metric_upper: str, horizon_col: str, target_month: str
+) -> Optional[int]:
+    if not _table_exists(con, "questions") or not _table_exists(con, "forecasts_ensemble"):
+        return None
+    row = _execute(
+        con,
+        f"""
+        SELECT MAX(fe.{horizon_col}) AS h
+        FROM forecasts_ensemble fe
+        JOIN questions q ON q.question_id = fe.question_id
+        WHERE UPPER(q.metric) = :metric
+          AND q.target_month = :target_month
+        """,
+        {"metric": metric_upper, "target_month": target_month},
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    return int(row[0])
+
+
 def _latest_questions_view(
     con: duckdb.DuckDBPyConnection,
     iso3: Optional[str] = None,
@@ -1145,8 +1203,14 @@ def get_risk_index(
     """
     con = _con()
     metric_upper = metric.upper()
+    horizon_col, bucket_col, prob_col = _resolve_forecasts_ensemble_columns(con)
 
-    if not _table_exists(con, "forecasts_ensemble") or not _table_exists(con, "questions"):
+    if (
+        not _table_exists(con, "questions")
+        or horizon_col is None
+        or bucket_col is None
+        or prob_col is None
+    ):
         return {
             "metric": metric_upper,
             "target_month": target_month or None,
@@ -1155,126 +1219,86 @@ def get_risk_index(
             "rows": [],
         }
 
-    def _latest_forecasted_target_month(
-        con: duckdb.DuckDBPyConnection, metric_upper: str, horizon_m: int
-    ) -> Optional[str]:
-        if not _table_exists(con, "questions") or not _table_exists(
-            con, "forecasts_ensemble"
-        ):
-            return None
-        row = con.execute(
-            """
-            SELECT MAX(q.target_month) AS target_month
-            FROM forecasts_ensemble fe
-            JOIN questions q ON q.question_id = fe.question_id
-            WHERE UPPER(q.metric) = ?
-              AND fe.horizon_m = ?
-            """,
-            [metric_upper, horizon_m],
-        ).fetchone()
-        return row[0] if row and row[0] else None
-
-    bucket_centroids_ok = _table_has_columns(
-        con, "bucket_centroids", ["metric", "class_bin", "hazard_code", "ev"]
-    )
-    populations_ok = _table_has_columns(con, "populations", ["iso3", "population", "year"])
-
-    centroid_expr = """
-      COALESCE(
-        bc.ev,
-        CASE fe.class_bin
-          WHEN '<10k' THEN 5000
-          WHEN '10k-<50k' THEN 25000
-          WHEN '50k-<250k' THEN 120000
-          WHEN '250k-<500k' THEN 350000
-          WHEN '>=500k' THEN 700000
-        END
-      )
-    """
-    if not bucket_centroids_ok:
-        centroid_expr = """
-        CASE fe.class_bin
-          WHEN '<10k' THEN 5000
-          WHEN '10k-<50k' THEN 25000
-          WHEN '50k-<250k' THEN 120000
-          WHEN '250k-<500k' THEN 350000
-          WHEN '>=500k' THEN 700000
-        END
-        """
-
-    pop_cte = ""
-    pop_join = ""
-    per_capita_expr = "NULL AS per_capita"
-    if populations_ok:
-        pop_cte = """
-        , pop AS (
-          SELECT iso3, MAX_BY(population, year) AS population
-          FROM populations GROUP BY 1
+    selected_month = target_month
+    if not selected_month:
+        selected_month = _latest_forecasted_target_month(
+            con, metric_upper, horizon_col, horizon_m
         )
-        """
-        pop_join = "LEFT JOIN pop ON ev.iso3 = pop.iso3"
-        per_capita_expr = (
-            "CASE WHEN :normalize THEN ev.ev_value/NULLIF(pop.population,0) ELSE NULL END AS per_capita"
-        )
+        if selected_month is None:
+            row = _execute(
+                con,
+                """
+                SELECT MAX(q.target_month) AS target_month
+                FROM forecasts_ensemble fe
+                JOIN questions q ON q.question_id = fe.question_id
+                WHERE UPPER(q.metric) = :metric
+                """,
+                {"metric": metric_upper},
+            ).fetchone()
+            selected_month = row[0] if row and row[0] else None
 
-    bc_join = ""
-    if bucket_centroids_ok:
-        bc_join = """
-        LEFT JOIN bucket_centroids bc
-          ON bc.metric = q.metric
-         AND bc.class_bin = fe.class_bin
-         AND bc.hazard_code = q.hazard_code
-        """
-
-    def _run_query(month: str) -> pd.DataFrame:
-        params = {
+    if selected_month is None:
+        return {
             "metric": metric_upper,
-            "target_month": month,
+            "target_month": None,
             "horizon_m": horizon_m,
             "normalize": normalize,
+            "rows": [],
         }
-        sql = f"""
-        WITH ev AS (
-          SELECT q.iso3, fe.horizon_m,
-                 SUM(fe.p * ({centroid_expr})) AS ev_value
-          FROM forecasts_ensemble fe
-          JOIN questions q ON q.question_id = fe.question_id
-          {bc_join}
-          WHERE UPPER(q.metric) = :metric
-            AND q.target_month = :target_month
-            AND fe.horizon_m = :horizon_m
-          GROUP BY 1,2
-        )
-        {pop_cte}
-        SELECT ev.iso3, ev.horizon_m,
-               ev.ev_value AS expected_value,
-               {per_capita_expr}
-        FROM ev
-        {pop_join}
-        ORDER BY (CASE WHEN :normalize THEN per_capita ELSE expected_value END) DESC
-        """
-        return _execute(con, sql, params).fetchdf()
 
-    selected_month = target_month
-    df = _run_query(selected_month) if selected_month else pd.DataFrame()
-    if not selected_month or df.empty:
-        fallback_month = _latest_forecasted_target_month(con, metric_upper, horizon_m)
-        if fallback_month is None:
-            return {
-                "metric": metric_upper,
-                "target_month": None,
-                "horizon_m": horizon_m,
-                "normalize": normalize,
-                "rows": [],
-            }
-        if fallback_month != selected_month:
+    def _run_query(month: str, horizon_value: int) -> pd.DataFrame:
+        sql = f"""
+        WITH q AS (
+          SELECT question_id, iso3
+          FROM questions
+          WHERE UPPER(metric) = :metric
+            AND target_month = :target_month
+        ),
+        ev_per_question AS (
+          SELECT
+            q.iso3,
+            fe.question_id,
+            SUM(CAST(fe.{bucket_col} AS DOUBLE) * fe.{prob_col}) AS expected_value
+          FROM forecasts_ensemble fe
+          JOIN q ON q.question_id = fe.question_id
+          WHERE fe.{horizon_col} = :horizon_m
+          GROUP BY q.iso3, fe.question_id
+        )
+        SELECT
+          iso3,
+          SUM(expected_value) AS expected_value
+        FROM ev_per_question
+        GROUP BY iso3
+        ORDER BY expected_value DESC NULLS LAST
+        """
+        return _execute(
+            con,
+            sql,
+            {"metric": metric_upper, "target_month": month, "horizon_m": horizon_value},
+        ).fetchdf()
+
+    selected_horizon = horizon_m
+    df = _run_query(selected_month, selected_horizon)
+    if df.empty:
+        fallback_horizon = _latest_available_horizon(
+            con, metric_upper, horizon_col, selected_month
+        )
+        if fallback_horizon is not None and fallback_horizon != selected_horizon:
+            selected_horizon = fallback_horizon
+            df = _run_query(selected_month, selected_horizon)
+
+    if df.empty and target_month:
+        fallback_month = _latest_forecasted_target_month(
+            con, metric_upper, horizon_col, selected_horizon
+        )
+        if fallback_month and fallback_month != selected_month:
             selected_month = fallback_month
-            df = _run_query(selected_month)
+            df = _run_query(selected_month, selected_horizon)
 
     return {
         "metric": metric_upper,
-        "target_month": selected_month or target_month or None,
-        "horizon_m": horizon_m,
+        "target_month": selected_month,
+        "horizon_m": selected_horizon,
         "normalize": normalize,
         "rows": _rows_from_df(df),
     }
