@@ -51,6 +51,15 @@ app.add_middleware(
 logger = logging.getLogger(__name__)
 
 
+class _HealthAccessFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "/v1/health" not in msg
+
+
+logging.getLogger("uvicorn.access").addFilter(_HealthAccessFilter())
+
+
 def _json_sanitize(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {key: _json_sanitize(value) for key, value in obj.items()}
@@ -1189,55 +1198,32 @@ def get_risk_index(
     horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
 ):
-    """
-    Country-level risk index for a given metric/target_month/horizon.
-
-    For each country (iso3), this sums expected value (centroid-based) across all
-    questions with the given metric and target_month at the specified horizon_m.
-    It then optionally normalises by population.
-
-    Returns:
-      - iso3
-      - expected_value (EV of metric, summed over hazards)
-      - per_capita (EV / population) if normalize=true
-    """
     con = _con()
-    metric_upper = metric.upper()
-    horizon_col, bucket_col, prob_col = _resolve_forecasts_ensemble_columns(con)
+    metric_upper = (metric or "").strip().upper() or "PA"
 
-    if (
-        not _table_exists(con, "questions")
-        or horizon_col is None
-        or bucket_col is None
-        or prob_col is None
-    ):
+    horizon_col, bucket_col, prob_col = _resolve_forecasts_ensemble_columns(con)
+    if not horizon_col or not bucket_col or not prob_col:
         return {
             "metric": metric_upper,
-            "target_month": target_month or None,
+            "target_month": target_month,
             "horizon_m": horizon_m,
             "normalize": normalize,
             "rows": [],
         }
 
-    selected_month = target_month
-    if not selected_month:
-        selected_month = _latest_forecasted_target_month(
+    if not target_month:
+        target_month = _latest_forecasted_target_month(
             con, metric_upper, horizon_col, horizon_m
         )
-        if selected_month is None:
+        if not target_month:
             row = _execute(
                 con,
-                """
-                SELECT MAX(q.target_month) AS target_month
-                FROM forecasts_ensemble fe
-                JOIN questions q ON q.question_id = fe.question_id
-                WHERE UPPER(q.metric) = :metric
-                """,
+                "SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric",
                 {"metric": metric_upper},
             ).fetchone()
-            selected_month = row[0] if row and row[0] else None
+            target_month = row[0] if row and row[0] else None
 
-    if selected_month is None:
+    if not target_month:
         return {
             "metric": metric_upper,
             "target_month": None,
@@ -1246,7 +1232,7 @@ def get_risk_index(
             "rows": [],
         }
 
-    def _run_query(month: str, horizon_value: int) -> pd.DataFrame:
+    def _run_query(chosen_h: int) -> pd.DataFrame:
         sql = f"""
         WITH q AS (
           SELECT question_id, iso3
@@ -1266,7 +1252,9 @@ def get_risk_index(
         )
         SELECT
           iso3,
-          SUM(expected_value) AS expected_value
+          :horizon_m AS horizon_m,
+          SUM(expected_value) AS expected_value,
+          NULL::DOUBLE AS per_capita
         FROM ev_per_question
         GROUP BY iso3
         ORDER BY expected_value DESC NULLS LAST
@@ -1274,31 +1262,29 @@ def get_risk_index(
         return _execute(
             con,
             sql,
-            {"metric": metric_upper, "target_month": month, "horizon_m": horizon_value},
+            {"metric": metric_upper, "target_month": target_month, "horizon_m": chosen_h},
         ).fetchdf()
 
-    selected_horizon = horizon_m
-    df = _run_query(selected_month, selected_horizon)
-    if df.empty:
-        fallback_horizon = _latest_available_horizon(
-            con, metric_upper, horizon_col, selected_month
-        )
-        if fallback_horizon is not None and fallback_horizon != selected_horizon:
-            selected_horizon = fallback_horizon
-            df = _run_query(selected_month, selected_horizon)
+    original_h = horizon_m
+    df = _run_query(horizon_m)
 
-    if df.empty and target_month:
-        fallback_month = _latest_forecasted_target_month(
-            con, metric_upper, horizon_col, selected_horizon
-        )
-        if fallback_month and fallback_month != selected_month:
-            selected_month = fallback_month
-            df = _run_query(selected_month, selected_horizon)
+    if df.empty:
+        fallback_h = _latest_available_horizon(con, metric_upper, horizon_col, target_month)
+        if fallback_h is not None and fallback_h != horizon_m:
+            horizon_m = fallback_h
+            logger.info(
+                "risk_index: no rows for horizon=%s; falling back to horizon=%s for metric=%s target_month=%s",
+                original_h,
+                horizon_m,
+                metric_upper,
+                target_month,
+            )
+            df = _run_query(horizon_m)
 
     return {
         "metric": metric_upper,
-        "target_month": selected_month,
-        "horizon_m": selected_horizon,
+        "target_month": target_month,
+        "horizon_m": horizon_m,
         "normalize": normalize,
         "rows": _rows_from_df(df),
     }
