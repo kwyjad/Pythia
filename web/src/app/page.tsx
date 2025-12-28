@@ -1,5 +1,5 @@
 import KpiCard from "../components/KpiCard";
-import RiskIndexTable from "../components/RiskIndexTable";
+import RiskIndexPanel from "../components/RiskIndexPanel";
 import { apiGet } from "../lib/api";
 import type {
   DiagnosticsSummaryResponse,
@@ -49,22 +49,10 @@ export default async function OverviewPage() {
       </section>
 
       <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold text-white">Risk index</h2>
-          {riskIndex ? (
-            <span className="text-sm text-slate-400">
-              Metric {riskIndex.metric} • {riskIndex.target_month ?? "latest"}
-            </span>
-          ) : null}
-        </div>
+        <h2 className="text-xl font-semibold text-white">Risk index</h2>
 
         {riskIndex ? (
-          <div className="w-full overflow-x-auto rounded-lg border border-slate-800">
-            <RiskIndexTable
-              rows={riskIndex.rows ?? []}
-              targetMonth={riskIndex.target_month}
-            />
-          </div>
+          <RiskIndexPanel initialResponse={riskIndex} />
         ) : (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
             Risk index unavailable (API error).

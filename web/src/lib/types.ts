@@ -14,12 +14,14 @@ export type DiagnosticsSummaryResponse = {
 };
 
 export type RiskIndexResponse = {
-  metric: string;
+  metric: "PA" | "FATALITIES" | string;
   target_month: string | null;
   horizon_m?: number | null;
   normalize?: boolean | null;
   rows?: RiskIndexRow[];
 };
+
+export type RiskView = "PA_EIV" | "PA_PC" | "FATALITIES_EIV";
 
 export type RiskIndexRow = {
   iso3: string;
