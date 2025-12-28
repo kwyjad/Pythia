@@ -132,6 +132,8 @@ def _compile_named_params(sql: str, params: Dict[str, Any]) -> tuple[str, List[A
 def _execute(
     con: duckdb.DuckDBPyConnection, sql: str, params: Optional[Any] = None
 ) -> duckdb.DuckDBPyConnection:
+    if not hasattr(con, "execute"):
+        raise TypeError(f"_execute expected a DuckDB connection, got {type(con)}")
     if params is None:
         return con.execute(sql)
     if isinstance(params, dict):
@@ -1062,8 +1064,13 @@ def get_risk_index(
             "rows": [],
         }
 
-    def _latest_target_month() -> Optional[str]:
+    def _latest_target_month(
+        con: duckdb.DuckDBPyConnection, metric_upper: str, horizon_m: int
+    ) -> Optional[str]:
+        if not _table_exists(con, "questions") or not _table_exists(con, "forecasts_ensemble"):
+            return None
         row = _execute(
+            con,
             """
             SELECT MAX(q.target_month) AS target_month
             FROM forecasts_ensemble fe
@@ -1073,7 +1080,7 @@ def get_risk_index(
             """,
             {"metric": metric_upper, "horizon_m": horizon_m},
         ).fetchone()
-        return row[0] if row else None
+        return row[0] if row and row[0] else None
 
     bucket_centroids_ok = _table_has_columns(
         con, "bucket_centroids", ["metric", "class_bin", "hazard_code", "ev"]
@@ -1158,11 +1165,19 @@ def get_risk_index(
 
     selected_month = target_month
     if not selected_month:
-        selected_month = _latest_target_month()
+        selected_month = _latest_target_month(con, metric_upper, horizon_m)
     df = _run_query(selected_month) if selected_month else pd.DataFrame()
     if target_month and df.empty:
-        fallback_month = _latest_target_month()
-        if fallback_month and fallback_month != target_month:
+        fallback_month = _latest_target_month(con, metric_upper, horizon_m)
+        if fallback_month is None:
+            return {
+                "metric": metric_upper,
+                "target_month": target_month or "",
+                "horizon_m": horizon_m,
+                "normalize": normalize,
+                "rows": [],
+            }
+        if fallback_month != target_month:
             selected_month = fallback_month
             df = _run_query(selected_month)
 
