@@ -87,6 +87,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m1 ?? null,
         render: (row) => formatNumber(row.m1) ?? "-",
+        defaultSortDirection: "desc",
       },
       {
         key: "m2",
@@ -95,6 +96,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m2 ?? null,
         render: (row) => formatNumber(row.m2) ?? "-",
+        defaultSortDirection: "desc",
       },
       {
         key: "m3",
@@ -103,6 +105,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m3 ?? null,
         render: (row) => formatNumber(row.m3) ?? "-",
+        defaultSortDirection: "desc",
       },
       {
         key: "m4",
@@ -111,6 +114,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m4 ?? null,
         render: (row) => formatNumber(row.m4) ?? "-",
+        defaultSortDirection: "desc",
       },
       {
         key: "m5",
@@ -119,6 +123,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m5 ?? null,
         render: (row) => formatNumber(row.m5) ?? "-",
+        defaultSortDirection: "desc",
       },
       {
         key: "m6",
@@ -127,6 +132,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m6 ?? null,
         render: (row) => formatNumber(row.m6) ?? "-",
+        defaultSortDirection: "desc",
       },
       {
         key: "total",
@@ -135,6 +141,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.total ?? null,
         render: (row) => formatNumber(row.total) ?? "-",
+        defaultSortDirection: "desc",
       },
     ];
 
@@ -147,6 +154,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         sortValue: (row) => row.m1_pc ?? null,
         render: (row) => perCapitaCell(row.m1_pc),
         isVisible: showPerCapita,
+        defaultSortDirection: "desc",
       },
       {
         key: "m2_pc",
@@ -156,6 +164,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         sortValue: (row) => row.m2_pc ?? null,
         render: (row) => perCapitaCell(row.m2_pc),
         isVisible: showPerCapita,
+        defaultSortDirection: "desc",
       },
       {
         key: "m3_pc",
@@ -165,6 +174,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         sortValue: (row) => row.m3_pc ?? null,
         render: (row) => perCapitaCell(row.m3_pc),
         isVisible: showPerCapita,
+        defaultSortDirection: "desc",
       },
       {
         key: "m4_pc",
@@ -174,6 +184,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         sortValue: (row) => row.m4_pc ?? null,
         render: (row) => perCapitaCell(row.m4_pc),
         isVisible: showPerCapita,
+        defaultSortDirection: "desc",
       },
       {
         key: "m5_pc",
@@ -183,6 +194,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         sortValue: (row) => row.m5_pc ?? null,
         render: (row) => perCapitaCell(row.m5_pc),
         isVisible: showPerCapita,
+        defaultSortDirection: "desc",
       },
       {
         key: "m6_pc",
@@ -192,6 +204,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         sortValue: (row) => row.m6_pc ?? null,
         render: (row) => perCapitaCell(row.m6_pc),
         isVisible: showPerCapita,
+        defaultSortDirection: "desc",
       },
       {
         key: "total_pc",
@@ -200,6 +213,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.total_pc ?? null,
         render: (row) => perCapitaCell(row.total_pc),
+        defaultSortDirection: "desc",
       },
     ];
 
@@ -215,6 +229,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
             {row.iso3}
           </Link>
         ),
+        defaultSortDirection: "asc",
       },
       {
         key: "country_name",
@@ -223,6 +238,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-56",
         sortValue: (row) => row.country_name ?? "",
         render: (row) => row.country_name || "-",
+        defaultSortDirection: "asc",
       },
       {
         key: "n_hazards_forecasted",
@@ -234,6 +250,7 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
           row.n_hazards_forecasted != null
             ? row.n_hazards_forecasted.toLocaleString()
             : "-",
+        defaultSortDirection: "desc",
       },
       ...eivColumns,
       ...perCapitaColumns,
