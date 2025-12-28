@@ -50,6 +50,34 @@ app.add_middleware(
 )
 logger = logging.getLogger(__name__)
 
+_COUNTRY_NAME_BY_ISO3: dict[str, str] = {}
+
+
+def _load_country_registry() -> None:
+    global _COUNTRY_NAME_BY_ISO3
+    if _COUNTRY_NAME_BY_ISO3:
+        return
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        path = repo_root / "resolver" / "data" / "countries.csv"
+        if not path.exists():
+            return
+        df = pd.read_csv(path, dtype=str).fillna("")
+        if "iso3" not in df.columns or "country_name" not in df.columns:
+            return
+        _COUNTRY_NAME_BY_ISO3 = {
+            str(iso3).strip().upper(): str(name).strip()
+            for iso3, name in zip(df["iso3"], df["country_name"])
+            if str(iso3).strip()
+        }
+    except Exception:
+        return
+
+
+def _country_name(iso3: str) -> Optional[str]:
+    _load_country_registry()
+    return _COUNTRY_NAME_BY_ISO3.get((iso3 or "").upper())
+
 
 class _HealthAccessFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -1250,76 +1278,173 @@ def get_risk_index(
         return {
             "metric": metric_upper,
             "target_month": None,
-            "horizon_m": horizon_m,
+            "horizon_m": 6,
             "normalize": normalize,
             "rows": [],
         }
 
-    def _run_query(chosen_h: int, chosen_col: str) -> pd.DataFrame:
-        sql = f"""
-        WITH q AS (
-          SELECT question_id, iso3
-          FROM questions
-          WHERE UPPER(metric) = :metric
-            AND target_month = :target_month
-        ),
-        ev_per_question AS (
-          SELECT
-            q.iso3,
-            fe.question_id,
-            SUM(CAST(fe.{bucket_col} AS DOUBLE) * fe.{prob_col}) AS expected_value
-          FROM forecasts_ensemble fe
-          JOIN q ON q.question_id = fe.question_id
-          WHERE fe.{chosen_col} = :horizon_m
-          GROUP BY q.iso3, fe.question_id
+    populations_available = _table_exists(con, "populations") and _table_has_columns(
+        con, "populations", ["iso3", "population", "year"]
+    )
+    centroids_available = _table_exists(con, "bucket_centroids") and _table_has_columns(
+        con, "bucket_centroids", ["metric", "hazard_code", "bucket_index", "centroid"]
+    )
+
+    pop_cte = ""
+    pop_select = ""
+    pop_join = ""
+    if populations_available:
+        pop_cte = """
+        , pop AS (
+          SELECT iso3, population
+          FROM (
+            SELECT iso3, population,
+                   ROW_NUMBER() OVER (PARTITION BY iso3 ORDER BY year DESC) AS rn
+            FROM populations
+          )
+          WHERE rn = 1
         )
-        SELECT
-          iso3,
-          :horizon_m AS horizon_m,
-          SUM(expected_value) AS expected_value,
-          NULL::DOUBLE AS per_capita
-        FROM ev_per_question
-        GROUP BY iso3
-        ORDER BY expected_value DESC NULLS LAST
         """
-        return _execute(
-            con,
-            sql,
-            {"metric": metric_upper, "target_month": target_month, "horizon_m": chosen_h},
-        ).fetchdf()
+        pop_select = """
+          , pop.population
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.m1 / pop.population
+              ELSE NULL
+            END AS m1_pc
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.m2 / pop.population
+              ELSE NULL
+            END AS m2_pc
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.m3 / pop.population
+              ELSE NULL
+            END AS m3_pc
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.m4 / pop.population
+              ELSE NULL
+            END AS m4_pc
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.m5 / pop.population
+              ELSE NULL
+            END AS m5_pc
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.m6 / pop.population
+              ELSE NULL
+            END AS m6_pc
+          , CASE
+              WHEN :normalize AND pop.population IS NOT NULL AND pop.population != 0
+                THEN p.total / pop.population
+              ELSE NULL
+            END AS total_pc
+        """
+        pop_join = "LEFT JOIN pop ON pop.iso3 = p.iso3"
 
-    original_h = horizon_m
-    df = _run_query(horizon_m, horizon_col)
+    centroid_join = ""
+    centroid_expr = f"CAST(fe.{bucket_col} AS DOUBLE)"
+    if centroids_available:
+        centroid_join = """
+          LEFT JOIN bucket_centroids bc
+            ON UPPER(bc.metric) = :metric
+           AND bc.hazard_code = '*'
+           AND bc.bucket_index = fe.{bucket_col}
+        """.format(bucket_col=bucket_col)
+        centroid_expr = f"COALESCE(bc.centroid, CAST(fe.{bucket_col} AS DOUBLE))"
 
-    if df.empty:
-        fallback_h = _latest_available_horizon(con, metric_upper, horizon_col, target_month)
-        if fallback_h is not None and fallback_h != horizon_m:
-            horizon_m = fallback_h
-            logger.info(
-                "risk_index: no rows for horizon=%s; falling back to horizon=%s for metric=%s target_month=%s",
-                original_h,
-                horizon_m,
-                metric_upper,
-                target_month,
-            )
-            df = _run_query(horizon_m, horizon_col)
+    sql = f"""
+    WITH q AS (
+      SELECT question_id, iso3, hazard_code, metric, target_month
+      FROM questions
+      WHERE UPPER(metric) = :metric
+        AND target_month = :target_month
+    )
+    {pop_cte}
+    , per_row AS (
+      SELECT
+        q.iso3,
+        q.hazard_code,
+        fe.{horizon_col} AS m,
+        fe.{bucket_col} AS b,
+        fe.{prob_col} AS p,
+        {centroid_expr} AS centroid
+      FROM forecasts_ensemble fe
+      JOIN q ON q.question_id = fe.question_id
+      {centroid_join}
+      WHERE fe.{horizon_col} BETWEEN 1 AND 6
+        AND fe.{bucket_col} IS NOT NULL
+        AND fe.{prob_col} IS NOT NULL
+    ),
+    monthly AS (
+      SELECT
+        iso3,
+        m,
+        SUM(p * centroid) AS eiv
+      FROM per_row
+      GROUP BY iso3, m
+    ),
+    hazards AS (
+      SELECT iso3, COUNT(DISTINCT hazard_code) AS n_hazards_forecasted
+      FROM q
+      GROUP BY iso3
+    ),
+    pivot AS (
+      SELECT
+        iso3,
+        SUM(CASE WHEN m = 1 THEN eiv ELSE 0 END) AS m1,
+        SUM(CASE WHEN m = 2 THEN eiv ELSE 0 END) AS m2,
+        SUM(CASE WHEN m = 3 THEN eiv ELSE 0 END) AS m3,
+        SUM(CASE WHEN m = 4 THEN eiv ELSE 0 END) AS m4,
+        SUM(CASE WHEN m = 5 THEN eiv ELSE 0 END) AS m5,
+        SUM(CASE WHEN m = 6 THEN eiv ELSE 0 END) AS m6,
+        SUM(eiv) AS total
+      FROM monthly
+      GROUP BY iso3
+    )
+    SELECT
+      p.iso3,
+      h.n_hazards_forecasted,
+      p.m1, p.m2, p.m3, p.m4, p.m5, p.m6,
+      p.total
+      {pop_select}
+    FROM pivot p
+    LEFT JOIN hazards h ON h.iso3 = p.iso3
+    {pop_join}
+    ORDER BY p.total DESC NULLS LAST
+    """
+    df = _execute(
+        con,
+        sql,
+        {"metric": metric_upper, "target_month": target_month, "normalize": normalize},
+    ).fetchdf()
 
-    if df.empty:
-        cols = _table_columns(con, "forecasts_ensemble")
-        alt_horizon_col = None
-        if horizon_col == "horizon_m" and "month_index" in cols:
-            alt_horizon_col = "month_index"
-        elif horizon_col == "month_index" and "horizon_m" in cols:
-            alt_horizon_col = "horizon_m"
-        if alt_horizon_col:
-            df = _run_query(horizon_m, alt_horizon_col)
+    if not populations_available:
+        for col in [
+            "population",
+            "m1_pc",
+            "m2_pc",
+            "m3_pc",
+            "m4_pc",
+            "m5_pc",
+            "m6_pc",
+            "total_pc",
+        ]:
+            df[col] = None
+
+    rows = _rows_from_df(df)
+    for row in rows:
+        row["country_name"] = _country_name(row.get("iso3", "")) or ""
 
     return {
         "metric": metric_upper,
         "target_month": target_month,
-        "horizon_m": horizon_m,
+        "horizon_m": 6,
         "normalize": normalize,
-        "rows": _rows_from_df(df),
+        "rows": rows,
     }
 
 

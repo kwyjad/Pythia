@@ -1,6 +1,5 @@
-import Link from "next/link";
-
 import KpiCard from "../components/KpiCard";
+import RiskIndexTable from "../components/RiskIndexTable";
 import { apiGet } from "../lib/api";
 import type {
   DiagnosticsSummaryResponse,
@@ -17,7 +16,7 @@ export default async function OverviewPage() {
   try {
     riskIndex = await apiGet<RiskIndexResponse>("/risk_index", {
       metric: "PA",
-      horizon_m: 1,
+      horizon_m: 6,
       normalize: true,
     });
   } catch (error) {
@@ -60,46 +59,11 @@ export default async function OverviewPage() {
         </div>
 
         {riskIndex ? (
-          <div className="overflow-x-auto rounded-lg border border-slate-800">
-            <table className="w-full border-collapse text-sm">
-              <thead className="bg-slate-900 text-slate-300">
-                <tr>
-                  <th className="px-3 py-2 text-left">ISO3</th>
-                  <th className="px-3 py-2 text-right">Expected value</th>
-                  <th className="px-3 py-2 text-right">Per capita</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800">
-                {riskIndex.rows?.map((row) => (
-                  <tr key={`${row.iso3}-${row.horizon_m}`} className="text-slate-200">
-                    <td className="px-3 py-2">
-                      <Link className="underline underline-offset-2" href={`/countries/${row.iso3}`}>
-                        {row.iso3}
-                      </Link>
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {typeof row.expected_value === "number"
-                        ? row.expected_value.toFixed(2)
-                        : "-"}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {typeof row.per_capita === "number"
-                        ? row.per_capita.toFixed(6)
-                        : "-"}
-                    </td>
-                  </tr>
-                ))}
-                {(!riskIndex.rows || riskIndex.rows.length === 0) && (
-                  <tr>
-                    <td className="px-3 py-3 text-slate-400" colSpan={3}>
-                      {riskIndex.target_month
-                        ? `No rows returned for ${riskIndex.target_month}.`
-                        : "No rows returned. (no month)"}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          <div className="w-full overflow-x-auto rounded-lg border border-slate-800 p-3">
+            <RiskIndexTable
+              rows={riskIndex.rows ?? []}
+              targetMonth={riskIndex.target_month}
+            />
           </div>
         ) : (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
