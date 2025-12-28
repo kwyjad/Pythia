@@ -13,6 +13,7 @@ export type SortableColumn<T> = {
   render?: (row: T) => React.ReactNode;
   sortable?: boolean;
   isVisible?: boolean;
+  defaultSortDirection?: SortDirection;
 };
 
 type SortableTableProps<T> = {
@@ -90,7 +91,7 @@ export default function SortableTable<T>({
         );
         return prevKey;
       }
-      setSortDirection("asc");
+      setSortDirection(column.defaultSortDirection ?? "asc");
       return column.key;
     });
   };
@@ -127,13 +128,13 @@ export default function SortableTable<T>({
       <tbody className="divide-y divide-slate-800 text-slate-200">
         {sortedRows.map((row) => (
           <tr key={rowKey(row)}>
-          {visibleColumns.map((column) => (
-            <td
-              key={column.key}
-              className={`px-2 py-2 ${column.cellClassName ?? ""}`}
-            >
-              {column.render ? column.render(row) : null}
-            </td>
+            {visibleColumns.map((column) => (
+              <td
+                key={column.key}
+                className={`px-2 py-2 ${column.cellClassName ?? ""}`}
+              >
+                {column.render ? column.render(row) : null}
+              </td>
             ))}
           </tr>
         ))}
