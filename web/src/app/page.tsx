@@ -5,31 +5,33 @@ import { apiGet } from "../lib/api";
 import type {
   DiagnosticsSummaryResponse,
   RiskIndexResponse,
-  VersionResponse
+  VersionResponse,
 } from "../lib/types";
 
-const getCurrentMonth = () => {
+
+function getCurrentMonthUTC(): string {
   const now = new Date();
   const year = now.getUTCFullYear();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
   return `${year}-${month}`;
-};
+}
 
-const OverviewPage = async () => {
+export default async function OverviewPage() {
   const [version, diagnostics, riskIndex] = await Promise.all([
     apiGet<VersionResponse>("/version"),
     apiGet<DiagnosticsSummaryResponse>("/diagnostics/summary"),
     apiGet<RiskIndexResponse>("/risk_index", {
       metric: "PA",
-      target_month: getCurrentMonth(),
+      target_month: getCurrentMonthUTC(),
       horizon_m: 1,
-      normalize: true
-    })
+      normalize: true,
+    }),
   ]);
 
-  const activeQuestions = diagnostics.questions_by_status.find(
-    (row) => row.status?.toLowerCase() === "active"
-  );
+  const activeQuestions =
+    diagnostics.questions_by_status?.find(
+      (row) => (row.status ?? "").toLowerCase() === "active"
+    ) ?? null;
 
   return (
     <div className="space-y-8">
@@ -47,7 +49,7 @@ const OverviewPage = async () => {
         <KpiCard label="Active questions" value={activeQuestions?.n ?? 0} />
         <KpiCard
           label="Questions with forecasts"
-          value={diagnostics.questions_with_forecasts}
+          value={diagnostics.questions_with_forecasts ?? 0}
         />
       </section>
 
@@ -58,31 +60,48 @@ const OverviewPage = async () => {
             Metric {riskIndex.metric} • {riskIndex.target_month}
           </span>
         </div>
+
         <div className="overflow-x-auto rounded-lg border border-slate-800">
-          <table>
-            <thead>
+          <table className="w-full border-collapse text-sm">
+            <thead className="bg-slate-900 text-slate-300">
               <tr>
-                <th>ISO3</th>
-                <th>Expected value</th>
-                <th>Per capita</th>
+                <th className="px-3 py-2 text-left">ISO3</th>
+                <th className="px-3 py-2 text-right">Expected value</th>
+                <th className="px-3 py-2 text-right">Per capita</th>
               </tr>
             </thead>
-            <tbody>
-              {riskIndex.rows.map((row) => (
-                <tr key={`${row.iso3}-${row.horizon_m}`}>
-                  <td>
-                    <Link href={`/countries/${row.iso3}`}>{row.iso3}</Link>
+            <tbody className="divide-y divide-slate-800">
+              {riskIndex.rows?.map((row) => (
+                <tr key={`${row.iso3}-${row.horizon_m}`} className="text-slate-200">
+                  <td className="px-3 py-2">
+                    <Link className="underline underline-offset-2" href={`/countries/${row.iso3}`}>
+                      {row.iso3}
+                    </Link>
                   </td>
-                  <td>{row.expected_value?.toFixed(2) ?? "-"}</td>
-                  <td>{row.per_capita?.toFixed(6) ?? "-"}</td>
+                  <td className="px-3 py-2 text-right">
+                    {typeof row.expected_value === "number"
+                      ? row.expected_value.toFixed(2)
+                      : "-"}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {typeof row.per_capita === "number"
+                      ? row.per_capita.toFixed(6)
+                      : "-"}
+                  </td>
                 </tr>
               ))}
+              {(!riskIndex.rows || riskIndex.rows.length === 0) && (
+                <tr>
+                  <td className="px-3 py-3 text-slate-400" colSpan={3}>
+                    No rows returned for {riskIndex.target_month}.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
       </section>
     </div>
   );
-};
+}
 
-export default OverviewPage;
