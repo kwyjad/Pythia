@@ -90,19 +90,19 @@ export default function SortableTable<T>({
         );
         return prevKey;
       }
-      setSortDirection("desc");
+      setSortDirection("asc");
       return column.key;
     });
   };
 
   return (
-    <table className="w-full min-w-[1400px] border-collapse text-sm">
+    <table className="w-full table-fixed border-collapse text-sm">
       <thead className="bg-slate-900 text-slate-300">
         <tr>
           {visibleColumns.map((column) => (
             <th
               key={column.key}
-              className={`px-3 py-2 text-left ${
+              className={`px-2 py-2 text-left ${
                 column.headerClassName ?? ""
               }`}
             >
@@ -127,13 +127,13 @@ export default function SortableTable<T>({
       <tbody className="divide-y divide-slate-800 text-slate-200">
         {sortedRows.map((row) => (
           <tr key={rowKey(row)}>
-            {visibleColumns.map((column) => (
-              <td
-                key={column.key}
-                className={`px-3 py-2 ${column.cellClassName ?? ""}`}
-              >
-                {column.render ? column.render(row) : null}
-              </td>
+          {visibleColumns.map((column) => (
+            <td
+              key={column.key}
+              className={`px-2 py-2 ${column.cellClassName ?? ""}`}
+            >
+              {column.render ? column.render(row) : null}
+            </td>
             ))}
           </tr>
         ))}
