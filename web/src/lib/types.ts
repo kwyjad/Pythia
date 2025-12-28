@@ -16,12 +16,30 @@ export type DiagnosticsSummaryResponse = {
 export type RiskIndexResponse = {
   metric: string;
   target_month: string | null;
-  rows?: Array<{
-    iso3: string;
-    horizon_m?: number | null;
-    expected_value?: number | null;
-    per_capita?: number | null;
-  }>;
+  horizon_m?: number | null;
+  normalize?: boolean | null;
+  rows?: RiskIndexRow[];
+};
+
+export type RiskIndexRow = {
+  iso3: string;
+  country_name?: string | null;
+  n_hazards_forecasted?: number | null;
+  m1?: number | null;
+  m2?: number | null;
+  m3?: number | null;
+  m4?: number | null;
+  m5?: number | null;
+  m6?: number | null;
+  total?: number | null;
+  population?: number | null;
+  m1_pc?: number | null;
+  m2_pc?: number | null;
+  m3_pc?: number | null;
+  m4_pc?: number | null;
+  m5_pc?: number | null;
+  m6_pc?: number | null;
+  total_pc?: number | null;
 };
 
 export type QuestionsResponse = {
