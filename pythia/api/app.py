@@ -74,9 +74,9 @@ def _load_country_registry() -> None:
         return
 
 
-def _country_name(iso3: str) -> Optional[str]:
+def _country_name(iso3: str) -> str:
     _load_country_registry()
-    return _COUNTRY_NAME_BY_ISO3.get((iso3 or "").upper())
+    return _COUNTRY_NAME_BY_ISO3.get((iso3 or "").upper(), "")
 
 
 class _HealthAccessFilter(logging.Filter):
@@ -1291,7 +1291,16 @@ def get_risk_index(
     )
 
     pop_cte = ""
-    pop_select = ""
+    pop_select = """
+      , NULL AS population
+      , NULL AS m1_pc
+      , NULL AS m2_pc
+      , NULL AS m3_pc
+      , NULL AS m4_pc
+      , NULL AS m5_pc
+      , NULL AS m6_pc
+      , NULL AS total_pc
+    """
     pop_join = ""
     if populations_available:
         pop_cte = """
@@ -1421,19 +1430,6 @@ def get_risk_index(
         params["normalize"] = normalize
     df = _execute(con, sql, params).fetchdf()
 
-    if not populations_available:
-        for col in [
-            "population",
-            "m1_pc",
-            "m2_pc",
-            "m3_pc",
-            "m4_pc",
-            "m5_pc",
-            "m6_pc",
-            "total_pc",
-        ]:
-            df[col] = None
-
     rows = _rows_from_df(df)
     # Back-compat: keep the v1 keys the frontend expects.
     for row in rows:
@@ -1451,7 +1447,7 @@ def get_risk_index(
                 row["per_capita"] = row["eiv_total_pc"]
 
     for row in rows:
-        row["country_name"] = _country_name(row.get("iso3", "")) or ""
+        row["country_name"] = _country_name(row.get("iso3", ""))
 
     return {
         "metric": metric_upper,

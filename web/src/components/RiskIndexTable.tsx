@@ -7,11 +7,12 @@ import type { RiskIndexRow } from "../lib/types";
 import SortableTable, { SortableColumn } from "./SortableTable";
 
 const EIV_TOOLTIP =
-  "EIV is computed as: for each question and month, sum over buckets of (P(bucket) × centroid(bucket)), then summed across all forecasted questions in the country. Centroids come from the SPD bucket definitions (or bucket_centroids table).";
-const POPULATION_TOOLTIP = "population table not populated.";
+  "EIV (Expected Impact Value) is calculated by taking the forecast probability for each severity bucket and multiplying by that bucket’s centroid, then summing across buckets. We then sum across forecasted hazards for the country and across the six forecast months.";
+const POPULATION_TOOLTIP =
+  "Per-capita requires population data (populations table). Not available in this snapshot.";
 
 const formatNumber = (value: number | null | undefined) =>
-  typeof value === "number" ? value.toLocaleString() : null;
+  typeof value === "number" ? Math.round(value).toLocaleString() : null;
 
 const formatPerCapita = (value: number | null | undefined) =>
   typeof value === "number"
@@ -173,7 +174,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "text-right",
         sortValue: (row) => row.total_pc ?? null,
         render: (row) => perCapitaCell(row.total_pc),
-        isVisible: showPerCapita,
       },
     ];
 
@@ -224,12 +224,10 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
             onChange={(event) => setShowPerCapita(event.target.checked)}
             type="checkbox"
           />
-          <span>Show per-capita columns</span>
+          <span>Show per-month per-capita columns</span>
         </label>
         {!populationAvailable ? (
-          <span className="text-xs text-slate-500">
-            Per-capita values unavailable: {POPULATION_TOOLTIP}
-          </span>
+          <span className="text-xs text-slate-500">{POPULATION_TOOLTIP}</span>
         ) : null}
       </div>
 
