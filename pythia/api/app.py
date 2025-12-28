@@ -1392,7 +1392,7 @@ def get_risk_index(
       FROM q
       GROUP BY iso3
     ),
-    pivot AS (
+    pivoted AS (
       SELECT
         iso3,
         SUM(CASE WHEN m = 1 THEN eiv ELSE 0 END) AS m1,
@@ -1411,16 +1411,15 @@ def get_risk_index(
       p.m1, p.m2, p.m3, p.m4, p.m5, p.m6,
       p.total
       {pop_select}
-    FROM pivot p
+    FROM pivoted p
     LEFT JOIN hazards h ON h.iso3 = p.iso3
     {pop_join}
     ORDER BY p.total DESC NULLS LAST
     """
-    df = _execute(
-        con,
-        sql,
-        {"metric": metric_upper, "target_month": target_month, "normalize": normalize},
-    ).fetchdf()
+    params = {"metric": metric_upper, "target_month": target_month}
+    if populations_available:
+        params["normalize"] = normalize
+    df = _execute(con, sql, params).fetchdf()
 
     if not populations_available:
         for col in [
