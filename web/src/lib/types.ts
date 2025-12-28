@@ -27,6 +27,7 @@ export type RiskIndexResponse = {
 export type QuestionsResponse = {
   rows: Array<{
     question_id: string;
+    hs_run_id?: string | null;
     iso3: string;
     hazard_code: string;
     metric: string;
@@ -37,9 +38,9 @@ export type QuestionsResponse = {
 };
 
 export type QuestionBundleResponse = {
-  question?: Record<string, unknown> | null;
-  hs_scenarios?: unknown;
-  research?: unknown;
-  ensemble?: unknown;
-  per_model?: unknown;
+  question: Record<string, unknown>;
+  hs?: Record<string, unknown> | null;
+  forecast?: Record<string, unknown> | null;
+  context?: Record<string, unknown> | null;
+  llm_calls?: Record<string, unknown> | null;
 };

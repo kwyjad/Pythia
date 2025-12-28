@@ -39,7 +39,11 @@ const CountryPage = async ({ params }: CountryPageProps) => {
               <tr key={row.question_id}>
                 <td>
                   <div className="font-medium text-white">{row.wording}</div>
-                  <Link href={`/questions/${row.question_id}`}>
+                  <Link
+                    href={`/questions/${row.question_id}?hs_run_id=${encodeURIComponent(
+                      row.hs_run_id ?? ""
+                    )}`}
+                  >
                     {row.question_id}
                   </Link>
                 </td>
