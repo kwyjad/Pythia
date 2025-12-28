@@ -1149,27 +1149,28 @@ def get_risk_index(
     if not _table_exists(con, "forecasts_ensemble") or not _table_exists(con, "questions"):
         return {
             "metric": metric_upper,
-            "target_month": target_month or "",
+            "target_month": target_month or None,
             "horizon_m": horizon_m,
             "normalize": normalize,
             "rows": [],
         }
 
-    def _latest_target_month(
+    def _latest_forecasted_target_month(
         con: duckdb.DuckDBPyConnection, metric_upper: str, horizon_m: int
     ) -> Optional[str]:
-        if not _table_exists(con, "questions") or not _table_exists(con, "forecasts_ensemble"):
+        if not _table_exists(con, "questions") or not _table_exists(
+            con, "forecasts_ensemble"
+        ):
             return None
-        row = _execute(
-            con,
+        row = con.execute(
             """
             SELECT MAX(q.target_month) AS target_month
             FROM forecasts_ensemble fe
             JOIN questions q ON q.question_id = fe.question_id
-            WHERE UPPER(q.metric) = :metric
-              AND fe.horizon_m = :horizon_m
+            WHERE UPPER(q.metric) = ?
+              AND fe.horizon_m = ?
             """,
-            {"metric": metric_upper, "horizon_m": horizon_m},
+            [metric_upper, horizon_m],
         ).fetchone()
         return row[0] if row and row[0] else None
 
@@ -1255,26 +1256,24 @@ def get_risk_index(
         return _execute(con, sql, params).fetchdf()
 
     selected_month = target_month
-    if not selected_month:
-        selected_month = _latest_target_month(con, metric_upper, horizon_m)
     df = _run_query(selected_month) if selected_month else pd.DataFrame()
-    if target_month and df.empty:
-        fallback_month = _latest_target_month(con, metric_upper, horizon_m)
+    if not selected_month or df.empty:
+        fallback_month = _latest_forecasted_target_month(con, metric_upper, horizon_m)
         if fallback_month is None:
             return {
                 "metric": metric_upper,
-                "target_month": target_month or "",
+                "target_month": None,
                 "horizon_m": horizon_m,
                 "normalize": normalize,
                 "rows": [],
             }
-        if fallback_month != target_month:
+        if fallback_month != selected_month:
             selected_month = fallback_month
             df = _run_query(selected_month)
 
     return {
         "metric": metric_upper,
-        "target_month": selected_month or target_month or "",
+        "target_month": selected_month or target_month or None,
         "horizon_m": horizon_m,
         "normalize": normalize,
         "rows": _rows_from_df(df),

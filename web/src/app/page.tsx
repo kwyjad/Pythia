@@ -54,7 +54,7 @@ export default async function OverviewPage() {
           <h2 className="text-xl font-semibold text-white">Risk index</h2>
           {riskIndex ? (
             <span className="text-sm text-slate-400">
-              Metric {riskIndex.metric} • {riskIndex.target_month}
+              Metric {riskIndex.metric} • {riskIndex.target_month ?? "latest"}
             </span>
           ) : null}
         </div>
@@ -92,7 +92,7 @@ export default async function OverviewPage() {
                 {(!riskIndex.rows || riskIndex.rows.length === 0) && (
                   <tr>
                     <td className="px-3 py-3 text-slate-400" colSpan={3}>
-                      No rows returned for {riskIndex.target_month}.
+                      No rows returned for {riskIndex.target_month ?? "latest"}.
                     </td>
                   </tr>
                 )}

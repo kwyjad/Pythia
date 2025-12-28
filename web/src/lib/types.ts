@@ -15,7 +15,7 @@ export type DiagnosticsSummaryResponse = {
 
 export type RiskIndexResponse = {
   metric: string;
-  target_month: string;
+  target_month: string | null;
   rows?: Array<{
     iso3: string;
     horizon_m?: number | null;
