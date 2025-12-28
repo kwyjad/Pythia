@@ -136,6 +136,14 @@ def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
     return set(df["name"].astype(str).str.lower().tolist())
 
 
+def _nonnull_count(con: duckdb.DuckDBPyConnection, table: str, col: str) -> int:
+    try:
+        row = con.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} IS NOT NULL").fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
 def _pick_col(cols: set[str], candidates: List[str]) -> Optional[str]:
     for candidate in candidates:
         if candidate.lower() in cols:
@@ -407,16 +415,31 @@ def _resolve_forecasts_ensemble_columns(
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Returns (horizon_col, bucket_col, prob_col)
-    - horizon_col: 'horizon_m' or 'month_index'
-    - bucket_col:  'class_bin' or 'bucket_index'
-    - prob_col:    'probability' (required)
+    Picks the *populated* column when both variants exist.
     """
     if not _table_exists(con, "forecasts_ensemble"):
         return None, None, None
+
     cols = _table_columns(con, "forecasts_ensemble")
-    horizon_col = _pick_col(cols, ["horizon_m", "month_index"])
-    bucket_col = _pick_col(cols, ["class_bin", "bucket_index"])
     prob_col = _pick_col(cols, ["probability"])
+    if not prob_col:
+        return None, None, None
+
+    horizon_candidates = [c for c in ["month_index", "horizon_m"] if c in cols]
+    bucket_candidates = [c for c in ["bucket_index", "class_bin"] if c in cols]
+
+    horizon_col = None
+    if horizon_candidates:
+        scored = [(c, _nonnull_count(con, "forecasts_ensemble", c)) for c in horizon_candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        horizon_col = scored[0][0] if scored[0][1] > 0 else horizon_candidates[0]
+
+    bucket_col = None
+    if bucket_candidates:
+        scored = [(c, _nonnull_count(con, "forecasts_ensemble", c)) for c in bucket_candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        bucket_col = scored[0][0] if scored[0][1] > 0 else bucket_candidates[0]
+
     return horizon_col, bucket_col, prob_col
 
 
@@ -1232,7 +1255,7 @@ def get_risk_index(
             "rows": [],
         }
 
-    def _run_query(chosen_h: int) -> pd.DataFrame:
+    def _run_query(chosen_h: int, chosen_col: str) -> pd.DataFrame:
         sql = f"""
         WITH q AS (
           SELECT question_id, iso3
@@ -1247,7 +1270,7 @@ def get_risk_index(
             SUM(CAST(fe.{bucket_col} AS DOUBLE) * fe.{prob_col}) AS expected_value
           FROM forecasts_ensemble fe
           JOIN q ON q.question_id = fe.question_id
-          WHERE fe.{horizon_col} = :horizon_m
+          WHERE fe.{chosen_col} = :horizon_m
           GROUP BY q.iso3, fe.question_id
         )
         SELECT
@@ -1266,7 +1289,7 @@ def get_risk_index(
         ).fetchdf()
 
     original_h = horizon_m
-    df = _run_query(horizon_m)
+    df = _run_query(horizon_m, horizon_col)
 
     if df.empty:
         fallback_h = _latest_available_horizon(con, metric_upper, horizon_col, target_month)
@@ -1279,7 +1302,17 @@ def get_risk_index(
                 metric_upper,
                 target_month,
             )
-            df = _run_query(horizon_m)
+            df = _run_query(horizon_m, horizon_col)
+
+    if df.empty:
+        cols = _table_columns(con, "forecasts_ensemble")
+        alt_horizon_col = None
+        if horizon_col == "horizon_m" and "month_index" in cols:
+            alt_horizon_col = "month_index"
+        elif horizon_col == "month_index" and "horizon_m" in cols:
+            alt_horizon_col = "horizon_m"
+        if alt_horizon_col:
+            df = _run_query(horizon_m, alt_horizon_col)
 
     return {
         "metric": metric_upper,
