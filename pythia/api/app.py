@@ -5,6 +5,7 @@
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import os
 
 import duckdb, pandas as pd
+import numpy as np
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -47,6 +49,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 logger = logging.getLogger(__name__)
+
+
+def _json_sanitize(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {key: _json_sanitize(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_json_sanitize(value) for value in obj]
+    if isinstance(obj, tuple):
+        return [_json_sanitize(value) for value in obj]
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    if isinstance(obj, (float, np.floating)):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return float(obj)
+    return obj
+
+
+def _rows_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    if df.empty:
+        return []
+    rows = df.to_dict(orient="records")
+    return _json_sanitize(rows)
 
 
 def _con():
@@ -179,9 +204,10 @@ def _apply_json_fields(row: Dict[str, Any], fields: List[str]) -> Dict[str, Any]
 
 def _fetch_one(con: duckdb.DuckDBPyConnection, sql: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     df = _execute(con, sql, params).fetchdf()
-    if df.empty:
+    rows = _rows_from_df(df)
+    if not rows:
         return None
-    return df.to_dict(orient="records")[0]
+    return rows[0]
 
 
 def _resolve_question_row(
@@ -210,9 +236,10 @@ def _resolve_question_row(
     sql += f" ORDER BY {', '.join(order_by_parts)} LIMIT 1"
 
     df = _execute(con, sql, params).fetchdf()
-    if df.empty:
+    rows = _rows_from_df(df)
+    if not rows:
         raise HTTPException(status_code=404, detail="Question not found")
-    return df.to_dict(orient="records")[0]
+    return rows[0]
 
 
 def _resolve_forecaster_run_id(
@@ -318,7 +345,7 @@ def _build_llm_calls_bundle(
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
-    for row in df.to_dict(orient="records"):
+    for row in _rows_from_df(df):
         parsed = _apply_json_fields(row, ["parsed_json", "usage_json"])
         if not transcripts_included:
             parsed.pop("prompt_text", None)
@@ -472,7 +499,8 @@ def get_ui_run(ui_run_id: str):
     ).fetchdf()
     if df.empty:
         return {"found": False, "row": None}
-    row = df.to_dict(orient="records")[0]
+    rows = _rows_from_df(df)
+    row = rows[0] if rows else None
     return {"found": True, "row": row}
 
 
@@ -524,7 +552,7 @@ def get_questions(
         if run_col:
             sql += f", {run_col}"
         df = _execute(con, sql, params).fetchdf()
-        return {"rows": df.to_dict(orient="records")}
+        return {"rows": _rows_from_df(df)}
 
     # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
     cte, _ = _latest_questions_view(
@@ -547,7 +575,7 @@ def get_questions(
         sql += " AND rn = 1"
     sql += " ORDER BY target_month, iso3, hazard_code, metric"
     df = _execute(con, sql, params).fetchdf()
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/question_bundle")
@@ -621,7 +649,7 @@ def get_question_bundle(
             """,
             [resolved_hs_run_id, *scenario_ids],
         ).fetchdf()
-        scenario_rows = [_apply_json_fields(r, ["scenario_json"]) for r in df.to_dict(orient="records")]
+        scenario_rows = [_apply_json_fields(r, ["scenario_json"]) for r in _rows_from_df(df)]
         order = {sid: idx for idx, sid in enumerate(scenario_ids)}
         scenarios = sorted(scenario_rows, key=lambda r: order.get(r.get("scenario_id"), len(order)))
 
@@ -661,7 +689,7 @@ def get_question_bundle(
                 """,
                 {"run_id": resolved_forecaster_run_id, "question_id": question_id},
             ).fetchdf()
-            ensemble_spd = ensemble_df.to_dict(orient="records")
+            ensemble_spd = _rows_from_df(ensemble_df)
 
         raw_order_fields: List[str] = []
         if _table_has_columns(con, "forecasts_raw", ["horizon_m"]):
@@ -689,7 +717,7 @@ def get_question_bundle(
                 """,
                 {"run_id": resolved_forecaster_run_id, "question_id": question_id},
             ).fetchdf()
-            raw_spd = [_apply_json_fields(r, ["spd_json"]) for r in raw_df.to_dict(orient="records")]
+            raw_spd = [_apply_json_fields(r, ["spd_json"]) for r in _rows_from_df(raw_df)]
 
         if _table_has_columns(con, "scenarios", ["run_id", "iso3", "hazard_code", "metric"]):
             scenario_df = _execute(
@@ -707,7 +735,7 @@ def get_question_bundle(
                     "metric": question.get("metric"),
                 },
             ).fetchdf()
-            scenario_writer = scenario_df.to_dict(orient="records")
+            scenario_writer = _rows_from_df(scenario_df)
 
     question_context = None
     if resolved_forecaster_run_id and _table_exists(con, "question_context"):
@@ -751,7 +779,7 @@ def get_question_bundle(
             """,
             {"question_id": question_id},
         ).fetchdf()
-        resolutions = res_df.to_dict(orient="records")
+        resolutions = _rows_from_df(res_df)
 
     llm_calls_bundle = _build_llm_calls_bundle(
         con,
@@ -784,7 +812,7 @@ def get_question_bundle(
         context=ContextBundle(question_context=question_context, resolutions=resolutions),
         llm_calls=llm_calls_bundle,
     )
-    return response.model_dump()
+    return _json_sanitize(response.model_dump())
 
 
 @app.get("/v1/calibration/weights")
@@ -865,7 +893,7 @@ def get_calibration_weights(
     return {
         "found": True,
         "as_of_month": as_of_month,
-        "rows": df.to_dict(orient="records"),
+        "rows": _rows_from_df(df),
     }
 
 
@@ -938,7 +966,7 @@ def get_calibration_advice(
     return {
         "found": True,
         "as_of_month": as_of_month,
-        "rows": df.to_dict(orient="records"),
+        "rows": _rows_from_df(df),
     }
 
 
@@ -996,7 +1024,7 @@ def get_forecasts_ensemble(
             sql += " WHERE " + " AND ".join(where_bits)
         sql += " ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, fe.horizon_m, fe.class_bin"
         df = _execute(con, sql, params).fetchdf()
-        return {"rows": df.to_dict(orient="records")}
+        return {"rows": _rows_from_df(df)}
 
     # latest_only=False: historical view (all runs)
     sql = """
@@ -1029,7 +1057,7 @@ def get_forecasts_ensemble(
 
     sql += " ORDER BY q.target_month, q.iso3, q.hazard_code, q.metric, q.run_id, fe.horizon_m, fe.class_bin"
     df = _execute(con, sql, params).fetchdf()
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/forecasts/history")
@@ -1076,7 +1104,7 @@ def get_forecasts_history(
       ORDER BY h.created_at, fe.horizon_m, fe.class_bin
     """
     df = _execute(con, sql, params).fetchdf()
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/resolutions")
@@ -1093,7 +1121,7 @@ def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
         f"SELECT * FROM resolutions WHERE question_id IN ({inlist})",
         qids,
     ).fetchdf()
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/risk_index")
@@ -1249,7 +1277,7 @@ def get_risk_index(
         "target_month": selected_month or target_month or "",
         "horizon_m": horizon_m,
         "normalize": normalize,
-        "rows": df.to_dict(orient="records"),
+        "rows": _rows_from_df(df),
     }
 
 
@@ -1290,7 +1318,7 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True):
       ORDER BY (CASE WHEN ? THEN per_capita ELSE expected_value END) DESC
     """
     df = con.execute(sql, [metric, month, normalize, normalize]).fetchdf()
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/diagnostics/summary")
@@ -1308,9 +1336,10 @@ def diagnostics_summary():
     con = _con()
 
     try:
-        q_counts = con.execute(
+        q_counts_df = con.execute(
             "SELECT status, COUNT(*) AS n FROM questions GROUP BY status"
-        ).fetchdf().to_dict(orient="records")
+        ).fetchdf()
+        q_counts = _rows_from_df(q_counts_df)
     except Exception:
         q_counts = []
 
@@ -1410,7 +1439,7 @@ def get_countries():
     df = con.execute(sql).fetchdf()
     if df.empty:
         return {"rows": []}
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/llm/costs")
@@ -1446,7 +1475,7 @@ def llm_costs(
     params.append(limit)
 
     df = _execute(con, sql, params).fetchdf()
-    return {"rows": df.to_dict(orient="records")}
+    return {"rows": _rows_from_df(df)}
 
 
 @app.get("/v1/llm/costs/summary")
@@ -1565,5 +1594,5 @@ def llm_costs_summary(
             "forecaster_run_id": forecaster_run_id,
             "since": since,
         },
-        "rows": df.to_dict(orient="records"),
+        "rows": _rows_from_df(df),
     }
