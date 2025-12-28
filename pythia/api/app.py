@@ -5,6 +5,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -113,6 +114,32 @@ def _table_has_columns(con: duckdb.DuckDBPyConnection, table: str, required: Lis
     return set(c.lower() for c in required).issubset(cols)
 
 
+def _compile_named_params(sql: str, params: Dict[str, Any]) -> tuple[str, List[Any]]:
+    pattern = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+    args: List[Any] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in params:
+            raise KeyError(f"Missing SQL parameter: {name}")
+        args.append(params[name])
+        return "?"
+
+    compiled = pattern.sub(_replace, sql)
+    return compiled, args
+
+
+def _execute(
+    con: duckdb.DuckDBPyConnection, sql: str, params: Optional[Any] = None
+) -> duckdb.DuckDBPyConnection:
+    if params is None:
+        return con.execute(sql)
+    if isinstance(params, dict):
+        compiled_sql, args = _compile_named_params(sql, params)
+        return con.execute(compiled_sql, args)
+    return con.execute(sql, params)
+
+
 def _safe_count_distinct(
     con: duckdb.DuckDBPyConnection, table: str, col_candidates: List[str]
 ) -> int:
@@ -149,7 +176,7 @@ def _apply_json_fields(row: Dict[str, Any], fields: List[str]) -> Dict[str, Any]
 
 
 def _fetch_one(con: duckdb.DuckDBPyConnection, sql: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     if df.empty:
         return None
     return df.to_dict(orient="records")[0]
@@ -170,7 +197,7 @@ def _resolve_question_row(
         params["hs_run_id"] = hs_run_id
     sql += " ORDER BY hs_run_created_at DESC NULLS LAST, q.hs_run_id DESC LIMIT 1"
 
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     if df.empty:
         raise HTTPException(status_code=404, detail="Question not found")
     return df.to_dict(orient="records")[0]
@@ -273,7 +300,7 @@ def _build_llm_calls_bundle(
     if order_fields:
         sql += " ORDER BY " + ", ".join(order_fields)
     sql += " LIMIT :limit"
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
@@ -448,7 +475,7 @@ def get_questions(
         if where_bits:
             sql += " WHERE " + " AND ".join(where_bits)
         sql += " ORDER BY target_month, iso3, hazard_code, metric, run_id"
-        df = con.execute(sql, params).fetchdf()
+        df = _execute(con, sql, params).fetchdf()
         return {"rows": df.to_dict(orient="records")}
 
     # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
@@ -466,7 +493,7 @@ def get_questions(
     if run_id:
         sql += " WHERE run_id = :run_id"
     sql += " ORDER BY target_month, iso3, hazard_code, metric"
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
 
 
@@ -735,7 +762,7 @@ def get_calibration_weights(
           ORDER BY as_of_month DESC
           LIMIT 1
         """
-        row = con.execute(sql_latest, params).fetchone()
+        row = _execute(con, sql_latest, params).fetchone()
         if not row:
             return {"found": False, "as_of_month": None, "rows": []}
         as_of_month = row[0]
@@ -766,7 +793,7 @@ def get_calibration_weights(
     sql += " WHERE " + " AND ".join(where_full)
     sql += " ORDER BY hazard_code, metric, model_name"
 
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
 
     if df.empty:
         return {"found": False, "as_of_month": as_of_month, "rows": []}
@@ -816,7 +843,7 @@ def get_calibration_advice(
           ORDER BY as_of_month DESC
           LIMIT 1
         """
-        row = con.execute(sql_latest, params).fetchone()
+        row = _execute(con, sql_latest, params).fetchone()
         if not row:
             return {"found": False, "as_of_month": None, "rows": []}
         as_of_month = row[0]
@@ -840,7 +867,7 @@ def get_calibration_advice(
     sql += " WHERE " + " AND ".join(where_full)
     sql += " ORDER BY hazard_code, metric"
 
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
 
     if df.empty:
         return {"found": False, "as_of_month": as_of_month, "rows": []}
@@ -903,7 +930,7 @@ def get_forecasts_ensemble(
         if where_bits:
             sql += " WHERE " + " AND ".join(where_bits)
         sql += " ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, fe.horizon_m, fe.class_bin"
-        df = con.execute(sql, params).fetchdf()
+        df = _execute(con, sql, params).fetchdf()
         return {"rows": df.to_dict(orient="records")}
 
     # latest_only=False: historical view (all runs)
@@ -936,7 +963,7 @@ def get_forecasts_ensemble(
         sql += " AND fe.horizon_m = :horizon_m"
 
     sql += " ORDER BY q.target_month, q.iso3, q.hazard_code, q.metric, q.run_id, fe.horizon_m, fe.class_bin"
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
 
 
@@ -983,7 +1010,7 @@ def get_forecasts_history(
         AND q.target_month = :target_month
       ORDER BY h.created_at, fe.horizon_m, fe.class_bin
     """
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
 
 
@@ -1007,7 +1034,7 @@ def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
 @app.get("/v1/risk_index")
 def get_risk_index(
     metric: str = Query("PA", description="Metric to rank on, e.g. 'PA'"),
-    target_month: str = Query(..., description="Target month 'YYYY-MM'"),
+    target_month: Optional[str] = Query(None, description="Target month 'YYYY-MM'"),
     horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
 ):
@@ -1024,53 +1051,124 @@ def get_risk_index(
       - per_capita (EV / population) if normalize=true
     """
     con = _con()
-    params = {
-        "metric": metric.upper(),
-        "target_month": target_month,
-        "horizon_m": horizon_m,
-        "normalize": normalize,
-    }
+    metric_upper = metric.upper()
 
-    sql = """
-    WITH ev AS (
-      SELECT q.iso3, fe.horizon_m,
-             SUM(
-               fe.p * COALESCE(
-                 bc.ev,
-                 CASE fe.class_bin
-                   WHEN '<10k' THEN 5000
-                   WHEN '10k-<50k' THEN 25000
-                   WHEN '50k-<250k' THEN 120000
-                   WHEN '250k-<500k' THEN 350000
-                   WHEN '>=500k' THEN 700000
-                 END
-               )
-             ) AS ev_value
-      FROM forecasts_ensemble fe
-      JOIN questions q ON q.question_id = fe.question_id
-      LEFT JOIN bucket_centroids bc
-        ON bc.metric = q.metric
-       AND bc.class_bin = fe.class_bin
-       AND bc.hazard_code = q.hazard_code
-      WHERE UPPER(q.metric) = :metric
-        AND q.target_month = :target_month
-        AND fe.horizon_m = :horizon_m
-      GROUP BY 1,2
-    ), pop AS (
-      SELECT iso3, MAX_BY(population, year) AS population
-      FROM populations GROUP BY 1
+    if not _table_exists(con, "forecasts_ensemble") or not _table_exists(con, "questions"):
+        return {
+            "metric": metric_upper,
+            "target_month": target_month or "",
+            "horizon_m": horizon_m,
+            "normalize": normalize,
+            "rows": [],
+        }
+
+    def _latest_target_month() -> Optional[str]:
+        row = _execute(
+            """
+            SELECT MAX(q.target_month) AS target_month
+            FROM forecasts_ensemble fe
+            JOIN questions q ON q.question_id = fe.question_id
+            WHERE UPPER(q.metric) = :metric
+              AND fe.horizon_m = :horizon_m
+            """,
+            {"metric": metric_upper, "horizon_m": horizon_m},
+        ).fetchone()
+        return row[0] if row else None
+
+    bucket_centroids_ok = _table_has_columns(
+        con, "bucket_centroids", ["metric", "class_bin", "hazard_code", "ev"]
     )
-    SELECT ev.iso3, ev.horizon_m,
-           ev.ev_value AS expected_value,
-           CASE WHEN :normalize THEN ev.ev_value/NULLIF(pop.population,0) ELSE NULL END AS per_capita
-    FROM ev LEFT JOIN pop ON ev.iso3 = pop.iso3
-    ORDER BY (CASE WHEN :normalize THEN per_capita ELSE expected_value END) DESC
-    """
+    populations_ok = _table_has_columns(con, "populations", ["iso3", "population", "year"])
 
-    df = con.execute(sql, params).fetchdf()
+    centroid_expr = """
+      COALESCE(
+        bc.ev,
+        CASE fe.class_bin
+          WHEN '<10k' THEN 5000
+          WHEN '10k-<50k' THEN 25000
+          WHEN '50k-<250k' THEN 120000
+          WHEN '250k-<500k' THEN 350000
+          WHEN '>=500k' THEN 700000
+        END
+      )
+    """
+    if not bucket_centroids_ok:
+        centroid_expr = """
+        CASE fe.class_bin
+          WHEN '<10k' THEN 5000
+          WHEN '10k-<50k' THEN 25000
+          WHEN '50k-<250k' THEN 120000
+          WHEN '250k-<500k' THEN 350000
+          WHEN '>=500k' THEN 700000
+        END
+        """
+
+    pop_cte = ""
+    pop_join = ""
+    per_capita_expr = "NULL AS per_capita"
+    if populations_ok:
+        pop_cte = """
+        , pop AS (
+          SELECT iso3, MAX_BY(population, year) AS population
+          FROM populations GROUP BY 1
+        )
+        """
+        pop_join = "LEFT JOIN pop ON ev.iso3 = pop.iso3"
+        per_capita_expr = (
+            "CASE WHEN :normalize THEN ev.ev_value/NULLIF(pop.population,0) ELSE NULL END AS per_capita"
+        )
+
+    bc_join = ""
+    if bucket_centroids_ok:
+        bc_join = """
+        LEFT JOIN bucket_centroids bc
+          ON bc.metric = q.metric
+         AND bc.class_bin = fe.class_bin
+         AND bc.hazard_code = q.hazard_code
+        """
+
+    def _run_query(month: str) -> pd.DataFrame:
+        params = {
+            "metric": metric_upper,
+            "target_month": month,
+            "horizon_m": horizon_m,
+            "normalize": normalize,
+        }
+        sql = f"""
+        WITH ev AS (
+          SELECT q.iso3, fe.horizon_m,
+                 SUM(fe.p * ({centroid_expr})) AS ev_value
+          FROM forecasts_ensemble fe
+          JOIN questions q ON q.question_id = fe.question_id
+          {bc_join}
+          WHERE UPPER(q.metric) = :metric
+            AND q.target_month = :target_month
+            AND fe.horizon_m = :horizon_m
+          GROUP BY 1,2
+        )
+        {pop_cte}
+        SELECT ev.iso3, ev.horizon_m,
+               ev.ev_value AS expected_value,
+               {per_capita_expr}
+        FROM ev
+        {pop_join}
+        ORDER BY (CASE WHEN :normalize THEN per_capita ELSE expected_value END) DESC
+        """
+        return _execute(con, sql, params).fetchdf()
+
+    selected_month = target_month
+    if not selected_month:
+        selected_month = _latest_target_month()
+    df = _run_query(selected_month) if selected_month else pd.DataFrame()
+    if target_month and df.empty:
+        fallback_month = _latest_target_month()
+        if fallback_month and fallback_month != target_month:
+            selected_month = fallback_month
+            df = _run_query(selected_month)
+
     return {
-        "metric": metric.upper(),
-        "target_month": target_month,
+        "metric": metric_upper,
+        "target_month": selected_month or target_month or "",
         "horizon_m": horizon_m,
         "normalize": normalize,
         "rows": df.to_dict(orient="records"),
@@ -1235,7 +1333,7 @@ def llm_costs(
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
 
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
 
 
@@ -1343,7 +1441,7 @@ def llm_costs_summary(
     """
     params["limit"] = limit
 
-    df = con.execute(sql, params).fetchdf()
+    df = _execute(con, sql, params).fetchdf()
     return {
         "group_by": group_fields,
         "filters": {
