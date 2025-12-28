@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import type { RiskIndexRow } from "../lib/types";
 import SortableTable, { SortableColumn } from "./SortableTable";
@@ -43,6 +43,7 @@ const formatMonthLabel = (date: Date): string =>
 type RiskIndexTableProps = {
   rows: RiskIndexRow[];
   targetMonth?: string | null;
+  mode: "raw" | "percap";
 };
 
 const renderEivHeader = (label: string) => (
@@ -57,8 +58,11 @@ const renderEivHeader = (label: string) => (
   </span>
 );
 
-export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProps) {
-  const [showPerCapita, setShowPerCapita] = useState(false);
+export default function RiskIndexTable({
+  rows,
+  targetMonth,
+  mode,
+}: RiskIndexTableProps) {
   const populationAvailable = rows.some(
     (row) => typeof row.population === "number"
   );
@@ -153,7 +157,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m1_pc ?? null,
         render: (row) => perCapitaCell(row.m1_pc),
-        isVisible: showPerCapita,
         defaultSortDirection: "desc",
       },
       {
@@ -163,7 +166,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m2_pc ?? null,
         render: (row) => perCapitaCell(row.m2_pc),
-        isVisible: showPerCapita,
         defaultSortDirection: "desc",
       },
       {
@@ -173,7 +175,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m3_pc ?? null,
         render: (row) => perCapitaCell(row.m3_pc),
-        isVisible: showPerCapita,
         defaultSortDirection: "desc",
       },
       {
@@ -183,7 +184,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m4_pc ?? null,
         render: (row) => perCapitaCell(row.m4_pc),
-        isVisible: showPerCapita,
         defaultSortDirection: "desc",
       },
       {
@@ -193,7 +193,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m5_pc ?? null,
         render: (row) => perCapitaCell(row.m5_pc),
-        isVisible: showPerCapita,
         defaultSortDirection: "desc",
       },
       {
@@ -203,7 +202,6 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m6_pc ?? null,
         render: (row) => perCapitaCell(row.m6_pc),
-        isVisible: showPerCapita,
         defaultSortDirection: "desc",
       },
       {
@@ -216,6 +214,8 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
         defaultSortDirection: "desc",
       },
     ];
+
+    const metricColumns = mode === "percap" ? perCapitaColumns : eivColumns;
 
     return [
       {
@@ -252,40 +252,22 @@ export default function RiskIndexTable({ rows, targetMonth }: RiskIndexTableProp
             : "-",
         defaultSortDirection: "desc",
       },
-      ...eivColumns,
-      ...perCapitaColumns,
+      ...metricColumns,
     ];
-  }, [monthLabel, showPerCapita, populationAvailable]);
+  }, [mode, monthLabel, populationAvailable]);
 
   const emptyMessage = targetMonth
     ? `No rows returned for ${targetMonth}.`
     : "No rows returned. (no month)";
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-4 text-sm text-slate-300">
-        <label className="inline-flex items-center gap-2">
-          <input
-            checked={showPerCapita}
-            className="h-4 w-4 rounded border-slate-600 bg-slate-900"
-            onChange={(event) => setShowPerCapita(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Show per-month per-capita columns</span>
-        </label>
-        {!populationAvailable ? (
-          <span className="text-xs text-slate-500">{POPULATION_TOOLTIP}</span>
-        ) : null}
-      </div>
-
-      <SortableTable
-        columns={columns}
-        emptyMessage={emptyMessage}
-        initialSortKey="total"
-        initialSortDirection="desc"
-        rowKey={(row) => row.iso3}
-        rows={rows}
-      />
-    </div>
+    <SortableTable
+      columns={columns}
+      emptyMessage={emptyMessage}
+      initialSortKey={mode === "percap" ? "total_pc" : "total"}
+      initialSortDirection="desc"
+      rowKey={(row) => row.iso3}
+      rows={rows}
+    />
   );
 }

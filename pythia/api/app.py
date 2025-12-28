@@ -1245,12 +1245,14 @@ def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
 @app.get("/v1/risk_index")
 def get_risk_index(
     metric: str = Query("PA", description="Metric to rank on, e.g. 'PA'"),
+    hazard_code: Optional[str] = Query(None, description="Optional hazard code filter"),
     target_month: Optional[str] = Query(None, description="Target month 'YYYY-MM'"),
     horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
 ):
     con = _con()
     metric_upper = (metric or "").strip().upper() or "PA"
+    hazard_code_upper = (hazard_code or "").strip().upper() or None
 
     horizon_col, bucket_col, prob_col = _resolve_forecasts_ensemble_columns(con)
     if not horizon_col or not bucket_col or not prob_col:
@@ -1371,6 +1373,7 @@ def get_risk_index(
       FROM questions
       WHERE UPPER(metric) = :metric
         AND target_month = :target_month
+        AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
     )
     {pop_cte}
     , per_row AS (
@@ -1425,7 +1428,11 @@ def get_risk_index(
     {pop_join}
     ORDER BY p.total DESC NULLS LAST
     """
-    params = {"metric": metric_upper, "target_month": target_month}
+    params = {
+        "metric": metric_upper,
+        "target_month": target_month,
+        "hazard_code": hazard_code_upper,
+    }
     if populations_available:
         params["normalize"] = normalize
     df = _execute(con, sql, params).fetchdf()
