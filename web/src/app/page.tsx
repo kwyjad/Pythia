@@ -92,7 +92,9 @@ export default async function OverviewPage() {
                 {(!riskIndex.rows || riskIndex.rows.length === 0) && (
                   <tr>
                     <td className="px-3 py-3 text-slate-400" colSpan={3}>
-                      No rows returned for {riskIndex.target_month ?? "latest"}.
+                      {riskIndex.target_month
+                        ? `No rows returned for ${riskIndex.target_month}.`
+                        : "No rows returned. (no month)"}
                     </td>
                   </tr>
                 )}

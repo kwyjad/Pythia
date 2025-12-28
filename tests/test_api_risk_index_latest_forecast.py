@@ -40,9 +40,9 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
-            horizon_m INTEGER,
-            class_bin TEXT,
-            p DOUBLE
+            month_index INTEGER,
+            bucket_index INTEGER,
+            probability DOUBLE
         );
         """
     )
@@ -56,8 +56,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
-        INSERT INTO forecasts_ensemble (question_id, horizon_m, class_bin, p)
-        VALUES ('q1', 1, '<10k', 1.0);
+        INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability)
+        VALUES ('q1', 1, 1, 1.0);
         """
     )
     con.close()
@@ -92,4 +92,64 @@ def test_risk_index_fallbacks_from_empty_month(api_env: None) -> None:
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["target_month"] == "2026-01"
+    assert payload["rows"]
+
+
+@pytest.fixture()
+def api_env_horizon_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[None, None, None]:
+    db_path = tmp_path / "api-horizon.duckdb"
+    con = duckdb.connect(str(db_path), read_only=False)
+    con.execute(
+        """
+        CREATE TABLE questions (
+            question_id TEXT,
+            iso3 TEXT,
+            target_month TEXT,
+            metric TEXT
+        );
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE forecasts_ensemble (
+            question_id TEXT,
+            month_index INTEGER,
+            bucket_index INTEGER,
+            probability DOUBLE
+        );
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO questions (question_id, iso3, target_month, metric)
+        VALUES ('q1', 'USA', '2026-01', 'PA');
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability)
+        VALUES ('q1', 6, 2, 1.0);
+        """
+    )
+    con.close()
+
+    config_path = _write_config(tmp_path, db_path)
+    monkeypatch.setenv("PYTHIA_CONFIG_PATH", str(config_path))
+    pythia_config.load.cache_clear()
+
+    try:
+        yield
+    finally:
+        pythia_config.load.cache_clear()
+
+
+def test_risk_index_fallbacks_to_latest_horizon(api_env_horizon_fallback: None) -> None:
+    client = TestClient(app)
+
+    resp = client.get("/v1/risk_index", params={"metric": "PA", "horizon_m": 1, "normalize": True})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["horizon_m"] == 6
     assert payload["rows"]
