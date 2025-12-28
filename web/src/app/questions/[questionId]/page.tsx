@@ -3,11 +3,13 @@ import type { QuestionBundleResponse } from "../../../lib/types";
 
 type QuestionPageProps = {
   params: { questionId: string };
+  searchParams?: { hs_run_id?: string };
 };
 
-const QuestionPage = async ({ params }: QuestionPageProps) => {
+const QuestionPage = async ({ params, searchParams }: QuestionPageProps) => {
   const bundle = await apiGet<QuestionBundleResponse>("/question_bundle", {
-    question_id: params.questionId
+    question_id: params.questionId,
+    hs_run_id: searchParams?.hs_run_id
   });
 
   const question = bundle.question as Record<string, unknown> | undefined;
@@ -26,27 +28,27 @@ const QuestionPage = async ({ params }: QuestionPageProps) => {
 
       <section className="space-y-4">
         <div>
-          <h2 className="text-lg font-semibold text-white">HS scenarios</h2>
+          <h2 className="text-lg font-semibold text-white">HS</h2>
           <pre className="mt-2 whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-200">
-            {JSON.stringify(bundle.hs_scenarios ?? null, null, 2)}
+            {JSON.stringify(bundle.hs ?? null, null, 2)}
           </pre>
         </div>
         <div>
-          <h2 className="text-lg font-semibold text-white">Research</h2>
+          <h2 className="text-lg font-semibold text-white">Forecast</h2>
           <pre className="mt-2 whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-200">
-            {JSON.stringify(bundle.research ?? null, null, 2)}
+            {JSON.stringify(bundle.forecast ?? null, null, 2)}
           </pre>
         </div>
         <div>
-          <h2 className="text-lg font-semibold text-white">Ensemble forecast</h2>
+          <h2 className="text-lg font-semibold text-white">Context</h2>
           <pre className="mt-2 whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-200">
-            {JSON.stringify(bundle.ensemble ?? null, null, 2)}
+            {JSON.stringify(bundle.context ?? null, null, 2)}
           </pre>
         </div>
         <div>
-          <h2 className="text-lg font-semibold text-white">Per-model forecasts</h2>
+          <h2 className="text-lg font-semibold text-white">LLM calls</h2>
           <pre className="mt-2 whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-200">
-            {JSON.stringify(bundle.per_model ?? null, null, 2)}
+            {JSON.stringify(bundle.llm_calls ?? null, null, 2)}
           </pre>
         </div>
       </section>

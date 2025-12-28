@@ -4,6 +4,7 @@ import { apiGet } from "../../lib/api";
 
 type QuestionRow = {
   question_id: string;
+  hs_run_id?: string | null;
   iso3: string;
   hazard_code: string;
   metric: string;
@@ -53,7 +54,11 @@ const QuestionsPage = async () => {
               <tr key={row.question_id}>
                 <td>
                   <div className="font-medium text-white">{row.wording}</div>
-                  <Link href={`/questions/${row.question_id}`}>
+                  <Link
+                    href={`/questions/${row.question_id}?hs_run_id=${encodeURIComponent(
+                      row.hs_run_id ?? ""
+                    )}`}
+                  >
                     {row.question_id}
                   </Link>
                 </td>
