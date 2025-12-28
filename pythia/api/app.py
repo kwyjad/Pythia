@@ -324,13 +324,44 @@ def _build_llm_calls_bundle(
     )
 
 
+def _resolve_latest_questions_columns(
+    con: duckdb.DuckDBPyConnection,
+) -> tuple[Optional[str], Optional[str], str]:
+    q_cols = _table_columns(con, "questions")
+    q_run_col = _pick_col(q_cols, ["hs_run_id", "run_id"])
+
+    hs_runs_exists = _table_exists(con, "hs_runs")
+    h_cols = _table_columns(con, "hs_runs") if hs_runs_exists else set()
+    h_run_col = _pick_col(h_cols, ["hs_run_id", "run_id"]) if hs_runs_exists else None
+
+    if hs_runs_exists and h_run_col:
+        if h_run_col == "hs_run_id" and "hs_run_id" in q_cols:
+            q_run_col = "hs_run_id"
+        elif h_run_col == "run_id" and "run_id" in q_cols:
+            q_run_col = "run_id"
+
+    hs_created_col = "created_at" if "created_at" in h_cols else None
+    hs_generated_col = "generated_at" if "generated_at" in h_cols else None
+    hs_timestamp_expr = "NULL"
+    if hs_runs_exists and h_run_col and q_run_col:
+        if hs_created_col and hs_generated_col:
+            hs_timestamp_expr = "COALESCE(h.created_at, h.generated_at)"
+        elif hs_created_col:
+            hs_timestamp_expr = "h.created_at"
+        elif hs_generated_col:
+            hs_timestamp_expr = "h.generated_at"
+
+    return q_run_col, h_run_col, hs_timestamp_expr
+
+
 def _latest_questions_view(
+    con: duckdb.DuckDBPyConnection,
     iso3: Optional[str] = None,
     hazard_code: Optional[str] = None,
     metric: Optional[str] = None,
     target_month: Optional[str] = None,
     status: Optional[str] = None,
-) -> str:
+) -> tuple[str, Optional[str]]:
     """
     Returns a SQL string for a 'latest questions' CTE called latest_q, parameterised
     by filters. The idea:
@@ -343,6 +374,9 @@ def _latest_questions_view(
     NOTE: This helper builds only the CTE string; you still need to bind the same
     filter parameters to the main query.
     """
+    q_run_col, h_run_col, hs_timestamp_expr = _resolve_latest_questions_columns(con)
+    hs_runs_exists = _table_exists(con, "hs_runs")
+
     # We build filters into both the inner and outer query for simplicity
     where_bits = []
     if iso3:
@@ -360,32 +394,29 @@ def _latest_questions_view(
     if where_bits:
         where_clause = "WHERE " + " AND ".join(where_bits)
 
+    join_clause = ""
+    if hs_runs_exists and h_run_col and q_run_col:
+        join_clause = f"LEFT JOIN hs_runs h ON q.{q_run_col} = h.{h_run_col}"
+
+    order_bits = [f"{hs_timestamp_expr} DESC NULLS LAST"]
+    if q_run_col:
+        order_bits.append(f"q.{q_run_col} DESC")
+
     cte = f"""
     WITH latest_q AS (
-      SELECT q.*
+      SELECT
+        q.*,
+        {hs_timestamp_expr} AS hs_run_created_at,
+        ROW_NUMBER() OVER (
+          PARTITION BY q.iso3, q.hazard_code, q.metric, q.target_month
+          ORDER BY {", ".join(order_bits)}
+        ) AS rn
       FROM questions q
-      JOIN hs_runs h ON q.run_id = h.run_id
-      JOIN (
-        SELECT
-          iso3,
-          hazard_code,
-          metric,
-          target_month,
-          MAX(h.created_at) AS latest_run
-        FROM questions q
-        JOIN hs_runs h ON q.run_id = h.run_id
-        {where_clause}
-        GROUP BY 1,2,3,4
-      ) x
-      ON q.iso3 = x.iso3
-     AND q.hazard_code = x.hazard_code
-     AND q.metric = x.metric
-     AND q.target_month = x.target_month
-     AND h.created_at = x.latest_run
+      {join_clause}
       {where_clause}
     )
     """
-    return cte
+    return cte, q_run_col
 
 
 @app.get("/v1/health")
@@ -444,6 +475,7 @@ def get_questions(
     latest_only: bool = Query(False),
 ):
     con = _con()
+    run_col, _, _ = _resolve_latest_questions_columns(con)
     params = {}
     if iso3:
         params["iso3"] = iso3
@@ -455,7 +487,7 @@ def get_questions(
         params["target_month"] = target_month
     if status:
         params["status"] = status
-    if run_id:
+    if run_id and run_col:
         params["run_id"] = run_id
 
     if not latest_only:
@@ -470,18 +502,21 @@ def get_questions(
             where_bits.append("target_month = :target_month")
         if status:
             where_bits.append("status = :status")
-        if run_id:
-            where_bits.append("run_id = :run_id")
+        if run_id and run_col:
+            where_bits.append(f"{run_col} = :run_id")
 
         sql = "SELECT * FROM questions"
         if where_bits:
             sql += " WHERE " + " AND ".join(where_bits)
-        sql += " ORDER BY target_month, iso3, hazard_code, metric, run_id"
+        sql += " ORDER BY target_month, iso3, hazard_code, metric"
+        if run_col:
+            sql += f", {run_col}"
         df = _execute(con, sql, params).fetchdf()
         return {"rows": df.to_dict(orient="records")}
 
     # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
-    cte = _latest_questions_view(
+    cte, _ = _latest_questions_view(
+        con,
         iso3=iso3,
         hazard_code=hazard_code,
         metric=metric,
@@ -492,8 +527,12 @@ def get_questions(
     SELECT *
     FROM latest_q
     """
-    if run_id:
-        sql += " WHERE run_id = :run_id"
+    if run_id and run_col:
+        sql += f" WHERE {run_col} = :run_id"
+    else:
+        sql += " WHERE rn = 1"
+    if run_id and run_col:
+        sql += " AND rn = 1"
     sql += " ORDER BY target_month, iso3, hazard_code, metric"
     df = _execute(con, sql, params).fetchdf()
     return {"rows": df.to_dict(orient="records")}
@@ -904,7 +943,8 @@ def get_forecasts_ensemble(
         params["horizon_m"] = horizon_m
 
     if latest_only:
-        cte = _latest_questions_view(
+        cte, _ = _latest_questions_view(
+            con,
             iso3=iso3,
             hazard_code=hazard_code,
             metric=metric,
@@ -927,6 +967,7 @@ def get_forecasts_ensemble(
         JOIN latest_q q ON fe.question_id = q.question_id
         """
         where_bits = []
+        where_bits.append("q.rn = 1")
         if horizon_m is not None:
             where_bits.append("fe.horizon_m = :horizon_m")
         if where_bits:
@@ -1314,6 +1355,40 @@ def diagnostics_summary():
         "latest_hs_run": latest_hs,
         "latest_calibration": latest_calibration,
     }
+
+
+@app.get("/v1/countries")
+def get_countries():
+    con = _con()
+    if not _table_exists(con, "questions"):
+        return {"rows": []}
+
+    if _table_exists(con, "forecasts_ensemble"):
+        sql = """
+          SELECT
+            q.iso3,
+            COUNT(DISTINCT q.question_id) AS n_questions,
+            COUNT(DISTINCT fe.question_id) AS n_forecasted
+          FROM questions q
+          LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+          GROUP BY q.iso3
+          ORDER BY q.iso3
+        """
+    else:
+        sql = """
+          SELECT
+            q.iso3,
+            COUNT(DISTINCT q.question_id) AS n_questions,
+            0 AS n_forecasted
+          FROM questions q
+          GROUP BY q.iso3
+          ORDER BY q.iso3
+        """
+
+    df = con.execute(sql).fetchdf()
+    if df.empty:
+        return {"rows": []}
+    return {"rows": df.to_dict(orient="records")}
 
 
 @app.get("/v1/llm/costs")
