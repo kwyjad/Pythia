@@ -59,7 +59,7 @@ export default async function OverviewPage() {
         </div>
 
         {riskIndex ? (
-          <div className="w-full overflow-x-auto rounded-lg border border-slate-800 p-3">
+          <div className="w-full overflow-x-auto rounded-lg border border-slate-800">
             <RiskIndexTable
               rows={riskIndex.rows ?? []}
               targetMonth={riskIndex.target_month}

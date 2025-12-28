@@ -32,6 +32,7 @@ export type RiskIndexRow = {
   m5?: number | null;
   m6?: number | null;
   total?: number | null;
+  expected_value?: number | null;
   population?: number | null;
   m1_pc?: number | null;
   m2_pc?: number | null;
@@ -40,6 +41,7 @@ export type RiskIndexRow = {
   m5_pc?: number | null;
   m6_pc?: number | null;
   total_pc?: number | null;
+  per_capita?: number | null;
 };
 
 export type QuestionsResponse = {
