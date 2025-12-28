@@ -188,16 +188,26 @@ def _resolve_question_row(
     con: duckdb.DuckDBPyConnection, question_id: str, hs_run_id: Optional[str]
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {"question_id": question_id}
-    sql = """
-      SELECT q.*, COALESCE(h.created_at, h.generated_at) AS hs_run_created_at
+    q_run_col, h_run_col, hs_timestamp_expr = _resolve_latest_questions_columns(con)
+    hs_runs_exists = _table_exists(con, "hs_runs")
+
+    join_clause = ""
+    if hs_runs_exists and q_run_col and h_run_col:
+        join_clause = f"LEFT JOIN hs_runs h ON q.{q_run_col} = h.{h_run_col}"
+
+    sql = f"""
+      SELECT q.*, {hs_timestamp_expr} AS hs_run_created_at
       FROM questions q
-      LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
+      {join_clause}
       WHERE q.question_id = :question_id
     """
-    if hs_run_id:
-        sql += " AND q.hs_run_id = :hs_run_id"
+    if hs_run_id and q_run_col:
+        sql += f" AND q.{q_run_col} = :hs_run_id"
         params["hs_run_id"] = hs_run_id
-    sql += " ORDER BY hs_run_created_at DESC NULLS LAST, q.hs_run_id DESC LIMIT 1"
+    order_by_parts = [f"{hs_timestamp_expr} DESC NULLS LAST"]
+    if q_run_col:
+        order_by_parts.append(f"q.{q_run_col} DESC")
+    sql += f" ORDER BY {', '.join(order_by_parts)} LIMIT 1"
 
     df = _execute(con, sql, params).fetchdf()
     if df.empty:
@@ -210,6 +220,8 @@ def _resolve_forecaster_run_id(
 ) -> Optional[str]:
     if forecaster_run_id:
         return forecaster_run_id
+    if not _table_exists(con, "forecasts_ensemble"):
+        return None
     df = con.execute(
         """
         SELECT run_id
@@ -559,45 +571,47 @@ def get_question_bundle(
     scenario_ids_raw = _safe_json_load(question.get("scenario_ids_json") or [])
     scenario_ids: List[str] = scenario_ids_raw if isinstance(scenario_ids_raw, list) else []
 
-    hs_run = (
-        _fetch_one(con, "SELECT * FROM hs_runs WHERE hs_run_id = :hs_run_id", {"hs_run_id": resolved_hs_run_id})
-        if resolved_hs_run_id
-        else None
-    )
+    hs_run = None
+    if resolved_hs_run_id and _table_exists(con, "hs_runs"):
+        hs_run = _fetch_one(
+            con, "SELECT * FROM hs_runs WHERE hs_run_id = :hs_run_id", {"hs_run_id": resolved_hs_run_id}
+        )
 
     triage = None
     if resolved_hs_run_id and iso3 and hazard_code:
-        triage_row = _fetch_one(
-            con,
-            """
-            SELECT *
-            FROM hs_triage
-            WHERE run_id = :hs_run_id AND iso3 = :iso3 AND hazard_code = :hazard_code
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            {"hs_run_id": resolved_hs_run_id, "iso3": iso3, "hazard_code": hazard_code},
-        )
-        if triage_row:
-            triage = _apply_json_fields(triage_row, ["drivers_json", "regime_shifts_json", "data_quality_json"])
+        if _table_has_columns(con, "hs_triage", ["run_id", "iso3", "hazard_code"]):
+            triage_row = _fetch_one(
+                con,
+                """
+                SELECT *
+                FROM hs_triage
+                WHERE run_id = :hs_run_id AND iso3 = :iso3 AND hazard_code = :hazard_code
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                {"hs_run_id": resolved_hs_run_id, "iso3": iso3, "hazard_code": hazard_code},
+            )
+            if triage_row:
+                triage = _apply_json_fields(triage_row, ["drivers_json", "regime_shifts_json", "data_quality_json"])
 
     country_report = None
     if resolved_hs_run_id and iso3:
-        report_row = _fetch_one(
-            con,
-            """
-            SELECT *
-            FROM hs_country_reports
-            WHERE hs_run_id = :hs_run_id AND iso3 = :iso3
-            LIMIT 1
-            """,
-            {"hs_run_id": resolved_hs_run_id, "iso3": iso3},
-        )
-        if report_row:
-            country_report = _apply_json_fields(report_row, ["sources_json"])
+        if _table_has_columns(con, "hs_country_reports", ["hs_run_id", "iso3"]):
+            report_row = _fetch_one(
+                con,
+                """
+                SELECT *
+                FROM hs_country_reports
+                WHERE hs_run_id = :hs_run_id AND iso3 = :iso3
+                LIMIT 1
+                """,
+                {"hs_run_id": resolved_hs_run_id, "iso3": iso3},
+            )
+            if report_row:
+                country_report = _apply_json_fields(report_row, ["sources_json"])
 
     scenarios: List[Dict[str, Any]] = []
-    if resolved_hs_run_id and scenario_ids:
+    if resolved_hs_run_id and scenario_ids and _table_has_columns(con, "hs_scenarios", ["hs_run_id", "scenario_id"]):
         placeholders = ",".join(["?"] * len(scenario_ids))
         df = con.execute(
             f"""
@@ -618,33 +632,36 @@ def get_question_bundle(
     raw_spd: List[Dict[str, Any]] = []
     scenario_writer: List[Dict[str, Any]] = []
     if resolved_forecaster_run_id:
-        research_row = _fetch_one(
-            con,
-            """
-            SELECT *
-            FROM question_research
-            WHERE run_id = :run_id AND question_id = :question_id
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            {"run_id": resolved_forecaster_run_id, "question_id": question_id},
-        )
-        if research_row:
-            research = _apply_json_fields(research_row, ["research_json"])
+        if _table_has_columns(con, "question_research", ["run_id", "question_id"]):
+            research_row = _fetch_one(
+                con,
+                """
+                SELECT *
+                FROM question_research
+                WHERE run_id = :run_id AND question_id = :question_id
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                {"run_id": resolved_forecaster_run_id, "question_id": question_id},
+            )
+            if research_row:
+                research = _apply_json_fields(research_row, ["research_json"])
 
-        ensemble_order_clause = "ORDER BY month_index, bucket_index, model_name"
-        if _table_has_columns(con, "forecasts_ensemble", ["horizon_m", "class_bin"]):
-            ensemble_order_clause = "ORDER BY horizon_m, class_bin, model_name"
-        ensemble_df = con.execute(
-            f"""
-            SELECT *
-            FROM forecasts_ensemble
-            WHERE run_id = :run_id AND question_id = :question_id
-            {ensemble_order_clause}
-            """,
-            {"run_id": resolved_forecaster_run_id, "question_id": question_id},
-        ).fetchdf()
-        ensemble_spd = ensemble_df.to_dict(orient="records")
+        if _table_has_columns(con, "forecasts_ensemble", ["run_id", "question_id"]):
+            ensemble_order_clause = "ORDER BY month_index, bucket_index, model_name"
+            if _table_has_columns(con, "forecasts_ensemble", ["horizon_m", "class_bin"]):
+                ensemble_order_clause = "ORDER BY horizon_m, class_bin, model_name"
+            ensemble_df = _execute(
+                con,
+                f"""
+                SELECT *
+                FROM forecasts_ensemble
+                WHERE run_id = :run_id AND question_id = :question_id
+                {ensemble_order_clause}
+                """,
+                {"run_id": resolved_forecaster_run_id, "question_id": question_id},
+            ).fetchdf()
+            ensemble_spd = ensemble_df.to_dict(orient="records")
 
         raw_order_fields: List[str] = []
         if _table_has_columns(con, "forecasts_raw", ["horizon_m"]):
@@ -661,32 +678,36 @@ def get_question_bundle(
         if raw_order_fields:
             raw_order_clause = " ORDER BY " + ", ".join(raw_order_fields)
 
-        raw_df = con.execute(
-            f"""
-            SELECT *
-            FROM forecasts_raw
-            WHERE run_id = :run_id AND question_id = :question_id
-            {raw_order_clause}
-            """,
-            {"run_id": resolved_forecaster_run_id, "question_id": question_id},
-        ).fetchdf()
-        raw_spd = [_apply_json_fields(r, ["spd_json"]) for r in raw_df.to_dict(orient="records")]
+        if _table_has_columns(con, "forecasts_raw", ["run_id", "question_id"]):
+            raw_df = _execute(
+                con,
+                f"""
+                SELECT *
+                FROM forecasts_raw
+                WHERE run_id = :run_id AND question_id = :question_id
+                {raw_order_clause}
+                """,
+                {"run_id": resolved_forecaster_run_id, "question_id": question_id},
+            ).fetchdf()
+            raw_spd = [_apply_json_fields(r, ["spd_json"]) for r in raw_df.to_dict(orient="records")]
 
-        scenario_df = con.execute(
-            """
-            SELECT *
-            FROM scenarios
-            WHERE run_id = :run_id AND iso3 = :iso3 AND hazard_code = :hazard_code AND metric = :metric
-            ORDER BY scenario_type, bucket_label
-            """,
-            {
-                "run_id": resolved_forecaster_run_id,
-                "iso3": iso3,
-                "hazard_code": hazard_code,
-                "metric": question.get("metric"),
-            },
-        ).fetchdf()
-        scenario_writer = scenario_df.to_dict(orient="records")
+        if _table_has_columns(con, "scenarios", ["run_id", "iso3", "hazard_code", "metric"]):
+            scenario_df = _execute(
+                con,
+                """
+                SELECT *
+                FROM scenarios
+                WHERE run_id = :run_id AND iso3 = :iso3 AND hazard_code = :hazard_code AND metric = :metric
+                ORDER BY scenario_type, bucket_label
+                """,
+                {
+                    "run_id": resolved_forecaster_run_id,
+                    "iso3": iso3,
+                    "hazard_code": hazard_code,
+                    "metric": question.get("metric"),
+                },
+            ).fetchdf()
+            scenario_writer = scenario_df.to_dict(orient="records")
 
     question_context = None
     if resolved_forecaster_run_id and _table_exists(con, "question_context"):
@@ -720,7 +741,8 @@ def get_question_bundle(
 
     resolutions: List[Dict[str, Any]] = []
     if _table_exists(con, "resolutions"):
-        res_df = con.execute(
+        res_df = _execute(
+            con,
             """
             SELECT *
             FROM resolutions
