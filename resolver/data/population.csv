@@ -1,1 +1,267 @@
-iso3,year,population,as_of,source,method
+iso3,country_name, population ,as_of,source
+ABW,Aruba," 107,995 ",2024,World Bank
+AFE,," 769,280,888 ",2024,World Bank
+AFG,Afghanistan," 42,647,492 ",2024,World Bank
+AFW,," 521,764,076 ",2024,World Bank
+AGO,Angola," 37,885,849 ",2024,World Bank
+ALB,Albania," 2,377,128 ",2024,World Bank
+AND,Andorra," 81,938 ",2024,World Bank
+ARB,," 492,612,632 ",2024,World Bank
+ARE,United Arab Emirates," 10,986,400 ",2024,World Bank
+ARG,Argentina," 45,696,159 ",2024,World Bank
+ARM,Armenia," 3,033,500 ",2024,World Bank
+ASM,American Samoa," 46,765 ",2024,World Bank
+ATG,Antigua and Barbuda," 93,772 ",2024,World Bank
+AUS,Australia," 27,196,812 ",2024,World Bank
+AUT,Austria," 9,177,982 ",2024,World Bank
+AZE,Azerbaijan," 10,202,830 ",2024,World Bank
+BDI,Burundi," 14,047,786 ",2024,World Bank
+BEL,Belgium," 11,858,610 ",2024,World Bank
+BEN,Benin," 14,462,724 ",2024,World Bank
+BFA,Burkina Faso," 23,548,781 ",2024,World Bank
+BGD,Bangladesh," 173,562,364 ",2024,World Bank
+BGR,Bulgaria," 6,441,421 ",2024,World Bank
+BHR,Bahrain," 1,588,670 ",2024,World Bank
+BHS,Bahamas," 401,283 ",2024,World Bank
+BIH,Bosnia-Herzegovina," 3,164,253 ",2024,World Bank
+BLR,Belarus," 9,132,629 ",2024,World Bank
+BLZ,Belize," 417,072 ",2024,World Bank
+BMU,Bermuda," 64,636 ",2024,World Bank
+BOL,Bolivia," 12,413,315 ",2024,World Bank
+BRA,Brazil," 211,998,573 ",2024,World Bank
+BRB,Barbados," 282,467 ",2024,World Bank
+BRN,Brunei," 462,721 ",2024,World Bank
+BTN,Bhutan," 791,524 ",2024,World Bank
+BWA,Botswana," 2,521,139 ",2024,World Bank
+CAF,Central African Republic," 5,330,690 ",2024,World Bank
+CAN,Canada," 41,288,599 ",2024,World Bank
+CEB,," 100,061,963 ",2024,World Bank
+CHE,Switzerland," 9,005,582 ",2024,World Bank
+CHI,Channel Islands," 168,126 ",2024,World Bank
+CHL,Chile," 19,764,771 ",2024,World Bank
+CHN,China," 1,408,975,000 ",2024,World Bank
+CIV,Cote d'Ivoire," 31,934,230 ",2024,World Bank
+CMR,Cameroon," 29,123,744 ",2024,World Bank
+COD,Democratic Republic of Congo," 109,276,265 ",2024,World Bank
+COG,Congo," 6,332,961 ",2024,World Bank
+COL,Colombia," 52,886,363 ",2024,World Bank
+COM,Comoros," 866,628 ",2024,World Bank
+CPV,Cape Verde," 524,877 ",2024,World Bank
+CRI,Costa Rica," 5,129,910 ",2024,World Bank
+CSS,," 4,539,060 ",2024,World Bank
+CUB,Cuba," 10,979,783 ",2024,World Bank
+CUW,Curacao," 155,967 ",2024,World Bank
+CYM,Cayman Islands," 74,457 ",2024,World Bank
+CYP,Cyprus," 1,358,282 ",2024,World Bank
+CZE,Czech Republic," 10,905,028 ",2024,World Bank
+DEU,Germany," 83,516,593 ",2024,World Bank
+DJI,Djibouti," 1,168,722 ",2024,World Bank
+DMA,Dominica," 66,205 ",2024,World Bank
+DNK,Denmark," 5,976,992 ",2024,World Bank
+DOM,Dominican Republic," 11,427,557 ",2024,World Bank
+DZA,Algeria," 46,814,308 ",2024,World Bank
+EAP,," 2,141,122,258 ",2024,World Bank
+EAR,," 3,552,278,604 ",2024,World Bank
+EAS,," 2,388,319,494 ",2024,World Bank
+ECA,," 250,281,521 ",2024,World Bank
+ECS,," 928,263,208 ",2024,World Bank
+ECU,Ecuador," 18,135,478 ",2024,World Bank
+EGY,Egypt," 116,538,258 ",2024,World Bank
+EMU,," 351,161,936 ",2024,World Bank
+ERI,Eritrea," 3,535,603 ",2024,World Bank
+ESP,Spain," 48,848,840 ",2024,World Bank
+EST,Estonia," 1,372,341 ",2024,World Bank
+ETH,Ethiopia," 132,059,767 ",2024,World Bank
+EUU,," 450,228,188 ",2024,World Bank
+FCS,," 1,081,767,572 ",2024,World Bank
+FIN,Finland," 5,619,911 ",2024,World Bank
+FJI,Fiji," 928,784 ",2024,World Bank
+FRA,France," 68,551,653 ",2024,World Bank
+FRO,Faeroe Islands," 54,681 ",2024,World Bank
+FSM,Micronesia," 113,160 ",2024,World Bank
+GAB,Gabon," 2,538,952 ",2024,World Bank
+GBR,Great Britain," 69,226,000 ",2024,World Bank
+GEO,Georgia," 3,699,557 ",2024,World Bank
+GHA,Ghana," 34,427,414 ",2024,World Bank
+GIB,Gibraltar," 39,329 ",2024,World Bank
+GIN,Guinea Conakry," 14,754,785 ",2024,World Bank
+GMB,Gambia," 2,759,988 ",2024,World Bank
+GNB,Guinea-Bissau," 2,201,352 ",2024,World Bank
+GNQ,Equatorial Guinea," 1,892,516 ",2024,World Bank
+GRC,Greece," 10,405,134 ",2024,World Bank
+GRD,Grenada," 117,207 ",2024,World Bank
+GRL,Greenland," 56,836 ",2024,World Bank
+GTM,Guatemala," 18,406,359 ",2024,World Bank
+GUM,Guam," 167,777 ",2024,World Bank
+GUY,Guyana," 831,087 ",2024,World Bank
+HIC,," 1,417,841,927 ",2024,World Bank
+HKG,Hong Kong SAR China," 7,524,100 ",2024,World Bank
+HND,Honduras," 10,825,703 ",2024,World Bank
+HPC,," 941,413,026 ",2024,World Bank
+HRV,Croatia," 3,866,200 ",2024,World Bank
+HTI,Haiti," 11,772,557 ",2024,World Bank
+HUN,Hungary," 9,562,065 ",2024,World Bank
+IBD,," 4,979,421,568 ",2024,World Bank
+IBT,," 6,926,222,113 ",2024,World Bank
+IDA,," 1,946,800,545 ",2024,World Bank
+IDB,," 676,957,651 ",2024,World Bank
+IDN,Indonesia," 283,487,931 ",2024,World Bank
+IDX,," 1,269,842,894 ",2024,World Bank
+IMN,Isle of Man," 84,160 ",2024,World Bank
+IND,India," 1,450,935,791 ",2024,World Bank
+INX,,,2024,World Bank
+IRL,Ireland," 5,395,790 ",2024,World Bank
+IRN,Iran," 91,567,738 ",2024,World Bank
+IRQ,Iraq," 46,042,015 ",2024,World Bank
+ISL,Iceland," 386,506 ",2024,World Bank
+ISR,Israel," 9,974,400 ",2024,World Bank
+ITA,Italy," 58,952,704 ",2024,World Bank
+JAM,Jamaica," 2,839,175 ",2024,World Bank
+JOR,Jordan," 11,552,876 ",2024,World Bank
+JPN,Japan," 123,975,371 ",2024,World Bank
+KAZ,Kazakhstan," 20,592,571 ",2024,World Bank
+KEN,Kenya," 56,432,944 ",2024,World Bank
+KGZ,Kyrgyzstan," 7,221,868 ",2024,World Bank
+KHM,Cambodia," 17,638,801 ",2024,World Bank
+KIR,Kiribati," 134,518 ",2024,World Bank
+KNA,Saint Kitts and Nevis," 46,843 ",2024,World Bank
+KOR,South Korea (Republic of)," 51,751,065 ",2024,World Bank
+KWT,Kuwait," 4,897,263 ",2024,World Bank
+LAC,," 594,158,638 ",2024,World Bank
+LAO,Laos," 7,769,819 ",2024,World Bank
+LBN,Lebanon," 5,805,962 ",2024,World Bank
+LBR,Liberia," 5,612,817 ",2024,World Bank
+LBY,Libya," 7,381,023 ",2024,World Bank
+LCA,Saint Lucia," 179,744 ",2024,World Bank
+LCN,," 662,186,388 ",2024,World Bank
+LDC,," 1,187,777,591 ",2024,World Bank
+LIC,," 624,608,098 ",2024,World Bank
+LIE,Liechtenstein," 40,450 ",2024,World Bank
+LKA,Sri Lanka," 21,916,000 ",2024,World Bank
+LMC,," 3,120,980,912 ",2024,World Bank
+LMY,," 6,563,501,708 ",2024,World Bank
+LSO,Lesotho," 2,337,423 ",2024,World Bank
+LTE,," 2,328,628,339 ",2024,World Bank
+LTU,Lithuania," 2,888,278 ",2024,World Bank
+LUX,Luxembourg," 677,012 ",2024,World Bank
+LVA,Latvia," 1,866,124 ",2024,World Bank
+MAC,Macao SAR China," 687,000 ",2024,World Bank
+MAF,Saint Martin (french part)," 26,129 ",2024,World Bank
+MAR,Morocco," 38,081,173 ",2024,World Bank
+MCO,Monaco," 38,631 ",2024,World Bank
+MDA,Moldova," 2,402,306 ",2024,World Bank
+MDG,Madagascar," 31,964,956 ",2024,World Bank
+MDV,Maldives," 527,799 ",2024,World Bank
+MEA,," 813,146,136 ",2024,World Bank
+MEX,Mexico," 130,861,007 ",2024,World Bank
+MHL,Marshall Islands," 37,548 ",2024,World Bank
+MIC,," 5,938,893,610 ",2024,World Bank
+MKD,Macedonia," 1,824,359 ",2024,World Bank
+MLI,Mali," 24,478,595 ",2024,World Bank
+MLT,Malta," 568,847 ",2024,World Bank
+MMR,Myanmar," 54,500,091 ",2024,World Bank
+MNA,," 741,690,916 ",2024,World Bank
+MNE,Montenegro," 623,525 ",2024,World Bank
+MNG,Mongolia," 3,524,788 ",2024,World Bank
+MNP,Northern Mariana Islands," 44,278 ",2024,World Bank
+MOZ,Mozambique," 34,631,766 ",2024,World Bank
+MRT,Mauritania," 5,169,395 ",2024,World Bank
+MUS,Mauritius," 1,245,779 ",2024,World Bank
+MWI,Malawi," 21,655,286 ",2024,World Bank
+MYS,Malaysia," 35,557,673 ",2024,World Bank
+NAC,," 381,464,223 ",2024,World Bank
+NAM,Namibia," 3,030,131 ",2024,World Bank
+NCL,New Caledonia," 292,639 ",2024,World Bank
+NER,Niger," 27,032,412 ",2024,World Bank
+NGA,Nigeria," 232,679,478 ",2024,World Bank
+NIC,Nicaragua," 6,916,140 ",2024,World Bank
+NLD,Netherlands," 17,993,485 ",2024,World Bank
+NOR,Norway," 5,572,279 ",2024,World Bank
+NPL,Nepal ," 29,651,054 ",2024,World Bank
+NRU,Nauru," 11,947 ",2024,World Bank
+NZL,New Zealand," 5,287,500 ",2024,World Bank
+OED,," 1,396,877,448 ",2024,World Bank
+OMN,Oman," 5,281,538 ",2024,World Bank
+OSS,," 12,931,878 ",2024,World Bank
+PAK,Pakistan," 251,269,164 ",2024,World Bank
+PAN,Panama," 4,515,577 ",2024,World Bank
+PER,Peru," 34,217,848 ",2024,World Bank
+PHL,Philippines," 115,843,670 ",2024,World Bank
+PLW,Palau," 17,695 ",2024,World Bank
+PNG,Papua New Guinea," 10,576,502 ",2024,World Bank
+POL,Poland," 36,559,233 ",2024,World Bank
+PRE,," 1,105,951,788 ",2024,World Bank
+PRI,Puerto Rico," 3,203,295 ",2024,World Bank
+PRK,North Korea," 26,498,823 ",2024,World Bank
+PRT,Portugal," 10,694,681 ",2024,World Bank
+PRY,Paraguay," 6,929,153 ",2024,World Bank
+PSE,Palestine," 5,289,152 ",2024,World Bank
+PSS,," 2,722,467 ",2024,World Bank
+PST,," 1,128,377,826 ",2024,World Bank
+PYF,French Polynesia," 281,807 ",2024,World Bank
+QAT,Qatar," 2,857,822 ",2024,World Bank
+ROU,Romania," 19,051,804 ",2024,World Bank
+RUS,Russia," 143,533,851 ",2024,World Bank
+RWA,Rwanda," 14,256,567 ",2024,World Bank
+SAS,," 1,677,384,532 ",2024,World Bank
+SAU,Saudi Arabia," 35,300,280 ",2024,World Bank
+SDN,Sudan," 50,448,963 ",2024,World Bank
+SEN,Senegal," 18,501,984 ",2024,World Bank
+SGP,Singapore," 6,036,860 ",2024,World Bank
+SLB,Solomon Islands," 819,198 ",2024,World Bank
+SLE,Sierra Leone," 8,642,022 ",2024,World Bank
+SLV,El Salvador," 6,338,193 ",2024,World Bank
+SMR,San Marino," 33,977 ",2024,World Bank
+SOM,Somalia," 19,009,151 ",2024,World Bank
+SRB,Serbia," 6,586,476 ",2024,World Bank
+SSA,," 1,158,863,843 ",2024,World Bank
+SSD,South Sudan," 11,943,408 ",2024,World Bank
+SSF,," 1,291,044,964 ",2024,World Bank
+SST,," 20,193,405 ",2024,World Bank
+STP,Sao Tome and Principe," 235,536 ",2024,World Bank
+SUR,Suriname," 634,431 ",2024,World Bank
+SVK,Slovak Republic," 5,422,069 ",2024,World Bank
+SVN,Slovenia," 2,127,400 ",2024,World Bank
+SWE,Sweden," 10,569,709 ",2024,World Bank
+SWZ,Eswatini," 1,242,822 ",2024,World Bank
+SXM,Sint Maarten," 43,350 ",2024,World Bank
+SYC,Seychelles," 121,354 ",2024,World Bank
+SYR,Syria," 24,672,760 ",2024,World Bank
+TCA,Turks and Caicos," 46,535 ",2024,World Bank
+TCD,Chad," 20,299,123 ",2024,World Bank
+TEA,," 2,114,653,077 ",2024,World Bank
+TEC,," 459,734,030 ",2024,World Bank
+TGO,Togo," 9,515,236 ",2024,World Bank
+THA,Thailand," 71,668,011 ",2024,World Bank
+TJK,Tajikistan," 10,590,927 ",2024,World Bank
+TKM,Turkmenistan," 7,494,498 ",2024,World Bank
+TLA,," 647,003,746 ",2024,World Bank
+TLS,Timor-Leste," 1,400,638 ",2024,World Bank
+TMN,," 736,401,764 ",2024,World Bank
+TON,Tonga," 104,175 ",2024,World Bank
+TSA,," 1,677,384,532 ",2024,World Bank
+TSS,," 1,291,044,964 ",2024,World Bank
+TTO,Trinidad and Tobago," 1,368,333 ",2024,World Bank
+TUN,Tunisia," 12,277,109 ",2024,World Bank
+TUR,Turkey," 85,518,661 ",2024,World Bank
+TUV,Tuvalu," 9,646 ",2024,World Bank
+TZA,Tanzania," 68,560,157 ",2024,World Bank
+UGA,Uganda," 50,015,092 ",2024,World Bank
+UKR,Ukraine," 37,860,221 ",2024,World Bank
+UMC,," 2,817,912,698 ",2024,World Bank
+URY,Uruguay," 3,386,588 ",2024,World Bank
+USA,United States," 340,110,988 ",2024,World Bank
+UZB,Uzbekistan," 36,361,859 ",2024,World Bank
+VCT,Saint Vincent and the Grenadines," 100,616 ",2024,World Bank
+VEN,Venezuela," 28,405,543 ",2024,World Bank
+VGB,British Virgin Islands," 39,471 ",2024,World Bank
+VIR,United States Virgin Islands," 104,377 ",2024,World Bank
+VNM,Vietnam," 100,987,686 ",2024,World Bank
+VUT,Vanuatu," 327,777 ",2024,World Bank
+WLD,," 8,141,808,945 ",2024,World Bank
+WSM,Samoa," 218,019 ",2024,World Bank
+XKX,," 1,594,353 ",2024,World Bank
+YEM,Yemen," 40,583,164 ",2024,World Bank
+ZAF,South Africa," 64,007,187 ",2024,World Bank
+ZMB,Zambia," 21,314,956 ",2024,World Bank
+ZWE,Zimbabwe," 16,634,373 ",2024,World Bank
