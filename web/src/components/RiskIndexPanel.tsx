@@ -7,7 +7,7 @@ import type { RiskIndexResponse, RiskView } from "../lib/types";
 import RiskIndexTable from "./RiskIndexTable";
 
 const POPULATION_HELPER =
-  "Per-capita requires population data (populations table). Not available in this snapshot.";
+  "Per-capita requires population data (populations table or resolver/data/population.csv).";
 
 const VIEW_OPTIONS: Array<{ value: RiskView; label: string }> = [
   { value: "PA_EIV", label: "PA EIV" },

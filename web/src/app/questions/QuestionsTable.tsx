@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
+import InfoTooltip from "../../components/InfoTooltip";
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
 type QuestionsRow = {
@@ -18,6 +19,9 @@ type QuestionsRow = {
   status?: string;
   wording?: string;
   eiv_total?: number | null;
+  triage_score?: number | null;
+  triage_tier?: string | null;
+  triage_need_full_spd?: boolean | null;
 };
 
 type QuestionsTableProps = {
@@ -67,6 +71,9 @@ const parseNumberValue = (value: string) => {
 const EIV_TOOLTIP =
   "EIV = sum over months 1–6 of (sum over buckets of p(bucket, month) × centroid(bucket)). Uses PA centroids for PA questions and fatalities centroids for FATALITIES questions.";
 
+const TRIAGE_TOOLTIP =
+  "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (default thresholds: priority ≥ 0.70, watchlist ≥ 0.40; hysteresis ±0.05). Only priority/watchlist hazards are sent to full forecasting; quiet hazards may appear but have no EIV.";
+
 const renderEivHeader = (label: string) => (
   <span className="inline-flex items-center gap-1">
     {label}
@@ -76,6 +83,13 @@ const renderEivHeader = (label: string) => (
     >
       ?
     </span>
+  </span>
+);
+
+const renderTriageHeader = (label: string) => (
+  <span className="inline-flex items-center gap-1">
+    {label}
+    <InfoTooltip text={TRIAGE_TOOLTIP} />
   </span>
 );
 
@@ -316,6 +330,16 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         sortValue: (row) => row.status ?? "",
         render: (row) => row.status ?? "",
         defaultSortDirection: "asc",
+      },
+      {
+        key: "triage_score",
+        label: renderTriageHeader("Triage Score"),
+        headerClassName: "text-right whitespace-nowrap",
+        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        sortValue: (row) => row.triage_score ?? null,
+        render: (row) =>
+          row.triage_score != null ? row.triage_score.toFixed(2) : "",
+        defaultSortDirection: "desc",
       },
       {
         key: "eiv_total",

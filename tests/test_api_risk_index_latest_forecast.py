@@ -48,6 +48,15 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
+        CREATE TABLE populations (
+            iso3 TEXT,
+            population BIGINT,
+            year INTEGER
+        );
+        """
+    )
+    con.execute(
+        """
         INSERT INTO questions (question_id, iso3, target_month, metric)
         VALUES
             ('q1', 'USA', '2026-01', 'PA'),
@@ -58,6 +67,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability)
         VALUES ('q1', 1, 1, 1.0);
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO populations (iso3, population, year)
+        VALUES ('USA', 2000000, 2024);
         """
     )
     con.close()
@@ -80,6 +95,9 @@ def test_risk_index_defaults_to_latest_forecasted_month(api_env: None) -> None:
     payload = resp.json()
     assert payload["target_month"] == "2026-01"
     assert payload["rows"]
+    row = payload["rows"][0]
+    assert row["population"] == 2000000
+    assert row["m1_pc"] == pytest.approx(row["m1"] / row["population"])
 
 
 def test_risk_index_fallbacks_from_empty_month(api_env: None) -> None:
@@ -93,6 +111,9 @@ def test_risk_index_fallbacks_from_empty_month(api_env: None) -> None:
     payload = resp.json()
     assert payload["target_month"] == "2026-01"
     assert payload["rows"]
+    row = payload["rows"][0]
+    assert row["population"] == 2000000
+    assert row["total_pc"] == pytest.approx(row["total"] / row["population"])
 
 
 @pytest.fixture()
@@ -123,6 +144,15 @@ def api_env_horizon_fallback(
     )
     con.execute(
         """
+        CREATE TABLE populations (
+            iso3 TEXT,
+            population BIGINT,
+            year INTEGER
+        );
+        """
+    )
+    con.execute(
+        """
         INSERT INTO questions (question_id, iso3, target_month, metric)
         VALUES ('q1', 'USA', '2026-01', 'PA');
         """
@@ -131,6 +161,12 @@ def api_env_horizon_fallback(
         """
         INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability)
         VALUES ('q1', 6, 2, 1.0);
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO populations (iso3, population, year)
+        VALUES ('USA', 3000000, 2024);
         """
     )
     con.close()
@@ -153,3 +189,6 @@ def test_risk_index_fallbacks_to_latest_horizon(api_env_horizon_fallback: None) 
     payload = resp.json()
     assert payload["horizon_m"] == 6
     assert payload["rows"]
+    row = payload["rows"][0]
+    assert row["population"] == 3000000
+    assert row["total_pc"] == pytest.approx(row["total"] / row["population"])

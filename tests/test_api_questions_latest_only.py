@@ -64,6 +64,19 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
+        CREATE TABLE hs_triage (
+            run_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            tier TEXT,
+            triage_score DOUBLE,
+            need_full_spd BOOLEAN,
+            created_at TIMESTAMP
+        );
+        """
+    )
+    con.execute(
+        """
         CREATE TABLE bucket_centroids (
             hazard_code TEXT,
             metric TEXT,
@@ -120,6 +133,14 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         VALUES ('*', 'PIN', 1, 10.0), ('*', 'PIN', 2, 20.0);
         """
     )
+    con.execute(
+        """
+        INSERT INTO hs_triage (
+            run_id, iso3, hazard_code, tier, triage_score, need_full_spd, created_at
+        )
+        VALUES ('hs_run_new', 'USA', 'TC', 'priority', 0.72, TRUE, '2024-02-05 00:00:00');
+        """
+    )
     con.close()
 
     config_path = _write_config(tmp_path, db_path)
@@ -144,6 +165,9 @@ def test_latest_only_questions_selects_latest_hs_run(api_env: None) -> None:
     assert row["forecast_date"] == "2024-02-10"
     assert row["forecast_horizon_max"] == 2
     assert row["eiv_total"] == pytest.approx(17.5)
+    assert row["triage_score"] == pytest.approx(0.72)
+    assert row["triage_tier"] == "priority"
+    assert row["triage_need_full_spd"] is True
 
 
 def test_countries_endpoint_returns_counts(api_env: None) -> None:

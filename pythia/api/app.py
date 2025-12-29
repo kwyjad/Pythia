@@ -34,7 +34,10 @@ from pythia.api.models import (
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
-from resolver.query.questions_index import compute_questions_forecast_summary
+from resolver.query.questions_index import (
+    compute_questions_forecast_summary,
+    compute_questions_triage_summary,
+)
 
 app = FastAPI(title="Pythia API", version="1.0.0")
 cors_origins_env = os.getenv("PYTHIA_CORS_ALLOW_ORIGINS", "*").strip()
@@ -53,6 +56,7 @@ app.add_middleware(
 logger = logging.getLogger(__name__)
 
 _COUNTRY_NAME_BY_ISO3: dict[str, str] = {}
+_POPULATION_BY_ISO3: dict[str, int] = {}
 
 
 def _load_country_registry() -> None:
@@ -79,6 +83,45 @@ def _load_country_registry() -> None:
 def _country_name(iso3: str) -> str:
     _load_country_registry()
     return _COUNTRY_NAME_BY_ISO3.get((iso3 or "").upper(), "")
+
+
+def _load_population_registry() -> None:
+    global _POPULATION_BY_ISO3
+    if _POPULATION_BY_ISO3:
+        return
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        path = repo_root / "resolver" / "data" / "population.csv"
+        if not path.exists():
+            return
+        df = pd.read_csv(path, dtype=str).fillna("")
+        if "iso3" not in df.columns or "population" not in df.columns:
+            return
+        population_map: dict[str, int] = {}
+        for iso3, population in zip(df["iso3"], df["population"]):
+            iso = str(iso3).strip().upper()
+            if not iso:
+                continue
+            pop_raw = str(population).strip().replace(",", "").replace(" ", "")
+            if not pop_raw:
+                continue
+            try:
+                pop_value = int(float(pop_raw))
+            except Exception:
+                continue
+            if pop_value <= 0:
+                continue
+            population_map[iso] = pop_value
+        _POPULATION_BY_ISO3 = population_map
+        if population_map:
+            logger.info("Loaded %d population rows from %s", len(population_map), path)
+    except Exception:
+        return
+
+
+def _population(iso3: str) -> Optional[int]:
+    _load_population_registry()
+    return _POPULATION_BY_ISO3.get((iso3 or "").upper())
 
 
 class _HealthAccessFilter(logging.Filter):
@@ -696,6 +739,7 @@ def get_questions(
     sql += " ORDER BY target_month, iso3, hazard_code, metric"
     df = _execute(con, sql, params).fetchdf()
     rows = _rows_from_df(df)
+    triage_summary: dict[str, dict[str, Any]] = {}
     try:
         question_ids = [row["question_id"] for row in rows if row.get("question_id")]
         summary = compute_questions_forecast_summary(con, question_ids=question_ids)
@@ -709,6 +753,16 @@ def get_questions(
             row["eiv_total"] = forecast.get("eiv_total")
     except Exception:
         logger.exception("Failed to enrich questions with forecast summary")
+    try:
+        triage_summary = compute_questions_triage_summary(con, rows)
+    except Exception:
+        logger.exception("Failed to enrich questions with triage summary")
+    for row in rows:
+        qid = row.get("question_id")
+        triage = triage_summary.get(qid or "", {})
+        row["triage_score"] = triage.get("triage_score")
+        row["triage_tier"] = triage.get("triage_tier")
+        row["triage_need_full_spd"] = triage.get("triage_need_full_spd")
     return {"rows": rows}
 
 
@@ -1301,9 +1355,17 @@ def get_risk_index(
             "rows": [],
         }
 
-    populations_available = _table_exists(con, "populations") and _table_has_columns(
-        con, "populations", ["iso3", "population", "year"]
+    populations_available = (
+        _table_exists(con, "populations")
+        and _table_has_columns(con, "populations", ["iso3", "population", "year"])
+        and _nonnull_count(con, "populations", "population") > 0
     )
+    registry_available = False
+    if normalize and not populations_available:
+        _load_population_registry()
+        registry_available = bool(_POPULATION_BY_ISO3)
+        if not registry_available:
+            logger.debug("Population registry empty; per-capita values unavailable.")
     centroids_available = _table_exists(con, "bucket_centroids") and _table_has_columns(
         con, "bucket_centroids", ["metric", "hazard_code", "bucket_index", "centroid"]
     )
@@ -1454,6 +1516,41 @@ def get_risk_index(
     df = _execute(con, sql, params).fetchdf()
 
     rows = _rows_from_df(df)
+    for row in rows:
+        row.setdefault("population", None)
+        row.setdefault("m1_pc", None)
+        row.setdefault("m2_pc", None)
+        row.setdefault("m3_pc", None)
+        row.setdefault("m4_pc", None)
+        row.setdefault("m5_pc", None)
+        row.setdefault("m6_pc", None)
+        row.setdefault("total_pc", None)
+        if not populations_available and normalize and registry_available:
+            pop_value = _population(row.get("iso3", ""))
+            if pop_value:
+                row["population"] = pop_value
+                row["m1_pc"] = (
+                    row["m1"] / pop_value if row.get("m1") is not None else None
+                )
+                row["m2_pc"] = (
+                    row["m2"] / pop_value if row.get("m2") is not None else None
+                )
+                row["m3_pc"] = (
+                    row["m3"] / pop_value if row.get("m3") is not None else None
+                )
+                row["m4_pc"] = (
+                    row["m4"] / pop_value if row.get("m4") is not None else None
+                )
+                row["m5_pc"] = (
+                    row["m5"] / pop_value if row.get("m5") is not None else None
+                )
+                row["m6_pc"] = (
+                    row["m6"] / pop_value if row.get("m6") is not None else None
+                )
+                row["total_pc"] = (
+                    row["total"] / pop_value if row.get("total") is not None else None
+                )
+
     # Back-compat: keep the v1 keys the frontend expects.
     for row in rows:
         # Prefer existing values if present, otherwise map from new names.
