@@ -452,85 +452,85 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 onChange={(event) => setEivMax(event.target.value)}
               />
             </label>
-          </div>
-          <div className="flex flex-wrap gap-6">
-            <div className="flex flex-col gap-3">
-              <label className="flex flex-col gap-1 text-xs text-slate-400">
-                Forecast Date From
-                <input
-                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                  inputMode="numeric"
-                  pattern="\\d{2}-\\d{4}"
-                  placeholder="mm-yyyy"
-                  type="text"
-                  value={forecastDateFrom}
-                  onChange={(event) => setForecastDateFrom(event.target.value)}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-400">
-                Forecast Date To
-                <input
-                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                  inputMode="numeric"
-                  pattern="\\d{2}-\\d{4}"
-                  placeholder="mm-yyyy"
-                  type="text"
-                  value={forecastDateTo}
-                  onChange={(event) => setForecastDateTo(event.target.value)}
-                />
-              </label>
-            </div>
-            <div className="flex flex-col gap-3">
-              <label className="flex flex-col gap-1 text-xs text-slate-400">
-                First Forecast Month From
-                <input
-                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                  inputMode="numeric"
-                  pattern="\\d{2}-\\d{4}"
-                  placeholder="mm-yyyy"
-                  type="text"
-                  value={firstMonthFrom}
-                  onChange={(event) => setFirstMonthFrom(event.target.value)}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-400">
-                First Forecast Month To
-                <input
-                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                  inputMode="numeric"
-                  pattern="\\d{2}-\\d{4}"
-                  placeholder="mm-yyyy"
-                  type="text"
-                  value={firstMonthTo}
-                  onChange={(event) => setFirstMonthTo(event.target.value)}
-                />
-              </label>
-            </div>
-            <div className="flex flex-col gap-3">
-              <label className="flex flex-col gap-1 text-xs text-slate-400">
-                Last Forecast Month From
-                <input
-                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                  inputMode="numeric"
-                  pattern="\\d{2}-\\d{4}"
-                  placeholder="mm-yyyy"
-                  type="text"
-                  value={lastMonthFrom}
-                  onChange={(event) => setLastMonthFrom(event.target.value)}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-slate-400">
-                Last Forecast Month To
-                <input
-                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-                  inputMode="numeric"
-                  pattern="\\d{2}-\\d{4}"
-                  placeholder="mm-yyyy"
-                  type="text"
-                  value={lastMonthTo}
-                  onChange={(event) => setLastMonthTo(event.target.value)}
-                />
-              </label>
+            <div className="flex flex-wrap gap-6">
+              <div className="flex flex-col gap-3">
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  Forecast Date From
+                  <input
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    inputMode="numeric"
+                    pattern="\\d{2}-\\d{4}"
+                    placeholder="mm-yyyy"
+                    type="text"
+                    value={forecastDateFrom}
+                    onChange={(event) => setForecastDateFrom(event.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  Forecast Date To
+                  <input
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    inputMode="numeric"
+                    pattern="\\d{2}-\\d{4}"
+                    placeholder="mm-yyyy"
+                    type="text"
+                    value={forecastDateTo}
+                    onChange={(event) => setForecastDateTo(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="flex flex-col gap-3">
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  First Forecast Month From
+                  <input
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    inputMode="numeric"
+                    pattern="\\d{2}-\\d{4}"
+                    placeholder="mm-yyyy"
+                    type="text"
+                    value={firstMonthFrom}
+                    onChange={(event) => setFirstMonthFrom(event.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  First Forecast Month To
+                  <input
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    inputMode="numeric"
+                    pattern="\\d{2}-\\d{4}"
+                    placeholder="mm-yyyy"
+                    type="text"
+                    value={firstMonthTo}
+                    onChange={(event) => setFirstMonthTo(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="flex flex-col gap-3">
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  Last Forecast Month From
+                  <input
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    inputMode="numeric"
+                    pattern="\\d{2}-\\d{4}"
+                    placeholder="mm-yyyy"
+                    type="text"
+                    value={lastMonthFrom}
+                    onChange={(event) => setLastMonthFrom(event.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  Last Forecast Month To
+                  <input
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    inputMode="numeric"
+                    pattern="\\d{2}-\\d{4}"
+                    placeholder="mm-yyyy"
+                    type="text"
+                    value={lastMonthTo}
+                    onChange={(event) => setLastMonthTo(event.target.value)}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>
