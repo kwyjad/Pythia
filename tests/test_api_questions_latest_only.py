@@ -50,7 +50,9 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     con.execute(
         """
         CREATE TABLE forecasts_ensemble (
-            question_id TEXT
+            question_id TEXT,
+            created_at TIMESTAMP,
+            status TEXT
         );
         """
     )
@@ -80,8 +82,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
-        INSERT INTO forecasts_ensemble (question_id)
-        VALUES ('q_new');
+        INSERT INTO forecasts_ensemble (question_id, created_at, status)
+        VALUES ('q_new', '2024-02-10 00:00:00', 'ok');
         """
     )
     con.close()
@@ -113,5 +115,11 @@ def test_countries_endpoint_returns_counts(api_env: None) -> None:
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["rows"] == [
-        {"iso3": "USA", "n_questions": 2, "n_forecasted": 1}
+        {
+            "iso3": "USA",
+            "n_questions": 2,
+            "n_forecasted": 1,
+            "last_triaged": "2024-02-01",
+            "last_forecasted": "2024-02-10",
+        }
     ]
