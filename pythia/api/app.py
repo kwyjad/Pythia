@@ -90,12 +90,23 @@ def _load_population_registry() -> None:
     if _POPULATION_BY_ISO3:
         return
     try:
-        repo_root = Path(__file__).resolve().parents[2]
-        path = repo_root / "resolver" / "data" / "population.csv"
+        env_path = os.getenv("PYTHIA_POPULATION_CSV_PATH")
+        if env_path:
+            path = Path(env_path)
+        else:
+            repo_root = Path(__file__).resolve().parents[2]
+            path = repo_root / "resolver" / "data" / "population.csv"
         if not path.exists():
             return
-        df = pd.read_csv(path, dtype=str).fillna("")
+        try:
+            df = pd.read_csv(path, dtype=str, sep=None, engine="python").fillna("")
+        except Exception:
+            df = pd.read_csv(path, dtype=str, sep="\t").fillna("")
+        df.columns = [str(col).strip().lower() for col in df.columns]
         if "iso3" not in df.columns or "population" not in df.columns:
+            logger.warning(
+                "Population registry present but could not be parsed; per-capita disabled"
+            )
             return
         population_map: dict[str, int] = {}
         for iso3, population in zip(df["iso3"], df["population"]):
@@ -115,7 +126,12 @@ def _load_population_registry() -> None:
         _POPULATION_BY_ISO3 = population_map
         if population_map:
             logger.info("Loaded %d population rows from %s", len(population_map), path)
+        else:
+            logger.warning(
+                "Population registry present but could not be parsed; per-capita disabled"
+            )
     except Exception:
+        logger.warning("Population registry present but could not be parsed; per-capita disabled")
         return
 
 
@@ -1355,11 +1371,38 @@ def get_risk_index(
             "rows": [],
         }
 
-    populations_available = (
-        _table_exists(con, "populations")
-        and _table_has_columns(con, "populations", ["iso3", "population", "year"])
-        and _nonnull_count(con, "populations", "population") > 0
-    )
+    db_population_map: dict[str, int] = {}
+    populations_available = False
+    populations_table_available = normalize and _table_exists(
+        con, "populations"
+    ) and _table_has_columns(con, "populations", ["iso3", "population", "year"])
+    if populations_table_available:
+        pop_df = _execute(
+            con,
+            """
+            SELECT iso3, population
+            FROM (
+              SELECT iso3, population,
+                     ROW_NUMBER() OVER (PARTITION BY iso3 ORDER BY year DESC) AS rn
+              FROM populations
+              WHERE population IS NOT NULL AND population > 0
+            )
+            WHERE rn = 1
+            """,
+        ).fetchdf()
+        if not pop_df.empty:
+            for iso3, population in zip(pop_df["iso3"], pop_df["population"]):
+                iso = str(iso3).strip().upper()
+                if not iso:
+                    continue
+                try:
+                    pop_value = int(float(population))
+                except Exception:
+                    continue
+                if pop_value <= 0:
+                    continue
+                db_population_map[iso] = pop_value
+            populations_available = bool(db_population_map)
     registry_available = False
     if normalize and not populations_available:
         _load_population_registry()
@@ -1390,6 +1433,7 @@ def get_risk_index(
             SELECT iso3, population,
                    ROW_NUMBER() OVER (PARTITION BY iso3 ORDER BY year DESC) AS rn
             FROM populations
+            WHERE population IS NOT NULL AND population > 0
           )
           WHERE rn = 1
         )
@@ -1525,10 +1569,14 @@ def get_risk_index(
         row.setdefault("m5_pc", None)
         row.setdefault("m6_pc", None)
         row.setdefault("total_pc", None)
-        if not populations_available and normalize and registry_available:
+        pop_value = row.get("population")
+        if not isinstance(pop_value, (int, float)) or pop_value <= 0:
+            pop_value = db_population_map.get(row.get("iso3", ""))
+        if normalize and (not pop_value or pop_value <= 0):
             pop_value = _population(row.get("iso3", ""))
-            if pop_value:
-                row["population"] = pop_value
+        if pop_value and pop_value > 0:
+            row["population"] = pop_value
+            if normalize:
                 row["m1_pc"] = (
                     row["m1"] / pop_value if row.get("m1") is not None else None
                 )

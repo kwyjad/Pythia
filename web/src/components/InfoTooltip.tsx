@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { MouseEvent } from "react";
+import type { KeyboardEvent, MouseEvent } from "react";
 
 type InfoTooltipProps = {
   text: string;
@@ -17,7 +17,7 @@ const TOOLTIP_OFFSET = 8;
 const TOOLTIP_WIDTH = 320;
 
 export default function InfoTooltip({ text }: InfoTooltipProps) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const triggerRef = useRef<HTMLSpanElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<Position | null>(null);
@@ -71,19 +71,36 @@ export default function InfoTooltip({ text }: InfoTooltipProps) {
     setOpen((prev) => !prev);
   };
 
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen((prev) => !prev);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }
+  };
+
   return (
     <>
-      <button
+      <span
         ref={triggerRef}
-        type="button"
+        role="button"
+        tabIndex={0}
+        aria-label="Help"
         className="rounded-full border border-slate-500 px-1 text-xs text-slate-300"
         onMouseDown={handleMouseDown}
         onClick={handleClick}
+        onKeyDown={handleKeyDown}
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
       >
         ?
-      </button>
+      </span>
       {open && position
         ? createPortal(
             <div
