@@ -24,21 +24,39 @@ type QuestionsTableProps = {
   rows: QuestionsRow[];
 };
 
-const parseYearMonth = (value?: string | null) => {
-  if (!value) return null;
-  const [yearStr, monthStr] = value.split("-");
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
-  return year * 12 + month;
-};
-
 const contains = (haystack: string, needle: string) =>
   haystack.toLowerCase().includes(needle.toLowerCase());
 
-const parseDateValue = (value: string) => {
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
+const parseMmYYYY = (value: string) => {
+  const match = value.match(/^(\d{2})-(\d{4})$/);
+  if (!match) return null;
+  const month = Number(match[1]);
+  const year = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+  if (month < 1 || month > 12) return null;
+  return year * 12 + month;
+};
+
+const rowForecastMonthKey = (value?: string | null) => {
+  if (!value) return null;
+  const match = value.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+  if (month < 1 || month > 12) return null;
+  return year * 12 + month;
+};
+
+const rowYearMonthKey = (value?: string | null) => {
+  if (!value) return null;
+  const match = value.match(/^(\d{4})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+  if (month < 1 || month > 12) return null;
+  return year * 12 + month;
 };
 
 const parseNumberValue = (value: string) => {
@@ -46,9 +64,23 @@ const parseNumberValue = (value: string) => {
   return Number.isNaN(num) ? null : num;
 };
 
+const EIV_TOOLTIP =
+  "EIV = sum over months 1–6 of (sum over buckets of p(bucket, month) × centroid(bucket)). Uses PA centroids for PA questions and fatalities centroids for FATALITIES questions.";
+
+const renderEivHeader = (label: string) => (
+  <span className="inline-flex items-center gap-1">
+    {label}
+    <span
+      className="rounded-full border border-slate-500 px-1 text-xs text-slate-300"
+      title={EIV_TOOLTIP}
+    >
+      ?
+    </span>
+  </span>
+);
+
 export default function QuestionsTable({ rows }: QuestionsTableProps) {
-  const [selectedIso3, setSelectedIso3] = useState<string[]>([]);
-  const [countryNameQuery, setCountryNameQuery] = useState("");
+  const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
   const [questionQuery, setQuestionQuery] = useState("");
   const [selectedHazards, setSelectedHazards] = useState<string[]>([]);
   const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
@@ -62,8 +94,16 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
   const [eivMin, setEivMin] = useState("");
   const [eivMax, setEivMax] = useState("");
 
-  const iso3Options = useMemo(
-    () => Array.from(new Set(rows.map((row) => row.iso3).filter(Boolean))).sort(),
+  const countryOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          rows
+            .map((row) => row.country_name ?? row.iso3)
+            .map((value) => value ?? "")
+            .filter(Boolean)
+        )
+      ).sort(),
     [rows]
   );
   const hazardOptions = useMemo(
@@ -82,20 +122,23 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
   );
 
   const filteredRows = useMemo(() => {
-    const iso3Set = new Set(selectedIso3);
+    const countrySet = new Set(selectedCountries);
     const hazardSet = new Set(selectedHazards);
     const metricSet = new Set(selectedMetrics);
     const statusSet = new Set(selectedStatuses);
-    const forecastFromValue = forecastDateFrom ? parseDateValue(forecastDateFrom) : null;
-    const forecastToValue = forecastDateTo ? parseDateValue(forecastDateTo) : null;
+    const forecastFromValue = forecastDateFrom ? parseMmYYYY(forecastDateFrom) : null;
+    const forecastToValue = forecastDateTo ? parseMmYYYY(forecastDateTo) : null;
+    const firstMonthFromValue = firstMonthFrom ? parseMmYYYY(firstMonthFrom) : null;
+    const firstMonthToValue = firstMonthTo ? parseMmYYYY(firstMonthTo) : null;
+    const lastMonthFromValue = lastMonthFrom ? parseMmYYYY(lastMonthFrom) : null;
+    const lastMonthToValue = lastMonthTo ? parseMmYYYY(lastMonthTo) : null;
     const eivMinValue = eivMin ? parseNumberValue(eivMin) : null;
     const eivMaxValue = eivMax ? parseNumberValue(eivMax) : null;
 
     return rows.filter((row) => {
-      if (iso3Set.size > 0 && !iso3Set.has(row.iso3)) return false;
-      if (countryNameQuery) {
-        const name = row.country_name ?? "";
-        if (!contains(name, countryNameQuery)) return false;
+      if (countrySet.size > 0) {
+        const countryValue = row.country_name ?? row.iso3;
+        if (!countryValue || !countrySet.has(countryValue)) return false;
       }
       if (questionQuery) {
         const questionText = row.wording ?? "";
@@ -110,24 +153,24 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
 
       if (forecastFromValue != null || forecastToValue != null) {
         if (!row.forecast_date) return false;
-        const rowForecast = parseDateValue(row.forecast_date);
+        const rowForecast = rowForecastMonthKey(row.forecast_date);
         if (rowForecast == null) return false;
         if (forecastFromValue != null && rowForecast < forecastFromValue) return false;
         if (forecastToValue != null && rowForecast > forecastToValue) return false;
       }
 
-      if (firstMonthFrom || firstMonthTo) {
-        const month = row.first_forecast_month ?? "";
-        if (!month) return false;
-        if (firstMonthFrom && month < firstMonthFrom) return false;
-        if (firstMonthTo && month > firstMonthTo) return false;
+      if (firstMonthFromValue != null || firstMonthToValue != null) {
+        const month = rowYearMonthKey(row.first_forecast_month);
+        if (month == null) return false;
+        if (firstMonthFromValue != null && month < firstMonthFromValue) return false;
+        if (firstMonthToValue != null && month > firstMonthToValue) return false;
       }
 
-      if (lastMonthFrom || lastMonthTo) {
-        const month = row.last_forecast_month ?? "";
-        if (!month) return false;
-        if (lastMonthFrom && month < lastMonthFrom) return false;
-        if (lastMonthTo && month > lastMonthTo) return false;
+      if (lastMonthFromValue != null || lastMonthToValue != null) {
+        const month = rowYearMonthKey(row.last_forecast_month);
+        if (month == null) return false;
+        if (lastMonthFromValue != null && month < lastMonthFromValue) return false;
+        if (lastMonthToValue != null && month > lastMonthToValue) return false;
       }
 
       if (eivMinValue != null || eivMaxValue != null) {
@@ -140,7 +183,6 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       return true;
     });
   }, [
-    countryNameQuery,
     eivMax,
     eivMin,
     firstMonthFrom,
@@ -152,14 +194,13 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     questionQuery,
     rows,
     selectedHazards,
-    selectedIso3,
+    selectedCountries,
     selectedMetrics,
     selectedStatuses,
   ]);
 
   const clearFilters = () => {
-    setSelectedIso3([]);
-    setCountryNameQuery("");
+    setSelectedCountries([]);
     setQuestionQuery("");
     setSelectedHazards([]);
     setSelectedMetrics([]);
@@ -179,8 +220,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "iso3",
         label: "ISO3",
-        headerClassName: "text-left",
-        cellClassName: "text-left",
+        headerClassName: "text-left whitespace-nowrap",
+        cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.iso3,
         render: (row) => (
           <Link
@@ -194,9 +235,9 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "country_name",
-        label: "Name",
-        headerClassName: "text-left",
-        cellClassName: "text-left",
+        label: "Country",
+        headerClassName: "text-left whitespace-nowrap",
+        cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.country_name ?? "",
         render: (row) => row.country_name ?? "",
         defaultSortDirection: "asc",
@@ -205,7 +246,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         key: "question",
         label: "Question",
         headerClassName: "text-left",
-        cellClassName: "text-left",
+        cellClassName: "text-left min-w-[40ch] align-top",
         sortValue: (row) => row.wording ?? row.question_id,
         render: (row) => (
           <div>
@@ -225,8 +266,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "hazard_code",
         label: "Hazard",
-        headerClassName: "text-left",
-        cellClassName: "text-left",
+        headerClassName: "text-left whitespace-nowrap",
+        cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.hazard_code,
         render: (row) => row.hazard_code,
         defaultSortDirection: "asc",
@@ -234,8 +275,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "metric",
         label: "Metric",
-        headerClassName: "text-left",
-        cellClassName: "text-left",
+        headerClassName: "text-left whitespace-nowrap",
+        cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.metric,
         render: (row) => row.metric,
         defaultSortDirection: "asc",
@@ -243,45 +284,44 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "forecast_date",
         label: "Forecast Date",
-        headerClassName: "text-right",
-        cellClassName: "text-right tabular-nums",
-        sortValue: (row) =>
-          row.forecast_date ? Date.parse(row.forecast_date) : null,
+        headerClassName: "text-right whitespace-nowrap",
+        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        sortValue: (row) => rowForecastMonthKey(row.forecast_date),
         render: (row) => row.forecast_date ?? "",
         defaultSortDirection: "desc",
       },
       {
         key: "first_forecast_month",
         label: "First Forecast Month",
-        headerClassName: "text-right",
-        cellClassName: "text-right tabular-nums",
-        sortValue: (row) => parseYearMonth(row.first_forecast_month),
+        headerClassName: "text-right whitespace-nowrap",
+        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        sortValue: (row) => rowYearMonthKey(row.first_forecast_month),
         render: (row) => row.first_forecast_month ?? "",
         defaultSortDirection: "desc",
       },
       {
         key: "last_forecast_month",
         label: "Last Forecast Month",
-        headerClassName: "text-right",
-        cellClassName: "text-right tabular-nums",
-        sortValue: (row) => parseYearMonth(row.last_forecast_month),
+        headerClassName: "text-right whitespace-nowrap",
+        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        sortValue: (row) => rowYearMonthKey(row.last_forecast_month),
         render: (row) => row.last_forecast_month ?? "",
         defaultSortDirection: "desc",
       },
       {
         key: "status",
         label: "Status",
-        headerClassName: "text-left",
-        cellClassName: "text-left",
+        headerClassName: "text-left whitespace-nowrap",
+        cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.status ?? "",
         render: (row) => row.status ?? "",
         defaultSortDirection: "asc",
       },
       {
         key: "eiv_total",
-        label: "EIV",
-        headerClassName: "text-right",
-        cellClassName: "text-right tabular-nums",
+        label: renderEivHeader("EIV"),
+        headerClassName: "text-right whitespace-nowrap",
+        cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => row.eiv_total ?? null,
         render: (row) =>
           row.eiv_total != null ? Math.round(row.eiv_total).toLocaleString() : "",
@@ -294,179 +334,205 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="grid w-full grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            ISO3
-            <select
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              multiple
-              value={selectedIso3}
-              onChange={(event) =>
-                setSelectedIso3(
-                  Array.from(event.target.selectedOptions).map((option) => option.value)
-                )
-              }
-            >
-              {iso3Options.map((iso3) => (
-                <option key={iso3} value={iso3}>
-                  {iso3}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Name
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              placeholder="Search name"
-              type="text"
-              value={countryNameQuery}
-              onChange={(event) => setCountryNameQuery(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Question
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              placeholder="Search text or ID"
-              type="text"
-              value={questionQuery}
-              onChange={(event) => setQuestionQuery(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Hazard
-            <select
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              multiple
-              value={selectedHazards}
-              onChange={(event) =>
-                setSelectedHazards(
-                  Array.from(event.target.selectedOptions).map((option) => option.value)
-                )
-              }
-            >
-              {hazardOptions.map((hazard) => (
-                <option key={hazard} value={hazard}>
-                  {hazard}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Metric
-            <select
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              multiple
-              value={selectedMetrics}
-              onChange={(event) =>
-                setSelectedMetrics(
-                  Array.from(event.target.selectedOptions).map((option) => option.value)
-                )
-              }
-            >
-              {metricOptions.map((metric) => (
-                <option key={metric} value={metric}>
-                  {metric}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Status
-            <select
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              multiple
-              value={selectedStatuses}
-              onChange={(event) =>
-                setSelectedStatuses(
-                  Array.from(event.target.selectedOptions).map((option) => option.value)
-                )
-              }
-            >
-              {statusOptions.map((status) => (
-                <option key={status} value={status}>
-                  {status}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Forecast Date From
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              type="date"
-              value={forecastDateFrom}
-              onChange={(event) => setForecastDateFrom(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Forecast Date To
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              type="date"
-              value={forecastDateTo}
-              onChange={(event) => setForecastDateTo(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            First Forecast Month From
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              type="month"
-              value={firstMonthFrom}
-              onChange={(event) => setFirstMonthFrom(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            First Forecast Month To
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              type="month"
-              value={firstMonthTo}
-              onChange={(event) => setFirstMonthTo(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Last Forecast Month From
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              type="month"
-              value={lastMonthFrom}
-              onChange={(event) => setLastMonthFrom(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            Last Forecast Month To
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              type="month"
-              value={lastMonthTo}
-              onChange={(event) => setLastMonthTo(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            EIV Min
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              min="0"
-              step="1"
-              type="number"
-              value={eivMin}
-              onChange={(event) => setEivMin(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
-            EIV Max
-            <input
-              className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
-              min="0"
-              step="1"
-              type="number"
-              value={eivMax}
-              onChange={(event) => setEivMax(event.target.value)}
-            />
-          </label>
+        <div className="flex w-full flex-col gap-3">
+          <div className="flex flex-wrap items-end gap-3 lg:flex-nowrap">
+            <label className="flex w-[15ch] flex-col gap-1 text-xs text-slate-400">
+              Country
+              <select
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                multiple
+                value={selectedCountries}
+                onChange={(event) =>
+                  setSelectedCountries(
+                    Array.from(event.target.selectedOptions).map(
+                      (option) => option.value
+                    )
+                  )
+                }
+              >
+                {countryOptions.map((country) => (
+                  <option key={country} value={country}>
+                    {country}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-400">
+              Hazard
+              <select
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                multiple
+                value={selectedHazards}
+                onChange={(event) =>
+                  setSelectedHazards(
+                    Array.from(event.target.selectedOptions).map(
+                      (option) => option.value
+                    )
+                  )
+                }
+              >
+                {hazardOptions.map((hazard) => (
+                  <option key={hazard} value={hazard}>
+                    {hazard}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-400">
+              Metric
+              <select
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                multiple
+                value={selectedMetrics}
+                onChange={(event) =>
+                  setSelectedMetrics(
+                    Array.from(event.target.selectedOptions).map(
+                      (option) => option.value
+                    )
+                  )
+                }
+              >
+                {metricOptions.map((metric) => (
+                  <option key={metric} value={metric}>
+                    {metric}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-400">
+              Status
+              <select
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                multiple
+                value={selectedStatuses}
+                onChange={(event) =>
+                  setSelectedStatuses(
+                    Array.from(event.target.selectedOptions).map(
+                      (option) => option.value
+                    )
+                  )
+                }
+              >
+                {statusOptions.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex w-[25ch] flex-col gap-1 text-xs text-slate-400">
+              Question
+              <input
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                placeholder="Search text or ID"
+                type="text"
+                value={questionQuery}
+                onChange={(event) => setQuestionQuery(event.target.value)}
+              />
+            </label>
+            <label className="flex w-[10ch] flex-col gap-1 text-xs text-slate-400">
+              EIV Min
+              <input
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                min="0"
+                step="1"
+                type="number"
+                value={eivMin}
+                onChange={(event) => setEivMin(event.target.value)}
+              />
+            </label>
+            <label className="flex w-[10ch] flex-col gap-1 text-xs text-slate-400">
+              EIV Max
+              <input
+                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                min="0"
+                step="1"
+                type="number"
+                value={eivMax}
+                onChange={(event) => setEivMax(event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-6">
+            <div className="flex flex-col gap-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Forecast Date From
+                <input
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                  inputMode="numeric"
+                  pattern="\\d{2}-\\d{4}"
+                  placeholder="mm-yyyy"
+                  type="text"
+                  value={forecastDateFrom}
+                  onChange={(event) => setForecastDateFrom(event.target.value)}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Forecast Date To
+                <input
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                  inputMode="numeric"
+                  pattern="\\d{2}-\\d{4}"
+                  placeholder="mm-yyyy"
+                  type="text"
+                  value={forecastDateTo}
+                  onChange={(event) => setForecastDateTo(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="flex flex-col gap-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                First Forecast Month From
+                <input
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                  inputMode="numeric"
+                  pattern="\\d{2}-\\d{4}"
+                  placeholder="mm-yyyy"
+                  type="text"
+                  value={firstMonthFrom}
+                  onChange={(event) => setFirstMonthFrom(event.target.value)}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                First Forecast Month To
+                <input
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                  inputMode="numeric"
+                  pattern="\\d{2}-\\d{4}"
+                  placeholder="mm-yyyy"
+                  type="text"
+                  value={firstMonthTo}
+                  onChange={(event) => setFirstMonthTo(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="flex flex-col gap-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Last Forecast Month From
+                <input
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                  inputMode="numeric"
+                  pattern="\\d{2}-\\d{4}"
+                  placeholder="mm-yyyy"
+                  type="text"
+                  value={lastMonthFrom}
+                  onChange={(event) => setLastMonthFrom(event.target.value)}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Last Forecast Month To
+                <input
+                  className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                  inputMode="numeric"
+                  pattern="\\d{2}-\\d{4}"
+                  placeholder="mm-yyyy"
+                  type="text"
+                  value={lastMonthTo}
+                  onChange={(event) => setLastMonthTo(event.target.value)}
+                />
+              </label>
+            </div>
+          </div>
         </div>
         <div className="flex flex-col items-end gap-2">
           <button
@@ -478,7 +544,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
           </button>
           <div className="text-xs text-slate-400">
             Showing {filteredRows.length.toLocaleString()} of{" "}
-            {rows.length.toLocaleString()} questions
+            {rows.length.toLocaleString()} forecasts
           </div>
         </div>
       </div>
@@ -489,6 +555,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         rows={filteredRows}
         initialSortKey="eiv_total"
         initialSortDirection="desc"
+        tableLayout="auto"
+        dense
       />
     </div>
   );

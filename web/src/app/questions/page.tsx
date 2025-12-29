@@ -133,9 +133,9 @@ const QuestionsPage = async () => {
   return (
     <div className="space-y-6">
       <section>
-        <h1 className="text-3xl font-semibold text-white">Questions</h1>
+        <h1 className="text-3xl font-semibold text-white">Forecasts</h1>
         <p className="text-sm text-slate-400">
-          Browse the latest questions by concept.
+          Browse the latest forecasts by concept.
         </p>
       </section>
 

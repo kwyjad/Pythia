@@ -105,14 +105,25 @@ def compute_questions_forecast_summary(
     base_alias = "scoped" if run_col and ts_col else "base"
     base_ev_expr = f"{base_alias}.{ev_value_col}" if ev_value_col else "NULL"
     if bc_joinable:
-        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.{prob_col} * bc.{bc_centroid_col})"
+        bc_exact_alias = "bc_exact"
+        bc_any_alias = "bc_any"
+        bc_centroid_expr = (
+            f"COALESCE({bc_exact_alias}.{bc_centroid_col}, {bc_any_alias}.{bc_centroid_col})"
+        )
+        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.{prob_col} * {bc_centroid_expr})"
         bc_join = (
-            "LEFT JOIN bucket_centroids bc ON "
-            f"bc.hazard_code = {base_alias}.hazard_code "
-            f"AND bc.metric = {base_alias}.metric "
-            f"AND bc.{bc_bucket_col} = {base_alias}.{bucket_col}"
+            "LEFT JOIN bucket_centroids bc_exact ON "
+            f"bc_exact.hazard_code = {base_alias}.hazard_code "
+            f"AND bc_exact.metric = {base_alias}.metric "
+            f"AND bc_exact.{bc_bucket_col} = {base_alias}.{bucket_col} "
+            "LEFT JOIN bucket_centroids bc_any ON "
+            f"bc_any.hazard_code = '*' "
+            f"AND bc_any.metric = {base_alias}.metric "
+            f"AND bc_any.{bc_bucket_col} = {base_alias}.{bucket_col}"
         )
     else:
+        if not ev_value_col:
+            LOGGER.info("Bucket centroids unavailable; EIV totals will be null.")
         eiv_expr = base_ev_expr
         bc_join = ""
 
