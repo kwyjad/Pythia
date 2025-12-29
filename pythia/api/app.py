@@ -33,6 +33,7 @@ from pythia.api.models import (
 )
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
+from resolver.query.countries_index import compute_countries_index
 
 app = FastAPI(title="Pythia API", version="1.0.0")
 cors_origins_env = os.getenv("PYTHIA_CORS_ALLOW_ORIGINS", "*").strip()
@@ -1595,6 +1596,12 @@ def diagnostics_summary():
 @app.get("/v1/countries")
 def get_countries():
     con = _con()
+    try:
+        rows = compute_countries_index(con)
+        return {"rows": rows}
+    except Exception:
+        logger.exception("Failed to compute countries index, falling back.")
+
     if not _table_exists(con, "questions"):
         return {"rows": []}
 

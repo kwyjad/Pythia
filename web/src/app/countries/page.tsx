@@ -16,22 +16,6 @@ type CountriesResponse = {
   rows: CountriesRow[];
 };
 
-type QuestionsResponse = {
-  rows: Array<{
-    iso3?: string;
-    hs_run_created_at?: string | null;
-  }>;
-};
-
-type ForecastsEnsembleResponse = {
-  rows: Array<{
-    iso3?: string;
-    created_at?: string | null;
-    timestamp?: string | null;
-    status?: string | null;
-  }>;
-};
-
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = "";
@@ -94,13 +78,6 @@ async function loadCountryNameMap(): Promise<Map<string, string>> {
   return map;
 }
 
-function updateMax(map: Map<string, number>, key: string, dateValue?: string | null) {
-  const ts = dateValue ? Date.parse(dateValue) : NaN;
-  if (!key || Number.isNaN(ts)) return;
-  const prev = map.get(key);
-  if (prev == null || ts > prev) map.set(key, ts);
-}
-
 const CountriesPage = async () => {
   let rows: CountriesRow[] = [];
   try {
@@ -112,46 +89,12 @@ const CountriesPage = async () => {
 
   const nameMap = await loadCountryNameMap();
 
-  const lastTriagedByIso3 = new Map<string, number>();
-  try {
-    const qResp = await apiGet<QuestionsResponse>("/questions", { latest_only: true });
-    for (const q of qResp.rows ?? []) {
-      const iso3 = (q.iso3 ?? "").toUpperCase();
-      updateMax(lastTriagedByIso3, iso3, q.hs_run_created_at ?? null);
-    }
-  } catch (error) {
-    console.warn("Failed to derive last triaged dates:", error);
-  }
-
-  const lastForecastedByIso3 = new Map<string, number>();
-  try {
-    const fResp = await apiGet<ForecastsEnsembleResponse>("/forecasts_ensemble", {
-      latest_only: true,
-    });
-    for (const f of fResp.rows ?? []) {
-      const iso3 = (f.iso3 ?? "").toUpperCase();
-      const t = f.created_at ?? f.timestamp ?? null;
-      if (typeof f.status === "string" && f.status.length > 0) {
-        if (f.status !== "ok") continue;
-      }
-      updateMax(lastForecastedByIso3, iso3, t);
-    }
-  } catch (error) {
-    console.warn("Failed to derive last forecasted dates:", error);
-  }
-
   rows = rows.map((r) => {
     const iso3 = (r.iso3 ?? "").toUpperCase();
-    const triagedTs = lastTriagedByIso3.get(iso3);
-    const forecastedTs = lastForecastedByIso3.get(iso3);
     return {
       ...r,
       iso3,
       country_name: nameMap.get(iso3) ?? null,
-      last_triaged: triagedTs ? new Date(triagedTs).toISOString().slice(0, 10) : null,
-      last_forecasted: forecastedTs
-        ? new Date(forecastedTs).toISOString().slice(0, 10)
-        : null,
     };
   });
 
