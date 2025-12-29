@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 
 import type { RiskIndexRow } from "../lib/types";
+import InfoTooltip from "./InfoTooltip";
 import SortableTable, { SortableColumn } from "./SortableTable";
 
 const EIV_TOOLTIP =
@@ -49,12 +50,7 @@ type RiskIndexTableProps = {
 const renderEivHeader = (label: string) => (
   <span className="inline-flex items-center gap-1">
     {label}
-    <span
-      className="rounded-full border border-slate-500 px-1 text-xs text-slate-300"
-      title={EIV_TOOLTIP}
-    >
-      ?
-    </span>
+    <InfoTooltip text={EIV_TOOLTIP} />
   </span>
 );
 
