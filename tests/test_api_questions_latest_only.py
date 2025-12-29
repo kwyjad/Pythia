@@ -54,6 +54,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             run_id TEXT,
             created_at TIMESTAMP,
             status TEXT,
+            hazard_code TEXT,
+            metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE
@@ -101,13 +103,15 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             run_id,
             created_at,
             status,
+            hazard_code,
+            metric,
             month_index,
             bucket_index,
             probability
         )
         VALUES
-            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 1, 1, 0.25),
-            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 2, 2, 0.75);
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 'TC', 'PIN', 1, 1, 0.25),
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 'TC', 'PIN', 2, 2, 0.75);
         """
     )
     con.execute(

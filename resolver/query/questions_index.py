@@ -75,18 +75,41 @@ def compute_questions_forecast_summary(
     ts_col = _pick_column(fe_cols, ["created_at", "timestamp"])
     run_col = _pick_column(fe_cols, ["run_id"])
     ev_value_col = _pick_column(fe_cols, ["ev_value"])
+    fe_has_hazard = "hazard_code" in fe_cols
+    fe_has_metric = "metric" in fe_cols
 
-    if status_col:
-        filter_expr = f"fe.{status_col} = 'ok'"
-    elif prob_col and horizon_col and bucket_col:
-        filter_expr = (
-            f"fe.{prob_col} IS NOT NULL AND "
-            f"fe.{horizon_col} IS NOT NULL AND "
-            f"fe.{bucket_col} IS NOT NULL"
+    def _log_summary_context(reason: str, *, bc_joinable: bool = False) -> None:
+        LOGGER.info(
+            "Skipping forecast summary (%s). Columns: prob=%s horizon=%s bucket=%s status=%s "
+            "ts=%s run=%s ev_value=%s bc_joinable=%s",
+            reason,
+            prob_col,
+            horizon_col,
+            bucket_col,
+            status_col,
+            ts_col,
+            run_col,
+            ev_value_col,
+            bc_joinable,
         )
-    else:
-        LOGGER.info("Skipping forecast summary; forecasts_ensemble columns missing.")
+
+    if not prob_col or not horizon_col or not bucket_col:
+        _log_summary_context("forecasts_ensemble columns missing")
         return {}
+
+    filter_bits = []
+    if status_col:
+        filter_bits.append(f"LOWER(CAST(fe.{status_col} AS VARCHAR)) = 'ok'")
+    if prob_col:
+        filter_bits.append(f"fe.{prob_col} IS NOT NULL")
+    if horizon_col:
+        filter_bits.append(f"fe.{horizon_col} IS NOT NULL")
+    if bucket_col:
+        filter_bits.append(f"fe.{bucket_col} IS NOT NULL")
+    if not filter_bits:
+        _log_summary_context("no usable filters")
+        return {}
+    filter_expr = " AND ".join(filter_bits)
 
     bc_exists = _table_exists(conn, "bucket_centroids")
     bc_cols = _table_columns(conn, "bucket_centroids") if bc_exists else set()
@@ -104,38 +127,83 @@ def compute_questions_forecast_summary(
 
     base_alias = "scoped" if run_col and ts_col else "base"
     base_ev_expr = f"{base_alias}.{ev_value_col}" if ev_value_col else "NULL"
+    metric_expr = f"{base_alias}.metric"
+    bucket_expr = f"{base_alias}.bucket"
+    if bucket_col == "bucket_index":
+        fallback_centroid_expr = f"""
+            CASE
+              WHEN UPPER({metric_expr}) = 'PA' THEN CASE {bucket_expr}
+                WHEN 1 THEN 0
+                WHEN 2 THEN 30000
+                WHEN 3 THEN 150000
+                WHEN 4 THEN 375000
+                WHEN 5 THEN 700000
+                ELSE NULL
+              END
+              WHEN UPPER({metric_expr}) = 'FATALITIES' THEN CASE {bucket_expr}
+                WHEN 1 THEN 0
+                WHEN 2 THEN 15
+                WHEN 3 THEN 62
+                WHEN 4 THEN 300
+                WHEN 5 THEN 700
+                ELSE NULL
+              END
+              ELSE NULL
+            END
+        """
+    elif bucket_col == "class_bin":
+        bucket_text = f"LOWER(CAST({bucket_expr} AS VARCHAR))"
+        fallback_centroid_expr = f"""
+            CASE
+              WHEN UPPER({metric_expr}) = 'PA' THEN CASE {bucket_text}
+                WHEN '<10k' THEN 0
+                WHEN '10k-<50k' THEN 30000
+                WHEN '50k-<250k' THEN 150000
+                WHEN '250k-<500k' THEN 375000
+                WHEN '>=500k' THEN 700000
+                ELSE NULL
+              END
+              WHEN UPPER({metric_expr}) = 'FATALITIES' THEN CASE {bucket_text}
+                WHEN '<5' THEN 0
+                WHEN '5-<20' THEN 15
+                WHEN '20-<100' THEN 62
+                WHEN '100-<500' THEN 300
+                WHEN '>=500' THEN 700
+                ELSE NULL
+              END
+              ELSE NULL
+            END
+        """
+    else:
+        fallback_centroid_expr = "NULL"
+
     if bc_joinable:
         bc_exact_alias = "bc_exact"
         bc_any_alias = "bc_any"
         bc_centroid_expr = (
             f"COALESCE({bc_exact_alias}.{bc_centroid_col}, {bc_any_alias}.{bc_centroid_col})"
         )
-        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.{prob_col} * {bc_centroid_expr})"
+        centroid_expr = f"COALESCE({bc_centroid_expr}, {fallback_centroid_expr})"
+        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.prob * {centroid_expr})"
         bc_join = (
             "LEFT JOIN bucket_centroids bc_exact ON "
-            f"bc_exact.hazard_code = {base_alias}.hazard_code "
-            f"AND bc_exact.metric = {base_alias}.metric "
-            f"AND bc_exact.{bc_bucket_col} = {base_alias}.{bucket_col} "
+            f"UPPER(bc_exact.hazard_code) = UPPER({base_alias}.hazard_code) "
+            f"AND UPPER(bc_exact.metric) = UPPER({base_alias}.metric) "
+            f"AND bc_exact.{bc_bucket_col} = {base_alias}.bucket "
             "LEFT JOIN bucket_centroids bc_any ON "
-            f"bc_any.hazard_code = '*' "
-            f"AND bc_any.metric = {base_alias}.metric "
-            f"AND bc_any.{bc_bucket_col} = {base_alias}.{bucket_col}"
+            "UPPER(bc_any.hazard_code) = '*' "
+            f"AND UPPER(bc_any.metric) = UPPER({base_alias}.metric) "
+            f"AND bc_any.{bc_bucket_col} = {base_alias}.bucket"
         )
     else:
-        if not ev_value_col:
-            LOGGER.info("Bucket centroids unavailable; EIV totals will be null.")
-        eiv_expr = base_ev_expr
+        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.prob * {fallback_centroid_expr})"
         bc_join = ""
 
-    horizon_expr = (
-        f"MAX({base_alias}.{horizon_col}) AS horizon_max" if horizon_col else "NULL AS horizon_max"
-    )
+    horizon_expr = f"MAX({base_alias}.horizon) AS horizon_max"
     forecast_date_expr = (
-        f"STRFTIME(MAX({base_alias}.{ts_col}), '%Y-%m-%d') AS forecast_date"
-        if ts_col
-        else "NULL AS forecast_date"
+        f"STRFTIME(MAX({base_alias}.ts), '%Y-%m-%d') AS forecast_date" if ts_col else "NULL AS forecast_date"
     )
-    eiv_total_expr = f"SUM({eiv_expr}) AS eiv_total"
+    eiv_total_expr = f"SUM(COALESCE({eiv_expr}, 0)) AS eiv_total"
 
     params: list[Any] = []
     question_filter = ""
@@ -146,11 +214,31 @@ def compute_questions_forecast_summary(
         question_filter = f"AND q.question_id IN ({placeholders})"
         params.extend(question_ids)
 
+    hazard_expr = "q.hazard_code AS hazard_code"
+    if fe_has_hazard:
+        hazard_expr = "COALESCE(NULLIF(fe.hazard_code, ''), q.hazard_code) AS hazard_code"
+    metric_expr = "q.metric AS metric"
+    if fe_has_metric:
+        metric_expr = "COALESCE(NULLIF(fe.metric, ''), q.metric) AS metric"
+
+    base_select = [
+        "fe.question_id AS question_id",
+        hazard_expr,
+        metric_expr,
+        f"fe.{prob_col} AS prob",
+        f"fe.{horizon_col} AS horizon",
+        f"fe.{bucket_col} AS bucket",
+    ]
+    if run_col:
+        base_select.append(f"fe.{run_col} AS run_id")
+    if ts_col:
+        base_select.append(f"fe.{ts_col} AS ts")
+    if ev_value_col:
+        base_select.append(f"fe.{ev_value_col} AS ev_value")
+
     base_sql = f"""
         SELECT
-          fe.*,
-          q.hazard_code AS hazard_code,
-          q.metric AS metric
+          {", ".join(base_select)}
         FROM forecasts_ensemble fe
         JOIN questions q ON q.question_id = fe.question_id
         WHERE {filter_expr}
@@ -166,20 +254,20 @@ def compute_questions_forecast_summary(
                 latest_runs AS (
                     SELECT
                       question_id,
-                      {run_col} AS run_id,
+                      run_id,
                       ROW_NUMBER() OVER (
                         PARTITION BY question_id
-                        ORDER BY {ts_col} DESC
+                        ORDER BY ts DESC
                       ) AS rn
                     FROM base
-                    GROUP BY question_id, {run_col}, {ts_col}
+                    GROUP BY question_id, run_id, ts
                 ),
                 scoped AS (
                     SELECT base.*
                     FROM base
                     JOIN latest_runs lr
                       ON lr.question_id = base.question_id
-                     AND lr.run_id = base.{run_col}
+                     AND lr.run_id = base.run_id
                     WHERE lr.rn = 1
                 )
                 SELECT
@@ -211,6 +299,7 @@ def compute_questions_forecast_summary(
         rows = conn.execute(sql, params).fetchall()
     except Exception:
         LOGGER.exception("Failed to compute questions forecast summary")
+        _log_summary_context("query failed", bc_joinable=bc_joinable)
         return {}
 
     summary: dict[str, dict[str, Any]] = {}
