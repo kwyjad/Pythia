@@ -9,8 +9,8 @@ const Nav = () => {
         </Link>
         <div className="flex items-center gap-4 text-sm text-slate-300">
           <Link href="/">Overview</Link>
-          <Link href="/countries">Country</Link>
-          <Link href="/questions">Question</Link>
+          <Link href="/countries">Countries</Link>
+          <Link href="/questions">Questions</Link>
         </div>
       </div>
     </nav>

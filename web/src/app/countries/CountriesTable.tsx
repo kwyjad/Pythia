@@ -7,6 +7,9 @@ import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
 type CountriesRow = {
   iso3: string;
+  country_name?: string | null;
+  last_forecasted?: string | null; // YYYY-MM-DD
+  last_triaged?: string | null; // YYYY-MM-DD
   n_questions: number;
   n_forecasted: number;
 };
@@ -20,7 +23,7 @@ export default function CountriesTable({ rows }: CountriesTableProps) {
     () => [
       {
         key: "iso3",
-        label: "Country",
+        label: "ISO3",
         headerClassName: "text-left",
         cellClassName: "text-left",
         sortValue: (row) => row.iso3,
@@ -35,12 +38,40 @@ export default function CountriesTable({ rows }: CountriesTableProps) {
         defaultSortDirection: "asc",
       },
       {
+        key: "country_name",
+        label: "Name",
+        headerClassName: "text-left",
+        cellClassName: "text-left",
+        sortValue: (row) => row.country_name ?? "",
+        render: (row) => row.country_name ?? "",
+        defaultSortDirection: "asc",
+      },
+      {
         key: "n_questions",
         label: "Questions",
         headerClassName: "text-right",
         cellClassName: "text-right tabular-nums",
         sortValue: (row) => row.n_questions,
         render: (row) => row.n_questions.toLocaleString(),
+        defaultSortDirection: "desc",
+      },
+      {
+        key: "last_forecasted",
+        label: "Last Forecasted",
+        headerClassName: "text-right",
+        cellClassName: "text-right tabular-nums",
+        sortValue: (row) =>
+          row.last_forecasted ? Date.parse(row.last_forecasted) : null,
+        render: (row) => row.last_forecasted ?? "",
+        defaultSortDirection: "desc",
+      },
+      {
+        key: "last_triaged",
+        label: "Last Triaged",
+        headerClassName: "text-right",
+        cellClassName: "text-right tabular-nums",
+        sortValue: (row) => (row.last_triaged ? Date.parse(row.last_triaged) : null),
+        render: (row) => row.last_triaged ?? "",
         defaultSortDirection: "desc",
       },
       {
