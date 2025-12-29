@@ -17,7 +17,7 @@
       `503 Admin token not configured`.
 - `GET /v1/question_bundle`
   - Query params: `question_id` (required), `hs_run_id`, `forecaster_run_id`, `include_llm_calls` (bool, default false), `include_transcripts` (bool, default false), `limit_llm_calls` (int, default 200).
-  - Returns a bundle containing: the question row, HS run/scenarios/country report, ensemble SPD rows plus per-model SPD rows, question context/resolutions, and optional `llm_calls` (including transcripts only when requested).
+  - Returns a bundle containing: the question row, HS run/scenarios/country report, ensemble SPD rows plus per-model SPD rows, question context/resolutions (plus `context.scores` when available), and optional `llm_calls` (including transcripts only when requested).
 - `GET /v1/questions`
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`.
 - `GET /v1/risk_index`
