@@ -127,9 +127,14 @@ const buildProbVector = (
 
     if (index === null || index < 0 || index >= probs.length) return;
 
-    const probValue = row.prob ?? row.p;
+    const probValue = row.probability ?? row.prob ?? row.p;
     if (typeof probValue === "number" && Number.isFinite(probValue)) {
       probs[index] += probValue;
+    } else if (typeof probValue === "string") {
+      const parsed = Number.parseFloat(probValue);
+      if (Number.isFinite(parsed)) {
+        probs[index] += parsed;
+      }
     }
   });
 
@@ -251,29 +256,17 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
             />
             Show total EIV
           </label>
+          <div className="text-sm text-slate-200">
+            EIV: {numberFormatter.format(Math.round(eivMonth))}
+            {showTotalEiv
+              ? ` • Total: ${numberFormatter.format(Math.round(eivTotal))}`
+              : ""}
+          </div>
         </div>
       </div>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[2fr,1fr]">
+      <div className="mt-6">
         <SpdBarChart labels={labels} probs={probs} />
-        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-4">
-          <div>
-            <div className="text-xs uppercase tracking-wide text-slate-400">EIV</div>
-            <div className="text-lg font-semibold text-white">
-              {numberFormatter.format(Math.round(eivMonth))}
-            </div>
-            <div className="text-xs text-slate-500">Selected month</div>
-          </div>
-          {showTotalEiv ? (
-            <div>
-              <div className="text-xs uppercase tracking-wide text-slate-400">Total</div>
-              <div className="text-lg font-semibold text-white">
-                {numberFormatter.format(Math.round(eivTotal))}
-              </div>
-              <div className="text-xs text-slate-500">Months 1–6</div>
-            </div>
-          ) : null}
-        </div>
       </div>
 
       <div className="mt-6 overflow-x-auto">

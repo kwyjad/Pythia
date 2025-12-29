@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import CollapsiblePanel from "../../../components/CollapsiblePanel";
 import SpdPanel from "./SpdPanel";
+import { formatModelList } from "../../../lib/model_names";
 import type { QuestionBundleResponse } from "../../../lib/types";
 
 type QuestionDetailViewProps = {
@@ -57,17 +58,37 @@ const getModelNamesForPhase = (
   phase: string
 ): string => {
   const rows = byPhase?.[phase] ?? [];
-  const names = new Set<string>();
+  const names: string[] = [];
   rows.forEach((row) => {
     const name =
+      (row.model_id as string | undefined) ??
       (row.model_name as string | undefined) ??
-      (row.model as string | undefined) ??
-      (row.model_id as string | undefined);
+      (row.model as string | undefined);
     if (name) {
-      names.add(name);
+      names.push(name);
     }
   });
-  return names.size ? Array.from(names).sort().join(", ") : "—";
+  return formatModelList(names);
+};
+
+const getModelNamesForPhases = (
+  byPhase: Record<string, ModelRow[]>,
+  phases: string[]
+): string => {
+  const names: string[] = [];
+  phases.forEach((phase) => {
+    const rows = byPhase?.[phase] ?? [];
+    rows.forEach((row) => {
+      const name =
+        (row.model_id as string | undefined) ??
+        (row.model_name as string | undefined) ??
+        (row.model as string | undefined);
+      if (name) {
+        names.push(name);
+      }
+    });
+  });
+  return formatModelList(names);
 };
 
 const renderScenarioText = (text?: string | null) => {
@@ -124,6 +145,11 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
   const triageScore = triage.triage_score ?? "—";
   const triageTier = triage.tier ?? "—";
+  const webSearchModels = getModelNamesForPhases(byPhase, [
+    "hs_web_research",
+    "research_web_research",
+    "forecast_web_research",
+  ]);
 
   const resolutionForTarget = resolutions.find(
     (row) => row.observed_month === targetMonth
@@ -187,85 +213,71 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
       <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
         <h2 className="text-lg font-semibold text-white">Summary</h2>
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full table-auto text-left text-sm text-slate-200">
-            <tbody className="divide-y divide-slate-800">
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Status</th>
-                <td className="py-2">{status}</td>
-              </tr>
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Forecast date</th>
-                <td className="py-2">{forecastDate}</td>
-              </tr>
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Forecast window</th>
-                <td className="py-2">
-                  {targetMonth ?? "—"} → {endMonth ?? "—"}
-                </td>
-              </tr>
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Models used</th>
-                <td className="py-2 space-y-1">
-                  <div>
-                    <span className="text-slate-400">HS triage:</span>{" "}
-                    {getModelNamesForPhase(byPhase, "hs_triage")}
-                  </div>
-                  <div>
-                    <span className="text-slate-400">Research:</span>{" "}
-                    {getModelNamesForPhase(byPhase, "research_v2")}
-                  </div>
-                  <div>
-                    <span className="text-slate-400">SPD:</span>{" "}
-                    {getModelNamesForPhase(byPhase, "spd_v2")}
-                  </div>
-                  <div>
-                    <span className="text-slate-400">Scenario:</span>{" "}
-                    {getModelNamesForPhase(byPhase, "scenario_v2")}
-                  </div>
-                </td>
-              </tr>
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Triage</th>
-                <td className="py-2">
-                  Score: {triageScore} • Tier: {triageTier}
-                </td>
-              </tr>
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Resolutions</th>
-                <td className="py-2">{resolutionSummary}</td>
-              </tr>
-              <tr>
-                <th className="py-2 pr-4 font-medium text-slate-400">Brier</th>
-                <td className="py-2 space-y-2">
-                  {brierAverage !== null ? (
-                    <div className="text-sm text-slate-200">
-                      Avg Brier (resolved months): {brierAverage.toFixed(3)}
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {[
+            { label: "Status", value: status },
+            { label: "Forecast date", value: forecastDate },
+            {
+              label: "Forecast window",
+              value: `${targetMonth ?? "—"} → ${endMonth ?? "—"}`,
+            },
+            { label: "Triage score", value: triageScore },
+            { label: "Triage tier", value: triageTier },
+            { label: "Web search", value: webSearchModels },
+            { label: "HS triage", value: getModelNamesForPhase(byPhase, "hs_triage") },
+            { label: "Research", value: getModelNamesForPhase(byPhase, "research_v2") },
+            { label: "SPD", value: getModelNamesForPhase(byPhase, "spd_v2") },
+            { label: "Scenario", value: getModelNamesForPhase(byPhase, "scenario_v2") },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="rounded border border-slate-800 bg-slate-950 px-3 py-2"
+            >
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                {item.label}
+              </div>
+              <div className="mt-1 text-sm text-slate-200">{item.value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div className="rounded border border-slate-800 bg-slate-950 px-3 py-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Resolutions
+            </div>
+            <div className="mt-2 text-sm text-slate-200">{resolutionSummary}</div>
+          </div>
+          <div className="rounded border border-slate-800 bg-slate-950 px-3 py-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Brier
+            </div>
+            <div className="mt-2 space-y-2">
+              {brierAverage !== null ? (
+                <div className="text-sm text-slate-200">
+                  Avg Brier (resolved months): {brierAverage.toFixed(3)}
+                </div>
+              ) : (
+                <div className="text-sm text-slate-400">No Brier yet</div>
+              )}
+              <div className="grid grid-cols-3 gap-2 text-xs text-slate-200 md:grid-cols-6">
+                {[1, 2, 3, 4, 5, 6].map((horizon) => (
+                  <div
+                    key={`brier-${horizon}`}
+                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1"
+                  >
+                    <div className="text-[11px] text-slate-400">
+                      Month {horizon}
                     </div>
-                  ) : (
-                    <div className="text-sm text-slate-400">No Brier yet</div>
-                  )}
-                  <div className="grid grid-cols-3 gap-2 text-xs text-slate-200 md:grid-cols-6">
-                    {[1, 2, 3, 4, 5, 6].map((horizon) => (
-                      <div
-                        key={`brier-${horizon}`}
-                        className="rounded border border-slate-800 bg-slate-950 px-2 py-1"
-                      >
-                        <div className="text-[11px] text-slate-400">
-                          Month {horizon}
-                        </div>
-                        <div>
-                          {brierByHorizon.has(horizon)
-                            ? brierByHorizon.get(horizon)?.toFixed(3)
-                            : "—"}
-                        </div>
-                      </div>
-                    ))}
+                    <div>
+                      {brierByHorizon.has(horizon)
+                        ? brierByHorizon.get(horizon)?.toFixed(3)
+                        : "—"}
+                    </div>
                   </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 

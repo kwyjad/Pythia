@@ -98,11 +98,13 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
         CREATE TABLE llm_calls (
             call_id TEXT, run_id TEXT, hs_run_id TEXT, question_id TEXT, phase TEXT, prompt_text TEXT,
             response_text TEXT, parsed_json TEXT, usage_json TEXT, timestamp TIMESTAMP, iso3 TEXT,
-            hazard_code TEXT
+            hazard_code TEXT, model_id TEXT, model_name TEXT
         );
         INSERT INTO llm_calls VALUES
-          ('c1', 'f-new', NULL, 'Q1', 'research_v2', 'prompt', 'response', '{"foo":1}', '{"bar":2}', now(), NULL, NULL),
-          ('c2', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt', 'hs response', '{"note":"triage"}', '{"usage":1}', now(), 'KEN', 'DR');
+          ('c1', 'f-new', NULL, 'Q1', 'research_v2', 'prompt', 'response', '{"foo":1}', '{"bar":2}', now(), NULL, NULL, 'gemini-3-pro-preview', 'gemini'),
+          ('c2', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt', 'hs response', '{"note":"triage"}', '{"usage":1}', now(), 'KEN', 'DR', 'gpt-5.1', 'gpt'),
+          ('c3', NULL, 'hs-new', NULL, 'hs_web_research', 'hs web', 'hs web response', '{"note":"web"}', '{"usage":2}', now(), 'KEN', 'DR', 'gemini-3-flash-preview', 'gemini'),
+          ('c4', 'f-new', NULL, 'Q1', 'forecast_web_research', 'web prompt', 'web response', '{"note":"forecast web"}', '{"usage":3}', now(), NULL, NULL, 'claude-opus-4-5-20240229', 'claude');
         """
     )
     con.close()
@@ -170,8 +172,14 @@ def test_question_bundle_llm_calls_toggle(client: TestClient) -> None:
 
     assert data["llm_calls"]["included"] is True
     assert data["llm_calls"]["transcripts_included"] is False
-    assert len(data["llm_calls"]["rows"]) == 2
+    assert len(data["llm_calls"]["rows"]) == 4
     assert all("prompt_text" not in row for row in data["llm_calls"]["rows"])
+    assert "hs_web_research" in data["llm_calls"]["by_phase"]
+    assert "forecast_web_research" in data["llm_calls"]["by_phase"]
+    assert any(
+        row.get("model_id") == "gemini-3-flash-preview"
+        for row in data["llm_calls"]["by_phase"]["hs_web_research"]
+    )
 
 
 def test_question_bundle_llm_calls_with_transcripts(client: TestClient) -> None:

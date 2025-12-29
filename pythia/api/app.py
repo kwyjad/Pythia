@@ -408,7 +408,14 @@ def _build_llm_calls_bundle(
                 included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
             )
         filters.append(
-            "(run_id = :forecaster_run_id AND question_id = :question_id AND phase IN ('research_v2','spd_v2','scenario_v2'))"
+            "("
+            "run_id = :forecaster_run_id "
+            "AND question_id = :question_id "
+            "AND phase IN ("
+            "'research_v2','spd_v2','scenario_v2',"
+            "'research_web_research','forecast_web_research'"
+            ")"
+            ")"
         )
         params["forecaster_run_id"] = forecaster_run_id
         params["question_id"] = question_id
@@ -419,7 +426,12 @@ def _build_llm_calls_bundle(
                 included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
             )
         filters.append(
-            "(hs_run_id = :hs_run_id AND iso3 = :iso3 AND hazard_code = :hazard_code AND phase = 'hs_triage')"
+            "("
+            "hs_run_id = :hs_run_id "
+            "AND iso3 = :iso3 "
+            "AND hazard_code = :hazard_code "
+            "AND phase IN ('hs_triage','hs_web_research')"
+            ")"
         )
         params["hs_run_id"] = hs_run_id
         params["iso3"] = iso3
