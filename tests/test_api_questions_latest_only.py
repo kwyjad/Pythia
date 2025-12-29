@@ -51,8 +51,22 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
+            run_id TEXT,
             created_at TIMESTAMP,
-            status TEXT
+            status TEXT,
+            month_index INTEGER,
+            bucket_index INTEGER,
+            probability DOUBLE
+        );
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
         );
         """
     )
@@ -82,8 +96,24 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
-        INSERT INTO forecasts_ensemble (question_id, created_at, status)
-        VALUES ('q_new', '2024-02-10 00:00:00', 'ok');
+        INSERT INTO forecasts_ensemble (
+            question_id,
+            run_id,
+            created_at,
+            status,
+            month_index,
+            bucket_index,
+            probability
+        )
+        VALUES
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 1, 1, 0.25),
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 2, 2, 0.75);
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+        VALUES ('TC', 'PIN', 1, 10.0), ('TC', 'PIN', 2, 20.0);
         """
     )
     con.close()
@@ -105,7 +135,11 @@ def test_latest_only_questions_selects_latest_hs_run(api_env: None) -> None:
     assert resp.status_code == 200
     payload = resp.json()
     assert len(payload["rows"]) == 1
-    assert payload["rows"][0]["question_id"] == "q_new"
+    row = payload["rows"][0]
+    assert row["question_id"] == "q_new"
+    assert row["forecast_date"] == "2024-02-10"
+    assert row["forecast_horizon_max"] == 2
+    assert row["eiv_total"] == pytest.approx(17.5)
 
 
 def test_countries_endpoint_returns_counts(api_env: None) -> None:
