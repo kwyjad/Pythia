@@ -34,6 +34,7 @@ from pythia.api.models import (
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
+from resolver.query.questions_index import compute_questions_forecast_summary
 
 app = FastAPI(title="Pythia API", version="1.0.0")
 cors_origins_env = os.getenv("PYTHIA_CORS_ALLOW_ORIGINS", "*").strip()
@@ -694,7 +695,19 @@ def get_questions(
         sql += " AND rn = 1"
     sql += " ORDER BY target_month, iso3, hazard_code, metric"
     df = _execute(con, sql, params).fetchdf()
-    return {"rows": _rows_from_df(df)}
+    rows = _rows_from_df(df)
+    try:
+        question_ids = [row["question_id"] for row in rows if row.get("question_id")]
+        summary = compute_questions_forecast_summary(con, question_ids=question_ids)
+        for row in rows:
+            qid = row.get("question_id")
+            forecast = summary.get(qid or "", {})
+            row["forecast_date"] = forecast.get("forecast_date")
+            row["forecast_horizon_max"] = forecast.get("horizon_max")
+            row["eiv_total"] = forecast.get("eiv_total")
+    except Exception:
+        logger.exception("Failed to enrich questions with forecast summary")
+    return {"rows": rows}
 
 
 @app.get("/v1/question_bundle")
