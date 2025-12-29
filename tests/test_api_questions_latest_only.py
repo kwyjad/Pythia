@@ -113,7 +113,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     con.execute(
         """
         INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
-        VALUES ('TC', 'PIN', 1, 10.0), ('TC', 'PIN', 2, 20.0);
+        VALUES ('*', 'PIN', 1, 10.0), ('*', 'PIN', 2, 20.0);
         """
     )
     con.close()

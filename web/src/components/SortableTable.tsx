@@ -23,6 +23,8 @@ type SortableTableProps<T> = {
   initialSortKey?: string;
   initialSortDirection?: SortDirection;
   emptyMessage?: string;
+  tableLayout?: "fixed" | "auto";
+  dense?: boolean;
 };
 
 const compareValues = (
@@ -51,6 +53,8 @@ export default function SortableTable<T>({
   initialSortKey,
   initialSortDirection = "desc",
   emptyMessage = "No rows returned.",
+  tableLayout = "fixed",
+  dense = false,
 }: SortableTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | undefined>(initialSortKey);
   const [sortDirection, setSortDirection] =
@@ -96,14 +100,17 @@ export default function SortableTable<T>({
     });
   };
 
+  const paddingClass = dense ? "py-1" : "py-2";
+  const layoutClass = tableLayout === "auto" ? "table-auto" : "table-fixed";
+
   return (
-    <table className="w-full table-fixed border-collapse text-sm">
+    <table className={`w-full ${layoutClass} border-collapse text-sm`}>
       <thead className="bg-slate-900 text-slate-300">
         <tr>
           {visibleColumns.map((column) => (
             <th
               key={column.key}
-              className={`px-2 py-2 text-left ${
+              className={`px-2 ${paddingClass} text-left ${
                 column.headerClassName ?? ""
               }`}
             >
@@ -131,7 +138,7 @@ export default function SortableTable<T>({
             {visibleColumns.map((column) => (
               <td
                 key={column.key}
-                className={`px-2 py-2 ${column.cellClassName ?? ""}`}
+                className={`px-2 ${paddingClass} ${column.cellClassName ?? ""}`}
               >
                 {column.render ? column.render(row) : null}
               </td>
