@@ -699,6 +699,8 @@ def get_questions(
     try:
         question_ids = [row["question_id"] for row in rows if row.get("question_id")]
         summary = compute_questions_forecast_summary(con, question_ids=question_ids)
+        if not summary:
+            logger.warning("Forecast summary empty; EIV will be null for questions page.")
         for row in rows:
             qid = row.get("question_id")
             forecast = summary.get(qid or "", {})

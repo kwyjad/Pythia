@@ -26,6 +26,8 @@ def test_compute_questions_forecast_summary_uses_latest_run() -> None:
             run_id TEXT,
             created_at TIMESTAMP,
             status TEXT,
+            hazard_code TEXT,
+            metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE
@@ -61,15 +63,17 @@ def test_compute_questions_forecast_summary_uses_latest_run() -> None:
             run_id,
             created_at,
             status,
+            hazard_code,
+            metric,
             month_index,
             bucket_index,
             probability
         )
         VALUES
-            ('q1', 'run_old', '2024-01-10 00:00:00', 'ok', 1, 1, 0.25),
-            ('q1', 'run_old', '2024-01-10 00:00:00', 'ok', 2, 2, 0.75),
-            ('q1', 'run_new', '2024-02-10 00:00:00', 'ok', 1, 1, 0.5),
-            ('q1', 'run_new', '2024-02-10 00:00:00', 'ok', 3, 2, 0.5);
+            ('q1', 'run_old', '2024-01-10 00:00:00', 'ok', 'TC', 'PIN', 1, 1, 0.25),
+            ('q1', 'run_old', '2024-01-10 00:00:00', 'ok', 'TC', 'PIN', 2, 2, 0.75),
+            ('q1', 'run_new', '2024-02-10 00:00:00', 'ok', 'TC', 'PIN', 1, 1, 0.5),
+            ('q1', 'run_new', '2024-02-10 00:00:00', 'ok', 'TC', 'PIN', 3, 2, 0.5);
         """
     )
 
@@ -100,6 +104,8 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
             run_id TEXT,
             created_at TIMESTAMP,
             status TEXT,
+            hazard_code TEXT,
+            metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE
@@ -135,13 +141,15 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
             run_id,
             created_at,
             status,
+            hazard_code,
+            metric,
             month_index,
             bucket_index,
             probability
         )
         VALUES
-            ('q2', 'run_new', '2024-02-10 00:00:00', 'ok', 1, 1, 0.4),
-            ('q2', 'run_new', '2024-02-10 00:00:00', 'ok', 2, 2, 0.6);
+            ('q2', 'run_new', '2024-02-10 00:00:00', 'ok', 'ACE', 'PA', 1, 1, 0.4),
+            ('q2', 'run_new', '2024-02-10 00:00:00', 'ok', 'ACE', 'PA', 2, 2, 0.6);
         """
     )
 
@@ -149,5 +157,65 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
     assert summary["q2"]["forecast_date"] == "2024-02-10"
     assert summary["q2"]["horizon_max"] == 2
     assert summary["q2"]["eiv_total"] == pytest.approx(11.0)
+
+    conn.close()
+
+
+def test_compute_questions_forecast_summary_falls_back_without_centroids() -> None:
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE questions (
+            question_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE forecasts_ensemble (
+            question_id TEXT,
+            run_id TEXT,
+            created_at TIMESTAMP,
+            status TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            month_index INTEGER,
+            bucket_index INTEGER,
+            probability DOUBLE
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO questions (question_id, iso3, hazard_code, metric)
+        VALUES ('q3', 'USA', 'EQ', 'PA');
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecasts_ensemble (
+            question_id,
+            run_id,
+            created_at,
+            status,
+            hazard_code,
+            metric,
+            month_index,
+            bucket_index,
+            probability
+        )
+        VALUES
+            ('q3', 'run_new', '2024-03-05 00:00:00', 'ok', 'EQ', 'PA', 1, 2, 0.5),
+            ('q3', 'run_new', '2024-03-05 00:00:00', 'ok', 'EQ', 'PA', 2, 3, 0.5);
+        """
+    )
+
+    summary = compute_questions_forecast_summary(conn, question_ids=["q3"])
+    assert summary["q3"]["forecast_date"] == "2024-03-05"
+    assert summary["q3"]["horizon_max"] == 2
+    assert summary["q3"]["eiv_total"] == pytest.approx(90000.0)
 
     conn.close()
