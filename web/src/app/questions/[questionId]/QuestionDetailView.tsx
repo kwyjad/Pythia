@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import CollapsiblePanel from "../../../components/CollapsiblePanel";
+import SpdPanel from "./SpdPanel";
 import type { QuestionBundleResponse } from "../../../lib/types";
 
 type QuestionDetailViewProps = {
@@ -267,6 +268,8 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
           </table>
         </div>
       </section>
+
+      <SpdPanel bundle={bundle} />
 
       <section className="space-y-4">
         <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
