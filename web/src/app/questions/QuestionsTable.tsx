@@ -452,12 +452,12 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 onChange={(event) => setEivMax(event.target.value)}
               />
             </label>
-            <div className="flex flex-wrap gap-6">
+            <div className="grid grid-cols-3 gap-3">
               <div className="flex flex-col gap-3">
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   Forecast Date From
                   <input
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -469,7 +469,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   Forecast Date To
                   <input
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -483,7 +483,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   First Forecast Month From
                   <input
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -495,7 +495,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   First Forecast Month To
                   <input
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -509,7 +509,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   Last Forecast Month From
                   <input
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -521,7 +521,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   Last Forecast Month To
                   <input
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
