@@ -29,7 +29,8 @@ type SortableTableProps<T> = {
 
 const compareValues = (
   a: number | string | null | undefined,
-  b: number | string | null | undefined
+  b: number | string | null | undefined,
+  direction: SortDirection
 ) => {
   if (a == null && b == null) {
     return 0;
@@ -41,9 +42,11 @@ const compareValues = (
     return -1;
   }
   if (typeof a === "number" && typeof b === "number") {
-    return a - b;
+    const base = a - b;
+    return direction === "asc" ? base : -base;
   }
-  return String(a).localeCompare(String(b));
+  const base = String(a).localeCompare(String(b));
+  return direction === "asc" ? base : -base;
 };
 
 export default function SortableTable<T>({
@@ -75,13 +78,13 @@ export default function SortableTable<T>({
     }
     const valueFor = (row: T) =>
       column.sortValue ? column.sortValue(row) : (row as Record<string, unknown>)[sortKey];
-    const sorted = [...rows].sort((a, b) =>
+    return [...rows].sort((a, b) =>
       compareValues(
         valueFor(a) as number | string | null | undefined,
-        valueFor(b) as number | string | null | undefined
+        valueFor(b) as number | string | null | undefined,
+        sortDirection
       )
     );
-    return sortDirection === "asc" ? sorted : sorted.reverse();
   }, [columns, rows, sortDirection, sortKey]);
 
   const handleSort = (column: SortableColumn<T>) => {

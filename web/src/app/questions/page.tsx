@@ -18,6 +18,9 @@ type QuestionRow = {
   country_name?: string | null;
   first_forecast_month?: string | null;
   last_forecast_month?: string | null;
+  triage_score?: number | null;
+  triage_tier?: string | null;
+  triage_need_full_spd?: boolean | null;
 };
 
 type QuestionsResponse = {

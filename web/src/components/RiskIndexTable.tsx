@@ -9,16 +9,20 @@ import SortableTable, { SortableColumn } from "./SortableTable";
 
 const EIV_TOOLTIP =
   "EIV = sum over buckets of p(bucket) × centroid(bucket), aggregated across all forecasted hazards for the country, shown per month and summed over months 1–6.";
-const POPULATION_TOOLTIP =
-  "Per-capita requires population data. The populations table is empty in this snapshot.";
+const PER_CAPITA_TOOLTIP =
+  "Per-capita = EIV ÷ population. Displayed as percent of population for the country (sum over months 1–6).";
+const POPULATION_TOOLTIP = "Population missing for this country in the current snapshot.";
 
 const formatNumber = (value: number | null | undefined) =>
   typeof value === "number" ? Math.round(value).toLocaleString() : null;
 
+const perCapitaFormatter = new Intl.NumberFormat(undefined, {
+  style: "percent",
+  minimumFractionDigits: 3,
+  maximumFractionDigits: 8,
+});
 const formatPerCapita = (value: number | null | undefined) =>
-  typeof value === "number"
-    ? value.toLocaleString(undefined, { maximumFractionDigits: 6 })
-    : null;
+  typeof value === "number" ? perCapitaFormatter.format(value) : null;
 
 const parseTargetMonth = (targetMonth?: string | null): Date | null => {
   if (!targetMonth) {
@@ -54,28 +58,33 @@ const renderEivHeader = (label: string) => (
   </span>
 );
 
+const renderPerCapitaHeader = (label: string) => (
+  <span className="inline-flex items-center gap-1">
+    {label}
+    <InfoTooltip text={PER_CAPITA_TOOLTIP} />
+  </span>
+);
+
 export default function RiskIndexTable({
   rows,
   targetMonth,
   mode,
 }: RiskIndexTableProps) {
-  const populationAvailable = rows.some(
-    (row) => typeof row.population === "number"
-  );
   const baseMonth = parseTargetMonth(targetMonth);
   const monthLabel = (index: number) =>
     baseMonth
       ? formatMonthLabel(addMonthsUTC(baseMonth, index - 1))
       : `M${index}`;
 
-  const perCapitaCell = (value: number | null | undefined) => {
+  const perCapitaCell = (
+    value: number | null | undefined,
+    population: number | null | undefined
+  ) => {
     const formatted = formatPerCapita(value);
     if (formatted) {
       return formatted;
     }
-    return (
-      <span title={populationAvailable ? undefined : POPULATION_TOOLTIP}>-</span>
-    );
+    return <span title={population == null ? POPULATION_TOOLTIP : undefined}>-</span>;
   };
 
   const columns = useMemo<Array<SortableColumn<RiskIndexRow>>>(() => {
@@ -148,65 +157,65 @@ export default function RiskIndexTable({
     const perCapitaColumns: Array<SortableColumn<RiskIndexRow>> = [
       {
         key: "m1_pc",
-        label: `${monthLabel(1)} per capita`,
+        label: renderPerCapitaHeader(`${monthLabel(1)} % pop`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m1_pc ?? null,
-        render: (row) => perCapitaCell(row.m1_pc),
+        render: (row) => perCapitaCell(row.m1_pc, row.population),
         defaultSortDirection: "desc",
       },
       {
         key: "m2_pc",
-        label: `${monthLabel(2)} per capita`,
+        label: renderPerCapitaHeader(`${monthLabel(2)} % pop`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m2_pc ?? null,
-        render: (row) => perCapitaCell(row.m2_pc),
+        render: (row) => perCapitaCell(row.m2_pc, row.population),
         defaultSortDirection: "desc",
       },
       {
         key: "m3_pc",
-        label: `${monthLabel(3)} per capita`,
+        label: renderPerCapitaHeader(`${monthLabel(3)} % pop`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m3_pc ?? null,
-        render: (row) => perCapitaCell(row.m3_pc),
+        render: (row) => perCapitaCell(row.m3_pc, row.population),
         defaultSortDirection: "desc",
       },
       {
         key: "m4_pc",
-        label: `${monthLabel(4)} per capita`,
+        label: renderPerCapitaHeader(`${monthLabel(4)} % pop`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m4_pc ?? null,
-        render: (row) => perCapitaCell(row.m4_pc),
+        render: (row) => perCapitaCell(row.m4_pc, row.population),
         defaultSortDirection: "desc",
       },
       {
         key: "m5_pc",
-        label: `${monthLabel(5)} per capita`,
+        label: renderPerCapitaHeader(`${monthLabel(5)} % pop`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m5_pc ?? null,
-        render: (row) => perCapitaCell(row.m5_pc),
+        render: (row) => perCapitaCell(row.m5_pc, row.population),
         defaultSortDirection: "desc",
       },
       {
         key: "m6_pc",
-        label: `${monthLabel(6)} per capita`,
+        label: renderPerCapitaHeader(`${monthLabel(6)} % pop`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m6_pc ?? null,
-        render: (row) => perCapitaCell(row.m6_pc),
+        render: (row) => perCapitaCell(row.m6_pc, row.population),
         defaultSortDirection: "desc",
       },
       {
         key: "total_pc",
-        label: "Total per capita",
+        label: renderPerCapitaHeader("Total % pop"),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.total_pc ?? null,
-        render: (row) => perCapitaCell(row.total_pc),
+        render: (row) => perCapitaCell(row.total_pc, row.population),
         defaultSortDirection: "desc",
       },
     ];
@@ -250,7 +259,7 @@ export default function RiskIndexTable({
       },
       ...metricColumns,
     ];
-  }, [mode, monthLabel, populationAvailable]);
+  }, [mode, monthLabel]);
 
   const emptyMessage = targetMonth
     ? `No rows returned for ${targetMonth}.`

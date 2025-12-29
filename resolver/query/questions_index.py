@@ -312,3 +312,88 @@ def compute_questions_forecast_summary(
             "eiv_total": float(eiv_total) if eiv_total is not None else None,
         }
     return summary
+
+
+def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    if conn is None:
+        return {}
+    if not _table_exists(conn, "hs_triage"):
+        return {}
+
+    hs_cols = _table_columns(conn, "hs_triage")
+    run_col = _pick_column(hs_cols, ["run_id", "hs_run_id"])
+    iso_col = _pick_column(hs_cols, ["iso3"])
+    hazard_col = _pick_column(hs_cols, ["hazard_code"])
+    tier_col = _pick_column(hs_cols, ["tier", "triage_tier"])
+    score_col = _pick_column(hs_cols, ["triage_score", "score"])
+    need_col = _pick_column(hs_cols, ["need_full_spd", "triage_need_full_spd"])
+    created_col = _pick_column(hs_cols, ["created_at", "timestamp"])
+
+    if not (run_col and iso_col and hazard_col and tier_col and score_col and need_col):
+        return {}
+
+    values: list[str] = []
+    params: list[Any] = []
+    for row in rows:
+        question_id = row.get("question_id")
+        run_id = row.get("hs_run_id") or row.get("run_id")
+        iso3 = row.get("iso3")
+        hazard_code = row.get("hazard_code")
+        if not question_id or not run_id or not iso3 or not hazard_code:
+            continue
+        values.append("(?, ?, ?, ?)")
+        params.extend([question_id, run_id, iso3, hazard_code])
+
+    if not values:
+        return {}
+
+    created_expr = created_col or "NULL"
+    sql = f"""
+        WITH qlist(question_id, hs_run_id, iso3, hazard_code) AS (
+            VALUES {", ".join(values)}
+        ),
+        triage_latest AS (
+            SELECT
+              {run_col} AS run_id,
+              {iso_col} AS iso3,
+              {hazard_col} AS hazard_code,
+              {tier_col} AS triage_tier,
+              {score_col} AS triage_score,
+              {need_col} AS triage_need_full_spd,
+              ROW_NUMBER() OVER (
+                PARTITION BY {run_col}, {iso_col}, {hazard_col}
+                ORDER BY {created_expr} DESC NULLS LAST
+              ) AS rn
+            FROM hs_triage
+        )
+        SELECT
+          qlist.question_id,
+          triage_latest.triage_score,
+          triage_latest.triage_tier,
+          triage_latest.triage_need_full_spd
+        FROM qlist
+        LEFT JOIN triage_latest
+          ON triage_latest.run_id = qlist.hs_run_id
+         AND UPPER(triage_latest.iso3) = UPPER(qlist.iso3)
+         AND UPPER(triage_latest.hazard_code) = UPPER(qlist.hazard_code)
+         AND triage_latest.rn = 1
+    """
+
+    try:
+        triage_rows = conn.execute(sql, params).fetchall()
+    except Exception:
+        LOGGER.exception("Failed to compute questions triage summary")
+        return {}
+
+    summary: dict[str, dict[str, Any]] = {}
+    for question_id, triage_score, triage_tier, triage_need_full_spd in triage_rows or []:
+        if not question_id:
+            continue
+        summary[str(question_id)] = {
+            "triage_score": float(triage_score) if triage_score is not None else None,
+            "triage_tier": str(triage_tier) if triage_tier is not None else None,
+            "triage_need_full_spd": (
+                bool(triage_need_full_spd) if triage_need_full_spd is not None else None
+            ),
+        }
+    return summary
