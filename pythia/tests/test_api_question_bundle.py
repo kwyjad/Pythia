@@ -91,6 +91,10 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
           ('f-new', 'Q1', '2025-06', '{"ctx":"new"}', '{"pa":2}');
         CREATE TABLE resolutions (question_id TEXT, observed_month TEXT, value DOUBLE);
         INSERT INTO resolutions VALUES ('Q1', '2025-01', 12.0);
+        CREATE TABLE scores (
+            question_id TEXT, horizon_m INTEGER, model_name TEXT, score_type TEXT, value DOUBLE, created_at TIMESTAMP
+        );
+        INSERT INTO scores VALUES ('Q1', 1, 'model-a', 'brier', 0.12, TIMESTAMP '2025-02-01');
         CREATE TABLE llm_calls (
             call_id TEXT, run_id TEXT, hs_run_id TEXT, question_id TEXT, phase TEXT, prompt_text TEXT,
             response_text TEXT, parsed_json TEXT, usage_json TEXT, timestamp TIMESTAMP, iso3 TEXT,
@@ -137,6 +141,11 @@ def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
     assert data["forecast"]["forecaster_run_id"] == "f-new"
     assert data["forecast"]["research"]["run_id"] == "f-new"
     assert data["context"]["question_context"]["run_id"] == "f-new"
+    assert isinstance(data["context"]["scores"], list)
+    assert any(
+        row["score_type"] == "brier" and row["value"] == pytest.approx(0.12)
+        for row in data["context"]["scores"]
+    )
     assert data["llm_calls"]["included"] is False
 
 

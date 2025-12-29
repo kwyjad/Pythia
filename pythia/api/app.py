@@ -985,6 +985,23 @@ def get_question_bundle(
         ).fetchdf()
         resolutions = _rows_from_df(res_df)
 
+    scores: List[Dict[str, Any]] = []
+    if _table_exists(con, "scores") and _table_has_columns(con, "scores", ["question_id", "score_type", "value"]):
+        try:
+            scores_df = _execute(
+                con,
+                """
+                SELECT *
+                FROM scores
+                WHERE question_id = :question_id
+                ORDER BY created_at DESC NULLS LAST, horizon_m ASC NULLS LAST, score_type ASC, model_name ASC NULLS LAST
+                """,
+                {"question_id": question_id},
+            ).fetchdf()
+            scores = _rows_from_df(scores_df)
+        except Exception:
+            logger.exception("Failed to load scores for question_bundle")
+
     llm_calls_bundle = _build_llm_calls_bundle(
         con,
         question_id=question_id,
@@ -1013,7 +1030,7 @@ def get_question_bundle(
             raw_spd=raw_spd,
             scenario_writer=scenario_writer,
         ),
-        context=ContextBundle(question_context=question_context, resolutions=resolutions),
+        context=ContextBundle(question_context=question_context, resolutions=resolutions, scores=scores),
         llm_calls=llm_calls_bundle,
     )
     return _json_sanitize(response.model_dump())

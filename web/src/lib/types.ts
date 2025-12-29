@@ -61,8 +61,37 @@ export type QuestionsResponse = {
 
 export type QuestionBundleResponse = {
   question: Record<string, unknown>;
-  hs?: Record<string, unknown> | null;
-  forecast?: Record<string, unknown> | null;
-  context?: Record<string, unknown> | null;
-  llm_calls?: Record<string, unknown> | null;
+  hs?:
+    | {
+        hs_run?: unknown;
+        triage?: unknown;
+        scenarios?: unknown[];
+        scenario_ids?: unknown[];
+        country_report?: unknown;
+      }
+    | null;
+  forecast?:
+    | {
+        forecaster_run_id?: string | null;
+        research?: unknown;
+        ensemble_spd?: unknown[];
+        raw_spd?: unknown[];
+        scenario_writer?: unknown[];
+      }
+    | null;
+  context?:
+    | {
+        question_context?: unknown;
+        resolutions?: unknown[];
+        scores?: unknown[];
+      }
+    | null;
+  llm_calls?:
+    | {
+        included?: boolean;
+        transcripts_included?: boolean;
+        rows?: unknown[];
+        by_phase?: Record<string, unknown[]>;
+      }
+    | null;
 };
