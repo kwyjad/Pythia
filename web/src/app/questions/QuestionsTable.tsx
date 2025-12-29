@@ -335,7 +335,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     <div className="space-y-4">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex w-full flex-col gap-3">
-          <div className="flex flex-wrap items-end gap-3 lg:flex-nowrap">
+          <div className="flex flex-wrap items-start gap-3 lg:flex-nowrap">
             <label className="flex w-[15ch] flex-col gap-1 text-xs text-slate-400">
               Country
               <select
