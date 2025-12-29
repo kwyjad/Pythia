@@ -19,13 +19,13 @@ const SpdBarChart = ({ labels, probs }: SpdBarChartProps) => {
   return (
     <div className="space-y-2">
       <div className="rounded-lg border border-slate-800 bg-slate-950 px-4 py-4">
-        <div className="flex h-44 items-end gap-3">
+        <div className="flex h-[440px] items-end gap-3">
           {labels.map((label, index) => {
             const prob = safeProbs[index] ?? 0;
             const height = maxProb > 0 ? (prob / maxProb) * 100 : 0;
             return (
               <div key={label} className="flex flex-1 flex-col items-center gap-2">
-                <div className="flex h-28 w-full items-end">
+                <div className="flex h-[280px] w-full items-end">
                   <div
                     className="w-full rounded-md bg-indigo-500/80 transition-all"
                     style={{ height: `${height}%` }}
