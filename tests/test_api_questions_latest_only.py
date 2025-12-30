@@ -53,6 +53,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             question_id TEXT,
             run_id TEXT,
             created_at TIMESTAMP,
+            model_name TEXT,
             status TEXT,
             hazard_code TEXT,
             metric TEXT,
@@ -115,6 +116,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             question_id,
             run_id,
             created_at,
+            model_name,
             status,
             hazard_code,
             metric,
@@ -123,8 +125,10 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             probability
         )
         VALUES
-            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 'TC', 'PIN', 1, 1, 0.25),
-            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ok', 'TC', 'PIN', 2, 2, 0.75);
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ensemble_bayesmc_v2', 'ok', 'TC', 'PIN', 1, 1, 0.25),
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ensemble_bayesmc_v2', 'ok', 'TC', 'PIN', 2, 2, 0.75),
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ensemble_mean_v2', 'ok', 'TC', 'PIN', 1, 1, 0.5),
+            ('q_new', 'run_new', '2024-02-10 00:00:00', 'ensemble_mean_v2', 'ok', 'TC', 'PIN', 2, 2, 0.5);
         """
     )
     con.execute(

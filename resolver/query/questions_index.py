@@ -77,6 +77,7 @@ def compute_questions_forecast_summary(
     ev_value_col = _pick_column(fe_cols, ["ev_value"])
     fe_has_hazard = "hazard_code" in fe_cols
     fe_has_metric = "metric" in fe_cols
+    model_col = _pick_column(fe_cols, ["model_name"])
 
     def _log_summary_context(reason: str, *, bc_joinable: bool = False) -> None:
         LOGGER.info(
@@ -125,7 +126,8 @@ def compute_questions_forecast_summary(
         and "metric" in bc_cols
     )
 
-    base_alias = "scoped" if run_col and ts_col else "base"
+    use_latest = bool(run_col and ts_col)
+    base_alias = "filtered" if model_col else ("scoped" if use_latest else "base")
     base_ev_expr = f"{base_alias}.{ev_value_col}" if ev_value_col else "NULL"
     metric_expr = f"{base_alias}.metric"
     bucket_expr = f"{base_alias}.bucket"
@@ -229,6 +231,8 @@ def compute_questions_forecast_summary(
         f"fe.{horizon_col} AS horizon",
         f"fe.{bucket_col} AS bucket",
     ]
+    if model_col:
+        base_select.append(f"fe.{model_col} AS model_name")
     if run_col:
         base_select.append(f"fe.{run_col} AS run_id")
     if ts_col:
@@ -247,54 +251,143 @@ def compute_questions_forecast_summary(
 
     try:
         if run_col and ts_col:
-            sql = f"""
-                WITH base AS (
-                    {base_sql}
-                ),
-                latest_runs AS (
+            if model_col:
+                sql = f"""
+                    WITH base AS (
+                        {base_sql}
+                    ),
+                    latest_runs AS (
+                        SELECT
+                          question_id,
+                          run_id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY question_id
+                            ORDER BY ts DESC
+                          ) AS rn
+                        FROM base
+                        GROUP BY question_id, run_id, ts
+                    ),
+                    scoped AS (
+                        SELECT base.*
+                        FROM base
+                        JOIN latest_runs lr
+                          ON lr.question_id = base.question_id
+                         AND lr.run_id = base.run_id
+                        WHERE lr.rn = 1
+                    ),
+                    chosen_model AS (
+                        SELECT
+                          question_id,
+                          CASE
+                            WHEN SUM(CASE WHEN model_name = 'ensemble_bayesmc_v2' THEN 1 ELSE 0 END) > 0
+                              THEN 'ensemble_bayesmc_v2'
+                            WHEN SUM(CASE WHEN model_name = 'ensemble_mean_v2' THEN 1 ELSE 0 END) > 0
+                              THEN 'ensemble_mean_v2'
+                            ELSE MIN(model_name)
+                          END AS chosen_model
+                        FROM scoped
+                        GROUP BY question_id
+                    ),
+                    filtered AS (
+                        SELECT scoped.*
+                        FROM scoped
+                        JOIN chosen_model USING (question_id)
+                        WHERE scoped.model_name = chosen_model.chosen_model
+                    )
                     SELECT
-                      question_id,
-                      run_id,
-                      ROW_NUMBER() OVER (
-                        PARTITION BY question_id
-                        ORDER BY ts DESC
-                      ) AS rn
-                    FROM base
-                    GROUP BY question_id, run_id, ts
-                ),
-                scoped AS (
-                    SELECT base.*
-                    FROM base
-                    JOIN latest_runs lr
-                      ON lr.question_id = base.question_id
-                     AND lr.run_id = base.run_id
-                    WHERE lr.rn = 1
-                )
-                SELECT
-                  scoped.question_id AS question_id,
-                  {forecast_date_expr},
-                  {horizon_expr},
-                  {eiv_total_expr}
-                FROM scoped
-                {bc_join}
-                GROUP BY scoped.question_id
-                ORDER BY scoped.question_id
-            """
+                      filtered.question_id AS question_id,
+                      {forecast_date_expr},
+                      {horizon_expr},
+                      {eiv_total_expr}
+                    FROM filtered
+                    {bc_join}
+                    GROUP BY filtered.question_id
+                    ORDER BY filtered.question_id
+                """
+            else:
+                sql = f"""
+                    WITH base AS (
+                        {base_sql}
+                    ),
+                    latest_runs AS (
+                        SELECT
+                          question_id,
+                          run_id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY question_id
+                            ORDER BY ts DESC
+                          ) AS rn
+                        FROM base
+                        GROUP BY question_id, run_id, ts
+                    ),
+                    scoped AS (
+                        SELECT base.*
+                        FROM base
+                        JOIN latest_runs lr
+                          ON lr.question_id = base.question_id
+                         AND lr.run_id = base.run_id
+                        WHERE lr.rn = 1
+                    )
+                    SELECT
+                      scoped.question_id AS question_id,
+                      {forecast_date_expr},
+                      {horizon_expr},
+                      {eiv_total_expr}
+                    FROM scoped
+                    {bc_join}
+                    GROUP BY scoped.question_id
+                    ORDER BY scoped.question_id
+                """
         else:
-            sql = f"""
-                WITH base AS (
-                    {base_sql}
-                )
-                SELECT
-                  base.question_id AS question_id,
-                  {forecast_date_expr},
-                  {horizon_expr},
-                  {eiv_total_expr}
-                FROM base
-                {bc_join}
-                GROUP BY base.question_id
-                ORDER BY base.question_id
-            """
+            if model_col:
+                sql = f"""
+                    WITH base AS (
+                        {base_sql}
+                    ),
+                    chosen_model AS (
+                        SELECT
+                          question_id,
+                          CASE
+                            WHEN SUM(CASE WHEN model_name = 'ensemble_bayesmc_v2' THEN 1 ELSE 0 END) > 0
+                              THEN 'ensemble_bayesmc_v2'
+                            WHEN SUM(CASE WHEN model_name = 'ensemble_mean_v2' THEN 1 ELSE 0 END) > 0
+                              THEN 'ensemble_mean_v2'
+                            ELSE MIN(model_name)
+                          END AS chosen_model
+                        FROM base
+                        GROUP BY question_id
+                    ),
+                    filtered AS (
+                        SELECT base.*
+                        FROM base
+                        JOIN chosen_model USING (question_id)
+                        WHERE base.model_name = chosen_model.chosen_model
+                    )
+                    SELECT
+                      filtered.question_id AS question_id,
+                      {forecast_date_expr},
+                      {horizon_expr},
+                      {eiv_total_expr}
+                    FROM filtered
+                    {bc_join}
+                    GROUP BY filtered.question_id
+                    ORDER BY filtered.question_id
+                """
+            else:
+                sql = f"""
+                    WITH base AS (
+                        {base_sql}
+                    )
+                    SELECT
+                      base.question_id AS question_id,
+                      {forecast_date_expr},
+                      {horizon_expr},
+                      {eiv_total_expr}
+                    FROM base
+                    {bc_join}
+                    GROUP BY base.question_id
+                    ORDER BY base.question_id
+                """
 
         rows = conn.execute(sql, params).fetchall()
     except Exception:
