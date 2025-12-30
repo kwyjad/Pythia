@@ -29,6 +29,7 @@ export default function RiskIndexMap({
   view,
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
+  const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
   const [tooltip, setTooltip] = useState<{
     x: number;
     y: number;
@@ -96,6 +97,7 @@ export default function RiskIndexMap({
   useEffect(() => {
     if (!svgText) {
       setTooltip(null);
+      setSvgWarnings([]);
       return;
     }
     const container = containerRef.current;
@@ -103,6 +105,30 @@ export default function RiskIndexMap({
     const paths = Array.from(
       container.querySelectorAll<SVGPathElement>("[data-iso3]")
     );
+    const warnings: string[] = [];
+    if (paths.length < 150) {
+      warnings.push(
+        "World map asset invalid: expected 150+ country paths with data-iso3. Check web/public/maps/world.svg."
+      );
+    }
+    const sampledLengths = paths
+      .slice(0, 20)
+      .map((path) => (path.getAttribute("d") || "").length)
+      .filter((length) => length > 0)
+      .sort((a, b) => a - b);
+    if (sampledLengths.length) {
+      const mid = Math.floor(sampledLengths.length / 2);
+      const median =
+        sampledLengths.length % 2 === 0
+          ? (sampledLengths[mid - 1] + sampledLengths[mid]) / 2
+          : sampledLengths[mid];
+      if (median < 150) {
+        warnings.push(
+          "World map asset looks non-polygonal (paths too small). Replace web/public/maps/world.svg with real country outlines."
+        );
+      }
+    }
+    setSvgWarnings(warnings);
     const listeners: Array<() => void> = [];
     paths.forEach((path) => {
       const iso3 = (path.getAttribute("data-iso3") || "").toUpperCase();
@@ -162,6 +188,13 @@ export default function RiskIndexMap({
       <p className="mt-1 text-xs text-slate-400">
         Jenks breaks calculated from the selected risk values.
       </p>
+      {svgWarnings.length ? (
+        <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          {svgWarnings.map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
+        </div>
+      ) : null}
       <div ref={containerRef} className="relative mt-3 w-full">
         <div
           aria-label="Risk index world map"
