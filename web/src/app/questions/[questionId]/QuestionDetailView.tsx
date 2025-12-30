@@ -1,10 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 import CollapsiblePanel from "../../../components/CollapsiblePanel";
 import SpdPanel from "./SpdPanel";
+import { asArray, asString, pickResearchJson } from "../../../lib/excerpts";
+import { extractForecastRationale } from "../../../lib/forecast_rationale";
 import { formatModelList } from "../../../lib/model_names";
+import { formatScenario } from "../../../lib/scenario_format";
 import type { QuestionBundleResponse } from "../../../lib/types";
 
 type QuestionDetailViewProps = {
@@ -91,31 +95,186 @@ const getModelNamesForPhases = (
   return formatModelList(names);
 };
 
-const renderScenarioText = (text?: string | null) => {
+const renderScenarioBlocks = (text?: string | null) => {
   if (!text) {
     return <p className="text-sm text-slate-400">No scenario narrative available.</p>;
   }
-  const blocks = text.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
-  return blocks.map((block, index) => {
-    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
-    const bulletLines = lines.filter((line) => line.startsWith("-") || line.startsWith("•"));
-    if (bulletLines.length === lines.length) {
-      return (
-        <ul key={`block-${index}`} className="list-disc space-y-1 pl-5 text-sm text-slate-200">
-          {bulletLines.map((line, lineIndex) => (
-            <li key={`bullet-${index}-${lineIndex}`}>
-              {line.replace(/^[-•]\s?/, "")}
-            </li>
-          ))}
-        </ul>
-      );
+  const blocks = formatScenario(text);
+  if (!blocks.length) {
+    return <p className="text-sm text-slate-400">No scenario narrative available.</p>;
+  }
+  const elements: ReactNode[] = [];
+  const bulletBuffer: string[] = [];
+  let listIndex = 0;
+
+  const flushBullets = () => {
+    if (!bulletBuffer.length) return;
+    elements.push(
+      <ul
+        key={`scenario-list-${listIndex}`}
+        className="list-disc space-y-1 pl-5 text-sm text-slate-200/90"
+      >
+        {bulletBuffer.map((item, index) => (
+          <li key={`scenario-li-${listIndex}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    );
+    bulletBuffer.length = 0;
+    listIndex += 1;
+  };
+
+  blocks.forEach((block, index) => {
+    if (block.type === "li") {
+      bulletBuffer.push(block.text);
+      return;
     }
-    return (
-      <p key={`block-${index}`} className="text-sm text-slate-200">
-        {lines.join(" ")}
+    flushBullets();
+    if (block.type === "h2") {
+      elements.push(
+        <h3 key={`scenario-h2-${index}`} className="text-base font-semibold text-slate-100">
+          {block.text}
+        </h3>
+      );
+      return;
+    }
+    if (block.type === "h3") {
+      elements.push(
+        <h4 key={`scenario-h3-${index}`} className="text-sm font-semibold text-slate-200">
+          {block.text}
+        </h4>
+      );
+      return;
+    }
+    elements.push(
+      <p
+        key={`scenario-p-${index}`}
+        className="text-sm text-slate-200/90 leading-relaxed"
+      >
+        {block.text}
       </p>
     );
   });
+
+  flushBullets();
+
+  return <div className="space-y-2">{elements}</div>;
+};
+
+const formatTimeframe = (value: unknown): string | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `${value} months`;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  return null;
+};
+
+const formatConfidence = (value: unknown): string | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toFixed(2);
+  }
+  return asString(value);
+};
+
+const getSourceLabel = (url: string): string => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    const cleaned = url.replace(/^https?:\/\//, "");
+    return cleaned.split("/")[0] || url;
+  }
+};
+
+const normalizeSources = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => asString(entry))
+      .filter((entry): entry is string => Boolean(entry));
+  }
+  const single = asString(value);
+  return single ? [single] : [];
+};
+
+const renderSupportText = (support: unknown, fields: { key: string; label: string }[]) => {
+  if (!support) {
+    return <p className="text-sm text-slate-200/90">—</p>;
+  }
+  if (typeof support === "string") {
+    return <p className="text-sm text-slate-200/90">{support}</p>;
+  }
+  if (typeof support !== "object") {
+    return <p className="text-sm text-slate-200/90">{String(support)}</p>;
+  }
+  const entries = fields
+    .map(({ key, label }) => ({
+      label,
+      value: asString((support as Record<string, unknown>)[key]),
+    }))
+    .filter((entry) => entry.value);
+  if (!entries.length) {
+    return <p className="text-sm text-slate-200/90">—</p>;
+  }
+  return (
+    <ul className="mt-2 space-y-1 text-sm text-slate-200/90">
+      {entries.map((entry) => (
+        <li key={entry.label}>
+          <span className="text-slate-400">{entry.label}:</span> {entry.value}
+        </li>
+      ))}
+    </ul>
+  );
+};
+
+const renderExternalSupport = (support: unknown) => {
+  if (!support) {
+    return <p className="text-sm text-slate-200/90">—</p>;
+  }
+  if (typeof support === "string") {
+    return <p className="text-sm text-slate-200/90">{support}</p>;
+  }
+  if (typeof support !== "object") {
+    return <p className="text-sm text-slate-200/90">{String(support)}</p>;
+  }
+  const supportObj = support as Record<string, unknown>;
+  const consensus = asString(supportObj.consensus);
+  const dataQuality = asString(supportObj.data_quality);
+  const analyses = asArray<unknown>(supportObj.recent_analyses)
+    .map((entry) => asString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  return (
+    <div className="space-y-2 text-sm text-slate-200/90">
+      {consensus ? (
+        <p>
+          <span className="text-slate-400">Consensus:</span> {consensus}
+        </p>
+      ) : null}
+      {dataQuality ? (
+        <p>
+          <span className="text-slate-400">Data quality:</span> {dataQuality}
+        </p>
+      ) : null}
+      {analyses.length ? (
+        <ul className="list-disc space-y-1 pl-5">
+          {analyses.map((analysis, index) => (
+            <li key={`analysis-${index}`}>{analysis}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+};
+
+const renderParagraphs = (text: string) => {
+  const blocks = text
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  return blocks.map((block, index) => (
+    <p key={`paragraph-${index}`} className="text-sm text-slate-200/90 leading-relaxed">
+      {block.replace(/\s+/g, " ")}
+    </p>
+  ));
 };
 
 const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
@@ -133,6 +292,8 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const resolutions = (context.resolutions ?? []) as ModelRow[];
   const scores = (context.scores ?? []) as ModelRow[];
   const byPhase = (llm.by_phase ?? {}) as Record<string, ModelRow[]>;
+  const researchJson = pickResearchJson(bundle);
+  const forecastRationale = extractForecastRationale(bundle);
 
   const [scenarioIndex, setScenarioIndex] = useState(0);
   const selectedScenario = scenarioWriter[scenarioIndex] ?? scenarioWriter[0];
@@ -162,10 +323,27 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
       }`
     : "No resolutions yet";
 
-  const baseRate = (research.base_rate ?? {}) as Record<string, unknown>;
-  const updateSignals = getTextList(research.update_signals);
-  const regimeShiftSignals = getTextList(research.regime_shift_signals);
-  const dataGaps = getTextList(research.data_gaps);
+  const baseRate = (researchJson?.base_rate ?? null) as Record<string, unknown> | null;
+  const updateSignals = asArray<Record<string, unknown>>(researchJson?.update_signals);
+  const regimeShiftSignals = asArray<Record<string, unknown>>(
+    researchJson?.regime_shift_signals
+  );
+  const dataGaps = asArray<unknown>(researchJson?.data_gaps)
+    .map((entry) => asString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  const researchSources = asArray<unknown>(researchJson?.sources)
+    .map((entry) => asString(entry))
+    .filter((entry): entry is string => Boolean(entry));
+
+  const scenarioStubText = asString(triage.scenario_stub);
+  const regimeShiftRows = asArray<Record<string, unknown>>(triage.regime_shifts_json);
+  const dataQuality = (triage.data_quality_json ?? null) as Record<string, unknown> | null;
+  const dataQualityEntries = [
+    { label: "Source", value: asString(dataQuality?.resolution_source) },
+    { label: "Reliability", value: asString(dataQuality?.reliability) },
+    { label: "Notes", value: asString(dataQuality?.notes) },
+  ].filter((entry) => entry.value);
+  const selectedScenarioText = asString(selectedScenario?.text);
 
   const brierScores = useMemo(() => {
     return scores.filter((row) => {
@@ -285,128 +463,20 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
       <section className="space-y-4">
         <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">HS triage excerpt</h2>
-          <div className="mt-3 space-y-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">Drivers</h3>
-              {getTextList(triage.drivers_json).length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                  {getTextList(triage.drivers_json).map((item, index) => (
-                    <li key={`driver-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">No drivers captured.</p>
-              )}
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">Regime shifts</h3>
-              {getTextList(triage.regime_shifts_json).length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                  {getTextList(triage.regime_shifts_json).map((item, index) => (
-                    <li key={`regime-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">No regime shifts noted.</p>
-              )}
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">Data quality</h3>
-              {getTextList(triage.data_quality_json).length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                  {getTextList(triage.data_quality_json).map((item, index) => (
-                    <li key={`data-quality-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">No data quality notes.</p>
-              )}
-            </div>
-            {triage.scenario_stub ? (
-              <div>
-                <h3 className="text-sm font-semibold text-slate-300">Scenario stub</h3>
-                <p className="mt-2 text-sm text-slate-200">
-                  {String(triage.scenario_stub)}
-                </p>
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Research excerpt</h2>
-          <div className="mt-3 space-y-4">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">
-                Qualitative summary
-              </h3>
-              <p className="mt-2 text-sm text-slate-200">
-                {(baseRate.qualitative_summary as string | undefined) ??
-                  "No qualitative summary available."}
+          <h2 className="text-lg font-semibold text-white">Forecast Rationale</h2>
+          <div className="mt-3 space-y-2">
+            {forecastRationale ? (
+              renderParagraphs(forecastRationale)
+            ) : (
+              <p className="text-sm text-slate-400">
+                No forecast rationale available for this forecast.
               </p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="rounded border border-slate-800 bg-slate-950 p-3">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Resolver support
-                </h4>
-                <p className="mt-2 text-sm text-slate-200">
-                  {(baseRate.resolver_support as string | undefined) ?? "—"}
-                </p>
-              </div>
-              <div className="rounded border border-slate-800 bg-slate-950 p-3">
-                <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  External support
-                </h4>
-                <p className="mt-2 text-sm text-slate-200">
-                  {(baseRate.external_support as string | undefined) ?? "—"}
-                </p>
-              </div>
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">Update signals</h3>
-              {updateSignals.length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                  {updateSignals.map((item, index) => (
-                    <li key={`update-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">No update signals.</p>
-              )}
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">
-                Regime shift signals
-              </h3>
-              {regimeShiftSignals.length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                  {regimeShiftSignals.map((item, index) => (
-                    <li key={`regime-signal-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">No regime shift signals.</p>
-              )}
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-300">Data gaps</h3>
-              {dataGaps.length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                  {dataGaps.map((item, index) => (
-                    <li key={`data-gap-${index}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-sm text-slate-400">No data gaps noted.</p>
-              )}
-            </div>
+            )}
           </div>
         </div>
 
         <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Scenario excerpt</h2>
+          <h2 className="text-lg font-semibold text-white">Scenario</h2>
           {scenarioWriter.length > 1 ? (
             <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center">
               <label className="text-sm text-slate-400">Scenario:</label>
@@ -424,9 +494,260 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
               </select>
             </div>
           ) : null}
-          <div className="mt-4 space-y-3">
-            {renderScenarioText((selectedScenario?.text as string | undefined) ?? null)}
+          <div className="mt-4">{renderScenarioBlocks(selectedScenarioText)}</div>
+        </div>
+
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+          <h2 className="text-lg font-semibold text-white">Horizon Scan Triage</h2>
+          <div className="mt-3 space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">Drivers</h3>
+              {getTextList(triage.drivers_json).length ? (
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200/90">
+                  {getTextList(triage.drivers_json).map((item, index) => (
+                    <li key={`driver-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-sm text-slate-400">No drivers captured.</p>
+              )}
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">Regime shifts</h3>
+              {regimeShiftRows.length ? (
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200/90">
+                  {regimeShiftRows.map((item, index) => {
+                    const isShiftObject = typeof item === "object" && item !== null;
+                    const shift = !isShiftObject
+                      ? String(item)
+                      : asString(item.shift) ?? asString(item.regime_shift) ?? "—";
+                    const likelihood = isShiftObject ? asString(item.likelihood) : null;
+                    const timeframe = isShiftObject
+                      ? formatTimeframe(item.timeframe) ??
+                        formatTimeframe(item.timeframe_months)
+                      : null;
+                    const meta = [
+                      likelihood ? `Likelihood: ${likelihood}` : null,
+                      timeframe ? `Timeframe: ${timeframe}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join("; ");
+                    return (
+                      <li key={`regime-${index}`}>
+                        <span className="font-medium text-slate-200">{shift}</span>
+                        {meta ? <span className="text-slate-400"> — {meta}</span> : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="mt-2 text-sm text-slate-400">No regime shifts noted.</p>
+              )}
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-200">Data quality</h3>
+              {dataQualityEntries.length ? (
+                <div className="mt-2 rounded border border-slate-800 bg-slate-950/30 p-3 text-sm text-slate-200/90">
+                  {dataQualityEntries.map((entry) => (
+                    <p key={entry.label}>
+                      <span className="text-slate-400">{entry.label}:</span>{" "}
+                      {entry.value}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-slate-400">No data quality notes.</p>
+              )}
+            </div>
+            {scenarioStubText ? (
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">Scenario stub</h3>
+                <div className="mt-2">{renderScenarioBlocks(scenarioStubText)}</div>
+              </div>
+            ) : null}
           </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+          <h2 className="text-lg font-semibold text-white">Research</h2>
+          {!baseRate ? (
+            <p className="mt-3 text-sm text-slate-200/90">
+              No research narrative available for this forecast.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">
+                  Qualitative summary
+                </h3>
+                <p className="mt-2 text-sm text-slate-200/90 leading-relaxed">
+                  {asString(baseRate.qualitative_summary) ??
+                    "No qualitative summary available."}
+                </p>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Resolver support
+                  </h4>
+                  {renderSupportText(baseRate.resolver_support, [
+                    { key: "recent_level", label: "Recent level" },
+                    { key: "trend", label: "Trend" },
+                    { key: "data_quality", label: "Data quality" },
+                    { key: "notes", label: "Notes" },
+                  ])}
+                </div>
+                <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    External support
+                  </h4>
+                  {renderExternalSupport(baseRate.external_support)}
+                </div>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">
+                  Update signals
+                </h3>
+                {updateSignals.length ? (
+                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-200/90">
+                    {updateSignals.map((signal, index) => {
+                      const isSignalObject = typeof signal === "object" && signal !== null;
+                      const description = !isSignalObject
+                        ? String(signal)
+                        : asString(signal.description) ?? asString(signal.signal) ?? "—";
+                      const direction = isSignalObject ? asString(signal.direction) : null;
+                      const confidence = isSignalObject
+                        ? formatConfidence(signal.confidence)
+                        : null;
+                      const timeframe = isSignalObject
+                        ? formatTimeframe(signal.timeframe) ??
+                          formatTimeframe(signal.timeframe_months)
+                        : null;
+                      const sources = isSignalObject
+                        ? normalizeSources(
+                            signal.sources ?? signal.source_urls ?? signal.source
+                          )
+                        : [];
+                      const meta = [
+                        direction ? `Direction: ${direction}` : null,
+                        confidence ? `Confidence: ${confidence}` : null,
+                        timeframe ? `Timeframe: ${timeframe}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" • ");
+                      return (
+                        <li key={`update-${index}`} className="space-y-1">
+                          <div>{description}</div>
+                          {meta ? <div className="text-xs text-slate-400">{meta}</div> : null}
+                          {sources.length ? (
+                            <div className="flex flex-wrap gap-2 text-xs">
+                              {sources.map((source) => (
+                                <a
+                                  key={source}
+                                  href={source}
+                                  className="text-slate-300 underline underline-offset-2"
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {getSourceLabel(source)}
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-400">No update signals.</p>
+                )}
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">
+                  Regime shift signals
+                </h3>
+                {regimeShiftSignals.length ? (
+                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-200/90">
+                    {regimeShiftSignals.map((signal, index) => {
+                      const isSignalObject = typeof signal === "object" && signal !== null;
+                      const description = !isSignalObject
+                        ? String(signal)
+                        : asString(signal.description) ?? asString(signal.signal) ?? "—";
+                      const likelihood = isSignalObject ? asString(signal.likelihood) : null;
+                      const timeframe = isSignalObject
+                        ? formatTimeframe(signal.timeframe) ??
+                          formatTimeframe(signal.timeframe_months)
+                        : null;
+                      const sources = isSignalObject
+                        ? normalizeSources(
+                            signal.sources ?? signal.source_urls ?? signal.source
+                          )
+                        : [];
+                      const meta = [
+                        likelihood ? `Likelihood: ${likelihood}` : null,
+                        timeframe ? `Timeframe: ${timeframe}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" • ");
+                      return (
+                        <li key={`regime-signal-${index}`} className="space-y-1">
+                          <div>{description}</div>
+                          {meta ? <div className="text-xs text-slate-400">{meta}</div> : null}
+                          {sources.length ? (
+                            <div className="flex flex-wrap gap-2 text-xs">
+                              {sources.map((source) => (
+                                <a
+                                  key={source}
+                                  href={source}
+                                  className="text-slate-300 underline underline-offset-2"
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {getSourceLabel(source)}
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-400">No regime shift signals.</p>
+                )}
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200">Data gaps</h3>
+                {dataGaps.length ? (
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200/90">
+                    {dataGaps.map((item, index) => (
+                      <li key={`data-gap-${index}`}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-400">No data gaps noted.</p>
+                )}
+              </div>
+              {researchSources.length ? (
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-200">Sources</h3>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    {researchSources.map((source) => (
+                      <a
+                        key={source}
+                        href={source}
+                        className="text-slate-300 underline underline-offset-2"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {getSourceLabel(source)}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
       </section>
 

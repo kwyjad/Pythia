@@ -314,53 +314,59 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
         </div>
       </div>
 
-      <div className="mt-6">
-        <SpdBarChart labels={labels} probs={probs} />
-        {process.env.NODE_ENV !== "production" ? (
-          <p className="mt-2 text-xs text-slate-400">
-            SPD sum: {probSum.toFixed(3)}
-          </p>
-        ) : null}
-      </div>
+      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
+          <SpdBarChart labels={labels} probs={probs} />
+          {process.env.NODE_ENV !== "production" ? (
+            <p className="mt-2 text-xs text-slate-400">
+              SPD sum: {probSum.toFixed(3)}
+            </p>
+          ) : null}
+        </div>
 
-      <div className="mt-6 overflow-x-auto">
-        <table className="w-full table-auto text-left text-sm text-slate-200">
-          <thead className="text-xs uppercase tracking-wide text-slate-400">
-            <tr>
-              <th className="pb-2 pr-4">Bucket</th>
-              <th className="pb-2 pr-4">Centroid</th>
-              <th className="pb-2 pr-4">Probability</th>
-              <th className="pb-2">p × centroid</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800">
-            {labels.map((label, index) => {
-              const prob = probs[index] ?? 0;
-              const centroid = centroids[index] ?? 0;
-              const contribution = prob * centroid;
-              return (
-                <tr key={label}>
-                  <td className="py-2 pr-4 text-slate-200">{label}</td>
-                  <td className="py-2 pr-4 text-slate-200">
-                    {numberFormatter.format(centroid)}
-                  </td>
-                  <td className="py-2 pr-4 text-slate-200">
-                    {percentFormatter.format(prob)}
-                  </td>
-                  <td className="py-2 text-slate-200">
-                    {numberFormatter.format(Math.round(contribution))}
+        <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
+          <div className="overflow-x-auto">
+            <table className="w-full table-auto text-left text-sm text-slate-200">
+              <thead className="text-xs uppercase tracking-wide text-slate-400">
+                <tr>
+                  <th className="pb-2 pr-4">Bucket</th>
+                  <th className="pb-2 pr-4">Centroid</th>
+                  <th className="pb-2 pr-4">Probability</th>
+                  <th className="pb-2">p × centroid</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800">
+                {labels.map((label, index) => {
+                  const prob = probs[index] ?? 0;
+                  const centroid = centroids[index] ?? 0;
+                  const contribution = prob * centroid;
+                  return (
+                    <tr key={label}>
+                      <td className="py-2 pr-4 text-slate-200">{label}</td>
+                      <td className="py-2 pr-4 text-slate-200">
+                        {numberFormatter.format(centroid)}
+                      </td>
+                      <td className="py-2 pr-4 text-slate-200">
+                        {percentFormatter.format(prob)}
+                      </td>
+                      <td className="py-2 text-slate-200">
+                        {numberFormatter.format(Math.round(contribution))}
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr className="font-semibold text-white">
+                  <td className="py-2 pr-4">EIV</td>
+                  <td className="py-2 pr-4">—</td>
+                  <td className="py-2 pr-4">—</td>
+                  <td className="py-2">
+                    {numberFormatter.format(Math.round(eivMonth))}
                   </td>
                 </tr>
-              );
-            })}
-            <tr className="font-semibold text-white">
-              <td className="py-2 pr-4">EIV</td>
-              <td className="py-2 pr-4">—</td>
-              <td className="py-2 pr-4">—</td>
-              <td className="py-2">{numberFormatter.format(Math.round(eivMonth))}</td>
-            </tr>
-          </tbody>
-        </table>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
   );
