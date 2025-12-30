@@ -59,13 +59,17 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     con.execute(
         """
         INSERT INTO questions (question_id, iso3, hazard_code, target_month, metric)
-        VALUES ('q1', 'USA', 'FL', '2026-01', 'PA');
+        VALUES
+          ('q1', 'USA', 'FL', '2026-01', 'PA'),
+          ('q2', 'USA', 'ACE', '2026-01', 'FATALITIES');
         """
     )
     con.execute(
         """
         INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability)
-        VALUES ('q1', 1, 2, 1.0);
+        VALUES
+          ('q1', 1, 2, 1.0),
+          ('q2', 1, 3, 1.0);
         """
     )
     con.execute(
@@ -100,3 +104,18 @@ def test_risk_index_smoke(api_env: None) -> None:
     assert row["population"] == 1000000
     assert row["m1_pc"] == pytest.approx(row["m1"] / row["population"])
     assert row["total_pc"] == pytest.approx(row["total"] / row["population"])
+
+    resp = client.get(
+        "/v1/risk_index",
+        params={
+            "metric": "FATALITIES",
+            "horizon_m": 1,
+            "normalize": True,
+            "target_month": "2026-01",
+        },
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    row = payload["rows"][0]
+    assert "population" in row
+    assert "total_pc" in row

@@ -6,6 +6,17 @@ body {
   @apply bg-slate-950 text-slate-100;
 }
 
+:root {
+  --risk-map-c5: #0b5563;
+  --risk-map-c4: #0f7183;
+  --risk-map-c3: #1e92a3;
+  --risk-map-c2: #4bb5c4;
+  --risk-map-c1: #7fd3dd;
+  --risk-map-no-eiv: #6b7280;
+  --risk-map-no-questions: #cbd5f5;
+  --risk-map-stroke: #0f172a;
+}
+
 main {
   @apply w-full px-6 py-8;
 }

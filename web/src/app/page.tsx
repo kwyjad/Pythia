@@ -2,6 +2,7 @@ import KpiCard from "../components/KpiCard";
 import RiskIndexPanel from "../components/RiskIndexPanel";
 import { apiGet } from "../lib/api";
 import type {
+  CountriesResponse,
   DiagnosticsSummaryResponse,
   RiskIndexResponse,
   VersionResponse,
@@ -13,6 +14,7 @@ export default async function OverviewPage() {
     apiGet<DiagnosticsSummaryResponse>("/diagnostics/summary"),
   ]);
   let riskIndex: RiskIndexResponse | null = null;
+  let countries: CountriesResponse | null = null;
   try {
     riskIndex = await apiGet<RiskIndexResponse>("/risk_index", {
       metric: "PA",
@@ -21,6 +23,11 @@ export default async function OverviewPage() {
     });
   } catch (error) {
     console.warn("Risk index unavailable:", error);
+  }
+  try {
+    countries = await apiGet<CountriesResponse>("/countries");
+  } catch (error) {
+    console.warn("Countries unavailable:", error);
   }
 
   const activeQuestions =
@@ -52,7 +59,10 @@ export default async function OverviewPage() {
         <h2 className="text-xl font-semibold text-white">Risk index</h2>
 
         {riskIndex ? (
-          <RiskIndexPanel initialResponse={riskIndex} />
+          <RiskIndexPanel
+            countriesRows={countries?.rows ?? []}
+            initialResponse={riskIndex}
+          />
         ) : (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
             Risk index unavailable (API error).
