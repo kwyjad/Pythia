@@ -16,7 +16,7 @@ def test_world_svg_has_iso3_paths() -> None:
     assert long_paths >= 120
 
     sample = " ".join(path_matches[:200])
-    tokens = re.findall(r"[-+]?(?:\\d*\\.\\d+|\\d+)(?:[eE][-+]?\\d+)?", sample)
+    tokens = re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", sample)
     assert tokens
     max_value = max(float(token) for token in tokens)
     assert max_value >= 500
