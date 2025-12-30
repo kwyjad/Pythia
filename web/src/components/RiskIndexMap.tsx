@@ -20,6 +20,13 @@ const perCapitaFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 8,
 });
 
+const cssVar = (name: string, fallback: string) => {
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  return value || fallback;
+};
+
 const formatValueLabel = (value: number, isPerCapita: boolean) =>
   isPerCapita ? perCapitaFormatter.format(value) : eivFormatter.format(value);
 
@@ -86,14 +93,6 @@ export default function RiskIndexMap({
 
   const breaks = useMemo(() => jenksBreaks(values, 5), [values]);
 
-  const colorScale = [
-    "var(--risk-map-c1, #a5f3fc)",
-    "var(--risk-map-c2, #67e8f9)",
-    "var(--risk-map-c3, #22d3ee)",
-    "var(--risk-map-c4, #06b6d4)",
-    "var(--risk-map-c5, #0e7490)",
-  ];
-
   useEffect(() => {
     if (!svgText) {
       setTooltip(null);
@@ -112,6 +111,23 @@ export default function RiskIndexMap({
       return Array.from(el.querySelectorAll<SVGPathElement>("path"));
     });
     const warnings: string[] = [];
+    const palette = {
+      c1: cssVar("--risk-map-c1", "#7fd3dd"),
+      c2: cssVar("--risk-map-c2", "#4bb5c4"),
+      c3: cssVar("--risk-map-c3", "#1e92a3"),
+      c4: cssVar("--risk-map-c4", "#0f7183"),
+      c5: cssVar("--risk-map-c5", "#0b5563"),
+      noEiv: cssVar("--risk-map-no-eiv", "#6b7280"),
+      noQ: cssVar("--risk-map-no-questions", "#cbd5f5"),
+      stroke: cssVar("--risk-map-stroke", "#0f172a"),
+    };
+    const colorScale = [
+      palette.c1,
+      palette.c2,
+      palette.c3,
+      palette.c4,
+      palette.c5,
+    ];
     if (iso3Elements.length < 150) {
       warnings.push(
         "World map asset invalid: expected 150+ country paths with data-iso3. Check web/public/maps/world.svg."
@@ -149,17 +165,16 @@ export default function RiskIndexMap({
         return;
       }
       const value = valueByIso3.get(iso3);
-      let fill = "var(--risk-map-no-questions, #cbd5e1)";
+      let fillColor = palette.noQ;
       if (typeof value === "number" && Number.isFinite(value)) {
         const classIndex = classifyJenks(value, breaks);
-        fill = colorScale[classIndex] ?? "var(--risk-map-c1, #a5f3fc)";
+        fillColor = colorScale[classIndex] ?? palette.c1;
       } else if (hasQuestionsIso3.has(iso3)) {
-        fill = "var(--risk-map-no-eiv, #6b7280)";
+        fillColor = palette.noEiv;
       }
-      const fillWithFallback = fill;
       targets.forEach((path) => {
-        path.style.fill = fillWithFallback;
-        path.style.stroke = "var(--risk-map-stroke, rgba(148,163,184,0.35))";
+        path.style.fill = fillColor;
+        path.style.stroke = palette.stroke;
         path.style.strokeWidth = "0.5";
         path.setAttribute("vector-effect", "non-scaling-stroke");
       });
