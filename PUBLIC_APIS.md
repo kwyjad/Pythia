@@ -8,7 +8,7 @@
     - `/v1/risk_index`, `/v1/rankings`
     - `/v1/questions`, `/v1/question_bundle`, `/v1/ui_runs/{ui_run_id}`
     - `/v1/forecasts/*`, `/v1/resolutions`
-    - `/v1/downloads/forecasts.xlsx`
+    - `/v1/downloads/forecasts.csv`, `/v1/downloads/forecasts.xlsx`
     - `/v1/llm/costs`, `/v1/llm/costs/summary`
     - `/v1/calibration/weights`, `/v1/calibration/advice`
   - **Admin (token required)**: Action endpoints (e.g., `POST /v1/run`).
@@ -23,8 +23,12 @@
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`.
 - `GET /v1/risk_index`
   - Rows include `population` and per-capita fields `m1_pc..m6_pc` and `total_pc` for any metric when normalization is enabled and population data is available.
+- `GET /v1/downloads/forecasts.csv`
+  - Streams a CSV export with one row per ISO3 × hazard × model × forecast_month.
+  - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `hs_run_ID`.
 - `GET /v1/downloads/forecasts.xlsx`
   - Streams an Excel export with one row per ISO3 × hazard × model × forecast_month.
+  - If the Excel dependency is unavailable, responds with a redirect to `/v1/downloads/forecasts.csv`.
   - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `hs_run_ID`.
 
 ## resolver.query.db_reader

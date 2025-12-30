@@ -41,6 +41,36 @@ const perCapitaFormatter = new Intl.NumberFormat(undefined, {
 const formatValueLabel = (value: number, isPerCapita: boolean) =>
   isPerCapita ? perCapitaFormatter.format(value) : eivFormatter.format(value);
 
+const roundLatitude = (lat: number) => Math.round(lat * 10000) / 10000;
+
+const collectOuterRingLatitudes = (
+  geometry: GeoFeature["geometry"],
+  latitudes: Set<number>
+) => {
+  if (!geometry) return;
+  if (geometry.type === "Polygon") {
+    const coords = geometry.coordinates as number[][][] | undefined;
+    const ring = coords?.[0];
+    ring?.forEach(([, lat]) => {
+      if (typeof lat === "number" && Number.isFinite(lat)) {
+        latitudes.add(roundLatitude(lat));
+      }
+    });
+    return;
+  }
+  if (geometry.type === "MultiPolygon") {
+    const coords = geometry.coordinates as number[][][][] | undefined;
+    coords?.forEach((polygon) => {
+      const ring = polygon?.[0];
+      ring?.forEach(([, lat]) => {
+        if (typeof lat === "number" && Number.isFinite(lat)) {
+          latitudes.add(roundLatitude(lat));
+        }
+      });
+    });
+  }
+};
+
 export default function RiskIndexMap({
   riskRows,
   countriesRows,
@@ -83,6 +113,15 @@ export default function RiskIndexMap({
     });
     return set;
   }, [countriesRows]);
+
+  const assetLooksSynthetic = useMemo(() => {
+    if (!features.length) return false;
+    const latitudes = new Set<number>();
+    features.slice(0, 50).forEach((feature) => {
+      collectOuterRingLatitudes(feature.geometry, latitudes);
+    });
+    return latitudes.size <= 50;
+  }, [features]);
 
   const valueByIso3 = useMemo(() => {
     const map = new Map<string, number>();
@@ -139,7 +178,14 @@ export default function RiskIndexMap({
 
   const getFeatureIso3 = (feature: GeoFeature) => {
     const props = feature.properties ?? {};
-    const iso3 = (props.iso3 ?? props.ISO_A3 ?? props["ISO_A3"] ?? "") as string;
+    const iso3 = (props.iso3 ??
+      props.ISO_A3 ??
+      props["ISO_A3"] ??
+      props.ADM0_A3 ??
+      props["ADM0_A3"] ??
+      props.adm0_a3 ??
+      props["adm0_a3"] ??
+      "") as string;
     return iso3 ? iso3.toUpperCase() : "";
   };
 
@@ -193,6 +239,12 @@ export default function RiskIndexMap({
       <p className="mt-1 text-xs text-slate-400">
         Jenks breaks calculated from the selected risk values.
       </p>
+      {assetLooksSynthetic ? (
+        <div className="mt-3 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          World map asset looks synthetic (grid-like). Replace
+          web/public/maps/world-countries-iso3.geojson with real country polygons.
+        </div>
+      ) : null}
       <div ref={containerRef} className="relative mt-3 w-full">
         <svg
           aria-label="Risk index world map"
@@ -223,6 +275,7 @@ export default function RiskIndexMap({
                 fill={fill}
                 stroke="var(--risk-map-stroke)"
                 strokeWidth={0.6}
+                vectorEffect="non-scaling-stroke"
                 onMouseLeave={handleMouseLeave}
                 onMouseMove={(event) => handleMouseMove(event, feature)}
               />

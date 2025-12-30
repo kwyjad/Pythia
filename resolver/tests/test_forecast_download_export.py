@@ -189,7 +189,7 @@ def test_build_forecast_spd_export():
 
     df = build_forecast_spd_export(con)
 
-    assert list(df.columns) == [
+    expected_columns = [
         "ISO",
         "country_name",
         "year",
@@ -208,6 +208,12 @@ def test_build_forecast_spd_export():
         "triage_tier",
         "hs_run_ID",
     ]
+    assert list(df.columns) == expected_columns
+
+    csv_text = df.to_csv(index=False)
+    csv_lines = [line for line in csv_text.strip().splitlines() if line]
+    assert csv_lines[0].split(",") == expected_columns
+    assert len(csv_lines) > 1
 
     assert {"ensemble_mean_v2", "ensemble_bayesmc_v2", "gpt-5.1"}.issubset(
         set(df["model"])

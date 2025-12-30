@@ -1,7 +1,8 @@
 const API_BASE =
   process.env.NEXT_PUBLIC_PYTHIA_API_BASE ?? "http://localhost:8000/v1";
 
-const DOWNLOAD_URL = `${API_BASE}/downloads/forecasts.xlsx`;
+const CSV_DOWNLOAD_URL = `${API_BASE}/downloads/forecasts.csv`;
+const XLSX_DOWNLOAD_URL = `${API_BASE}/downloads/forecasts.xlsx`;
 
 const DownloadsPage = () => {
   return (
@@ -16,17 +17,25 @@ const DownloadsPage = () => {
       <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-6">
         <div className="space-y-2">
           <h2 className="text-lg font-semibold text-white">
-            Forecast SPD &amp; EIV export (Excel)
+            Forecast SPD &amp; EIV export
           </h2>
           <p className="text-sm text-slate-400">
             One row per ISO3, hazard, model, and forecast month.
           </p>
-          <a
-            href={DOWNLOAD_URL}
-            className="inline-flex items-center rounded-md bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400"
-          >
-            Download .xlsx
-          </a>
+          <div className="flex flex-wrap items-center gap-3">
+            <a
+              href={CSV_DOWNLOAD_URL}
+              className="inline-flex items-center rounded-md bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400"
+            >
+              Download .csv
+            </a>
+            <a
+              href={XLSX_DOWNLOAD_URL}
+              className="text-xs text-slate-300 underline underline-offset-4 hover:text-white"
+            >
+              Excel (if available; otherwise downloads CSV)
+            </a>
+          </div>
         </div>
       </section>
     </div>
