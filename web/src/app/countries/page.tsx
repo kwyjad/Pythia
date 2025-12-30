@@ -1,20 +1,9 @@
-import { apiGet } from "../../lib/api";
-import CountriesTable from "./CountriesTable";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-type CountriesRow = {
-  iso3: string;
-  n_questions: number;
-  n_forecasted: number;
-  country_name?: string | null;
-  last_triaged?: string | null; // YYYY-MM-DD
-  last_forecasted?: string | null; // YYYY-MM-DD
-};
-
-type CountriesResponse = {
-  rows: CountriesRow[];
-};
+import { apiGet } from "../../lib/api";
+import type { CountriesResponse, CountriesRow } from "../../lib/types";
+import CountriesTable from "./CountriesTable";
 
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];

@@ -21,7 +21,20 @@ export type RiskIndexResponse = {
   rows?: RiskIndexRow[];
 };
 
-export type RiskView = "PA_EIV" | "PA_PC" | "FATALITIES_EIV";
+export type RiskView = "PA_EIV" | "PA_PC" | "FATALITIES_EIV" | "FATALITIES_PC";
+
+export type CountriesRow = {
+  iso3: string;
+  n_questions: number;
+  n_forecasted: number;
+  country_name?: string | null;
+  last_triaged?: string | null;
+  last_forecasted?: string | null;
+};
+
+export type CountriesResponse = {
+  rows: CountriesRow[];
+};
 
 export type RiskIndexRow = {
   iso3: string;

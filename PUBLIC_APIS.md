@@ -21,7 +21,7 @@
 - `GET /v1/questions`
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`.
 - `GET /v1/risk_index`
-  - Rows include `population` and per-capita fields `m1_pc..m6_pc` and `total_pc` when normalization is enabled.
+  - Rows include `population` and per-capita fields `m1_pc..m6_pc` and `total_pc` for any metric when normalization is enabled and population data is available.
 
 ## resolver.query.db_reader
 
