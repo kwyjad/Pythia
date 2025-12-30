@@ -44,10 +44,18 @@ def test_world_geojson_sanity():
     assert len(iso3_features) >= 150
 
     latitudes = set()
+    max_abs_lon = 0.0
+    max_abs_lat = 0.0
     for feature in polygon_features[:50]:
         geometry = feature.get("geometry") or {}
-        for _, lat in iter_outer_ring_positions(geometry):
+        for lon, lat in iter_outer_ring_positions(geometry):
             if isinstance(lat, (float, int)):
                 latitudes.add(round(lat, 4))
+            if isinstance(lon, (float, int)):
+                max_abs_lon = max(max_abs_lon, abs(lon))
+            if isinstance(lat, (float, int)):
+                max_abs_lat = max(max_abs_lat, abs(lat))
 
     assert len(latitudes) > 200
+    assert max_abs_lon <= 180.5
+    assert max_abs_lat <= 90.5

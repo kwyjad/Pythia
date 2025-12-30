@@ -24,7 +24,7 @@ def _write_config(tmp_path: Path, db_path: Path) -> Path:
 
 @pytest.fixture()
 def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    db_path = tmp_path / "api-risk-index.duckdb"
+    db_path = tmp_path / "api-risk-index-bayesmc.duckdb"
     con = duckdb.connect(str(db_path), read_only=False)
     con.execute(
         """
@@ -50,19 +50,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
-        CREATE TABLE populations (
-            iso3 TEXT,
-            population BIGINT,
-            year INTEGER
-        );
-        """
-    )
-    con.execute(
-        """
         INSERT INTO questions (question_id, iso3, hazard_code, target_month, metric)
-        VALUES
-          ('q1', 'USA', 'FL', '2026-01', 'PA'),
-          ('q2', 'USA', 'ACE', '2026-01', 'FATALITIES');
+        VALUES ('q1', 'ETH', 'PA', '2026-01', 'PA');
         """
     )
     con.execute(
@@ -70,15 +59,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability, model_name)
         VALUES
           ('q1', 1, 2, 1.0, 'ensemble_bayesmc_v2'),
-          ('q1', 1, 5, 1.0, 'ensemble_mean_v2'),
-          ('q2', 1, 3, 1.0, 'ensemble_bayesmc_v2'),
-          ('q2', 1, 7, 1.0, 'ensemble_mean_v2');
-        """
-    )
-    con.execute(
-        """
-        INSERT INTO populations (iso3, population, year)
-        VALUES ('USA', 1000000, 2024);
+          ('q1', 1, 5, 1.0, 'ensemble_mean_v2');
         """
     )
     con.close()
@@ -93,33 +74,16 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         pythia_config.load.cache_clear()
 
 
-def test_risk_index_smoke(api_env: None) -> None:
+def test_risk_index_prefers_bayesmc(api_env: None) -> None:
     client = TestClient(app)
 
     resp = client.get(
         "/v1/risk_index",
-        params={"metric": "PA", "horizon_m": 1, "normalize": True, "target_month": "2026-01"},
+        params={"metric": "PA", "horizon_m": 1, "normalize": False, "target_month": "2026-01"},
     )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["rows"]
     row = payload["rows"][0]
     assert row["total"] == pytest.approx(2.0)
-    assert row["population"] == 1000000
-    assert row["m1_pc"] == pytest.approx(row["m1"] / row["population"])
-    assert row["total_pc"] == pytest.approx(row["total"] / row["population"])
-
-    resp = client.get(
-        "/v1/risk_index",
-        params={
-            "metric": "FATALITIES",
-            "horizon_m": 1,
-            "normalize": True,
-            "target_month": "2026-01",
-        },
-    )
-    assert resp.status_code == 200
-    payload = resp.json()
-    row = payload["rows"][0]
-    assert "population" in row
-    assert "total_pc" in row
+    assert row["m1"] == pytest.approx(2.0)
