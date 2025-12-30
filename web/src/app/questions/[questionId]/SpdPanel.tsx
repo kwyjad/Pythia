@@ -75,6 +75,11 @@ const collectSpdSources = (bundle: QuestionBundleResponse): SpdSource[] => {
   });
 
   rawRows.forEach((row) => {
+    const modelName =
+      typeof row.model_name === "string" ? row.model_name.trim().toLowerCase() : "";
+    if (modelName.startsWith("ensemble_")) {
+      return;
+    }
     const key =
       (row.model_name as string | undefined) ??
       (row.model as string | undefined) ??
@@ -106,10 +111,13 @@ const resolveMonthIndex = (row: SpdRow): number | null => {
 const buildProbVector = (
   rows: SpdRow[],
   monthIndex: number,
-  labels: string[]
+  labels: string[],
+  sourceKey?: string
 ): number[] => {
   const probs = Array.from({ length: labels.length }, () => 0);
+  const seen = Array.from({ length: labels.length }, () => false);
   const labelIndex = new Map(labels.map((label, index) => [label, index]));
+  let duplicateFound = false;
 
   rows.forEach((row) => {
     const rowMonth = resolveMonthIndex(row);
@@ -127,16 +135,43 @@ const buildProbVector = (
 
     if (index === null || index < 0 || index >= probs.length) return;
 
+    if (seen[index]) {
+      duplicateFound = true;
+      return;
+    }
+
     const probValue = row.probability ?? row.prob ?? row.p;
+    let parsed: number | null = null;
     if (typeof probValue === "number" && Number.isFinite(probValue)) {
-      probs[index] += probValue;
+      parsed = probValue;
     } else if (typeof probValue === "string") {
-      const parsed = Number.parseFloat(probValue);
-      if (Number.isFinite(parsed)) {
-        probs[index] += parsed;
+      const numeric = Number.parseFloat(probValue);
+      if (Number.isFinite(numeric)) {
+        parsed = numeric;
       }
     }
+
+    if (parsed !== null) {
+      probs[index] = parsed;
+      seen[index] = true;
+    }
   });
+
+  if (duplicateFound) {
+    console.warn(
+      `[SPD] Duplicate bucket rows deduped for source "${sourceKey ?? "unknown"}"`,
+      { monthIndex }
+    );
+  }
+
+  const sum = probs.reduce((total, value) => total + value, 0);
+  if (sum > 1.01 || sum < 0.99) {
+    console.warn(`[SPD] Probability sum out of range`, {
+      source: sourceKey ?? "unknown",
+      monthIndex,
+      sum,
+    });
+  }
 
   return probs;
 };
@@ -171,17 +206,31 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
 
   const probs = useMemo(() => {
     if (!selectedSource) return Array.from({ length: labels.length }, () => 0);
-    return buildProbVector(selectedSource.rows, selectedMonthIndex, labels);
+    return buildProbVector(
+      selectedSource.rows,
+      selectedMonthIndex,
+      labels,
+      selectedSource.key
+    );
   }, [labels, selectedMonthIndex, selectedSource]);
 
   const eivMonth = useMemo(() => {
     return probs.reduce((sum, prob, index) => sum + prob * (centroids[index] ?? 0), 0);
   }, [centroids, probs]);
 
+  const probSum = useMemo(() => {
+    return probs.reduce((sum, prob) => sum + prob, 0);
+  }, [probs]);
+
   const eivTotal = useMemo(() => {
     if (!selectedSource) return 0;
     return [1, 2, 3, 4, 5, 6].reduce((sum, monthIndex) => {
-      const monthProbs = buildProbVector(selectedSource.rows, monthIndex, labels);
+      const monthProbs = buildProbVector(
+        selectedSource.rows,
+        monthIndex,
+        labels,
+        selectedSource.key
+      );
       const monthEiv = monthProbs.reduce(
         (subtotal, prob, index) => subtotal + prob * (centroids[index] ?? 0),
         0
@@ -267,6 +316,11 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
 
       <div className="mt-6">
         <SpdBarChart labels={labels} probs={probs} />
+        {process.env.NODE_ENV !== "production" ? (
+          <p className="mt-2 text-xs text-slate-400">
+            SPD sum: {probSum.toFixed(3)}
+          </p>
+        ) : null}
       </div>
 
       <div className="mt-6 overflow-x-auto">
