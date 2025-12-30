@@ -87,11 +87,11 @@ export default function RiskIndexMap({
   const breaks = useMemo(() => jenksBreaks(values, 5), [values]);
 
   const colorScale = [
-    "var(--risk-map-c1)",
-    "var(--risk-map-c2)",
-    "var(--risk-map-c3)",
-    "var(--risk-map-c4)",
-    "var(--risk-map-c5)",
+    "var(--risk-map-c1, #a5f3fc)",
+    "var(--risk-map-c2, #67e8f9)",
+    "var(--risk-map-c3, #22d3ee)",
+    "var(--risk-map-c4, #06b6d4)",
+    "var(--risk-map-c5, #0e7490)",
   ];
 
   useEffect(() => {
@@ -102,11 +102,17 @@ export default function RiskIndexMap({
     }
     const container = containerRef.current;
     if (!container) return;
-    const paths = Array.from(
-      container.querySelectorAll<SVGPathElement>("[data-iso3]")
+    const iso3Elements = Array.from(
+      container.querySelectorAll<SVGElement>("[data-iso3]")
     );
+    const paths = iso3Elements.flatMap((el) => {
+      if (el.tagName.toLowerCase() === "path") {
+        return [el as SVGPathElement];
+      }
+      return Array.from(el.querySelectorAll<SVGPathElement>("path"));
+    });
     const warnings: string[] = [];
-    if (paths.length < 150) {
+    if (iso3Elements.length < 150) {
       warnings.push(
         "World map asset invalid: expected 150+ country paths with data-iso3. Check web/public/maps/world.svg."
       );
@@ -130,23 +136,33 @@ export default function RiskIndexMap({
     }
     setSvgWarnings(warnings);
     const listeners: Array<() => void> = [];
-    paths.forEach((path) => {
-      const iso3 = (path.getAttribute("data-iso3") || "").toUpperCase();
+    iso3Elements.forEach((element) => {
+      const iso3 = (element.getAttribute("data-iso3") || "").toUpperCase();
       if (!iso3) {
         return;
       }
+      const targets =
+        element.tagName.toLowerCase() === "path"
+          ? [element as SVGPathElement]
+          : Array.from(element.querySelectorAll<SVGPathElement>("path"));
+      if (!targets.length) {
+        return;
+      }
       const value = valueByIso3.get(iso3);
-      let fill = "var(--risk-map-no-questions)";
+      let fill = "var(--risk-map-no-questions, #cbd5e1)";
       if (typeof value === "number" && Number.isFinite(value)) {
         const classIndex = classifyJenks(value, breaks);
-        fill = colorScale[classIndex] ?? "var(--risk-map-c1)";
+        fill = colorScale[classIndex] ?? "var(--risk-map-c1, #a5f3fc)";
       } else if (hasQuestionsIso3.has(iso3)) {
-        fill = "var(--risk-map-no-eiv)";
+        fill = "var(--risk-map-no-eiv, #6b7280)";
       }
-      path.setAttribute("fill", fill);
-      path.setAttribute("stroke", "var(--risk-map-stroke)");
-      path.setAttribute("stroke-width", "0.5");
-      path.setAttribute("vector-effect", "non-scaling-stroke");
+      const fillWithFallback = fill;
+      targets.forEach((path) => {
+        path.style.fill = fillWithFallback;
+        path.style.stroke = "var(--risk-map-stroke, rgba(148,163,184,0.35))";
+        path.style.strokeWidth = "0.5";
+        path.setAttribute("vector-effect", "non-scaling-stroke");
+      });
 
       const handleMouseMove = (event: MouseEvent) => {
         const name =
@@ -168,12 +184,16 @@ export default function RiskIndexMap({
 
       const handleMouseLeave = () => setTooltip(null);
 
-      path.addEventListener("mousemove", handleMouseMove);
-      path.addEventListener("mouseleave", handleMouseLeave);
+      targets.forEach((path) => {
+        path.addEventListener("mousemove", handleMouseMove);
+        path.addEventListener("mouseleave", handleMouseLeave);
+      });
 
       listeners.push(() => {
-        path.removeEventListener("mousemove", handleMouseMove);
-        path.removeEventListener("mouseleave", handleMouseLeave);
+        targets.forEach((path) => {
+          path.removeEventListener("mousemove", handleMouseMove);
+          path.removeEventListener("mouseleave", handleMouseLeave);
+        });
       });
     });
 
