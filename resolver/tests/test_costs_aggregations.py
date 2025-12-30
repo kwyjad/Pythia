@@ -94,6 +94,8 @@ def test_costs_monthly_and_run_aggregations():
     assert feb["median_cost_per_question"] == pytest.approx(6.5)
 
     runs = build_costs_runs(con)["summary"]
+    assert runs["run_id"].is_unique
+    assert runs[runs["run_id"] == "run-1"].shape[0] == 1
     run_1 = _summary_row(runs, run_id="run-1")
     run_2 = _summary_row(runs, run_id="run-2")
     run_hs = _summary_row(runs, run_id="hs-9")

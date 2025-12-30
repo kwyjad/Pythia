@@ -186,6 +186,7 @@ def _load_llm_calls(conn) -> pd.DataFrame:
     created_at = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
     df["year"] = created_at.dt.year.astype("Int64")
     df["month"] = created_at.dt.month.astype("Int64")
+    df["created_at"] = created_at
 
     return df[
         [
@@ -198,6 +199,7 @@ def _load_llm_calls(conn) -> pd.DataFrame:
             "elapsed_ms",
             "year",
             "month",
+            "created_at",
         ]
     ]
 
@@ -380,7 +382,33 @@ def build_costs_monthly(conn) -> dict[str, pd.DataFrame]:
 
 def build_costs_runs(conn) -> dict[str, pd.DataFrame]:
     df = _load_llm_calls(conn)
-    return _build_costs_grain(df, "run", ["run_id", "year", "month"])
+    if df.empty:
+        empty = pd.DataFrame(columns=COST_COLUMNS)
+        return {"summary": empty, "by_model": empty, "by_phase": empty}
+
+    metadata = (
+        df.groupby(["run_id"], dropna=False)["created_at"]
+        .min()
+        .reset_index()
+        .rename(columns={"created_at": "run_created_at"})
+    )
+    if not metadata.empty:
+        metadata["year"] = metadata["run_created_at"].dt.year.astype("Int64")
+        metadata["month"] = metadata["run_created_at"].dt.month.astype("Int64")
+    else:
+        metadata["year"] = pd.NA
+        metadata["month"] = pd.NA
+
+    tables = _build_costs_grain(df, "run", ["run_id"])
+    for key, table in tables.items():
+        if table.empty:
+            continue
+        table = table.merge(metadata[["run_id", "year", "month"]], on="run_id", how="left")
+        table["year"] = table["year_y"].combine_first(table["year_x"])
+        table["month"] = table["month_y"].combine_first(table["month_x"])
+        table = table.drop(columns=["year_x", "year_y", "month_x", "month_y"])
+        tables[key] = table[COST_COLUMNS]
+    return tables
 
 
 def build_latencies_runs(conn) -> pd.DataFrame:
