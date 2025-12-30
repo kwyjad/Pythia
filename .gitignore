@@ -12,6 +12,8 @@ build/
 develop-eggs/
 dist/
 downloads/
+!web/src/app/downloads/
+!web/src/app/downloads/**
 eggs/
 .eggs/
 lib/

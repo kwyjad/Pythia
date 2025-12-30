@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,7 @@ import duckdb, pandas as pd
 import numpy as np
 from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from pythia.api.auth import require_admin_token
 from pythia.api.db_sync import (
@@ -34,6 +36,7 @@ from pythia.api.models import (
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
+from resolver.query.downloads import build_forecast_spd_export
 from resolver.query.questions_index import (
     compute_questions_forecast_summary,
     compute_questions_triage_summary,
@@ -1820,6 +1823,37 @@ def get_countries():
     if df.empty:
         return {"rows": []}
     return {"rows": _rows_from_df(df)}
+
+
+@app.get("/v1/downloads/forecasts.xlsx")
+def download_forecasts_xlsx():
+    con = _con()
+    try:
+        df = build_forecast_spd_export(con)
+    except Exception as exc:
+        logger.exception("Failed to build forecast download export")
+        raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
+
+    buffer = BytesIO()
+    try:
+        df.to_excel(buffer, index=False, engine="openpyxl")
+    except ModuleNotFoundError as exc:
+        logger.exception("Missing dependency for forecast download export")
+        raise HTTPException(
+            status_code=500,
+            detail="Missing dependency 'openpyxl' required for Excel export",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to serialize forecast download export")
+        raise HTTPException(status_code=500, detail="Failed to serialize forecast download export") from exc
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="pythia_forecasts_export.xlsx"'}
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
 
 
 @app.get("/v1/llm/costs")
