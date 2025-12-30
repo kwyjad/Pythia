@@ -74,9 +74,25 @@ def test_costs_total_aggregations():
     assert model_totals["gpt-4"] == pytest.approx(8.0)
     assert model_totals["gpt-3.5"] == pytest.approx(7.0)
     assert model_totals["custom-model"] == pytest.approx(1.0)
+    gpt4 = _summary_row(by_model, model="gpt-4")
+    gpt35 = _summary_row(by_model, model="gpt-3.5")
+    custom = _summary_row(by_model, model="custom-model")
+    assert gpt4["n_questions"] == 2
+    assert gpt35["n_questions"] == 1
+    assert gpt4["avg_cost_per_question"] == pytest.approx(4.0)
+    assert gpt35["avg_cost_per_question"] == pytest.approx(7.0)
+    assert custom["avg_cost_per_question"] == pytest.approx(1.0)
+    assert gpt4["n_countries"] == 2
+    assert gpt35["n_countries"] == 1
 
     by_phase = tables["by_phase"]
     assert by_phase["total_cost_usd"].sum() == pytest.approx(16.0)
+    web = _summary_row(by_phase, phase="web_search")
+    scenario = _summary_row(by_phase, phase="scenario")
+    assert web["total_cost_usd"] == pytest.approx(1.0)
+    assert scenario["total_cost_usd"] == pytest.approx(5.0)
+    assert web["avg_cost_per_question"] == pytest.approx(1.0)
+    assert scenario["avg_cost_per_question"] == pytest.approx(5.0)
 
 
 def test_costs_monthly_and_run_aggregations():
