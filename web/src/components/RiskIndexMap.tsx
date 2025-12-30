@@ -1,6 +1,4 @@
 "use client";
-
-import { geoNaturalEarth1, geoPath } from "d3-geo";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 
 import { classifyJenks, jenksBreaks } from "../lib/jenks";
@@ -109,56 +107,32 @@ const collectOuterRingPositions = (geometry: GeoFeature["geometry"]) => {
   return positions;
 };
 
-const mapCoordinates = (
-  coords: unknown,
-  transform: (lon: number, lat: number) => [number, number]
-): unknown => {
+const normalizeCoord = ([a, b]: [number, number]) => {
+  let lon = a;
+  let lat = b;
+  if (Math.abs(a) <= 90 && Math.abs(b) > 90) {
+    lon = b;
+    lat = a;
+  }
+  if (lon > 180) {
+    lon -= 360;
+  }
+  return [lon, lat] as [number, number];
+};
+
+const mapCoordinates = (coords: unknown): unknown => {
   if (!Array.isArray(coords)) {
     return coords;
   }
   if (coords.length >= 2 && coords.every((value) => typeof value === "number")) {
     const [lon, lat] = coords as number[];
-    const [nextLon, nextLat] = transform(lon, lat);
+    const [nextLon, nextLat] = normalizeCoord([lon, lat]);
     return [nextLon, nextLat, ...(coords.slice(2) as number[])];
   }
-  return coords.map((child) => mapCoordinates(child, transform));
+  return coords.map((child) => mapCoordinates(child));
 };
 
 const normalizeFeatures = (rawFeatures: GeoFeature[]) => {
-  const samplePositions: Array<[number, number]> = [];
-  rawFeatures.slice(0, 50).forEach((feature) => {
-    const positions = collectOuterRingPositions(feature.geometry);
-    samplePositions.push(...positions);
-  });
-
-  let lonMin = Infinity;
-  let lonMax = -Infinity;
-  let latMin = Infinity;
-  let latMax = -Infinity;
-  samplePositions.forEach(([lon, lat]) => {
-    lonMin = Math.min(lonMin, lon);
-    lonMax = Math.max(lonMax, lon);
-    latMin = Math.min(latMin, lat);
-    latMax = Math.max(latMax, lat);
-  });
-
-  const absLonMax = Math.max(Math.abs(lonMin), Math.abs(lonMax));
-  const absLatMax = Math.max(Math.abs(latMin), Math.abs(latMax));
-  const needsSwap = absLatMax > 90 && absLonMax <= 90;
-  const needsWrap = lonMin >= 0 && lonMax > 180;
-
-  const transform = (lon: number, lat: number) => {
-    let nextLon = lon;
-    let nextLat = lat;
-    if (needsSwap) {
-      [nextLon, nextLat] = [nextLat, nextLon];
-    }
-    if (needsWrap && nextLon > 180) {
-      nextLon -= 360;
-    }
-    return [nextLon, nextLat] as [number, number];
-  };
-
   const normalizedFeatures = rawFeatures.map((feature) => {
     const geometry = feature.geometry;
     if (!geometry) return feature;
@@ -166,7 +140,7 @@ const normalizeFeatures = (rawFeatures: GeoFeature[]) => {
       ...feature,
       geometry: {
         ...geometry,
-        coordinates: mapCoordinates(geometry.coordinates, transform),
+        coordinates: mapCoordinates(geometry.coordinates),
       },
     };
   });
@@ -190,6 +164,66 @@ const normalizeFeatures = (rawFeatures: GeoFeature[]) => {
     Number.isNaN(normalizedAbsLatMax);
 
   return { features: normalizedFeatures, invalid };
+};
+
+const projectCoordinate = (lon: number, lat: number) => {
+  const x = ((lon + 180) / 360) * MAP_WIDTH;
+  const y = ((90 - lat) / 180) * MAP_HEIGHT;
+  return [x, y] as [number, number];
+};
+
+const toPathForRing = (ring: unknown) => {
+  if (!Array.isArray(ring)) return null;
+  const points: Array<[number, number]> = [];
+  ring.forEach((coord) => {
+    if (!Array.isArray(coord) || coord.length < 2) return;
+    const [lon, lat] = coord as number[];
+    if (
+      typeof lon === "number" &&
+      Number.isFinite(lon) &&
+      typeof lat === "number" &&
+      Number.isFinite(lat)
+    ) {
+      points.push(projectCoordinate(lon, lat));
+    }
+  });
+  if (!points.length) return null;
+  const [startX, startY] = points[0];
+  const segments = points
+    .slice(1)
+    .map(([x, y]) => `L ${x} ${y}`)
+    .join(" ");
+  return `M ${startX} ${startY} ${segments} Z`;
+};
+
+const toPathForPolygon = (coordinates: unknown) => {
+  if (!Array.isArray(coordinates)) return null;
+  const ringPaths = coordinates
+    .map((ring) => toPathForRing(ring))
+    .filter((path): path is string => Boolean(path));
+  if (!ringPaths.length) return null;
+  return ringPaths.join(" ");
+};
+
+const toPathForMultiPolygon = (coordinates: unknown) => {
+  if (!Array.isArray(coordinates)) return null;
+  const polygonPaths = coordinates
+    .map((polygon) => toPathForPolygon(polygon))
+    .filter((path): path is string => Boolean(path));
+  if (!polygonPaths.length) return null;
+  return polygonPaths.join(" ");
+};
+
+const toPathForFeature = (feature: GeoFeature) => {
+  const geometry = feature.geometry;
+  if (!geometry) return null;
+  if (geometry.type === "Polygon") {
+    return toPathForPolygon(geometry.coordinates);
+  }
+  if (geometry.type === "MultiPolygon") {
+    return toPathForMultiPolygon(geometry.coordinates);
+  }
+  return null;
 };
 
 export default function RiskIndexMap({
@@ -265,22 +299,6 @@ export default function RiskIndexMap({
   );
 
   const breaks = useMemo(() => jenksBreaks(values, 5), [values]);
-
-  const projection = useMemo(() => {
-    if (!features.length || assetInvalid) return null;
-    return geoNaturalEarth1().fitSize(
-      [MAP_WIDTH, MAP_HEIGHT],
-      {
-        type: "FeatureCollection",
-        features,
-      } as GeoCollection
-    );
-  }, [features, assetInvalid]);
-
-  const path = useMemo(
-    () => (projection ? geoPath(projection) : null),
-    [projection]
-  );
 
   const getFeatureIso3 = (feature: GeoFeature) => {
     const props = feature.properties ?? {};
@@ -369,32 +387,35 @@ export default function RiskIndexMap({
             height={MAP_HEIGHT}
             fill="transparent"
           />
-          {assetInvalid || !path
+          {assetInvalid
             ? null
             : features.map((feature, index) => {
-            const iso3 = getFeatureIso3(feature);
-            const value = iso3 ? valueByIso3.get(iso3) : undefined;
-            let fill = "var(--risk-map-no-questions)";
-            if (typeof value === "number" && Number.isFinite(value)) {
-              const classIndex = classifyJenks(value, breaks);
-              fill = colorScale[classIndex] ?? "var(--risk-map-c1)";
-            } else if (iso3 && hasQuestionsIso3.has(iso3)) {
-              fill = "var(--risk-map-no-eiv)";
-            }
-            const d = path(feature as any);
-            return (
-              <path
-                key={`${iso3 || "country"}-${index}`}
-                d={d || undefined}
-                fill={fill}
-                stroke="var(--risk-map-stroke)"
-                strokeWidth={0.6}
-                vectorEffect="non-scaling-stroke"
-                onMouseLeave={handleMouseLeave}
-                onMouseMove={(event) => handleMouseMove(event, feature)}
-              />
-            );
-          })}
+                const iso3 = getFeatureIso3(feature);
+                const value = iso3 ? valueByIso3.get(iso3) : undefined;
+                let fill = "var(--risk-map-no-questions)";
+                if (typeof value === "number" && Number.isFinite(value)) {
+                  const classIndex = classifyJenks(value, breaks);
+                  fill = colorScale[classIndex] ?? "var(--risk-map-c1)";
+                } else if (iso3 && hasQuestionsIso3.has(iso3)) {
+                  fill = "var(--risk-map-no-eiv)";
+                }
+                const d = toPathForFeature(feature);
+                if (!d) {
+                  return null;
+                }
+                return (
+                  <path
+                    key={`${iso3 || "country"}-${index}`}
+                    d={d}
+                    fill={fill}
+                    stroke="var(--risk-map-stroke)"
+                    strokeWidth={0.6}
+                    vectorEffect="non-scaling-stroke"
+                    onMouseLeave={handleMouseLeave}
+                    onMouseMove={(event) => handleMouseMove(event, feature)}
+                  />
+                );
+              })}
         </svg>
         {tooltip ? (
           <div

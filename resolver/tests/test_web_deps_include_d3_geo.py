@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 
 
-def test_web_dependencies_include_d3_geo():
+def test_web_dependencies_exclude_d3_geo():
     package_json = Path(__file__).resolve().parents[2] / "web" / "package.json"
     data = json.loads(package_json.read_text())
     deps = data.get("dependencies", {})
-    assert "d3-geo" in deps
+    assert "d3-geo" not in deps
