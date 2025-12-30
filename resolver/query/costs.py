@@ -120,7 +120,7 @@ def _load_llm_calls(conn) -> pd.DataFrame:
     model_name_col = _pick_column(cols, ["model_name"])
     cost_col = _pick_column(cols, ["cost_usd"])
     elapsed_col = _pick_column(cols, ["elapsed_ms"])
-    created_col = _pick_column(cols, ["created_at"])
+    created_col = _pick_column(cols, ["created_at", "timestamp"])
 
     run_expr = f"CAST({run_id_col} AS VARCHAR) AS run_id" if run_id_col else "NULL AS run_id"
     hs_run_expr = (
@@ -314,49 +314,8 @@ def _build_costs_grain(df: pd.DataFrame, grain: str, group_cols: list[str]) -> d
 
     df_grouped, group_cols_use, drop_all = _with_group(df, group_cols)
     summary = _compute_summary(df_grouped, group_cols_use)
-    by_model = (
-        df_grouped.groupby(group_cols_use + ["model"], dropna=False)["cost_usd"]
-        .sum()
-        .reset_index()
-        .rename(columns={"cost_usd": "total_cost_usd"})
-    )
-    by_model = by_model.merge(
-        summary[
-            group_cols_use
-            + [
-                "n_questions",
-                "avg_cost_per_question",
-                "median_cost_per_question",
-                "n_countries",
-                "avg_cost_per_country",
-                "median_cost_per_country",
-            ]
-        ],
-        on=group_cols_use,
-        how="left",
-    )
-
-    by_phase = (
-        df_grouped.groupby(group_cols_use + ["phase"], dropna=False)["cost_usd"]
-        .sum()
-        .reset_index()
-        .rename(columns={"cost_usd": "total_cost_usd"})
-    )
-    by_phase = by_phase.merge(
-        summary[
-            group_cols_use
-            + [
-                "n_questions",
-                "avg_cost_per_question",
-                "median_cost_per_question",
-                "n_countries",
-                "avg_cost_per_country",
-                "median_cost_per_country",
-            ]
-        ],
-        on=group_cols_use,
-        how="left",
-    )
+    by_model = _compute_summary(df_grouped, group_cols_use + ["model"])
+    by_phase = _compute_summary(df_grouped, group_cols_use + ["phase"])
 
     if drop_all:
         summary = summary.drop(columns=group_cols_use)
