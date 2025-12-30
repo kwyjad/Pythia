@@ -37,6 +37,13 @@ from pythia.api.models import (
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
+from resolver.query.costs import (
+    COST_COLUMNS,
+    build_costs_monthly,
+    build_costs_runs,
+    build_costs_total,
+    build_latencies_runs,
+)
 from resolver.query.downloads import build_forecast_spd_export
 from resolver.query.questions_index import (
     compute_questions_forecast_summary,
@@ -174,6 +181,18 @@ def _rows_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
         return []
     rows = df.to_dict(orient="records")
     return _json_sanitize(rows)
+
+
+def _concat_cost_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    frames = [
+        tables.get("summary"),
+        tables.get("by_model"),
+        tables.get("by_phase"),
+    ]
+    frames = [frame for frame in frames if frame is not None]
+    if not frames or all(frame.empty for frame in frames):
+        return pd.DataFrame(columns=COST_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
 
 
 def _con():
@@ -1937,6 +1956,84 @@ def download_forecasts_csv():
     )
 
 
+@app.get("/v1/downloads/total_costs.csv")
+def download_total_costs_csv():
+    con = _con()
+    try:
+        tables = build_costs_total(con)
+        df = _concat_cost_tables(tables)
+    except Exception as exc:
+        logger.exception("Failed to build total cost export")
+        raise HTTPException(status_code=500, detail="Failed to build total cost export") from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize total cost export")
+        raise HTTPException(status_code=500, detail="Failed to serialize total cost export") from exc
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="total_costs.csv"'}
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/monthly_costs.csv")
+def download_monthly_costs_csv():
+    con = _con()
+    try:
+        tables = build_costs_monthly(con)
+        df = _concat_cost_tables(tables)
+    except Exception as exc:
+        logger.exception("Failed to build monthly cost export")
+        raise HTTPException(status_code=500, detail="Failed to build monthly cost export") from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize monthly cost export")
+        raise HTTPException(status_code=500, detail="Failed to serialize monthly cost export") from exc
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="monthly_costs.csv"'}
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/run_costs.csv")
+def download_run_costs_csv():
+    con = _con()
+    try:
+        tables = build_costs_runs(con)
+        df = _concat_cost_tables(tables)
+    except Exception as exc:
+        logger.exception("Failed to build run cost export")
+        raise HTTPException(status_code=500, detail="Failed to build run cost export") from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize run cost export")
+        raise HTTPException(status_code=500, detail="Failed to serialize run cost export") from exc
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="run_costs.csv"'}
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
 @app.get("/v1/llm/costs")
 def llm_costs(
     component: str | None = Query(None),
@@ -2091,3 +2188,51 @@ def llm_costs_summary(
         },
         "rows": _rows_from_df(df),
     }
+
+
+@app.get("/v1/costs/total")
+def costs_total():
+    con = _con()
+    try:
+        tables = build_costs_total(con)
+    except Exception as exc:
+        logger.exception("Failed to build total costs")
+        raise HTTPException(status_code=500, detail="Failed to build total costs") from exc
+
+    return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
+
+
+@app.get("/v1/costs/monthly")
+def costs_monthly():
+    con = _con()
+    try:
+        tables = build_costs_monthly(con)
+    except Exception as exc:
+        logger.exception("Failed to build monthly costs")
+        raise HTTPException(status_code=500, detail="Failed to build monthly costs") from exc
+
+    return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
+
+
+@app.get("/v1/costs/runs")
+def costs_runs():
+    con = _con()
+    try:
+        tables = build_costs_runs(con)
+    except Exception as exc:
+        logger.exception("Failed to build run costs")
+        raise HTTPException(status_code=500, detail="Failed to build run costs") from exc
+
+    return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
+
+
+@app.get("/v1/costs/latencies")
+def costs_latencies():
+    con = _con()
+    try:
+        df = build_latencies_runs(con)
+    except Exception as exc:
+        logger.exception("Failed to build run latencies")
+        raise HTTPException(status_code=500, detail="Failed to build run latencies") from exc
+
+    return {"rows": _rows_from_df(df)}
