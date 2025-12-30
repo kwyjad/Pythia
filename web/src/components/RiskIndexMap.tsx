@@ -1,5 +1,6 @@
 "use client";
 
+import { geoNaturalEarth1, geoPath } from "d3-geo";
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 
 import { classifyJenks, jenksBreaks } from "../lib/jenks";
@@ -71,12 +72,133 @@ const collectOuterRingLatitudes = (
   }
 };
 
+const collectOuterRingPositions = (geometry: GeoFeature["geometry"]) => {
+  const positions: Array<[number, number]> = [];
+  if (!geometry) return positions;
+  if (geometry.type === "Polygon") {
+    const coords = geometry.coordinates as number[][][] | undefined;
+    const ring = coords?.[0];
+    ring?.forEach(([lon, lat]) => {
+      if (
+        typeof lon === "number" &&
+        Number.isFinite(lon) &&
+        typeof lat === "number" &&
+        Number.isFinite(lat)
+      ) {
+        positions.push([lon, lat]);
+      }
+    });
+    return positions;
+  }
+  if (geometry.type === "MultiPolygon") {
+    const coords = geometry.coordinates as number[][][][] | undefined;
+    coords?.forEach((polygon) => {
+      const ring = polygon?.[0];
+      ring?.forEach(([lon, lat]) => {
+        if (
+          typeof lon === "number" &&
+          Number.isFinite(lon) &&
+          typeof lat === "number" &&
+          Number.isFinite(lat)
+        ) {
+          positions.push([lon, lat]);
+        }
+      });
+    });
+  }
+  return positions;
+};
+
+const mapCoordinates = (
+  coords: unknown,
+  transform: (lon: number, lat: number) => [number, number]
+): unknown => {
+  if (!Array.isArray(coords)) {
+    return coords;
+  }
+  if (coords.length >= 2 && coords.every((value) => typeof value === "number")) {
+    const [lon, lat] = coords as number[];
+    const [nextLon, nextLat] = transform(lon, lat);
+    return [nextLon, nextLat, ...(coords.slice(2) as number[])];
+  }
+  return coords.map((child) => mapCoordinates(child, transform));
+};
+
+const normalizeFeatures = (rawFeatures: GeoFeature[]) => {
+  const samplePositions: Array<[number, number]> = [];
+  rawFeatures.slice(0, 50).forEach((feature) => {
+    const positions = collectOuterRingPositions(feature.geometry);
+    samplePositions.push(...positions);
+  });
+
+  let lonMin = Infinity;
+  let lonMax = -Infinity;
+  let latMin = Infinity;
+  let latMax = -Infinity;
+  samplePositions.forEach(([lon, lat]) => {
+    lonMin = Math.min(lonMin, lon);
+    lonMax = Math.max(lonMax, lon);
+    latMin = Math.min(latMin, lat);
+    latMax = Math.max(latMax, lat);
+  });
+
+  const absLonMax = Math.max(Math.abs(lonMin), Math.abs(lonMax));
+  const absLatMax = Math.max(Math.abs(latMin), Math.abs(latMax));
+  const needsSwap = absLatMax > 90 && absLonMax <= 90;
+  const needsWrap = lonMin >= 0 && lonMax > 180;
+
+  const transform = (lon: number, lat: number) => {
+    let nextLon = lon;
+    let nextLat = lat;
+    if (needsSwap) {
+      [nextLon, nextLat] = [nextLat, nextLon];
+    }
+    if (needsWrap && nextLon > 180) {
+      nextLon -= 360;
+    }
+    return [nextLon, nextLat] as [number, number];
+  };
+
+  const normalizedFeatures = rawFeatures.map((feature) => {
+    const geometry = feature.geometry;
+    if (!geometry) return feature;
+    return {
+      ...feature,
+      geometry: {
+        ...geometry,
+        coordinates: mapCoordinates(geometry.coordinates, transform),
+      },
+    };
+  });
+
+  const normalizedPositions: Array<[number, number]> = [];
+  normalizedFeatures.slice(0, 50).forEach((feature) => {
+    normalizedPositions.push(...collectOuterRingPositions(feature.geometry));
+  });
+
+  let normalizedAbsLonMax = 0;
+  let normalizedAbsLatMax = 0;
+  normalizedPositions.forEach(([lon, lat]) => {
+    normalizedAbsLonMax = Math.max(normalizedAbsLonMax, Math.abs(lon));
+    normalizedAbsLatMax = Math.max(normalizedAbsLatMax, Math.abs(lat));
+  });
+
+  const invalid =
+    normalizedAbsLonMax > 200 ||
+    normalizedAbsLatMax > 100 ||
+    Number.isNaN(normalizedAbsLonMax) ||
+    Number.isNaN(normalizedAbsLatMax);
+
+  return { features: normalizedFeatures, invalid };
+};
+
 export default function RiskIndexMap({
   riskRows,
   countriesRows,
   view,
 }: RiskIndexMapProps) {
   const [features, setFeatures] = useState<GeoFeature[]>([]);
+  const [assetInvalid, setAssetInvalid] = useState(false);
   const [tooltip, setTooltip] = useState<{
     x: number;
     y: number;
@@ -91,7 +213,9 @@ export default function RiskIndexMap({
       .then((res) => res.json())
       .then((data: GeoCollection) => {
         if (!active) return;
-        setFeatures(data.features ?? []);
+        const normalized = normalizeFeatures(data.features ?? []);
+        setAssetInvalid(normalized.invalid);
+        setFeatures(normalized.features);
       })
       .catch((error) => {
         console.warn("Failed to load world map:", error);
@@ -142,39 +266,21 @@ export default function RiskIndexMap({
 
   const breaks = useMemo(() => jenksBreaks(values, 5), [values]);
 
-  const projectPoint = (lon: number, lat: number) => {
-    const x = ((lon + 180) / 360) * MAP_WIDTH;
-    const y = ((90 - lat) / 180) * MAP_HEIGHT;
-    return [x, y];
-  };
+  const projection = useMemo(() => {
+    if (!features.length || assetInvalid) return null;
+    return geoNaturalEarth1().fitSize(
+      [MAP_WIDTH, MAP_HEIGHT],
+      {
+        type: "FeatureCollection",
+        features,
+      } as GeoCollection
+    );
+  }, [features, assetInvalid]);
 
-  const renderRing = (ring: number[][]) => {
-    if (!ring.length) return "";
-    const [firstLon, firstLat] = ring[0];
-    const [x0, y0] = projectPoint(firstLon, firstLat);
-    const segments = [`M${x0},${y0}`];
-    for (let i = 1; i < ring.length; i++) {
-      const [lon, lat] = ring[i];
-      const [x, y] = projectPoint(lon, lat);
-      segments.push(`L${x},${y}`);
-    }
-    segments.push("Z");
-    return segments.join(" ");
-  };
-
-  const pathForFeature = (feature: GeoFeature) => {
-    const geometry = feature.geometry;
-    if (!geometry) return "";
-    if (geometry.type === "Polygon") {
-      const coords = geometry.coordinates as number[][][];
-      return coords.map(renderRing).join(" ");
-    }
-    if (geometry.type === "MultiPolygon") {
-      const coords = geometry.coordinates as number[][][][];
-      return coords.map((polygon) => polygon.map(renderRing).join(" ")).join(" ");
-    }
-    return "";
-  };
+  const path = useMemo(
+    () => (projection ? geoPath(projection) : null),
+    [projection]
+  );
 
   const getFeatureIso3 = (feature: GeoFeature) => {
     const props = feature.properties ?? {};
@@ -239,7 +345,12 @@ export default function RiskIndexMap({
       <p className="mt-1 text-xs text-slate-400">
         Jenks breaks calculated from the selected risk values.
       </p>
-      {assetLooksSynthetic ? (
+      {assetInvalid ? (
+        <div className="mt-3 rounded-md border border-rose-500/60 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+          World map asset coordinates do not look like lon/lat degrees. Expected
+          lon [-180..180], lat [-90..90].
+        </div>
+      ) : assetLooksSynthetic ? (
         <div className="mt-3 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           World map asset looks synthetic (grid-like). Replace
           web/public/maps/world-countries-iso3.geojson with real country polygons.
@@ -258,7 +369,9 @@ export default function RiskIndexMap({
             height={MAP_HEIGHT}
             fill="transparent"
           />
-          {features.map((feature, index) => {
+          {assetInvalid || !path
+            ? null
+            : features.map((feature, index) => {
             const iso3 = getFeatureIso3(feature);
             const value = iso3 ? valueByIso3.get(iso3) : undefined;
             let fill = "var(--risk-map-no-questions)";
@@ -268,10 +381,11 @@ export default function RiskIndexMap({
             } else if (iso3 && hasQuestionsIso3.has(iso3)) {
               fill = "var(--risk-map-no-eiv)";
             }
+            const d = path(feature as any);
             return (
               <path
                 key={`${iso3 || "country"}-${index}`}
-                d={pathForFeature(feature) || undefined}
+                d={d || undefined}
                 fill={fill}
                 stroke="var(--risk-map-stroke)"
                 strokeWidth={0.6}

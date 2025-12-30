@@ -1522,15 +1522,9 @@ def get_risk_index(
         """.format(bucket_col=bucket_col)
         centroid_expr = f"COALESCE(bc.centroid, CAST(fe.{bucket_col} AS DOUBLE))"
 
-    sql = f"""
-    WITH q AS (
-      SELECT question_id, iso3, hazard_code, metric, target_month
-      FROM questions
-      WHERE UPPER(metric) = :metric
-        AND target_month = :target_month
-        AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
-    )
-    {pop_cte}
+    model_name_available = _table_has_columns(con, "forecasts_ensemble", ["model_name"])
+    base_cte = ""
+    per_row_cte = f"""
     , per_row AS (
       SELECT
         q.iso3,
@@ -1545,7 +1539,70 @@ def get_risk_index(
       WHERE fe.{horizon_col} BETWEEN 1 AND 6
         AND fe.{bucket_col} IS NOT NULL
         AND fe.{prob_col} IS NOT NULL
-    ),
+    )
+    """
+    if model_name_available:
+        base_cte = f"""
+        , base AS (
+          SELECT
+            q.question_id,
+            q.iso3,
+            q.hazard_code,
+            fe.{horizon_col} AS {horizon_col},
+            fe.{bucket_col} AS {bucket_col},
+            fe.{prob_col} AS {prob_col},
+            COALESCE(fe.model_name, '') AS model_name
+          FROM forecasts_ensemble fe
+          JOIN q ON q.question_id = fe.question_id
+          WHERE fe.{horizon_col} BETWEEN 1 AND 6
+            AND fe.{bucket_col} IS NOT NULL
+            AND fe.{prob_col} IS NOT NULL
+        ),
+        chosen_model AS (
+          SELECT
+            question_id,
+            CASE
+              WHEN SUM(CASE WHEN model_name = 'ensemble_bayesmc_v2' THEN 1 ELSE 0 END) > 0
+                THEN 'ensemble_bayesmc_v2'
+              WHEN SUM(CASE WHEN model_name = 'ensemble_mean_v2' THEN 1 ELSE 0 END) > 0
+                THEN 'ensemble_mean_v2'
+              ELSE MIN(model_name)
+            END AS chosen_model
+          FROM base
+          GROUP BY question_id
+        ),
+        filtered AS (
+          SELECT base.*
+          FROM base
+          JOIN chosen_model USING (question_id)
+          WHERE base.model_name = chosen_model.chosen_model
+        )
+        """
+        per_row_cte = f"""
+        , per_row AS (
+          SELECT
+            fe.iso3,
+            fe.hazard_code,
+            fe.{horizon_col} AS m,
+            fe.{bucket_col} AS b,
+            fe.{prob_col} AS p,
+            {centroid_expr} AS centroid
+          FROM filtered fe
+          {centroid_join}
+        )
+        """
+
+    sql = f"""
+    WITH q AS (
+      SELECT question_id, iso3, hazard_code, metric, target_month
+      FROM questions
+      WHERE UPPER(metric) = :metric
+        AND target_month = :target_month
+        AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
+    )
+    {pop_cte}
+    {base_cte}
+    {per_row_cte},
     monthly AS (
       SELECT
         iso3,
