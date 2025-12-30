@@ -10,6 +10,28 @@ type RiskIndexMapProps = {
   view: RiskView;
 };
 
+type DebugSample = {
+  dLen: number;
+  fillAttr: string | null;
+  styleAttr: string | null;
+  computedFill: string;
+  computedOpacity: string;
+  computedDisplay: string;
+};
+
+type DebugInfo = {
+  svgLoaded: boolean;
+  viewBox: string | null;
+  widthAttr: string | null;
+  heightAttr: string | null;
+  taggedNodes: number;
+  targetPaths: number;
+  medianBboxWidth: number | null;
+  medianBboxHeight: number | null;
+  firstPathSample: DebugSample | null;
+  lastApplyStatus: string;
+};
+
 const eivFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0,
 });
@@ -19,13 +41,6 @@ const perCapitaFormatter = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 3,
   maximumFractionDigits: 8,
 });
-
-const cssVar = (name: string, fallback: string) => {
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim();
-  return value || fallback;
-};
 
 const formatValueLabel = (value: number, isPerCapita: boolean) =>
   isPerCapita ? perCapitaFormatter.format(value) : eivFormatter.format(value);
@@ -37,6 +52,7 @@ export default function RiskIndexMap({
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [tooltip, setTooltip] = useState<{
     x: number;
     y: number;
@@ -44,6 +60,10 @@ export default function RiskIndexMap({
     value: string;
   } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const debugEnabled =
+    typeof window !== "undefined" &&
+    (new URLSearchParams(window.location.search).get("debug_map") === "1" ||
+      window.localStorage.getItem("pythia_debug_map") === "1");
 
   useEffect(() => {
     let active = true;
@@ -97,10 +117,32 @@ export default function RiskIndexMap({
     if (!svgText) {
       setTooltip(null);
       setSvgWarnings([]);
+      if (debugEnabled) {
+        setDebugInfo({
+          svgLoaded: false,
+          viewBox: null,
+          widthAttr: null,
+          heightAttr: null,
+          taggedNodes: 0,
+          targetPaths: 0,
+          medianBboxWidth: null,
+          medianBboxHeight: null,
+          firstPathSample: null,
+          lastApplyStatus: "no svg",
+        });
+      } else {
+        setDebugInfo(null);
+      }
       return;
     }
     const container = containerRef.current;
     if (!container) return;
+    const svgEl = container.querySelector("svg");
+    if (svgEl) {
+      svgEl.setAttribute("width", "100%");
+      svgEl.setAttribute("height", "100%");
+      svgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    }
     const iso3Elements = Array.from(
       container.querySelectorAll<SVGElement>("[data-iso3]")
     );
@@ -111,15 +153,15 @@ export default function RiskIndexMap({
       return Array.from(el.querySelectorAll<SVGPathElement>("path"));
     });
     const warnings: string[] = [];
+    const css = getComputedStyle(document.documentElement);
     const palette = {
-      c1: cssVar("--risk-map-c1", "#7fd3dd"),
-      c2: cssVar("--risk-map-c2", "#4bb5c4"),
-      c3: cssVar("--risk-map-c3", "#1e92a3"),
-      c4: cssVar("--risk-map-c4", "#0f7183"),
-      c5: cssVar("--risk-map-c5", "#0b5563"),
-      noEiv: cssVar("--risk-map-no-eiv", "#6b7280"),
-      noQ: cssVar("--risk-map-no-questions", "#cbd5f5"),
-      stroke: cssVar("--risk-map-stroke", "#0f172a"),
+      c1: css.getPropertyValue("--risk-map-c1").trim() || "#7fd3dd",
+      c2: css.getPropertyValue("--risk-map-c2").trim() || "#4bb5c4",
+      c3: css.getPropertyValue("--risk-map-c3").trim() || "#1e92a3",
+      c4: css.getPropertyValue("--risk-map-c4").trim() || "#0f7183",
+      c5: css.getPropertyValue("--risk-map-c5").trim() || "#0b5563",
+      noEiv: css.getPropertyValue("--risk-map-no-eiv").trim() || "#6b7280",
+      noQ: css.getPropertyValue("--risk-map-no-questions").trim() || "#cbd5f5",
     };
     const colorScale = [
       palette.c1,
@@ -151,7 +193,32 @@ export default function RiskIndexMap({
       }
     }
     setSvgWarnings(warnings);
+    const normalizeVisibility = (path: SVGPathElement) => {
+      path.style.setProperty("display", "inline", "important");
+      path.style.setProperty("visibility", "visible", "important");
+      path.style.setProperty("opacity", "1", "important");
+      path.style.setProperty("stroke", "rgba(148,163,184,0.55)", "important");
+      path.style.setProperty("stroke-width", "0.6", "important");
+      path.style.setProperty("vector-effect", "non-scaling-stroke", "important");
+    };
     const listeners: Array<() => void> = [];
+    let lastApplyStatus = "ok";
+    let debugSample: DebugSample[] = [];
+    let medianBboxWidth: number | null = null;
+    let medianBboxHeight: number | null = null;
+    try {
+      iso3Elements.forEach((element) => {
+        const targets =
+          element.tagName.toLowerCase() === "path"
+            ? [element as SVGPathElement]
+            : Array.from(element.querySelectorAll<SVGPathElement>("path"));
+        targets.forEach((path) => normalizeVisibility(path));
+      });
+    } catch (error) {
+      lastApplyStatus = `failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`;
+    }
     iso3Elements.forEach((element) => {
       const iso3 = (element.getAttribute("data-iso3") || "").toUpperCase();
       if (!iso3) {
@@ -173,15 +240,17 @@ export default function RiskIndexMap({
         fillColor = palette.noEiv;
       }
       targets.forEach((path) => {
-        path.style.fill = fillColor;
-        path.style.stroke = palette.stroke;
-        path.style.strokeWidth = "0.5";
-        path.setAttribute("vector-effect", "non-scaling-stroke");
+        normalizeVisibility(path);
+        path.style.setProperty("fill", fillColor, "important");
+        path.style.setProperty("stroke", "rgba(148,163,184,0.55)", "important");
+        path.style.setProperty("stroke-width", "0.6", "important");
+        path.style.setProperty("vector-effect", "non-scaling-stroke", "important");
       });
 
       const handleMouseMove = (event: MouseEvent) => {
+        const target = event.currentTarget as SVGElement | null;
         const name =
-          path.getAttribute("data-name")?.trim() || iso3.toUpperCase();
+          target?.getAttribute("data-name")?.trim() || iso3.toUpperCase();
         let valueLabel = "No forecasts";
         if (typeof value === "number") {
           valueLabel = formatValueLabel(value, isPerCapita);
@@ -211,11 +280,69 @@ export default function RiskIndexMap({
         });
       });
     });
+    if (debugEnabled) {
+      const sampleTargets = paths.slice(0, 10);
+      debugSample = sampleTargets.map((path) => ({
+        dLen: path.getAttribute("d")?.length ?? 0,
+        fillAttr: path.getAttribute("fill"),
+        styleAttr: path.getAttribute("style"),
+        computedFill: getComputedStyle(path).fill,
+        computedOpacity: getComputedStyle(path).opacity,
+        computedDisplay: getComputedStyle(path).display,
+      }));
+      const bboxSamples: Array<{ width: number; height: number }> = [];
+      sampleTargets.forEach((path) => {
+        try {
+          const bbox = path.getBBox();
+          if (Number.isFinite(bbox.width) && Number.isFinite(bbox.height)) {
+            bboxSamples.push({ width: bbox.width, height: bbox.height });
+          }
+        } catch {
+          // getBBox can throw if element isn't rendered.
+        }
+      });
+      if (bboxSamples.length) {
+        const widths = bboxSamples
+          .map((sample) => sample.width)
+          .sort((a, b) => a - b);
+        const heights = bboxSamples
+          .map((sample) => sample.height)
+          .sort((a, b) => a - b);
+        const mid = Math.floor(widths.length / 2);
+        const pickMedian = (list: number[]) =>
+          list.length % 2 === 0
+            ? (list[mid - 1] + list[mid]) / 2
+            : list[mid];
+        medianBboxWidth = pickMedian(widths);
+        medianBboxHeight = pickMedian(heights);
+      }
+      const meta = {
+        svgLoaded: Boolean(svgEl),
+        viewBox: svgEl?.getAttribute("viewBox") ?? null,
+        widthAttr: svgEl?.getAttribute("width") ?? null,
+        heightAttr: svgEl?.getAttribute("height") ?? null,
+        taggedNodes: iso3Elements.length,
+        targetPaths: paths.length,
+        medianBboxWidth,
+        medianBboxHeight,
+        lastApplyStatus,
+      };
+      console.groupCollapsed("[RiskIndexMap] debug");
+      console.log(meta);
+      console.table(debugSample);
+      console.groupEnd();
+      setDebugInfo({
+        ...meta,
+        firstPathSample: debugSample[0] ?? null,
+      });
+    } else {
+      setDebugInfo(null);
+    }
 
     return () => {
       listeners.forEach((cleanup) => cleanup());
     };
-  }, [svgText, valueByIso3, breaks, hasQuestionsIso3, isPerCapita]);
+  }, [svgText, valueByIso3, breaks, hasQuestionsIso3, isPerCapita, debugEnabled]);
 
   return (
     <div className="relative w-full rounded-lg border border-slate-800 bg-slate-950/30 p-4">
@@ -230,10 +357,41 @@ export default function RiskIndexMap({
           ))}
         </div>
       ) : null}
-      <div ref={containerRef} className="relative mt-3 w-full">
+      {debugEnabled && debugInfo ? (
+        <div className="mt-3 rounded-md border border-slate-700/60 bg-slate-950/30 px-3 py-2 text-xs text-slate-200">
+          <div className="font-semibold text-slate-100">Map debug</div>
+          <div className="text-slate-400">
+            Enable via ?debug_map=1 or localStorage pythia_debug_map=1
+          </div>
+          <div className="mt-2 grid gap-1 text-slate-200">
+            <div>SVG loaded: {debugInfo.svgLoaded ? "yes" : "no"}</div>
+            <div>viewBox: {debugInfo.viewBox ?? "none"}</div>
+            <div>
+              tagged nodes: {debugInfo.taggedNodes} | target paths:{" "}
+              {debugInfo.targetPaths}
+            </div>
+            <div>
+              median bbox (w×h):{" "}
+              {debugInfo.medianBboxWidth && debugInfo.medianBboxHeight
+                ? `${debugInfo.medianBboxWidth.toFixed(
+                    2
+                  )}×${debugInfo.medianBboxHeight.toFixed(2)}`
+                : "n/a"}
+            </div>
+            <div>
+              first path computed fill:{" "}
+              {debugInfo.firstPathSample?.computedFill ?? "n/a"} | opacity:{" "}
+              {debugInfo.firstPathSample?.computedOpacity ?? "n/a"} | display:{" "}
+              {debugInfo.firstPathSample?.computedDisplay ?? "n/a"}
+            </div>
+            <div>last apply pass: {debugInfo.lastApplyStatus}</div>
+          </div>
+        </div>
+      ) : null}
+      <div ref={containerRef} className="relative mt-3 h-[360px] w-full">
         <div
           aria-label="Risk index world map"
-          className="h-auto w-full [&_svg]:h-auto [&_svg]:w-full"
+          className="h-full w-full [&_svg]:h-full [&_svg]:w-full"
           dangerouslySetInnerHTML={{ __html: svgText }}
         />
         {tooltip ? (
