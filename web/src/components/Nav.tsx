@@ -8,7 +8,7 @@ const Nav = () => {
           Pythia Dashboard
         </Link>
         <div className="flex items-center gap-4 text-sm text-slate-300">
-          <Link href="/">Overview</Link>
+          <Link href="/">Risk Index</Link>
           <Link href="/countries">Countries</Link>
           <Link href="/questions">Forecasts</Link>
           <Link href="/costs">Costs</Link>

@@ -35,10 +35,20 @@ export default async function OverviewPage() {
       (row) => (row.status ?? "").toLowerCase() === "active"
     ) ?? null;
 
+  const kpiAside = (
+    <div className="space-y-4" data-testid="risk-index-kpi-panel">
+      <KpiCard label="Active questions" value={activeQuestions?.n ?? 0} />
+      <KpiCard
+        label="Questions with forecasts"
+        value={diagnostics.questions_with_forecasts ?? 0}
+      />
+    </div>
+  );
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <section className="space-y-2">
-        <h1 className="text-3xl font-semibold text-white">Overview</h1>
+        <h1 className="text-3xl font-semibold text-white">Risk Index</h1>
         <p className="text-sm text-slate-400">
           Last updated:{" "}
           <span className="text-slate-200">
@@ -47,21 +57,13 @@ export default async function OverviewPage() {
         </p>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2">
-        <KpiCard label="Active questions" value={activeQuestions?.n ?? 0} />
-        <KpiCard
-          label="Questions with forecasts"
-          value={diagnostics.questions_with_forecasts ?? 0}
-        />
-      </section>
-
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white">Risk index</h2>
-
         {riskIndex ? (
           <RiskIndexPanel
+            aside={kpiAside}
             countriesRows={countries?.rows ?? []}
             initialResponse={riskIndex}
+            mapHeightClassName="h-[520px] md:h-[600px] lg:h-[720px]"
           />
         ) : (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
