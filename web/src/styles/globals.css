@@ -4,7 +4,7 @@
 
 @layer base {
   body {
-    @apply bg-fredBg text-fredText;
+    @apply bg-fred-bg text-fred-text;
   }
 
   :root {
@@ -23,7 +23,7 @@
   }
 
   a {
-    @apply text-fredPrimary hover:text-fredSecondary;
+    @apply text-fred-primary hover:text-fred-secondary;
   }
 
   table {
@@ -31,14 +31,14 @@
   }
 
   thead {
-    @apply bg-fredBg;
+    @apply bg-fred-bg;
   }
 
   thead th {
-    @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-fredPrimary;
+    @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-fred-primary;
   }
 
   tbody td {
-    @apply border-t border-fredBorder px-4 py-3 text-sm text-fredText;
+    @apply border-t border-fred-border px-4 py-3 text-sm text-fred-text;
   }
 }
