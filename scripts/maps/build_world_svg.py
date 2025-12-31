@@ -11,6 +11,7 @@ SVG_PATH = ROOT / "web" / "public" / "maps" / "world.svg"
 
 VIEWBOX_WIDTH = 1000
 VIEWBOX_HEIGHT = 500
+MIN_ISO3_FEATURES = 150
 
 
 def project(lon: float, lat: float) -> tuple[float, float]:
@@ -90,6 +91,21 @@ def build_paths(data: dict) -> list[str]:
     return paths
 
 
+def validate_geojson_iso3(data: dict) -> None:
+    features = data.get("features", [])
+    iso3_features = 0
+    for feature in features:
+        properties = feature.get("properties") or {}
+        if get_iso3(properties):
+            iso3_features += 1
+    if iso3_features < MIN_ISO3_FEATURES:
+        print(
+            "GeoJSON validation failed: not enough ISO3-tagged features.",
+        )
+        print(f"ISO3 features: {iso3_features} (minimum {MIN_ISO3_FEATURES})")
+        sys.exit(1)
+
+
 def validate_geojson_bounds(data: dict) -> None:
     min_lon = None
     max_lon = None
@@ -124,6 +140,7 @@ def validate_geojson_bounds(data: dict) -> None:
 def main() -> None:
     data = json.loads(GEOJSON_PATH.read_text(encoding="utf-8"))
     validate_geojson_bounds(data)
+    validate_geojson_iso3(data)
     paths = build_paths(data)
     svg_lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VIEWBOX_WIDTH} {VIEWBOX_HEIGHT}">',

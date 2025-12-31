@@ -10,6 +10,8 @@ type RiskIndexMapProps = {
   view: RiskView;
 };
 
+const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
+
 type DebugSample = {
   dLen: number;
   fillAttr: string | null;
@@ -37,6 +39,35 @@ type BBoxDiagnostics = {
   maxY: number;
 };
 
+type SamplePathBboxStats = {
+  count: number;
+  wMin: number | null;
+  wP50: number | null;
+  wP90: number | null;
+  wMax: number | null;
+  hMin: number | null;
+  hP50: number | null;
+  hP90: number | null;
+  hMax: number | null;
+  tinyCount: number;
+};
+
+type SampleComputedStyle = {
+  computedFill: string;
+  computedStroke: string;
+  computedOpacity: string;
+  computedDisplay: string;
+  computedVisibility: string;
+};
+
+type SentinelSvgCenter = {
+  found: boolean;
+  cx: number | null;
+  cy: number | null;
+  w: number | null;
+  h: number | null;
+};
+
 type DebugInfo = {
   svgLoaded: boolean;
   originalViewBox: string | null;
@@ -49,6 +80,9 @@ type DebugInfo = {
   medianBboxWidth: number | null;
   medianBboxHeight: number | null;
   firstPathSample: DebugSample | null;
+  samplePathBboxStats: SamplePathBboxStats | null;
+  sampleComputedStyle: SampleComputedStyle | null;
+  sentinelSvgCenters: Record<string, SentinelSvgCenter>;
   lastApplyStatus: string;
   contentBBox: BBoxDiagnostics | null;
   coverageW: number | null;
@@ -207,6 +241,18 @@ export default function RiskIndexMap({
     if (!svgText) {
       setTooltip(null);
       setSvgWarnings([]);
+      const emptySentinelCenters = Object.fromEntries(
+        SENTINEL_ISO3.map((iso3) => [
+          iso3,
+          {
+            found: false,
+            cx: null,
+            cy: null,
+            w: null,
+            h: null,
+          },
+        ])
+      );
       setDebugInfo({
         svgLoaded: false,
         originalViewBox: null,
@@ -219,6 +265,9 @@ export default function RiskIndexMap({
         medianBboxWidth: null,
         medianBboxHeight: null,
         firstPathSample: null,
+        samplePathBboxStats: null,
+        sampleComputedStyle: null,
+        sentinelSvgCenters: emptySentinelCenters,
         lastApplyStatus: "no svg",
         contentBBox: null,
         coverageW: null,
@@ -331,7 +380,6 @@ export default function RiskIndexMap({
         );
       }
     }
-    setSvgWarnings(warnings);
     const normalizeVisibility = (path: SVGPathElement) => {
       path.style.setProperty("display", "inline", "important");
       path.style.setProperty("visibility", "visible", "important");
@@ -345,6 +393,15 @@ export default function RiskIndexMap({
     let debugSample: DebugSample[] = [];
     let medianBboxWidth: number | null = null;
     let medianBboxHeight: number | null = null;
+    let samplePathBboxStats: SamplePathBboxStats | null = null;
+    let sampleComputedStyle: SampleComputedStyle | null = null;
+    const sentinelSvgCenters: Record<string, SentinelSvgCenter> =
+      Object.fromEntries(
+        SENTINEL_ISO3.map((iso3) => [
+          iso3,
+          { found: false, cx: null, cy: null, w: null, h: null },
+        ])
+      );
     try {
       iso3Elements.forEach((element) => {
         const targets =
@@ -419,6 +476,111 @@ export default function RiskIndexMap({
         });
       });
     });
+    const samplePaths = paths.slice(0, 50);
+    const bboxSamples: Array<{ width: number; height: number }> = [];
+    let tinyCount = 0;
+    samplePaths.forEach((path) => {
+      try {
+        const bbox = path.getBBox();
+        if (Number.isFinite(bbox.width) && Number.isFinite(bbox.height)) {
+          bboxSamples.push({ width: bbox.width, height: bbox.height });
+          if (bbox.width < 2 && bbox.height < 2) {
+            tinyCount += 1;
+          }
+        }
+      } catch {
+        // getBBox can throw if element isn't rendered.
+      }
+    });
+    if (bboxSamples.length) {
+      const widths = bboxSamples
+        .map((sample) => sample.width)
+        .sort((a, b) => a - b);
+      const heights = bboxSamples
+        .map((sample) => sample.height)
+        .sort((a, b) => a - b);
+      const pickPercentile = (values: number[], percentile: number) => {
+        const idx = Math.max(
+          0,
+          Math.min(values.length - 1, Math.round((values.length - 1) * percentile))
+        );
+        return values[idx];
+      };
+      samplePathBboxStats = {
+        count: bboxSamples.length,
+        wMin: widths[0] ?? null,
+        wP50: pickPercentile(widths, 0.5),
+        wP90: pickPercentile(widths, 0.9),
+        wMax: widths[widths.length - 1] ?? null,
+        hMin: heights[0] ?? null,
+        hP50: pickPercentile(heights, 0.5),
+        hP90: pickPercentile(heights, 0.9),
+        hMax: heights[heights.length - 1] ?? null,
+        tinyCount,
+      };
+      if (samplePathBboxStats.wP50 !== null) {
+        medianBboxWidth = samplePathBboxStats.wP50;
+      }
+      if (samplePathBboxStats.hP50 !== null) {
+        medianBboxHeight = samplePathBboxStats.hP50;
+      }
+      const tinyRatio = tinyCount / bboxSamples.length;
+      if (
+        tinyRatio > 0.7 ||
+        (samplePathBboxStats.wP90 !== null && samplePathBboxStats.wP90 < 10) ||
+        (samplePathBboxStats.hP90 !== null && samplePathBboxStats.hP90 < 10)
+      ) {
+        warnings.push(
+          "World SVG appears to contain mostly microscopic shapes; replace world-countries-iso3.geojson and regenerate world.svg."
+        );
+      }
+    }
+    const sampleStyleTarget = samplePaths[0];
+    if (sampleStyleTarget) {
+      const computed = getComputedStyle(sampleStyleTarget);
+      sampleComputedStyle = {
+        computedFill: computed.fill,
+        computedStroke: computed.stroke,
+        computedOpacity: computed.opacity,
+        computedDisplay: computed.display,
+        computedVisibility: computed.visibility,
+      };
+    }
+    SENTINEL_ISO3.forEach((iso3) => {
+      const element = iso3Elements.find(
+        (node) => (node.getAttribute("data-iso3") || "").toUpperCase() === iso3
+      );
+      if (!element) {
+        return;
+      }
+      const path =
+        element.tagName.toLowerCase() === "path"
+          ? (element as SVGPathElement)
+          : element.querySelector<SVGPathElement>("path");
+      if (!path) {
+        return;
+      }
+      try {
+        const bbox = path.getBBox();
+        if (
+          Number.isFinite(bbox.width) &&
+          Number.isFinite(bbox.height) &&
+          Number.isFinite(bbox.x) &&
+          Number.isFinite(bbox.y)
+        ) {
+          sentinelSvgCenters[iso3] = {
+            found: true,
+            cx: bbox.x + bbox.width / 2,
+            cy: bbox.y + bbox.height / 2,
+            w: bbox.width,
+            h: bbox.height,
+          };
+        }
+      } catch {
+        // getBBox can throw if element isn't rendered.
+      }
+    });
+    setSvgWarnings(warnings);
     if (debugEnabled) {
       const sampleTargets = paths.slice(0, 10);
       debugSample = sampleTargets.map((path) => ({
@@ -429,32 +591,6 @@ export default function RiskIndexMap({
         computedOpacity: getComputedStyle(path).opacity,
         computedDisplay: getComputedStyle(path).display,
       }));
-      const bboxSamples: Array<{ width: number; height: number }> = [];
-      sampleTargets.forEach((path) => {
-        try {
-          const bbox = path.getBBox();
-          if (Number.isFinite(bbox.width) && Number.isFinite(bbox.height)) {
-            bboxSamples.push({ width: bbox.width, height: bbox.height });
-          }
-        } catch {
-          // getBBox can throw if element isn't rendered.
-        }
-      });
-      if (bboxSamples.length) {
-        const widths = bboxSamples
-          .map((sample) => sample.width)
-          .sort((a, b) => a - b);
-        const heights = bboxSamples
-          .map((sample) => sample.height)
-          .sort((a, b) => a - b);
-        const mid = Math.floor(widths.length / 2);
-        const pickMedian = (list: number[]) =>
-          list.length % 2 === 0
-            ? (list[mid - 1] + list[mid]) / 2
-            : list[mid];
-        medianBboxWidth = pickMedian(widths);
-        medianBboxHeight = pickMedian(heights);
-      }
       const meta = {
         svgLoaded: Boolean(svgEl),
         originalViewBox,
@@ -472,6 +608,10 @@ export default function RiskIndexMap({
         coverageH,
         autoFitApplied,
         autoFitViewBox,
+        bboxStatsPresent: Boolean(samplePathBboxStats),
+        samplePathBboxStats,
+        sampleComputedStyle,
+        sentinelSvgCenters,
       };
       console.groupCollapsed("[RiskIndexMap] debug");
       console.log(meta);
@@ -502,6 +642,9 @@ export default function RiskIndexMap({
       medianBboxWidth,
       medianBboxHeight,
       firstPathSample: debugSample[0] ?? null,
+      samplePathBboxStats,
+      sampleComputedStyle,
+      sentinelSvgCenters,
       lastApplyStatus,
       contentBBox,
       coverageW,
@@ -667,6 +810,73 @@ export default function RiskIndexMap({
                   <div>
                     auto-fit viewBox: {debugInfo.autoFitViewBox ?? "n/a"}
                   </div>
+                </div>
+              </div>
+              <div>
+                <div className="font-semibold text-slate-100">
+                  Sample path bbox stats
+                </div>
+                <div className="mt-1 grid gap-1">
+                  <div>
+                    count:{" "}
+                    {debugInfo.samplePathBboxStats?.count ?? "n/a"} | tiny:{" "}
+                    {debugInfo.samplePathBboxStats?.tinyCount ?? "n/a"}
+                  </div>
+                  <div>
+                    w (min/p50/p90/max):{" "}
+                    {debugInfo.samplePathBboxStats
+                      ? `${debugInfo.samplePathBboxStats.wMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wMax?.toFixed(2) ?? "n/a"}`
+                      : "n/a"}
+                  </div>
+                  <div>
+                    h (min/p50/p90/max):{" "}
+                    {debugInfo.samplePathBboxStats
+                      ? `${debugInfo.samplePathBboxStats.hMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hMax?.toFixed(2) ?? "n/a"}`
+                      : "n/a"}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="font-semibold text-slate-100">
+                  Computed style sample
+                </div>
+                <div className="mt-1 grid gap-1">
+                  <div>
+                    fill: {debugInfo.sampleComputedStyle?.computedFill ?? "n/a"}
+                  </div>
+                  <div>
+                    stroke:{" "}
+                    {debugInfo.sampleComputedStyle?.computedStroke ?? "n/a"}
+                  </div>
+                  <div>
+                    opacity:{" "}
+                    {debugInfo.sampleComputedStyle?.computedOpacity ?? "n/a"}
+                  </div>
+                  <div>
+                    display:{" "}
+                    {debugInfo.sampleComputedStyle?.computedDisplay ?? "n/a"}
+                  </div>
+                  <div>
+                    visibility:{" "}
+                    {debugInfo.sampleComputedStyle?.computedVisibility ?? "n/a"}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="font-semibold text-slate-100">
+                  Sentinel SVG centers
+                </div>
+                <div className="mt-1 grid gap-1">
+                  {Object.entries(debugInfo.sentinelSvgCenters).map(
+                    ([iso3, info]) => (
+                      <div key={iso3}>
+                        {iso3}:{" "}
+                        {info.found
+                          ? `(${info.cx?.toFixed(1)}, ${info.cy?.toFixed(1)}) ${info.w?.toFixed(1)}×${info.h?.toFixed(1)}`
+                          : "not found"}
+                      </div>
+                    )
+                  )}
                 </div>
               </div>
               <div>

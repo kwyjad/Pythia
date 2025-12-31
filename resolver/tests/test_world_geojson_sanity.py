@@ -20,8 +20,53 @@ def iter_outer_ring_positions(geometry):
 def has_iso3(properties):
     if not isinstance(properties, dict):
         return False
-    iso3 = properties.get("iso3") or properties.get("ISO_A3") or properties.get("ADM0_A3") or properties.get("adm0_a3")
+    iso3 = (
+        properties.get("iso3")
+        or properties.get("ISO_A3")
+        or properties.get("ADM0_A3")
+        or properties.get("adm0_a3")
+    )
     return bool(iso3)
+
+
+def get_iso3(properties):
+    if not isinstance(properties, dict):
+        return None
+    iso3 = (
+        properties.get("iso3")
+        or properties.get("ISO_A3")
+        or properties.get("ADM0_A3")
+        or properties.get("adm0_a3")
+    )
+    if not iso3 or iso3 == "-99":
+        return None
+    return str(iso3).strip().upper()
+
+
+def find_feature(features, iso3):
+    iso3 = iso3.upper()
+    for feature in features:
+        properties = feature.get("properties") or {}
+        if get_iso3(properties) == iso3:
+            return feature
+    return None
+
+
+def bbox_center_from_geometry(geometry):
+    min_lon = None
+    max_lon = None
+    min_lat = None
+    max_lat = None
+    for lon, lat in iter_outer_ring_positions(geometry):
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            continue
+        min_lon = lon if min_lon is None else min(min_lon, lon)
+        max_lon = lon if max_lon is None else max(max_lon, lon)
+        min_lat = lat if min_lat is None else min(min_lat, lat)
+        max_lat = lat if max_lat is None else max(max_lat, lat)
+    if None in (min_lon, max_lon, min_lat, max_lat):
+        return None
+    return ((min_lon + max_lon) / 2, (min_lat + max_lat) / 2)
 
 
 def test_world_geojson_sanity():
@@ -59,3 +104,20 @@ def test_world_geojson_sanity():
     assert len(latitudes) > 200
     assert max_abs_lon <= 180.5
     assert max_abs_lat <= 90.5
+
+    sentinels = {
+        "ABW": {"lon": (-85, -55), "lat": (5, 20)},
+        "AFG": {"lon": (50, 80), "lat": (20, 45)},
+        "AUS": {"lon": (110, 160), "lat": (-45, -10)},
+        "USA": {"lon": (-130, -60), "lat": (20, 55)},
+        "BRA": {"lon": (-80, -30), "lat": (-40, 10)},
+    }
+    for iso3, ranges in sentinels.items():
+        feature = find_feature(features, iso3)
+        assert feature is not None, f"Expected ISO3 feature {iso3}"
+        geometry = feature.get("geometry") or {}
+        center = bbox_center_from_geometry(geometry)
+        assert center is not None, f"Expected geometry for {iso3}"
+        lon, lat = center
+        assert ranges["lon"][0] <= lon <= ranges["lon"][1]
+        assert ranges["lat"][0] <= lat <= ranges["lat"][1]
