@@ -64,8 +64,10 @@ def main() -> None:
     view_box_height = view_box_values[3]
     path_matches = re.findall(r'd="([^"]+)"', world_svg_content)
     coord_matches: list[tuple[float, float]] = []
+    per_path_bboxes: list[tuple[float, float]] = []
     for path_d in path_matches[:400]:
         numbers = re.findall(r"-?\d+(?:\.\d+)?", path_d)
+        coords: list[tuple[float, float]] = []
         for idx in range(0, len(numbers) - 1, 2):
             try:
                 x_val = float(numbers[idx])
@@ -73,9 +75,19 @@ def main() -> None:
             except ValueError:
                 continue
             coord_matches.append((x_val, y_val))
+            coords.append((x_val, y_val))
+        if coords:
+            xs = [coord[0] for coord in coords]
+            ys = [coord[1] for coord in coords]
+            per_path_bboxes.append((max(xs) - min(xs), max(ys) - min(ys)))
     if not coord_matches:
         fail_guardrail(
             "World SVG must include numeric path coordinates.",
+            {"file": str(world_svg_path)},
+        )
+    if not per_path_bboxes:
+        fail_guardrail(
+            "World SVG must include per-path coordinate data.",
             {"file": str(world_svg_path)},
         )
     xs, ys = zip(*coord_matches, strict=True)
@@ -99,6 +111,77 @@ def main() -> None:
                 "ratio_x": f"{ratio_x:.3f}",
                 "ratio_y": f"{ratio_y:.3f}",
             },
+        )
+
+    widths = sorted(width for width, _ in per_path_bboxes)
+    heights = sorted(height for _, height in per_path_bboxes)
+
+    def percentile(values: list[float], frac: float) -> float:
+        idx = max(0, min(len(values) - 1, int(round(frac * (len(values) - 1)))))
+        return values[idx]
+
+    p50_width = percentile(widths, 0.5)
+    p90_width = percentile(widths, 0.9)
+    p50_height = percentile(heights, 0.5)
+    p90_height = percentile(heights, 0.9)
+    if p90_width < 20 or p90_height < 20:
+        fail_guardrail(
+            "World SVG per-path bboxes are too small.",
+            {
+                "file": str(world_svg_path),
+                "p50_width": f"{p50_width:.2f}",
+                "p90_width": f"{p90_width:.2f}",
+                "p50_height": f"{p50_height:.2f}",
+                "p90_height": f"{p90_height:.2f}",
+            },
+        )
+
+    def find_iso3_path(iso3: str) -> str | None:
+        pattern = re.compile(rf'data-iso3="{iso3}"[^>]*d="([^"]+)"')
+        match = pattern.search(world_svg_content)
+        if not match:
+            return None
+        return match.group(1)
+
+    def bbox_center(path_d: str) -> tuple[float, float] | None:
+        numbers = re.findall(r"-?\d+(?:\.\d+)?", path_d)
+        coords = []
+        for idx in range(0, len(numbers) - 1, 2):
+            try:
+                x_val = float(numbers[idx])
+                y_val = float(numbers[idx + 1])
+            except ValueError:
+                continue
+            coords.append((x_val, y_val))
+        if not coords:
+            return None
+        xs = [coord[0] for coord in coords]
+        ys = [coord[1] for coord in coords]
+        return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
+    afghanistan_path = find_iso3_path("AFG")
+    australia_path = find_iso3_path("AUS")
+    if not afghanistan_path or not australia_path:
+        fail_guardrail(
+            "World SVG must include sentinel ISO3 paths for AFG and AUS.",
+            {"file": str(world_svg_path)},
+        )
+    afg_center = bbox_center(afghanistan_path)
+    aus_center = bbox_center(australia_path)
+    if afg_center is None or aus_center is None:
+        fail_guardrail(
+            "World SVG sentinel path bbox centers could not be computed.",
+            {"file": str(world_svg_path)},
+        )
+    if not (600 <= afg_center[0] <= 800):
+        fail_guardrail(
+            "World SVG AFG center appears implausible.",
+            {"file": str(world_svg_path), "afg_center": afg_center},
+        )
+    if not (300 <= aus_center[1] <= 450):
+        fail_guardrail(
+            "World SVG AUS center appears implausible.",
+            {"file": str(world_svg_path), "aus_center": aus_center},
         )
 
     print("UI guardrails passed.")
