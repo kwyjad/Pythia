@@ -55,7 +55,7 @@ def main() -> None:
         Path("web/src/components/SpdBarChart.tsx"),
         Path("web/src/components/CollapsiblePanel.tsx"),
     ]
-    banned_public_tokens = ["bg-slate-9", "text-white", "bg-indigo-"]
+    banned_public_tokens = ["bg-slate-9", "bg-indigo-"]
     for path in public_theme_paths:
         content = path.read_text(encoding="utf-8")
         for token in banned_public_tokens:
@@ -64,6 +64,32 @@ def main() -> None:
                     "Public theme sanity check failed.",
                     {"file": str(path), "token": token},
                 )
+
+    spd_panel_path = Path("web/src/app/questions/[questionId]/SpdPanel.tsx")
+    spd_panel_content = spd_panel_path.read_text(encoding="utf-8")
+    if "text-white" not in spd_panel_content:
+        fail_guardrail(
+            "SPD table header must include text-white.",
+            {"file": str(spd_panel_path)},
+        )
+
+    ai_prompts_path = Path("web/src/app/about/AiPromptsSection.tsx")
+    ai_prompts_content = ai_prompts_path.read_text(encoding="utf-8")
+    ai_prompts_tokens = ["border-fred-secondary", "bg-fred-surface"]
+    missing_tokens = [token for token in ai_prompts_tokens if token not in ai_prompts_content]
+    if missing_tokens:
+        fail_guardrail(
+            "AI Prompts section must use Fred styling tokens.",
+            {"file": str(ai_prompts_path), "missing": ", ".join(missing_tokens)},
+        )
+    heading_lines = [
+        line for line in ai_prompts_content.splitlines() if "AI Prompts" in line
+    ]
+    if any("text-white" in line for line in heading_lines):
+        fail_guardrail(
+            "AI Prompts heading must not include text-white.",
+            {"file": str(ai_prompts_path)},
+        )
 
     src_root = Path("web/src")
     src_extensions = {".ts", ".tsx", ".js", ".jsx", ".css"}

@@ -5,7 +5,7 @@ const Nav = () => {
     <nav className="border-b border-fred-secondary bg-fred-surface">
       <div className="flex w-full items-center justify-between px-6 py-4">
         <Link href="/" className="flex items-center gap-3">
-          <img src="/brand/fred_logo.png" alt="Fred logo" className="h-16 w-16" />
+          <img src="/brand/fred_logo.png" alt="Fred logo" className="h-24 w-24" />
           <div className="flex flex-col">
             <span className="text-2xl font-semibold text-fred-primary">
               Fred: Humanitarian Forecasting System
