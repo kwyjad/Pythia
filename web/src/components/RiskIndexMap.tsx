@@ -10,6 +10,8 @@ type RiskIndexMapProps = {
   view: RiskView;
 };
 
+const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
+
 type DebugSample = {
   dLen: number;
   fillAttr: string | null;
@@ -128,7 +130,6 @@ export default function RiskIndexMap({
   countriesRows,
   view,
 }: RiskIndexMapProps) {
-  const sentinelIso3 = ["AFG", "AUS"];
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
@@ -241,7 +242,7 @@ export default function RiskIndexMap({
       setTooltip(null);
       setSvgWarnings([]);
       const emptySentinelCenters = Object.fromEntries(
-        sentinelIso3.map((iso3) => [
+        SENTINEL_ISO3.map((iso3) => [
           iso3,
           {
             found: false,
@@ -396,7 +397,7 @@ export default function RiskIndexMap({
     let sampleComputedStyle: SampleComputedStyle | null = null;
     const sentinelSvgCenters: Record<string, SentinelSvgCenter> =
       Object.fromEntries(
-        sentinelIso3.map((iso3) => [
+        SENTINEL_ISO3.map((iso3) => [
           iso3,
           { found: false, cx: null, cy: null, w: null, h: null },
         ])
@@ -545,7 +546,7 @@ export default function RiskIndexMap({
         computedVisibility: computed.visibility,
       };
     }
-    sentinelIso3.forEach((iso3) => {
+    SENTINEL_ISO3.forEach((iso3) => {
       const element = iso3Elements.find(
         (node) => (node.getAttribute("data-iso3") || "").toUpperCase() === iso3
       );
@@ -590,12 +591,6 @@ export default function RiskIndexMap({
         computedOpacity: getComputedStyle(path).opacity,
         computedDisplay: getComputedStyle(path).display,
       }));
-      if (samplePathBboxStats?.wP50 !== null) {
-        medianBboxWidth = samplePathBboxStats.wP50;
-      }
-      if (samplePathBboxStats?.hP50 !== null) {
-        medianBboxHeight = samplePathBboxStats.hP50;
-      }
       const meta = {
         svgLoaded: Boolean(svgEl),
         originalViewBox,
@@ -613,6 +608,7 @@ export default function RiskIndexMap({
         coverageH,
         autoFitApplied,
         autoFitViewBox,
+        bboxStatsPresent: Boolean(samplePathBboxStats),
         samplePathBboxStats,
         sampleComputedStyle,
         sentinelSvgCenters,
