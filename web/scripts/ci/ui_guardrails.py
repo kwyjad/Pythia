@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 
 
@@ -34,7 +35,8 @@ def main() -> None:
     world_svg_content = world_svg_path.read_text(encoding="utf-8")
 
     iso3_count = world_svg_content.count('data-iso3="')
-    has_view_box = "viewBox=\"" in world_svg_content
+    view_box_match = re.search(r'viewBox="([^"]+)"', world_svg_content)
+    has_view_box = view_box_match is not None
     if iso3_count < 150:
         fail_guardrail(
             "World SVG must contain at least 150 data-iso3 entries.",
@@ -44,6 +46,59 @@ def main() -> None:
         fail_guardrail(
             "World SVG must include a viewBox attribute.",
             {"file": str(world_svg_path), "iso3_count": iso3_count},
+        )
+    view_box_values = []
+    if view_box_match:
+        for value in re.split(r"[\s,]+", view_box_match.group(1).strip()):
+            try:
+                view_box_values.append(float(value))
+            except ValueError:
+                view_box_values = []
+                break
+    if len(view_box_values) != 4:
+        fail_guardrail(
+            "World SVG viewBox must contain four numeric values.",
+            {"file": str(world_svg_path), "viewBox": view_box_match.group(1)},
+        )
+    view_box_width = view_box_values[2]
+    view_box_height = view_box_values[3]
+    path_matches = re.findall(r'd="([^"]+)"', world_svg_content)
+    coord_matches: list[tuple[float, float]] = []
+    for path_d in path_matches[:400]:
+        numbers = re.findall(r"-?\d+(?:\.\d+)?", path_d)
+        for idx in range(0, len(numbers) - 1, 2):
+            try:
+                x_val = float(numbers[idx])
+                y_val = float(numbers[idx + 1])
+            except ValueError:
+                continue
+            coord_matches.append((x_val, y_val))
+    if not coord_matches:
+        fail_guardrail(
+            "World SVG must include numeric path coordinates.",
+            {"file": str(world_svg_path)},
+        )
+    xs, ys = zip(*coord_matches, strict=True)
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    ratio_x = span_x / view_box_width if view_box_width else 0
+    ratio_y = span_y / view_box_height if view_box_height else 0
+    if ratio_x < 0.5 or ratio_y < 0.5:
+        fail_guardrail(
+            "World SVG coordinate spread is implausibly narrow.",
+            {
+                "file": str(world_svg_path),
+                "min_x": min_x,
+                "max_x": max_x,
+                "min_y": min_y,
+                "max_y": max_y,
+                "ratio_x": f"{ratio_x:.3f}",
+                "ratio_y": f"{ratio_y:.3f}",
+            },
         )
 
     print("UI guardrails passed.")
