@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { classifyJenks, jenksBreaks } from "../lib/jenks";
 import type { CountriesRow, RiskIndexRow, RiskView } from "../lib/types";
@@ -90,6 +90,14 @@ type DebugInfo = {
   autoFitApplied: boolean;
   autoFitViewBox: string | null;
   palette: Record<string, string>;
+  svgNodeVersion: number;
+  domReplaceCount: number;
+  svgIsConnected: boolean;
+  containerClientRect: { w: number; h: number } | null;
+  svgClientRect: { w: number; h: number } | null;
+  svgComputed: { display: string; visibility: string; opacity: string } | null;
+  ancestorOpacityProduct: number | null;
+  debugNeon: boolean;
   matchCounts: {
     riskRows: number;
     valueByIso3: number;
@@ -125,6 +133,17 @@ const parseViewBox = (viewBox: string | null) => {
   return { vbX, vbY, vbW, vbH };
 };
 
+const SvgMarkup = memo(function SvgMarkup({ svgText }: { svgText: string }) {
+  const html = useMemo(() => ({ __html: svgText }), [svgText]);
+  return (
+    <div
+      aria-label="Risk index world map"
+      className="h-full w-full [&_svg]:h-full [&_svg]:w-full"
+      dangerouslySetInnerHTML={html}
+    />
+  );
+});
+
 export default function RiskIndexMap({
   riskRows,
   countriesRows,
@@ -133,6 +152,7 @@ export default function RiskIndexMap({
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
+  const [debugNeon, setDebugNeon] = useState(false);
   const [fetchDiagnostics, setFetchDiagnostics] = useState<FetchDiagnostics>({
     fetchUrl: "/maps/world.svg",
     fetchOk: null,
@@ -148,6 +168,10 @@ export default function RiskIndexMap({
     value: string;
   } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const svgHostRef = useRef<HTMLDivElement | null>(null);
+  const svgNodeRef = useRef<SVGSVGElement | null>(null);
+  const domReplaceCountRef = useRef<number>(0);
+  const svgNodeVersionRef = useRef<number>(0);
   const debugEnabled =
     typeof window !== "undefined" &&
     (new URLSearchParams(window.location.search).get("debug_map") === "1" ||
@@ -275,6 +299,14 @@ export default function RiskIndexMap({
         autoFitApplied: false,
         autoFitViewBox: null,
         palette,
+        svgNodeVersion: svgNodeVersionRef.current,
+        domReplaceCount: domReplaceCountRef.current,
+        svgIsConnected: false,
+        containerClientRect: null,
+        svgClientRect: null,
+        svgComputed: null,
+        ancestorOpacityProduct: null,
+        debugNeon,
         matchCounts: {
           riskRows: riskRows.length,
           valueByIso3: valueByIso3.size,
@@ -286,12 +318,17 @@ export default function RiskIndexMap({
       return;
     }
     const container = containerRef.current;
-    if (!container) return;
-    const svgEl = container.querySelector("svg");
+    const svgHost = svgHostRef.current;
+    if (!container || !svgHost) return;
+    const svgEl = svgHost.querySelector("svg");
     if (svgEl) {
       svgEl.setAttribute("width", "100%");
       svgEl.setAttribute("height", "100%");
       svgEl.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    }
+    if (svgEl !== svgNodeRef.current) {
+      svgNodeRef.current = svgEl;
+      svgNodeVersionRef.current += 1;
     }
     const originalViewBox = svgEl?.getAttribute("viewBox") ?? null;
     const parsedViewBox = parseViewBox(originalViewBox);
@@ -342,7 +379,7 @@ export default function RiskIndexMap({
       }
     }
     const iso3Elements = Array.from(
-      container.querySelectorAll<SVGElement>("[data-iso3]")
+      svgHost.querySelectorAll<SVGElement>("[data-iso3]")
     );
     const paths = iso3Elements.flatMap((el) => {
       if (el.tagName.toLowerCase() === "path") {
@@ -441,6 +478,11 @@ export default function RiskIndexMap({
         path.style.setProperty("stroke", "rgba(148,163,184,0.55)", "important");
         path.style.setProperty("stroke-width", "0.6", "important");
         path.style.setProperty("vector-effect", "non-scaling-stroke", "important");
+        if (debugNeon) {
+          path.style.setProperty("fill", "#ff00ff", "important");
+          path.style.setProperty("stroke", "#00ff00", "important");
+          path.style.setProperty("stroke-width", "2", "important");
+        }
       });
 
       const handleMouseMove = (event: MouseEvent) => {
@@ -630,6 +672,56 @@ export default function RiskIndexMap({
       }
     });
     const unmatchedIso3 = Math.max(iso3Set.size - matchedIso3, 0);
+    const containerRect = container.getBoundingClientRect();
+    const svgRect = svgEl?.getBoundingClientRect();
+    const svgComputedStyle = svgEl ? getComputedStyle(svgEl) : null;
+    let ancestorOpacityProduct: number | null = null;
+    if (svgEl) {
+      let product = 1;
+      let node: Element | null = svgEl;
+      while (node) {
+        const opacityValue = parseFloat(getComputedStyle(node).opacity);
+        if (!Number.isNaN(opacityValue)) {
+          product *= opacityValue;
+        }
+        if (node === container) {
+          break;
+        }
+        node = node.parentElement;
+      }
+      ancestorOpacityProduct = product;
+    }
+    let observer: MutationObserver | null = null;
+    if (svgHost) {
+      observer = new MutationObserver((mutations) => {
+        const sawSvgMutation = mutations.some((mutation) => {
+          if (mutation.type !== "childList") return false;
+          const removedSvg = Array.from(mutation.removedNodes).some((node) =>
+            node instanceof SVGSVGElement ||
+            (node instanceof Element && node.querySelector("svg"))
+          );
+          const addedSvg = Array.from(mutation.addedNodes).some((node) =>
+            node instanceof SVGSVGElement ||
+            (node instanceof Element && node.querySelector("svg"))
+          );
+          return removedSvg || addedSvg;
+        });
+        if (sawSvgMutation) {
+          domReplaceCountRef.current += 1;
+          setDebugInfo((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  domReplaceCount: domReplaceCountRef.current,
+                  svgNodeVersion: svgNodeVersionRef.current,
+                  svgIsConnected: Boolean(svgNodeRef.current?.isConnected),
+                }
+              : prev
+          );
+        }
+      });
+      observer.observe(svgHost, { childList: true, subtree: true });
+    }
     setDebugInfo({
       svgLoaded: Boolean(svgEl),
       originalViewBox,
@@ -652,6 +744,25 @@ export default function RiskIndexMap({
       autoFitApplied,
       autoFitViewBox,
       palette,
+      svgNodeVersion: svgNodeVersionRef.current,
+      domReplaceCount: domReplaceCountRef.current,
+      svgIsConnected: Boolean(svgEl?.isConnected),
+      containerClientRect: {
+        w: containerRect.width,
+        h: containerRect.height,
+      },
+      svgClientRect: svgRect
+        ? { w: svgRect.width, h: svgRect.height }
+        : null,
+      svgComputed: svgComputedStyle
+        ? {
+            display: svgComputedStyle.display,
+            visibility: svgComputedStyle.visibility,
+            opacity: svgComputedStyle.opacity,
+          }
+        : null,
+      ancestorOpacityProduct,
+      debugNeon,
       matchCounts: {
         riskRows: riskRows.length,
         valueByIso3: valueByIso3.size,
@@ -663,6 +774,7 @@ export default function RiskIndexMap({
 
     return () => {
       listeners.forEach((cleanup) => cleanup());
+      observer?.disconnect();
     };
   }, [
     svgText,
@@ -671,6 +783,7 @@ export default function RiskIndexMap({
     hasQuestionsIso3,
     isPerCapita,
     debugEnabled,
+    debugNeon,
     riskRows,
   ]);
 
@@ -688,11 +801,9 @@ export default function RiskIndexMap({
         </div>
       ) : null}
       <div ref={containerRef} className="relative mt-3 h-[360px] w-full">
-        <div
-          aria-label="Risk index world map"
-          className="h-full w-full [&_svg]:h-full [&_svg]:w-full"
-          dangerouslySetInnerHTML={{ __html: svgText }}
-        />
+        <div ref={svgHostRef} className="h-full w-full">
+          <SvgMarkup svgText={svgText} />
+        </div>
         {tooltip ? (
           <div
             className="pointer-events-none absolute z-10 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 shadow-lg"
@@ -775,6 +886,18 @@ export default function RiskIndexMap({
               </div>
               <div>
                 <div className="font-semibold text-slate-100">
+                  DOM integrity diagnostics
+                </div>
+                <div className="mt-1 grid gap-1">
+                  <div>svg node version: {debugInfo.svgNodeVersion}</div>
+                  <div>dom replace count: {debugInfo.domReplaceCount}</div>
+                  <div>
+                    svg is connected: {debugInfo.svgIsConnected ? "yes" : "no"}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="font-semibold text-slate-100">
                   Geometry diagnostics
                 </div>
                 <div className="mt-1 grid gap-1">
@@ -809,6 +932,43 @@ export default function RiskIndexMap({
                   <div>auto-fit: {debugInfo.autoFitApplied ? "applied" : "no"}</div>
                   <div>
                     auto-fit viewBox: {debugInfo.autoFitViewBox ?? "n/a"}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="font-semibold text-slate-100">
+                  Layout diagnostics
+                </div>
+                <div className="mt-1 grid gap-1">
+                  <div>
+                    container rect:{" "}
+                    {debugInfo.containerClientRect
+                      ? `${debugInfo.containerClientRect.w.toFixed(
+                          1
+                        )}×${debugInfo.containerClientRect.h.toFixed(1)}`
+                      : "n/a"}
+                  </div>
+                  <div>
+                    svg rect:{" "}
+                    {debugInfo.svgClientRect
+                      ? `${debugInfo.svgClientRect.w.toFixed(1)}×${debugInfo.svgClientRect.h.toFixed(1)}`
+                      : "n/a"}
+                  </div>
+                  <div>
+                    svg display: {debugInfo.svgComputed?.display ?? "n/a"}
+                  </div>
+                  <div>
+                    svg visibility:{" "}
+                    {debugInfo.svgComputed?.visibility ?? "n/a"}
+                  </div>
+                  <div>
+                    svg opacity: {debugInfo.svgComputed?.opacity ?? "n/a"}
+                  </div>
+                  <div>
+                    ancestor opacity product:{" "}
+                    {debugInfo.ancestorOpacityProduct !== null
+                      ? debugInfo.ancestorOpacityProduct.toFixed(3)
+                      : "n/a"}
                   </div>
                 </div>
               </div>
@@ -861,6 +1021,15 @@ export default function RiskIndexMap({
                     {debugInfo.sampleComputedStyle?.computedVisibility ?? "n/a"}
                   </div>
                 </div>
+                <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    className="h-3 w-3"
+                    checked={debugNeon}
+                    onChange={(event) => setDebugNeon(event.target.checked)}
+                  />
+                  Neon stress-test mode
+                </label>
               </div>
               <div>
                 <div className="font-semibold text-slate-100">
