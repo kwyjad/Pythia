@@ -78,7 +78,7 @@ const renderEivHeader = (label: string) => (
   <span className="inline-flex items-center gap-1">
     {label}
     <span
-      className="rounded-full border border-slate-500 px-1 text-xs text-slate-300"
+      className="rounded-full border border-fred-secondary px-1 text-xs text-fred-secondary"
       title={EIV_TOOLTIP}
     >
       ?
@@ -240,7 +240,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         render: (row) => (
           <Link
             href={`/countries/${row.iso3}`}
-            className="block w-full px-0 py-0 text-sky-300 underline underline-offset-2 hover:text-sky-200"
+            className="block w-full px-0 py-0 text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
           >
             {row.iso3}
           </Link>
@@ -264,12 +264,12 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         sortValue: (row) => row.wording ?? row.question_id,
         render: (row) => (
           <div>
-            <div className="font-medium text-white">{row.wording}</div>
+            <div className="font-medium text-fred-text">{row.wording}</div>
             <Link
               href={`/questions/${row.question_id}?hs_run_id=${encodeURIComponent(
                 row.hs_run_id ?? ""
               )}`}
-              className="text-sky-300 underline underline-offset-2 hover:text-sky-200"
+              className="text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
             >
               {row.question_id}
             </Link>
@@ -360,10 +360,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex w-full flex-col gap-3">
           <div className="flex flex-wrap items-start gap-3 lg:flex-nowrap">
-            <label className="flex w-[15ch] flex-col gap-1 text-xs text-slate-400">
+            <label className="flex w-[15ch] flex-col gap-1 text-xs text-fred-text">
               Country
               <select
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 multiple
                 value={selectedCountries}
                 onChange={(event) =>
@@ -381,10 +381,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-400">
+            <label className="flex flex-col gap-1 text-xs text-fred-text">
               Hazard
               <select
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 multiple
                 value={selectedHazards}
                 onChange={(event) =>
@@ -402,10 +402,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-400">
+            <label className="flex flex-col gap-1 text-xs text-fred-text">
               Metric
               <select
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 multiple
                 value={selectedMetrics}
                 onChange={(event) =>
@@ -423,10 +423,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-400">
+            <label className="flex flex-col gap-1 text-xs text-fred-text">
               Status
               <select
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 multiple
                 value={selectedStatuses}
                 onChange={(event) =>
@@ -444,20 +444,20 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 ))}
               </select>
             </label>
-            <label className="flex w-[25ch] flex-col gap-1 text-xs text-slate-400">
+            <label className="flex w-[25ch] flex-col gap-1 text-xs text-fred-text">
               Question
               <input
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 placeholder="Search text or ID"
                 type="text"
                 value={questionQuery}
                 onChange={(event) => setQuestionQuery(event.target.value)}
               />
             </label>
-            <label className="flex w-[10ch] flex-col gap-1 text-xs text-slate-400">
+            <label className="flex w-[10ch] flex-col gap-1 text-xs text-fred-text">
               EIV Min
               <input
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 min="0"
                 step="1"
                 type="number"
@@ -465,10 +465,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 onChange={(event) => setEivMin(event.target.value)}
               />
             </label>
-            <label className="flex w-[10ch] flex-col gap-1 text-xs text-slate-400">
+            <label className="flex w-[10ch] flex-col gap-1 text-xs text-fred-text">
               EIV Max
               <input
-                className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                 min="0"
                 step="1"
                 type="number"
@@ -478,10 +478,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
             </label>
             <div className="grid grid-cols-3 gap-3">
               <div className="flex flex-col gap-3">
-                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                <label className="flex flex-col gap-1 text-xs text-fred-text">
                   Forecast Date From
                   <input
-                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -490,10 +490,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                     onChange={(event) => setForecastDateFrom(event.target.value)}
                   />
                 </label>
-                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                <label className="flex flex-col gap-1 text-xs text-fred-text">
                   Forecast Date To
                   <input
-                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -504,10 +504,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 </label>
               </div>
               <div className="flex flex-col gap-3">
-                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                <label className="flex flex-col gap-1 text-xs text-fred-text">
                   First Forecast Month From
                   <input
-                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -516,10 +516,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                     onChange={(event) => setFirstMonthFrom(event.target.value)}
                   />
                 </label>
-                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                <label className="flex flex-col gap-1 text-xs text-fred-text">
                   First Forecast Month To
                   <input
-                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -530,10 +530,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 </label>
               </div>
               <div className="flex flex-col gap-3">
-                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                <label className="flex flex-col gap-1 text-xs text-fred-text">
                   Last Forecast Month From
                   <input
-                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -542,10 +542,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                     onChange={(event) => setLastMonthFrom(event.target.value)}
                   />
                 </label>
-                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                <label className="flex flex-col gap-1 text-xs text-fred-text">
                   Last Forecast Month To
                   <input
-                    className="w-[10ch] rounded border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"
+                    className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
                     inputMode="numeric"
                     pattern="\\d{2}-\\d{4}"
                     placeholder="mm-yyyy"
@@ -560,13 +560,13 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         </div>
         <div className="flex flex-col items-end gap-2">
           <button
-            className="rounded border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:text-white"
+            className="rounded border border-fred-secondary bg-fred-secondary px-3 py-2 text-xs text-fred-surface hover:opacity-90"
             type="button"
             onClick={clearFilters}
           >
             Clear all Filters
           </button>
-          <div className="text-xs text-slate-400">
+          <div className="text-xs text-fred-text">
             Showing {filteredRows.length.toLocaleString()} of{" "}
             {rows.length.toLocaleString()} forecasts
           </div>

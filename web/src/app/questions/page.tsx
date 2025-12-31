@@ -136,13 +136,13 @@ const QuestionsPage = async () => {
   return (
     <div className="space-y-6">
       <section>
-        <h1 className="text-3xl font-semibold text-white">Forecasts</h1>
-        <p className="text-sm text-slate-400">
+        <h1 className="text-3xl font-semibold">Forecasts</h1>
+        <p className="text-sm text-fred-text">
           Browse the latest forecasts by concept.
         </p>
       </section>
 
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
+      <div className="overflow-x-auto rounded-lg border border-fred-secondary">
         <QuestionsTable rows={rows} />
       </div>
     </div>

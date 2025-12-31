@@ -11,30 +11,30 @@ const DownloadsPage = () => {
   return (
     <div className="space-y-6">
       <section className="space-y-2">
-        <h1 className="text-3xl font-semibold text-white">Downloads</h1>
-        <p className="text-sm text-slate-400">
+        <h1 className="text-3xl font-semibold">Downloads</h1>
+        <p className="text-sm text-fred-text">
           Export forecast outputs for offline analysis and QA.
         </p>
       </section>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-6">
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-6">
         <div className="space-y-2">
-          <h2 className="text-lg font-semibold text-white">
+          <h2 className="text-lg font-semibold">
             Forecast SPD &amp; EIV export
           </h2>
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-fred-text">
             One row per ISO3, hazard, model, and forecast month.
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <a
               href={CSV_DOWNLOAD_URL}
-              className="inline-flex items-center rounded-md bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400"
+              className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
             >
               Download .csv
             </a>
             <a
               href={XLSX_DOWNLOAD_URL}
-              className="text-xs text-slate-300 underline underline-offset-4 hover:text-white"
+              className="text-xs text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
             >
               Excel (if available; otherwise downloads CSV)
             </a>
@@ -42,23 +42,29 @@ const DownloadsPage = () => {
         </div>
       </section>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-6">
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-6">
         <div className="space-y-2">
-          <h2 className="text-lg font-semibold text-white">Cost exports</h2>
-          <p className="text-sm text-slate-400">
+          <h2 className="text-lg font-semibold">Cost exports</h2>
+          <p className="text-sm text-fred-text">
             Tidy CSVs for total, monthly, and run-level cost summaries.
           </p>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <a
               href={TOTAL_COSTS_URL}
-              className="inline-flex items-center rounded-md bg-indigo-500 px-4 py-2 font-semibold text-white hover:bg-indigo-400"
+              className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 font-semibold text-white hover:opacity-90"
             >
               Total costs (CSV)
             </a>
-            <a className="text-slate-300 underline underline-offset-4 hover:text-white" href={MONTHLY_COSTS_URL}>
+            <a
+              className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
+              href={MONTHLY_COSTS_URL}
+            >
               Monthly costs (CSV)
             </a>
-            <a className="text-slate-300 underline underline-offset-4 hover:text-white" href={RUN_COSTS_URL}>
+            <a
+              className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
+              href={RUN_COSTS_URL}
+            >
               Run costs (CSV)
             </a>
           </div>

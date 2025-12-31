@@ -90,13 +90,13 @@ const CountriesPage = async () => {
   return (
     <div className="space-y-6">
       <section>
-        <h1 className="text-3xl font-semibold text-white">Countries</h1>
-        <p className="text-sm text-slate-400">
+        <h1 className="text-3xl font-semibold">Countries</h1>
+        <p className="text-sm text-fred-text">
           Browse available countries in the database.
         </p>
       </section>
 
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
+      <div className="overflow-x-auto rounded-lg border border-fred-secondary">
         <CountriesTable rows={rows} />
       </div>
     </div>

@@ -21,7 +21,7 @@ function renderInline(text: string): React.ReactNode[] {
       return (
         <a
           key={`link-${inlineKey}`}
-          className="text-sky-300 underline underline-offset-2 hover:text-sky-200"
+          className="text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
           href={part}
           rel="noreferrer"
           target="_blank"
@@ -52,7 +52,7 @@ export function renderSimpleMarkdown(md: string): React.ReactNode {
     if (text) {
       blockKey += 1;
       elements.push(
-        <p key={`p-${blockKey}`} className="my-4 leading-relaxed text-slate-200">
+        <p key={`p-${blockKey}`} className="my-4 leading-relaxed text-fred-text">
           {renderInline(text)}
         </p>
       );
@@ -76,7 +76,7 @@ export function renderSimpleMarkdown(md: string): React.ReactNode {
     elements.push(
       <Tag key={`list-${blockKey}`} className={listClass}>
         {listItems.map((item, index) => (
-          <li key={`li-${blockKey}-${index}`} className="text-slate-200">
+          <li key={`li-${blockKey}-${index}`} className="text-fred-text">
             {item}
           </li>
         ))}
@@ -110,25 +110,25 @@ export function renderSimpleMarkdown(md: string): React.ReactNode {
       blockKey += 1;
       if (level === 1) {
         elements.push(
-          <h1 key={`h1-${blockKey}`} className="mt-10 mb-3 text-2xl font-semibold text-white">
+          <h1 key={`h1-${blockKey}`} className="mt-10 mb-3 text-2xl font-semibold">
             {renderInline(content)}
           </h1>
         );
       } else if (level === 2) {
         elements.push(
-          <h2 key={`h2-${blockKey}`} className="mt-8 mb-3 text-xl font-semibold text-white">
+          <h2 key={`h2-${blockKey}`} className="mt-8 mb-3 text-xl font-semibold">
             {renderInline(content)}
           </h2>
         );
       } else if (level === 3) {
         elements.push(
-          <h3 key={`h3-${blockKey}`} className="mt-6 mb-2 text-lg font-semibold text-white">
+          <h3 key={`h3-${blockKey}`} className="mt-6 mb-2 text-lg font-semibold">
             {renderInline(content)}
           </h3>
         );
       } else {
         elements.push(
-          <h4 key={`h4-${blockKey}`} className="mt-4 mb-2 text-base font-semibold text-white">
+          <h4 key={`h4-${blockKey}`} className="mt-4 mb-2 text-base font-semibold text-fred-text">
             {renderInline(content)}
           </h4>
         );
