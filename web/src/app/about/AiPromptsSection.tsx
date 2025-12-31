@@ -1,11 +1,15 @@
-const linkClass =
-  "text-sky-300 underline underline-offset-2 hover:text-sky-200";
+const linkClass = "text-fred-primary underline hover:text-fred-secondary";
 
 const panelClass =
-  "rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 text-sm text-slate-300";
+  "group rounded-md border border-fred-secondary bg-fred-surface";
+
+const summaryClass =
+  "cursor-pointer px-4 py-3 font-semibold text-fred-secondary group-open:bg-fred-bg";
+
+const bodyClass = "px-4 pb-4 pt-2 text-fred-text";
 
 const preClass =
-  "mt-3 whitespace-pre-wrap rounded-md bg-slate-950/50 p-4 text-xs text-slate-200 overflow-auto";
+  "mt-3 whitespace-pre-wrap rounded-md bg-fred-bg p-4 text-xs text-fred-text border border-fred-secondary/40 overflow-auto";
 
 const sourceLink = (href: string, label = "Source") => (
   <a className={linkClass} href={href} rel="noreferrer" target="_blank">
@@ -16,23 +20,22 @@ const sourceLink = (href: string, label = "Source") => (
 export default function AiPromptsSection() {
   return (
     <section className="mt-10 space-y-4">
-      <h2 className="text-2xl font-semibold text-white">AI Prompts</h2>
-      <p className="text-sm text-slate-300">
+      <h2 className="text-2xl font-semibold">AI Prompts</h2>
+      <p className="text-sm text-fred-text">
         These are short, readable excerpts from the real prompts used in the
         pipeline. Each panel links to the source file in GitHub so you can inspect
         the exact code.
       </p>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          Web search / evidence pack
-        </summary>
-        <p className="mt-2">
-          Used by the Gemini grounding retriever to produce a structured evidence
-          pack (structural context + recent signals). It is a JSON-only response
-          with no URLs in the text.
-        </p>
-        <pre className={preClass}>{`You are a research assistant using Google Search grounding.
+        <summary className={summaryClass}>Web search / evidence pack</summary>
+        <div className={bodyClass}>
+          <p>
+            Used by the Gemini grounding retriever to produce a structured evidence
+            pack (structural context + recent signals). It is a JSON-only response
+            with no URLs in the text.
+          </p>
+          <pre className={preClass}>{`You are a research assistant using Google Search grounding.
 Return strictly JSON with this shape:
 {
   "structural_context": "max 8 lines",
@@ -43,27 +46,27 @@ Return strictly JSON with this shape:
 - Do not include URLs in the JSON text.
 Query: Afghanistan (AFG) humanitarian risk outlook - fetch grounded recent signals (last 120 days)
 across conflict, displacement, disasters, food security, and political stability.`}</pre>
-        <div className="mt-2 flex flex-wrap gap-3">
-          {sourceLink(
-            "https://github.com/kwyjad/Pythia/blob/main/pythia/web_research/backends/gemini_grounding.py"
-          )}
-          {sourceLink(
-            "https://github.com/kwyjad/Pythia/blob/main/horizon_scanner/horizon_scanner.py",
-            "Query builder"
-          )}
+          <div className="mt-2 flex flex-wrap gap-3">
+            {sourceLink(
+              "https://github.com/kwyjad/Pythia/blob/main/pythia/web_research/backends/gemini_grounding.py"
+            )}
+            {sourceLink(
+              "https://github.com/kwyjad/Pythia/blob/main/horizon_scanner/horizon_scanner.py",
+              "Query builder"
+            )}
+          </div>
         </div>
       </details>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          Horizon scan triage (HS v2)
-        </summary>
-        <p className="mt-2">
-          The horizon scan prompt requires a single JSON object with a hazard entry
-          for every code (ACE, DI, DR, FL, HW, TC). The model must output a numeric
-          triage score and optional tier per hazard.
-        </p>
-        <pre className={preClass}>{`You are a strategic humanitarian risk analyst.
+        <summary className={summaryClass}>Horizon scan triage (HS v2)</summary>
+        <div className={bodyClass}>
+          <p>
+            The horizon scan prompt requires a single JSON object with a hazard entry
+            for every code (ACE, DI, DR, FL, HW, TC). The model must output a numeric
+            triage score and optional tier per hazard.
+          </p>
+          <pre className={preClass}>{`You are a strategic humanitarian risk analyst.
 You are assessing {country_name} ({iso3}) for the next 1-6 months.
 ...
 Output requirements (strict):
@@ -71,20 +74,20 @@ Output requirements (strict):
 - Provide a hazards entry for every hazard code in the catalog (ACE, DI, DR, FL, HW, TC).
 - Each hazard must include a numeric triage_score (0.0 to 1.0).
 - A tier is optional for interpretability (quiet/watchlist/priority).`}</pre>
-        <div className="mt-2">{sourceLink(
-          "https://github.com/kwyjad/Pythia/blob/main/horizon_scanner/prompts.py"
-        )}</div>
+          <div className="mt-2">{sourceLink(
+            "https://github.com/kwyjad/Pythia/blob/main/horizon_scanner/prompts.py"
+          )}</div>
+        </div>
       </details>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          Researcher
-        </summary>
-        <p className="mt-2">
-          The researcher prompt produces a concise brief with explicit headings
-          so forecasters can update their priors quickly.
-        </p>
-        <pre className={preClass}>{`You are a professional RESEARCHER for a Bayesian forecasting panel.
+        <summary className={summaryClass}>Researcher</summary>
+        <div className={bodyClass}>
+          <p>
+            The researcher prompt produces a concise brief with explicit headings
+            so forecasters can update their priors quickly.
+          </p>
+          <pre className={preClass}>{`You are a professional RESEARCHER for a Bayesian forecasting panel.
 Your job is to produce a concise, decision-useful research brief that helps a statistician
 update a prior.
 
@@ -125,21 +128,21 @@ RESOLUTION CRITERIA (what counts as “true”/resolution)
 - 3–5 bullets on uncertainty, data gaps, deception risks, regime changes, definitional gotchas.
 
 Final Research Summary: One or two sentences for the forecaster. Keep the entire brief under ~3000 words.`}</pre>
-        <div className="mt-2">{sourceLink(
-          "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
-          "Source: forecaster/prompts.py"
-        )}</div>
+          <div className="mt-2">{sourceLink(
+            "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
+            "Source: forecaster/prompts.py"
+          )}</div>
+        </div>
       </details>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          Forecast (SPD)
-        </summary>
-        <p className="mt-2">
-          The forecaster produces a six‑month SPD (Subjective Probability Distribution)
-          over five impact buckets. Output must be JSON only.
-        </p>
-        <pre className={preClass}>{`You are a careful probabilistic forecaster on a humanitarian early warning panel.
+        <summary className={summaryClass}>Forecast (SPD)</summary>
+        <div className={bodyClass}>
+          <p>
+            The forecaster produces a six-month SPD (Subjective Probability Distribution)
+            over five impact buckets. Output must be JSON only.
+          </p>
+          <pre className={preClass}>{`You are a careful probabilistic forecaster on a humanitarian early warning panel.
 
 Your task is to forecast {quantity_description}.
 
@@ -181,35 +184,35 @@ FORECASTING INSTRUCTIONS (Bayesian SPD)
    }}
 
    - Do not include any text before or after the JSON.`}</pre>
-        <div className="mt-3 text-sm text-slate-300">
-          <p className="font-medium text-slate-100">Hazard-specific notes</p>
-          <ul className="mt-2 list-disc space-y-1 pl-5">
-            <li>
-              Bucket set depends on metric: PA uses PA buckets; fatalities uses
-              fatalities buckets.
-            </li>
-            <li>
-              The system injects scoring + time-horizon blocks ahead of the
-              template for each question.
-            </li>
-          </ul>
+          <div className="mt-3 text-sm">
+            <p className="font-medium text-fred-secondary">Hazard-specific notes</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              <li>
+                Bucket set depends on metric: PA uses PA buckets; fatalities uses
+                fatalities buckets.
+              </li>
+              <li>
+                The system injects scoring + time-horizon blocks ahead of the
+                template for each question.
+              </li>
+            </ul>
+          </div>
+          <div className="mt-2">{sourceLink(
+            "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
+            "Source: forecaster/prompts.py"
+          )}</div>
         </div>
-        <div className="mt-2">{sourceLink(
-          "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
-          "Source: forecaster/prompts.py"
-        )}</div>
       </details>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          Scenario generation (priority-only)
-        </summary>
-        <p className="mt-2">
-          Scenario writing only runs when triage tier is <strong>priority</strong> and
-          an ensemble SPD exists. The writer returns structured JSON with context,
-          needs by sector, and operational impacts.
-        </p>
-        <pre className={preClass}>{`{
+        <summary className={summaryClass}>Scenario generation (priority-only)</summary>
+        <div className={bodyClass}>
+          <p>
+            Scenario writing only runs when triage tier is <strong>priority</strong> and
+            an ensemble SPD exists. The writer returns structured JSON with context,
+            needs by sector, and operational impacts.
+          </p>
+          <pre className={preClass}>{`{
   "primary": {
     "bucket_label": "bucket_3",
     "probability": 0.6,
@@ -227,58 +230,59 @@ FORECASTING INSTRUCTIONS (Bayesian SPD)
   },
   "alternative": null
 }`}</pre>
-        <div className="mt-2 flex flex-wrap gap-3">
-          {sourceLink(
-            "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
-            "Scenario prompt"
-          )}
-          {sourceLink(
-            "https://github.com/kwyjad/Pythia/blob/main/forecaster/scenario_writer.py",
-            "Priority-only rule"
-          )}
+          <div className="mt-2 flex flex-wrap gap-3">
+            {sourceLink(
+              "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
+              "Scenario prompt"
+            )}
+            {sourceLink(
+              "https://github.com/kwyjad/Pythia/blob/main/forecaster/scenario_writer.py",
+              "Priority-only rule"
+            )}
+          </div>
         </div>
       </details>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          How forecast questions are constructed
-        </summary>
-        <p className="mt-2">
-          Horizon Scanner outputs are converted into question rows during HS
-          upsert. The pipeline computes a target month and forecast window, then
-          formats question text using hazard templates.
-        </p>
-        <pre className={preClass}>{`- upsert_hs_payload computes target_month + [opening_date, closing_date]
+        <summary className={summaryClass}>How forecast questions are constructed</summary>
+        <div className={bodyClass}>
+          <p>
+            Horizon Scanner outputs are converted into question rows during HS
+            upsert. The pipeline computes a target month and forecast window, then
+            formats question text using hazard templates.
+          </p>
+          <pre className={preClass}>{`- upsert_hs_payload computes target_month + [opening_date, closing_date]
 - _build_questions_for_scenario formats wording from templates:
   * Conflict fatalities (ACLED), displacement (IDMC/DTM)
   * Natural hazards (EM-DAT “people affected”)
 - Persisted fields include:
   question_id, iso3, hazard_code, metric, target_month,
   window_start_date, window_end_date, wording, status`}</pre>
-        <div className="mt-2">{sourceLink(
-          "https://github.com/kwyjad/Pythia/blob/main/horizon_scanner/db_writer.py"
-        )}</div>
+          <div className="mt-2">{sourceLink(
+            "https://github.com/kwyjad/Pythia/blob/main/horizon_scanner/db_writer.py"
+          )}</div>
+        </div>
       </details>
 
       <details className={panelClass}>
-        <summary className="cursor-pointer text-slate-100 font-medium">
-          Self-search escape hatch
-        </summary>
-        <p className="mt-2">
-          If the model needs more evidence, it can respond with a single line
-          containing <code>NEED_WEB_EVIDENCE:</code> and a query. The system then
-          performs retrieval and retries the prompt with appended evidence.
-        </p>
-        <pre className={preClass}>{`NEED_WEB_EVIDENCE: {country} {hazard} {metric} outlook — include recent signals and structural drivers.`}</pre>
-        <div className="mt-2 flex flex-wrap gap-3">
-          {sourceLink(
-            "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
-            "Escape hatch in SPD prompt"
-          )}
-          {sourceLink(
-            "https://github.com/kwyjad/Pythia/blob/main/forecaster/self_search.py",
-            "Self-search retry"
-          )}
+        <summary className={summaryClass}>Self-search escape hatch</summary>
+        <div className={bodyClass}>
+          <p>
+            If the model needs more evidence, it can respond with a single line
+            containing <code>NEED_WEB_EVIDENCE:</code> and a query. The system then
+            performs retrieval and retries the prompt with appended evidence.
+          </p>
+          <pre className={preClass}>{`NEED_WEB_EVIDENCE: {country} {hazard} {metric} outlook — include recent signals and structural drivers.`}</pre>
+          <div className="mt-2 flex flex-wrap gap-3">
+            {sourceLink(
+              "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
+              "Escape hatch in SPD prompt"
+            )}
+            {sourceLink(
+              "https://github.com/kwyjad/Pythia/blob/main/forecaster/self_search.py",
+              "Self-search retry"
+            )}
+          </div>
         </div>
       </details>
     </section>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import SpdBarChart from "../../../components/SpdBarChart";
 import type { QuestionBundleResponse } from "../../../lib/types";
@@ -197,10 +197,30 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
   const [selectedSourceKey, setSelectedSourceKey] = useState(defaultSourceKey);
   const [selectedMonthIndex, setSelectedMonthIndex] = useState(1);
   const [showTotalEiv, setShowTotalEiv] = useState(false);
+  const headerCellRef = useRef<HTMLTableCellElement | null>(null);
+  const headerLogSent = useRef(false);
+
+  const debugEnabled = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("debug_question") === "1";
+  }, []);
 
   useEffect(() => {
     setSelectedSourceKey(defaultSourceKey);
   }, [defaultSourceKey]);
+
+  useEffect(() => {
+    if (!debugEnabled || headerLogSent.current) return;
+    const headerCell = headerCellRef.current;
+    if (!headerCell) return;
+    const styles = window.getComputedStyle(headerCell);
+    console.log("[SPD header]", {
+      color: styles.color,
+      background: styles.backgroundColor,
+    });
+    headerLogSent.current = true;
+  }, [debugEnabled]);
 
   const selectedSource = sources.find((source) => source.key === selectedSourceKey);
 
@@ -327,9 +347,11 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
         <div className="rounded border border-fred-secondary bg-fred-surface p-3">
           <div className="overflow-x-auto">
             <table className="w-full table-auto text-left text-sm text-fred-text">
-              <thead className="bg-fred-primary text-xs uppercase tracking-wide text-fred-surface">
+              <thead className="bg-fred-primary text-white text-xs uppercase tracking-wide">
                 <tr>
-                  <th className="pb-2 pr-4">Bucket</th>
+                  <th ref={headerCellRef} className="pb-2 pr-4">
+                    Bucket
+                  </th>
                   <th className="pb-2 pr-4">Centroid</th>
                   <th className="pb-2 pr-4">Probability</th>
                   <th className="pb-2">p × centroid</th>
