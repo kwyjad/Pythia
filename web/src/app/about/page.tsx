@@ -7,13 +7,13 @@ Fred is an experimental humanitarian impact forecasting system. Its objective is
 
 To repeat: FRED IS AN EXPERIMENTAL SYSTEM. Do not use Fred's forecasts for anything, ever, for any reason, except pure entertainment. Consult an astrolger instead. Assume Fred's forecasts are rubbish. Whether or not they are any good is what we are here to figure out. Even if for some reason Fred's forecasts are not rubbish, they certainly don't foresee the future.
 
-View at your own risk, and don't even think about using Fred's outputs. Beyond this, don't expect stability. Everything about Fred could change at any moment. In fact, it will change, that's the only certina thing around here. Its an experimental system. Question resolution is a major weak spot and this will negatively affect forecasting skill scoring.
+View at your own risk, and don't even think about using Fred's outputs. Beyond this, don't expect stability. Everything about Fred could change at any moment. In fact, it will change, that's the only sure thing around here. It is an experimental system. Question resolution is a major weak spot and this will negatively affect forecasting skill scoring.
 
 ## Fred: an end-to-end forecasting system for humanitarian risk
 
 Fred is an AI forecasting pipeline built to answer a simple question in a rigorous way:
 
-**What is likely to happen in the next few months, and how uncertain are we?**
+**How many people are likley to be affected by certain hazards in a set of countries in the next few months, and how (un)certain are we?**
 
 Fred doesn’t just output a single prediction. It produces **probabilistic forecasts**—distributions over plausible outcomes—grounded in retrieved evidence and backed by a complete, inspectable audit trail.
 
@@ -60,7 +60,7 @@ Fred runs a Horizon Scanner across a fixed hazard taxonomy for each country. HS 
 A key design choice: **HS is allowed to produce zero forecast-worthy hazards.** “No questions” can be the correct outcome for a country-month. The system still records the triage outputs so the “quiet” decision is inspectable.
 
 **Model used:**  
-- HS triage runs on **Gemini 3 Flash** to balance intelligence, cost, and speed.
+- HS triage runs on **Gemini 3 Flash** to balance intelligence, cost, and speed. The model is queried twice and the triage scores averaged to promote stability.
 
 ### 3) Turn triage into forecast questions
 
@@ -68,7 +68,7 @@ When HS flags something as forecast-worthy, Fred converts it into standardized f
 
 ### 4) Gather a shared evidence pack (retriever web research)
 
-Fred can run a shared retriever that performs web research once and injects the resulting evidence pack into multiple stages. This reduces cost, stabilizes sources, and avoids having each model “browse” independently.
+Fred runs a shared retriever that performs web research once and injects the resulting evidence pack into multiple stages. This reduces cost, stabilizes sources, and avoids having each model “browse” independently.
 
 **Model used:**  
 - Web search and evidence pack generation uses **Gemini 2.5 Flash Lite** for speed and low cost where intelligence is less important.
@@ -82,7 +82,7 @@ Research v2 transforms the evidence pack into a structured brief: what changed r
 
 ### 6) Produce probabilistic forecasts (SPD v2 ensemble)
 
-Fred’s core output is an SPD (Subjective Probability Distribution): a probability mass across humanitarian impact severity bins for each month ahead in the forecast horizon.
+Fred’s core output is an SPD (Subjective Probability Distribution): a probability mass across five humanitarian impact severity bins for each month ahead in the forecast horizon. This allows the forecast to cover the different probabilities of various levels of impact that a hazard could have. The bins cover the range of zero to infinity, so one must be true each month.
 
 Instead of a single number, you get answers like:
 
@@ -123,6 +123,12 @@ This makes it possible to audit decisions, reproduce outputs, and systematically
 
 - Fred uses the data in the DuckDB, updated monthly, to resolve the forecast questions. This produces Brier scores and variants.
 - Fred also uses the resolution results to provide calibratiion advice back to the forecasting models, e.g., "on this kind of question you usually overestimate by X", to help the forecasts improve over time.
+
+## Fred's schedule
+
+- Horizon Scan and forecasts: First day of every month, with the forecast window starting one month forward and extending six months from that. E.g., forecasts made on 01 January start on 01 February and end 31 July
+- Resolver updates: 15th day of every month, with a 3 month backfill to capture source data revisions
+- Resolution and calibration advice: Automatically after Resolver updates, for active forecasts in the window for which resolution is available.
 
 ## Why distributions (not point predictions) matter
 
