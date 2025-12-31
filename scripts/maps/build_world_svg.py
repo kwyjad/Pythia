@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import sys
 from pathlib import Path
 
 authored_by = "Generated from Natural Earth admin-0 GeoJSON"
@@ -89,8 +90,40 @@ def build_paths(data: dict) -> list[str]:
     return paths
 
 
+def validate_geojson_bounds(data: dict) -> None:
+    min_lon = None
+    max_lon = None
+    min_lat = None
+    max_lat = None
+    for feature in data.get("features", []):
+        geometry = feature.get("geometry") or {}
+        for ring in iter_outer_rings(geometry):
+            for lon, lat in ring:
+                min_lon = lon if min_lon is None else min(min_lon, lon)
+                max_lon = lon if max_lon is None else max(max_lon, lon)
+                min_lat = lat if min_lat is None else min(min_lat, lat)
+                max_lat = lat if max_lat is None else max(max_lat, lat)
+    if None in (min_lon, max_lon, min_lat, max_lat):
+        print("GeoJSON validation failed: no coordinates found.")
+        sys.exit(1)
+    lon_span = max_lon - min_lon
+    lat_span = max_lat - min_lat
+    if lon_span < 300 or lat_span < 120:
+        print(
+            "GeoJSON validation failed: coordinate span too small.",
+        )
+        print(
+            f"Longitude span: {lon_span:.2f} ({min_lon:.2f} to {max_lon:.2f})"
+        )
+        print(
+            f"Latitude span: {lat_span:.2f} ({min_lat:.2f} to {max_lat:.2f})"
+        )
+        sys.exit(1)
+
+
 def main() -> None:
     data = json.loads(GEOJSON_PATH.read_text(encoding="utf-8"))
+    validate_geojson_bounds(data)
     paths = build_paths(data)
     svg_lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VIEWBOX_WIDTH} {VIEWBOX_HEIGHT}">',
