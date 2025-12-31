@@ -21,6 +21,14 @@ def main() -> None:
             "globals.css must not include bg-slate-950.",
             {"file": str(globals_path)},
         )
+    if "bg-fredBg" in globals_content:
+        tailwind_config_path = Path("web/tailwind.config.ts")
+        tailwind_config_content = tailwind_config_path.read_text(encoding="utf-8")
+        if "fredBg" not in tailwind_config_content:
+            fail_guardrail(
+                "Tailwind config must define fredBg when globals.css references bg-fredBg.",
+                {"file": str(tailwind_config_path)},
+            )
 
     risk_map_path = Path("web/src/components/RiskIndexMap.tsx")
     risk_map_content = risk_map_path.read_text(encoding="utf-8")

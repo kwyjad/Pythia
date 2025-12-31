@@ -2,41 +2,43 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-fredBg text-fredText;
-}
+@layer base {
+  body {
+    @apply bg-fredBg text-fredText;
+  }
 
-:root {
-  --risk-map-c5: #156082;
-  --risk-map-c4: #1f7697;
-  --risk-map-c3: #3a8fb0;
-  --risk-map-c2: #6bb2c5;
-  --risk-map-c1: #a6d5e3;
-  --risk-map-no-eiv: #b0b0b0;
-  --risk-map-no-questions: #e0e0e0;
-  --risk-map-stroke: #3a3a3a;
-}
+  :root {
+    --risk-map-c5: #156082;
+    --risk-map-c4: #1f7697;
+    --risk-map-c3: #3a8fb0;
+    --risk-map-c2: #6bb2c5;
+    --risk-map-c1: #a6d5e3;
+    --risk-map-no-eiv: #b0b0b0;
+    --risk-map-no-questions: #e0e0e0;
+    --risk-map-stroke: #3a3a3a;
+  }
 
-main {
-  @apply w-full px-6 py-6;
-}
+  main {
+    @apply w-full px-6 py-6;
+  }
 
-a {
-  @apply text-fredPrimary hover:text-fredSecondary;
-}
+  a {
+    @apply text-fredPrimary hover:text-fredSecondary;
+  }
 
-table {
-  @apply w-full border-collapse;
-}
+  table {
+    @apply w-full border-collapse;
+  }
 
-thead {
-  @apply bg-fredBg;
-}
+  thead {
+    @apply bg-fredBg;
+  }
 
-thead th {
-  @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-fredPrimary;
-}
+  thead th {
+    @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-fredPrimary;
+  }
 
-tbody td {
-  @apply border-t border-fredBorder px-4 py-3 text-sm text-fredText;
+  tbody td {
+    @apply border-t border-fredBorder px-4 py-3 text-sm text-fredText;
+  }
 }
