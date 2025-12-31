@@ -44,6 +44,7 @@ on:
 # --- Job Definition ---
 jobs:
   build-report:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb

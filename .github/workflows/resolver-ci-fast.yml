@@ -8,6 +8,8 @@ name: Resolver CI — Fast
 
 on:
   push:
+    branches:
+      - main
     paths:
       - "resolver/**"
       - "scripts/ci/collect_diagnostics.py"
