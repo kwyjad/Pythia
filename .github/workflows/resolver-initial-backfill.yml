@@ -6,6 +6,10 @@
 ---
 name: Resolver — Initial Backfill
 
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
 "on":
   workflow_dispatch:
     inputs:
