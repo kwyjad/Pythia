@@ -11,10 +11,10 @@ const POPULATION_HELPER =
   "Per-capita requires population data (populations table or resolver/data/population.csv).";
 
 const VIEW_OPTIONS: Array<{ value: RiskView; label: string }> = [
-  { value: "PA_EIV", label: "PA EIV" },
-  { value: "PA_PC", label: "PA per-capita EIV" },
-  { value: "FATALITIES_EIV", label: "ACE fatalities EIV" },
-  { value: "FATALITIES_PC", label: "Fatalities per-capita" },
+  { value: "PA_EIV", label: "People Affected (PA) EIV" },
+  { value: "PA_PC", label: "People Affected (PA) per capita EIV" },
+  { value: "FATALITIES_EIV", label: "Armed Conflict (ACE) fatalities EIV" },
+  { value: "FATALITIES_PC", label: "Armed Conflict (ACE) fatalities per capita EIV" },
 ];
 
 type RiskIndexPanelProps = {
@@ -89,7 +89,7 @@ export default function RiskIndexPanel({
           <label className="flex items-center gap-2 text-sm text-slate-300">
             <span>View</span>
             <select
-              className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+              className="w-[30ch] max-w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 sm:w-[40ch] md:w-[48ch]"
               disabled={isLoading}
               onChange={(event) =>
                 handleViewChange(event.target.value as RiskView)

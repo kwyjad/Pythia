@@ -314,6 +314,22 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
     "research_web_research",
     "forecast_web_research",
   ]);
+  const hsTriageModels = getModelNamesForPhase(byPhase, "hs_triage");
+  const hasLlmPhases = Object.keys(byPhase).length > 0;
+  const hsTriageDisplay =
+    hsTriageModels === "—" && hasLlmPhases
+      ? "— (no hs_triage llm_calls found)"
+      : hsTriageModels;
+  const debugEnabled = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("debug_question") === "1") return true;
+    try {
+      return window.localStorage.getItem("pythia_debug_question") === "1";
+    } catch {
+      return false;
+    }
+  }, []);
 
   const resolutionForTarget = resolutions.find(
     (row) => row.observed_month === targetMonth
@@ -405,7 +421,7 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
             { label: "Triage score", value: triageScore },
             { label: "Triage tier", value: triageTier },
             { label: "Web search", value: webSearchModels },
-            { label: "HS triage", value: getModelNamesForPhase(byPhase, "hs_triage") },
+            { label: "HS triage", value: hsTriageDisplay },
             { label: "Research", value: getModelNamesForPhase(byPhase, "research_v2") },
             { label: "SPD", value: getModelNamesForPhase(byPhase, "spd_v2") },
             { label: "Scenario", value: getModelNamesForPhase(byPhase, "scenario_v2") },
@@ -421,6 +437,31 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
             </div>
           ))}
         </div>
+        {debugEnabled ? (
+          <details className="mt-4 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">
+            <summary className="cursor-pointer text-slate-200">
+              Question debug
+            </summary>
+            <div className="mt-2 space-y-2">
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                  by_phase keys
+                </div>
+                <div className="text-sm text-slate-200">
+                  {Object.keys(byPhase).length ? Object.keys(byPhase).join(", ") : "—"}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                  llm_calls.debug
+                </div>
+                <pre className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-200">
+                  {JSON.stringify(llm.debug ?? null, null, 2)}
+                </pre>
+              </div>
+            </div>
+          </details>
+        ) : null}
         <div className="mt-4 grid gap-4 md:grid-cols-2">
           <div className="rounded border border-slate-800 bg-slate-950 px-3 py-3">
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">

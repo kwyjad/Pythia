@@ -408,17 +408,34 @@ def _build_llm_calls_bundle(
     if not include_llm_calls:
         return LlmCallsBundle(included=False, transcripts_included=False, rows=[], by_phase={})
 
+    def build_debug_payload(by_phase: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return {
+            "hs_filter_requested": bool(hs_run_id and iso3 and hazard_code),
+            "hs_run_id": hs_run_id,
+            "iso3": iso3,
+            "hazard_code": hazard_code,
+            "phases": sorted(by_phase.keys()),
+            "counts_by_phase": {key: len(value) for key, value in by_phase.items()},
+        }
+
     if not _table_exists(con, "llm_calls"):
         return LlmCallsBundle(
             included=True,
             transcripts_included=False,
             rows=[],
             by_phase={},
+            debug=build_debug_payload({}),
         )
 
     available_columns = _table_columns(con, "llm_calls")
     if not available_columns:
-        return LlmCallsBundle(included=True, transcripts_included=False, rows=[], by_phase={})
+        return LlmCallsBundle(
+            included=True,
+            transcripts_included=False,
+            rows=[],
+            by_phase={},
+            debug=build_debug_payload({}),
+        )
 
     filters: List[str] = []
     params: Dict[str, Any] = {"limit": limit_llm_calls}
@@ -428,7 +445,11 @@ def _build_llm_calls_bundle(
     if forecaster_run_id:
         if not _table_has_columns(con, "llm_calls", ["run_id", "question_id", "phase"]):
             return LlmCallsBundle(
-                included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
+                included=True,
+                transcripts_included=transcripts_included,
+                rows=[],
+                by_phase={},
+                debug=build_debug_payload({}),
             )
         filters.append(
             "("
@@ -446,13 +467,17 @@ def _build_llm_calls_bundle(
     if hs_run_id and iso3 and hazard_code:
         if not _table_has_columns(con, "llm_calls", ["hs_run_id", "iso3", "hazard_code", "phase"]):
             return LlmCallsBundle(
-                included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
+                included=True,
+                transcripts_included=transcripts_included,
+                rows=[],
+                by_phase={},
+                debug=build_debug_payload({}),
             )
         filters.append(
             "("
             "hs_run_id = :hs_run_id "
-            "AND iso3 = :iso3 "
-            "AND hazard_code = :hazard_code "
+            "AND UPPER(iso3) = :iso3 "
+            "AND UPPER(hazard_code) = :hazard_code "
             "AND phase IN ('hs_triage','hs_web_research')"
             ")"
         )
@@ -462,7 +487,11 @@ def _build_llm_calls_bundle(
 
     if not filters:
         return LlmCallsBundle(
-            included=True, transcripts_included=transcripts_included, rows=[], by_phase={}
+            included=True,
+            transcripts_included=transcripts_included,
+            rows=[],
+            by_phase={},
+            debug=build_debug_payload({}),
         )
 
     select_columns = sorted(available_columns)
@@ -501,6 +530,7 @@ def _build_llm_calls_bundle(
         transcripts_included=transcripts_included,
         rows=cleaned_rows,
         by_phase=by_phase,
+        debug=build_debug_payload(by_phase),
     )
 
 

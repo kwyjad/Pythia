@@ -51,7 +51,7 @@ const formatDate = (value?: string | null) => value ?? "—";
 
 const formatEiv = (value?: number | null) => {
   if (value == null) return "—";
-  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return Math.round(value).toLocaleString();
 };
 
 const buildColumns = (): Array<SortableColumn<CountryQuestionRow>> => [
@@ -220,10 +220,12 @@ export default function CountryQuestionsTable({ rows }: CountryQuestionsTablePro
               missing last_forecast_month: {debugSummary.missingLastForecastMonth}
             </div>
             <div>
-              eiv_min: {debugSummary.eivMin == null ? "n/a" : formatEiv(debugSummary.eivMin)}
+              eiv_min:{" "}
+              {debugSummary.eivMin == null ? "n/a" : formatEiv(debugSummary.eivMin)}
             </div>
             <div>
-              eiv_max: {debugSummary.eivMax == null ? "n/a" : formatEiv(debugSummary.eivMax)}
+              eiv_max:{" "}
+              {debugSummary.eivMax == null ? "n/a" : formatEiv(debugSummary.eivMax)}
             </div>
           </div>
         </details>
