@@ -202,15 +202,17 @@ def main() -> None:
 
     about_page_path = Path("web/src/app/about/page.tsx")
     ai_prompts_path = Path("web/src/app/about/AiPromptsSection.tsx")
+    prompts_path = Path("forecaster/prompts.py")
     about_page_content = about_page_path.read_text(encoding="utf-8")
     ai_prompts_content = ai_prompts_path.read_text(encoding="utf-8")
+    prompts_content = prompts_path.read_text(encoding="utf-8")
     ai_combined = "\n".join([about_page_content, ai_prompts_content])
     ai_markers = [
         "AI Prompts",
         "Web search",
         "Horizon scan",
-        "Research v2",
-        "SPD v2",
+        "Researcher",
+        "Forecast (SPD)",
         "Scenario",
         "How forecast questions are constructed",
     ]
@@ -223,6 +225,25 @@ def main() -> None:
                 "files": f"{about_page_path}, {ai_prompts_path}",
             },
         )
+
+    prompt_markers = [
+        "FORECASTING INSTRUCTIONS (Bayesian SPD)",
+        "Final JSON output (IMPORTANT)",
+        "REQUIRED OUTPUT FORMAT (use headings exactly as written)",
+        "People affected (PA) buckets",
+        "Conflict fatalities buckets",
+    ]
+    for marker in prompt_markers:
+        if marker not in ai_prompts_content:
+            fail_guardrail(
+                "AI Prompts section missing prompt marker.",
+                {"marker": marker, "file": str(ai_prompts_path)},
+            )
+        if marker not in prompts_content:
+            fail_guardrail(
+                "Prompt source missing required marker.",
+                {"marker": marker, "file": str(prompts_path)},
+            )
 
     print("UI guardrails passed.")
 

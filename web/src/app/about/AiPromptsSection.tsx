@@ -78,78 +78,125 @@ Output requirements (strict):
 
       <details className={panelClass}>
         <summary className="cursor-pointer text-slate-100 font-medium">
-          Research v2
+          Researcher
         </summary>
         <p className="mt-2">
-          Research v2 combines question metadata, Resolver history, HS triage, and
-          merged evidence packs, then returns a strict JSON brief for the forecaster.
+          The researcher prompt produces a concise brief with explicit headings
+          so forecasters can update their priors quickly.
         </p>
-        <pre className={preClass}>{`Question metadata:
-\`\`\`json
-{ ...question... }
-\`\`\`
-Resolver history (noisy, incomplete base-rate data):
-\`\`\`json
-{ ...resolver_features... }
-\`\`\`
-HS triage (tier, triage_score, drivers, regime_shifts, data_quality):
-\`\`\`json
-{ ...hs_triage_entry... }
-\`\`\`
-Merged evidence (HS country pack + question-specific web research):
-\`\`\`json
-{ ...merged_evidence... }
-\`\`\`
-Return a single JSON object:
-{ ...RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA... }
-Do not include any text outside the JSON.`}</pre>
+        <pre className={preClass}>{`You are a professional RESEARCHER for a Bayesian forecasting panel.
+Your job is to produce a concise, decision-useful research brief that helps a statistician
+update a prior.
+
+QUESTION
+Title: {title}
+Type: {qtype}
+Units/Options: {units_or_options}
+
+BACKGROUND
+{background}
+
+RESOLUTION CRITERIA (what counts as “true”/resolution)
+{criteria}
+
+=== REQUIRED OUTPUT FORMAT (use headings exactly as written) ===
+### Reference class & base rates
+- Identify 1–3 plausible reference classes; give ballpark base rates or ranges and reasoning and on how these were derived; note limitations.
+
+### Recent developments (timeline bullets)
+- [YYYY-MM-DD] item — direction (↑/↓ for event effect on YES) — why it matters (≤25 words)
+
+### Mechanisms & drivers (causal levers)
+- List 3–6 drivers that move probability up/down; note typical size (small/moderate/large).
+
+### Differences vs. the base rate (what’s unusual now)
+- 3–6 bullets contrasting this case with the reference class (structure, actors, constraints, policy).
+
+### Bayesian update sketch (for the statistician)
+- Prior: brief sentence suggesting a plausible prior and “equivalent n” (strength).
+- Evidence mapping: 3–6 bullets with sign (↑/↓) and rough magnitude (small/moderate/large).
+- Net effect: one line describing whether the posterior should move up/down and by how much qualitatively.
+
+### Indicators to watch (leading signals; next weeks/months)
+- UP indicators: 3–5 short bullets.
+- DOWN indicators: 3–5 short bullets.
+
+### Caveats & pitfalls
+- 3–5 bullets on uncertainty, data gaps, deception risks, regime changes, definitional gotchas.
+
+Final Research Summary: One or two sentences for the forecaster. Keep the entire brief under ~3000 words.`}</pre>
         <div className="mt-2">{sourceLink(
-          "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py"
+          "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
+          "Source: forecaster/prompts.py"
         )}</div>
       </details>
 
       <details className={panelClass}>
         <summary className="cursor-pointer text-slate-100 font-medium">
-          Forecasting (SPD v2)
+          Forecast (SPD)
         </summary>
         <p className="mt-2">
           The forecaster produces a six‑month SPD (Subjective Probability Distribution)
           over five impact buckets. Output must be JSON only.
         </p>
-        <pre className={preClass}>{`Your task is to produce a six-month PROBABILITY DISTRIBUTION over five impact buckets.
-...
-If you need more evidence before forecasting, output EXACTLY one line:
-NEED_WEB_EVIDENCE: <your query>
-Otherwise, produce the forecast JSON.
+        <pre className={preClass}>{`You are a careful probabilistic forecaster on a humanitarian early warning panel.
 
-Output schema:
-{
-  "spds": {
-    "YYYY-MM": {"buckets": ["<10k","10k-<50k","50k-<250k","250k-<500k",">=500k"], "probs": [0.7,0.2,0.07,0.02,0.01]},
-    "YYYY-MM+1": {"buckets": ["<10k","10k-<50k","50k-<250k","250k-<500k",">=500k"], "probs": [0.7,0.2,0.07,0.02,0.01]}
-  },
-  "human_explanation": "3–4 sentences summarising the base rate and update signals."
-}`}</pre>
+Your task is to forecast {quantity_description}.
+
+You will express your beliefs as a SUBJECTIVE PROBABILITY DISTRIBUTION (SPD) over FIVE buckets
+for each month.
+
+For each month, distribute 100% probability across these buckets:
+
+People affected (PA) buckets (per month, country-level):
+- Bucket 1: < 10,000 people affected (label: "<10k")
+- Bucket 2: 10,000 to < 50,000 people affected (label: "10k-<50k")
+- Bucket 3: 50,000 to < 250,000 people affected (label: "50k-<250k")
+- Bucket 4: 250,000 to < 500,000 people affected (label: "250k-<500k")
+- Bucket 5: >= 500,000 people affected (label: ">=500k")
+
+Conflict fatalities buckets (per month, country-level):
+- Bucket 1: 0–4 deaths (label: "<5")
+- Bucket 2: 5–24 deaths (label: "5-<25")
+- Bucket 3: 25–99 deaths (label: "25-<100")
+- Bucket 4: 100–499 deaths (label: "100-<500")
+- Bucket 5: >= 500 deaths (label: ">=500")
+
+FORECASTING INSTRUCTIONS (Bayesian SPD)
+
+1) Prior / base rates
+   - Start from a prior SPD over the buckets based on historical data and relevant reference classes
+     (for this hazard and country).
+
+5) Final JSON output (IMPORTANT)
+   - At the very end, output ONLY a single JSON object with this exact schema:
+
+   {{
+     "month_1": [p1, p2, p3, p4, p5],
+     "month_2": [p1, p2, p3, p4, p5],
+     "month_3": [p1, p2, p3, p4, p5],
+     "month_4": [p1, p2, p3, p4, p5],
+     "month_5": [p1, p2, p3, p4, p5],
+     "month_6": [p1, p2, p3, p4, p5]
+   }}
+
+   - Do not include any text before or after the JSON.`}</pre>
         <div className="mt-3 text-sm text-slate-300">
           <p className="font-medium text-slate-100">Hazard-specific notes</p>
           <ul className="mt-2 list-disc space-y-1 pl-5">
             <li>
-              Bucket labels differ for conflict fatalities vs. people‑affected
-              (PA) questions.
+              Bucket set depends on metric: PA uses PA buckets; fatalities uses
+              fatalities buckets.
             </li>
             <li>
-              DI (displacement inflow) has no Resolver base rate; the model must
-              construct a prior from research and focus on incoming cross‑border flows.
-            </li>
-            <li>
-              Natural hazards with PA metrics use EM‑DAT “people affected”
-              definitions (injured, displaced, or needing assistance).
+              The system injects scoring + time-horizon blocks ahead of the
+              template for each question.
             </li>
           </ul>
         </div>
         <div className="mt-2">{sourceLink(
           "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
-          "SPD v2 prompt"
+          "Source: forecaster/prompts.py"
         )}</div>
       </details>
 
@@ -226,7 +273,7 @@ Output schema:
         <div className="mt-2 flex flex-wrap gap-3">
           {sourceLink(
             "https://github.com/kwyjad/Pythia/blob/main/forecaster/prompts.py",
-            "Escape hatch in SPD v2"
+            "Escape hatch in SPD prompt"
           )}
           {sourceLink(
             "https://github.com/kwyjad/Pythia/blob/main/forecaster/self_search.py",
