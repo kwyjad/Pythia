@@ -1,2 +1,121 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
+Afghanistan
+Armenia
+Burundi
+Cote d'Ivoire
+Democratic Republic of Congo
+Ecuador
+Egypt
+Ethiopia
+Haiti
+Iran
+Iraq
+Kenya
+Lebanon
+Libya
+Madagascar
+Mexico
+Myanmar
+Niger
+Nigeria
+North Korea
+Pakistan
+Palestine
+Philippines
+Russia
+Somalia
+South Sudan
+Sudan
+Syria
+Taiwan
+Turkey
+Venezuela
+Yemen
+Zimbabwe
+Bangladesh
+Belarus
+Benin
+Bolivia
+Bosnia-Herzegovina
+Burkina Faso
+Cambodia
+Cape Verde
+Chad
+Chile
+Colombia
+Comoros
+Croatia
+Cuba
+Cyprus
+Djibouti
+Equatorial Guinea
+Eritrea
+Guatemala
+Guinea Conakry
+Guinea-Bissau
+Guyana
+India
+Israel
+Kazakhstan
+Kyrgyzstan
+Moldova
+Mozambique
+Namibia
+South Africa
+Tanzania
+Thailand
+Cameroon
+Central African Republic
+China
+El Salvador
+Georgia
+Ghana
+Jordan
+Kosovo
+Liberia
+Malawi
+Mali
+Nicaragua
+Poland
+Serbia
+Tajikistan
+Togo
+Uganda
+Ukraine
+Uzbekistan
+Laos
+Congo
+Gambia
+Panama
 Peru
+Botswana
+Brazil
+Costa Rica
+Dominican Republic
+Gabon
+Honduras
+Indonesia
+Lesotho
+Malaysia
+Maldives
+Morocco
+Sri Lanka
+Suriname
+Timor-Leste
+Tunisia
+Turkmenistan
+Western Sahara
+Eswatini
+Mongolia
+Nepal
+Papua New Guinea
+Rwanda
+Sierra Leone
+Solomon Islands
+South Korea (Republic of)
+Vietnam
+Zambia
+Canada
+Fiji
+Azerbaijan
+Algeria
