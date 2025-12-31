@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { apiGet } from "../lib/api";
 import type { CountriesRow, RiskIndexResponse, RiskView } from "../lib/types";
@@ -20,6 +20,8 @@ const VIEW_OPTIONS: Array<{ value: RiskView; label: string }> = [
 type RiskIndexPanelProps = {
   initialResponse: RiskIndexResponse;
   countriesRows: CountriesRow[];
+  aside?: ReactNode;
+  mapHeightClassName?: string;
 };
 
 const buildParams = (view: RiskView) => {
@@ -43,6 +45,8 @@ const buildParams = (view: RiskView) => {
 export default function RiskIndexPanel({
   initialResponse,
   countriesRows,
+  aside,
+  mapHeightClassName,
 }: RiskIndexPanelProps) {
   const [view, setView] = useState<RiskView>("PA_EIV");
   const [rows, setRows] = useState(initialResponse.rows ?? []);
@@ -81,28 +85,36 @@ export default function RiskIndexPanel({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <label className="flex items-center gap-2 text-sm text-slate-300">
-          <span>View</span>
-          <select
-            className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
-            disabled={isLoading}
-            onChange={(event) => handleViewChange(event.target.value as RiskView)}
-            value={view}
-          >
-            {VIEW_OPTIONS.map((option) => (
-              <option
-                key={option.value}
-                disabled={
-                  (option.value === "PA_PC" || option.value === "FATALITIES_PC") &&
-                  !populationAvailable
-                }
-                value={option.value}
-              >
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <span>View</span>
+            <select
+              className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+              disabled={isLoading}
+              onChange={(event) =>
+                handleViewChange(event.target.value as RiskView)
+              }
+              value={view}
+            >
+              {VIEW_OPTIONS.map((option) => (
+                <option
+                  key={option.value}
+                  disabled={
+                    (option.value === "PA_PC" ||
+                      option.value === "FATALITIES_PC") &&
+                    !populationAvailable
+                  }
+                  value={option.value}
+                >
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="text-xs text-slate-500">
+            World overview • Jenks breaks calculated from the selected risk values.
+          </span>
+        </div>
 
         <span className="text-sm text-slate-400">
           Metric {metric} • {targetMonth ?? "latest"}
@@ -119,11 +131,15 @@ export default function RiskIndexPanel({
         </div>
       ) : null}
 
-      <RiskIndexMap
-        countriesRows={countriesRows}
-        riskRows={rows}
-        view={view}
-      />
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <RiskIndexMap
+          countriesRows={countriesRows}
+          heightClassName={mapHeightClassName}
+          riskRows={rows}
+          view={view}
+        />
+        {aside ?? null}
+      </div>
 
       <div className="w-full overflow-x-auto rounded-lg border border-slate-800">
         <RiskIndexTable

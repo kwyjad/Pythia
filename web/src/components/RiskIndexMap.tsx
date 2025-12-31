@@ -8,6 +8,7 @@ type RiskIndexMapProps = {
   riskRows: RiskIndexRow[];
   countriesRows: CountriesRow[];
   view: RiskView;
+  heightClassName?: string;
 };
 
 const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
@@ -77,6 +78,9 @@ type DebugInfo = {
   heightAttr: string | null;
   taggedNodes: number;
   targetPaths: number;
+  svgHasPathsWithD: boolean;
+  firstIso3: string | null;
+  requestedHeightClassName: string | null;
   medianBboxWidth: number | null;
   medianBboxHeight: number | null;
   firstPathSample: DebugSample | null;
@@ -148,6 +152,7 @@ export default function RiskIndexMap({
   riskRows,
   countriesRows,
   view,
+  heightClassName,
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
@@ -172,10 +177,31 @@ export default function RiskIndexMap({
   const svgNodeRef = useRef<SVGSVGElement | null>(null);
   const domReplaceCountRef = useRef<number>(0);
   const svgNodeVersionRef = useRef<number>(0);
-  const debugEnabled =
+  const resolvedHeightClassName = heightClassName ?? "h-[360px]";
+  const debugQueryEnabled =
     typeof window !== "undefined" &&
-    (new URLSearchParams(window.location.search).get("debug_map") === "1" ||
-      window.localStorage.getItem("pythia_debug_map") === "1");
+    new URLSearchParams(window.location.search).get("debug_map") === "1";
+  const [deepDebugEnabled, setDeepDebugEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const stored = window.localStorage.getItem("pythia_debug_map_deep");
+    const legacy = window.localStorage.getItem("pythia_debug_map");
+    return stored === "1" || legacy === "1" || debugQueryEnabled;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (deepDebugEnabled) {
+      window.localStorage.setItem("pythia_debug_map_deep", "1");
+    } else {
+      window.localStorage.removeItem("pythia_debug_map_deep");
+    }
+  }, [deepDebugEnabled]);
+
+  useEffect(() => {
+    if (!deepDebugEnabled && debugNeon) {
+      setDebugNeon(false);
+    }
+  }, [deepDebugEnabled, debugNeon]);
 
   useEffect(() => {
     let active = true;
@@ -286,6 +312,9 @@ export default function RiskIndexMap({
         heightAttr: null,
         taggedNodes: 0,
         targetPaths: 0,
+        svgHasPathsWithD: false,
+        firstIso3: null,
+        requestedHeightClassName: resolvedHeightClassName,
         medianBboxWidth: null,
         medianBboxHeight: null,
         firstPathSample: null,
@@ -307,16 +336,16 @@ export default function RiskIndexMap({
         svgComputed: null,
         ancestorOpacityProduct: null,
         debugNeon,
-        matchCounts: {
-          riskRows: riskRows.length,
-          valueByIso3: valueByIso3.size,
-          iso3Elements: 0,
-          matchedIso3: 0,
-          unmatchedIso3: 0,
-        },
-      });
-      return;
-    }
+      matchCounts: {
+        riskRows: riskRows.length,
+        valueByIso3: valueByIso3.size,
+        iso3Elements: 0,
+        matchedIso3: 0,
+        unmatchedIso3: 0,
+      },
+    });
+    return;
+  }
     const container = containerRef.current;
     const svgHost = svgHostRef.current;
     if (!container || !svgHost) return;
@@ -331,53 +360,11 @@ export default function RiskIndexMap({
       svgNodeVersionRef.current += 1;
     }
     const originalViewBox = svgEl?.getAttribute("viewBox") ?? null;
-    const parsedViewBox = parseViewBox(originalViewBox);
     let contentBBox: BBoxDiagnostics | null = null;
     let coverageW: number | null = null;
     let coverageH: number | null = null;
     let autoFitApplied = false;
     let autoFitViewBox: string | null = null;
-    if (svgEl) {
-      try {
-        const bbox = svgEl.getBBox();
-        if (
-          Number.isFinite(bbox.x) &&
-          Number.isFinite(bbox.y) &&
-          Number.isFinite(bbox.width) &&
-          Number.isFinite(bbox.height)
-        ) {
-          contentBBox = {
-            x: bbox.x,
-            y: bbox.y,
-            width: bbox.width,
-            height: bbox.height,
-            maxX: bbox.x + bbox.width,
-            maxY: bbox.y + bbox.height,
-          };
-        }
-      } catch {
-        // getBBox can throw if the SVG is not rendered yet.
-      }
-    }
-    if (contentBBox && parsedViewBox) {
-      coverageW = contentBBox.width / parsedViewBox.vbW;
-      coverageH = contentBBox.height / parsedViewBox.vbH;
-      if (coverageW < 0.35 || coverageH < 0.35) {
-        const pad = Math.max(
-          2,
-          Math.min(contentBBox.width, contentBBox.height) * 0.05
-        );
-        const nextViewBox = [
-          contentBBox.x - pad,
-          contentBBox.y - pad,
-          contentBBox.width + pad * 2,
-          contentBBox.height + pad * 2,
-        ];
-        svgEl?.setAttribute("viewBox", nextViewBox.join(" "));
-        autoFitApplied = true;
-        autoFitViewBox = nextViewBox.join(" ");
-      }
-    }
     const iso3Elements = Array.from(
       svgHost.querySelectorAll<SVGElement>("[data-iso3]")
     );
@@ -400,23 +387,9 @@ export default function RiskIndexMap({
         "World map asset invalid: expected 150+ country paths with data-iso3. Check web/public/maps/world.svg."
       );
     }
-    const sampledLengths = paths
-      .slice(0, 20)
-      .map((path) => (path.getAttribute("d") || "").length)
-      .filter((length) => length > 0)
-      .sort((a, b) => a - b);
-    if (sampledLengths.length) {
-      const mid = Math.floor(sampledLengths.length / 2);
-      const median =
-        sampledLengths.length % 2 === 0
-          ? (sampledLengths[mid - 1] + sampledLengths[mid]) / 2
-          : sampledLengths[mid];
-      if (median < 150) {
-        warnings.push(
-          "World map asset looks non-polygonal (paths too small). Replace web/public/maps/world.svg with real country outlines."
-        );
-      }
-    }
+    const firstPath = svgHost.querySelector("path");
+    const firstPathDLen = (firstPath?.getAttribute("d") || "").length;
+    const svgHasPathsWithD = firstPathDLen > 20;
     const normalizeVisibility = (path: SVGPathElement) => {
       path.style.setProperty("display", "inline", "important");
       path.style.setProperty("visibility", "visible", "important");
@@ -518,112 +491,173 @@ export default function RiskIndexMap({
         });
       });
     });
-    const samplePaths = paths.slice(0, 50);
-    const bboxSamples: Array<{ width: number; height: number }> = [];
-    let tinyCount = 0;
-    samplePaths.forEach((path) => {
-      try {
-        const bbox = path.getBBox();
-        if (Number.isFinite(bbox.width) && Number.isFinite(bbox.height)) {
-          bboxSamples.push({ width: bbox.width, height: bbox.height });
-          if (bbox.width < 2 && bbox.height < 2) {
-            tinyCount += 1;
+    if (deepDebugEnabled) {
+      const sampledLengths = paths
+        .slice(0, 20)
+        .map((path) => (path.getAttribute("d") || "").length)
+        .filter((length) => length > 0)
+        .sort((a, b) => a - b);
+      if (sampledLengths.length) {
+        const mid = Math.floor(sampledLengths.length / 2);
+        const median =
+          sampledLengths.length % 2 === 0
+            ? (sampledLengths[mid - 1] + sampledLengths[mid]) / 2
+            : sampledLengths[mid];
+        if (median < 150) {
+          warnings.push(
+            "World map asset looks non-polygonal (paths too small). Replace web/public/maps/world.svg with real country outlines."
+          );
+        }
+      }
+      const parsedViewBox = parseViewBox(originalViewBox);
+      if (svgEl) {
+        try {
+          const bbox = svgEl.getBBox();
+          if (
+            Number.isFinite(bbox.x) &&
+            Number.isFinite(bbox.y) &&
+            Number.isFinite(bbox.width) &&
+            Number.isFinite(bbox.height)
+          ) {
+            contentBBox = {
+              x: bbox.x,
+              y: bbox.y,
+              width: bbox.width,
+              height: bbox.height,
+              maxX: bbox.x + bbox.width,
+              maxY: bbox.y + bbox.height,
+            };
           }
+        } catch {
+          // getBBox can throw if the SVG is not rendered yet.
         }
-      } catch {
-        // getBBox can throw if element isn't rendered.
       }
-    });
-    if (bboxSamples.length) {
-      const widths = bboxSamples
-        .map((sample) => sample.width)
-        .sort((a, b) => a - b);
-      const heights = bboxSamples
-        .map((sample) => sample.height)
-        .sort((a, b) => a - b);
-      const pickPercentile = (values: number[], percentile: number) => {
-        const idx = Math.max(
-          0,
-          Math.min(values.length - 1, Math.round((values.length - 1) * percentile))
-        );
-        return values[idx];
-      };
-      samplePathBboxStats = {
-        count: bboxSamples.length,
-        wMin: widths[0] ?? null,
-        wP50: pickPercentile(widths, 0.5),
-        wP90: pickPercentile(widths, 0.9),
-        wMax: widths[widths.length - 1] ?? null,
-        hMin: heights[0] ?? null,
-        hP50: pickPercentile(heights, 0.5),
-        hP90: pickPercentile(heights, 0.9),
-        hMax: heights[heights.length - 1] ?? null,
-        tinyCount,
-      };
-      if (samplePathBboxStats.wP50 !== null) {
-        medianBboxWidth = samplePathBboxStats.wP50;
+      if (contentBBox && parsedViewBox) {
+        coverageW = contentBBox.width / parsedViewBox.vbW;
+        coverageH = contentBBox.height / parsedViewBox.vbH;
+        if (coverageW < 0.35 || coverageH < 0.35) {
+          const pad = Math.max(
+            2,
+            Math.min(contentBBox.width, contentBBox.height) * 0.05
+          );
+          const nextViewBox = [
+            contentBBox.x - pad,
+            contentBBox.y - pad,
+            contentBBox.width + pad * 2,
+            contentBBox.height + pad * 2,
+          ];
+          svgEl?.setAttribute("viewBox", nextViewBox.join(" "));
+          autoFitApplied = true;
+          autoFitViewBox = nextViewBox.join(" ");
+        }
       }
-      if (samplePathBboxStats.hP50 !== null) {
-        medianBboxHeight = samplePathBboxStats.hP50;
-      }
-      const tinyRatio = tinyCount / bboxSamples.length;
-      if (
-        tinyRatio > 0.7 ||
-        (samplePathBboxStats.wP90 !== null && samplePathBboxStats.wP90 < 10) ||
-        (samplePathBboxStats.hP90 !== null && samplePathBboxStats.hP90 < 10)
-      ) {
-        warnings.push(
-          "World SVG appears to contain mostly microscopic shapes; replace world-countries-iso3.geojson and regenerate world.svg."
-        );
-      }
-    }
-    const sampleStyleTarget = samplePaths[0];
-    if (sampleStyleTarget) {
-      const computed = getComputedStyle(sampleStyleTarget);
-      sampleComputedStyle = {
-        computedFill: computed.fill,
-        computedStroke: computed.stroke,
-        computedOpacity: computed.opacity,
-        computedDisplay: computed.display,
-        computedVisibility: computed.visibility,
-      };
-    }
-    SENTINEL_ISO3.forEach((iso3) => {
-      const element = iso3Elements.find(
-        (node) => (node.getAttribute("data-iso3") || "").toUpperCase() === iso3
-      );
-      if (!element) {
-        return;
-      }
-      const path =
-        element.tagName.toLowerCase() === "path"
-          ? (element as SVGPathElement)
-          : element.querySelector<SVGPathElement>("path");
-      if (!path) {
-        return;
-      }
-      try {
-        const bbox = path.getBBox();
+      const samplePaths = paths.slice(0, 50);
+      const bboxSamples: Array<{ width: number; height: number }> = [];
+      let tinyCount = 0;
+      samplePaths.forEach((path) => {
+        try {
+          const bbox = path.getBBox();
+          if (Number.isFinite(bbox.width) && Number.isFinite(bbox.height)) {
+            bboxSamples.push({ width: bbox.width, height: bbox.height });
+            if (bbox.width < 2 && bbox.height < 2) {
+              tinyCount += 1;
+            }
+          }
+        } catch {
+          // getBBox can throw if element isn't rendered.
+        }
+      });
+      if (bboxSamples.length) {
+        const widths = bboxSamples
+          .map((sample) => sample.width)
+          .sort((a, b) => a - b);
+        const heights = bboxSamples
+          .map((sample) => sample.height)
+          .sort((a, b) => a - b);
+        const pickPercentile = (values: number[], percentile: number) => {
+          const idx = Math.max(
+            0,
+            Math.min(values.length - 1, Math.round((values.length - 1) * percentile))
+          );
+          return values[idx];
+        };
+        samplePathBboxStats = {
+          count: bboxSamples.length,
+          wMin: widths[0] ?? null,
+          wP50: pickPercentile(widths, 0.5),
+          wP90: pickPercentile(widths, 0.9),
+          wMax: widths[widths.length - 1] ?? null,
+          hMin: heights[0] ?? null,
+          hP50: pickPercentile(heights, 0.5),
+          hP90: pickPercentile(heights, 0.9),
+          hMax: heights[heights.length - 1] ?? null,
+          tinyCount,
+        };
+        if (samplePathBboxStats.wP50 !== null) {
+          medianBboxWidth = samplePathBboxStats.wP50;
+        }
+        if (samplePathBboxStats.hP50 !== null) {
+          medianBboxHeight = samplePathBboxStats.hP50;
+        }
+        const tinyRatio = tinyCount / bboxSamples.length;
         if (
-          Number.isFinite(bbox.width) &&
-          Number.isFinite(bbox.height) &&
-          Number.isFinite(bbox.x) &&
-          Number.isFinite(bbox.y)
+          tinyRatio > 0.7 ||
+          (samplePathBboxStats.wP90 !== null && samplePathBboxStats.wP90 < 10) ||
+          (samplePathBboxStats.hP90 !== null && samplePathBboxStats.hP90 < 10)
         ) {
-          sentinelSvgCenters[iso3] = {
-            found: true,
-            cx: bbox.x + bbox.width / 2,
-            cy: bbox.y + bbox.height / 2,
-            w: bbox.width,
-            h: bbox.height,
-          };
+          warnings.push(
+            "World SVG appears to contain mostly microscopic shapes; replace world-countries-iso3.geojson and regenerate world.svg."
+          );
         }
-      } catch {
-        // getBBox can throw if element isn't rendered.
       }
-    });
+      const sampleStyleTarget = samplePaths[0];
+      if (sampleStyleTarget) {
+        const computed = getComputedStyle(sampleStyleTarget);
+        sampleComputedStyle = {
+          computedFill: computed.fill,
+          computedStroke: computed.stroke,
+          computedOpacity: computed.opacity,
+          computedDisplay: computed.display,
+          computedVisibility: computed.visibility,
+        };
+      }
+      SENTINEL_ISO3.forEach((iso3) => {
+        const element = iso3Elements.find(
+          (node) => (node.getAttribute("data-iso3") || "").toUpperCase() === iso3
+        );
+        if (!element) {
+          return;
+        }
+        const path =
+          element.tagName.toLowerCase() === "path"
+            ? (element as SVGPathElement)
+            : element.querySelector<SVGPathElement>("path");
+        if (!path) {
+          return;
+        }
+        try {
+          const bbox = path.getBBox();
+          if (
+            Number.isFinite(bbox.width) &&
+            Number.isFinite(bbox.height) &&
+            Number.isFinite(bbox.x) &&
+            Number.isFinite(bbox.y)
+          ) {
+            sentinelSvgCenters[iso3] = {
+              found: true,
+              cx: bbox.x + bbox.width / 2,
+              cy: bbox.y + bbox.height / 2,
+              w: bbox.width,
+              h: bbox.height,
+            };
+          }
+        } catch {
+          // getBBox can throw if element isn't rendered.
+        }
+      });
+    }
     setSvgWarnings(warnings);
-    if (debugEnabled) {
+    if (deepDebugEnabled) {
       const sampleTargets = paths.slice(0, 10);
       debugSample = sampleTargets.map((path) => ({
         dLen: path.getAttribute("d")?.length ?? 0,
@@ -692,7 +726,7 @@ export default function RiskIndexMap({
       ancestorOpacityProduct = product;
     }
     let observer: MutationObserver | null = null;
-    if (svgHost) {
+    if (svgHost && deepDebugEnabled) {
       observer = new MutationObserver((mutations) => {
         const sawSvgMutation = mutations.some((mutation) => {
           if (mutation.type !== "childList") return false;
@@ -722,6 +756,8 @@ export default function RiskIndexMap({
       });
       observer.observe(svgHost, { childList: true, subtree: true });
     }
+    const firstIso3 =
+      iso3Elements[0]?.getAttribute("data-iso3")?.toUpperCase() ?? null;
     setDebugInfo({
       svgLoaded: Boolean(svgEl),
       originalViewBox,
@@ -731,6 +767,9 @@ export default function RiskIndexMap({
       heightAttr: svgEl?.getAttribute("height") ?? null,
       taggedNodes: iso3Elements.length,
       targetPaths: paths.length,
+      svgHasPathsWithD,
+      firstIso3,
+      requestedHeightClassName: resolvedHeightClassName,
       medianBboxWidth,
       medianBboxHeight,
       firstPathSample: debugSample[0] ?? null,
@@ -762,7 +801,7 @@ export default function RiskIndexMap({
           }
         : null,
       ancestorOpacityProduct,
-      debugNeon,
+      debugNeon: deepDebugEnabled && debugNeon,
       matchCounts: {
         riskRows: riskRows.length,
         valueByIso3: valueByIso3.size,
@@ -782,17 +821,14 @@ export default function RiskIndexMap({
     breaks,
     hasQuestionsIso3,
     isPerCapita,
-    debugEnabled,
+    deepDebugEnabled,
     debugNeon,
     riskRows,
+    resolvedHeightClassName,
   ]);
 
   return (
     <div className="relative w-full rounded-lg border border-slate-800 bg-slate-950/30 p-4">
-      <div className="text-sm font-semibold text-slate-200">World overview</div>
-      <p className="mt-1 text-xs text-slate-400">
-        Jenks breaks calculated from the selected risk values.
-      </p>
       {svgWarnings.length ? (
         <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           {svgWarnings.map((warning) => (
@@ -800,7 +836,11 @@ export default function RiskIndexMap({
           ))}
         </div>
       ) : null}
-      <div ref={containerRef} className="relative mt-3 h-[360px] w-full">
+      <div
+        ref={containerRef}
+        data-testid="risk-index-map-container"
+        className={`relative mt-3 w-full ${resolvedHeightClassName}`}
+      >
         <div ref={svgHostRef} className="h-full w-full">
           <SvgMarkup svgText={svgText} />
         </div>
@@ -816,7 +856,8 @@ export default function RiskIndexMap({
       </div>
       {debugInfo ? (
         <>
-          {debugInfo.autoFitApplied &&
+          {deepDebugEnabled &&
+          debugInfo.autoFitApplied &&
           debugInfo.coverageW !== null &&
           debugInfo.coverageH !== null ? (
             <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -831,23 +872,40 @@ export default function RiskIndexMap({
             className="mt-3 rounded-md border border-slate-700/60 bg-slate-950/30 px-3 py-2 text-xs text-slate-200"
             open={
               fetchDiagnostics.fetchOk === false ||
-              debugInfo.autoFitApplied ||
               debugInfo.targetPaths === 0 ||
               svgWarnings.length > 0
             }
           >
             <summary className="cursor-pointer text-slate-100">
               Map debug — SVG loaded: {debugInfo.svgLoaded ? "yes" : "no"} |
-              iso3 nodes: {debugInfo.taggedNodes} | paths:{" "}
-              {debugInfo.targetPaths} | bbox coverage:{" "}
-              {debugInfo.coverageW !== null && debugInfo.coverageH !== null
-                ? `${(debugInfo.coverageW * 100).toFixed(1)}%×${(
-                    debugInfo.coverageH * 100
-                  ).toFixed(1)}%`
-                : "n/a"}{" "}
-              | auto-fit: {debugInfo.autoFitApplied ? "applied" : "not applied"}
+              iso3 nodes: {debugInfo.taggedNodes} | matched iso3s:{" "}
+              {debugInfo.matchCounts.matchedIso3} | fetch:{" "}
+              {fetchDiagnostics.fetchOk === null
+                ? "n/a"
+                : fetchDiagnostics.fetchOk
+                ? "ok"
+                : "error"}
             </summary>
             <div className="mt-3 grid gap-3 text-slate-200">
+              <div>
+                <label className="flex items-center gap-2 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    className="h-3 w-3"
+                    checked={deepDebugEnabled}
+                    onChange={(event) =>
+                      setDeepDebugEnabled(event.target.checked)
+                    }
+                  />
+                  Enable deep diagnostics
+                </label>
+                {!deepDebugEnabled ? (
+                  <div className="mt-1 text-xs text-slate-500">
+                    Deep diagnostics are disabled. Enable to run bbox sampling,
+                    computed style scans, and sentinel checks.
+                  </div>
+                ) : null}
+              </div>
               <div>
                 <div className="font-semibold text-slate-100">
                   Fetch diagnostics
@@ -882,56 +940,13 @@ export default function RiskIndexMap({
                   </div>
                   <div>width attr: {debugInfo.widthAttr ?? "n/a"}</div>
                   <div>height attr: {debugInfo.heightAttr ?? "n/a"}</div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  DOM integrity diagnostics
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>svg node version: {debugInfo.svgNodeVersion}</div>
-                  <div>dom replace count: {debugInfo.domReplaceCount}</div>
                   <div>
-                    svg is connected: {debugInfo.svgIsConnected ? "yes" : "no"}
+                    svg has path d: {debugInfo.svgHasPathsWithD ? "yes" : "no"}
                   </div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Geometry diagnostics
-                </div>
-                <div className="mt-1 grid gap-1">
+                  <div>first iso3: {debugInfo.firstIso3 ?? "n/a"}</div>
                   <div>
-                    content bbox:{" "}
-                    {debugInfo.contentBBox
-                      ? `${debugInfo.contentBBox.x.toFixed(
-                          2
-                        )}, ${debugInfo.contentBBox.y.toFixed(
-                          2
-                        )} (${debugInfo.contentBBox.width.toFixed(
-                          2
-                        )}×${debugInfo.contentBBox.height.toFixed(2)})`
-                      : "n/a"}
-                  </div>
-                  <div>
-                    bbox max:{" "}
-                    {debugInfo.contentBBox
-                      ? `${debugInfo.contentBBox.maxX.toFixed(
-                          2
-                        )}, ${debugInfo.contentBBox.maxY.toFixed(2)}`
-                      : "n/a"}
-                  </div>
-                  <div>
-                    coverage (W×H):{" "}
-                    {debugInfo.coverageW !== null && debugInfo.coverageH !== null
-                      ? `${(debugInfo.coverageW * 100).toFixed(
-                          1
-                        )}%×${(debugInfo.coverageH * 100).toFixed(1)}%`
-                      : "n/a"}
-                  </div>
-                  <div>auto-fit: {debugInfo.autoFitApplied ? "applied" : "no"}</div>
-                  <div>
-                    auto-fit viewBox: {debugInfo.autoFitViewBox ?? "n/a"}
+                    requested height:{" "}
+                    {debugInfo.requestedHeightClassName ?? "n/a"}
                   </div>
                 </div>
               </div>
@@ -974,82 +989,6 @@ export default function RiskIndexMap({
               </div>
               <div>
                 <div className="font-semibold text-slate-100">
-                  Sample path bbox stats
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>
-                    count:{" "}
-                    {debugInfo.samplePathBboxStats?.count ?? "n/a"} | tiny:{" "}
-                    {debugInfo.samplePathBboxStats?.tinyCount ?? "n/a"}
-                  </div>
-                  <div>
-                    w (min/p50/p90/max):{" "}
-                    {debugInfo.samplePathBboxStats
-                      ? `${debugInfo.samplePathBboxStats.wMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wMax?.toFixed(2) ?? "n/a"}`
-                      : "n/a"}
-                  </div>
-                  <div>
-                    h (min/p50/p90/max):{" "}
-                    {debugInfo.samplePathBboxStats
-                      ? `${debugInfo.samplePathBboxStats.hMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hMax?.toFixed(2) ?? "n/a"}`
-                      : "n/a"}
-                  </div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Computed style sample
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>
-                    fill: {debugInfo.sampleComputedStyle?.computedFill ?? "n/a"}
-                  </div>
-                  <div>
-                    stroke:{" "}
-                    {debugInfo.sampleComputedStyle?.computedStroke ?? "n/a"}
-                  </div>
-                  <div>
-                    opacity:{" "}
-                    {debugInfo.sampleComputedStyle?.computedOpacity ?? "n/a"}
-                  </div>
-                  <div>
-                    display:{" "}
-                    {debugInfo.sampleComputedStyle?.computedDisplay ?? "n/a"}
-                  </div>
-                  <div>
-                    visibility:{" "}
-                    {debugInfo.sampleComputedStyle?.computedVisibility ?? "n/a"}
-                  </div>
-                </div>
-                <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    className="h-3 w-3"
-                    checked={debugNeon}
-                    onChange={(event) => setDebugNeon(event.target.checked)}
-                  />
-                  Neon stress-test mode
-                </label>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Sentinel SVG centers
-                </div>
-                <div className="mt-1 grid gap-1">
-                  {Object.entries(debugInfo.sentinelSvgCenters).map(
-                    ([iso3, info]) => (
-                      <div key={iso3}>
-                        {iso3}:{" "}
-                        {info.found
-                          ? `(${info.cx?.toFixed(1)}, ${info.cy?.toFixed(1)}) ${info.w?.toFixed(1)}×${info.h?.toFixed(1)}`
-                          : "not found"}
-                      </div>
-                    )
-                  )}
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
                   Matching diagnostics
                 </div>
                 <div className="mt-1 grid gap-1">
@@ -1074,30 +1013,171 @@ export default function RiskIndexMap({
                   <div>noQ: {debugInfo.palette.noQ}</div>
                 </div>
               </div>
-              {debugEnabled && debugInfo.firstPathSample ? (
-                <div>
-                  <div className="font-semibold text-slate-100">
-                    First path sample
-                  </div>
-                  <div className="mt-1 grid gap-1">
-                    <div>d length: {debugInfo.firstPathSample.dLen}</div>
-                    <div>fill attr: {debugInfo.firstPathSample.fillAttr ?? "n/a"}</div>
-                    <div>
-                      style attr: {debugInfo.firstPathSample.styleAttr ?? "n/a"}
+              {deepDebugEnabled ? (
+                <>
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      DOM integrity diagnostics
                     </div>
-                    <div>
-                      computed fill: {debugInfo.firstPathSample.computedFill ?? "n/a"}
-                    </div>
-                    <div>
-                      computed opacity:{" "}
-                      {debugInfo.firstPathSample.computedOpacity ?? "n/a"}
-                    </div>
-                    <div>
-                      computed display:{" "}
-                      {debugInfo.firstPathSample.computedDisplay ?? "n/a"}
+                    <div className="mt-1 grid gap-1">
+                      <div>svg node version: {debugInfo.svgNodeVersion}</div>
+                      <div>dom replace count: {debugInfo.domReplaceCount}</div>
+                      <div>
+                        svg is connected: {debugInfo.svgIsConnected ? "yes" : "no"}
+                      </div>
                     </div>
                   </div>
-                </div>
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      Geometry diagnostics
+                    </div>
+                    <div className="mt-1 grid gap-1">
+                      <div>
+                        content bbox:{" "}
+                        {debugInfo.contentBBox
+                          ? `${debugInfo.contentBBox.x.toFixed(
+                              2
+                            )}, ${debugInfo.contentBBox.y.toFixed(
+                              2
+                            )} (${debugInfo.contentBBox.width.toFixed(
+                              2
+                            )}×${debugInfo.contentBBox.height.toFixed(2)})`
+                          : "n/a"}
+                      </div>
+                      <div>
+                        bbox max:{" "}
+                        {debugInfo.contentBBox
+                          ? `${debugInfo.contentBBox.maxX.toFixed(
+                              2
+                            )}, ${debugInfo.contentBBox.maxY.toFixed(2)}`
+                          : "n/a"}
+                      </div>
+                      <div>
+                        coverage (W×H):{" "}
+                        {debugInfo.coverageW !== null &&
+                        debugInfo.coverageH !== null
+                          ? `${(debugInfo.coverageW * 100).toFixed(
+                              1
+                            )}%×${(debugInfo.coverageH * 100).toFixed(1)}%`
+                          : "n/a"}
+                      </div>
+                      <div>
+                        auto-fit: {debugInfo.autoFitApplied ? "applied" : "no"}
+                      </div>
+                      <div>
+                        auto-fit viewBox: {debugInfo.autoFitViewBox ?? "n/a"}
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      Sample path bbox stats
+                    </div>
+                    <div className="mt-1 grid gap-1">
+                      <div>
+                        count:{" "}
+                        {debugInfo.samplePathBboxStats?.count ?? "n/a"} | tiny:{" "}
+                        {debugInfo.samplePathBboxStats?.tinyCount ?? "n/a"}
+                      </div>
+                      <div>
+                        w (min/p50/p90/max):{" "}
+                        {debugInfo.samplePathBboxStats
+                          ? `${debugInfo.samplePathBboxStats.wMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wMax?.toFixed(2) ?? "n/a"}`
+                          : "n/a"}
+                      </div>
+                      <div>
+                        h (min/p50/p90/max):{" "}
+                        {debugInfo.samplePathBboxStats
+                          ? `${debugInfo.samplePathBboxStats.hMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hMax?.toFixed(2) ?? "n/a"}`
+                          : "n/a"}
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      Computed style sample
+                    </div>
+                    <div className="mt-1 grid gap-1">
+                      <div>
+                        fill:{" "}
+                        {debugInfo.sampleComputedStyle?.computedFill ?? "n/a"}
+                      </div>
+                      <div>
+                        stroke:{" "}
+                        {debugInfo.sampleComputedStyle?.computedStroke ?? "n/a"}
+                      </div>
+                      <div>
+                        opacity:{" "}
+                        {debugInfo.sampleComputedStyle?.computedOpacity ?? "n/a"}
+                      </div>
+                      <div>
+                        display:{" "}
+                        {debugInfo.sampleComputedStyle?.computedDisplay ?? "n/a"}
+                      </div>
+                      <div>
+                        visibility:{" "}
+                        {debugInfo.sampleComputedStyle?.computedVisibility ??
+                          "n/a"}
+                      </div>
+                    </div>
+                    <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        className="h-3 w-3"
+                        checked={debugNeon}
+                        onChange={(event) => setDebugNeon(event.target.checked)}
+                      />
+                      Neon stress-test mode
+                    </label>
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-100">
+                      Sentinel SVG centers
+                    </div>
+                    <div className="mt-1 grid gap-1">
+                      {Object.entries(debugInfo.sentinelSvgCenters).map(
+                        ([iso3, info]) => (
+                          <div key={iso3}>
+                            {iso3}:{" "}
+                            {info.found
+                              ? `(${info.cx?.toFixed(1)}, ${info.cy?.toFixed(1)}) ${info.w?.toFixed(1)}×${info.h?.toFixed(1)}`
+                              : "not found"}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                  {debugInfo.firstPathSample ? (
+                    <div>
+                      <div className="font-semibold text-slate-100">
+                        First path sample
+                      </div>
+                      <div className="mt-1 grid gap-1">
+                        <div>d length: {debugInfo.firstPathSample.dLen}</div>
+                        <div>
+                          fill attr:{" "}
+                          {debugInfo.firstPathSample.fillAttr ?? "n/a"}
+                        </div>
+                        <div>
+                          style attr:{" "}
+                          {debugInfo.firstPathSample.styleAttr ?? "n/a"}
+                        </div>
+                        <div>
+                          computed fill:{" "}
+                          {debugInfo.firstPathSample.computedFill ?? "n/a"}
+                        </div>
+                        <div>
+                          computed opacity:{" "}
+                          {debugInfo.firstPathSample.computedOpacity ?? "n/a"}
+                        </div>
+                        <div>
+                          computed display:{" "}
+                          {debugInfo.firstPathSample.computedDisplay ?? "n/a"}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               ) : null}
               <div className="flex flex-wrap items-center gap-2">
                 <button
