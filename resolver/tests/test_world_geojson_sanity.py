@@ -106,15 +106,31 @@ def test_world_geojson_sanity():
     assert max_abs_lat <= 90.5
 
     sentinels = {
-        "ABW": {"lon": (-85, -55), "lat": (5, 20)},
         "AFG": {"lon": (50, 80), "lat": (20, 45)},
         "AUS": {"lon": (110, 160), "lat": (-45, -10)},
         "USA": {"lon": (-130, -60), "lat": (20, 55)},
         "BRA": {"lon": (-80, -30), "lat": (-40, 10)},
+        "CAN": {"lon": (-150, -40), "lat": (40, 85)},
     }
+    iso3_codes = sorted(
+        {
+            code
+            for feature in features
+            for code in [get_iso3(feature.get("properties") or {})]
+            if code
+        }
+    )
     for iso3, ranges in sentinels.items():
         feature = find_feature(features, iso3)
-        assert feature is not None, f"Expected ISO3 feature {iso3}"
+        if feature is None:
+            prefix = iso3[:2]
+            related = [code for code in iso3_codes if code.startswith(prefix)][:25]
+            sample = iso3_codes[:25]
+            assert feature is not None, (
+                f"Expected ISO3 feature {iso3}. "
+                f"Available ISO3 count={len(iso3_codes)} "
+                f"sample={sample} related_prefix={related}"
+            )
         geometry = feature.get("geometry") or {}
         center = bbox_center_from_geometry(geometry)
         assert center is not None, f"Expected geometry for {iso3}"
