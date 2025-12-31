@@ -184,6 +184,30 @@ def main() -> None:
             {"file": str(world_svg_path), "aus_center": aus_center},
         )
 
+    about_page_path = Path("web/src/app/about/page.tsx")
+    ai_prompts_path = Path("web/src/app/about/AiPromptsSection.tsx")
+    about_page_content = about_page_path.read_text(encoding="utf-8")
+    ai_prompts_content = ai_prompts_path.read_text(encoding="utf-8")
+    ai_combined = "\n".join([about_page_content, ai_prompts_content])
+    ai_markers = [
+        "AI Prompts",
+        "Web search",
+        "Horizon scan",
+        "Research v2",
+        "SPD v2",
+        "Scenario",
+        "How forecast questions are constructed",
+    ]
+    missing_markers = [marker for marker in ai_markers if marker not in ai_combined]
+    if missing_markers:
+        fail_guardrail(
+            "AI Prompts section missing required markers.",
+            {
+                "missing": ", ".join(missing_markers),
+                "files": f"{about_page_path}, {ai_prompts_path}",
+            },
+        )
+
     print("UI guardrails passed.")
 
 

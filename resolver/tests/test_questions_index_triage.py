@@ -66,6 +66,7 @@ def test_compute_questions_triage_summary_selects_latest_row() -> None:
     assert summary["q1"]["triage_score"] == pytest.approx(0.78)
     assert summary["q1"]["triage_tier"] == "priority"
     assert summary["q1"]["triage_need_full_spd"] is True
+    assert summary["q1"]["triage_date"] == "2024-02-01"
     assert summary.get("q2") is None
 
     con.close()

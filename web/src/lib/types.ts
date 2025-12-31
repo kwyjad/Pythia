@@ -67,6 +67,13 @@ export type QuestionsResponse = {
     hazard_code: string;
     metric: string;
     target_month: string;
+    forecast_date?: string | null;
+    forecast_horizon_max?: number | null;
+    eiv_total?: number | null;
+    triage_score?: number | null;
+    triage_tier?: string | null;
+    triage_need_full_spd?: boolean | null;
+    triage_date?: string | null;
     status?: string | null;
     wording?: string | null;
   }>;

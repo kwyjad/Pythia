@@ -814,6 +814,7 @@ def get_questions(
         row["triage_score"] = triage.get("triage_score")
         row["triage_tier"] = triage.get("triage_tier")
         row["triage_need_full_spd"] = triage.get("triage_need_full_spd")
+        row["triage_date"] = triage.get("triage_date")
     return {"rows": rows}
 
 

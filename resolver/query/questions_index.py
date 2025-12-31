@@ -441,6 +441,7 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
         return {}
 
     created_expr = created_col or "NULL"
+    triage_ts_expr = f"TRY_CAST({created_expr} AS TIMESTAMP)"
     sql = f"""
         WITH qlist(question_id, hs_run_id, iso3, hazard_code) AS (
             VALUES {", ".join(values)}
@@ -453,9 +454,10 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
               {tier_col} AS triage_tier,
               {score_col} AS triage_score,
               {need_col} AS triage_need_full_spd,
+              {triage_ts_expr} AS triage_ts,
               ROW_NUMBER() OVER (
                 PARTITION BY {run_col}, {iso_col}, {hazard_col}
-                ORDER BY {created_expr} DESC NULLS LAST
+                ORDER BY {triage_ts_expr} DESC NULLS LAST
               ) AS rn
             FROM hs_triage
         )
@@ -463,7 +465,8 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
           qlist.question_id,
           triage_latest.triage_score,
           triage_latest.triage_tier,
-          triage_latest.triage_need_full_spd
+          triage_latest.triage_need_full_spd,
+          STRFTIME(triage_latest.triage_ts, '%Y-%m-%d') AS triage_date
         FROM qlist
         LEFT JOIN triage_latest
           ON triage_latest.run_id = qlist.hs_run_id
@@ -479,7 +482,13 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
         return {}
 
     summary: dict[str, dict[str, Any]] = {}
-    for question_id, triage_score, triage_tier, triage_need_full_spd in triage_rows or []:
+    for (
+        question_id,
+        triage_score,
+        triage_tier,
+        triage_need_full_spd,
+        triage_date,
+    ) in triage_rows or []:
         if not question_id:
             continue
         summary[str(question_id)] = {
@@ -488,5 +497,6 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
             "triage_need_full_spd": (
                 bool(triage_need_full_spd) if triage_need_full_spd is not None else None
             ),
+            "triage_date": str(triage_date) if triage_date is not None else None,
         }
     return summary
