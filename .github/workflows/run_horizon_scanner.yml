@@ -33,11 +33,13 @@ on:
         required: false
         default: "pythia-resolver-db"
         type: string
+  schedule:
+    # Run at 03:00 Europe/Istanbul on the 1st of each month (00:00 UTC)
+    - cron: "0 0 1 * *"
 
 # --- Job Definition ---
 jobs:
   build-report:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
