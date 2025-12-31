@@ -304,8 +304,11 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const endMonth = addMonths(targetMonth, 5);
   const status = (question.status as string | undefined) ?? "—";
 
-  const triageScore = triage.triage_score ?? "—";
-  const triageTier = triage.tier ?? "—";
+  const triageScore =
+    typeof triage.triage_score === "number"
+      ? triage.triage_score.toFixed(2)
+      : asString(triage.triage_score) ?? "—";
+  const triageTier = asString(triage.tier) ?? "—";
   const webSearchModels = getModelNamesForPhases(byPhase, [
     "hs_web_research",
     "research_web_research",

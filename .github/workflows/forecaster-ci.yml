@@ -15,9 +15,12 @@ on:
     paths:
       - "forecaster/**"
       - "horizon_scanner/**"
-      - "pythia/**"
+      - "pythia/db/**"
+      - "pythia/tools/**"
+      - "pythia/web_research/**"
+      - "pythia/llm_profiles.py"
+      - "pythia/config.yaml"
       - "python_library_requirements.txt"
-      - ".github/workflows/forecaster-ci.yml"
 
   workflow_dispatch:
     inputs:
