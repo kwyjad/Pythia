@@ -5,8 +5,8 @@ import type { Metadata } from "next";
 import Nav from "../components/Nav";
 
 export const metadata: Metadata = {
-  title: "Pythia Dashboard",
-  description: "Pythia public diagnostics dashboard"
+  title: "Fred: Humanitarian Forecasting System",
+  description: "An AI-driven end-to-end humanitarian impact forecasting system"
 };
 
 type RootLayoutProps = {
@@ -19,6 +19,19 @@ const RootLayout = ({ children }: RootLayoutProps) => {
       <body>
         <Nav />
         <main>{children}</main>
+        {process.env.NODE_ENV === "development" ? (
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `(() => {
+  if (typeof document === "undefined") return;
+  const body = document.body;
+  if (body && body.classList.contains("bg-slate-950")) {
+    console.warn("Fred theme warning: body still has bg-slate-950.");
+  }
+})();`,
+            }}
+          />
+        ) : null}
       </body>
     </html>
   );

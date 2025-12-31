@@ -108,7 +108,7 @@ export default function SortableTable<T>({
 
   return (
     <table className={`w-full ${layoutClass} border-collapse text-sm`}>
-      <thead className="bg-slate-900 text-slate-300">
+      <thead className="bg-fredBg text-fredPrimary">
         <tr>
           {visibleColumns.map((column) => (
             <th
@@ -135,9 +135,9 @@ export default function SortableTable<T>({
           ))}
         </tr>
       </thead>
-      <tbody className="divide-y divide-slate-800 text-slate-200">
+      <tbody className="divide-y divide-fredBorder text-fredText">
         {sortedRows.map((row) => (
-          <tr key={rowKey(row)}>
+          <tr key={rowKey(row)} className="hover:bg-fredBg/60">
             {visibleColumns.map((column) => (
               <td
                 key={column.key}
@@ -150,7 +150,7 @@ export default function SortableTable<T>({
         ))}
         {sortedRows.length === 0 ? (
           <tr>
-            <td className="px-3 py-3 text-slate-400" colSpan={visibleColumns.length}>
+            <td className="px-3 py-3 text-fredMuted" colSpan={visibleColumns.length}>
               {emptyMessage}
             </td>
           </tr>
