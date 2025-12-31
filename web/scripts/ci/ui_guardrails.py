@@ -21,14 +21,41 @@ def main() -> None:
             "globals.css must not include bg-slate-950.",
             {"file": str(globals_path)},
         )
-    if "bg-fredBg" in globals_content:
-        tailwind_config_path = Path("web/tailwind.config.ts")
-        tailwind_config_content = tailwind_config_path.read_text(encoding="utf-8")
-        if "fredBg" not in tailwind_config_content:
+    tailwind_config_path = Path("web/tailwind.config.ts")
+    tailwind_config_content = tailwind_config_path.read_text(encoding="utf-8")
+    camel_tokens = [
+        "fredBg",
+        "fredPrimary",
+        "fredSecondary",
+        "fredText",
+        "fredSurface",
+        "fredBorder",
+        "fredMuted",
+    ]
+    for token in camel_tokens:
+        if token in tailwind_config_content:
             fail_guardrail(
-                "Tailwind config must define fredBg when globals.css references bg-fredBg.",
-                {"file": str(tailwind_config_path)},
+                "Tailwind config must not define camelCase fred tokens.",
+                {"file": str(tailwind_config_path), "token": token},
             )
+    if "bg-fredBg" in globals_content:
+        fail_guardrail(
+            "globals.css must not reference bg-fredBg.",
+            {"file": str(globals_path)},
+        )
+
+    src_root = Path("web/src")
+    src_extensions = {".ts", ".tsx", ".js", ".jsx", ".css"}
+    for path in src_root.rglob("*"):
+        if path.suffix not in src_extensions or not path.is_file():
+            continue
+        content = path.read_text(encoding="utf-8")
+        for token in camel_tokens:
+            if token in content:
+                fail_guardrail(
+                    "CamelCase fred tokens must not be used in web/src.",
+                    {"file": str(path), "token": token},
+                )
 
     risk_map_path = Path("web/src/components/RiskIndexMap.tsx")
     risk_map_content = risk_map_path.read_text(encoding="utf-8")
