@@ -104,7 +104,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
           ('c1', 'f-new', NULL, 'Q1', 'research_v2', 'prompt', 'response', '{"foo":1}', '{"bar":2}', now(), NULL, NULL, 'gemini-3-pro-preview', 'gemini'),
           ('c2', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt', 'hs response', '{"note":"triage"}', '{"usage":1}', now(), 'KEN', 'DR', 'gpt-5.1', 'gpt'),
           ('c3', NULL, 'hs-new', NULL, 'hs_web_research', 'hs web', 'hs web response', '{"note":"web"}', '{"usage":2}', now(), 'KEN', 'DR', 'gemini-3-flash-preview', 'gemini'),
-          ('c4', 'f-new', NULL, 'Q1', 'forecast_web_research', 'web prompt', 'web response', '{"note":"forecast web"}', '{"usage":3}', now(), NULL, NULL, 'claude-opus-4-5-20240229', 'claude');
+          ('c4', 'f-new', NULL, 'Q1', 'forecast_web_research', 'web prompt', 'web response', '{"note":"forecast web"}', '{"usage":3}', now(), NULL, NULL, 'claude-opus-4-5-20240229', 'claude'),
+          ('c_lower', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt 2', 'hs response 2', '{"note":"triage-2"}', '{"usage":4}', now(), 'ken', 'dr', 'gemini-3-flash-preview', 'gemini');
         """
     )
     con.close()
@@ -172,14 +173,20 @@ def test_question_bundle_llm_calls_toggle(client: TestClient) -> None:
 
     assert data["llm_calls"]["included"] is True
     assert data["llm_calls"]["transcripts_included"] is False
-    assert len(data["llm_calls"]["rows"]) == 4
+    assert len(data["llm_calls"]["rows"]) == 5
     assert all("prompt_text" not in row for row in data["llm_calls"]["rows"])
+    assert "hs_triage" in data["llm_calls"]["by_phase"]
     assert "hs_web_research" in data["llm_calls"]["by_phase"]
     assert "forecast_web_research" in data["llm_calls"]["by_phase"]
     assert any(
         row.get("model_id") == "gemini-3-flash-preview"
         for row in data["llm_calls"]["by_phase"]["hs_web_research"]
     )
+    assert any(
+        row.get("model_id") == "gemini-3-flash-preview"
+        for row in data["llm_calls"]["by_phase"]["hs_triage"]
+    )
+    assert data["llm_calls"]["debug"]["counts_by_phase"]["hs_triage"] >= 1
 
 
 def test_question_bundle_llm_calls_with_transcripts(client: TestClient) -> None:
