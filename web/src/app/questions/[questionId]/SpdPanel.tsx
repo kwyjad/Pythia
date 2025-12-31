@@ -251,27 +251,27 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
 
   if (!sources.length) {
     return (
-      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-        <h2 className="text-lg font-semibold text-white">Forecast SPD</h2>
-        <p className="mt-3 text-sm text-slate-400">No forecasts available.</p>
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+        <h2 className="text-lg font-semibold">Forecast SPD</h2>
+        <p className="mt-3 text-sm text-fred-text">No forecasts available.</p>
       </section>
     );
   }
 
   return (
-    <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
+    <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-white">Forecast SPD</h2>
-          <p className="text-sm text-slate-400">
+          <h2 className="text-lg font-semibold">Forecast SPD</h2>
+          <p className="text-sm text-fred-text">
             Probability distribution by bucket for the selected forecast.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <label className="text-sm text-slate-400">
+          <label className="text-sm text-fred-text">
             Source
             <select
-              className="ml-2 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+              className="ml-2 rounded border border-fred-secondary bg-fred-surface px-3 py-2 text-sm text-fred-text"
               value={selectedSourceKey}
               onChange={(event) => setSelectedSourceKey(event.target.value)}
             >
@@ -282,10 +282,10 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
               ))}
             </select>
           </label>
-          <label className="text-sm text-slate-400">
+          <label className="text-sm text-fred-text">
             Month
             <select
-              className="ml-2 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+              className="ml-2 rounded border border-fred-secondary bg-fred-surface px-3 py-2 text-sm text-fred-text"
               value={selectedMonthIndex}
               onChange={(event) => setSelectedMonthIndex(Number(event.target.value))}
             >
@@ -296,16 +296,16 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
               ))}
             </select>
           </label>
-          <label className="flex items-center gap-2 text-sm text-slate-400">
+          <label className="flex items-center gap-2 text-sm text-fred-text">
             <input
               type="checkbox"
-              className="h-4 w-4 rounded border-slate-700 bg-slate-950"
+              className="h-4 w-4 rounded border-fred-secondary bg-fred-surface"
               checked={showTotalEiv}
               onChange={(event) => setShowTotalEiv(event.target.checked)}
             />
             Show total EIV
           </label>
-          <div className="text-sm text-slate-200">
+          <div className="text-sm text-fred-text">
             EIV: {numberFormatter.format(Math.round(eivMonth))}
             {showTotalEiv
               ? ` • Total: ${numberFormatter.format(Math.round(eivTotal))}`
@@ -315,19 +315,19 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
+        <div className="rounded border border-fred-secondary bg-fred-surface p-3">
           <SpdBarChart labels={labels} probs={probs} />
           {process.env.NODE_ENV !== "production" ? (
-            <p className="mt-2 text-xs text-slate-400">
+            <p className="mt-2 text-xs text-fred-text">
               SPD sum: {probSum.toFixed(3)}
             </p>
           ) : null}
         </div>
 
-        <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
+        <div className="rounded border border-fred-secondary bg-fred-surface p-3">
           <div className="overflow-x-auto">
-            <table className="w-full table-auto text-left text-sm text-slate-200">
-              <thead className="text-xs uppercase tracking-wide text-slate-400">
+            <table className="w-full table-auto text-left text-sm text-fred-text">
+              <thead className="bg-fred-primary text-xs uppercase tracking-wide text-fred-surface">
                 <tr>
                   <th className="pb-2 pr-4">Bucket</th>
                   <th className="pb-2 pr-4">Centroid</th>
@@ -335,27 +335,27 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
                   <th className="pb-2">p × centroid</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800">
+              <tbody className="divide-y divide-fred-secondary/20">
                 {labels.map((label, index) => {
                   const prob = probs[index] ?? 0;
                   const centroid = centroids[index] ?? 0;
                   const contribution = prob * centroid;
                   return (
                     <tr key={label}>
-                      <td className="py-2 pr-4 text-slate-200">{label}</td>
-                      <td className="py-2 pr-4 text-slate-200">
+                      <td className="py-2 pr-4 text-fred-text">{label}</td>
+                      <td className="py-2 pr-4 text-fred-text">
                         {numberFormatter.format(centroid)}
                       </td>
-                      <td className="py-2 pr-4 text-slate-200">
+                      <td className="py-2 pr-4 text-fred-text">
                         {percentFormatter.format(prob)}
                       </td>
-                      <td className="py-2 text-slate-200">
+                      <td className="py-2 text-fred-text">
                         {numberFormatter.format(Math.round(contribution))}
                       </td>
                     </tr>
                   );
                 })}
-                <tr className="font-semibold text-white">
+                <tr className="font-semibold text-fred-secondary">
                   <td className="py-2 pr-4">EIV</td>
                   <td className="py-2 pr-4">—</td>
                   <td className="py-2 pr-4">—</td>

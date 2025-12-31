@@ -97,11 +97,11 @@ const getModelNamesForPhases = (
 
 const renderScenarioBlocks = (text?: string | null) => {
   if (!text) {
-    return <p className="text-sm text-slate-400">No scenario narrative available.</p>;
+    return <p className="text-sm text-fred-text">No scenario narrative available.</p>;
   }
   const blocks = formatScenario(text);
   if (!blocks.length) {
-    return <p className="text-sm text-slate-400">No scenario narrative available.</p>;
+    return <p className="text-sm text-fred-text">No scenario narrative available.</p>;
   }
   const elements: ReactNode[] = [];
   const bulletBuffer: string[] = [];
@@ -112,7 +112,7 @@ const renderScenarioBlocks = (text?: string | null) => {
     elements.push(
       <ul
         key={`scenario-list-${listIndex}`}
-        className="list-disc space-y-1 pl-5 text-sm text-slate-200/90"
+        className="list-disc space-y-1 pl-5 text-sm text-fred-text"
       >
         {bulletBuffer.map((item, index) => (
           <li key={`scenario-li-${listIndex}-${index}`}>{item}</li>
@@ -131,7 +131,7 @@ const renderScenarioBlocks = (text?: string | null) => {
     flushBullets();
     if (block.type === "h2") {
       elements.push(
-        <h3 key={`scenario-h2-${index}`} className="text-base font-semibold text-slate-100">
+        <h3 key={`scenario-h2-${index}`} className="text-base font-semibold text-fred-primary">
           {block.text}
         </h3>
       );
@@ -139,7 +139,7 @@ const renderScenarioBlocks = (text?: string | null) => {
     }
     if (block.type === "h3") {
       elements.push(
-        <h4 key={`scenario-h3-${index}`} className="text-sm font-semibold text-slate-200">
+        <h4 key={`scenario-h3-${index}`} className="text-sm font-semibold text-fred-text">
           {block.text}
         </h4>
       );
@@ -148,7 +148,7 @@ const renderScenarioBlocks = (text?: string | null) => {
     elements.push(
       <p
         key={`scenario-p-${index}`}
-        className="text-sm text-slate-200/90 leading-relaxed"
+        className="text-sm text-fred-text leading-relaxed"
       >
         {block.text}
       </p>
@@ -198,13 +198,13 @@ const normalizeSources = (value: unknown): string[] => {
 
 const renderSupportText = (support: unknown, fields: { key: string; label: string }[]) => {
   if (!support) {
-    return <p className="text-sm text-slate-200/90">—</p>;
+    return <p className="text-sm text-fred-text">—</p>;
   }
   if (typeof support === "string") {
-    return <p className="text-sm text-slate-200/90">{support}</p>;
+    return <p className="text-sm text-fred-text">{support}</p>;
   }
   if (typeof support !== "object") {
-    return <p className="text-sm text-slate-200/90">{String(support)}</p>;
+    return <p className="text-sm text-fred-text">{String(support)}</p>;
   }
   const entries = fields
     .map(({ key, label }) => ({
@@ -213,13 +213,13 @@ const renderSupportText = (support: unknown, fields: { key: string; label: strin
     }))
     .filter((entry) => entry.value);
   if (!entries.length) {
-    return <p className="text-sm text-slate-200/90">—</p>;
+    return <p className="text-sm text-fred-text">—</p>;
   }
   return (
-    <ul className="mt-2 space-y-1 text-sm text-slate-200/90">
+    <ul className="mt-2 space-y-1 text-sm text-fred-text">
       {entries.map((entry) => (
         <li key={entry.label}>
-          <span className="text-slate-400">{entry.label}:</span> {entry.value}
+          <span className="text-fred-muted">{entry.label}:</span> {entry.value}
         </li>
       ))}
     </ul>
@@ -228,13 +228,13 @@ const renderSupportText = (support: unknown, fields: { key: string; label: strin
 
 const renderExternalSupport = (support: unknown) => {
   if (!support) {
-    return <p className="text-sm text-slate-200/90">—</p>;
+    return <p className="text-sm text-fred-text">—</p>;
   }
   if (typeof support === "string") {
-    return <p className="text-sm text-slate-200/90">{support}</p>;
+    return <p className="text-sm text-fred-text">{support}</p>;
   }
   if (typeof support !== "object") {
-    return <p className="text-sm text-slate-200/90">{String(support)}</p>;
+    return <p className="text-sm text-fred-text">{String(support)}</p>;
   }
   const supportObj = support as Record<string, unknown>;
   const consensus = asString(supportObj.consensus);
@@ -243,15 +243,15 @@ const renderExternalSupport = (support: unknown) => {
     .map((entry) => asString(entry))
     .filter((entry): entry is string => Boolean(entry));
   return (
-    <div className="space-y-2 text-sm text-slate-200/90">
+    <div className="space-y-2 text-sm text-fred-text">
       {consensus ? (
         <p>
-          <span className="text-slate-400">Consensus:</span> {consensus}
+          <span className="text-fred-muted">Consensus:</span> {consensus}
         </p>
       ) : null}
       {dataQuality ? (
         <p>
-          <span className="text-slate-400">Data quality:</span> {dataQuality}
+          <span className="text-fred-muted">Data quality:</span> {dataQuality}
         </p>
       ) : null}
       {analyses.length ? (
@@ -271,7 +271,7 @@ const renderParagraphs = (text: string) => {
     .map((block) => block.trim())
     .filter(Boolean);
   return blocks.map((block, index) => (
-    <p key={`paragraph-${index}`} className="text-sm text-slate-200/90 leading-relaxed">
+    <p key={`paragraph-${index}`} className="text-sm text-fred-text leading-relaxed">
       {block.replace(/\s+/g, " ")}
     </p>
   ));
@@ -397,10 +397,10 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   return (
     <div className="space-y-8">
       <section className="space-y-2">
-        <h1 className="text-2xl font-semibold text-white">
+        <h1 className="text-2xl font-semibold">
           {(question.wording as string | undefined) ?? "Question detail"}
         </h1>
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-fred-text">
           {(question.iso3 as string | undefined) ?? ""} •{" "}
           {(question.hazard_code as string | undefined) ?? ""} •{" "}
           {(question.metric as string | undefined) ?? ""} •{" "}
@@ -408,8 +408,8 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
         </p>
       </section>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-        <h2 className="text-lg font-semibold text-white">Summary</h2>
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+        <h2 className="text-lg font-semibold">Summary</h2>
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
             { label: "Status", value: status },
@@ -428,34 +428,34 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
           ].map((item) => (
             <div
               key={item.label}
-              className="rounded border border-slate-800 bg-slate-950 px-3 py-2"
+              className="rounded border border-fred-secondary bg-fred-surface px-3 py-2"
             >
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
                 {item.label}
               </div>
-              <div className="mt-1 text-sm text-slate-200">{item.value}</div>
+              <div className="mt-1 text-sm text-fred-text">{item.value}</div>
             </div>
           ))}
         </div>
         {debugEnabled ? (
-          <details className="mt-4 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">
-            <summary className="cursor-pointer text-slate-200">
+          <details className="mt-4 rounded border border-fred-secondary bg-fred-surface px-3 py-2 text-xs text-fred-text">
+            <summary className="cursor-pointer text-fred-primary">
               Question debug
             </summary>
             <div className="mt-2 space-y-2">
               <div>
-                <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                <div className="text-[11px] uppercase tracking-wide text-fred-muted">
                   by_phase keys
                 </div>
-                <div className="text-sm text-slate-200">
+                <div className="text-sm text-fred-text">
                   {Object.keys(byPhase).length ? Object.keys(byPhase).join(", ") : "—"}
                 </div>
               </div>
               <div>
-                <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                <div className="text-[11px] uppercase tracking-wide text-fred-muted">
                   llm_calls.debug
                 </div>
-                <pre className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-200">
+                <pre className="mt-1 whitespace-pre-wrap break-words text-xs text-fred-text">
                   {JSON.stringify(llm.debug ?? null, null, 2)}
                 </pre>
               </div>
@@ -463,31 +463,31 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
           </details>
         ) : null}
         <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <div className="rounded border border-slate-800 bg-slate-950 px-3 py-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+          <div className="rounded border border-fred-secondary bg-fred-surface px-3 py-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
               Resolutions
             </div>
-            <div className="mt-2 text-sm text-slate-200">{resolutionSummary}</div>
+            <div className="mt-2 text-sm text-fred-text">{resolutionSummary}</div>
           </div>
-          <div className="rounded border border-slate-800 bg-slate-950 px-3 py-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+          <div className="rounded border border-fred-secondary bg-fred-surface px-3 py-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
               Brier
             </div>
             <div className="mt-2 space-y-2">
               {brierAverage !== null ? (
-                <div className="text-sm text-slate-200">
+                <div className="text-sm text-fred-text">
                   Avg Brier (resolved months): {brierAverage.toFixed(3)}
                 </div>
               ) : (
-                <div className="text-sm text-slate-400">No Brier yet</div>
+                <div className="text-sm text-fred-text">No Brier yet</div>
               )}
-              <div className="grid grid-cols-3 gap-2 text-xs text-slate-200 md:grid-cols-6">
+              <div className="grid grid-cols-3 gap-2 text-xs text-fred-text md:grid-cols-6">
                 {[1, 2, 3, 4, 5, 6].map((horizon) => (
                   <div
                     key={`brier-${horizon}`}
-                    className="rounded border border-slate-800 bg-slate-950 px-2 py-1"
+                    className="rounded border border-fred-secondary bg-fred-surface px-2 py-1"
                   >
-                    <div className="text-[11px] text-slate-400">
+                    <div className="text-[11px] text-fred-muted">
                       Month {horizon}
                     </div>
                     <div>
@@ -506,26 +506,26 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
       <SpdPanel bundle={bundle} />
 
       <section className="space-y-4">
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Forecast Rationale</h2>
+        <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+          <h2 className="text-lg font-semibold">Forecast Rationale</h2>
           <div className="mt-3 space-y-2">
             {forecastRationale ? (
               renderParagraphs(forecastRationale)
             ) : (
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-fred-text">
                 No forecast rationale available for this forecast.
               </p>
             )}
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Scenario</h2>
+        <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+          <h2 className="text-lg font-semibold">Scenario</h2>
           {scenarioWriter.length > 1 ? (
             <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center">
-              <label className="text-sm text-slate-400">Scenario:</label>
+              <label className="text-sm text-fred-text">Scenario:</label>
               <select
-                className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                className="rounded border border-fred-secondary bg-fred-surface px-3 py-2 text-sm text-fred-text"
                 value={scenarioIndex}
                 onChange={(event) => setScenarioIndex(Number(event.target.value))}
               >
@@ -541,25 +541,25 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
           <div className="mt-4">{renderScenarioBlocks(selectedScenarioText)}</div>
         </div>
 
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Horizon Scan Triage</h2>
+        <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+          <h2 className="text-lg font-semibold">Horizon Scan Triage</h2>
           <div className="mt-3 space-y-3">
             <div>
-              <h3 className="text-sm font-semibold text-slate-200">Drivers</h3>
+              <h3 className="text-sm font-semibold">Drivers</h3>
               {getTextList(triage.drivers_json).length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200/90">
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-fred-text">
                   {getTextList(triage.drivers_json).map((item, index) => (
                     <li key={`driver-${index}`}>{item}</li>
                   ))}
                 </ul>
               ) : (
-                <p className="mt-2 text-sm text-slate-400">No drivers captured.</p>
+                <p className="mt-2 text-sm text-fred-text">No drivers captured.</p>
               )}
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-200">Regime shifts</h3>
+              <h3 className="text-sm font-semibold">Regime shifts</h3>
               {regimeShiftRows.length ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200/90">
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-fred-text">
                   {regimeShiftRows.map((item, index) => {
                     const isShiftObject = typeof item === "object" && item !== null;
                     const shift = !isShiftObject
@@ -578,60 +578,60 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                       .join("; ");
                     return (
                       <li key={`regime-${index}`}>
-                        <span className="font-medium text-slate-200">{shift}</span>
-                        {meta ? <span className="text-slate-400"> — {meta}</span> : null}
+                        <span className="font-medium text-fred-text">{shift}</span>
+                        {meta ? <span className="text-fred-muted"> — {meta}</span> : null}
                       </li>
                     );
                   })}
                 </ul>
               ) : (
-                <p className="mt-2 text-sm text-slate-400">No regime shifts noted.</p>
+                <p className="mt-2 text-sm text-fred-text">No regime shifts noted.</p>
               )}
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-slate-200">Data quality</h3>
+              <h3 className="text-sm font-semibold">Data quality</h3>
               {dataQualityEntries.length ? (
-                <div className="mt-2 rounded border border-slate-800 bg-slate-950/30 p-3 text-sm text-slate-200/90">
+                <div className="mt-2 rounded border border-fred-secondary bg-fred-surface p-3 text-sm text-fred-text">
                   {dataQualityEntries.map((entry) => (
                     <p key={entry.label}>
-                      <span className="text-slate-400">{entry.label}:</span>{" "}
+                      <span className="text-fred-muted">{entry.label}:</span>{" "}
                       {entry.value}
                     </p>
                   ))}
                 </div>
               ) : (
-                <p className="mt-2 text-sm text-slate-400">No data quality notes.</p>
+                <p className="mt-2 text-sm text-fred-text">No data quality notes.</p>
               )}
             </div>
             {scenarioStubText ? (
               <div>
-                <h3 className="text-sm font-semibold text-slate-200">Scenario stub</h3>
+                <h3 className="text-sm font-semibold">Scenario stub</h3>
                 <div className="mt-2">{renderScenarioBlocks(scenarioStubText)}</div>
               </div>
             ) : null}
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Research</h2>
+        <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+          <h2 className="text-lg font-semibold">Research</h2>
           {!baseRate ? (
-            <p className="mt-3 text-sm text-slate-200/90">
+            <p className="mt-3 text-sm text-fred-text">
               No research narrative available for this forecast.
             </p>
           ) : (
             <div className="mt-3 space-y-4">
               <div>
-                <h3 className="text-sm font-semibold text-slate-200">
+                <h3 className="text-sm font-semibold">
                   Qualitative summary
                 </h3>
-                <p className="mt-2 text-sm text-slate-200/90 leading-relaxed">
+                <p className="mt-2 text-sm text-fred-text leading-relaxed">
                   {asString(baseRate.qualitative_summary) ??
                     "No qualitative summary available."}
                 </p>
               </div>
               <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <div className="rounded border border-fred-secondary bg-fred-surface p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
                     Resolver support
                   </h4>
                   {renderSupportText(baseRate.resolver_support, [
@@ -641,19 +641,19 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                     { key: "notes", label: "Notes" },
                   ])}
                 </div>
-                <div className="rounded border border-slate-800 bg-slate-950/30 p-3">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <div className="rounded border border-fred-secondary bg-fred-surface p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
                     External support
                   </h4>
                   {renderExternalSupport(baseRate.external_support)}
                 </div>
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-slate-200">
+                <h3 className="text-sm font-semibold">
                   Update signals
                 </h3>
                 {updateSignals.length ? (
-                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-200/90">
+                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-fred-text">
                     {updateSignals.map((signal, index) => {
                       const isSignalObject = typeof signal === "object" && signal !== null;
                       const description = !isSignalObject
@@ -682,14 +682,14 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                       return (
                         <li key={`update-${index}`} className="space-y-1">
                           <div>{description}</div>
-                          {meta ? <div className="text-xs text-slate-400">{meta}</div> : null}
+                          {meta ? <div className="text-xs text-fred-muted">{meta}</div> : null}
                           {sources.length ? (
                             <div className="flex flex-wrap gap-2 text-xs">
                               {sources.map((source) => (
                                 <a
                                   key={source}
                                   href={source}
-                                  className="text-slate-300 underline underline-offset-2"
+                                  className="text-fred-primary underline underline-offset-2"
                                   target="_blank"
                                   rel="noreferrer"
                                 >
@@ -703,15 +703,15 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                     })}
                   </ul>
                 ) : (
-                  <p className="mt-2 text-sm text-slate-400">No update signals.</p>
+                  <p className="mt-2 text-sm text-fred-text">No update signals.</p>
                 )}
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-slate-200">
+                <h3 className="text-sm font-semibold">
                   Regime shift signals
                 </h3>
                 {regimeShiftSignals.length ? (
-                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-slate-200/90">
+                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-fred-text">
                     {regimeShiftSignals.map((signal, index) => {
                       const isSignalObject = typeof signal === "object" && signal !== null;
                       const description = !isSignalObject
@@ -736,14 +736,14 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                       return (
                         <li key={`regime-signal-${index}`} className="space-y-1">
                           <div>{description}</div>
-                          {meta ? <div className="text-xs text-slate-400">{meta}</div> : null}
+                          {meta ? <div className="text-xs text-fred-muted">{meta}</div> : null}
                           {sources.length ? (
                             <div className="flex flex-wrap gap-2 text-xs">
                               {sources.map((source) => (
                                 <a
                                   key={source}
                                   href={source}
-                                  className="text-slate-300 underline underline-offset-2"
+                                  className="text-fred-primary underline underline-offset-2"
                                   target="_blank"
                                   rel="noreferrer"
                                 >
@@ -757,30 +757,30 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                     })}
                   </ul>
                 ) : (
-                  <p className="mt-2 text-sm text-slate-400">No regime shift signals.</p>
+                  <p className="mt-2 text-sm text-fred-text">No regime shift signals.</p>
                 )}
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-slate-200">Data gaps</h3>
+                <h3 className="text-sm font-semibold">Data gaps</h3>
                 {dataGaps.length ? (
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-200/90">
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-fred-text">
                     {dataGaps.map((item, index) => (
                       <li key={`data-gap-${index}`}>{item}</li>
                     ))}
                   </ul>
                 ) : (
-                  <p className="mt-2 text-sm text-slate-400">No data gaps noted.</p>
+                  <p className="mt-2 text-sm text-fred-text">No data gaps noted.</p>
                 )}
               </div>
               {researchSources.length ? (
                 <div>
-                  <h3 className="text-sm font-semibold text-slate-200">Sources</h3>
+                  <h3 className="text-sm font-semibold">Sources</h3>
                   <div className="mt-2 flex flex-wrap gap-2 text-xs">
                     {researchSources.map((source) => (
                       <a
                         key={source}
                         href={source}
-                        className="text-slate-300 underline underline-offset-2"
+                        className="text-fred-primary underline underline-offset-2"
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -797,27 +797,27 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
       <section className="space-y-3">
         <CollapsiblePanel title="Raw HS bundle">
-          <pre className="whitespace-pre-wrap text-xs text-slate-200">
+          <pre className="whitespace-pre-wrap text-xs text-fred-text">
             {JSON.stringify(hs ?? null, null, 2)}
           </pre>
         </CollapsiblePanel>
         <CollapsiblePanel title="Raw Research bundle">
-          <pre className="whitespace-pre-wrap text-xs text-slate-200">
+          <pre className="whitespace-pre-wrap text-xs text-fred-text">
             {JSON.stringify(research ?? null, null, 2)}
           </pre>
         </CollapsiblePanel>
         <CollapsiblePanel title="Raw Forecast SPD rows">
-          <pre className="whitespace-pre-wrap text-xs text-slate-200">
+          <pre className="whitespace-pre-wrap text-xs text-fred-text">
             {JSON.stringify({ ensemble_spd: ensemble, raw_spd: rawSpd }, null, 2)}
           </pre>
         </CollapsiblePanel>
         <CollapsiblePanel title="Raw Scenario writer output">
-          <pre className="whitespace-pre-wrap text-xs text-slate-200">
+          <pre className="whitespace-pre-wrap text-xs text-fred-text">
             {JSON.stringify(scenarioWriter ?? null, null, 2)}
           </pre>
         </CollapsiblePanel>
         <CollapsiblePanel title="Raw LLM calls (no transcripts)">
-          <pre className="whitespace-pre-wrap text-xs text-slate-200">
+          <pre className="whitespace-pre-wrap text-xs text-fred-text">
             {JSON.stringify(llm ?? null, null, 2)}
           </pre>
         </CollapsiblePanel>

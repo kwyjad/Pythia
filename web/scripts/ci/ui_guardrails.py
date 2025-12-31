@@ -44,6 +44,27 @@ def main() -> None:
             {"file": str(globals_path)},
         )
 
+    public_theme_paths = [
+        Path("web/src/components/Nav.tsx"),
+        Path("web/src/app/page.tsx"),
+        Path("web/src/app/countries/page.tsx"),
+        Path("web/src/app/questions/page.tsx"),
+        Path("web/src/app/questions/QuestionsTable.tsx"),
+        Path("web/src/app/questions/[questionId]/QuestionDetailView.tsx"),
+        Path("web/src/app/questions/[questionId]/SpdPanel.tsx"),
+        Path("web/src/components/SpdBarChart.tsx"),
+        Path("web/src/components/CollapsiblePanel.tsx"),
+    ]
+    banned_public_tokens = ["bg-slate-9", "text-white", "bg-indigo-"]
+    for path in public_theme_paths:
+        content = path.read_text(encoding="utf-8")
+        for token in banned_public_tokens:
+            if token in content:
+                fail_guardrail(
+                    "Public theme sanity check failed.",
+                    {"file": str(path), "token": token},
+                )
+
     src_root = Path("web/src")
     src_extensions = {".ts", ".tsx", ".js", ".jsx", ".css"}
     for path in src_root.rglob("*"):

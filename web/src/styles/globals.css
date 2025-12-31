@@ -7,6 +7,22 @@
     @apply bg-fred-bg text-fred-text;
   }
 
+  h1 {
+    @apply text-fred-primary;
+  }
+
+  h2 {
+    @apply text-fred-secondary;
+  }
+
+  h3 {
+    @apply text-fred-primary;
+  }
+
+  p {
+    @apply text-fred-text;
+  }
+
   :root {
     --risk-map-c5: #156082;
     --risk-map-c4: #1f7697;

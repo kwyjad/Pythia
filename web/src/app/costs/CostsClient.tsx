@@ -214,7 +214,7 @@ const CostsTable = ({
   );
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-800">
+    <div className="overflow-x-auto rounded-lg border border-fred-secondary">
       <SortableTable
         columns={columns}
         emptyMessage={emptyMessage}
@@ -315,7 +315,7 @@ const LatencyTable = ({
   );
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-800">
+    <div className="overflow-x-auto rounded-lg border border-fred-secondary">
       <SortableTable
         columns={columns}
         emptyMessage={emptyMessage}
@@ -346,15 +346,15 @@ export default function CostsClient({
   return (
     <div className="space-y-8">
       <section className="space-y-2">
-        <h1 className="text-3xl font-semibold text-white">Costs</h1>
-        <p className="text-sm text-slate-400">
+        <h1 className="text-3xl font-semibold">Costs</h1>
+        <p className="text-sm text-fred-text">
           Review LLM spend and latency across total, monthly, and run-level
           aggregates.
         </p>
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white">Total costs</h2>
+        <h2 className="text-xl font-semibold">Total costs</h2>
         <CostsTable
           rows={total.summary}
           emptyMessage="No total cost summary available."
@@ -367,7 +367,7 @@ export default function CostsClient({
         />
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="space-y-2">
-            <h3 className="text-sm font-semibold text-slate-200">By model</h3>
+            <h3 className="text-sm font-semibold">By model</h3>
             <CostsTable
               rows={total.by_model}
               emptyMessage="No model breakdown available."
@@ -380,7 +380,7 @@ export default function CostsClient({
             />
           </div>
           <div className="space-y-2">
-            <h3 className="text-sm font-semibold text-slate-200">By phase</h3>
+            <h3 className="text-sm font-semibold">By phase</h3>
             <CostsTable
               rows={total.by_phase}
               emptyMessage="No phase breakdown available."
@@ -396,7 +396,7 @@ export default function CostsClient({
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white">Monthly costs</h2>
+        <h2 className="text-xl font-semibold">Monthly costs</h2>
         <CostsTable
           rows={monthly.summary}
           emptyMessage="No monthly summary available."
@@ -407,13 +407,13 @@ export default function CostsClient({
             showPhase: false,
           }}
         />
-        <details className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-          <summary className="cursor-pointer text-sm font-semibold text-slate-200">
+        <details className="space-y-3 rounded-lg border border-fred-secondary bg-fred-surface p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-fred-secondary">
             View monthly breakdowns by model and phase
           </summary>
           <div className="grid gap-6 lg:grid-cols-2">
             <div className="space-y-2">
-              <h3 className="text-sm font-semibold text-slate-200">By model</h3>
+              <h3 className="text-sm font-semibold">By model</h3>
               <CostsTable
                 rows={monthly.by_model}
                 emptyMessage="No monthly model data."
@@ -426,7 +426,7 @@ export default function CostsClient({
               />
             </div>
             <div className="space-y-2">
-              <h3 className="text-sm font-semibold text-slate-200">By phase</h3>
+              <h3 className="text-sm font-semibold">By phase</h3>
               <CostsTable
                 rows={monthly.by_phase}
                 emptyMessage="No monthly phase data."
@@ -443,7 +443,7 @@ export default function CostsClient({
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white">Run costs</h2>
+        <h2 className="text-xl font-semibold">Run costs</h2>
         <CostsTable
           rows={runs.summary}
           emptyMessage="No run summary available."
@@ -456,7 +456,7 @@ export default function CostsClient({
         />
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="space-y-2">
-            <h3 className="text-sm font-semibold text-slate-200">By model</h3>
+            <h3 className="text-sm font-semibold">By model</h3>
             <CostsTable
               rows={runs.by_model}
               emptyMessage="No run model breakdown available."
@@ -469,7 +469,7 @@ export default function CostsClient({
             />
           </div>
           <div className="space-y-2">
-            <h3 className="text-sm font-semibold text-slate-200">By phase</h3>
+            <h3 className="text-sm font-semibold">By phase</h3>
             <CostsTable
               rows={runs.by_phase}
               emptyMessage="No run phase breakdown available."
@@ -485,7 +485,7 @@ export default function CostsClient({
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-white">Run latencies</h2>
+        <h2 className="text-xl font-semibold">Run latencies</h2>
         <LatencyTable rows={latencies} emptyMessage="No latency data available." />
       </section>
     </div>

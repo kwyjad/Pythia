@@ -48,10 +48,10 @@ export default async function OverviewPage() {
   return (
     <div className="space-y-6">
       <section className="space-y-2">
-        <h1 className="text-3xl font-semibold text-white">Risk Index</h1>
-        <p className="text-sm text-slate-400">
+        <h1 className="text-3xl font-semibold">Risk Index</h1>
+        <p className="text-sm text-fred-text">
           Last updated:{" "}
-          <span className="text-slate-200">
+          <span className="text-fred-text font-medium">
             {version.latest_hs_created_at ?? "Unknown"}
           </span>
         </p>
