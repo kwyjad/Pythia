@@ -1,10 +1,15 @@
 import { renderSimpleMarkdown } from "../../lib/simple_markdown";
+import AiPromptsSection from "./AiPromptsSection";
 
-const ABOUT_MD = `# Welcome!
+const ABOUT_MD = `## Welcome!
 
-Fred is an experimental humanitarian impact forecasting system. Its objective is to test the effectiveness of LLM as horizon scanning and forecasting agents in the humanitarian space. Fred started operation in December 2025. Its first "stable" run (i.e. with a standard set of models and processes) was in January 2026. Fred runs monthly and will update with new forecasts at the start of each month. To repeat: FRED IS AN EXPERIMENTAL SYSTEM. Do not use Fred's forecasts for anything, ever, for any reason, except pure entertainment. Consult an astrolger instead. Assume Fred's forecasts are rubbish. Whether or not they are any good is what we are here to figure out. Even if for some reason Fred's forecasts are not rubbish, they certainly don't foresee the future. View at your own risk, and don't even think about using Fred's outputs. Beyond this, don't expect stability. Everything about Fred could change at any moment. In fact, it will change, that's the only certina thing around here. Its an experimental system. Question resolution is a major weak spot and this will negatively affect forecasting skill scoring.
+Fred is an experimental humanitarian impact forecasting system. Its objective is to test the effectiveness of LLM as horizon scanning and forecasting agents in the humanitarian space. Fred started operation in December 2025. Its first "stable" run (i.e. with a standard set of models and processes) was in January 2026. Fred runs monthly and will update with new forecasts at the start of each month.
 
-# Fred: an end-to-end forecasting system for humanitarian risk
+To repeat: FRED IS AN EXPERIMENTAL SYSTEM. Do not use Fred's forecasts for anything, ever, for any reason, except pure entertainment. Consult an astrolger instead. Assume Fred's forecasts are rubbish. Whether or not they are any good is what we are here to figure out. Even if for some reason Fred's forecasts are not rubbish, they certainly don't foresee the future.
+
+View at your own risk, and don't even think about using Fred's outputs. Beyond this, don't expect stability. Everything about Fred could change at any moment. In fact, it will change, that's the only certina thing around here. Its an experimental system. Question resolution is a major weak spot and this will negatively affect forecasting skill scoring.
+
+## Fred: an end-to-end forecasting system for humanitarian risk
 
 Fred is an AI forecasting pipeline built to answer a simple question in a rigorous way:
 
@@ -20,9 +25,7 @@ Right now Fred covers the following hazards/events:
 - Tropical cyclone (people affected)
 - Displacement inflow (from neighbouring countries)
 
-Future goals include adding public health emergencies and replacing people affected with people in need of humanitarian assistance, but resolution data limitations at present make this impossible (or at least a very big job)
-
----
+Future goals include adding public health emergencies and replacing people affected with people in need of humanitarian assistance, but resolution data limitations at present make this impossible (or at least a very big job).
 
 ## What Fred produces
 
@@ -36,8 +39,6 @@ For each country and hazard type, Fred generates:
 - **Diagnostics**: model-by-model outputs, costs, latency, and run metadata.
 
 Everything is written to a single **DuckDB system of record**, so each run is reproducible and auditable end-to-end.
-
----
 
 ## How Fred works (step by step)
 
@@ -123,8 +124,6 @@ This makes it possible to audit decisions, reproduce outputs, and systematically
 - Fred uses the data in the DuckDB, updated monthly, to resolve the forecast questions. This produces Brier scores and variants.
 - Fred also uses the resolution results to provide calibratiion advice back to the forecasting models, e.g., "on this kind of question you usually overestimate by X", to help the forecasts improve over time.
 
----
-
 ## Why distributions (not point predictions) matter
 
 Humanitarian planning is rarely about “will X happen?” It’s about:
@@ -184,43 +183,27 @@ Real-world runs face rate limits, provider outages, and key configuration issues
 - a substitute for expert judgment,
 - a decision engine that dictates policy actions.
 
-# Caveats, just to be clear**
+## Caveats
 
 - The resolution component is currently Fred's weakest point. More work is needed to have comprehensive resolution data for all hazars. This will negatively impact forecast scoring, and probably produce poor scores until improved.
 
 Fred provides probabilities and evidence, not instructions. If eventually these turn out to have value humans still decide what to do.
 
-# Code and Contact
+## Code and Contact
 
 - Fred's code (almost entirely python) is open for non-profit or research use - not commercial. You can access the code at https://github.com/kwyjad/Pythia. Be aware that the code is a vibe-coded mess, and again, use at your own risk (Note: In GitHub Fred is called Pythia). 
 - If you are interested in talking or collaborating, so am I. Contact me on LinkedIn at https://www.linkedin.com/in/kevinwyjad/
-Acceptance Criteria
-/about route exists and renders the text with headings/lists/paragraphs correctly.
-
-Top nav includes an “About” link that routes to /about.
-
-Resolver CI fast tests pass (new test is lightweight and stable).
-
-Rollback Plan
-Remove web/src/app/about/page.tsx.
-
-Remove web/src/lib/simple_markdown.tsx.
-
-Revert web/src/components/Nav.tsx.
-
-Remove resolver/tests/test_web_about_page_exists.py.
-
-Unit Tests
-Add: resolver/tests/test_web_about_page_exists.py
-
-Schema/Config Updates
-None.`;
+`;
 
 export const metadata = {
   title: "About",
 };
 
 export default function AboutPage() {
+  if (process.env.NODE_ENV !== "production" && ABOUT_MD.includes("Acceptance Criteria")) {
+    console.warn("[About] ABOUT_MD contains Codex meta tail; remove it.");
+  }
+
   return (
     <div className="space-y-6">
       <header className="space-y-2">
@@ -229,8 +212,9 @@ export default function AboutPage() {
           About Fred and how the system works.
         </p>
       </header>
-      <article className="prose prose-invert max-w-none">
+      <article className="max-w-none">
         {renderSimpleMarkdown(ABOUT_MD)}
+        <AiPromptsSection />
       </article>
     </div>
   );

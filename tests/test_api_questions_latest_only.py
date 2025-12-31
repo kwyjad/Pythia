@@ -172,6 +172,7 @@ def test_latest_only_questions_selects_latest_hs_run(api_env: None) -> None:
     assert row["triage_score"] == pytest.approx(0.72)
     assert row["triage_tier"] == "priority"
     assert row["triage_need_full_spd"] is True
+    assert row["triage_date"] == "2024-02-05"
 
 
 def test_countries_endpoint_returns_counts(api_env: None) -> None:
