@@ -2,7 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { KeyboardEvent, MouseEvent } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from "react";
 
 type InfoTooltipProps = {
   text: string;
@@ -43,7 +46,7 @@ export default function InfoTooltip({ text }: InfoTooltipProps) {
     updatePosition();
     const handleScroll = () => updatePosition();
     const handleResize = () => updatePosition();
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: globalThis.MouseEvent) => {
       const target = event.target as Node | null;
       if (triggerRef.current?.contains(target) || tooltipRef.current?.contains(target)) {
         return;
@@ -60,18 +63,18 @@ export default function InfoTooltip({ text }: InfoTooltipProps) {
     };
   }, [open]);
 
-  const handleMouseDown = (event: MouseEvent) => {
+  const handleMouseDown = (event: ReactMouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
   };
 
-  const handleClick = (event: MouseEvent) => {
+  const handleClick = (event: ReactMouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
     setOpen((prev) => !prev);
   };
 
-  const handleKeyDown = (event: KeyboardEvent) => {
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       event.stopPropagation();
