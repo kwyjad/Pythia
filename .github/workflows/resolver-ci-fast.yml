@@ -10,13 +10,19 @@ on:
   push:
     paths:
       - "resolver/**"
-      - "scripts/ci/**"
+      - "scripts/ci/collect_diagnostics.py"
+      - "scripts/ci/make_ai_summary.py"
+      - "scripts/ci/run_and_capture.sh"
+      - "scripts/ci/validate_python_syntax.py"
       - "constraints-ci.txt"
       - ".github/workflows/resolver-ci-fast.yml"
   pull_request:
     paths:
       - "resolver/**"
-      - "scripts/ci/**"
+      - "scripts/ci/collect_diagnostics.py"
+      - "scripts/ci/make_ai_summary.py"
+      - "scripts/ci/run_and_capture.sh"
+      - "scripts/ci/validate_python_syntax.py"
       - "constraints-ci.txt"
       - ".github/workflows/resolver-ci-fast.yml"
   workflow_dispatch:
