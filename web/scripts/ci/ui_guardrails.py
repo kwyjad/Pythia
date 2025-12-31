@@ -14,6 +14,14 @@ def fail_guardrail(message: str, details: dict[str, object] | None = None) -> No
 
 
 def main() -> None:
+    globals_path = Path("web/src/styles/globals.css")
+    globals_content = globals_path.read_text(encoding="utf-8")
+    if "bg-slate-950" in globals_content:
+        fail_guardrail(
+            "globals.css must not include bg-slate-950.",
+            {"file": str(globals_path)},
+        )
+
     risk_map_path = Path("web/src/components/RiskIndexMap.tsx")
     risk_map_content = risk_map_path.read_text(encoding="utf-8")
 

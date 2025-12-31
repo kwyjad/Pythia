@@ -86,10 +86,10 @@ export default function RiskIndexPanel({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-slate-300">
+          <label className="flex items-center gap-2 text-sm text-fredText">
             <span>View</span>
             <select
-              className="w-[30ch] max-w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 sm:w-[40ch] md:w-[48ch]"
+              className="w-[30ch] max-w-full rounded-md border border-fredBorder bg-fredSurface px-3 py-2 text-sm text-fredText focus:outline-none focus:ring-2 focus:ring-fredPrimary/30 sm:w-[40ch] md:w-[48ch]"
               disabled={isLoading}
               onChange={(event) =>
                 handleViewChange(event.target.value as RiskView)
@@ -111,18 +111,18 @@ export default function RiskIndexPanel({
               ))}
             </select>
           </label>
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-fredMuted">
             World overview • Jenks breaks calculated from the selected risk values.
           </span>
         </div>
 
-        <span className="text-sm text-slate-400">
+        <span className="text-sm text-fredMuted">
           Metric {metric} • {targetMonth ?? "latest"}
         </span>
       </div>
 
       {!populationAvailable ? (
-        <p className="text-xs text-slate-500">{POPULATION_HELPER}</p>
+        <p className="text-xs text-fredMuted">{POPULATION_HELPER}</p>
       ) : null}
 
       {error ? (
@@ -141,7 +141,7 @@ export default function RiskIndexPanel({
         {aside ?? null}
       </div>
 
-      <div className="w-full overflow-x-auto rounded-lg border border-slate-800">
+      <div className="w-full overflow-x-auto rounded-lg border border-fredBorder bg-fredSurface">
         <RiskIndexTable
           mode={isPerCapita ? "percap" : "raw"}
           rows={rows}

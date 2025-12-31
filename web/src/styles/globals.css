@@ -3,26 +3,26 @@
 @tailwind utilities;
 
 body {
-  @apply bg-slate-950 text-slate-100;
+  @apply bg-fredBg text-fredText;
 }
 
 :root {
-  --risk-map-c5: #0b5563;
-  --risk-map-c4: #0f7183;
-  --risk-map-c3: #1e92a3;
-  --risk-map-c2: #4bb5c4;
-  --risk-map-c1: #7fd3dd;
-  --risk-map-no-eiv: #6b7280;
-  --risk-map-no-questions: #cbd5f5;
-  --risk-map-stroke: #0f172a;
+  --risk-map-c5: #156082;
+  --risk-map-c4: #1f7697;
+  --risk-map-c3: #3a8fb0;
+  --risk-map-c2: #6bb2c5;
+  --risk-map-c1: #a6d5e3;
+  --risk-map-no-eiv: #b0b0b0;
+  --risk-map-no-questions: #e0e0e0;
+  --risk-map-stroke: #3a3a3a;
 }
 
 main {
-  @apply w-full px-6 py-8;
+  @apply w-full px-6 py-6;
 }
 
 a {
-  @apply text-sky-300 hover:text-sky-200;
+  @apply text-fredPrimary hover:text-fredSecondary;
 }
 
 table {
@@ -30,13 +30,13 @@ table {
 }
 
 thead {
-  @apply bg-slate-900;
+  @apply bg-fredBg;
 }
 
 thead th {
-  @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-400;
+  @apply px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-fredPrimary;
 }
 
 tbody td {
-  @apply border-t border-slate-800 px-4 py-3 text-sm;
+  @apply border-t border-fredBorder px-4 py-3 text-sm text-fredText;
 }
