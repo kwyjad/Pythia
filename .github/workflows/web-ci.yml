@@ -10,7 +10,9 @@ on:
   pull_request:
     paths:
       - "web/**"
-      - "scripts/ci/ui_guardrails.py"
+      - "web/package.json"
+      - "web/package-lock.json"
+      - "web/scripts/ci/ui_guardrails.py"
       - ".github/workflows/web-ci.yml"
 
 jobs:
@@ -47,4 +49,4 @@ jobs:
           python-version: "3.11"
 
       - name: Run UI guardrails
-        run: python scripts/ci/ui_guardrails.py
+        run: python web/scripts/ci/ui_guardrails.py

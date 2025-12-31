@@ -11,22 +11,46 @@ on:
     branches:
       - main
     paths:
-      - "resolver/**"
+      - "resolver/api/**"
+      - "resolver/cli/**"
+      - "resolver/common/**"
+      - "resolver/config/**"
+      - "resolver/db/**"
+      - "resolver/diag/**"
+      - "resolver/diagnostics/**"
+      - "resolver/ingestion/**"
+      - "resolver/io/**"
+      - "resolver/query/**"
+      - "resolver/snapshot/**"
+      - "resolver/tools/**"
+      - "resolver/*.py"
+      - "resolver/requirements*.txt"
       - "scripts/ci/collect_diagnostics.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
       - "constraints-ci.txt"
-      - ".github/workflows/resolver-ci-fast.yml"
   pull_request:
     paths:
-      - "resolver/**"
+      - "resolver/api/**"
+      - "resolver/cli/**"
+      - "resolver/common/**"
+      - "resolver/config/**"
+      - "resolver/db/**"
+      - "resolver/diag/**"
+      - "resolver/diagnostics/**"
+      - "resolver/ingestion/**"
+      - "resolver/io/**"
+      - "resolver/query/**"
+      - "resolver/snapshot/**"
+      - "resolver/tools/**"
+      - "resolver/*.py"
+      - "resolver/requirements*.txt"
       - "scripts/ci/collect_diagnostics.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
       - "constraints-ci.txt"
-      - ".github/workflows/resolver-ci-fast.yml"
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *"
@@ -55,6 +79,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Debug trigger context
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          if [ -n "${{ github.base_ref }}" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1 || true
+            git diff --name-only "origin/${{ github.base_ref }}"...HEAD || true
+          else
+            echo "No base_ref available; skipping diff."
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5

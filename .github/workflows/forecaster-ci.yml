@@ -18,9 +18,9 @@ on:
       - "pythia/db/**"
       - "pythia/tools/**"
       - "pythia/web_research/**"
+      - "pythia/llm_profiles.py"
+      - "pythia/config.yaml"
       - "python_library_requirements.txt"
-      - ".github/workflows/forecaster-ci.yml"
-      - "!pythia/api/**"
 
   workflow_dispatch:
     inputs:

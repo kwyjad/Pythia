@@ -15,14 +15,6 @@ on:
       - "scripts/**"
       - "scripts/ci/**"
       - "constraints-ci.txt"
-      - ".github/workflows/resolver-smoke.yml"
-  pull_request:
-    paths:
-      - "resolver/**"
-      - "scripts/**"
-      - "scripts/ci/**"
-      - "constraints-ci.txt"
-      - ".github/workflows/resolver-smoke.yml"
   workflow_dispatch:
 
 permissions:

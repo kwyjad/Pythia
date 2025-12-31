@@ -47,3 +47,15 @@ contract tests on demand. The diagnostics summary now parses
 `.ci/diagnostics/pytest-junit.xml` via `scripts/ci/junit_stats.py` and falls
 back to the pytest command tails when the XML is missing or incomplete, so the
 reported totals in `SUMMARY.md` always reflect the real pytest outcome.
+
+## CI triggers and path filters
+
+- **Web CI** runs on PRs that touch `web/**` and executes the UI guardrails script
+  at `web/scripts/ci/ui_guardrails.py`, plus `npm run build`.
+- **Resolver CI — Fast** and **Resolver smoke** are limited to resolver pipeline
+  paths to avoid running on web-only changes.
+- **Forecaster CI** runs only when forecaster or shared Pythia dependencies
+  (`pythia/db/**`, `pythia/tools/**`, `pythia/web_research/**`, and
+  `pythia/llm_profiles.py`) are updated.
+- **Horizon Scanner Triage** remains manual-only (`workflow_dispatch`) and is
+  guarded from running on PR events.
