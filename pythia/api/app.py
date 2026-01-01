@@ -1659,6 +1659,7 @@ def get_risk_index(
                     continue
                 db_population_map[iso] = pop_value
             populations_available = bool(db_population_map)
+    agg_mode = "burden"
     registry_available = False
     if (normalize or agg_mode == "surge") and not populations_available:
         _load_population_registry()
