@@ -21,7 +21,10 @@ export const apiGet = async <T>(path: string, params?: QueryParams): Promise<T> 
   const url = buildUrl(path, params);
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`API request failed (${response.status})`);
+    const bodyText = await response.text().catch(() => "");
+    throw new Error(
+      `API request failed (${response.status}) for ${url}: ${bodyText.slice(0, 400)}`
+    );
   }
   return (await response.json()) as T;
 };
