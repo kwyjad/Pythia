@@ -357,19 +357,72 @@ def _resolve_question_row(
       {join_clause}
       WHERE q.question_id = :question_id
     """
-    if hs_run_id and q_run_col:
-        sql += f" AND q.{q_run_col} = :hs_run_id"
-        params["hs_run_id"] = hs_run_id
     order_by_parts = [f"{hs_timestamp_expr} DESC NULLS LAST"]
     if q_run_col:
         order_by_parts.append(f"q.{q_run_col} DESC")
     sql += f" ORDER BY {', '.join(order_by_parts)} LIMIT 1"
 
-    df = _execute(con, sql, params).fetchdf()
-    rows = _rows_from_df(df)
-    if not rows:
+    def fetch_row(query: str, query_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        df = _execute(con, query, query_params).fetchdf()
+        rows = _rows_from_df(df)
+        if not rows:
+            return None
+        return rows[0]
+
+    if hs_run_id and q_run_col:
+        filtered_params = dict(params)
+        filtered_params["hs_run_id"] = hs_run_id
+        filtered_sql = sql.replace(
+            "WHERE q.question_id = :question_id",
+            f"WHERE q.question_id = :question_id AND q.{q_run_col} = :hs_run_id",
+        )
+        row = fetch_row(filtered_sql, filtered_params)
+        if row:
+            row["requested_hs_run_id"] = hs_run_id
+            row["requested_hs_run_id_matched"] = True
+            return row
+        logger.warning(
+            "Requested hs_run_id %s not found for question_id %s; falling back to latest run",
+            hs_run_id,
+            question_id,
+        )
+        row = fetch_row(sql, params)
+        if row:
+            row["requested_hs_run_id"] = hs_run_id
+            row["requested_hs_run_id_matched"] = False
+            return row
+        available_run_ids: List[str] = []
+        if q_run_col:
+            available_df = _execute(
+                con,
+                f"""
+                SELECT DISTINCT q.{q_run_col} AS run_id
+                FROM questions q
+                WHERE q.question_id = :question_id
+                ORDER BY q.{q_run_col} DESC
+                LIMIT 10
+                """,
+                {"question_id": question_id},
+            ).fetchdf()
+            if not available_df.empty:
+                available_run_ids = available_df["run_id"].dropna().tolist()
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "question_id": question_id,
+                "requested_hs_run_id": hs_run_id,
+                "q_run_col": q_run_col,
+                "available_run_ids": available_run_ids,
+            },
+        )
+
+    row = fetch_row(sql, params)
+    if not row:
         raise HTTPException(status_code=404, detail="Question not found")
-    return rows[0]
+    if hs_run_id:
+        row["requested_hs_run_id"] = hs_run_id
+        row["requested_hs_run_id_matched"] = False
+    return row
 
 
 def _resolve_forecaster_run_id(
@@ -863,7 +916,8 @@ def get_question_bundle(
     question_row = _resolve_question_row(con, question_id, hs_run_id)
     question = _apply_json_fields(question_row, ["scenario_ids_json", "pythia_metadata_json"])
 
-    resolved_hs_run_id = hs_run_id or question.get("hs_run_id")
+    question_run_id = question.get("hs_run_id") or question.get("run_id")
+    resolved_hs_run_id = question_run_id or hs_run_id
     iso3 = (question.get("iso3") or "").upper()
     hazard_code = (question.get("hazard_code") or "").upper()
 

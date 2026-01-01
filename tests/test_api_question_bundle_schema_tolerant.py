@@ -80,6 +80,19 @@ def test_question_bundle_uses_generated_at(api_env: None) -> None:
     assert payload["question"]["question_id"] == "AFG_ACE_FATALITIES"
 
 
+def test_question_bundle_fallbacks_on_hs_run_id(api_env: None) -> None:
+    client = TestClient(app)
+    resp = client.get(
+        "/v1/question_bundle",
+        params={"question_id": "AFG_ACE_FATALITIES", "hs_run_id": "hs_DOES_NOT_EXIST"},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["question"]["question_id"] == "AFG_ACE_FATALITIES"
+    assert payload["question"]["requested_hs_run_id"] == "hs_DOES_NOT_EXIST"
+    assert payload["question"]["requested_hs_run_id_matched"] is False
+
+
 def test_question_bundle_missing_question(api_env: None) -> None:
     client = TestClient(app)
     resp = client.get("/v1/question_bundle", params={"question_id": "DOES_NOT_EXIST"})

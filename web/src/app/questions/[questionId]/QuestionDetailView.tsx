@@ -342,6 +342,11 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
       }`
     : "No resolutions yet";
 
+  const requestedHsRunId = asString(question.requested_hs_run_id);
+  const requestedHsRunIdMatched = question.requested_hs_run_id_matched;
+  const showRequestedRunBanner =
+    Boolean(requestedHsRunId) && requestedHsRunIdMatched === false;
+
   const baseRate = (researchJson?.base_rate ?? null) as Record<string, unknown> | null;
   const updateSignals = asArray<Record<string, unknown>>(researchJson?.update_signals);
   const regimeShiftSignals = asArray<Record<string, unknown>>(
@@ -406,6 +411,11 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
           {(question.metric as string | undefined) ?? ""} •{" "}
           {(question.target_month as string | undefined) ?? ""}
         </p>
+        {showRequestedRunBanner ? (
+          <div className="rounded border border-fred-secondary bg-fred-surface px-3 py-2 text-sm text-fred-text">
+            Requested HS run not available; showing latest run instead.
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
