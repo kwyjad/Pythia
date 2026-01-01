@@ -287,6 +287,10 @@ export default function RiskIndexMap({
       c5: css.getPropertyValue("--risk-map-c5").trim() || "#0b5563",
       noEiv: css.getPropertyValue("--risk-map-no-eiv").trim() || "#6b7280",
       noQ: css.getPropertyValue("--risk-map-no-questions").trim() || "#cbd5f5",
+      triagedNoForecast:
+        css.getPropertyValue("--risk-map-no-eiv").trim() || "#6b7280",
+      notTriaged:
+        css.getPropertyValue("--risk-map-no-questions").trim() || "#cbd5f5",
     };
     if (!svgText) {
       setTooltip(null);
@@ -336,16 +340,16 @@ export default function RiskIndexMap({
         svgComputed: null,
         ancestorOpacityProduct: null,
         debugNeon,
-      matchCounts: {
-        riskRows: riskRows.length,
-        valueByIso3: valueByIso3.size,
-        iso3Elements: 0,
-        matchedIso3: 0,
-        unmatchedIso3: 0,
-      },
-    });
-    return;
-  }
+        matchCounts: {
+          riskRows: riskRows.length,
+          valueByIso3: valueByIso3.size,
+          iso3Elements: 0,
+          matchedIso3: 0,
+          unmatchedIso3: 0,
+        },
+      });
+      return;
+    }
     const container = containerRef.current;
     const svgHost = svgHostRef.current;
     if (!container || !svgHost) return;
@@ -854,6 +858,27 @@ export default function RiskIndexMap({
           </div>
         ) : null}
       </div>
+      <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-xs text-fred-text shadow-fredCard">
+        <div className="grid gap-1">
+          {[
+            { label: "Very low", color: "var(--risk-map-c1)" },
+            { label: "Low", color: "var(--risk-map-c2)" },
+            { label: "Moderate", color: "var(--risk-map-c3)" },
+            { label: "High", color: "var(--risk-map-c4)" },
+            { label: "Very high", color: "var(--risk-map-c5)" },
+            { label: "Triaged but no forecast", color: "var(--risk-map-no-eiv)" },
+            { label: "Not triaged", color: "var(--risk-map-no-questions)" },
+          ].map((item) => (
+            <div key={item.label} className="flex items-center gap-2">
+              <span
+                className="h-3 w-3 rounded-sm border border-fred-border"
+                style={{ backgroundColor: item.color }}
+              />
+              <span>{item.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
       {debugInfo ? (
         <>
           {deepDebugEnabled &&
@@ -1011,6 +1036,10 @@ export default function RiskIndexMap({
                   <div>c5: {debugInfo.palette.c5}</div>
                   <div>noEiv: {debugInfo.palette.noEiv}</div>
                   <div>noQ: {debugInfo.palette.noQ}</div>
+                  <div>
+                    triagedNoForecast: {debugInfo.palette.triagedNoForecast}
+                  </div>
+                  <div>notTriaged: {debugInfo.palette.notTriaged}</div>
                 </div>
               </div>
               {deepDebugEnabled ? (

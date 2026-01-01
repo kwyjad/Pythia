@@ -52,6 +52,20 @@ const buildParams = (view: RiskView) => {
 const metricScopeForView = (view: RiskView) =>
   view === "FATALITIES_EIV" || view === "FATALITIES_PC" ? "FATALITIES" : "PA";
 
+const addMonthsYYYYMM = (value: string, months: number): string | null => {
+  const parts = value.split("-");
+  if (parts.length < 2) return null;
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+  if (month < 1 || month > 12) return null;
+  const total = year * 12 + (month - 1) + months;
+  if (!Number.isFinite(total)) return null;
+  const outYear = Math.floor(total / 12);
+  const outMonth = (total % 12) + 1;
+  return `${String(outYear).padStart(4, "0")}-${String(outMonth).padStart(2, "0")}`;
+};
+
 const HAZARD_LABELS: Record<string, string> = {
   ACE: "Armed Conflict",
   FL: "Flood",
@@ -81,6 +95,7 @@ export default function RiskIndexPanel({
     kpiScopes.selected_month
   );
   const [kpiError, setKpiError] = useState<string | null>(null);
+  const [runMonthFallback, setRunMonthFallback] = useState(false);
 
   const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
 
@@ -115,17 +130,33 @@ export default function RiskIndexPanel({
     setIsLoading(true);
     setError(null);
     try {
+      const forecastTargetMonthForRun = selectedRunMonth
+        ? addMonthsYYYYMM(selectedRunMonth, 1)
+        : null;
       const response = await apiGet<RiskIndexResponse>(
         "/risk_index",
-        buildParams(nextView)
+        {
+          ...buildParams(nextView),
+          ...(forecastTargetMonthForRun
+            ? { target_month: forecastTargetMonthForRun }
+            : {}),
+        }
       );
       setRows(response.rows ?? []);
       setTargetMonth(response.target_month ?? null);
       setMetric(response.metric);
+      setRunMonthFallback(
+        Boolean(
+          forecastTargetMonthForRun &&
+            response.target_month &&
+            response.target_month !== forecastTargetMonthForRun
+        )
+      );
       void fetchKpiScopes(metricScopeForView(nextView), selectedRunMonth);
     } catch (fetchError) {
       console.warn("Risk index unavailable:", fetchError);
       setError("Risk index unavailable (API error).");
+      setRunMonthFallback(false);
     } finally {
       setIsLoading(false);
     }
@@ -133,7 +164,34 @@ export default function RiskIndexPanel({
 
   const handleRunMonthChange = async (yearMonth: string) => {
     setSelectedRunMonth(yearMonth);
-    await fetchKpiScopes(metricScopeForView(view), yearMonth);
+    setIsLoading(true);
+    setError(null);
+    try {
+      await fetchKpiScopes(metricScopeForView(view), yearMonth);
+      const forecastTargetMonthForRun = addMonthsYYYYMM(yearMonth, 1);
+      const response = await apiGet<RiskIndexResponse>("/risk_index", {
+        ...buildParams(view),
+        ...(forecastTargetMonthForRun
+          ? { target_month: forecastTargetMonthForRun }
+          : {}),
+      });
+      setRows(response.rows ?? []);
+      setTargetMonth(response.target_month ?? null);
+      setMetric(response.metric);
+      setRunMonthFallback(
+        Boolean(
+          forecastTargetMonthForRun &&
+            response.target_month &&
+            response.target_month !== forecastTargetMonthForRun
+        )
+      );
+    } catch (fetchError) {
+      console.warn("Risk index unavailable:", fetchError);
+      setError("Risk index unavailable (API error).");
+      setRunMonthFallback(false);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const selectedScope = kpiData.scopes?.selected_run;
@@ -187,6 +245,12 @@ export default function RiskIndexPanel({
             <div>
               Metric {metric} • {targetMonth ?? "latest"}
             </div>
+            {runMonthFallback ? (
+              <div className="text-amber-300">
+                No forecasts found for selected run month; showing latest
+                available month instead.
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -232,8 +296,18 @@ export default function RiskIndexPanel({
                 value={selectedScope?.forecasts ?? 0}
               />
               <KpiCard
-                label="Countries"
-                value={selectedScope?.countries ?? 0}
+                label="Countries with Forecasts"
+                value={
+                  selectedScope?.countries_with_forecasts ??
+                  selectedScope?.countries ??
+                  0
+                }
+              />
+            </div>
+            <div className="mt-3">
+              <KpiCard
+                label="Total Countries in Run"
+                value={selectedScope?.countries_total ?? 0}
               />
             </div>
             <p className="mt-3 text-xs text-fred-muted">

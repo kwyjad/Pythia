@@ -30,7 +30,7 @@
     - `selected_run`: KPIs scoped to the selected run month.
     - `total_active`: `questions.status = 'active'`.
     - `total_all`: all questions.
-  - Each scope returns `questions`, `forecasts`, `countries`, `resolved_questions`, and `forecasts_by_hazard`.
+  - Each scope returns `questions`, `forecasts`, `countries_with_forecasts`, `countries_total`, `countries` (legacy alias of `countries_with_forecasts`), `resolved_questions`, and `forecasts_by_hazard`.
   - Includes `available_months`, `selected_month`, `explanations`, `notes`, and `diagnostics` fields identifying the timestamp sources used for months and forecast counts.
 - `GET /v1/risk_index`
   - Rows include `population` and per-capita fields `m1_pc..m6_pc` and `total_pc` for any metric when normalization is enabled and population data is available.
