@@ -323,7 +323,7 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
               checked={showTotalEiv}
               onChange={(event) => setShowTotalEiv(event.target.checked)}
             />
-            Show total EIV
+            Show 6-Month EIV
           </label>
           <div className="text-sm text-fred-text">
             EIV: {numberFormatter.format(Math.round(eivMonth))}

@@ -47,6 +47,7 @@ from resolver.query.costs import (
     build_run_runtimes,
 )
 from resolver.query.downloads import build_forecast_spd_export, build_triage_export
+from resolver.query.kpi_scopes import compute_countries_triaged_for_month_with_source
 from resolver.query.questions_index import (
     compute_questions_forecast_summary,
     compute_questions_triage_summary,
@@ -1996,6 +1997,7 @@ def diagnostics_kpi_scopes(
         "forecast_source": None,
         "metric_scope": metric_scope,
         "selected_month": None,
+        "countries_triaged_source": None,
     }
 
     metric_scope = metric_scope.upper()
@@ -2396,7 +2398,7 @@ def diagnostics_kpi_scopes(
         "questions": 0,
         "forecasts": 0,
         "countries": 0,
-        "countries_total": 0,
+        "countries_triaged": 0,
         "countries_with_forecasts": 0,
         "resolved_questions": 0,
         "forecasts_by_hazard": {},
@@ -2425,6 +2427,13 @@ def diagnostics_kpi_scopes(
                 selected_scope = _scope_from_question_ids(
                     question_ids_sql, question_ids_params
                 )
+                countries_triaged, triaged_source = (
+                    compute_countries_triaged_for_month_with_source(con, selected_month)
+                )
+                selected_scope["countries_triaged"] = countries_triaged
+                selected_scope.pop("countries_total", None)
+                if triaged_source:
+                    diagnostics["countries_triaged_source"] = triaged_source
             else:
                 notes.append("selected_run_questions_unavailable")
         else:
