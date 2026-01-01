@@ -132,7 +132,7 @@ const CountryPage = async ({ params }: CountryPageProps) => {
           ← Back to Countries
         </Link>
         <h1 className="text-3xl font-semibold text-fred-primary">{countryName}</h1>
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-fred-text">
           Latest questions for {countryName} ({iso3})
         </p>
       </section>

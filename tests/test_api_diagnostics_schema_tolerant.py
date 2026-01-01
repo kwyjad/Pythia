@@ -128,6 +128,8 @@ def test_kpi_scopes_schema_tolerant(api_env: None) -> None:
     assert isinstance(latest["questions"], int)
     assert isinstance(latest["forecasts"], int)
     assert isinstance(latest["countries"], int)
+    assert isinstance(latest["countries_total"], int)
+    assert isinstance(latest["countries_with_forecasts"], int)
     assert isinstance(latest["resolved_questions"], int)
     assert isinstance(latest["forecasts_by_hazard"], dict)
     assert isinstance(total_active["questions"], int)

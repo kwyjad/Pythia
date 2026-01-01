@@ -2146,6 +2146,8 @@ def diagnostics_kpi_scopes(
             "questions": 0,
             "forecasts": 0,
             "countries": 0,
+            "countries_total": 0,
+            "countries_with_forecasts": 0,
             "resolved_questions": 0,
             "forecasts_by_hazard": {},
         }
@@ -2168,7 +2170,7 @@ def diagnostics_kpi_scopes(
         )
 
         if has_iso3:
-            scope["countries"] = _count(
+            scope["countries_total"] = _count(
                 f"SELECT COUNT(DISTINCT q.iso3) {base_sql}",
                 question_ids_params + metric_params + status_params,
                 "scope_countries_failed",
@@ -2216,6 +2218,14 @@ def diagnostics_kpi_scopes(
                 forecast_params + metric_params + status_params,
                 "scope_forecasts_failed",
             )
+            if has_iso3:
+                scope["countries_with_forecasts"] = _count(
+                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_base_sql}",
+                    forecast_params + metric_params + status_params,
+                    "scope_countries_with_forecasts_failed",
+                )
+            else:
+                notes.append("countries_with_forecasts_ignored_missing_column")
             scope["forecasts_by_hazard"] = _fetch_hazard_counts(
                 f"""
                 SELECT q.hazard_code, COUNT(DISTINCT q.question_id)
@@ -2249,9 +2259,18 @@ def diagnostics_kpi_scopes(
                 forecast_params + metric_params + status_params,
                 "scope_forecasts_failed",
             )
+            if has_iso3:
+                scope["countries_with_forecasts"] = _count(
+                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_base_sql}",
+                    forecast_params + metric_params + status_params,
+                    "scope_countries_with_forecasts_failed",
+                )
+            else:
+                notes.append("countries_with_forecasts_ignored_missing_column")
         else:
             notes.append("forecasts_unavailable")
 
+        scope["countries"] = scope["countries_with_forecasts"]
         return scope
 
     def _scope_from_questions(status_filter: Optional[str] = None) -> Dict[str, Any]:
@@ -2259,6 +2278,8 @@ def diagnostics_kpi_scopes(
             "questions": 0,
             "forecasts": 0,
             "countries": 0,
+            "countries_total": 0,
+            "countries_with_forecasts": 0,
             "resolved_questions": 0,
             "forecasts_by_hazard": {},
         }
@@ -2278,7 +2299,7 @@ def diagnostics_kpi_scopes(
         )
 
         if has_iso3:
-            scope["countries"] = _count(
+            scope["countries_total"] = _count(
                 f"SELECT COUNT(DISTINCT q.iso3) {base_sql}",
                 metric_params + status_params,
                 "scope_countries_failed",
@@ -2314,6 +2335,14 @@ def diagnostics_kpi_scopes(
                     forecast_base_params,
                     "scope_forecasts_failed",
                 )
+                if has_iso3:
+                    scope["countries_with_forecasts"] = _count(
+                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_join}",
+                        forecast_base_params,
+                        "scope_countries_with_forecasts_failed",
+                    )
+                else:
+                    notes.append("countries_with_forecasts_ignored_missing_column")
                 if has_hazard:
                     scope["forecasts_by_hazard"] = _fetch_hazard_counts(
                         f"""
@@ -2337,6 +2366,14 @@ def diagnostics_kpi_scopes(
                     params,
                     "scope_forecasts_failed",
                 )
+                if has_iso3:
+                    scope["countries_with_forecasts"] = _count(
+                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_join}",
+                        params,
+                        "scope_countries_with_forecasts_failed",
+                    )
+                else:
+                    notes.append("countries_with_forecasts_ignored_missing_column")
                 if has_hazard:
                     scope["forecasts_by_hazard"] = _fetch_hazard_counts(
                         f"""
@@ -2351,6 +2388,7 @@ def diagnostics_kpi_scopes(
         else:
             notes.append("forecasts_unavailable")
 
+        scope["countries"] = scope["countries_with_forecasts"]
         return scope
 
     selected_scope: Dict[str, Any] = {
@@ -2358,6 +2396,8 @@ def diagnostics_kpi_scopes(
         "questions": 0,
         "forecasts": 0,
         "countries": 0,
+        "countries_total": 0,
+        "countries_with_forecasts": 0,
         "resolved_questions": 0,
         "forecasts_by_hazard": {},
     }

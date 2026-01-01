@@ -17,7 +17,9 @@ export type DiagnosticsKpiScope = {
   label: string;
   questions: number;
   forecasts: number;
-  countries: number;
+  countries?: number;
+  countries_total?: number;
+  countries_with_forecasts?: number;
   resolved_questions: number;
   forecasts_by_hazard: Record<string, number>;
 };
