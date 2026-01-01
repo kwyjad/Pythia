@@ -73,6 +73,37 @@ def test_get_db_url_prefers_env_over_config(monkeypatch):
     assert url == env_url
 
 
+def test_bucket_definitions_seeded(tmp_path, monkeypatch):
+    db_path = tmp_path / "resolver_buckets.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    ensure_schema()
+
+    con = duckdb.connect(str(db_path))
+    try:
+        pa_bucket_rows = con.execute(
+            """
+            SELECT bucket_index, label
+            FROM bucket_definitions
+            WHERE metric = 'PA'
+            ORDER BY bucket_index
+            """
+        ).fetchall()
+        assert len(pa_bucket_rows) == 5
+
+        pa_centroids = con.execute(
+            """
+            SELECT bucket_index
+            FROM bucket_centroids
+            WHERE hazard_code = '*' AND metric = 'PA'
+            ORDER BY bucket_index
+            """
+        ).fetchall()
+        assert [row[0] for row in pa_centroids] == [1, 2, 3, 4, 5]
+    finally:
+        con.close()
+
+
 def test_connect_normalises_read_only_for_file_backed_db(monkeypatch, tmp_path):
     """For file-backed DBs, connect() should always open read-write."""
     db_path = tmp_path / "test_duckdb_config.duckdb"

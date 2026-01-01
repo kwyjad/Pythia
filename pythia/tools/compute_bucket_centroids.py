@@ -10,21 +10,13 @@ import logging
 
 from resolver.db import duckdb_io
 
+from pythia.buckets import get_bucket_specs
 from pythia.config import load as load_cfg
 
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
-
-
-SPD_CLASS_BINS = [
-    "<10k",
-    "10k-<50k",
-    "50k-<250k",
-    "250k-<500k",
-    ">=500k",
-]
 
 
 def _get_db_url_from_config() -> str:
@@ -72,21 +64,42 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
             CREATE TABLE IF NOT EXISTS bucket_centroids (
               hazard_code TEXT,
               metric      TEXT,
-              class_bin   TEXT,
-              ev          DOUBLE,
-              n_obs       BIGINT,
-              updated_at  TIMESTAMP DEFAULT now(),
-              PRIMARY KEY (hazard_code, metric, class_bin)
+              bucket_index INTEGER,
+              centroid    DOUBLE
             )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_bucket_centroids
+            ON bucket_centroids (hazard_code, metric, bucket_index)
             """
         )
 
         LOGGER.info("Deleting existing bucket_centroids rows for metric=%r", metric)
         conn.execute("DELETE FROM bucket_centroids WHERE metric = ?", [metric])
 
+        specs = list(get_bucket_specs(metric))
+        if not specs:
+            raise ValueError(f"No bucket specs configured for metric={metric!r}")
+
+        if any(spec.lower is None for spec in specs):
+            raise ValueError("Bucket specs must include lower bounds for all buckets")
+
+        case_lines = []
+        for spec in specs:
+            if spec.upper is None:
+                case_lines.append(f"WHEN v >= {float(spec.lower)} THEN {int(spec.idx)}")
+            else:
+                case_lines.append(
+                    f"WHEN v >= {float(spec.lower)} AND v < {float(spec.upper)} THEN {int(spec.idx)}"
+                )
+        case_sql = "\n                ".join(case_lines)
+
         LOGGER.info("Computing centroids from facts_resolved (PA-like metrics).")
         conn.execute(
-            """
+            f"""
             WITH base AS (
               SELECT
                 COALESCE(hazard_code, '') AS hazard_code,
@@ -99,32 +112,27 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
               SELECT
                 hazard_code,
                 CASE
-                  WHEN v < 10000 THEN '<10k'
-                  WHEN v < 50000 THEN '10k-<50k'
-                  WHEN v < 250000 THEN '50k-<250k'
-                  WHEN v < 500000 THEN '250k-<500k'
-                  ELSE '>=500k'
-                END AS class_bin,
+                  {case_sql}
+                  ELSE NULL
+                END AS bucket_index,
                 v
               FROM base
             ),
             agg AS (
               SELECT
                 hazard_code,
-                class_bin,
-                AVG(v) AS ev,
-                COUNT(*) AS n_obs
+                bucket_index,
+                AVG(v) AS centroid
               FROM binned
-              GROUP BY hazard_code, class_bin
+              WHERE bucket_index IS NOT NULL
+              GROUP BY hazard_code, bucket_index
             )
-            INSERT INTO bucket_centroids (hazard_code, metric, class_bin, ev, n_obs, updated_at)
+            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
             SELECT
               hazard_code,
               ? AS metric,
-              class_bin,
-              ev,
-              n_obs,
-              now()
+              bucket_index,
+              centroid
             FROM agg
             """,
             [metric],
@@ -132,26 +140,26 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
 
         rows = conn.execute(
             """
-            SELECT hazard_code, class_bin, ev, n_obs
+            SELECT hazard_code, bucket_index, centroid
             FROM bucket_centroids
             WHERE metric = ?
-            ORDER BY hazard_code, CASE class_bin
-              WHEN '<10k' THEN 1
-              WHEN '10k-<50k' THEN 2
-              WHEN '50k-<250k' THEN 3
-              WHEN '250k-<500k' THEN 4
-              WHEN '>=500k' THEN 5
-              ELSE 6
-            END
+            ORDER BY hazard_code, bucket_index
             """,
             [metric],
         ).fetchall()
-        bin_order = {bin_label: idx for idx, bin_label in enumerate(SPD_CLASS_BINS)}
-        rows = sorted(rows, key=lambda r: (r[0], bin_order.get(r[1], len(bin_order))))
         LOGGER.info("bucket_centroids: wrote %d rows for metric=%s", len(rows), metric)
         if len(rows) <= 20:
-            for hc, bin_label, ev, n_obs in rows:
-                LOGGER.info("  %s | %s -> ev=%.1f (n=%d)", hc or "<ALL>", bin_label, ev, n_obs)
+            for hc, bucket_index, centroid in rows:
+                label = next(
+                    (spec.label for spec in specs if spec.idx == bucket_index),
+                    str(bucket_index),
+                )
+                LOGGER.info(
+                    "  %s | %s -> centroid=%.1f",
+                    hc or "<ALL>",
+                    label,
+                    centroid,
+                )
     finally:
         _close_db(conn)
 

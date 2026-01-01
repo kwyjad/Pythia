@@ -23,6 +23,8 @@ class ForecastBundle(ExtraFriendlyModel):
     ensemble_spd: List[Dict[str, Any]] = Field(default_factory=list)
     raw_spd: List[Dict[str, Any]] = Field(default_factory=list)
     scenario_writer: List[Dict[str, Any]] = Field(default_factory=list)
+    bucket_labels: List[str] = Field(default_factory=list)
+    bucket_centroids: List[float] = Field(default_factory=list)
 
 
 class ContextBundle(ExtraFriendlyModel):

@@ -57,6 +57,16 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
+        );
+        """
+    )
+    con.execute(
+        """
         INSERT INTO questions (question_id, iso3, target_month, metric)
         VALUES
             ('q1', 'USA', '2026-01', 'PA'),
@@ -73,6 +83,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         INSERT INTO populations (iso3, population, year)
         VALUES ('USA', 2000000, 2024);
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+        VALUES ('*', 'PA', 1, 1.0), ('*', 'PA', 2, 2.0);
         """
     )
     con.close()
@@ -153,6 +169,16 @@ def api_env_horizon_fallback(
     )
     con.execute(
         """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
+        );
+        """
+    )
+    con.execute(
+        """
         INSERT INTO questions (question_id, iso3, target_month, metric)
         VALUES ('q1', 'USA', '2026-01', 'PA');
         """
@@ -167,6 +193,12 @@ def api_env_horizon_fallback(
         """
         INSERT INTO populations (iso3, population, year)
         VALUES ('USA', 3000000, 2024);
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+        VALUES ('*', 'PA', 2, 2.0);
         """
     )
     con.close()

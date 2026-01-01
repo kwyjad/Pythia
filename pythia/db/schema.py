@@ -8,15 +8,13 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import duckdb
 from duckdb import CatalogException
 
+from pythia.buckets import BucketSpec, BUCKET_SPECS
 from pythia.config import load as load_config
-
-PA_CENTROIDS: tuple[float, ...] = (0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0)
-FATALITIES_CENTROIDS: tuple[float, ...] = (0.0, 15.0, 62.0, 300.0, 700.0)
 
 PYTHIA_DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
 
@@ -281,65 +279,87 @@ def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _seed_pa_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
-    """Ensure wildcard PA centroids exist in bucket_centroids."""
+def _seed_bucket_definitions(
+    con: duckdb.DuckDBPyConnection,
+    metric: str,
+    specs: Sequence[BucketSpec],
+) -> None:
+    """Ensure bucket_definitions rows exist for a metric."""
 
+    metric_upper = metric.upper()
     rows = con.execute(
         """
         SELECT COUNT(*)
-        FROM bucket_centroids
-        WHERE upper(metric) = 'PA' AND hazard_code = '*'
-        """
+        FROM bucket_definitions
+        WHERE upper(metric) = ?
+        """,
+        [metric_upper],
     ).fetchone()
 
-    if rows and (rows[0] or 0) >= 5:
+    if rows and (rows[0] or 0) >= len(specs):
         return
 
     con.execute(
         """
-        DELETE FROM bucket_centroids
-        WHERE upper(metric) = 'PA' AND hazard_code = '*'
-        """
+        DELETE FROM bucket_definitions
+        WHERE upper(metric) = ?
+        """,
+        [metric_upper],
     )
 
-    for idx, centroid in enumerate(PA_CENTROIDS, start=1):
+    for spec in specs:
         con.execute(
             """
-            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO bucket_definitions (
+                metric, bucket_index, label, lower_bound, upper_bound
+            )
+            VALUES (?, ?, ?, ?, ?)
             """,
-            ["*", "PA", idx, float(centroid)],
+            [
+                metric_upper,
+                int(spec.idx),
+                spec.label,
+                None if spec.lower is None else float(spec.lower),
+                None if spec.upper is None else float(spec.upper),
+            ],
         )
 
 
-def _seed_fatalities_bucket_centroids(con: duckdb.DuckDBPyConnection) -> None:
-    """Ensure wildcard fatalities centroids exist in bucket_centroids."""
+def _seed_bucket_centroids(
+    con: duckdb.DuckDBPyConnection,
+    metric: str,
+    specs: Sequence[BucketSpec],
+) -> None:
+    """Ensure wildcard centroids exist in bucket_centroids."""
 
+    metric_upper = metric.upper()
     rows = con.execute(
         """
         SELECT COUNT(*)
         FROM bucket_centroids
-        WHERE upper(metric) = 'FATALITIES' AND hazard_code = '*'
-        """
+        WHERE upper(metric) = ? AND hazard_code = '*'
+        """,
+        [metric_upper],
     ).fetchone()
 
-    if rows and (rows[0] or 0) >= 5:
+    if rows and (rows[0] or 0) >= len(specs):
         return
 
     con.execute(
         """
         DELETE FROM bucket_centroids
-        WHERE upper(metric) = 'FATALITIES' AND hazard_code = '*'
-        """
+        WHERE upper(metric) = ? AND hazard_code = '*'
+        """,
+        [metric_upper],
     )
 
-    for idx, centroid in enumerate(FATALITIES_CENTROIDS, start=1):
+    for spec in specs:
         con.execute(
             """
             INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
             VALUES (?, ?, ?, ?)
             """,
-            ["*", "FATALITIES", idx, float(centroid)],
+            ["*", metric_upper, int(spec.idx), float(spec.centroid)],
         )
 
 
@@ -650,6 +670,34 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
 
         _ensure_table_and_columns(
             con,
+            "bucket_definitions",
+            """
+            CREATE TABLE IF NOT EXISTS bucket_definitions (
+                metric TEXT,
+                bucket_index INTEGER,
+                label TEXT,
+                lower_bound DOUBLE,
+                upper_bound DOUBLE
+            );
+            """,
+            {
+                "metric": "TEXT",
+                "bucket_index": "INTEGER",
+                "label": "TEXT",
+                "lower_bound": "DOUBLE",
+                "upper_bound": "DOUBLE",
+            },
+        )
+
+        con.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_bucket_definitions
+            ON bucket_definitions (metric, bucket_index)
+            """
+        )
+
+        _ensure_table_and_columns(
+            con,
             "bucket_centroids",
             """
             CREATE TABLE IF NOT EXISTS bucket_centroids (
@@ -674,8 +722,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             """
         )
 
-        _seed_pa_bucket_centroids(con)
-        _seed_fatalities_bucket_centroids(con)
+        for metric, specs in BUCKET_SPECS.items():
+            _seed_bucket_definitions(con, metric, specs)
+            _seed_bucket_centroids(con, metric, specs)
 
         _ensure_table_and_columns(
             con,

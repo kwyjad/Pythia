@@ -97,6 +97,16 @@ def test_build_forecast_spd_export():
         )
         """
     )
+    con.execute(
+        """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
+        )
+        """
+    )
 
     con.execute(
         """
@@ -186,6 +196,21 @@ def test_build_forecast_spd_export():
             ('hs-run-2', 'UGA', 'DR', 'tier-1', 0.3, '2024-01-02')
         """
     )
+    con.execute(
+        """
+        INSERT INTO bucket_centroids VALUES
+            ('*', 'PA', 1, 1.0),
+            ('*', 'PA', 2, 10.0),
+            ('*', 'PA', 3, 100.0),
+            ('*', 'PA', 4, 1000.0),
+            ('*', 'PA', 5, 10000.0),
+            ('*', 'FATALITIES', 1, 2.0),
+            ('*', 'FATALITIES', 2, 4.0),
+            ('*', 'FATALITIES', 3, 6.0),
+            ('*', 'FATALITIES', 4, 8.0),
+            ('*', 'FATALITIES', 5, 10.0)
+        """
+    )
 
     df = build_forecast_spd_export(con)
 
@@ -226,10 +251,10 @@ def test_build_forecast_spd_export():
     fatal_row = df[(df["ISO"] == "UGA") & (df["model"] == "ensemble_bayesmc_v2")].iloc[0]
     assert sum(fatal_row[["SPD_1", "SPD_2", "SPD_3", "SPD_4", "SPD_5"]]) == pytest.approx(1.0)
 
-    pa_expected = 0.1 * 0 + 0.2 * 30000 + 0.3 * 150000 + 0.2 * 375000 + 0.2 * 700000
+    pa_expected = 0.1 * 1.0 + 0.2 * 10.0 + 0.3 * 100.0 + 0.2 * 1000.0 + 0.2 * 10000.0
     assert pa_row["EIV"] == pytest.approx(pa_expected)
 
-    fatal_expected = 0.25 * 0 + 0.25 * 15 + 0.2 * 62 + 0.2 * 300 + 0.1 * 700
+    fatal_expected = 0.25 * 2.0 + 0.25 * 4.0 + 0.2 * 6.0 + 0.2 * 8.0 + 0.1 * 10.0
     assert fatal_row["EIV"] == pytest.approx(fatal_expected)
 
     assert pa_row["triage_score"] == pytest.approx(0.4)

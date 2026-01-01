@@ -55,8 +55,9 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
             metric TEXT, target_month TEXT, wording TEXT
         );
         INSERT INTO questions VALUES
-          ('Q1', 'hs-old', '["S-OLD"]', 'KEN', 'DR', 'PIN', '2025-01', 'Old wording'),
-          ('Q1', 'hs-new', '["S-NEW"]', 'KEN', 'DR', 'PIN', '2025-01', 'New wording');
+          ('Q1', 'hs-old', '["S-OLD"]', 'KEN', 'DR', 'PA', '2025-01', 'Old wording'),
+          ('Q1', 'hs-new', '["S-NEW"]', 'KEN', 'DR', 'PA', '2025-01', 'New wording'),
+          ('Q2', 'hs-new', '[]', 'UGA', 'ACE', 'FATALITIES', '2025-02', 'Fatalities wording');
         CREATE TABLE forecasts_ensemble (
             run_id TEXT, question_id TEXT, month_index INTEGER, bucket_index INTEGER,
             probability DOUBLE, model_name TEXT, created_at TIMESTAMP
@@ -75,14 +76,14 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
             created_at TIMESTAMP
         );
         INSERT INTO question_research VALUES (
-            'f-new', 'Q1', 'KEN', 'DR', 'PIN', '{"base_rate":{"note":"test"}}',
+            'f-new', 'Q1', 'KEN', 'DR', 'PA', '{"base_rate":{"note":"test"}}',
             '{}', '{}', '{}', TIMESTAMP '2024-03-02'
         );
         CREATE TABLE scenarios (
             run_id TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, scenario_type TEXT,
             bucket_label TEXT, probability DOUBLE, text TEXT, created_at TIMESTAMP
         );
-        INSERT INTO scenarios VALUES ('f-new', 'KEN', 'DR', 'PIN', 'baseline', 'baseline', 0.4, 'story', now());
+        INSERT INTO scenarios VALUES ('f-new', 'KEN', 'DR', 'PA', 'baseline', 'baseline', 0.4, 'story', now());
         CREATE TABLE question_context (
             run_id TEXT, question_id TEXT, snapshot_end_month TEXT, context_json TEXT, pa_history_json TEXT
         );
@@ -106,6 +107,34 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
           ('c3', NULL, 'hs-new', NULL, 'hs_web_research', 'hs web', 'hs web response', '{"note":"web"}', '{"usage":2}', now(), 'KEN', 'DR', 'gemini-3-flash-preview', 'gemini'),
           ('c4', 'f-new', NULL, 'Q1', 'forecast_web_research', 'web prompt', 'web response', '{"note":"forecast web"}', '{"usage":3}', now(), NULL, NULL, 'claude-opus-4-5-20240229', 'claude'),
           ('c_lower', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt 2', 'hs response 2', '{"note":"triage-2"}', '{"usage":4}', now(), 'ken', 'dr', 'gemini-3-flash-preview', 'gemini');
+        CREATE TABLE bucket_definitions (
+            metric TEXT, bucket_index INTEGER, label TEXT, lower_bound DOUBLE, upper_bound DOUBLE
+        );
+        INSERT INTO bucket_definitions VALUES
+          ('PA', 1, '<10k', 0, 10000),
+          ('PA', 2, '10k-<50k', 10000, 50000),
+          ('PA', 3, '50k-<250k', 50000, 250000),
+          ('PA', 4, '250k-<500k', 250000, 500000),
+          ('PA', 5, '>=500k', 500000, NULL),
+          ('FATALITIES', 1, '<5', 0, 5),
+          ('FATALITIES', 2, '5-<25', 5, 25),
+          ('FATALITIES', 3, '25-<100', 25, 100),
+          ('FATALITIES', 4, '100-<500', 100, 500),
+          ('FATALITIES', 5, '>=500', 500, NULL);
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT, metric TEXT, bucket_index INTEGER, centroid DOUBLE
+        );
+        INSERT INTO bucket_centroids VALUES
+          ('*', 'PA', 1, 0),
+          ('*', 'PA', 2, 30000),
+          ('*', 'PA', 3, 150000),
+          ('*', 'PA', 4, 375000),
+          ('*', 'PA', 5, 700000),
+          ('*', 'FATALITIES', 1, 0),
+          ('*', 'FATALITIES', 2, 15),
+          ('*', 'FATALITIES', 3, 62),
+          ('*', 'FATALITIES', 4, 300),
+          ('*', 'FATALITIES', 5, 700);
         """
     )
     con.close()
@@ -145,6 +174,14 @@ def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
     assert data["forecast"]["research"]["run_id"] == "f-new"
     assert data["context"]["question_context"]["run_id"] == "f-new"
     assert isinstance(data["context"]["scores"], list)
+    assert data["forecast"]["bucket_labels"] == [
+        "<10k",
+        "10k-<50k",
+        "50k-<250k",
+        "250k-<500k",
+        ">=500k",
+    ]
+    assert data["forecast"]["bucket_centroids"] == [0.0, 30000.0, 150000.0, 375000.0, 700000.0]
     assert any(
         row["score_type"] == "brier" and row["value"] == pytest.approx(0.12)
         for row in data["context"]["scores"]
@@ -155,6 +192,15 @@ def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
 def test_question_bundle_is_public(unauthorized_client: TestClient) -> None:
     resp = unauthorized_client.get("/v1/question_bundle", params={"question_id": "Q1"})
     assert resp.status_code == 200
+
+
+def test_question_bundle_fatalities_bucket_specs(client: TestClient) -> None:
+    resp = client.get("/v1/question_bundle", params={"question_id": "Q2"})
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["forecast"]["bucket_labels"] == ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
+    assert data["forecast"]["bucket_centroids"] == [0.0, 15.0, 62.0, 300.0, 700.0]
 
 
 def test_question_bundle_accepts_legacy_header(api_env: dict[str, str]) -> None:

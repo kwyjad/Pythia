@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from resolver.query import eiv_sql
+
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
     LOGGER.addHandler(logging.NullHandler())
@@ -430,18 +432,49 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
     pivot["year"] = pd.to_numeric(pivot["year"], errors="coerce")
     pivot["month"] = pd.to_numeric(pivot["month"], errors="coerce")
 
-    pa_centroids = pd.Series([0, 30000, 150000, 375000, 700000], index=[1, 2, 3, 4, 5])
-    fatal_centroids = pd.Series([0, 15, 62, 300, 700], index=[1, 2, 3, 4, 5])
+    hazard_centroids: dict[tuple[str, str, int], float] = {}
+    wildcard_centroids: dict[tuple[str, int], float] = {}
+    if _table_exists(con, "bucket_centroids"):
+        bc_cols = _table_columns(con, "bucket_centroids")
+        if {"hazard_code", "metric", "bucket_index", "centroid"}.issubset(bc_cols):
+            bc_df = con.execute(
+                """
+                SELECT hazard_code, metric, bucket_index, centroid
+                FROM bucket_centroids
+                """
+            ).fetchdf()
+            if not bc_df.empty:
+                bc_df["hazard_code"] = bc_df["hazard_code"].astype(str).str.upper()
+                bc_df["metric"] = bc_df["metric"].astype(str).str.upper()
+                bc_df["bucket_index"] = pd.to_numeric(bc_df["bucket_index"], errors="coerce")
+                bc_df["centroid"] = pd.to_numeric(bc_df["centroid"], errors="coerce")
+                for _, row in bc_df.dropna().iterrows():
+                    hazard = str(row["hazard_code"]).upper()
+                    metric = str(row["metric"]).upper()
+                    bucket_index = int(row["bucket_index"])
+                    centroid = float(row["centroid"])
+                    if hazard == "*":
+                        wildcard_centroids[(metric, bucket_index)] = centroid
+                    else:
+                        hazard_centroids[(hazard, metric, bucket_index)] = centroid
+
+    def _resolve_centroid(hazard: str, metric: str, bucket_index: int) -> float | None:
+        key = (hazard, metric, bucket_index)
+        if key in hazard_centroids:
+            return hazard_centroids[key]
+        wildcard_key = (metric, bucket_index)
+        if wildcard_key in wildcard_centroids:
+            return wildcard_centroids[wildcard_key]
+        return eiv_sql.centroid_from_defaults(metric, bucket_index)
 
     def _compute_eiv(row: pd.Series) -> float:
-        centroids = fatal_centroids if row["metric"] == "FATALITIES" else pa_centroids
-        return float(
-            row["SPD_1"] * centroids[1]
-            + row["SPD_2"] * centroids[2]
-            + row["SPD_3"] * centroids[3]
-            + row["SPD_4"] * centroids[4]
-            + row["SPD_5"] * centroids[5]
-        )
+        hazard = str(row["hazard_code"]).upper()
+        metric = str(row["metric"]).upper()
+        total = 0.0
+        for idx in range(1, 6):
+            centroid = _resolve_centroid(hazard, metric, idx) or 0.0
+            total += float(row[f"SPD_{idx}"]) * centroid
+        return float(total)
 
     pivot["EIV"] = pivot.apply(_compute_eiv, axis=1)
 

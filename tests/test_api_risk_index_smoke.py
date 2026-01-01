@@ -59,6 +59,16 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
+        );
+        """
+    )
+    con.execute(
+        """
         INSERT INTO questions (question_id, iso3, hazard_code, target_month, metric)
         VALUES
           ('q1', 'USA', 'FL', '2026-01', 'PA'),
@@ -79,6 +89,22 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         INSERT INTO populations (iso3, population, year)
         VALUES ('USA', 1000000, 2024);
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+        VALUES
+          ('*', 'PA', 1, 1.0),
+          ('*', 'PA', 2, 2.0),
+          ('*', 'PA', 3, 3.0),
+          ('*', 'PA', 4, 4.0),
+          ('*', 'PA', 5, 5.0),
+          ('*', 'FATALITIES', 1, 1.0),
+          ('*', 'FATALITIES', 2, 2.0),
+          ('*', 'FATALITIES', 3, 3.0),
+          ('*', 'FATALITIES', 4, 4.0),
+          ('*', 'FATALITIES', 5, 5.0);
         """
     )
     con.close()
