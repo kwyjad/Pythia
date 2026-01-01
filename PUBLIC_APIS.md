@@ -10,7 +10,7 @@
     - `/v1/forecasts/*`, `/v1/resolutions`
     - `/v1/downloads/forecasts.csv`, `/v1/downloads/forecasts.xlsx`
     - `/v1/llm/costs`, `/v1/llm/costs/summary`
-    - `/v1/costs/total`, `/v1/costs/monthly`, `/v1/costs/runs`, `/v1/costs/latencies`
+    - `/v1/costs/total`, `/v1/costs/monthly`, `/v1/costs/runs`, `/v1/costs/latencies`, `/v1/costs/run_runtimes`
     - `/v1/downloads/total_costs.csv`, `/v1/downloads/monthly_costs.csv`, `/v1/downloads/run_costs.csv`
     - `/v1/calibration/weights`, `/v1/calibration/advice`
   - **Admin (token required)**: Action endpoints (e.g., `POST /v1/run`).
@@ -37,6 +37,9 @@
   - Returns `tables.summary`, `tables.by_model`, and `tables.by_phase` using the same schema as the cost CSV downloads.
 - `GET /v1/costs/latencies`
   - Returns `rows` with run/model/phase latency percentiles (p50/p90).
+- `GET /v1/costs/run_runtimes`
+  - Returns `rows` with per-run elapsed_ms totals by phase plus total.
+  - Includes per-run p50/p90 for total elapsed_ms per question_id and per iso3.
 - `GET /v1/downloads/total_costs.csv`, `/v1/downloads/monthly_costs.csv`, `/v1/downloads/run_costs.csv`
   - Streams tidy CSVs for costs with these columns:
     - `grain` (`total`, `monthly`, `run`)

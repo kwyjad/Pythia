@@ -3,6 +3,9 @@ import QuestionsTable from "./QuestionsTable";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type QuestionRow = {
   question_id: string;
   hs_run_id?: string | null;
@@ -104,6 +107,9 @@ function addMonthsYYYYMM(value: string, months: number): string | null {
 }
 
 const QuestionsPage = async () => {
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[page] dynamic=force-dynamic", { route: "/questions" });
+  }
   let rows: QuestionRow[] = [];
   try {
     const response = await apiGet<QuestionsResponse>("/questions", {

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 COST_COLUMNS = [
@@ -36,6 +38,28 @@ LATENCY_COLUMNS = [
     "p50_elapsed_ms",
     "p90_elapsed_ms",
 ]
+
+RUN_RUNTIME_COLUMNS = [
+    "run_date",
+    "run_id",
+    "year",
+    "month",
+    "n_questions",
+    "n_countries",
+    "question_p50_ms",
+    "question_p90_ms",
+    "country_p50_ms",
+    "country_p90_ms",
+    "web_search_ms",
+    "hs_ms",
+    "research_ms",
+    "forecast_ms",
+    "scenario_ms",
+    "other_ms",
+    "total_ms",
+]
+
+logger = logging.getLogger(__name__)
 
 
 def phase_group(phase: str | None) -> str:
@@ -391,3 +415,151 @@ def build_latencies_runs(conn) -> pd.DataFrame:
     )
     agg["n_calls"] = agg["n_calls"].fillna(0).astype(int)
     return agg[LATENCY_COLUMNS]
+
+
+def _empty_run_runtimes_frame(**attrs: int) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=RUN_RUNTIME_COLUMNS)
+    if attrs:
+        empty.attrs.update(attrs)
+    return empty
+
+
+def build_run_runtimes(conn) -> pd.DataFrame:
+    df = _load_llm_calls(conn)
+    total_rows = len(df)
+    missing_elapsed_ms = int(df["elapsed_ms"].isna().sum()) if "elapsed_ms" in df.columns else total_rows
+    missing_created_at = (
+        int(df["created_at"].isna().sum()) if "created_at" in df.columns else total_rows
+    )
+    missing_run_id = int(df["run_id"].isna().sum()) if "run_id" in df.columns else total_rows
+    attrs = {
+        "total_rows": total_rows,
+        "missing_elapsed_ms": missing_elapsed_ms,
+        "missing_created_at": missing_created_at,
+        "missing_run_id": missing_run_id,
+    }
+
+    if df.empty or "elapsed_ms" not in df.columns or "created_at" not in df.columns:
+        return _empty_run_runtimes_frame(**attrs)
+
+    df = df[df["elapsed_ms"].notna() & df["created_at"].notna() & df["run_id"].notna()]
+    if df.empty:
+        return _empty_run_runtimes_frame(**attrs)
+
+    base = (
+        df.groupby("run_id", as_index=False)
+        .agg(
+            run_created_at=("created_at", "min"),
+            n_questions=("question_id", lambda s: s.dropna().nunique()),
+            n_countries=("iso3", lambda s: s.dropna().nunique()),
+        )
+        .reset_index(drop=True)
+    )
+    base["run_date"] = base["run_created_at"].dt.strftime("%Y-%m-%d")
+    base["year"] = base["run_created_at"].dt.year.astype("Int64")
+    base["month"] = base["run_created_at"].dt.month.astype("Int64")
+    if not base["run_id"].is_unique:
+        counts = base["run_id"].value_counts().head(10).to_dict()
+        logger.error("run_runtimes duplicate run_id rows detected: %s", counts)
+        raise ValueError("run_runtimes base rows are not unique by run_id")
+
+    phase_totals = (
+        df.groupby(["run_id", "phase"], as_index=False)["elapsed_ms"].sum()
+    )
+    pivot = phase_totals.pivot(index="run_id", columns="phase", values="elapsed_ms")
+    pivot = pivot.fillna(0.0)
+    known_phases = {"web_search", "hs", "research", "forecast", "scenario", "other"}
+    other_cols = [col for col in pivot.columns if col not in known_phases]
+    if other_cols:
+        pivot["other"] = pivot.get("other", 0.0) + pivot[other_cols].sum(axis=1)
+        pivot = pivot.drop(columns=other_cols)
+    for phase in known_phases:
+        if phase not in pivot.columns:
+            pivot[phase] = 0.0
+    pivot = pivot.reset_index()
+    phase_columns = {
+        "web_search": "web_search_ms",
+        "hs": "hs_ms",
+        "research": "research_ms",
+        "forecast": "forecast_ms",
+        "scenario": "scenario_ms",
+        "other": "other_ms",
+    }
+    pivot = pivot.rename(columns=phase_columns)
+    for column in phase_columns.values():
+        pivot[column] = pd.to_numeric(pivot[column], errors="coerce").fillna(0.0)
+    pivot["total_ms"] = pivot[list(phase_columns.values())].sum(axis=1)
+    if not pivot["run_id"].is_unique:
+        counts = pivot["run_id"].value_counts().head(10).to_dict()
+        logger.error("run_runtimes phase totals not unique: %s", counts)
+        raise ValueError("run_runtimes phase totals are not unique by run_id")
+
+    q_totals = (
+        df.dropna(subset=["question_id"])
+        .groupby(["run_id", "question_id"])["elapsed_ms"]
+        .sum()
+    )
+    q_pct = (
+        q_totals.groupby("run_id").quantile([0.5, 0.9]).unstack()
+        if not q_totals.empty
+        else pd.DataFrame()
+    )
+    if not q_pct.empty:
+        q_pct = q_pct.rename(columns={0.5: "question_p50_ms", 0.9: "question_p90_ms"}).reset_index()
+    else:
+        q_pct = pd.DataFrame(columns=["run_id", "question_p50_ms", "question_p90_ms"])
+
+    c_totals = (
+        df.dropna(subset=["iso3"])
+        .groupby(["run_id", "iso3"])["elapsed_ms"]
+        .sum()
+    )
+    c_pct = (
+        c_totals.groupby("run_id").quantile([0.5, 0.9]).unstack()
+        if not c_totals.empty
+        else pd.DataFrame()
+    )
+    if not c_pct.empty:
+        c_pct = c_pct.rename(columns={0.5: "country_p50_ms", 0.9: "country_p90_ms"}).reset_index()
+    else:
+        c_pct = pd.DataFrame(columns=["run_id", "country_p50_ms", "country_p90_ms"])
+
+    merged = base.merge(pivot, on="run_id", how="left", validate="one_to_one")
+    merged = merged.merge(q_pct, on="run_id", how="left", validate="one_to_one")
+    merged = merged.merge(c_pct, on="run_id", how="left", validate="one_to_one")
+
+    for column in phase_columns.values():
+        if column not in merged.columns:
+            merged[column] = 0.0
+        merged[column] = merged[column].fillna(0.0)
+    if "total_ms" not in merged.columns:
+        merged["total_ms"] = merged[list(phase_columns.values())].sum(axis=1)
+
+    for column in RUN_RUNTIME_COLUMNS:
+        if column not in merged.columns:
+            merged[column] = None
+
+    if not merged["run_id"].is_unique:
+        counts = merged["run_id"].value_counts().head(10).to_dict()
+        logger.error("run_runtimes merge produced duplicate run_id rows: %s", counts)
+        raise ValueError("run_runtimes output is not unique by run_id")
+
+    missing_percentiles = merged[
+        merged[
+            ["question_p50_ms", "question_p90_ms", "country_p50_ms", "country_p90_ms"]
+        ].isna().any(axis=1)
+    ]
+    if not missing_percentiles.empty:
+        question_groups = q_totals.groupby(level=0).size()
+        country_groups = c_totals.groupby(level=0).size()
+        for _, row in missing_percentiles.iterrows():
+            run_id = row["run_id"]
+            logger.warning(
+                "run_runtimes missing percentiles run_id=%s question_groups=%s country_groups=%s",
+                run_id,
+                int(question_groups.get(run_id, 0)),
+                int(country_groups.get(run_id, 0)),
+            )
+
+    merged.attrs.update(attrs)
+    return merged[RUN_RUNTIME_COLUMNS]
