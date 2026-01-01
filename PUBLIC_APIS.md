@@ -10,6 +10,7 @@
     - `/v1/questions`, `/v1/question_bundle`, `/v1/ui_runs/{ui_run_id}`
     - `/v1/forecasts/*`, `/v1/resolutions`
     - `/v1/downloads/forecasts.csv`, `/v1/downloads/forecasts.xlsx`
+    - `/v1/downloads/triage.csv`
     - `/v1/llm/costs`, `/v1/llm/costs/summary`
     - `/v1/costs/total`, `/v1/costs/monthly`, `/v1/costs/runs`, `/v1/costs/latencies`, `/v1/costs/run_runtimes`
     - `/v1/downloads/total_costs.csv`, `/v1/downloads/monthly_costs.csv`, `/v1/downloads/run_costs.csv`
@@ -42,6 +43,9 @@
   - Streams an Excel export with one row per ISO3 × hazard × model × forecast_month.
   - If the Excel dependency is unavailable, responds with a redirect to `/v1/downloads/forecasts.csv`.
   - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `hs_run_ID`.
+- `GET /v1/downloads/triage.csv`
+  - Streams a CSV export with one row per run × country.
+  - Columns (in order): `Triage Year`, `Triage Month`, `Triage Date`, `Run ID`, `Triage model`, `ISO3`, `Country`, `Triage Score`, `Triage Tier`.
 - `GET /v1/costs/total`, `/v1/costs/monthly`, `/v1/costs/runs`
   - Returns `tables.summary`, `tables.by_model`, and `tables.by_phase` using the same schema as the cost CSV downloads.
 - `GET /v1/costs/latencies`

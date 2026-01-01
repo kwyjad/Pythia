@@ -6,6 +6,7 @@ const XLSX_DOWNLOAD_URL = `${API_BASE}/downloads/forecasts.xlsx`;
 const TOTAL_COSTS_URL = `${API_BASE}/downloads/total_costs.csv`;
 const MONTHLY_COSTS_URL = `${API_BASE}/downloads/monthly_costs.csv`;
 const RUN_COSTS_URL = `${API_BASE}/downloads/run_costs.csv`;
+const TRIAGE_DOWNLOAD_URL = `${API_BASE}/downloads/triage.csv`;
 
 const DownloadsPage = () => {
   return (
@@ -66,6 +67,23 @@ const DownloadsPage = () => {
               href={RUN_COSTS_URL}
             >
               Run costs (CSV)
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-6">
+        <div className="space-y-2">
+          <h2 className="text-lg font-semibold">Run triage results</h2>
+          <p className="text-sm text-fred-text">
+            One row per run × country with HS triage score, tier, and model.
+          </p>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <a
+              href={TRIAGE_DOWNLOAD_URL}
+              className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 font-semibold text-white hover:opacity-90"
+            >
+              Run triage results (CSV)
             </a>
           </div>
         </div>
