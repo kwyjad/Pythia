@@ -347,14 +347,14 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
         <div className="rounded border border-fred-secondary bg-fred-surface p-3">
           <div className="overflow-x-auto">
             <table className="w-full table-auto text-left text-sm text-fred-text">
-              <thead className="bg-fred-primary text-white text-xs uppercase tracking-wide">
+              <thead className="bg-fred-primary text-xs uppercase tracking-wide">
                 <tr>
-                  <th ref={headerCellRef} className="pb-2 pr-4">
+                  <th ref={headerCellRef} className="pb-2 pr-4 !text-white">
                     Bucket
                   </th>
-                  <th className="pb-2 pr-4">Centroid</th>
-                  <th className="pb-2 pr-4">Probability</th>
-                  <th className="pb-2">p × centroid</th>
+                  <th className="pb-2 pr-4 !text-white">Centroid</th>
+                  <th className="pb-2 pr-4 !text-white">Probability</th>
+                  <th className="pb-2 !text-white">p × centroid</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-fred-secondary/20">

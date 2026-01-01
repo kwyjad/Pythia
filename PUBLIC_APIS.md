@@ -25,11 +25,13 @@
 - `GET /v1/questions`
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`, `triage_date` (YYYY-MM-DD).
 - `GET /v1/diagnostics/kpi_scopes`
+  - Query params: `metric_scope` (`PA` or `FATALITIES`, default `PA`), `year_month` (optional `YYYY-MM`).
   - Returns KPI counts for three scopes in a single payload:
-    - `latest_run`: most recent month with `llm_calls` activity.
+    - `selected_run`: KPIs scoped to the selected run month.
     - `total_active`: `questions.status = 'active'`.
     - `total_all`: all questions.
-  - Includes `diagnostics` fields identifying the timestamp columns used for the latest run and forecast counts.
+  - Each scope returns `questions`, `forecasts`, `countries`, `resolved_questions`, and `forecasts_by_hazard`.
+  - Includes `available_months`, `selected_month`, `explanations`, `notes`, and `diagnostics` fields identifying the timestamp sources used for months and forecast counts.
 - `GET /v1/risk_index`
   - Rows include `population` and per-capita fields `m1_pc..m6_pc` and `total_pc` for any metric when normalization is enabled and population data is available.
   - When `forecasts_ensemble` includes multiple ensemble aggregations (e.g., BayesMC + Mean), risk_index uses BayesMC per question when available, falling back to Mean.

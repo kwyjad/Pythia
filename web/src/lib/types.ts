@@ -15,16 +15,24 @@ export type DiagnosticsSummaryResponse = {
 
 export type DiagnosticsKpiScope = {
   label: string;
-  year?: number | null;
-  month?: number | null;
   questions: number;
-  questions_with_forecasts: number;
+  forecasts: number;
+  countries: number;
+  resolved_questions: number;
+  forecasts_by_hazard: Record<string, number>;
 };
 
 export type DiagnosticsKpiScopesResponse = {
-  default_scope: string;
+  available_months: Array<{
+    year_month: string;
+    label: string;
+    is_latest: boolean;
+  }>;
+  selected_month: string | null;
   scopes: Record<string, DiagnosticsKpiScope>;
+  explanations?: string[] | null;
   diagnostics?: Record<string, unknown> | null;
+  notes?: string[] | null;
 };
 
 export type RiskIndexResponse = {
