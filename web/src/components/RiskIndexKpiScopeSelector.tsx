@@ -92,6 +92,7 @@ const RiskIndexKpiScopeSelector = ({
 
   return (
     <div className="space-y-4" data-testid="risk-index-kpi-panel">
+      {/* Note: Avoid raw '>' in JSX text; use words or &gt; to satisfy the parser. */}
       <div className="space-y-2">
         <label
           className="text-xs font-semibold uppercase tracking-wide text-fred-muted"
