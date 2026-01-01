@@ -154,6 +154,7 @@ def test_run_runtimes_aggregation():
     ]:
         assert column in runtimes.columns
     assert runtimes["run_id"].is_unique
+    assert len(runtimes) == 3
     assert runtimes[runtimes["run_id"] == "run-1"].shape[0] == 1
     assert runtimes[runtimes["run_id"] == "run-2"].shape[0] == 1
     assert runtimes[runtimes["run_id"] == "hs-9"].shape[0] == 1
