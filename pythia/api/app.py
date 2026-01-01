@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+from datetime import datetime
 from importlib.util import find_spec
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -262,6 +263,24 @@ def _pick_col(cols: set[str], candidates: List[str]) -> Optional[str]:
         if candidate.lower() in cols:
             return candidate
     return None
+
+
+def _pick_timestamp_column(
+    con: duckdb.DuckDBPyConnection, table: str, candidates: List[str]
+) -> Optional[str]:
+    if not _table_exists(con, table):
+        return None
+    cols = _table_columns(con, table)
+    return _pick_col(cols, candidates)
+
+
+def _month_window(year: int, month: int) -> tuple[str, str]:
+    start = datetime(year, month, 1)
+    if month == 12:
+        end = datetime(year + 1, 1, 1)
+    else:
+        end = datetime(year, month + 1, 1)
+    return start.isoformat(), end.isoformat()
 
 
 def _table_has_columns(con: duckdb.DuckDBPyConnection, table: str, required: List[str]) -> bool:
@@ -1945,6 +1964,167 @@ def diagnostics_summary():
         "questions_with_scores": int(q_with_scores),
         "latest_hs_run": latest_hs,
         "latest_calibration": latest_calibration,
+    }
+
+
+@app.get("/v1/diagnostics/kpi_scopes")
+def diagnostics_kpi_scopes():
+    con = _con()
+    diagnostics: Dict[str, Any] = {
+        "latest_run_source": None,
+        "forecasts_count_source": None,
+        "notes": [],
+    }
+
+    total_active_questions = 0
+    total_active_forecasts = 0
+    if _table_exists(con, "questions") and _table_has_columns(
+        con, "questions", ["question_id", "status"]
+    ):
+        try:
+            row = con.execute(
+                "SELECT COUNT(*) FROM questions WHERE status = 'active'"
+            ).fetchone()
+            total_active_questions = int(row[0]) if row else 0
+        except Exception:
+            diagnostics["notes"].append("total_active_questions_failed")
+        if _table_exists(con, "forecasts_ensemble") and _table_has_columns(
+            con, "forecasts_ensemble", ["question_id"]
+        ):
+            try:
+                row = con.execute(
+                    """
+                    SELECT COUNT(DISTINCT q.question_id)
+                    FROM questions q
+                    JOIN forecasts_ensemble f USING(question_id)
+                    WHERE q.status = 'active'
+                    """
+                ).fetchone()
+                total_active_forecasts = int(row[0]) if row else 0
+            except Exception:
+                diagnostics["notes"].append("total_active_forecasts_failed")
+
+    total_all_questions = 0
+    if _table_exists(con, "questions") and _table_has_columns(con, "questions", ["question_id"]):
+        try:
+            row = con.execute("SELECT COUNT(*) FROM questions").fetchone()
+            total_all_questions = int(row[0]) if row else 0
+        except Exception:
+            diagnostics["notes"].append("total_all_questions_failed")
+
+    total_all_forecasts = 0
+    if _table_exists(con, "forecasts_ensemble") and _table_has_columns(
+        con, "forecasts_ensemble", ["question_id"]
+    ):
+        try:
+            row = con.execute(
+                "SELECT COUNT(DISTINCT question_id) FROM forecasts_ensemble"
+            ).fetchone()
+            total_all_forecasts = int(row[0]) if row else 0
+        except Exception:
+            diagnostics["notes"].append("total_all_forecasts_failed")
+
+    latest_scope: Dict[str, Any] = {
+        "label": "Most recent run (unknown)",
+        "year": None,
+        "month": None,
+        "questions": 0,
+        "questions_with_forecasts": 0,
+    }
+
+    latest_ts_col = _pick_timestamp_column(
+        con, "llm_calls", ["created_at", "timestamp", "started_at"]
+    )
+    latest_dt: Optional[datetime] = None
+    if latest_ts_col and _table_exists(con, "llm_calls"):
+        try:
+            row = con.execute(f"SELECT MAX({latest_ts_col}) FROM llm_calls").fetchone()
+            if row and row[0] is not None:
+                latest_dt = pd.to_datetime(row[0]).to_pydatetime()
+        except Exception:
+            diagnostics["notes"].append("latest_run_max_failed")
+
+    if latest_dt:
+        year = int(latest_dt.year)
+        month = int(latest_dt.month)
+        start_iso, end_iso = _month_window(year, month)
+        latest_scope["label"] = f"Most recent run ({year:04d}-{month:02d})"
+        latest_scope["year"] = year
+        latest_scope["month"] = month
+        diagnostics["latest_run_source"] = f"llm_calls.{latest_ts_col}"
+        if _table_has_columns(con, "llm_calls", ["question_id", latest_ts_col]):
+            try:
+                row = con.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT question_id)
+                    FROM llm_calls
+                    WHERE {latest_ts_col} >= ? AND {latest_ts_col} < ?
+                    """,
+                    [start_iso, end_iso],
+                ).fetchone()
+                latest_scope["questions"] = int(row[0]) if row else 0
+            except Exception:
+                diagnostics["notes"].append("latest_run_questions_failed")
+
+        forecast_ts_col = _pick_timestamp_column(
+            con, "forecasts_ensemble", ["created_at", "timestamp", "started_at"]
+        )
+        if forecast_ts_col and _table_has_columns(
+            con, "forecasts_ensemble", ["question_id", forecast_ts_col]
+        ):
+            try:
+                row = con.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT question_id)
+                    FROM forecasts_ensemble
+                    WHERE {forecast_ts_col} >= ? AND {forecast_ts_col} < ?
+                    """,
+                    [start_iso, end_iso],
+                ).fetchone()
+                latest_scope["questions_with_forecasts"] = int(row[0]) if row else 0
+                diagnostics["forecasts_count_source"] = (
+                    f"forecasts_ensemble.{forecast_ts_col}"
+                )
+            except Exception:
+                diagnostics["notes"].append("latest_run_forecasts_failed")
+        elif _table_has_columns(
+            con, "llm_calls", ["question_id", "phase", latest_ts_col]
+        ):
+            try:
+                row = con.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT question_id)
+                    FROM llm_calls
+                    WHERE phase = 'forecast'
+                      AND {latest_ts_col} >= ? AND {latest_ts_col} < ?
+                    """,
+                    [start_iso, end_iso],
+                ).fetchone()
+                latest_scope["questions_with_forecasts"] = int(row[0]) if row else 0
+                diagnostics["forecasts_count_source"] = (
+                    f"llm_calls.{latest_ts_col}.phase"
+                )
+            except Exception:
+                diagnostics["notes"].append("latest_run_forecasts_fallback_failed")
+        else:
+            diagnostics["forecasts_count_source"] = "unavailable"
+
+    return {
+        "default_scope": "latest_run",
+        "scopes": {
+            "latest_run": latest_scope,
+            "total_active": {
+                "label": "Total active",
+                "questions": int(total_active_questions),
+                "questions_with_forecasts": int(total_active_forecasts),
+            },
+            "total_all": {
+                "label": "Total active + inactive",
+                "questions": int(total_all_questions),
+                "questions_with_forecasts": int(total_all_forecasts),
+            },
+        },
+        "diagnostics": diagnostics,
     }
 
 

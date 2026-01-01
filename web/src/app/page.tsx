@@ -1,9 +1,9 @@
-import KpiCard from "../components/KpiCard";
 import RiskIndexPanel from "../components/RiskIndexPanel";
+import RiskIndexKpiScopeSelector from "../components/RiskIndexKpiScopeSelector";
 import { apiGet } from "../lib/api";
 import type {
   CountriesResponse,
-  DiagnosticsSummaryResponse,
+  DiagnosticsKpiScopesResponse,
   RiskIndexResponse,
   VersionResponse,
 } from "../lib/types";
@@ -15,9 +15,9 @@ export default async function OverviewPage() {
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/" });
   }
-  const [version, diagnostics] = await Promise.all([
+  const [version, kpiScopes] = await Promise.all([
     apiGet<VersionResponse>("/version"),
-    apiGet<DiagnosticsSummaryResponse>("/diagnostics/summary"),
+    apiGet<DiagnosticsKpiScopesResponse>("/diagnostics/kpi_scopes"),
   ]);
   let riskIndex: RiskIndexResponse | null = null;
   let countries: CountriesResponse | null = null;
@@ -36,19 +36,8 @@ export default async function OverviewPage() {
     console.warn("Countries unavailable:", error);
   }
 
-  const activeQuestions =
-    diagnostics.questions_by_status?.find(
-      (row) => (row.status ?? "").toLowerCase() === "active"
-    ) ?? null;
-
   const kpiAside = (
-    <div className="space-y-4" data-testid="risk-index-kpi-panel">
-      <KpiCard label="Active questions" value={activeQuestions?.n ?? 0} />
-      <KpiCard
-        label="Questions with forecasts"
-        value={diagnostics.questions_with_forecasts ?? 0}
-      />
-    </div>
+    <RiskIndexKpiScopeSelector kpiScopes={kpiScopes} />
   );
 
   return (

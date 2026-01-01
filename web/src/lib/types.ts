@@ -13,6 +13,20 @@ export type DiagnosticsSummaryResponse = {
   latest_calibration?: Record<string, unknown> | null;
 };
 
+export type DiagnosticsKpiScope = {
+  label: string;
+  year?: number | null;
+  month?: number | null;
+  questions: number;
+  questions_with_forecasts: number;
+};
+
+export type DiagnosticsKpiScopesResponse = {
+  default_scope: string;
+  scopes: Record<string, DiagnosticsKpiScope>;
+  diagnostics?: Record<string, unknown> | null;
+};
+
 export type RiskIndexResponse = {
   metric: "PA" | "FATALITIES" | string;
   target_month: string | null;
