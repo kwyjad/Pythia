@@ -44,7 +44,8 @@ jobs:
             ${{ runner.os }}-nextjs-
 
       - name: Report Next.js cache status
-        run: echo "Next.js cache hit: ${{ steps.nextjs-cache.outputs.cache-hit }}"
+        run: |
+          echo "Next.js cache hit: ${{ steps.nextjs-cache.outputs.cache-hit }}"
 
       - name: Build
         working-directory: web
