@@ -4,6 +4,7 @@
 
 - **Authentication**
   - **Public (no auth)**: All read-only `GET` endpoints are public, including:
+    - `/v1/diagnostics/kpi_scopes`
     - `/v1/diagnostics/summary`
     - `/v1/risk_index`, `/v1/rankings`
     - `/v1/questions`, `/v1/question_bundle`, `/v1/ui_runs/{ui_run_id}`
@@ -23,6 +24,12 @@
   - Returns a bundle containing: the question row, HS run/scenarios/country report, ensemble SPD rows plus per-model SPD rows, question context/resolutions (plus `context.scores` when available), and optional `llm_calls` (including transcripts only when requested).
 - `GET /v1/questions`
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`, `triage_date` (YYYY-MM-DD).
+- `GET /v1/diagnostics/kpi_scopes`
+  - Returns KPI counts for three scopes in a single payload:
+    - `latest_run`: most recent month with `llm_calls` activity.
+    - `total_active`: `questions.status = 'active'`.
+    - `total_all`: all questions.
+  - Includes `diagnostics` fields identifying the timestamp columns used for the latest run and forecast counts.
 - `GET /v1/risk_index`
   - Rows include `population` and per-capita fields `m1_pc..m6_pc` and `total_pc` for any metric when normalization is enabled and population data is available.
   - When `forecasts_ensemble` includes multiple ensemble aggregations (e.g., BayesMC + Mean), risk_index uses BayesMC per question when available, falling back to Mean.
