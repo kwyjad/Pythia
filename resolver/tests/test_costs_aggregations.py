@@ -146,6 +146,13 @@ def test_run_runtimes_aggregation():
     _seed_llm_calls(con)
 
     runtimes = build_run_runtimes(con)
+    for column in [
+        "question_p50_ms",
+        "question_p90_ms",
+        "country_p50_ms",
+        "country_p90_ms",
+    ]:
+        assert column in runtimes.columns
     assert runtimes["run_id"].is_unique
     assert runtimes[runtimes["run_id"] == "run-1"].shape[0] == 1
     assert runtimes[runtimes["run_id"] == "run-2"].shape[0] == 1

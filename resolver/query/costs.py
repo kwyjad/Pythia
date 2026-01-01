@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 COST_COLUMNS = [
@@ -56,6 +58,8 @@ RUN_RUNTIME_COLUMNS = [
     "other_ms",
     "total_ms",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 def phase_group(phase: str | None) -> str:
@@ -460,6 +464,11 @@ def build_run_runtimes(conn) -> pd.DataFrame:
         .groupby(["run_id", "question_id"], dropna=False)["elapsed_ms"]
         .sum()
     )
+    q_counts = (
+        q_totals.groupby(level=0).size().rename("question_groups").reset_index()
+        if not q_totals.empty
+        else pd.DataFrame(columns=["run_id", "question_groups"])
+    )
     if q_totals.empty:
         question_stats = pd.DataFrame(columns=["run_id", "question_p50_ms", "question_p90_ms"])
     else:
@@ -480,6 +489,11 @@ def build_run_runtimes(conn) -> pd.DataFrame:
         df.dropna(subset=["iso3"])
         .groupby(["run_id", "iso3"], dropna=False)["elapsed_ms"]
         .sum()
+    )
+    c_counts = (
+        c_totals.groupby(level=0).size().rename("country_groups").reset_index()
+        if not c_totals.empty
+        else pd.DataFrame(columns=["run_id", "country_groups"])
     )
     if c_totals.empty:
         country_stats = pd.DataFrame(columns=["run_id", "country_p50_ms", "country_p90_ms"])
@@ -523,6 +537,33 @@ def build_run_runtimes(conn) -> pd.DataFrame:
     merged = merged.merge(pivot, on="run_id", how="left")
     for column in list(phase_columns.values()) + ["total_ms"]:
         merged[column] = merged[column].fillna(0.0)
+
+    for column in RUN_RUNTIME_COLUMNS:
+        if column not in merged.columns:
+            merged[column] = None
+
+    missing_questions = merged["question_p50_ms"].isna()
+    missing_countries = merged["country_p50_ms"].isna()
+    if len(merged) and (missing_questions.any() or missing_countries.any()):
+        merged_counts = merged[["run_id"]].copy()
+        merged_counts = merged_counts.merge(q_counts, on="run_id", how="left").merge(
+            c_counts, on="run_id", how="left"
+        )
+        merged_counts["question_groups"] = (
+            merged_counts["question_groups"].fillna(0).astype(int)
+        )
+        merged_counts["country_groups"] = (
+            merged_counts["country_groups"].fillna(0).astype(int)
+        )
+        for idx, row in merged.iterrows():
+            if missing_questions.iloc[idx] or missing_countries.iloc[idx]:
+                counts = merged_counts.iloc[idx]
+                logger.warning(
+                    "run_runtimes missing percentiles run_id=%s question_groups=%s country_groups=%s",
+                    row.get("run_id"),
+                    counts.get("question_groups"),
+                    counts.get("country_groups"),
+                )
 
     merged.attrs.update(attrs)
     return merged[RUN_RUNTIME_COLUMNS]

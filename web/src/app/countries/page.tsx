@@ -5,6 +5,9 @@ import { apiGet } from "../../lib/api";
 import type { CountriesResponse, CountriesRow } from "../../lib/types";
 import CountriesTable from "./CountriesTable";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = "";
@@ -68,6 +71,9 @@ async function loadCountryNameMap(): Promise<Map<string, string>> {
 }
 
 const CountriesPage = async () => {
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[page] dynamic=force-dynamic", { route: "/countries" });
+  }
   let rows: CountriesRow[] = [];
   try {
     const response = await apiGet<CountriesResponse>("/countries");

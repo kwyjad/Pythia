@@ -8,7 +8,13 @@ import type {
   VersionResponse,
 } from "../lib/types";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function OverviewPage() {
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[page] dynamic=force-dynamic", { route: "/" });
+  }
   const [version, diagnostics] = await Promise.all([
     apiGet<VersionResponse>("/version"),
     apiGet<DiagnosticsSummaryResponse>("/diagnostics/summary"),
