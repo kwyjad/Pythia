@@ -283,6 +283,23 @@ def _month_window(year: int, month: int) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _parse_year_month(value: Optional[str]) -> Optional[tuple[int, int]]:
+    if not value:
+        return None
+    match = re.match(r"^(\d{4})-(\d{2})$", value.strip())
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if month < 1 or month > 12:
+        return None
+    return year, month
+
+
+def _format_year_month_label(year: int, month: int) -> str:
+    return datetime(year, month, 1).strftime("%B %Y")
+
+
 def _table_has_columns(con: duckdb.DuckDBPyConnection, table: str, required: List[str]) -> bool:
     cols = _table_columns(con, table)
     return set(c.lower() for c in required).issubset(cols)
@@ -1968,163 +1985,432 @@ def diagnostics_summary():
 
 
 @app.get("/v1/diagnostics/kpi_scopes")
-def diagnostics_kpi_scopes():
+def diagnostics_kpi_scopes(
+    metric_scope: str = Query("PA"),
+    year_month: Optional[str] = Query(None),
+):
     con = _con()
+    notes: List[str] = []
     diagnostics: Dict[str, Any] = {
-        "latest_run_source": None,
-        "forecasts_count_source": None,
-        "notes": [],
+        "month_source": None,
+        "forecast_source": None,
+        "metric_scope": metric_scope,
+        "selected_month": None,
     }
 
-    total_active_questions = 0
-    total_active_forecasts = 0
-    if _table_exists(con, "questions") and _table_has_columns(
-        con, "questions", ["question_id", "status"]
-    ):
-        try:
-            row = con.execute(
-                "SELECT COUNT(*) FROM questions WHERE status = 'active'"
-            ).fetchone()
-            total_active_questions = int(row[0]) if row else 0
-        except Exception:
-            diagnostics["notes"].append("total_active_questions_failed")
-        if _table_exists(con, "forecasts_ensemble") and _table_has_columns(
-            con, "forecasts_ensemble", ["question_id"]
-        ):
-            try:
-                row = con.execute(
-                    """
-                    SELECT COUNT(DISTINCT q.question_id)
-                    FROM questions q
-                    JOIN forecasts_ensemble f USING(question_id)
-                    WHERE q.status = 'active'
-                    """
-                ).fetchone()
-                total_active_forecasts = int(row[0]) if row else 0
-            except Exception:
-                diagnostics["notes"].append("total_active_forecasts_failed")
+    metric_scope = metric_scope.upper()
+    if metric_scope not in {"PA", "FATALITIES"}:
+        notes.append("metric_scope_unrecognized")
 
-    total_all_questions = 0
-    if _table_exists(con, "questions") and _table_has_columns(con, "questions", ["question_id"]):
-        try:
-            row = con.execute("SELECT COUNT(*) FROM questions").fetchone()
-            total_all_questions = int(row[0]) if row else 0
-        except Exception:
-            diagnostics["notes"].append("total_all_questions_failed")
+    questions_cols = _table_columns(con, "questions") if _table_exists(con, "questions") else set()
+    has_questions = _table_has_columns(con, "questions", ["question_id"])
+    has_metric = "metric" in questions_cols
+    has_iso3 = "iso3" in questions_cols
+    has_status = "status" in questions_cols
+    has_hazard = "hazard_code" in questions_cols
 
-    total_all_forecasts = 0
-    if _table_exists(con, "forecasts_ensemble") and _table_has_columns(
-        con, "forecasts_ensemble", ["question_id"]
-    ):
-        try:
-            row = con.execute(
-                "SELECT COUNT(DISTINCT question_id) FROM forecasts_ensemble"
-            ).fetchone()
-            total_all_forecasts = int(row[0]) if row else 0
-        except Exception:
-            diagnostics["notes"].append("total_all_forecasts_failed")
+    if not has_questions:
+        notes.append("questions_table_missing")
 
-    latest_scope: Dict[str, Any] = {
-        "label": "Most recent run (unknown)",
-        "year": None,
-        "month": None,
-        "questions": 0,
-        "questions_with_forecasts": 0,
-    }
+    def metric_clause() -> tuple[str, List[Any]]:
+        if not metric_scope or not has_metric:
+            if metric_scope and not has_metric:
+                notes.append("metric_scope_ignored_missing_column")
+            return "", []
+        return " AND q.metric = ?", [metric_scope]
 
-    latest_ts_col = _pick_timestamp_column(
-        con, "llm_calls", ["created_at", "timestamp", "started_at"]
+    def status_clause(status_value: str) -> tuple[str, List[Any]]:
+        if not has_status:
+            notes.append("status_filter_ignored_missing_column")
+            return "", []
+        return " AND q.status = ?", [status_value]
+
+    month_source_table: Optional[str] = None
+    month_source_ts: Optional[str] = None
+    month_source_phase: Optional[List[str]] = None
+    forecast_source_table: Optional[str] = None
+    forecast_source_ts: Optional[str] = None
+    forecast_source_phase: Optional[List[str]] = None
+    question_source_table: Optional[str] = None
+    question_source_ts: Optional[str] = None
+
+    forecast_ts = _pick_timestamp_column(
+        con, "forecasts_ensemble", ["created_at", "timestamp", "started_at"]
     )
-    latest_dt: Optional[datetime] = None
-    if latest_ts_col and _table_exists(con, "llm_calls"):
-        try:
-            row = con.execute(f"SELECT MAX({latest_ts_col}) FROM llm_calls").fetchone()
-            if row and row[0] is not None:
-                latest_dt = pd.to_datetime(row[0]).to_pydatetime()
-        except Exception:
-            diagnostics["notes"].append("latest_run_max_failed")
-
-    if latest_dt:
-        year = int(latest_dt.year)
-        month = int(latest_dt.month)
-        start_iso, end_iso = _month_window(year, month)
-        latest_scope["label"] = f"Most recent run ({year:04d}-{month:02d})"
-        latest_scope["year"] = year
-        latest_scope["month"] = month
-        diagnostics["latest_run_source"] = f"llm_calls.{latest_ts_col}"
-        if _table_has_columns(con, "llm_calls", ["question_id", latest_ts_col]):
-            try:
-                row = con.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT question_id)
-                    FROM llm_calls
-                    WHERE {latest_ts_col} >= ? AND {latest_ts_col} < ?
-                    """,
-                    [start_iso, end_iso],
-                ).fetchone()
-                latest_scope["questions"] = int(row[0]) if row else 0
-            except Exception:
-                diagnostics["notes"].append("latest_run_questions_failed")
-
-        forecast_ts_col = _pick_timestamp_column(
-            con, "forecasts_ensemble", ["created_at", "timestamp", "started_at"]
+    if forecast_ts and _table_has_columns(con, "forecasts_ensemble", ["question_id", forecast_ts]):
+        month_source_table = "forecasts_ensemble"
+        month_source_ts = forecast_ts
+        forecast_source_table = "forecasts_ensemble"
+        forecast_source_ts = forecast_ts
+        diagnostics["month_source"] = f"forecasts_ensemble.{forecast_ts}"
+        diagnostics["forecast_source"] = f"forecasts_ensemble.{forecast_ts}"
+    else:
+        llm_ts = _pick_timestamp_column(
+            con, "llm_calls", ["created_at", "timestamp", "started_at"]
         )
-        if forecast_ts_col and _table_has_columns(
-            con, "forecasts_ensemble", ["question_id", forecast_ts_col]
-        ):
-            try:
-                row = con.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT question_id)
-                    FROM forecasts_ensemble
-                    WHERE {forecast_ts_col} >= ? AND {forecast_ts_col} < ?
-                    """,
-                    [start_iso, end_iso],
-                ).fetchone()
-                latest_scope["questions_with_forecasts"] = int(row[0]) if row else 0
-                diagnostics["forecasts_count_source"] = (
-                    f"forecasts_ensemble.{forecast_ts_col}"
-                )
-            except Exception:
-                diagnostics["notes"].append("latest_run_forecasts_failed")
-        elif _table_has_columns(
-            con, "llm_calls", ["question_id", "phase", latest_ts_col]
-        ):
-            try:
-                row = con.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT question_id)
-                    FROM llm_calls
-                    WHERE phase = 'forecast'
-                      AND {latest_ts_col} >= ? AND {latest_ts_col} < ?
-                    """,
-                    [start_iso, end_iso],
-                ).fetchone()
-                latest_scope["questions_with_forecasts"] = int(row[0]) if row else 0
-                diagnostics["forecasts_count_source"] = (
-                    f"llm_calls.{latest_ts_col}.phase"
-                )
-            except Exception:
-                diagnostics["notes"].append("latest_run_forecasts_fallback_failed")
+        if llm_ts and _table_has_columns(con, "llm_calls", ["question_id", llm_ts]):
+            month_source_table = "llm_calls"
+            month_source_ts = llm_ts
+            month_source_phase = ["forecast", "research", "triage", "context"]
+            diagnostics["month_source"] = f"llm_calls.{llm_ts}"
+            if _table_has_columns(con, "llm_calls", ["phase"]):
+                forecast_source_table = "llm_calls"
+                forecast_source_ts = llm_ts
+                forecast_source_phase = ["forecast"]
+                diagnostics["forecast_source"] = f"llm_calls.{llm_ts}.phase"
         else:
-            diagnostics["forecasts_count_source"] = "unavailable"
+            notes.append("month_source_unavailable")
+            diagnostics["forecast_source"] = "unavailable"
+
+    available_months: List[str] = []
+    if month_source_table and month_source_ts:
+        sql = (
+            f"SELECT DISTINCT strftime({month_source_ts}, '%Y-%m') AS year_month "
+            f"FROM {month_source_table} WHERE {month_source_ts} IS NOT NULL"
+        )
+        params: List[Any] = []
+        if month_source_phase:
+            placeholders = ", ".join(["?"] * len(month_source_phase))
+            sql += f" AND phase IN ({placeholders})"
+            params.extend(month_source_phase)
+        try:
+            rows = con.execute(sql, params).fetchall()
+            available_months = [row[0] for row in rows if row and row[0]]
+        except Exception:
+            notes.append("available_months_failed")
+
+    parsed_months: List[tuple[int, int, str]] = []
+    for ym in available_months:
+        parsed = _parse_year_month(ym)
+        if parsed:
+            parsed_months.append((parsed[0], parsed[1], ym))
+    parsed_months.sort(reverse=True)
+    sorted_months = [entry[2] for entry in parsed_months]
+
+    selected_month = None
+    if year_month:
+        parsed = _parse_year_month(year_month)
+        if parsed:
+            if sorted_months and year_month not in sorted_months:
+                notes.append("selected_month_not_available")
+                selected_month = sorted_months[0]
+            else:
+                selected_month = year_month
+        else:
+            notes.append("selected_month_invalid")
+    if selected_month is None and sorted_months:
+        selected_month = sorted_months[0]
+
+    diagnostics["selected_month"] = selected_month
+
+    available_month_rows: List[Dict[str, Any]] = []
+    for index, ym in enumerate(sorted_months):
+        parsed = _parse_year_month(ym)
+        if not parsed:
+            continue
+        available_month_rows.append(
+            {
+                "year_month": ym,
+                "label": _format_year_month_label(parsed[0], parsed[1]),
+                "is_latest": index == 0,
+            }
+        )
+
+    def _count(sql: str, params: List[Any], note: str) -> int:
+        try:
+            row = con.execute(sql, params).fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            notes.append(note)
+            return 0
+
+    def _fetch_hazard_counts(sql: str, params: List[Any], note: str) -> Dict[str, int]:
+        try:
+            rows = con.execute(sql, params).fetchall()
+        except Exception:
+            notes.append(note)
+            return {}
+        output: Dict[str, int] = {}
+        for hazard, count in rows:
+            if hazard is None:
+                continue
+            output[str(hazard)] = int(count)
+        return output
+
+    def _scope_from_question_ids(
+        question_ids_sql: str,
+        question_ids_params: List[Any],
+        status_filter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        scope: Dict[str, Any] = {
+            "questions": 0,
+            "forecasts": 0,
+            "countries": 0,
+            "resolved_questions": 0,
+            "forecasts_by_hazard": {},
+        }
+        if not has_questions:
+            return scope
+
+        metric_sql, metric_params = metric_clause()
+        status_sql, status_params = ("", [])
+        if status_filter:
+            status_sql, status_params = status_clause(status_filter)
+
+        base_sql = (
+            f"FROM questions q JOIN ({question_ids_sql}) src ON src.question_id = q.question_id "
+            f"WHERE 1=1{metric_sql}{status_sql}"
+        )
+        scope["questions"] = _count(
+            f"SELECT COUNT(DISTINCT q.question_id) {base_sql}",
+            question_ids_params + metric_params + status_params,
+            "scope_questions_failed",
+        )
+
+        if has_iso3:
+            scope["countries"] = _count(
+                f"SELECT COUNT(DISTINCT q.iso3) {base_sql}",
+                question_ids_params + metric_params + status_params,
+                "scope_countries_failed",
+            )
+        else:
+            notes.append("countries_ignored_missing_column")
+
+        if has_status:
+            resolved_sql = f"{base_sql} AND q.status IN ('resolved', 'closed')"
+            scope["resolved_questions"] = _count(
+                f"SELECT COUNT(DISTINCT q.question_id) {resolved_sql}",
+                question_ids_params + metric_params + status_params,
+                "scope_resolved_failed",
+            )
+        elif _table_has_columns(con, "resolutions", ["question_id"]):
+            scope["resolved_questions"] = _count(
+                f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
+                f"JOIN ({question_ids_sql}) src ON src.question_id = r.question_id",
+                question_ids_params,
+                "scope_resolutions_failed",
+            )
+        else:
+            notes.append("resolved_questions_unavailable")
+
+        if has_hazard and forecast_source_table and forecast_source_ts:
+            forecast_ids_sql = question_ids_sql
+            forecast_params = list(question_ids_params)
+            if forecast_source_table != question_source_table or forecast_source_phase:
+                forecast_ids_sql = (
+                    f"SELECT DISTINCT question_id FROM {forecast_source_table} "
+                    f"WHERE {forecast_source_ts} >= ? AND {forecast_source_ts} < ?"
+                )
+                forecast_params = list(question_ids_params[:2])
+                if forecast_source_phase:
+                    placeholders = ", ".join(["?"] * len(forecast_source_phase))
+                    forecast_ids_sql += f" AND phase IN ({placeholders})"
+                    forecast_params.extend(forecast_source_phase)
+
+            forecast_base_sql = (
+                f"FROM questions q JOIN ({forecast_ids_sql}) f ON f.question_id = q.question_id "
+                f"WHERE 1=1{metric_sql}{status_sql}"
+            )
+            scope["forecasts"] = _count(
+                f"SELECT COUNT(DISTINCT q.question_id) {forecast_base_sql}",
+                forecast_params + metric_params + status_params,
+                "scope_forecasts_failed",
+            )
+            scope["forecasts_by_hazard"] = _fetch_hazard_counts(
+                f"""
+                SELECT q.hazard_code, COUNT(DISTINCT q.question_id)
+                {forecast_base_sql}
+                GROUP BY q.hazard_code
+                ORDER BY q.hazard_code
+                """,
+                forecast_params + metric_params + status_params,
+                "scope_forecasts_by_hazard_failed",
+            )
+        elif forecast_source_table and forecast_source_ts:
+            forecast_ids_sql = question_ids_sql
+            forecast_params = list(question_ids_params)
+            if forecast_source_table != question_source_table or forecast_source_phase:
+                forecast_ids_sql = (
+                    f"SELECT DISTINCT question_id FROM {forecast_source_table} "
+                    f"WHERE {forecast_source_ts} >= ? AND {forecast_source_ts} < ?"
+                )
+                forecast_params = list(question_ids_params[:2])
+                if forecast_source_phase:
+                    placeholders = ", ".join(["?"] * len(forecast_source_phase))
+                    forecast_ids_sql += f" AND phase IN ({placeholders})"
+                    forecast_params.extend(forecast_source_phase)
+
+            forecast_base_sql = (
+                f"FROM questions q JOIN ({forecast_ids_sql}) f ON f.question_id = q.question_id "
+                f"WHERE 1=1{metric_sql}{status_sql}"
+            )
+            scope["forecasts"] = _count(
+                f"SELECT COUNT(DISTINCT q.question_id) {forecast_base_sql}",
+                forecast_params + metric_params + status_params,
+                "scope_forecasts_failed",
+            )
+        else:
+            notes.append("forecasts_unavailable")
+
+        return scope
+
+    def _scope_from_questions(status_filter: Optional[str] = None) -> Dict[str, Any]:
+        scope: Dict[str, Any] = {
+            "questions": 0,
+            "forecasts": 0,
+            "countries": 0,
+            "resolved_questions": 0,
+            "forecasts_by_hazard": {},
+        }
+        if not has_questions:
+            return scope
+
+        metric_sql, metric_params = metric_clause()
+        status_sql, status_params = ("", [])
+        if status_filter:
+            status_sql, status_params = status_clause(status_filter)
+
+        base_sql = f"FROM questions q WHERE 1=1{metric_sql}{status_sql}"
+        scope["questions"] = _count(
+            f"SELECT COUNT(DISTINCT q.question_id) {base_sql}",
+            metric_params + status_params,
+            "scope_questions_failed",
+        )
+
+        if has_iso3:
+            scope["countries"] = _count(
+                f"SELECT COUNT(DISTINCT q.iso3) {base_sql}",
+                metric_params + status_params,
+                "scope_countries_failed",
+            )
+        else:
+            notes.append("countries_ignored_missing_column")
+
+        if has_status:
+            resolved_sql = f"{base_sql} AND q.status IN ('resolved', 'closed')"
+            scope["resolved_questions"] = _count(
+                f"SELECT COUNT(DISTINCT q.question_id) {resolved_sql}",
+                metric_params + status_params,
+                "scope_resolved_failed",
+            )
+        elif _table_has_columns(con, "resolutions", ["question_id"]):
+            scope["resolved_questions"] = _count(
+                "SELECT COUNT(DISTINCT question_id) FROM resolutions",
+                [],
+                "scope_resolutions_failed",
+            )
+        else:
+            notes.append("resolved_questions_unavailable")
+
+        forecast_base_params = metric_params + status_params
+        if forecast_source_table and forecast_source_ts:
+            if forecast_source_table == "forecasts_ensemble":
+                forecast_join = (
+                    "FROM questions q JOIN forecasts_ensemble f ON f.question_id = q.question_id "
+                    f"WHERE 1=1{metric_sql}{status_sql}"
+                )
+                scope["forecasts"] = _count(
+                    f"SELECT COUNT(DISTINCT q.question_id) {forecast_join}",
+                    forecast_base_params,
+                    "scope_forecasts_failed",
+                )
+                if has_hazard:
+                    scope["forecasts_by_hazard"] = _fetch_hazard_counts(
+                        f"""
+                        SELECT q.hazard_code, COUNT(DISTINCT q.question_id)
+                        {forecast_join}
+                        GROUP BY q.hazard_code
+                        ORDER BY q.hazard_code
+                        """,
+                        forecast_base_params,
+                        "scope_forecasts_by_hazard_failed",
+                    )
+            elif forecast_source_table == "llm_calls" and forecast_source_phase:
+                placeholders = ", ".join(["?"] * len(forecast_source_phase))
+                forecast_join = (
+                    "FROM questions q JOIN llm_calls l ON l.question_id = q.question_id "
+                    f"WHERE l.phase IN ({placeholders}){metric_sql}{status_sql}"
+                )
+                params = list(forecast_source_phase) + forecast_base_params
+                scope["forecasts"] = _count(
+                    f"SELECT COUNT(DISTINCT q.question_id) {forecast_join}",
+                    params,
+                    "scope_forecasts_failed",
+                )
+                if has_hazard:
+                    scope["forecasts_by_hazard"] = _fetch_hazard_counts(
+                        f"""
+                        SELECT q.hazard_code, COUNT(DISTINCT q.question_id)
+                        {forecast_join}
+                        GROUP BY q.hazard_code
+                        ORDER BY q.hazard_code
+                        """,
+                        params,
+                        "scope_forecasts_by_hazard_failed",
+                    )
+        else:
+            notes.append("forecasts_unavailable")
+
+        return scope
+
+    selected_scope: Dict[str, Any] = {
+        "label": f"Selected run {selected_month}" if selected_month else "Selected run",
+        "questions": 0,
+        "forecasts": 0,
+        "countries": 0,
+        "resolved_questions": 0,
+        "forecasts_by_hazard": {},
+    }
+
+    if selected_month and month_source_table and month_source_ts:
+        parsed = _parse_year_month(selected_month)
+        if parsed:
+            start_iso, end_iso = _month_window(parsed[0], parsed[1])
+            llm_ts = _pick_timestamp_column(
+                con, "llm_calls", ["created_at", "timestamp", "started_at"]
+            )
+            if llm_ts and _table_has_columns(con, "llm_calls", ["question_id", llm_ts]):
+                question_source_table = "llm_calls"
+                question_source_ts = llm_ts
+            elif month_source_table and month_source_ts:
+                question_source_table = month_source_table
+                question_source_ts = month_source_ts
+
+            if question_source_table and question_source_ts:
+                question_ids_sql = (
+                    f"SELECT DISTINCT question_id FROM {question_source_table} "
+                    f"WHERE {question_source_ts} >= ? AND {question_source_ts} < ?"
+                )
+                question_ids_params = [start_iso, end_iso]
+                selected_scope = _scope_from_question_ids(
+                    question_ids_sql, question_ids_params
+                )
+            else:
+                notes.append("selected_run_questions_unavailable")
+        else:
+            notes.append("selected_month_invalid")
+
+    explanations = [
+        "Questions can exceed forecasts because runs include triaged or researched questions that did not receive forecasts.",
+    ]
 
     return {
-        "default_scope": "latest_run",
+        "available_months": available_month_rows,
+        "selected_month": selected_month,
         "scopes": {
-            "latest_run": latest_scope,
+            "selected_run": selected_scope,
             "total_active": {
                 "label": "Total active",
-                "questions": int(total_active_questions),
-                "questions_with_forecasts": int(total_active_forecasts),
+                **_scope_from_questions(status_filter="active"),
             },
             "total_all": {
                 "label": "Total active + inactive",
-                "questions": int(total_all_questions),
-                "questions_with_forecasts": int(total_all_forecasts),
+                **_scope_from_questions(),
             },
         },
+        "explanations": explanations,
         "diagnostics": diagnostics,
+        "notes": notes,
     }
 
 

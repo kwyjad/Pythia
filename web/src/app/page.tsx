@@ -1,5 +1,4 @@
 import RiskIndexPanel from "../components/RiskIndexPanel";
-import RiskIndexKpiScopeSelector from "../components/RiskIndexKpiScopeSelector";
 import { apiGet } from "../lib/api";
 import type {
   CountriesResponse,
@@ -17,7 +16,9 @@ export default async function OverviewPage() {
   }
   const [version, kpiScopes] = await Promise.all([
     apiGet<VersionResponse>("/version"),
-    apiGet<DiagnosticsKpiScopesResponse>("/diagnostics/kpi_scopes"),
+    apiGet<DiagnosticsKpiScopesResponse>("/diagnostics/kpi_scopes", {
+      metric_scope: "PA",
+    }),
   ]);
   let riskIndex: RiskIndexResponse | null = null;
   let countries: CountriesResponse | null = null;
@@ -36,10 +37,6 @@ export default async function OverviewPage() {
     console.warn("Countries unavailable:", error);
   }
 
-  const kpiAside = (
-    <RiskIndexKpiScopeSelector kpiScopes={kpiScopes} />
-  );
-
   return (
     <div className="space-y-6">
       <section className="space-y-2">
@@ -55,9 +52,9 @@ export default async function OverviewPage() {
       <section className="space-y-4">
         {riskIndex ? (
           <RiskIndexPanel
-            aside={kpiAside}
             countriesRows={countries?.rows ?? []}
             initialResponse={riskIndex}
+            kpiScopes={kpiScopes}
             mapHeightClassName="h-[520px] md:h-[600px] lg:h-[720px]"
           />
         ) : (

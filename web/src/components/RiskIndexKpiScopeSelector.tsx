@@ -11,37 +11,35 @@ type RiskIndexKpiScopeSelectorProps = {
   kpiScopes: DiagnosticsKpiScopesResponse;
 };
 
-type ScopeKey = "latest_run" | "total_active" | "total_all";
+type ScopeKey = "selected_run" | "total_active" | "total_all";
 
-const scopeOrder: ScopeKey[] = ["latest_run", "total_active", "total_all"];
+const scopeOrder: ScopeKey[] = ["selected_run", "total_active", "total_all"];
 
 const defaultScopeLabels: Record<ScopeKey, string> = {
-  latest_run: "Most recent run",
+  selected_run: "Selected run",
   total_active: "Total active",
   total_all: "Total active + inactive",
 };
 
 const kpiLabels: Record<ScopeKey, { questions: string; forecasts: string }> = {
-  latest_run: {
-    questions: "Questions (most recent run)",
-    forecasts: "Questions with forecasts (most recent run)",
+  selected_run: {
+    questions: "Questions (selected run)",
+    forecasts: "Forecasts (selected run)",
   },
   total_active: {
     questions: "Active questions",
-    forecasts: "Active questions with forecasts",
+    forecasts: "Active forecasts",
   },
   total_all: {
     questions: "All questions",
-    forecasts: "All questions with forecasts",
+    forecasts: "All forecasts",
   },
 };
 
 const RiskIndexKpiScopeSelector = ({
   kpiScopes,
 }: RiskIndexKpiScopeSelectorProps) => {
-  const [selectedScope, setSelectedScope] = useState<string>(
-    kpiScopes.default_scope ?? "latest_run"
-  );
+  const [selectedScope, setSelectedScope] = useState<string>("selected_run");
   const [storedScope, setStoredScope] = useState<string | null>(null);
   const [debugEnabled, setDebugEnabled] = useState(false);
 
@@ -61,10 +59,8 @@ const RiskIndexKpiScopeSelector = ({
     setStoredScope(stored);
     if (stored && kpiScopes.scopes?.[stored]) {
       setSelectedScope(stored);
-    } else if (kpiScopes.default_scope) {
-      setSelectedScope(kpiScopes.default_scope);
     }
-  }, [kpiScopes.default_scope, kpiScopes.scopes]);
+  }, [kpiScopes.scopes]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -75,19 +71,16 @@ const RiskIndexKpiScopeSelector = ({
   }, [selectedScope]);
 
   const scopeData = useMemo(() => {
-    const fallbackScope =
-      kpiScopes.scopes?.[kpiScopes.default_scope] ??
-      kpiScopes.scopes?.latest_run ??
-      null;
+    const fallbackScope = kpiScopes.scopes?.selected_run ?? null;
     return kpiScopes.scopes?.[selectedScope] ?? fallbackScope;
-  }, [kpiScopes.default_scope, kpiScopes.scopes, selectedScope]);
+  }, [kpiScopes.scopes, selectedScope]);
 
   const labelSet = useMemo(() => {
     const key = scopeOrder.includes(selectedScope as ScopeKey)
       ? (selectedScope as ScopeKey)
-      : (kpiScopes.default_scope as ScopeKey) ?? "latest_run";
-    return kpiLabels[key] ?? kpiLabels.latest_run;
-  }, [kpiScopes.default_scope, selectedScope]);
+      : "selected_run";
+    return kpiLabels[key] ?? kpiLabels.selected_run;
+  }, [selectedScope]);
 
   return (
     <div className="space-y-4" data-testid="risk-index-kpi-panel">
@@ -114,12 +107,9 @@ const RiskIndexKpiScopeSelector = ({
       </div>
 
       <KpiCard label={labelSet.questions} value={scopeData?.questions ?? 0} />
-      <KpiCard
-        label={labelSet.forecasts}
-        value={scopeData?.questions_with_forecasts ?? 0}
-      />
+      <KpiCard label={labelSet.forecasts} value={scopeData?.forecasts ?? 0} />
 
-      {debugEnabled ? (
+      {debugEnabled && (
         <details className="rounded-lg border border-fred-secondary/60 bg-fred-surface px-4 py-3 text-xs text-fred-muted">
           <summary className="cursor-pointer font-semibold text-fred-primary">
             KPI diagnostics
@@ -136,7 +126,7 @@ const RiskIndexKpiScopeSelector = ({
             )}
           </pre>
         </details>
-      ) : null}
+      )}
     </div>
   );
 };

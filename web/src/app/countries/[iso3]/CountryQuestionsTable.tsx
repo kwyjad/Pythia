@@ -62,9 +62,11 @@ const buildColumns = (): Array<SortableColumn<CountryQuestionRow>> => [
     defaultSortDirection: "asc",
     render: (row) => (
       <div className="space-y-1">
-        <div className="font-medium text-white">{row.wording ?? "Untitled"}</div>
+        <div className="font-medium text-fred-text">
+          {row.wording ?? "Untitled"}
+        </div>
         <Link
-          className="text-sky-300 underline underline-offset-2 hover:text-sky-200"
+          className="text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
           href={`/questions/${row.question_id}?hs_run_id=${encodeURIComponent(
             row.hs_run_id ?? ""
           )}`}

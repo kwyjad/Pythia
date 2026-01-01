@@ -115,21 +115,31 @@ def test_kpi_scopes_schema_tolerant(api_env: None) -> None:
     resp = client.get("/v1/diagnostics/kpi_scopes")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["default_scope"] == "latest_run"
-    assert "latest_run" in payload["scopes"]
+    assert "available_months" in payload
+    assert "selected_month" in payload
+    assert "selected_run" in payload["scopes"]
     assert "total_active" in payload["scopes"]
     assert "total_all" in payload["scopes"]
 
-    latest = payload["scopes"]["latest_run"]
+    latest = payload["scopes"]["selected_run"]
     total_active = payload["scopes"]["total_active"]
     total_all = payload["scopes"]["total_all"]
 
     assert isinstance(latest["questions"], int)
-    assert isinstance(latest["questions_with_forecasts"], int)
+    assert isinstance(latest["forecasts"], int)
+    assert isinstance(latest["countries"], int)
+    assert isinstance(latest["resolved_questions"], int)
+    assert isinstance(latest["forecasts_by_hazard"], dict)
     assert isinstance(total_active["questions"], int)
-    assert isinstance(total_active["questions_with_forecasts"], int)
+    assert isinstance(total_active["forecasts"], int)
+    assert isinstance(total_active["countries"], int)
+    assert isinstance(total_active["resolved_questions"], int)
+    assert isinstance(total_active["forecasts_by_hazard"], dict)
     assert isinstance(total_all["questions"], int)
-    assert isinstance(total_all["questions_with_forecasts"], int)
+    assert isinstance(total_all["forecasts"], int)
+    assert isinstance(total_all["countries"], int)
+    assert isinstance(total_all["resolved_questions"], int)
+    assert isinstance(total_all["forecasts_by_hazard"], dict)
 
     assert total_all["questions"] >= total_active["questions"]
     assert total_active["questions"] >= latest["questions"]

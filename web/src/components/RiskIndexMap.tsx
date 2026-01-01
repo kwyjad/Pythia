@@ -828,7 +828,7 @@ export default function RiskIndexMap({
   ]);
 
   return (
-    <div className="relative w-full rounded-lg border border-slate-800 bg-slate-950/30 p-4">
+    <div className="relative w-full rounded-lg border border-fred-secondary bg-slate-950/30 p-4">
       {svgWarnings.length ? (
         <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
           {svgWarnings.map((warning) => (

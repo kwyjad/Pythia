@@ -125,10 +125,13 @@ const CountryPage = async ({ params }: CountryPageProps) => {
   return (
     <div className="space-y-6">
       <section>
-        <Link className="text-sm text-sky-300 underline underline-offset-2 hover:text-sky-200" href="/countries">
+        <Link
+          className="text-sm text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
+          href="/countries"
+        >
           ← Back to Countries
         </Link>
-        <h1 className="text-3xl font-semibold text-white">{countryName}</h1>
+        <h1 className="text-3xl font-semibold text-fred-primary">{countryName}</h1>
         <p className="text-sm text-slate-400">
           Latest questions for {countryName} ({iso3})
         </p>
