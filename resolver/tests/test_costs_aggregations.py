@@ -11,6 +11,7 @@ from resolver.query.costs import (
     build_costs_runs,
     build_costs_total,
     build_latencies_runs,
+    build_run_runtimes,
 )
 
 
@@ -138,3 +139,38 @@ def test_latencies_run_quantiles():
     assert row["n_calls"] == 1
     assert row["p50_elapsed_ms"] == pytest.approx(600.0)
     assert row["p90_elapsed_ms"] == pytest.approx(600.0)
+
+
+def test_run_runtimes_aggregation():
+    con = duckdb.connect(":memory:")
+    _seed_llm_calls(con)
+
+    runtimes = build_run_runtimes(con)
+    assert runtimes["run_id"].is_unique
+    assert runtimes[runtimes["run_id"] == "run-1"].shape[0] == 1
+    assert runtimes[runtimes["run_id"] == "run-2"].shape[0] == 1
+    assert runtimes[runtimes["run_id"] == "hs-9"].shape[0] == 1
+
+    run_1 = _summary_row(runtimes, run_id="run-1")
+    assert run_1["web_search_ms"] == pytest.approx(100.0)
+    assert run_1["hs_ms"] == pytest.approx(200.0)
+    assert run_1["research_ms"] == pytest.approx(300.0)
+    assert run_1["total_ms"] == pytest.approx(600.0)
+    assert run_1["question_p50_ms"] == pytest.approx(300.0)
+    assert run_1["question_p90_ms"] == pytest.approx(300.0)
+    assert run_1["country_p50_ms"] == pytest.approx(300.0)
+    assert run_1["country_p90_ms"] == pytest.approx(300.0)
+    assert run_1["n_questions"] == 2
+    assert run_1["n_countries"] == 2
+
+    run_2 = _summary_row(runtimes, run_id="run-2")
+    assert run_2["question_p50_ms"] == pytest.approx(1100.0)
+    assert run_2["question_p90_ms"] == pytest.approx(1100.0)
+    assert run_2["country_p50_ms"] == pytest.approx(1100.0)
+    assert run_2["country_p90_ms"] == pytest.approx(1100.0)
+
+    run_hs = _summary_row(runtimes, run_id="hs-9")
+    assert run_hs["question_p50_ms"] == pytest.approx(400.0)
+    assert run_hs["question_p90_ms"] == pytest.approx(400.0)
+    assert run_hs["country_p50_ms"] == pytest.approx(400.0)
+    assert run_hs["country_p90_ms"] == pytest.approx(400.0)

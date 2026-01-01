@@ -1,6 +1,7 @@
 import CostsClient, {
   CostsResponse,
   LatenciesResponse,
+  RunRuntimesResponse,
 } from "./CostsClient";
 import { apiGet } from "../../lib/api";
 
@@ -14,7 +15,7 @@ const safeGet = async <T,>(path: string, fallback: T): Promise<T> => {
 };
 
 const CostsPage = async () => {
-  const [total, monthly, runs, latencies] = await Promise.all([
+  const [total, monthly, runs, latencies, runRuntimes] = await Promise.all([
     safeGet<CostsResponse>("/costs/total", {
       tables: { summary: [], by_model: [], by_phase: [] },
     }),
@@ -25,6 +26,7 @@ const CostsPage = async () => {
       tables: { summary: [], by_model: [], by_phase: [] },
     }),
     safeGet<LatenciesResponse>("/costs/latencies", { rows: [] }),
+    safeGet<RunRuntimesResponse>("/costs/run_runtimes", { rows: [] }),
   ]);
 
   return (
@@ -33,6 +35,7 @@ const CostsPage = async () => {
       monthly={monthly.tables}
       runs={runs.tables}
       latencies={latencies.rows}
+      runRuntimes={runRuntimes.rows}
     />
   );
 };

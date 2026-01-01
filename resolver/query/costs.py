@@ -37,6 +37,26 @@ LATENCY_COLUMNS = [
     "p90_elapsed_ms",
 ]
 
+RUN_RUNTIME_COLUMNS = [
+    "run_date",
+    "run_id",
+    "year",
+    "month",
+    "n_questions",
+    "n_countries",
+    "question_p50_ms",
+    "question_p90_ms",
+    "country_p50_ms",
+    "country_p90_ms",
+    "web_search_ms",
+    "hs_ms",
+    "research_ms",
+    "forecast_ms",
+    "scenario_ms",
+    "other_ms",
+    "total_ms",
+]
+
 
 def phase_group(phase: str | None) -> str:
     if not phase:
@@ -391,3 +411,118 @@ def build_latencies_runs(conn) -> pd.DataFrame:
     )
     agg["n_calls"] = agg["n_calls"].fillna(0).astype(int)
     return agg[LATENCY_COLUMNS]
+
+
+def _empty_run_runtimes_frame(**attrs: int) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=RUN_RUNTIME_COLUMNS)
+    if attrs:
+        empty.attrs.update(attrs)
+    return empty
+
+
+def build_run_runtimes(conn) -> pd.DataFrame:
+    df = _load_llm_calls(conn)
+    total_rows = len(df)
+    missing_elapsed_ms = int(df["elapsed_ms"].isna().sum()) if "elapsed_ms" in df.columns else total_rows
+    missing_created_at = (
+        int(df["created_at"].isna().sum()) if "created_at" in df.columns else total_rows
+    )
+    missing_run_id = int(df["run_id"].isna().sum()) if "run_id" in df.columns else total_rows
+    attrs = {
+        "total_rows": total_rows,
+        "missing_elapsed_ms": missing_elapsed_ms,
+        "missing_created_at": missing_created_at,
+        "missing_run_id": missing_run_id,
+    }
+
+    if df.empty or "elapsed_ms" not in df.columns or "created_at" not in df.columns:
+        return _empty_run_runtimes_frame(**attrs)
+
+    df = df[df["elapsed_ms"].notna() & df["created_at"].notna() & df["run_id"].notna()]
+    if df.empty:
+        return _empty_run_runtimes_frame(**attrs)
+
+    metadata = (
+        df.groupby(["run_id"], dropna=False)
+        .agg(
+            run_created_at=("created_at", "min"),
+            n_questions=("question_id", lambda s: s.dropna().nunique()),
+            n_countries=("iso3", lambda s: s.dropna().nunique()),
+        )
+        .reset_index()
+    )
+    metadata["run_date"] = metadata["run_created_at"].dt.strftime("%Y-%m-%d")
+    metadata["year"] = metadata["run_created_at"].dt.year.astype("Int64")
+    metadata["month"] = metadata["run_created_at"].dt.month.astype("Int64")
+
+    q_totals = (
+        df.dropna(subset=["question_id"])
+        .groupby(["run_id", "question_id"], dropna=False)["elapsed_ms"]
+        .sum()
+    )
+    if q_totals.empty:
+        question_stats = pd.DataFrame(columns=["run_id", "question_p50_ms", "question_p90_ms"])
+    else:
+        question_stats = (
+            q_totals.groupby(level=0)
+            .apply(
+                lambda s: pd.Series(
+                    {
+                        "question_p50_ms": s.quantile(0.5),
+                        "question_p90_ms": s.quantile(0.9),
+                    }
+                )
+            )
+            .reset_index()
+        )
+
+    c_totals = (
+        df.dropna(subset=["iso3"])
+        .groupby(["run_id", "iso3"], dropna=False)["elapsed_ms"]
+        .sum()
+    )
+    if c_totals.empty:
+        country_stats = pd.DataFrame(columns=["run_id", "country_p50_ms", "country_p90_ms"])
+    else:
+        country_stats = (
+            c_totals.groupby(level=0)
+            .apply(
+                lambda s: pd.Series(
+                    {
+                        "country_p50_ms": s.quantile(0.5),
+                        "country_p90_ms": s.quantile(0.9),
+                    }
+                )
+            )
+            .reset_index()
+        )
+
+    phase_totals = (
+        df.groupby(["run_id", "phase"], dropna=False)["elapsed_ms"].sum().reset_index()
+    )
+    pivot = phase_totals.pivot(index="run_id", columns="phase", values="elapsed_ms").reset_index()
+    phase_columns = {
+        "web_search": "web_search_ms",
+        "hs": "hs_ms",
+        "research": "research_ms",
+        "forecast": "forecast_ms",
+        "scenario": "scenario_ms",
+        "other": "other_ms",
+    }
+    for phase in phase_columns:
+        if phase not in pivot.columns:
+            pivot[phase] = 0.0
+    pivot = pivot.rename(columns=phase_columns)
+    for column in phase_columns.values():
+        pivot[column] = pd.to_numeric(pivot[column], errors="coerce").fillna(0.0)
+
+    pivot["total_ms"] = pivot[list(phase_columns.values())].sum(axis=1)
+
+    merged = metadata.merge(question_stats, on="run_id", how="left")
+    merged = merged.merge(country_stats, on="run_id", how="left")
+    merged = merged.merge(pivot, on="run_id", how="left")
+    for column in list(phase_columns.values()) + ["total_ms"]:
+        merged[column] = merged[column].fillna(0.0)
+
+    merged.attrs.update(attrs)
+    return merged[RUN_RUNTIME_COLUMNS]

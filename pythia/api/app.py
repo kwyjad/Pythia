@@ -43,6 +43,7 @@ from resolver.query.costs import (
     build_costs_runs,
     build_costs_total,
     build_latencies_runs,
+    build_run_runtimes,
 )
 from resolver.query.downloads import build_forecast_spd_export
 from resolver.query.questions_index import (
@@ -2267,3 +2268,36 @@ def costs_latencies():
         raise HTTPException(status_code=500, detail="Failed to build run latencies") from exc
 
     return {"rows": _rows_from_df(df)}
+
+
+@app.get("/v1/costs/run_runtimes")
+def costs_run_runtimes():
+    con = _con()
+    try:
+        df = build_run_runtimes(con)
+    except Exception as exc:
+        logger.exception("Failed to build run runtimes")
+        raise HTTPException(status_code=500, detail="Failed to build run runtimes") from exc
+
+    rows = _rows_from_df(df)
+    missing_question_p50 = sum(
+        1 for row in rows if row.get("question_p50_ms") is None
+    )
+    missing_country_p50 = sum(
+        1 for row in rows if row.get("country_p50_ms") is None
+    )
+    logger.info(
+        "costs/run_runtimes rows=%d missing_question_p50=%d missing_country_p50=%d",
+        len(rows),
+        missing_question_p50,
+        missing_country_p50,
+    )
+    if not rows:
+        logger.warning(
+            "costs/run_runtimes empty total_rows=%s missing_elapsed_ms=%s missing_created_at=%s missing_run_id=%s",
+            df.attrs.get("total_rows"),
+            df.attrs.get("missing_elapsed_ms"),
+            df.attrs.get("missing_created_at"),
+            df.attrs.get("missing_run_id"),
+        )
+    return {"rows": rows}
