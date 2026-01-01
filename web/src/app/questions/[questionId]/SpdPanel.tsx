@@ -17,11 +17,6 @@ type SpdSource = {
   rows: SpdRow[];
 };
 
-const PA_BINS = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"];
-const FATALITIES_BINS = ["<5", "5-<25", "25-<100", "100-<500", ">=500"];
-const PA_CENTROIDS = [0, 30000, 150000, 375000, 700000];
-const FATALITIES_CENTROIDS = [0, 15, 62, 300, 700];
-
 const numberFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0,
 });
@@ -180,9 +175,30 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
   const question = (bundle.question ?? {}) as Record<string, unknown>;
   const metric = (question.metric as string | undefined) ?? "";
   const targetMonth = (question.target_month as string | undefined) ?? null;
+  const forecast = (bundle.forecast ?? {}) as Record<string, unknown>;
 
-  const labels = metric === "FATALITIES" ? FATALITIES_BINS : PA_BINS;
-  const centroids = metric === "FATALITIES" ? FATALITIES_CENTROIDS : PA_CENTROIDS;
+  const labels = useMemo(() => {
+    const raw = forecast.bucket_labels;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((label): label is string => typeof label === "string");
+  }, [forecast.bucket_labels]);
+
+  const centroids = useMemo(() => {
+    const raw = forecast.bucket_centroids;
+    if (!Array.isArray(raw)) {
+      return Array.from({ length: labels.length }, () => 0);
+    }
+    const parsed = raw
+      .map((centroid) => (typeof centroid === "number" ? centroid : Number(centroid)))
+      .map((centroid) => (Number.isFinite(centroid) ? centroid : 0));
+    if (parsed.length < labels.length) {
+      return [
+        ...parsed,
+        ...Array.from({ length: labels.length - parsed.length }, () => 0),
+      ];
+    }
+    return parsed.slice(0, labels.length);
+  }, [forecast.bucket_centroids, labels.length]);
 
   const sources = useMemo(() => collectSpdSources(bundle), [bundle]);
 
@@ -278,6 +294,15 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
     );
   }
 
+  if (!labels.length) {
+    return (
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
+        <h2 className="text-lg font-semibold">Forecast SPD</h2>
+        <p className="mt-3 text-sm text-fred-text">Bucket definitions unavailable.</p>
+      </section>
+    );
+  }
+
   return (
     <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -323,12 +348,16 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
               checked={showTotalEiv}
               onChange={(event) => setShowTotalEiv(event.target.checked)}
             />
-            Show 6-Month EIV
+            {metric.toUpperCase() === "FATALITIES"
+              ? "Show 6-Month cumulative expected deaths"
+              : "Show 6-Month EIV"}
           </label>
           <div className="text-sm text-fred-text">
             EIV: {numberFormatter.format(Math.round(eivMonth))}
             {showTotalEiv
-              ? ` • Total: ${numberFormatter.format(Math.round(eivTotal))}`
+              ? ` • ${
+                  metric.toUpperCase() === "FATALITIES" ? "Cumulative" : "Total"
+                }: ${numberFormatter.format(Math.round(eivTotal))}`
               : ""}
           </div>
         </div>

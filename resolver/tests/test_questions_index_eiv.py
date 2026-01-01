@@ -83,6 +83,7 @@ def test_compute_questions_forecast_summary_uses_latest_run() -> None:
     assert summary["q1"]["forecast_date"] == "2024-02-10"
     assert summary["q1"]["horizon_max"] == 3
     assert summary["q1"]["eiv_total"] == pytest.approx(15.0)
+    assert summary["q1"]["eiv_peak"] == pytest.approx(10.0)
 
     conn.close()
 
@@ -161,6 +162,7 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
     assert summary["q2"]["forecast_date"] == "2024-02-10"
     assert summary["q2"]["horizon_max"] == 2
     assert summary["q2"]["eiv_total"] == pytest.approx(11.0)
+    assert summary["q2"]["eiv_peak"] == pytest.approx(9.0)
 
     conn.close()
 
@@ -223,6 +225,7 @@ def test_compute_questions_forecast_summary_falls_back_without_centroids() -> No
     assert summary["q3"]["forecast_date"] == "2024-03-05"
     assert summary["q3"]["horizon_max"] == 2
     assert summary["q3"]["eiv_total"] == pytest.approx(90000.0)
+    assert summary["q3"]["eiv_peak"] == pytest.approx(75000.0)
 
     conn.close()
 
@@ -303,6 +306,7 @@ def test_compute_questions_forecast_summary_prefers_bayesmc() -> None:
     assert summary["q4"]["forecast_date"] == "2024-02-12"
     assert summary["q4"]["horizon_max"] == 2
     assert summary["q4"]["eiv_total"] == pytest.approx(19.0)
+    assert summary["q4"]["eiv_peak"] == pytest.approx(18.0)
 
     conn.close()
 
@@ -381,5 +385,167 @@ def test_compute_questions_forecast_summary_falls_back_to_mean() -> None:
     assert summary["q5"]["forecast_date"] == "2024-02-12"
     assert summary["q5"]["horizon_max"] == 2
     assert summary["q5"]["eiv_total"] == pytest.approx(15.0)
+    assert summary["q5"]["eiv_peak"] == pytest.approx(10.0)
+
+    conn.close()
+
+
+def test_compute_questions_forecast_summary_fatalities_additive() -> None:
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE questions (
+            question_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE forecasts_ensemble (
+            question_id TEXT,
+            run_id TEXT,
+            created_at TIMESTAMP,
+            model_name TEXT,
+            status TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            month_index INTEGER,
+            bucket_index INTEGER,
+            probability DOUBLE
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO questions (question_id, iso3, hazard_code, metric)
+        VALUES ('q7', 'USA', 'ACE', 'FATALITIES');
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+        VALUES ('*', 'FATALITIES', 1, 10.0), ('*', 'FATALITIES', 2, 20.0);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecasts_ensemble (
+            question_id,
+            run_id,
+            created_at,
+            model_name,
+            status,
+            hazard_code,
+            metric,
+            month_index,
+            bucket_index,
+            probability
+        )
+        VALUES
+            ('q7', 'run_new', '2024-02-12 00:00:00', 'ensemble_mean_v2', 'ok', 'ACE', 'FATALITIES', 1, 1, 0.6),
+            ('q7', 'run_new', '2024-02-12 00:00:00', 'ensemble_mean_v2', 'ok', 'ACE', 'FATALITIES', 1, 2, 0.4),
+            ('q7', 'run_new', '2024-02-12 00:00:00', 'ensemble_mean_v2', 'ok', 'ACE', 'FATALITIES', 2, 2, 1.0);
+        """
+    )
+
+    summary = compute_questions_forecast_summary(conn, question_ids=["q7"])
+    assert summary["q7"]["eiv_total"] == pytest.approx(34.0)
+    assert summary["q7"]["eiv_peak"] == pytest.approx(20.0)
+
+    conn.close()
+
+
+def test_compute_questions_forecast_summary_ignores_ev_value() -> None:
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE questions (
+            question_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE forecasts_ensemble (
+            question_id TEXT,
+            run_id TEXT,
+            created_at TIMESTAMP,
+            model_name TEXT,
+            status TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            month_index INTEGER,
+            bucket_index INTEGER,
+            probability DOUBLE,
+            ev_value DOUBLE
+        );
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT,
+            metric TEXT,
+            bucket_index INTEGER,
+            centroid DOUBLE
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO questions (question_id, iso3, hazard_code, metric)
+        VALUES ('q6', 'USA', 'TC', 'PA');
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+        VALUES ('TC', 'PA', 1, 10.0);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecasts_ensemble (
+            question_id,
+            run_id,
+            created_at,
+            model_name,
+            status,
+            hazard_code,
+            metric,
+            month_index,
+            bucket_index,
+            probability,
+            ev_value
+        )
+        VALUES
+            ('q6', 'run_new', '2024-02-12 00:00:00', 'ensemble_mean_v2', 'ok', 'TC', 'PA', 1, 1, 0.5, 999.0);
+        """
+    )
+
+    summary = compute_questions_forecast_summary(conn, question_ids=["q6"])
+    assert summary["q6"]["eiv_total"] == pytest.approx(5.0)
+
+    conn.execute(
+        "UPDATE bucket_centroids SET centroid = 20.0 WHERE hazard_code = 'TC' AND metric = 'PA'"
+    )
+    summary = compute_questions_forecast_summary(conn, question_ids=["q6"])
+    assert summary["q6"]["eiv_total"] == pytest.approx(10.0)
 
     conn.close()

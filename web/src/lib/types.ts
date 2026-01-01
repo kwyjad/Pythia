@@ -95,6 +95,7 @@ export type QuestionsResponse = {
     forecast_date?: string | null;
     forecast_horizon_max?: number | null;
     eiv_total?: number | null;
+    eiv_peak?: number | null;
     triage_score?: number | null;
     triage_tier?: string | null;
     triage_need_full_spd?: boolean | null;
@@ -122,6 +123,8 @@ export type QuestionBundleResponse = {
         ensemble_spd?: unknown[];
         raw_spd?: unknown[];
         scenario_writer?: unknown[];
+        bucket_labels?: string[];
+        bucket_centroids?: number[];
       }
     | null;
   context?:

@@ -8,9 +8,9 @@ import InfoTooltip from "./InfoTooltip";
 import SortableTable, { SortableColumn } from "./SortableTable";
 
 const EIV_TOOLTIP =
-  "EIV = sum over buckets of p(bucket) × centroid(bucket), aggregated across all forecasted hazards for the country, shown per month and summed over months 1–6.";
+  "EIV = sum over buckets of p(bucket) × centroid(bucket). Monthly values use surge aggregation across hazards (max hazard + 25% of the remainder) and Total is the worst month across months 1–6.";
 const PER_CAPITA_TOOLTIP =
-  "Per-capita = EIV ÷ population. Displayed as percent of population (sum over months 1–6).";
+  "Per-capita = surge-adjusted EIV ÷ population. Displayed as percent of population (worst month across months 1–6).";
 const POPULATION_TOOLTIP = "Population missing for this country in the current snapshot.";
 
 const formatNumber = (value: number | null | undefined) =>

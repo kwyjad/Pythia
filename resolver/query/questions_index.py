@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from resolver.query import eiv_sql
+
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
     LOGGER.addHandler(logging.NullHandler())
@@ -74,7 +76,6 @@ def compute_questions_forecast_summary(
     bucket_col = _pick_column(fe_cols, ["bucket_index", "class_bin"])
     ts_col = _pick_column(fe_cols, ["created_at", "timestamp"])
     run_col = _pick_column(fe_cols, ["run_id"])
-    ev_value_col = _pick_column(fe_cols, ["ev_value"])
     fe_has_hazard = "hazard_code" in fe_cols
     fe_has_metric = "metric" in fe_cols
     model_col = _pick_column(fe_cols, ["model_name"])
@@ -82,7 +83,7 @@ def compute_questions_forecast_summary(
     def _log_summary_context(reason: str, *, bc_joinable: bool = False) -> None:
         LOGGER.info(
             "Skipping forecast summary (%s). Columns: prob=%s horizon=%s bucket=%s status=%s "
-            "ts=%s run=%s ev_value=%s bc_joinable=%s",
+            "ts=%s run=%s bc_joinable=%s",
             reason,
             prob_col,
             horizon_col,
@@ -90,7 +91,6 @@ def compute_questions_forecast_summary(
             status_col,
             ts_col,
             run_col,
-            ev_value_col,
             bc_joinable,
         )
 
@@ -128,84 +128,34 @@ def compute_questions_forecast_summary(
 
     use_latest = bool(run_col and ts_col)
     base_alias = "filtered" if model_col else ("scoped" if use_latest else "base")
-    base_ev_expr = f"{base_alias}.{ev_value_col}" if ev_value_col else "NULL"
     metric_expr = f"{base_alias}.metric"
+    hazard_expr = f"{base_alias}.hazard_code"
     bucket_expr = f"{base_alias}.bucket"
-    if bucket_col == "bucket_index":
-        fallback_centroid_expr = f"""
-            CASE
-              WHEN UPPER({metric_expr}) = 'PA' THEN CASE {bucket_expr}
-                WHEN 1 THEN 0
-                WHEN 2 THEN 30000
-                WHEN 3 THEN 150000
-                WHEN 4 THEN 375000
-                WHEN 5 THEN 700000
-                ELSE NULL
-              END
-              WHEN UPPER({metric_expr}) = 'FATALITIES' THEN CASE {bucket_expr}
-                WHEN 1 THEN 0
-                WHEN 2 THEN 15
-                WHEN 3 THEN 62
-                WHEN 4 THEN 300
-                WHEN 5 THEN 700
-                ELSE NULL
-              END
-              ELSE NULL
-            END
-        """
-    elif bucket_col == "class_bin":
-        bucket_text = f"LOWER(CAST({bucket_expr} AS VARCHAR))"
-        fallback_centroid_expr = f"""
-            CASE
-              WHEN UPPER({metric_expr}) = 'PA' THEN CASE {bucket_text}
-                WHEN '<10k' THEN 0
-                WHEN '10k-<50k' THEN 30000
-                WHEN '50k-<250k' THEN 150000
-                WHEN '250k-<500k' THEN 375000
-                WHEN '>=500k' THEN 700000
-                ELSE NULL
-              END
-              WHEN UPPER({metric_expr}) = 'FATALITIES' THEN CASE {bucket_text}
-                WHEN '<5' THEN 0
-                WHEN '5-<20' THEN 15
-                WHEN '20-<100' THEN 62
-                WHEN '100-<500' THEN 300
-                WHEN '>=500' THEN 700
-                ELSE NULL
-              END
-              ELSE NULL
-            END
-        """
-    else:
-        fallback_centroid_expr = "NULL"
+    bucket_is_label = bucket_col == "class_bin"
 
     if bc_joinable:
-        bc_exact_alias = "bc_exact"
-        bc_any_alias = "bc_any"
-        bc_centroid_expr = (
-            f"COALESCE({bc_exact_alias}.{bc_centroid_col}, {bc_any_alias}.{bc_centroid_col})"
-        )
-        centroid_expr = f"COALESCE({bc_centroid_expr}, {fallback_centroid_expr})"
-        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.prob * {centroid_expr})"
-        bc_join = (
-            "LEFT JOIN bucket_centroids bc_exact ON "
-            f"UPPER(bc_exact.hazard_code) = UPPER({base_alias}.hazard_code) "
-            f"AND UPPER(bc_exact.metric) = UPPER({base_alias}.metric) "
-            f"AND bc_exact.{bc_bucket_col} = {base_alias}.bucket "
-            "LEFT JOIN bucket_centroids bc_any ON "
-            "UPPER(bc_any.hazard_code) = '*' "
-            f"AND UPPER(bc_any.metric) = UPPER({base_alias}.metric) "
-            f"AND bc_any.{bc_bucket_col} = {base_alias}.bucket"
+        bc_join, centroid_expr, _bucket_index_expr = eiv_sql.build_centroid_join(
+            base_alias=base_alias,
+            metric_expr=metric_expr,
+            hazard_expr=hazard_expr,
+            bucket_expr=bucket_expr,
+            bucket_is_label=bucket_is_label,
+            bc_bucket_col=bc_bucket_col,
+            bc_centroid_col=bc_centroid_col,
         )
     else:
-        eiv_expr = f"COALESCE({base_ev_expr}, {base_alias}.prob * {fallback_centroid_expr})"
+        bucket_index_expr = eiv_sql.bucket_index_expr(
+            metric_expr, bucket_expr, bucket_is_label=bucket_is_label
+        )
+        centroid_expr = eiv_sql.fallback_centroid_expr(metric_expr, bucket_index_expr)
         bc_join = ""
+
+    eiv_expr = f"{base_alias}.prob * {centroid_expr}"
 
     horizon_expr = f"MAX({base_alias}.horizon) AS horizon_max"
     forecast_date_expr = (
         f"STRFTIME(MAX({base_alias}.ts), '%Y-%m-%d') AS forecast_date" if ts_col else "NULL AS forecast_date"
     )
-    eiv_total_expr = f"SUM(COALESCE({eiv_expr}, 0)) AS eiv_total"
 
     params: list[Any] = []
     question_filter = ""
@@ -237,8 +187,6 @@ def compute_questions_forecast_summary(
         base_select.append(f"fe.{run_col} AS run_id")
     if ts_col:
         base_select.append(f"fe.{ts_col} AS ts")
-    if ev_value_col:
-        base_select.append(f"fe.{ev_value_col} AS ev_value")
 
     base_sql = f"""
         SELECT
@@ -294,15 +242,41 @@ def compute_questions_forecast_summary(
                         JOIN chosen_model USING (question_id)
                         WHERE scoped.model_name = chosen_model.chosen_model
                     )
+                    ,
+                    monthly AS (
+                        SELECT
+                          filtered.question_id AS question_id,
+                          filtered.horizon AS horizon,
+                          SUM({eiv_expr}) AS eiv_month
+                        FROM filtered
+                        {bc_join}
+                        GROUP BY filtered.question_id, filtered.horizon
+                    ),
+                    summary AS (
+                        SELECT
+                          question_id,
+                          SUM(eiv_month) AS eiv_total,
+                          MAX(eiv_month) AS eiv_peak
+                        FROM monthly
+                        GROUP BY question_id
+                    ),
+                    meta AS (
+                        SELECT
+                          filtered.question_id AS question_id,
+                          {forecast_date_expr},
+                          {horizon_expr}
+                        FROM filtered
+                        GROUP BY filtered.question_id
+                    )
                     SELECT
-                      filtered.question_id AS question_id,
-                      {forecast_date_expr},
-                      {horizon_expr},
-                      {eiv_total_expr}
-                    FROM filtered
-                    {bc_join}
-                    GROUP BY filtered.question_id
-                    ORDER BY filtered.question_id
+                      meta.question_id AS question_id,
+                      meta.forecast_date,
+                      meta.horizon_max,
+                      summary.eiv_total,
+                      summary.eiv_peak
+                    FROM meta
+                    JOIN summary ON summary.question_id = meta.question_id
+                    ORDER BY meta.question_id
                 """
             else:
                 sql = f"""
@@ -328,15 +302,41 @@ def compute_questions_forecast_summary(
                          AND lr.run_id = base.run_id
                         WHERE lr.rn = 1
                     )
+                    ,
+                    monthly AS (
+                        SELECT
+                          scoped.question_id AS question_id,
+                          scoped.horizon AS horizon,
+                          SUM({eiv_expr}) AS eiv_month
+                        FROM scoped
+                        {bc_join}
+                        GROUP BY scoped.question_id, scoped.horizon
+                    ),
+                    summary AS (
+                        SELECT
+                          question_id,
+                          SUM(eiv_month) AS eiv_total,
+                          MAX(eiv_month) AS eiv_peak
+                        FROM monthly
+                        GROUP BY question_id
+                    ),
+                    meta AS (
+                        SELECT
+                          scoped.question_id AS question_id,
+                          {forecast_date_expr},
+                          {horizon_expr}
+                        FROM scoped
+                        GROUP BY scoped.question_id
+                    )
                     SELECT
-                      scoped.question_id AS question_id,
-                      {forecast_date_expr},
-                      {horizon_expr},
-                      {eiv_total_expr}
-                    FROM scoped
-                    {bc_join}
-                    GROUP BY scoped.question_id
-                    ORDER BY scoped.question_id
+                      meta.question_id AS question_id,
+                      meta.forecast_date,
+                      meta.horizon_max,
+                      summary.eiv_total,
+                      summary.eiv_peak
+                    FROM meta
+                    JOIN summary ON summary.question_id = meta.question_id
+                    ORDER BY meta.question_id
                 """
         else:
             if model_col:
@@ -363,30 +363,81 @@ def compute_questions_forecast_summary(
                         JOIN chosen_model USING (question_id)
                         WHERE base.model_name = chosen_model.chosen_model
                     )
+                    ,
+                    monthly AS (
+                        SELECT
+                          filtered.question_id AS question_id,
+                          filtered.horizon AS horizon,
+                          SUM({eiv_expr}) AS eiv_month
+                        FROM filtered
+                        {bc_join}
+                        GROUP BY filtered.question_id, filtered.horizon
+                    ),
+                    summary AS (
+                        SELECT
+                          question_id,
+                          SUM(eiv_month) AS eiv_total,
+                          MAX(eiv_month) AS eiv_peak
+                        FROM monthly
+                        GROUP BY question_id
+                    ),
+                    meta AS (
+                        SELECT
+                          filtered.question_id AS question_id,
+                          {forecast_date_expr},
+                          {horizon_expr}
+                        FROM filtered
+                        GROUP BY filtered.question_id
+                    )
                     SELECT
-                      filtered.question_id AS question_id,
-                      {forecast_date_expr},
-                      {horizon_expr},
-                      {eiv_total_expr}
-                    FROM filtered
-                    {bc_join}
-                    GROUP BY filtered.question_id
-                    ORDER BY filtered.question_id
+                      meta.question_id AS question_id,
+                      meta.forecast_date,
+                      meta.horizon_max,
+                      summary.eiv_total,
+                      summary.eiv_peak
+                    FROM meta
+                    JOIN summary ON summary.question_id = meta.question_id
+                    ORDER BY meta.question_id
                 """
             else:
                 sql = f"""
                     WITH base AS (
                         {base_sql}
+                    ),
+                    monthly AS (
+                        SELECT
+                          base.question_id AS question_id,
+                          base.horizon AS horizon,
+                          SUM({eiv_expr}) AS eiv_month
+                        FROM base
+                        {bc_join}
+                        GROUP BY base.question_id, base.horizon
+                    ),
+                    summary AS (
+                        SELECT
+                          question_id,
+                          SUM(eiv_month) AS eiv_total,
+                          MAX(eiv_month) AS eiv_peak
+                        FROM monthly
+                        GROUP BY question_id
+                    ),
+                    meta AS (
+                        SELECT
+                          base.question_id AS question_id,
+                          {forecast_date_expr},
+                          {horizon_expr}
+                        FROM base
+                        GROUP BY base.question_id
                     )
                     SELECT
-                      base.question_id AS question_id,
-                      {forecast_date_expr},
-                      {horizon_expr},
-                      {eiv_total_expr}
-                    FROM base
-                    {bc_join}
-                    GROUP BY base.question_id
-                    ORDER BY base.question_id
+                      meta.question_id AS question_id,
+                      meta.forecast_date,
+                      meta.horizon_max,
+                      summary.eiv_total,
+                      summary.eiv_peak
+                    FROM meta
+                    JOIN summary ON summary.question_id = meta.question_id
+                    ORDER BY meta.question_id
                 """
 
         rows = conn.execute(sql, params).fetchall()
@@ -396,13 +447,14 @@ def compute_questions_forecast_summary(
         return {}
 
     summary: dict[str, dict[str, Any]] = {}
-    for question_id, forecast_date, horizon_max, eiv_total in rows or []:
+    for question_id, forecast_date, horizon_max, eiv_total, eiv_peak in rows or []:
         if not question_id:
             continue
         summary[str(question_id)] = {
             "forecast_date": forecast_date,
             "horizon_max": int(horizon_max) if horizon_max is not None else None,
             "eiv_total": float(eiv_total) if eiv_total is not None else None,
+            "eiv_peak": float(eiv_peak) if eiv_peak is not None else None,
         }
     return summary
 

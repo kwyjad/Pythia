@@ -52,6 +52,8 @@ from resolver.query.questions_index import (
     compute_questions_forecast_summary,
     compute_questions_triage_summary,
 )
+from pythia.buckets import BUCKET_SPECS
+from resolver.query import eiv_sql
 
 app = FastAPI(title="Pythia API", version="1.0.0")
 cors_origins_env = os.getenv("PYTHIA_CORS_ALLOW_ORIGINS", "*").strip()
@@ -304,6 +306,67 @@ def _format_year_month_label(year: int, month: int) -> str:
 def _table_has_columns(con: duckdb.DuckDBPyConnection, table: str, required: List[str]) -> bool:
     cols = _table_columns(con, table)
     return set(c.lower() for c in required).issubset(cols)
+
+
+def _bucket_labels(con: duckdb.DuckDBPyConnection, metric: str) -> List[str]:
+    metric_upper = (metric or "").upper()
+    labels: List[str] = []
+    if _table_has_columns(con, "bucket_definitions", ["metric", "bucket_index", "label"]):
+        rows = con.execute(
+            """
+            SELECT bucket_index, label
+            FROM bucket_definitions
+            WHERE UPPER(metric) = ?
+            ORDER BY bucket_index
+            """,
+            [metric_upper],
+        ).fetchall()
+        labels = [str(label) for _, label in rows if label is not None]
+    if labels:
+        return labels
+    specs = BUCKET_SPECS.get(metric_upper)
+    if not specs:
+        return []
+    return [spec.label for spec in specs]
+
+
+def _bucket_centroids(
+    con: duckdb.DuckDBPyConnection,
+    metric: str,
+    hazard_code: str,
+    bucket_count: int,
+) -> List[float]:
+    metric_upper = (metric or "").upper()
+    hazard_upper = (hazard_code or "").upper()
+    centroids: List[float] = []
+    if _table_has_columns(con, "bucket_centroids", ["hazard_code", "metric", "bucket_index", "centroid"]):
+        rows = con.execute(
+            """
+            SELECT bucket_index, centroid
+            FROM bucket_centroids
+            WHERE UPPER(metric) = ? AND UPPER(hazard_code) = ?
+            ORDER BY bucket_index
+            """,
+            [metric_upper, hazard_upper],
+        ).fetchall()
+        centroids = [float(centroid) for _, centroid in rows if centroid is not None]
+        if len(centroids) != bucket_count:
+            rows = con.execute(
+                """
+                SELECT bucket_index, centroid
+                FROM bucket_centroids
+                WHERE UPPER(metric) = ? AND hazard_code = '*'
+                ORDER BY bucket_index
+                """,
+                [metric_upper],
+            ).fetchall()
+            centroids = [float(centroid) for _, centroid in rows if centroid is not None]
+    if centroids and len(centroids) == bucket_count:
+        return centroids
+    specs = BUCKET_SPECS.get(metric_upper)
+    if not specs:
+        return []
+    return [float(spec.centroid) for spec in specs]
 
 
 def _compile_named_params(sql: str, params: Dict[str, Any]) -> tuple[str, List[Any]]:
@@ -923,6 +986,7 @@ def get_questions(
             row["forecast_date"] = forecast.get("forecast_date")
             row["forecast_horizon_max"] = forecast.get("horizon_max")
             row["eiv_total"] = forecast.get("eiv_total")
+            row["eiv_peak"] = forecast.get("eiv_peak")
     except Exception:
         logger.exception("Failed to enrich questions with forecast summary")
     try:
@@ -1172,6 +1236,10 @@ def get_question_bundle(
         limit_llm_calls=limit_llm_calls,
     )
 
+    metric = (question.get("metric") or "").upper()
+    bucket_labels = _bucket_labels(con, metric)
+    bucket_centroids = _bucket_centroids(con, metric, hazard_code, len(bucket_labels))
+
     response = QuestionBundleResponse(
         question=question,
         hs=HsBundle(
@@ -1187,6 +1255,8 @@ def get_question_bundle(
             ensemble_spd=ensemble_spd,
             raw_spd=raw_spd,
             scenario_writer=scenario_writer,
+            bucket_labels=bucket_labels,
+            bucket_centroids=bucket_centroids,
         ),
         context=ContextBundle(question_context=question_context, resolutions=resolutions, scores=scores),
         llm_calls=llm_calls_bundle,
@@ -1510,10 +1580,21 @@ def get_risk_index(
     target_month: Optional[str] = Query(None, description="Target month 'YYYY-MM'"),
     horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
+    agg: str = Query("surge", description="Aggregation mode: surge (default) or burden (legacy)"),
+    alpha: float = Query(0.25, ge=0, le=1, description="Surge blending weight"),
 ):
     con = _con()
     metric_upper = (metric or "").strip().upper() or "PA"
     hazard_code_upper = (hazard_code or "").strip().upper() or None
+
+    if metric_upper != "PA":
+        return {
+            "metric": metric_upper,
+            "target_month": target_month,
+            "horizon_m": horizon_m,
+            "normalize": normalize,
+            "rows": [],
+        }
 
     horizon_col, bucket_col, prob_col = _resolve_forecasts_ensemble_columns(con)
     if not horizon_col or not bucket_col or not prob_col:
@@ -1548,9 +1629,9 @@ def get_risk_index(
 
     db_population_map: dict[str, int] = {}
     populations_available = False
-    populations_table_available = normalize and _table_exists(
-        con, "populations"
-    ) and _table_has_columns(con, "populations", ["iso3", "population", "year"])
+    populations_table_available = _table_exists(con, "populations") and _table_has_columns(
+        con, "populations", ["iso3", "population", "year"]
+    )
     if populations_table_available:
         pop_df = _execute(
             con,
@@ -1578,12 +1659,18 @@ def get_risk_index(
                     continue
                 db_population_map[iso] = pop_value
             populations_available = bool(db_population_map)
+    agg_mode = "burden"
     registry_available = False
-    if normalize and not populations_available:
+    if (normalize or agg_mode == "surge") and not populations_available:
         _load_population_registry()
         registry_available = bool(_POPULATION_BY_ISO3)
         if not registry_available:
             logger.debug("Population registry empty; per-capita values unavailable.")
+    if agg is not None and str(agg).strip():
+        agg_mode = str(agg).strip().lower()
+    if agg_mode not in {"surge", "burden"}:
+        raise HTTPException(status_code=400, detail="agg must be 'surge' or 'burden'")
+
     centroids_available = _table_exists(con, "bucket_centroids") and _table_has_columns(
         con, "bucket_centroids", ["metric", "hazard_code", "bucket_index", "centroid"]
     )
@@ -1600,6 +1687,7 @@ def get_risk_index(
       , NULL AS total_pc
     """
     pop_join = ""
+    pop_join_monthly = ""
     if populations_available:
         pop_cte = """
         , pop AS (
@@ -1652,32 +1740,40 @@ def get_risk_index(
             END AS total_pc
         """
         pop_join = "LEFT JOIN pop ON pop.iso3 = p.iso3"
+        pop_join_monthly = "LEFT JOIN pop ON pop.iso3 = ms.iso3"
 
+    bucket_is_label = bucket_col == "class_bin"
     centroid_join = ""
-    centroid_expr = f"CAST(fe.{bucket_col} AS DOUBLE)"
+    centroid_expr = "NULL"
     if centroids_available:
-        centroid_join = """
-          LEFT JOIN bucket_centroids bc
-            ON UPPER(bc.metric) = :metric
-           AND bc.hazard_code = '*'
-           AND bc.bucket_index = fe.{bucket_col}
-        """.format(bucket_col=bucket_col)
-        centroid_expr = f"COALESCE(bc.centroid, CAST(fe.{bucket_col} AS DOUBLE))"
+        centroid_join, centroid_expr, _bucket_index_expr = eiv_sql.build_centroid_join(
+            base_alias="fe",
+            metric_expr=":metric",
+            hazard_expr="fe.hazard_code",
+            bucket_expr=f"fe.{bucket_col}",
+            bucket_is_label=bucket_is_label,
+        )
+    else:
+        bucket_index_expr = eiv_sql.bucket_index_expr(
+            ":metric", f"fe.{bucket_col}", bucket_is_label=bucket_is_label
+        )
+        centroid_expr = eiv_sql.fallback_centroid_expr(":metric", bucket_index_expr)
 
     model_name_available = _table_has_columns(con, "forecasts_ensemble", ["model_name"])
     base_cte = ""
     per_row_cte = f"""
-    , per_row AS (
-      SELECT
-        q.iso3,
-        q.hazard_code,
-        fe.{horizon_col} AS m,
-        fe.{bucket_col} AS b,
-        fe.{prob_col} AS p,
-        {centroid_expr} AS centroid
-      FROM forecasts_ensemble fe
-      JOIN q ON q.question_id = fe.question_id
-      {centroid_join}
+        , per_row AS (
+          SELECT
+            q.iso3,
+            q.hazard_code,
+            q.metric,
+            fe.{horizon_col} AS m,
+            fe.{bucket_col} AS b,
+            fe.{prob_col} AS p,
+            COALESCE({centroid_expr}, 0) AS centroid
+          FROM forecasts_ensemble fe
+          JOIN q ON q.question_id = fe.question_id
+          {centroid_join}
       WHERE fe.{horizon_col} BETWEEN 1 AND 6
         AND fe.{bucket_col} IS NOT NULL
         AND fe.{prob_col} IS NOT NULL
@@ -1690,6 +1786,7 @@ def get_risk_index(
             q.question_id,
             q.iso3,
             q.hazard_code,
+            q.metric,
             fe.{horizon_col} AS {horizon_col},
             fe.{bucket_col} AS {bucket_col},
             fe.{prob_col} AS {prob_col},
@@ -1725,13 +1822,34 @@ def get_risk_index(
           SELECT
             fe.iso3,
             fe.hazard_code,
+            fe.metric,
             fe.{horizon_col} AS m,
             fe.{bucket_col} AS b,
             fe.{prob_col} AS p,
-            {centroid_expr} AS centroid
+            COALESCE({centroid_expr}, 0) AS centroid
           FROM filtered fe
           {centroid_join}
         )
+        """
+
+    if populations_available:
+        monthly_eiv_expr = """
+          CASE
+            WHEN :agg = 'surge' THEN
+              CASE
+                WHEN pop.population IS NOT NULL
+                  THEN LEAST(pop.population, ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv))
+                ELSE ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv)
+              END
+            ELSE ms.sum_eiv
+          END
+        """
+    else:
+        monthly_eiv_expr = """
+          CASE
+            WHEN :agg = 'surge' THEN ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv)
+            ELSE ms.sum_eiv
+          END
         """
 
     sql = f"""
@@ -1745,13 +1863,31 @@ def get_risk_index(
     {pop_cte}
     {base_cte}
     {per_row_cte},
-    monthly AS (
+    monthly_hazards AS (
       SELECT
         iso3,
+        hazard_code,
         m,
         SUM(p * centroid) AS eiv
       FROM per_row
+      GROUP BY iso3, hazard_code, m
+    ),
+    monthly_summary AS (
+      SELECT
+        iso3,
+        m,
+        SUM(eiv) AS sum_eiv,
+        MAX(eiv) AS max_eiv
+      FROM monthly_hazards
       GROUP BY iso3, m
+    ),
+    monthly AS (
+      SELECT
+        ms.iso3,
+        ms.m,
+        {monthly_eiv_expr} AS eiv
+      FROM monthly_summary ms
+      {pop_join_monthly}
     ),
     hazards AS (
       SELECT iso3, COUNT(DISTINCT hazard_code) AS n_hazards_forecasted
@@ -1767,7 +1903,10 @@ def get_risk_index(
         SUM(CASE WHEN m = 4 THEN eiv ELSE 0 END) AS m4,
         SUM(CASE WHEN m = 5 THEN eiv ELSE 0 END) AS m5,
         SUM(CASE WHEN m = 6 THEN eiv ELSE 0 END) AS m6,
-        SUM(eiv) AS total
+        CASE
+          WHEN :agg = 'surge' THEN MAX(eiv)
+          ELSE SUM(eiv)
+        END AS total
       FROM monthly
       GROUP BY iso3
     )
@@ -1786,6 +1925,8 @@ def get_risk_index(
         "metric": metric_upper,
         "target_month": target_month,
         "hazard_code": hazard_code_upper,
+        "agg": agg_mode,
+        "alpha": alpha,
     }
     if populations_available:
         params["normalize"] = normalize
@@ -1808,6 +1949,19 @@ def get_risk_index(
             pop_value = _population(row.get("iso3", ""))
         if pop_value and pop_value > 0:
             row["population"] = pop_value
+            if agg_mode == "surge":
+                capped_months = []
+                for key in ["m1", "m2", "m3", "m4", "m5", "m6"]:
+                    value = row.get(key)
+                    if value is None:
+                        capped_months.append(None)
+                        continue
+                    capped_value = min(float(value), float(pop_value))
+                    row[key] = capped_value
+                    capped_months.append(capped_value)
+                capped_values = [v for v in capped_months if v is not None]
+                if capped_values:
+                    row["total"] = max(capped_values)
             if normalize:
                 row["m1_pc"] = (
                     row["m1"] / pop_value if row.get("m1") is not None else None
