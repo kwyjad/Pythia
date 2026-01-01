@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -91,6 +93,55 @@ def _add_months(ym: str | None, months: int) -> str | None:
     new_year = total // 12
     new_month = (total % 12) + 1
     return f"{new_year:04d}-{new_month:02d}"
+
+
+def _parse_run_id_date(run_id: str | None) -> datetime | None:
+    if not run_id:
+        return None
+    match = re.search(r"\b(\d{8})T\d{6}\b", str(run_id))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d")
+    except Exception:
+        return None
+
+
+def _load_triage_models(con) -> dict[str, str]:
+    if con is None or not _table_exists(con, "llm_calls"):
+        return {}
+    cols = _table_columns(con, "llm_calls")
+    if "hs_run_id" not in cols or "phase" not in cols:
+        return {}
+    model_col = _pick_column(cols, ["model_id", "model_name"])
+    if not model_col:
+        return {}
+
+    df = con.execute(
+        f"""
+        SELECT hs_run_id, {model_col} AS model
+        FROM llm_calls
+        WHERE LOWER(CAST(phase AS VARCHAR)) = 'hs_triage'
+          AND {model_col} IS NOT NULL
+        """
+    ).fetchdf()
+
+    if df.empty:
+        return {}
+
+    df["model"] = df["model"].astype(str).str.strip()
+    df = df[df["model"] != ""]
+    if df.empty:
+        return {}
+
+    counts = (
+        df.groupby(["hs_run_id", "model"], dropna=False)
+        .size()
+        .reset_index(name="n")
+        .sort_values(["hs_run_id", "n", "model"], ascending=[True, False, True])
+    )
+    top = counts.groupby("hs_run_id", as_index=False).head(1)
+    return dict(zip(top["hs_run_id"], top["model"]))
 
 
 def _standardize_forecasts(conn, table: str) -> pd.DataFrame:
@@ -417,3 +468,99 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
     )
 
     return output[columns]
+
+
+def build_triage_export(con) -> pd.DataFrame:
+    columns = [
+        "Triage Year",
+        "Triage Month",
+        "Triage Date",
+        "Run ID",
+        "Triage model",
+        "ISO3",
+        "Country",
+        "Triage Score",
+        "Triage Tier",
+    ]
+
+    if con is None or not _table_exists(con, "hs_triage"):
+        return pd.DataFrame(columns=columns)
+
+    triage_df = _latest_triage(con)
+    if triage_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    triage_df["iso3"] = triage_df["iso3"].astype(str).str.upper()
+    triage_df["triage_score"] = pd.to_numeric(triage_df["triage_score"], errors="coerce")
+    triage_df["_created_at"] = pd.to_datetime(triage_df["created_at"], errors="coerce")
+
+    tier_order = {"quiet": 0, "watchlist": 1, "priority": 2}
+    triage_df["_tier_sort"] = (
+        triage_df["tier"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .map(tier_order)
+        .fillna(-1)
+    )
+    triage_df["_tier_label"] = triage_df["tier"].astype(str).fillna("")
+    triage_df.loc[triage_df["tier"].isna(), "_tier_label"] = ""
+
+    score_df = (
+        triage_df.groupby(["run_id", "iso3"], dropna=False)["triage_score"]
+        .max()
+        .reset_index()
+    )
+    date_df = (
+        triage_df.groupby(["run_id", "iso3"], dropna=False)["_created_at"]
+        .max()
+        .reset_index()
+    )
+    tier_df = (
+        triage_df.sort_values(["run_id", "iso3", "_tier_sort", "_tier_label"])
+        .groupby(["run_id", "iso3"], as_index=False)
+        .tail(1)[["run_id", "iso3", "tier"]]
+    )
+
+    collapsed = score_df.merge(date_df, on=["run_id", "iso3"], how="left").merge(
+        tier_df, on=["run_id", "iso3"], how="left"
+    )
+
+    def _derive_date_fields(row: pd.Series) -> pd.Series:
+        created_at = row["_created_at"]
+        run_id = row["run_id"]
+        parsed = created_at if pd.notna(created_at) else _parse_run_id_date(run_id)
+        if not parsed:
+            return pd.Series({"Triage Year": None, "Triage Month": None, "Triage Date": None})
+        return pd.Series(
+            {
+                "Triage Year": parsed.year,
+                "Triage Month": parsed.month,
+                "Triage Date": parsed.strftime("%Y-%m-%d"),
+            }
+        )
+
+    date_fields = collapsed.apply(_derive_date_fields, axis=1)
+    collapsed = pd.concat([collapsed, date_fields], axis=1)
+
+    country_map = _load_country_registry()
+    collapsed["Country"] = collapsed["iso3"].map(country_map).fillna(collapsed["iso3"])
+
+    model_map = _load_triage_models(con)
+    collapsed["Triage model"] = collapsed["run_id"].map(model_map)
+
+    output = pd.DataFrame(
+        {
+            "Triage Year": collapsed["Triage Year"],
+            "Triage Month": collapsed["Triage Month"],
+            "Triage Date": collapsed["Triage Date"],
+            "Run ID": collapsed["run_id"],
+            "Triage model": collapsed["Triage model"],
+            "ISO3": collapsed["iso3"],
+            "Country": collapsed["Country"],
+            "Triage Score": collapsed["triage_score"],
+            "Triage Tier": collapsed["tier"],
+        }
+    )
+
+    return output.sort_values(["Run ID", "ISO3"]).reset_index(drop=True)[columns]

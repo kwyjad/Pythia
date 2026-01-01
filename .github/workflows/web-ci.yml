@@ -33,9 +33,26 @@ jobs:
         working-directory: web
         run: npm ci
 
+      - name: Restore Next.js cache
+        id: nextjs-cache
+        uses: actions/cache@v4
+        with:
+          path: web/.next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('web/package-lock.json') }}-${{ hashFiles('web/src/**/*', 'web/public/**/*', 'web/tailwind.config.ts', 'web/postcss.config.js') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('web/package-lock.json') }}-
+            ${{ runner.os }}-nextjs-
+
+      - name: Report Next.js cache status
+        run: |
+          echo "Next.js cache hit: ${{ steps.nextjs-cache.outputs.cache-hit }}"
+
       - name: Build
         working-directory: web
         run: npm run build
+
+      - name: Report Next.js cache size
+        run: du -sh web/.next/cache || true
 
   ui-guardrails:
     runs-on: ubuntu-latest

@@ -46,7 +46,7 @@ from resolver.query.costs import (
     build_latencies_runs,
     build_run_runtimes,
 )
-from resolver.query.downloads import build_forecast_spd_export
+from resolver.query.downloads import build_forecast_spd_export, build_triage_export
 from resolver.query.questions_index import (
     compute_questions_forecast_summary,
     compute_questions_triage_summary,
@@ -2541,6 +2541,38 @@ def download_forecasts_csv():
 
     buffer.seek(0)
     headers = {"Content-Disposition": 'attachment; filename="pythia_forecasts_export.csv"'}
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/triage.csv")
+def download_triage_csv():
+    con = _con()
+    try:
+        df = build_triage_export(con)
+    except Exception as exc:
+        logger.exception("Failed to build triage download export")
+        raise HTTPException(status_code=500, detail="Failed to build triage download export") from exc
+
+    logger.info(
+        "Triage download export rows=%s runs=%s iso3=%s",
+        len(df),
+        df["Run ID"].nunique(dropna=True),
+        df["ISO3"].nunique(dropna=True),
+    )
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize triage download export")
+        raise HTTPException(status_code=500, detail="Failed to serialize triage download export") from exc
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="run_triage_results.csv"'}
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv; charset=utf-8",
