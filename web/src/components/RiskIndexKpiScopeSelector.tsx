@@ -21,33 +21,25 @@ const defaultScopeLabels: Record<ScopeKey, string> = {
   total_all: "Total active + inactive",
 };
 
-const kpiLabels: Record<
-  ScopeKey,
-  { questions: string; forecasts: string; countries: string }
-> = {
+const kpiLabels: Record<ScopeKey, { questions: string; forecasts: string }> = {
   selected_run: {
     questions: "Questions (selected run)",
     forecasts: "Forecasts (selected run)",
-    countries: "Countries (selected run)",
   },
   total_active: {
     questions: "Active questions",
     forecasts: "Active forecasts",
-    countries: "Active countries",
   },
   total_all: {
     questions: "All questions",
     forecasts: "All forecasts",
-    countries: "All countries",
   },
 };
 
 const RiskIndexKpiScopeSelector = ({
   kpiScopes,
 }: RiskIndexKpiScopeSelectorProps) => {
-  const [selectedScope, setSelectedScope] = useState<string>(
-    "selected_run"
-  );
+  const [selectedScope, setSelectedScope] = useState<string>("selected_run");
   const [storedScope, setStoredScope] = useState<string | null>(null);
   const [debugEnabled, setDebugEnabled] = useState(false);
 
@@ -92,7 +84,6 @@ const RiskIndexKpiScopeSelector = ({
 
   return (
     <div className="space-y-4" data-testid="risk-index-kpi-panel">
-      {/* Note: Avoid raw '>' in JSX text; use words or &gt; to satisfy the parser. */}
       <div className="space-y-2">
         <label
           className="text-xs font-semibold uppercase tracking-wide text-fred-muted"
@@ -116,14 +107,9 @@ const RiskIndexKpiScopeSelector = ({
       </div>
 
       <KpiCard label={labelSet.questions} value={scopeData?.questions ?? 0} />
-      <KpiCard
-        label={labelSet.forecasts}
-        value={scopeData?.forecasts ?? 0}
-      />
-      <KpiCard label={labelSet.countries} value={scopeData?.countries ?? 0} />
-      />
+      <KpiCard label={labelSet.forecasts} value={scopeData?.forecasts ?? 0} />
 
-      {debugEnabled ? (
+      {debugEnabled && (
         <details className="rounded-lg border border-fred-secondary/60 bg-fred-surface px-4 py-3 text-xs text-fred-muted">
           <summary className="cursor-pointer font-semibold text-fred-primary">
             KPI diagnostics
@@ -140,7 +126,7 @@ const RiskIndexKpiScopeSelector = ({
             )}
           </pre>
         </details>
-      ) : null}
+      )}
     </div>
   );
 };
