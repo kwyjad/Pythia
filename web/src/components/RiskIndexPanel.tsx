@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { apiGet } from "../lib/api";
 import type {
@@ -73,6 +74,7 @@ const HAZARD_LABELS: Record<string, string> = {
   TC: "Tropical Cyclone",
   DI: "Displacement Inflow",
   EP: "Earthquake",
+  HW: "Heatwave",
   LS: "Landslide",
   VO: "Volcano",
   WH: "Wildfire",
@@ -96,6 +98,8 @@ export default function RiskIndexPanel({
   );
   const [kpiError, setKpiError] = useState<string | null>(null);
   const [runMonthFallback, setRunMonthFallback] = useState(false);
+  const searchParams = useSearchParams();
+  const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
   const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
 
@@ -306,9 +310,17 @@ export default function RiskIndexPanel({
             </div>
             <div className="mt-3">
               <KpiCard
-                label="Total Countries in Run"
-                value={selectedScope?.countries_total ?? 0}
+                label="Countries Triaged"
+                value={selectedScope?.countries_triaged ?? 0}
               />
+              {showKpiDebug ? (
+                <div className="mt-1 text-[11px] text-fred-muted">
+                  countries_triaged_source:{" "}
+                  {String(
+                    kpiData.diagnostics?.countries_triaged_source ?? "unknown"
+                  )}
+                </div>
+              ) : null}
             </div>
             <p className="mt-3 text-xs text-fred-muted">
               {kpiData.explanations?.[0] ??

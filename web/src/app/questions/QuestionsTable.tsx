@@ -343,7 +343,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "eiv_total",
-        label: renderEivHeader("EIV"),
+        label: renderEivHeader("6-month EIV"),
         headerClassName: "text-right whitespace-nowrap",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => row.eiv_total ?? null,

@@ -18,6 +18,7 @@ export type DiagnosticsKpiScope = {
   questions: number;
   forecasts: number;
   countries?: number;
+  countries_triaged?: number;
   countries_total?: number;
   countries_with_forecasts?: number;
   resolved_questions: number;

@@ -10,6 +10,18 @@ import type {
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+const formatLastUpdated = (timestamp: string | null | undefined) => {
+  if (!timestamp) return "Unknown";
+  const core = timestamp.slice(0, 19);
+  if (core.length === 19 && core.includes("T")) {
+    const [date, time] = core.split("T");
+    if (date && time) {
+      return `Date: ${date}  Time ${time}`;
+    }
+  }
+  return timestamp;
+};
+
 export default async function OverviewPage() {
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/" });
@@ -44,7 +56,7 @@ export default async function OverviewPage() {
         <p className="text-sm text-fred-text">
           Last updated:{" "}
           <span className="text-fred-text font-medium">
-            {version.latest_hs_created_at ?? "Unknown"}
+            {formatLastUpdated(version.latest_hs_created_at)}
           </span>
         </p>
       </section>

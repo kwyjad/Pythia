@@ -145,7 +145,7 @@ export default function RiskIndexTable({
       },
       {
         key: "total",
-        label: renderEivHeader("Total EIV"),
+        label: renderEivHeader("6-Month EIV"),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.total ?? null,
