@@ -1666,7 +1666,8 @@ def get_risk_index(
         registry_available = bool(_POPULATION_BY_ISO3)
         if not registry_available:
             logger.debug("Population registry empty; per-capita values unavailable.")
-    agg_mode = (agg or "").strip().lower() or "surge"
+    if agg is not None and str(agg).strip():
+        agg_mode = str(agg).strip().lower()
     if agg_mode not in {"surge", "burden"}:
         raise HTTPException(status_code=400, detail="agg must be 'surge' or 'burden'")
 
