@@ -15,9 +15,6 @@ import RiskIndexMap from "./RiskIndexMap";
 import RiskIndexTable from "./RiskIndexTable";
 import RunMonthSelector from "./RunMonthSelector";
 
-const POPULATION_HELPER =
-  "Per-capita requires population data (populations table or resolver/data/population.csv).";
-
 const VIEW_OPTIONS: Array<{ value: RiskView; label: string }> = [
   { value: "PA_EIV", label: "People Affected (PA) EIV" },
   { value: "PA_PC", label: "People Affected (PA) per capita EIV" },
@@ -34,11 +31,18 @@ type RiskIndexPanelProps = {
 
 const buildParams = (view: RiskView) => {
   switch (view) {
-    case "PA_PC":
     case "PA_EIV":
+      return { metric: "PA", horizon_m: 6, normalize: false };
+    case "PA_PC":
       return { metric: "PA", horizon_m: 6, normalize: true };
-    case "FATALITIES_PC":
     case "FATALITIES_EIV":
+      return {
+        metric: "FATALITIES",
+        hazard_code: "ACE",
+        horizon_m: 6,
+        normalize: false,
+      };
+    case "FATALITIES_PC":
       return {
         metric: "FATALITIES",
         hazard_code: "ACE",
@@ -46,7 +50,7 @@ const buildParams = (view: RiskView) => {
         normalize: true,
       };
     default:
-      return { metric: "PA", horizon_m: 6, normalize: true };
+      return { metric: "PA", horizon_m: 6, normalize: false };
   }
 };
 
@@ -102,11 +106,6 @@ export default function RiskIndexPanel({
   const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
   const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
-
-  const populationAvailable = useMemo(
-    () => rows.some((row) => typeof row.population === "number"),
-    [rows]
-  );
 
   const fetchKpiScopes = async (
     metricScope: string,
@@ -222,15 +221,7 @@ export default function RiskIndexPanel({
                 value={view}
               >
                 {VIEW_OPTIONS.map((option) => (
-                  <option
-                    key={option.value}
-                    disabled={
-                      (option.value === "PA_PC" ||
-                        option.value === "FATALITIES_PC") &&
-                      !populationAvailable
-                    }
-                    value={option.value}
-                  >
+                  <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
                 ))}
@@ -258,10 +249,6 @@ export default function RiskIndexPanel({
           </div>
         </div>
       </div>
-
-      {!populationAvailable ? (
-        <p className="text-xs text-fred-muted">{POPULATION_HELPER}</p>
-      ) : null}
 
       {error ? (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
