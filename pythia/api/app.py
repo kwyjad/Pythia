@@ -17,7 +17,7 @@ import os
 
 import duckdb, pandas as pd
 import numpy as np
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 
@@ -51,6 +51,12 @@ from resolver.query.kpi_scopes import compute_countries_triaged_for_month_with_s
 from resolver.query.questions_index import (
     compute_questions_forecast_summary,
     compute_questions_triage_summary,
+)
+from resolver.query.debug_ui import (
+    _get_hs_triage_llm_calls_with_debug,
+    _get_hs_triage_rows_with_debug,
+    _list_hs_runs_with_debug,
+    get_country_run_summary,
 )
 from pythia.buckets import BUCKET_SPECS
 from resolver.query import eiv_sql
@@ -213,6 +219,14 @@ def _con():
     if not db_path.exists():
         raise HTTPException(status_code=503, detail="DB not available yet")
     return duckdb.connect(db_url, read_only=True)
+
+
+def _require_debug_token(token: Optional[str]) -> None:
+    expected = os.getenv("FRED_DEBUG_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=404, detail="Not found")
+    if token != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 @app.on_event("startup")
@@ -2137,6 +2151,71 @@ def diagnostics_summary():
         "latest_hs_run": latest_hs,
         "latest_calibration": latest_calibration,
     }
+
+
+@app.get("/v1/debug/hs_runs")
+def debug_hs_runs(
+    limit: int = Query(50, ge=1, le=500),
+    x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
+):
+    _require_debug_token(x_fred_debug_token)
+    con = _con()
+    rows, schema_debug = _list_hs_runs_with_debug(con, limit=limit)
+    logger.info("Debug hs_runs rows=%d schema=%s", len(rows), schema_debug)
+    return {"rows": rows, "schema_debug": schema_debug}
+
+
+@app.get("/v1/debug/hs_triage")
+def debug_hs_triage(
+    run_id: str = Query(...),
+    iso3: Optional[str] = Query(None),
+    hazard_code: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+    x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
+):
+    _require_debug_token(x_fred_debug_token)
+    con = _con()
+    rows, schema_debug = _get_hs_triage_rows_with_debug(
+        con, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit
+    )
+    logger.info("Debug hs_triage rows=%d schema=%s", len(rows), schema_debug)
+    return {"rows": rows, "schema_debug": schema_debug}
+
+
+@app.get("/v1/debug/hs_triage_llm_calls")
+def debug_hs_triage_llm_calls(
+    run_id: str = Query(...),
+    iso3: Optional[str] = Query(None),
+    hazard_code: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+    preview_chars: int = Query(800, ge=50, le=5000),
+    x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
+):
+    _require_debug_token(x_fred_debug_token)
+    con = _con()
+    rows, schema_debug = _get_hs_triage_llm_calls_with_debug(
+        con,
+        run_id=run_id,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        limit=limit,
+        preview_chars=preview_chars,
+    )
+    logger.info("Debug hs_triage_llm_calls rows=%d schema=%s", len(rows), schema_debug)
+    return {"rows": rows, "schema_debug": schema_debug}
+
+
+@app.get("/v1/debug/hs_country_summary")
+def debug_hs_country_summary(
+    run_id: str = Query(...),
+    iso3: str = Query(...),
+    x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
+):
+    _require_debug_token(x_fred_debug_token)
+    con = _con()
+    row = get_country_run_summary(con, run_id=run_id, iso3=iso3)
+    logger.info("Debug hs_country_summary run_id=%s iso3=%s", run_id, iso3)
+    return {"row": row}
 
 
 @app.get("/v1/diagnostics/kpi_scopes")
