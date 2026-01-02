@@ -161,7 +161,7 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
     summary = compute_questions_forecast_summary(conn, question_ids=["q2"])
     assert summary["q2"]["forecast_date"] == "2024-02-10"
     assert summary["q2"]["horizon_max"] == 2
-    assert summary["q2"]["eiv_total"] == pytest.approx(11.0)
+    assert summary["q2"]["eiv_total"] == pytest.approx(9.0)
     assert summary["q2"]["eiv_peak"] == pytest.approx(9.0)
 
     conn.close()
@@ -224,7 +224,7 @@ def test_compute_questions_forecast_summary_falls_back_without_centroids() -> No
     summary = compute_questions_forecast_summary(conn, question_ids=["q3"])
     assert summary["q3"]["forecast_date"] == "2024-03-05"
     assert summary["q3"]["horizon_max"] == 2
-    assert summary["q3"]["eiv_total"] == pytest.approx(90000.0)
+    assert summary["q3"]["eiv_total"] == pytest.approx(75000.0)
     assert summary["q3"]["eiv_peak"] == pytest.approx(75000.0)
 
     conn.close()

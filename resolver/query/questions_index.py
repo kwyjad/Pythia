@@ -264,7 +264,8 @@ def compute_questions_forecast_summary(
                         SELECT
                           filtered.question_id AS question_id,
                           {forecast_date_expr},
-                          {horizon_expr}
+                          {horizon_expr},
+                          MAX(filtered.metric) AS metric
                         FROM filtered
                         GROUP BY filtered.question_id
                     )
@@ -272,6 +273,7 @@ def compute_questions_forecast_summary(
                       meta.question_id AS question_id,
                       meta.forecast_date,
                       meta.horizon_max,
+                      meta.metric,
                       summary.eiv_total,
                       summary.eiv_peak
                     FROM meta
@@ -324,7 +326,8 @@ def compute_questions_forecast_summary(
                         SELECT
                           scoped.question_id AS question_id,
                           {forecast_date_expr},
-                          {horizon_expr}
+                          {horizon_expr},
+                          MAX(scoped.metric) AS metric
                         FROM scoped
                         GROUP BY scoped.question_id
                     )
@@ -332,6 +335,7 @@ def compute_questions_forecast_summary(
                       meta.question_id AS question_id,
                       meta.forecast_date,
                       meta.horizon_max,
+                      meta.metric,
                       summary.eiv_total,
                       summary.eiv_peak
                     FROM meta
@@ -385,7 +389,8 @@ def compute_questions_forecast_summary(
                         SELECT
                           filtered.question_id AS question_id,
                           {forecast_date_expr},
-                          {horizon_expr}
+                          {horizon_expr},
+                          MAX(filtered.metric) AS metric
                         FROM filtered
                         GROUP BY filtered.question_id
                     )
@@ -393,6 +398,7 @@ def compute_questions_forecast_summary(
                       meta.question_id AS question_id,
                       meta.forecast_date,
                       meta.horizon_max,
+                      meta.metric,
                       summary.eiv_total,
                       summary.eiv_peak
                     FROM meta
@@ -425,7 +431,8 @@ def compute_questions_forecast_summary(
                         SELECT
                           base.question_id AS question_id,
                           {forecast_date_expr},
-                          {horizon_expr}
+                          {horizon_expr},
+                          MAX(base.metric) AS metric
                         FROM base
                         GROUP BY base.question_id
                     )
@@ -433,6 +440,7 @@ def compute_questions_forecast_summary(
                       meta.question_id AS question_id,
                       meta.forecast_date,
                       meta.horizon_max,
+                      meta.metric,
                       summary.eiv_total,
                       summary.eiv_peak
                     FROM meta
@@ -447,9 +455,12 @@ def compute_questions_forecast_summary(
         return {}
 
     summary: dict[str, dict[str, Any]] = {}
-    for question_id, forecast_date, horizon_max, eiv_total, eiv_peak in rows or []:
+    for question_id, forecast_date, horizon_max, metric, eiv_total, eiv_peak in rows or []:
         if not question_id:
             continue
+        metric_upper = str(metric).strip().upper() if metric is not None else ""
+        if metric_upper == "PA" and eiv_peak is not None:
+            eiv_total = eiv_peak
         summary[str(question_id)] = {
             "forecast_date": forecast_date,
             "horizon_max": int(horizon_max) if horizon_max is not None else None,

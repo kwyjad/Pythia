@@ -72,7 +72,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         INSERT INTO questions (question_id, iso3, hazard_code, target_month, metric)
         VALUES
           ('q1', 'USA', 'FL', '2026-01', 'PA'),
-          ('q2', 'USA', 'ACE', '2026-01', 'FATALITIES');
+          ('q2', 'USA', 'ACE', '2026-01', 'FATALITIES'),
+          ('q3', 'USA', 'TC', '2026-01', 'PA');
         """
     )
     con.execute(
@@ -81,8 +82,9 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         VALUES
           ('q1', 1, 2, 1.0, 'ensemble_bayesmc_v2'),
           ('q1', 1, 5, 1.0, 'ensemble_mean_v2'),
+          ('q3', 1, 5, 1.0, 'ensemble_bayesmc_v2'),
           ('q2', 1, 3, 1.0, 'ensemble_bayesmc_v2'),
-          ('q2', 1, 7, 1.0, 'ensemble_mean_v2');
+          ('q2', 2, 4, 1.0, 'ensemble_bayesmc_v2');
         """
     )
     con.execute(
@@ -130,7 +132,7 @@ def test_risk_index_smoke(api_env: None) -> None:
     payload = resp.json()
     assert payload["rows"]
     row = payload["rows"][0]
-    assert row["total"] == pytest.approx(2.0)
+    assert row["total"] == pytest.approx(5.2)
     assert row["population"] == 1000000
     assert row["m1_pc"] == pytest.approx(row["m1"] / row["population"])
     assert row["total_pc"] == pytest.approx(row["total"] / row["population"])
@@ -149,3 +151,4 @@ def test_risk_index_smoke(api_env: None) -> None:
     row = payload["rows"][0]
     assert "population" in row
     assert "total_pc" in row
+    assert row["total"] == pytest.approx(7.0)
