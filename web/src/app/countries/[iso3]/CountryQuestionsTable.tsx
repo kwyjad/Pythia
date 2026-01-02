@@ -54,7 +54,7 @@ const formatEiv = (value?: number | null) => {
   return Math.round(value).toLocaleString();
 };
 
-const buildColumns = (): Array<SortableColumn<CountryQuestionRow>> => [
+const buildColumns = (eivLabel: string): Array<SortableColumn<CountryQuestionRow>> => [
   {
     key: "question",
     label: "Question",
@@ -127,7 +127,7 @@ const buildColumns = (): Array<SortableColumn<CountryQuestionRow>> => [
   },
   {
     key: "eiv_total",
-    label: "6 Month EIV",
+    label: eivLabel,
     sortValue: (row) => row.eiv_total ?? null,
     defaultSortDirection: "desc",
     render: (row) => formatEiv(row.eiv_total),
@@ -156,7 +156,21 @@ const useDebugCountry = () => {
 
 export default function CountryQuestionsTable({ rows }: CountryQuestionsTableProps) {
   const debugEnabled = useDebugCountry();
-  const columns = useMemo(() => buildColumns(), []);
+  const eivLabel = useMemo(() => {
+    const metrics = Array.from(new Set(rows.map((row) => row.metric).filter(Boolean)));
+    const upperMetrics = metrics.map((metric) => metric.toUpperCase());
+    const onlyPa = upperMetrics.length === 1 && upperMetrics[0] === "PA";
+    const onlyFatalities =
+      upperMetrics.length === 1 && upperMetrics[0] === "FATALITIES";
+    if (onlyFatalities) {
+      return "6-Month cumulative expected deaths";
+    }
+    if (onlyPa) {
+      return "6-Month EIV (Peak Month)";
+    }
+    return "6-Month EIV / cumulative expected deaths";
+  }, [rows]);
+  const columns = useMemo(() => buildColumns(eivLabel), [eivLabel]);
 
   const debugSummary = useMemo(() => {
     let eivMin: number | null = null;

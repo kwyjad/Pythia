@@ -354,6 +354,7 @@ export default function RiskIndexPanel({
           mode={isPerCapita ? "percap" : "raw"}
           rows={rows}
           targetMonth={targetMonth}
+          metric={metric}
         />
       </div>
     </div>
