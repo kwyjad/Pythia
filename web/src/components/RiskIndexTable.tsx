@@ -8,9 +8,9 @@ import InfoTooltip from "./InfoTooltip";
 import SortableTable, { SortableColumn } from "./SortableTable";
 
 const EIV_TOOLTIP =
-  "EIV = sum over buckets of p(bucket) × centroid(bucket). Monthly values use surge aggregation across hazards (max hazard + 25% of the remainder) and Total is the worst month across months 1–6.";
+  "EIV = sum over buckets of p(bucket) × centroid(bucket). Monthly values use surge aggregation across hazards (max hazard + 10% of the remainder) and Total is the worst month across months 1–6. 6-month Total = peak month (duration D is recorded but not applied yet).";
 const PER_CAPITA_TOOLTIP =
-  "Per-capita = surge-adjusted EIV ÷ population. Displayed as percent of population (worst month across months 1–6).";
+  "Per-capita = surge-adjusted EIV ÷ population. Displayed as percent of population (worst month across months 1–6). 6-month Total = peak month (duration D is recorded but not applied yet).";
 const POPULATION_TOOLTIP = "Population missing for this country in the current snapshot.";
 
 const formatNumber = (value: number | null | undefined) =>
@@ -49,6 +49,7 @@ type RiskIndexTableProps = {
   rows: RiskIndexRow[];
   targetMonth?: string | null;
   mode: "raw" | "percap";
+  metric?: string | null;
 };
 
 const renderEivHeader = (label: string) => (
@@ -69,7 +70,13 @@ export default function RiskIndexTable({
   rows,
   targetMonth,
   mode,
+  metric,
 }: RiskIndexTableProps) {
+  const metricUpper = (metric ?? "").toUpperCase();
+  const totalLabel =
+    metricUpper === "FATALITIES"
+      ? "6-Month cumulative expected deaths"
+      : "6-Month EIV (Peak Month)";
   const baseMonth = parseTargetMonth(targetMonth);
   const monthLabel = (index: number) =>
     baseMonth
@@ -145,7 +152,7 @@ export default function RiskIndexTable({
       },
       {
         key: "total",
-        label: renderEivHeader("6-Month EIV"),
+        label: renderEivHeader(totalLabel),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.total ?? null,

@@ -26,6 +26,14 @@ const percentFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2,
 });
 
+export const computeTotalEiv = (metric: string, monthlyEivs: number[]) => {
+  const metricUpper = metric.toUpperCase();
+  if (metricUpper === "FATALITIES") {
+    return monthlyEivs.reduce((sum, value) => sum + value, 0);
+  }
+  return monthlyEivs.length ? Math.max(...monthlyEivs) : 0;
+};
+
 const addMonths = (ym: string | null | undefined, months: number): string | null => {
   if (!ym) return null;
   const [year, month] = ym.split("-").map(Number);
@@ -260,20 +268,20 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
 
   const eivTotal = useMemo(() => {
     if (!selectedSource) return 0;
-    return [1, 2, 3, 4, 5, 6].reduce((sum, monthIndex) => {
+    const monthlyEivs = [1, 2, 3, 4, 5, 6].map((monthIndex) => {
       const monthProbs = buildProbVector(
         selectedSource.rows,
         monthIndex,
         labels,
         selectedSource.key
       );
-      const monthEiv = monthProbs.reduce(
+      return monthProbs.reduce(
         (subtotal, prob, index) => subtotal + prob * (centroids[index] ?? 0),
         0
       );
-      return sum + monthEiv;
-    }, 0);
-  }, [centroids, labels, selectedSource]);
+    });
+    return computeTotalEiv(metric, monthlyEivs);
+  }, [centroids, labels, metric, selectedSource]);
 
   const monthOptions = useMemo(() => {
     return [1, 2, 3, 4, 5, 6].map((monthIndex) => {
@@ -350,13 +358,15 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
             />
             {metric.toUpperCase() === "FATALITIES"
               ? "Show 6-Month cumulative expected deaths"
-              : "Show 6-Month EIV"}
+              : "Show 6-Month EIV (peak month)"}
           </label>
           <div className="text-sm text-fred-text">
             EIV: {numberFormatter.format(Math.round(eivMonth))}
             {showTotalEiv
               ? ` • ${
-                  metric.toUpperCase() === "FATALITIES" ? "Cumulative" : "Total"
+                  metric.toUpperCase() === "FATALITIES"
+                    ? "Cumulative"
+                    : "Peak Month"
                 }: ${numberFormatter.format(Math.round(eivTotal))}`
               : ""}
           </div>

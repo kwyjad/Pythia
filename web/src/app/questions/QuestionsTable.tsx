@@ -69,7 +69,7 @@ const parseNumberValue = (value: string) => {
 };
 
 const EIV_TOOLTIP =
-  "EIV = sum over months 1–6 of (sum over buckets of p(bucket, month) × centroid(bucket)). Uses PA centroids for PA questions and fatalities centroids for FATALITIES questions.";
+  "PA uses 6-month EIV as the peak month (not a sum). FATALITIES uses 6-month cumulative expected deaths. Values come from sum over buckets of p(bucket, month) × centroid(bucket).";
 
 const TRIAGE_TOOLTIP =
   "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (default thresholds: priority ≥ 0.70, watchlist ≥ 0.40; hysteresis ±0.05). Only priority/watchlist hazards are sent to full forecasting; quiet hazards may appear but have no EIV.";
@@ -213,6 +213,23 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     selectedStatuses,
   ]);
 
+  const eivHeaderLabel = useMemo(() => {
+    const metrics = selectedMetrics.length
+      ? selectedMetrics
+      : Array.from(new Set(rows.map((row) => row.metric).filter(Boolean)));
+    const upperMetrics = metrics.map((metric) => metric.toUpperCase());
+    const onlyPa = upperMetrics.length === 1 && upperMetrics[0] === "PA";
+    const onlyFatalities =
+      upperMetrics.length === 1 && upperMetrics[0] === "FATALITIES";
+    if (onlyFatalities) {
+      return "6-Month cumulative expected deaths";
+    }
+    if (onlyPa) {
+      return "6-Month EIV (Peak Month)";
+    }
+    return "6-Month EIV / cumulative expected deaths";
+  }, [rows, selectedMetrics]);
+
   const clearFilters = () => {
     setSelectedCountries([]);
     setQuestionQuery("");
@@ -343,7 +360,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "eiv_total",
-        label: renderEivHeader("6-month EIV"),
+        label: renderEivHeader(eivHeaderLabel),
         headerClassName: "text-right whitespace-nowrap",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => row.eiv_total ?? null,
@@ -352,7 +369,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         defaultSortDirection: "desc",
       },
     ],
-    []
+    [eivHeaderLabel]
   );
 
   return (

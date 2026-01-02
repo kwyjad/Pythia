@@ -1593,19 +1593,23 @@ def get_risk_index(
     hazard_code: Optional[str] = Query(None, description="Optional hazard code filter"),
     target_month: Optional[str] = Query(None, description="Target month 'YYYY-MM'"),
     horizon_m: int = Query(1, ge=1, le=6, description="Forecast horizon in months ahead"),
+    duration_m: int = Query(6, ge=1, le=12, description="Duration in months (metadata only)"),
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
     agg: str = Query("surge", description="Aggregation mode: surge (default) or burden (legacy)"),
-    alpha: float = Query(0.25, ge=0, le=1, description="Surge blending weight"),
+    alpha: float = Query(0.1, ge=0, le=1, description="Surge blending weight"),
 ):
     con = _con()
     metric_upper = (metric or "").strip().upper() or "PA"
     hazard_code_upper = (hazard_code or "").strip().upper() or None
+    is_pa = metric_upper == "PA"
+    is_fatalities = metric_upper == "FATALITIES"
 
-    if metric_upper != "PA":
+    if not (is_pa or is_fatalities):
         return {
             "metric": metric_upper,
             "target_month": target_month,
             "horizon_m": horizon_m,
+            "duration_m": duration_m,
             "normalize": normalize,
             "rows": [],
         }
@@ -1616,6 +1620,7 @@ def get_risk_index(
             "metric": metric_upper,
             "target_month": target_month,
             "horizon_m": horizon_m,
+            "duration_m": duration_m,
             "normalize": normalize,
             "rows": [],
         }
@@ -1637,6 +1642,7 @@ def get_risk_index(
             "metric": metric_upper,
             "target_month": None,
             "horizon_m": 6,
+            "duration_m": duration_m,
             "normalize": normalize,
             "rows": [],
         }
@@ -1673,7 +1679,7 @@ def get_risk_index(
                     continue
                 db_population_map[iso] = pop_value
             populations_available = bool(db_population_map)
-    agg_mode = "burden"
+    agg_mode = "surge" if is_pa else "burden"
     registry_available = False
     if (normalize or agg_mode == "surge") and not populations_available:
         _load_population_registry()
@@ -1681,9 +1687,9 @@ def get_risk_index(
         if not registry_available:
             logger.debug("Population registry empty; per-capita values unavailable.")
     if agg is not None and str(agg).strip():
-        agg_mode = str(agg).strip().lower()
-    if agg_mode not in {"surge", "burden"}:
-        raise HTTPException(status_code=400, detail="agg must be 'surge' or 'burden'")
+        requested_agg = str(agg).strip().lower()
+        if requested_agg not in {"surge", "burden"}:
+            raise HTTPException(status_code=400, detail="agg must be 'surge' or 'burden'")
 
     centroids_available = _table_exists(con, "bucket_centroids") and _table_has_columns(
         con, "bucket_centroids", ["metric", "hazard_code", "bucket_index", "centroid"]
@@ -1846,25 +1852,21 @@ def get_risk_index(
         )
         """
 
-    if populations_available:
-        monthly_eiv_expr = """
-          CASE
-            WHEN :agg = 'surge' THEN
+    if is_pa:
+        if populations_available:
+            monthly_eiv_expr = """
               CASE
                 WHEN pop.population IS NOT NULL
                   THEN LEAST(pop.population, ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv))
                 ELSE ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv)
               END
-            ELSE ms.sum_eiv
-          END
-        """
+            """
+        else:
+            monthly_eiv_expr = """
+              ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv)
+            """
     else:
-        monthly_eiv_expr = """
-          CASE
-            WHEN :agg = 'surge' THEN ms.max_eiv + :alpha * (ms.sum_eiv - ms.max_eiv)
-            ELSE ms.sum_eiv
-          END
-        """
+        monthly_eiv_expr = "ms.sum_eiv"
 
     sql = f"""
     WITH q AS (
@@ -2021,6 +2023,7 @@ def get_risk_index(
         "metric": metric_upper,
         "target_month": target_month,
         "horizon_m": 6,
+        "duration_m": duration_m,
         "normalize": normalize,
         "rows": rows,
     }
