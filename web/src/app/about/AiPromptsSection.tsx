@@ -165,11 +165,30 @@ Conflict fatalities buckets (per month, country-level):
 - Bucket 4: 100–499 deaths (label: "100-<500")
 - Bucket 5: >= 500 deaths (label: ">=500")
 
+
 FORECASTING INSTRUCTIONS (Bayesian SPD)
 
 1) Prior / base rates
    - Start from a prior SPD over the buckets based on historical data and relevant reference classes
      (for this hazard and country).
+   - Make your prior explicit in your own thinking: which bucket would you expect *before* reading the evidence?
+
+2) Evidence & likelihood
+   - Use the research bundle and history to identify the most important pieces of evidence.
+   - For each bucket, ask: “If the true value were in this bucket, how likely is this evidence?”
+   - Note which buckets the evidence pushes up or down.
+
+3) Posterior SPD sketch
+   - Combine your prior and the evidence qualitatively to sketch a posterior SPD for each month.
+   - Check that your SPD:
+     - is not implausibly sharp (overconfident), and
+     - is not completely flat (ignoring structure).
+
+4) Red-team your forecast
+   - Challenge your own forecast:
+     - What scenarios might you be underweighting (e.g. rare breakdown of state control, extreme hazard)?
+     - Are you systematically underweighting tail risks?
+   - Adjust your SPD if needed to reflect realistic but low-probability extreme scenarios.
 
 5) Final JSON output (IMPORTANT)
    - At the very end, output ONLY a single JSON object with this exact schema:

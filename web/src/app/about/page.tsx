@@ -87,7 +87,7 @@ Fred’s core output is an SPD (Subjective Probability Distribution): a probabil
 Instead of a single number, you get answers like:
 
 - a distribution over outcome ranges, and
-- derived probabilities such as “chance of exceeding a critical threshold.”
+- Fred calculates Expected Impact Values (EIVs) as a convenient summary statistic. This give you a single number that captures the average expected impact (by multiplying probabilities assigned to each bin by a bin centroid value and the summing these values), but the full distribution is still available for deeper analysis.
 
 Fred first records each model’s raw distribution, then aggregates them into an ensemble forecast.
 
