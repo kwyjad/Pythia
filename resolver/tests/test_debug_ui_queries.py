@@ -140,3 +140,10 @@ def test_country_run_summary_counts():
     assert summary["questions_generated"] == 2
     assert summary["questions_forecasted"] == 1
     assert summary["notes"] == []
+    assert "diagnostics" in summary
+    assert summary["diagnostics"].get("forecasts_source") in {
+        "fallback_join_via_questions",
+        "forecasts_table_direct",
+    }
+    assert summary["diagnostics"]["forecasts_source"] == "fallback_join_via_questions"
+    assert summary["diagnostics"]["forecasts_run_id_missing_fallback"] is True

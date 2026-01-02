@@ -371,6 +371,7 @@ def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
         "questions_generated": None,
         "questions_forecasted": None,
         "notes": [],
+        "diagnostics": {},
     }
 
     iso3_upper = iso3.upper()
@@ -433,6 +434,7 @@ def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
             q_iso_col = _pick_column(q_cols, ["iso3", "country_iso3"])
 
             if fe_run_col and q_iso_col:
+                summary["diagnostics"]["forecasts_source"] = "forecasts_table_direct"
                 try:
                     row = conn.execute(
                         f"""
@@ -448,7 +450,14 @@ def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
                     LOGGER.exception("Failed to count forecasts (run_id join)")
                     summary["notes"].append("forecasts_count_failed")
             elif q_run_col and q_iso_col:
-                summary["notes"].append("forecasts_run_id_missing_fallback")
+                summary["diagnostics"]["forecasts_source"] = "fallback_join_via_questions"
+                summary["diagnostics"]["forecasts_run_id_missing_fallback"] = True
+                LOGGER.info(
+                    "Debug summary forecasts fallback run_id=%s iso3=%s source=%s",
+                    run_id,
+                    iso3_upper,
+                    summary["diagnostics"]["forecasts_source"],
+                )
                 try:
                     row = conn.execute(
                         f"""
