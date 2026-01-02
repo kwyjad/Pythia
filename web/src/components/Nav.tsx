@@ -1,6 +1,8 @@
 import Link from "next/link";
 
 const Nav = () => {
+  const showDebug = process.env.NEXT_PUBLIC_FRED_DEBUG_UI === "1";
+
   return (
     <nav className="border-b border-fred-secondary bg-fred-surface">
       <div className="flex w-full items-center justify-between px-6 py-4">
@@ -52,6 +54,14 @@ const Nav = () => {
           >
             About
           </Link>
+          {showDebug ? (
+            <Link
+              className="text-fred-primary font-semibold hover:text-fred-secondary"
+              href="/debug"
+            >
+              Debug
+            </Link>
+          ) : null}
         </div>
       </div>
     </nav>

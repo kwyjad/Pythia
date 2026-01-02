@@ -20,6 +20,8 @@
     - Legacy header `X-Pythia-Token` is still accepted for backwards compatibility.
     - If no token environment variable is set, admin endpoints fail closed with
       `503 Admin token not configured`.
+  - **Admin-only (debug)**: `/v1/debug/*` endpoints are gated by `FRED_DEBUG_TOKEN`
+    and are excluded from the public API surface.
 - `GET /v1/question_bundle`
   - Query params: `question_id` (required), `hs_run_id`, `forecaster_run_id`, `include_llm_calls` (bool, default false), `include_transcripts` (bool, default false), `limit_llm_calls` (int, default 200).
   - Returns a bundle containing: the question row, HS run/scenarios/country report, ensemble SPD rows plus per-model SPD rows, question context/resolutions (plus `context.scores` when available), and optional `llm_calls` (including transcripts only when requested).
