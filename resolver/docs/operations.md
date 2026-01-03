@@ -83,12 +83,10 @@ This convention keeps environment-dependent behaviour in a small, well-defined s
 
 ## Monthly snapshots in CI
 
-- Workflow: `.github/workflows/resolver-monthly.yml` (manual dispatch remains available; `.github/workflows/publish_snapshot.yml` is now a fallback for unusual recoveries).
-- Schedule: cron `0 2 1 * *` → 02:00 on the first day of the month in Europe/Istanbul. The workflow derives `SNAPSHOT_TARGET_YM` from the previous month in Istanbul time and exports matching `RESOLVER_START_ISO`/`RESOLVER_END_ISO` bounds for the connectors.
-- Pipeline: run live connectors (skipping any missing credentials), execute `python -m resolver.cli.snapshot_cli make-monthly --ym $SNAPSHOT_TARGET_YM --write-db 1 --db-url data/resolver.duckdb`, build the rolling 12‑month LLM context bundle, and prepare both directories for artifact upload.
-- Artifacts & release: uploads `resolver/snapshots/$SNAPSHOT_TARGET_YM/**` plus `context/` as a single artifact and updates or creates a GitHub Release tagged `resolver-$SNAPSHOT_TARGET_YM` containing a compressed bundle.
-- Runbook checks: review the Actions summary table for healthy `resolved_rows` (zero rows usually means a connector was skipped), confirm the context bundle file sizes look reasonable, and verify the release upload succeeded. Skipped connectors log clear warnings so the run still completes green.
-- SLO: finish within 75 minutes so the artifact and release are available by 03:30 Istanbul. If the run fails, resolve the connector issue and re-run; when live data is unavailable fall back to `publish_snapshot.yml` and note the variance in the monthly summary.
+- Workflow: `.github/workflows/publish_snapshot.yml` (manual dispatch remains available; scheduled runs are gated to the first day of the month in Europe/Istanbul time).
+- Schedule: cron `0 23 * * *` with a guard that skips non‑first‑day runs; the workflow derives `YM` from Istanbul time when not provided.
+- Pipeline: run `python -m resolver.cli.snapshot_cli make-monthly --ym "${YM}" --write-db 1`, upload `resolver/snapshots/${YM}` as an artifact, and optionally commit the snapshot when `SNAPSHOT_PUBLISH_TOKEN` is configured.
+- Runbook checks: confirm the artifact upload succeeds, validate the snapshot directory contents, and review the job logs for skipped connectors or missing credentials.
 
 ## Initial backfill workflow
 
@@ -157,5 +155,3 @@ Use the GitHub Actions diagnostics table (rendered by `scripts/ci/summarize_conn
 ## Continuous integration
 
 The `resolver-ci` workflow executes offline smoke tests plus the ReliefWeb PDF unit suite. When the optional Markdown link checker is enabled it runs after the tests and reports broken intra-repo links in the job logs without failing the build.
-
-The nightly workflow (`resolver-ci-nightly`) now includes an `emdat_smoke` job that exercises the live EM-DAT path when `EMDAT_API_KEY` is configured. The job sets `EMDAT_NETWORK=1`, probes the API before fetching a tiny Belgium window, writes the results to a temporary DuckDB, and uploads the database artifact for one day. Nightly logs should show `emdat.probe.ok` and a small `emdat_pa` row count; when the secret is missing the job exits with a warning without impacting the remaining nightly checks.

@@ -16,6 +16,9 @@ on:
     # 02:00 Europe/Istanbul is 23:00 UTC on the final day of the previous month
     - cron: '0 23 * * *'
 
+permissions:
+  contents: read
+
 jobs:
   snapshot:
     runs-on: ubuntu-latest

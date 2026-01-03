@@ -37,6 +37,10 @@ on:
     # Run at 03:00 Europe/Istanbul on the 1st of each month (00:00 UTC)
     - cron: "0 0 1 * *"
 
+permissions:
+  contents: read
+  actions: read
+
 # --- Job Definition ---
 jobs:
   build-report:
