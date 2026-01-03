@@ -18,6 +18,10 @@ concurrency:
   group: pythia-resolver-db
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   compute-scores:
     runs-on: ubuntu-latest

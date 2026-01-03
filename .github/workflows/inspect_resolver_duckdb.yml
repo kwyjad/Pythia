@@ -17,6 +17,10 @@ on:
     workflows: ["Resolver — Initial Backfill"]
     types: [completed]
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   inspect-resolver-db:
     runs-on: ubuntu-latest
