@@ -56,7 +56,9 @@ from resolver.query.debug_ui import (
     _get_hs_triage_llm_calls_with_debug,
     _get_hs_triage_rows_with_debug,
     _list_hs_runs_with_debug,
+    get_hs_triage_all,
     get_country_run_summary,
+    list_hs_runs,
 )
 from pythia.buckets import BUCKET_SPECS
 from resolver.query import eiv_sql
@@ -2166,6 +2168,31 @@ def debug_hs_runs(
     rows, schema_debug = _list_hs_runs_with_debug(con, limit=limit)
     logger.info("Debug hs_runs rows=%d schema=%s", len(rows), schema_debug)
     return {"rows": rows, "schema_debug": schema_debug}
+
+
+@app.get("/v1/hs_runs")
+def hs_runs(
+    limit: int = Query(50, ge=1, le=500),
+):
+    con = _con()
+    rows = list_hs_runs(con, limit=limit)
+    logger.info("HS runs rows=%d", len(rows))
+    return {"rows": rows}
+
+
+@app.get("/v1/hs_triage/all")
+def hs_triage_all(
+    run_id: str = Query(...),
+    iso3: Optional[str] = Query(None),
+    hazard_code: Optional[str] = Query(None),
+    limit: int = Query(2000, ge=1, le=5000),
+):
+    con = _con()
+    rows, diagnostics = get_hs_triage_all(
+        con, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit
+    )
+    logger.info("HS triage all rows=%d run_id=%s", len(rows), run_id)
+    return {"rows": rows, "diagnostics": diagnostics}
 
 
 @app.get("/v1/debug/hs_triage")

@@ -25,6 +25,7 @@ type SortableTableProps<T> = {
   emptyMessage?: string;
   tableLayout?: "fixed" | "auto";
   dense?: boolean;
+  colGroup?: React.ReactNode;
 };
 
 const compareValues = (
@@ -58,6 +59,7 @@ export default function SortableTable<T>({
   emptyMessage = "No rows returned.",
   tableLayout = "fixed",
   dense = false,
+  colGroup,
 }: SortableTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | undefined>(initialSortKey);
   const [sortDirection, setSortDirection] =
@@ -108,6 +110,7 @@ export default function SortableTable<T>({
 
   return (
     <table className={`w-full ${layoutClass} border-collapse text-sm`}>
+      {colGroup ? <colgroup>{colGroup}</colgroup> : null}
       <thead className="bg-fred-bg text-fred-primary">
         <tr>
           {visibleColumns.map((column) => (

@@ -5,7 +5,7 @@ const ABOUT_MD = `## Welcome!
 
 Fred is an experimental humanitarian impact forecasting system. Its objective is to test the effectiveness of LLM as horizon scanning and forecasting agents in the humanitarian space. Fred started operation in December 2025. Its first "stable" run (i.e. with a standard set of models and processes) was in January 2026. Fred runs monthly and will update with new forecasts at the start of each month.
 
-To repeat: FRED IS AN EXPERIMENTAL SYSTEM. Do not use Fred's forecasts for anything, ever, for any reason, except pure entertainment. Consult an astrolger instead. Assume Fred's forecasts are rubbish. Whether or not they are any good is what we are here to figure out. Even if for some reason Fred's forecasts are not rubbish, they certainly don't foresee the future.
+To repeat: FRED IS AN EXPERIMENTAL SYSTEM. Do not use Fred's forecasts for anything, ever, for any reason, except pure entertainment. Consult an astrologer instead. Assume Fred's forecasts are rubbish. Whether or not they are any good is what we are here to figure out. Even if for some reason Fred's forecasts are not rubbish, they certainly don't foresee the future.
 
 View at your own risk, and don't even think about using Fred's outputs. Beyond this, don't expect stability. Everything about Fred could change at any moment. In fact, it will change, that's the only sure thing around here. It is an experimental system. Question resolution is a major weak spot and this will negatively affect forecasting skill scoring.
 
@@ -13,17 +13,18 @@ View at your own risk, and don't even think about using Fred's outputs. Beyond t
 
 Fred is an AI forecasting pipeline built to answer a simple question in a rigorous way:
 
-**How many people are likley to be affected by certain hazards in a set of countries in the next few months, and how (un)certain are we?**
+**How many people are likely to be affected by certain hazards in a set of countries in the next few months, and how (un)certain are we?**
 
 Fred doesn’t just output a single prediction. It produces **probabilistic forecasts**—distributions over plausible outcomes—grounded in retrieved evidence and backed by a complete, inspectable audit trail.
 
 Right now Fred covers the following hazards/events:
 
-- Armed conflict (impact measured as conflict fatalities and people displaced by confict; separate forecasts for each conflict question)
+- Armed conflict (impact measured as conflict fatalities and people displaced by conflict; separate forecasts for each conflict question)
 - Flood (people affected)
 - Drought (people affected)
 - Tropical cyclone (people affected)
 - Displacement inflow (from neighbouring countries)
+- Heat wave (people affected)
 
 Future goals include adding public health emergencies and replacing people affected with people in need of humanitarian assistance, but resolution data limitations at present make this impossible (or at least a very big job).
 
@@ -122,7 +123,7 @@ This makes it possible to audit decisions, reproduce outputs, and systematically
 ### 9) Resolve questions and provide calibration advice
 
 - Fred uses the data in the DuckDB, updated monthly, to resolve the forecast questions. This produces Brier scores and variants.
-- Fred also uses the resolution results to provide calibratiion advice back to the forecasting models, e.g., "on this kind of question you usually overestimate by X", to help the forecasts improve over time.
+- Fred also uses the resolution results to provide calibration advice back to the forecasting models, e.g., "on this kind of question you usually overestimate by X", to help the forecasts improve over time.
 
 ## Fred's schedule
 
@@ -191,7 +192,7 @@ Real-world runs face rate limits, provider outages, and key configuration issues
 
 ## Caveats
 
-- The resolution component is currently Fred's weakest point. More work is needed to have comprehensive resolution data for all hazars. This will negatively impact forecast scoring, and probably produce poor scores until improved.
+- The resolution component is currently Fred's weakest point. More work is needed to have comprehensive resolution data for all hazards. This will negatively impact forecast scoring, and probably produce poor scores until improved.
 
 Fred provides probabilities and evidence, not instructions. If eventually these turn out to have value humans still decide what to do.
 
