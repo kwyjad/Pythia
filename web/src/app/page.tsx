@@ -67,7 +67,7 @@ export default async function OverviewPage() {
             countriesRows={countries?.rows ?? []}
             initialResponse={riskIndex}
             kpiScopes={kpiScopes}
-            mapHeightClassName="h-[520px] md:h-[600px] lg:h-[720px]"
+            mapHeightClassName="h-[360px] sm:h-[420px] md:h-[520px] lg:h-[720px]"
           />
         ) : (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">

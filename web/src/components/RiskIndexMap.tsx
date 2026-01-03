@@ -9,8 +9,6 @@ type RiskIndexMapProps = {
   countriesRows: CountriesRow[];
   view: RiskView;
   heightClassName?: string;
-  heightPx?: number | null;
-  kpiHeightPx?: number | null;
 };
 
 const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
@@ -103,11 +101,6 @@ type DebugInfo = {
   svgClientRect: { w: number; h: number } | null;
   svgComputed: { display: string; visibility: string; opacity: string } | null;
   ancestorOpacityProduct: number | null;
-  debugNeon: boolean;
-  layout: {
-    mapHeightPx: number | null;
-    kpiHeightPx: number | null;
-  };
   matchCounts: {
     riskRows: number;
     valueByIso3: number;
@@ -159,13 +152,10 @@ export default function RiskIndexMap({
   countriesRows,
   view,
   heightClassName,
-  heightPx,
-  kpiHeightPx,
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
   const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
-  const [debugNeon, setDebugNeon] = useState(false);
   const [fetchDiagnostics, setFetchDiagnostics] = useState<FetchDiagnostics>({
     fetchUrl: "/maps/world.svg",
     fetchOk: null,
@@ -186,30 +176,14 @@ export default function RiskIndexMap({
   const domReplaceCountRef = useRef<number>(0);
   const svgNodeVersionRef = useRef<number>(0);
   const resolvedHeightClassName = heightClassName ?? "h-[360px]";
-  const debugQueryEnabled =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("debug_map") === "1";
-  const [deepDebugEnabled, setDeepDebugEnabled] = useState<boolean>(() => {
+  const [debugEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
+    const debugQuery =
+      new URLSearchParams(window.location.search).get("debug_map") === "1";
     const stored = window.localStorage.getItem("pythia_debug_map_deep");
     const legacy = window.localStorage.getItem("pythia_debug_map");
-    return stored === "1" || legacy === "1" || debugQueryEnabled;
+    return debugQuery || stored === "1" || legacy === "1";
   });
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (deepDebugEnabled) {
-      window.localStorage.setItem("pythia_debug_map_deep", "1");
-    } else {
-      window.localStorage.removeItem("pythia_debug_map_deep");
-    }
-  }, [deepDebugEnabled]);
-
-  useEffect(() => {
-    if (!deepDebugEnabled && debugNeon) {
-      setDebugNeon(false);
-    }
-  }, [deepDebugEnabled, debugNeon]);
 
   useEffect(() => {
     let active = true;
@@ -347,11 +321,6 @@ export default function RiskIndexMap({
         svgClientRect: null,
         svgComputed: null,
         ancestorOpacityProduct: null,
-        debugNeon,
-        layout: {
-          mapHeightPx: heightPx ?? null,
-          kpiHeightPx: kpiHeightPx ?? null,
-        },
         matchCounts: {
           riskRows: riskRows.length,
           valueByIso3: valueByIso3.size,
@@ -467,11 +436,6 @@ export default function RiskIndexMap({
         path.style.setProperty("stroke", "rgba(148,163,184,0.55)", "important");
         path.style.setProperty("stroke-width", "0.6", "important");
         path.style.setProperty("vector-effect", "non-scaling-stroke", "important");
-        if (debugNeon) {
-          path.style.setProperty("fill", "#ff00ff", "important");
-          path.style.setProperty("stroke", "#00ff00", "important");
-          path.style.setProperty("stroke-width", "2", "important");
-        }
       });
 
       const handleMouseMove = (event: MouseEvent) => {
@@ -507,7 +471,7 @@ export default function RiskIndexMap({
         });
       });
     });
-    if (deepDebugEnabled) {
+    if (debugEnabled) {
       const sampledLengths = paths
         .slice(0, 20)
         .map((path) => (path.getAttribute("d") || "").length)
@@ -673,7 +637,7 @@ export default function RiskIndexMap({
       });
     }
     setSvgWarnings(warnings);
-    if (deepDebugEnabled) {
+    if (debugEnabled) {
       const sampleTargets = paths.slice(0, 10);
       debugSample = sampleTargets.map((path) => ({
         dLen: path.getAttribute("d")?.length ?? 0,
@@ -742,7 +706,7 @@ export default function RiskIndexMap({
       ancestorOpacityProduct = product;
     }
     let observer: MutationObserver | null = null;
-    if (svgHost && deepDebugEnabled) {
+    if (svgHost && debugEnabled) {
       observer = new MutationObserver((mutations) => {
         const sawSvgMutation = mutations.some((mutation) => {
           if (mutation.type !== "childList") return false;
@@ -817,11 +781,6 @@ export default function RiskIndexMap({
           }
         : null,
       ancestorOpacityProduct,
-      debugNeon: deepDebugEnabled && debugNeon,
-      layout: {
-        mapHeightPx: heightPx ?? null,
-        kpiHeightPx: kpiHeightPx ?? null,
-      },
       matchCounts: {
         riskRows: riskRows.length,
         valueByIso3: valueByIso3.size,
@@ -841,12 +800,9 @@ export default function RiskIndexMap({
     breaks,
     hasQuestionsIso3,
     isPerCapita,
-    deepDebugEnabled,
-    debugNeon,
+    debugEnabled,
     riskRows,
     resolvedHeightClassName,
-    heightPx,
-    kpiHeightPx,
   ]);
 
   return (
@@ -862,7 +818,6 @@ export default function RiskIndexMap({
         ref={containerRef}
         data-testid="risk-index-map-container"
         className={`relative mt-3 w-full ${resolvedHeightClassName}`}
-        style={heightPx ? { height: `${heightPx}px` } : undefined}
       >
         <div ref={svgHostRef} className="h-full w-full">
           <SvgMarkup svgText={svgText} />
@@ -877,8 +832,8 @@ export default function RiskIndexMap({
           </div>
         ) : null}
       </div>
-      <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-xs text-fred-text shadow-fredCard">
-        <div className="grid gap-1">
+      <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-[11px] text-fred-text shadow-fredCard sm:text-xs">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-1">
           {[
             { label: "Very low", color: "var(--risk-map-c1)" },
             { label: "Low", color: "var(--risk-map-c2)" },
@@ -898,10 +853,9 @@ export default function RiskIndexMap({
           ))}
         </div>
       </div>
-      {debugInfo ? (
+      {debugEnabled && debugInfo ? (
         <>
-          {deepDebugEnabled &&
-          debugInfo.autoFitApplied &&
+          {debugInfo.autoFitApplied &&
           debugInfo.coverageW !== null &&
           debugInfo.coverageH !== null ? (
             <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
@@ -912,356 +866,23 @@ export default function RiskIndexMap({
               be regenerated.
             </div>
           ) : null}
-          <details
-            className="mt-3 rounded-md border border-slate-700/60 bg-slate-950/30 px-3 py-2 text-xs text-slate-200"
-            open={
-              fetchDiagnostics.fetchOk === false ||
-              debugInfo.targetPaths === 0 ||
-              svgWarnings.length > 0
-            }
-          >
+          <details className="mt-3 rounded-md border border-slate-700/60 bg-slate-950/30 px-3 py-2 text-[11px] text-slate-200 sm:text-xs">
             <summary className="cursor-pointer text-slate-100">
               Map debug — SVG loaded: {debugInfo.svgLoaded ? "yes" : "no"} |
               iso3 nodes: {debugInfo.taggedNodes} | matched iso3s:{" "}
-              {debugInfo.matchCounts.matchedIso3} | fetch:{" "}
+              {debugInfo.matchCounts.matchedIso3} | container:{" "}
+              {debugInfo.containerClientRect
+                ? `${debugInfo.containerClientRect.w.toFixed(
+                    0
+                  )}×${debugInfo.containerClientRect.h.toFixed(0)}`
+                : "n/a"}{" "}
+              | fetch:{" "}
               {fetchDiagnostics.fetchOk === null
                 ? "n/a"
                 : fetchDiagnostics.fetchOk
                 ? "ok"
                 : "error"}
             </summary>
-            <div className="mt-3 grid gap-3 text-slate-200">
-              <div>
-                <label className="flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    className="h-3 w-3"
-                    checked={deepDebugEnabled}
-                    onChange={(event) =>
-                      setDeepDebugEnabled(event.target.checked)
-                    }
-                  />
-                  Enable deep diagnostics
-                </label>
-                {!deepDebugEnabled ? (
-                  <div className="mt-1 text-xs text-slate-500">
-                    Deep diagnostics are disabled. Enable to run bbox sampling,
-                    computed style scans, and sentinel checks.
-                  </div>
-                ) : null}
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Fetch diagnostics
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>url: {fetchDiagnostics.fetchUrl}</div>
-                  <div>
-                    ok:{" "}
-                    {fetchDiagnostics.fetchOk === null
-                      ? "n/a"
-                      : fetchDiagnostics.fetchOk
-                      ? "yes"
-                      : "no"}
-                  </div>
-                  <div>status: {fetchDiagnostics.fetchStatus ?? "n/a"}</div>
-                  <div>
-                    content-type:{" "}
-                    {fetchDiagnostics.fetchContentType ?? "n/a"}
-                  </div>
-                  <div>bytes: {fetchDiagnostics.fetchBytes ?? "n/a"}</div>
-                  <div>error: {fetchDiagnostics.fetchError ?? "n/a"}</div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">SVG diagnostics</div>
-                <div className="mt-1 grid gap-1">
-                  <div>original viewBox: {debugInfo.originalViewBox ?? "n/a"}</div>
-                  <div>final viewBox: {debugInfo.finalViewBox ?? "n/a"}</div>
-                  <div>
-                    preserveAspectRatio:{" "}
-                    {debugInfo.preserveAspectRatio ?? "n/a"}
-                  </div>
-                  <div>width attr: {debugInfo.widthAttr ?? "n/a"}</div>
-                  <div>height attr: {debugInfo.heightAttr ?? "n/a"}</div>
-                  <div>
-                    svg has path d: {debugInfo.svgHasPathsWithD ? "yes" : "no"}
-                  </div>
-                  <div>first iso3: {debugInfo.firstIso3 ?? "n/a"}</div>
-                  <div>
-                    requested height:{" "}
-                    {debugInfo.requestedHeightClassName ?? "n/a"}
-                  </div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Layout diagnostics
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>
-                    container rect:{" "}
-                    {debugInfo.containerClientRect
-                      ? `${debugInfo.containerClientRect.w.toFixed(
-                          1
-                        )}×${debugInfo.containerClientRect.h.toFixed(1)}`
-                      : "n/a"}
-                  </div>
-                  <div>
-                    svg rect:{" "}
-                    {debugInfo.svgClientRect
-                      ? `${debugInfo.svgClientRect.w.toFixed(1)}×${debugInfo.svgClientRect.h.toFixed(1)}`
-                      : "n/a"}
-                  </div>
-                  <div>
-                    svg display: {debugInfo.svgComputed?.display ?? "n/a"}
-                  </div>
-                  <div>
-                    svg visibility:{" "}
-                    {debugInfo.svgComputed?.visibility ?? "n/a"}
-                  </div>
-                  <div>
-                    svg opacity: {debugInfo.svgComputed?.opacity ?? "n/a"}
-                  </div>
-                  <div>
-                    ancestor opacity product:{" "}
-                    {debugInfo.ancestorOpacityProduct !== null
-                      ? debugInfo.ancestorOpacityProduct.toFixed(3)
-                      : "n/a"}
-                  </div>
-                  <div>
-                    map height px:{" "}
-                    {debugInfo.layout.mapHeightPx !== null
-                      ? debugInfo.layout.mapHeightPx
-                      : "n/a"}
-                  </div>
-                  <div>
-                    kpi height px:{" "}
-                    {debugInfo.layout.kpiHeightPx !== null
-                      ? debugInfo.layout.kpiHeightPx
-                      : "n/a"}
-                  </div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Matching diagnostics
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>risk rows: {debugInfo.matchCounts.riskRows}</div>
-                  <div>valueByIso3: {debugInfo.matchCounts.valueByIso3}</div>
-                  <div>iso3 elements: {debugInfo.matchCounts.iso3Elements}</div>
-                  <div>matched iso3s: {debugInfo.matchCounts.matchedIso3}</div>
-                  <div>unmatched iso3s: {debugInfo.matchCounts.unmatchedIso3}</div>
-                </div>
-              </div>
-              <div>
-                <div className="font-semibold text-slate-100">
-                  Palette diagnostics
-                </div>
-                <div className="mt-1 grid gap-1">
-                  <div>c1: {debugInfo.palette.c1}</div>
-                  <div>c2: {debugInfo.palette.c2}</div>
-                  <div>c3: {debugInfo.palette.c3}</div>
-                  <div>c4: {debugInfo.palette.c4}</div>
-                  <div>c5: {debugInfo.palette.c5}</div>
-                  <div>noEiv: {debugInfo.palette.noEiv}</div>
-                  <div>noQ: {debugInfo.palette.noQ}</div>
-                  <div>
-                    triagedNoForecast: {debugInfo.palette.triagedNoForecast}
-                  </div>
-                  <div>notTriaged: {debugInfo.palette.notTriaged}</div>
-                </div>
-              </div>
-              {deepDebugEnabled ? (
-                <>
-                  <div>
-                    <div className="font-semibold text-slate-100">
-                      DOM integrity diagnostics
-                    </div>
-                    <div className="mt-1 grid gap-1">
-                      <div>svg node version: {debugInfo.svgNodeVersion}</div>
-                      <div>dom replace count: {debugInfo.domReplaceCount}</div>
-                      <div>
-                        svg is connected: {debugInfo.svgIsConnected ? "yes" : "no"}
-                      </div>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-100">
-                      Geometry diagnostics
-                    </div>
-                    <div className="mt-1 grid gap-1">
-                      <div>
-                        content bbox:{" "}
-                        {debugInfo.contentBBox
-                          ? `${debugInfo.contentBBox.x.toFixed(
-                              2
-                            )}, ${debugInfo.contentBBox.y.toFixed(
-                              2
-                            )} (${debugInfo.contentBBox.width.toFixed(
-                              2
-                            )}×${debugInfo.contentBBox.height.toFixed(2)})`
-                          : "n/a"}
-                      </div>
-                      <div>
-                        bbox max:{" "}
-                        {debugInfo.contentBBox
-                          ? `${debugInfo.contentBBox.maxX.toFixed(
-                              2
-                            )}, ${debugInfo.contentBBox.maxY.toFixed(2)}`
-                          : "n/a"}
-                      </div>
-                      <div>
-                        coverage (W×H):{" "}
-                        {debugInfo.coverageW !== null &&
-                        debugInfo.coverageH !== null
-                          ? `${(debugInfo.coverageW * 100).toFixed(
-                              1
-                            )}%×${(debugInfo.coverageH * 100).toFixed(1)}%`
-                          : "n/a"}
-                      </div>
-                      <div>
-                        auto-fit: {debugInfo.autoFitApplied ? "applied" : "no"}
-                      </div>
-                      <div>
-                        auto-fit viewBox: {debugInfo.autoFitViewBox ?? "n/a"}
-                      </div>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-100">
-                      Sample path bbox stats
-                    </div>
-                    <div className="mt-1 grid gap-1">
-                      <div>
-                        count:{" "}
-                        {debugInfo.samplePathBboxStats?.count ?? "n/a"} | tiny:{" "}
-                        {debugInfo.samplePathBboxStats?.tinyCount ?? "n/a"}
-                      </div>
-                      <div>
-                        w (min/p50/p90/max):{" "}
-                        {debugInfo.samplePathBboxStats
-                          ? `${debugInfo.samplePathBboxStats.wMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.wMax?.toFixed(2) ?? "n/a"}`
-                          : "n/a"}
-                      </div>
-                      <div>
-                        h (min/p50/p90/max):{" "}
-                        {debugInfo.samplePathBboxStats
-                          ? `${debugInfo.samplePathBboxStats.hMin?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP50?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hP90?.toFixed(2) ?? "n/a"} / ${debugInfo.samplePathBboxStats.hMax?.toFixed(2) ?? "n/a"}`
-                          : "n/a"}
-                      </div>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-100">
-                      Computed style sample
-                    </div>
-                    <div className="mt-1 grid gap-1">
-                      <div>
-                        fill:{" "}
-                        {debugInfo.sampleComputedStyle?.computedFill ?? "n/a"}
-                      </div>
-                      <div>
-                        stroke:{" "}
-                        {debugInfo.sampleComputedStyle?.computedStroke ?? "n/a"}
-                      </div>
-                      <div>
-                        opacity:{" "}
-                        {debugInfo.sampleComputedStyle?.computedOpacity ?? "n/a"}
-                      </div>
-                      <div>
-                        display:{" "}
-                        {debugInfo.sampleComputedStyle?.computedDisplay ?? "n/a"}
-                      </div>
-                      <div>
-                        visibility:{" "}
-                        {debugInfo.sampleComputedStyle?.computedVisibility ??
-                          "n/a"}
-                      </div>
-                    </div>
-                    <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
-                      <input
-                        type="checkbox"
-                        className="h-3 w-3"
-                        checked={debugNeon}
-                        onChange={(event) => setDebugNeon(event.target.checked)}
-                      />
-                      Neon stress-test mode
-                    </label>
-                  </div>
-                  <div>
-                    <div className="font-semibold text-slate-100">
-                      Sentinel SVG centers
-                    </div>
-                    <div className="mt-1 grid gap-1">
-                      {Object.entries(debugInfo.sentinelSvgCenters).map(
-                        ([iso3, info]) => (
-                          <div key={iso3}>
-                            {iso3}:{" "}
-                            {info.found
-                              ? `(${info.cx?.toFixed(1)}, ${info.cy?.toFixed(1)}) ${info.w?.toFixed(1)}×${info.h?.toFixed(1)}`
-                              : "not found"}
-                          </div>
-                        )
-                      )}
-                    </div>
-                  </div>
-                  {debugInfo.firstPathSample ? (
-                    <div>
-                      <div className="font-semibold text-slate-100">
-                        First path sample
-                      </div>
-                      <div className="mt-1 grid gap-1">
-                        <div>d length: {debugInfo.firstPathSample.dLen}</div>
-                        <div>
-                          fill attr:{" "}
-                          {debugInfo.firstPathSample.fillAttr ?? "n/a"}
-                        </div>
-                        <div>
-                          style attr:{" "}
-                          {debugInfo.firstPathSample.styleAttr ?? "n/a"}
-                        </div>
-                        <div>
-                          computed fill:{" "}
-                          {debugInfo.firstPathSample.computedFill ?? "n/a"}
-                        </div>
-                        <div>
-                          computed opacity:{" "}
-                          {debugInfo.firstPathSample.computedOpacity ?? "n/a"}
-                        </div>
-                        <div>
-                          computed display:{" "}
-                          {debugInfo.firstPathSample.computedDisplay ?? "n/a"}
-                        </div>
-                      </div>
-                    </div>
-                  ) : null}
-                </>
-              ) : null}
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-100 hover:bg-slate-900/60"
-                  onClick={() => {
-                    const payload = {
-                      fetch: fetchDiagnostics,
-                      svg: debugInfo,
-                      warnings: svgWarnings,
-                    };
-                    navigator.clipboard
-                      .writeText(JSON.stringify(payload, null, 2))
-                      .catch(() => undefined);
-                  }}
-                >
-                  Copy debug JSON
-                </button>
-                <div className="text-slate-400">
-                  Auto-open triggers: fetch errors, auto-fit, no paths, or SVG
-                  warnings.
-                </div>
-              </div>
-            </div>
           </details>
         </>
       ) : null}

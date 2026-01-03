@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import InfoTooltip from "../../components/InfoTooltip";
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
@@ -271,7 +271,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         sortValue: (row) => row.wording ?? row.question_id,
         render: (row) => (
           <div>
-            <div className="max-h-[2.8em] overflow-hidden font-medium leading-tight text-fred-text">
+            <div className="max-h-[4.2em] max-w-full overflow-hidden whitespace-normal break-words font-medium leading-tight text-fred-text">
               {row.wording}
             </div>
             <Link
@@ -307,8 +307,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "forecast_date",
         label: renderHeaderClamp("Forecast Date"),
-        headerClassName: "text-right whitespace-normal leading-tight",
-        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        headerClassName: "text-left whitespace-normal leading-tight",
+        cellClassName: "text-left tabular-nums whitespace-nowrap",
         sortValue: (row) => rowForecastMonthKey(row.forecast_date),
         render: (row) => row.forecast_date ?? "",
         defaultSortDirection: "desc",
@@ -316,8 +316,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "first_forecast_month",
         label: renderHeaderClamp("First Forecast Month"),
-        headerClassName: "text-right whitespace-normal leading-tight",
-        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        headerClassName: "text-left whitespace-normal leading-tight",
+        cellClassName: "text-left tabular-nums whitespace-nowrap",
         sortValue: (row) => rowYearMonthKey(row.first_forecast_month),
         render: (row) => row.first_forecast_month ?? "",
         defaultSortDirection: "desc",
@@ -325,8 +325,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       {
         key: "last_forecast_month",
         label: renderHeaderClamp("Last Forecast Month"),
-        headerClassName: "text-right whitespace-normal leading-tight",
-        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        headerClassName: "text-left whitespace-normal leading-tight",
+        cellClassName: "text-left tabular-nums whitespace-nowrap",
         sortValue: (row) => rowYearMonthKey(row.last_forecast_month),
         render: (row) => row.last_forecast_month ?? "",
         defaultSortDirection: "desc",
@@ -372,6 +372,35 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     ],
     []
   );
+
+  const columnWidths = useMemo(
+    () => [
+      "5ch",
+      "12ch",
+      "40ch",
+      "6ch",
+      "7ch",
+      "10ch",
+      "10ch",
+      "10ch",
+      "7ch",
+      "7ch",
+      "12ch",
+    ],
+    []
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const debugEnabled =
+      new URLSearchParams(window.location.search).get("debug_table") === "1";
+    if (!debugEnabled) return;
+    const columnConfig = columns.map((column, index) => ({
+      key: column.key,
+      width: columnWidths[index] ?? "auto",
+    }));
+    console.log("[QuestionsTable] column config", columnConfig);
+  }, [columns, columnWidths]);
 
   return (
     <div className="space-y-4">
@@ -659,17 +688,9 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         <SortableTable
           colGroup={
             <>
-              <col style={{ width: "6ch" }} />
-              <col style={{ width: "14ch" }} />
-              <col style={{ width: "32ch" }} />
-              <col style={{ width: "6ch" }} />
-              <col style={{ width: "10ch" }} />
-              <col style={{ width: "11ch" }} />
-              <col style={{ width: "11ch" }} />
-              <col style={{ width: "11ch" }} />
-              <col style={{ width: "8ch" }} />
-              <col style={{ width: "8ch" }} />
-              <col style={{ width: "16ch" }} />
+              {columnWidths.map((width, index) => (
+                <col key={`${width}-${index}`} style={{ width }} />
+              ))}
             </>
           }
           columns={columns}

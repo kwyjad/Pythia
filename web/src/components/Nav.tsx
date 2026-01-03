@@ -40,6 +40,12 @@ const Nav = () => {
           </Link>
           <Link
             className="text-fred-primary font-semibold hover:text-fred-secondary"
+            href="/hs-triage"
+          >
+            HS Triage
+          </Link>
+          <Link
+            className="text-fred-primary font-semibold hover:text-fred-secondary"
             href="/questions"
           >
             Forecasts
@@ -116,6 +122,12 @@ const Nav = () => {
               href="/countries"
             >
               Countries
+            </Link>
+            <Link
+              className="text-fred-primary font-semibold hover:text-fred-secondary"
+              href="/hs-triage"
+            >
+              HS Triage
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"
