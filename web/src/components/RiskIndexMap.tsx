@@ -9,6 +9,8 @@ type RiskIndexMapProps = {
   countriesRows: CountriesRow[];
   view: RiskView;
   heightClassName?: string;
+  heightPx?: number | null;
+  kpiHeightPx?: number | null;
 };
 
 const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
@@ -102,6 +104,10 @@ type DebugInfo = {
   svgComputed: { display: string; visibility: string; opacity: string } | null;
   ancestorOpacityProduct: number | null;
   debugNeon: boolean;
+  layout: {
+    mapHeightPx: number | null;
+    kpiHeightPx: number | null;
+  };
   matchCounts: {
     riskRows: number;
     valueByIso3: number;
@@ -153,6 +159,8 @@ export default function RiskIndexMap({
   countriesRows,
   view,
   heightClassName,
+  heightPx,
+  kpiHeightPx,
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
@@ -340,6 +348,10 @@ export default function RiskIndexMap({
         svgComputed: null,
         ancestorOpacityProduct: null,
         debugNeon,
+        layout: {
+          mapHeightPx: heightPx ?? null,
+          kpiHeightPx: kpiHeightPx ?? null,
+        },
         matchCounts: {
           riskRows: riskRows.length,
           valueByIso3: valueByIso3.size,
@@ -806,6 +818,10 @@ export default function RiskIndexMap({
         : null,
       ancestorOpacityProduct,
       debugNeon: deepDebugEnabled && debugNeon,
+      layout: {
+        mapHeightPx: heightPx ?? null,
+        kpiHeightPx: kpiHeightPx ?? null,
+      },
       matchCounts: {
         riskRows: riskRows.length,
         valueByIso3: valueByIso3.size,
@@ -829,6 +845,8 @@ export default function RiskIndexMap({
     debugNeon,
     riskRows,
     resolvedHeightClassName,
+    heightPx,
+    kpiHeightPx,
   ]);
 
   return (
@@ -844,6 +862,7 @@ export default function RiskIndexMap({
         ref={containerRef}
         data-testid="risk-index-map-container"
         className={`relative mt-3 w-full ${resolvedHeightClassName}`}
+        style={heightPx ? { height: `${heightPx}px` } : undefined}
       >
         <div ref={svgHostRef} className="h-full w-full">
           <SvgMarkup svgText={svgText} />
@@ -1008,6 +1027,18 @@ export default function RiskIndexMap({
                     ancestor opacity product:{" "}
                     {debugInfo.ancestorOpacityProduct !== null
                       ? debugInfo.ancestorOpacityProduct.toFixed(3)
+                      : "n/a"}
+                  </div>
+                  <div>
+                    map height px:{" "}
+                    {debugInfo.layout.mapHeightPx !== null
+                      ? debugInfo.layout.mapHeightPx
+                      : "n/a"}
+                  </div>
+                  <div>
+                    kpi height px:{" "}
+                    {debugInfo.layout.kpiHeightPx !== null
+                      ? debugInfo.layout.kpiHeightPx
                       : "n/a"}
                   </div>
                 </div>

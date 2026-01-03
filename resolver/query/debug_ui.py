@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import pandas as pd
+
+from resolver.query.downloads import _load_country_registry, _load_triage_models
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
@@ -363,6 +366,214 @@ def get_hs_triage_llm_calls(
     return rows
 
 
+_TRIAGE_SCORE_PATTERN = re.compile(
+    r"triage_score\"?\s*[:=]\s*(-?\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_triage_score(value: Any, response_text: str | None) -> float | None:
+    if value is not None:
+        try:
+            score = float(value)
+            if score == score:
+                return score
+        except (TypeError, ValueError):
+            pass
+    if not response_text:
+        return None
+    match = _TRIAGE_SCORE_PATTERN.search(response_text)
+    if not match:
+        return None
+    try:
+        score = float(match.group(1))
+    except ValueError:
+        return None
+    return score if score == score else None
+
+
+def get_hs_triage_all(
+    conn,
+    run_id: str,
+    iso3: str | None = None,
+    hazard_code: str | None = None,
+    limit: int = 2000,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "parsed_scores": 0,
+        "null_scores": 0,
+        "total_calls": 0,
+    }
+    if not _table_exists(conn, "hs_triage"):
+        diagnostics["notes"] = ["hs_triage_missing"]
+        return [], diagnostics
+
+    columns = _table_columns(conn, "hs_triage")
+    run_col = _pick_column(columns, ["run_id", "hs_run_id"])
+    iso_col = _pick_column(columns, ["iso3", "country_iso3"])
+    hazard_col = _pick_column(columns, ["hazard_code", "hazard"])
+    tier_col = _pick_column(columns, ["tier", "triage_tier"])
+    ts_col = _pick_column(columns, ["created_at", "timestamp"])
+
+    if not run_col:
+        diagnostics["notes"] = ["run_id_missing"]
+        return [], diagnostics
+
+    created_expr = f"{ts_col} AS created_at" if ts_col else "NULL AS created_at"
+    tier_expr = f"{tier_col} AS tier" if tier_col else "NULL AS tier"
+    hazard_expr = f"{hazard_col} AS hazard_code" if hazard_col else "NULL AS hazard_code"
+    iso_expr = f"UPPER({iso_col}) AS iso3" if iso_col else "NULL AS iso3"
+
+    sql = f"""
+        SELECT
+          {run_col} AS run_id,
+          {iso_expr},
+          {hazard_expr},
+          {tier_expr},
+          {created_expr}
+        FROM hs_triage
+        WHERE {run_col} = ?
+    """
+    params: list[Any] = [run_id]
+    if iso3 and iso_col:
+        sql += f" AND UPPER({iso_col}) = ?"
+        params.append(iso3.upper())
+    if hazard_code and hazard_col:
+        sql += f" AND {hazard_col} = ?"
+        params.append(hazard_code)
+    if ts_col:
+        sql += f" ORDER BY {ts_col} DESC NULLS LAST"
+    else:
+        sql += " ORDER BY 1"
+    sql += " LIMIT ?"
+    params.append(limit)
+
+    try:
+        base_df = conn.execute(sql, params).fetchdf()
+    except Exception:
+        LOGGER.exception("Failed to query hs_triage rows")
+        diagnostics["notes"] = ["hs_triage_query_failed"]
+        return [], diagnostics
+
+    if base_df.empty:
+        return [], diagnostics
+
+    country_map = _load_country_registry()
+    model_map = _load_triage_models(conn)
+
+    llm_scores: dict[tuple[str | None, str | None], list[float | None]] = {}
+    if _table_exists(conn, "llm_calls"):
+        llm_cols = _table_columns(conn, "llm_calls")
+        llm_run_col = _pick_column(llm_cols, ["hs_run_id", "run_id"])
+        llm_iso_col = _pick_column(llm_cols, ["iso3", "country_iso3"])
+        llm_hazard_col = _pick_column(llm_cols, ["hazard_code", "hazard"])
+        llm_phase_col = _pick_column(llm_cols, ["phase"])
+        llm_ts_col = _pick_column(llm_cols, ["created_at", "timestamp"])
+        llm_score_col = _pick_column(llm_cols, ["triage_score", "score"])
+        llm_response_col = _pick_column(llm_cols, ["response_text", "response", "completion"])
+
+        if llm_run_col and llm_phase_col:
+            created_expr = f"{llm_ts_col} AS created_at" if llm_ts_col else "NULL AS created_at"
+            score_expr = (
+                f"{llm_score_col} AS triage_score" if llm_score_col else "NULL AS triage_score"
+            )
+            response_expr = (
+                f"SUBSTR({llm_response_col}, 1, 2000) AS response_text"
+                if llm_response_col
+                else "NULL AS response_text"
+            )
+            iso_expr = f"UPPER({llm_iso_col}) AS iso3" if llm_iso_col else "NULL AS iso3"
+            hazard_expr = (
+                f"{llm_hazard_col} AS hazard_code"
+                if llm_hazard_col
+                else "NULL AS hazard_code"
+            )
+            llm_sql = f"""
+                SELECT
+                  {created_expr},
+                  {iso_expr},
+                  {hazard_expr},
+                  {score_expr},
+                  {response_expr}
+                FROM llm_calls
+                WHERE {llm_phase_col} = 'hs_triage'
+                  AND {llm_run_col} = ?
+            """
+            llm_params: list[Any] = [run_id]
+            if iso3 and llm_iso_col:
+                llm_sql += f" AND UPPER({llm_iso_col}) = ?"
+                llm_params.append(iso3.upper())
+            if hazard_code and llm_hazard_col:
+                llm_sql += f" AND {llm_hazard_col} = ?"
+                llm_params.append(hazard_code)
+            if llm_ts_col:
+                llm_sql += f" ORDER BY {llm_ts_col} DESC NULLS LAST"
+            else:
+                llm_sql += " ORDER BY 1"
+            llm_sql += " LIMIT ?"
+            llm_params.append(limit * 6)
+
+            try:
+                llm_df = conn.execute(llm_sql, llm_params).fetchdf()
+            except Exception:
+                LOGGER.exception("Failed to query llm_calls triage scores")
+                llm_df = None
+
+            if llm_df is not None and not llm_df.empty:
+                for row in llm_df.to_dict(orient="records"):
+                    iso_val = row.get("iso3")
+                    hazard_val = row.get("hazard_code")
+                    key = (iso_val, hazard_val)
+                    scores = llm_scores.setdefault(key, [])
+                    if len(scores) >= 2:
+                        continue
+                    score = _extract_triage_score(row.get("triage_score"), row.get("response_text"))
+                    diagnostics["total_calls"] += 1
+                    if score is None:
+                        diagnostics["null_scores"] += 1
+                    else:
+                        diagnostics["parsed_scores"] += 1
+                    scores.append(score)
+
+    rows: list[dict[str, Any]] = []
+    for row in base_df.to_dict(orient="records"):
+        iso_val = row.get("iso3")
+        hazard_val = row.get("hazard_code")
+        score_candidates = llm_scores.get((iso_val, hazard_val), [])
+        score_1 = score_candidates[0] if len(score_candidates) > 0 else None
+        score_2 = score_candidates[1] if len(score_candidates) > 1 else None
+        score_values = [score for score in (score_1, score_2) if score is not None]
+        score_avg = sum(score_values) / len(score_values) if score_values else None
+        created_at = row.get("created_at")
+        if hasattr(created_at, "date"):
+            triage_date = created_at.date().isoformat()
+        elif created_at:
+            triage_date = str(created_at).split(" ")[0]
+        else:
+            triage_date = None
+        rows.append(
+            {
+                "triage_date": triage_date,
+                "run_id": row.get("run_id"),
+                "iso3": iso_val,
+                "country": country_map.get(str(iso_val).upper(), iso_val) if iso_val else None,
+                "triage_tier": row.get("tier"),
+                "triage_model": model_map.get(run_id),
+                "triage_score_1": score_1,
+                "triage_score_2": score_2,
+                "triage_score_avg": score_avg,
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            (item.get("iso3") or ""),
+            (item.get("triage_date") or ""),
+        )
+    )
+    return rows, diagnostics
+
+
 def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "run_id": run_id,
@@ -484,6 +695,7 @@ __all__ = [
     "list_hs_runs",
     "get_hs_triage_rows",
     "get_hs_triage_llm_calls",
+    "get_hs_triage_all",
     "get_country_run_summary",
     "_list_hs_runs_with_debug",
     "_get_hs_triage_rows_with_debug",

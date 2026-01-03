@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { apiGet } from "../lib/api";
@@ -102,6 +102,10 @@ export default function RiskIndexPanel({
   );
   const [kpiError, setKpiError] = useState<string | null>(null);
   const [runMonthFallback, setRunMonthFallback] = useState(false);
+  const [kpiHeightPx, setKpiHeightPx] = useState<number | null>(null);
+  const [mapHeightPx, setMapHeightPx] = useState<number | null>(null);
+  const mapHostRef = useRef<HTMLDivElement | null>(null);
+  const kpiHostRef = useRef<HTMLDivElement | null>(null);
   const searchParams = useSearchParams();
   const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
@@ -205,6 +209,38 @@ export default function RiskIndexPanel({
     return entries.sort(([a], [b]) => a.localeCompare(b));
   }, [selectedScope]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const kpiHost = kpiHostRef.current;
+    if (!kpiHost) return;
+    let frameId = 0;
+    const updateHeights = () => {
+      const nextHeight = Math.round(kpiHost.getBoundingClientRect().height);
+      setKpiHeightPx(nextHeight);
+      if (window.innerWidth < 768) {
+        setMapHeightPx(null);
+      } else {
+        setMapHeightPx(nextHeight);
+      }
+    };
+    updateHeights();
+    const observer = new ResizeObserver(() => {
+      if (frameId) {
+        cancelAnimationFrame(frameId);
+      }
+      frameId = requestAnimationFrame(updateHeights);
+    });
+    observer.observe(kpiHost);
+    window.addEventListener("resize", updateHeights);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateHeights);
+      if (frameId) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, []);
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -257,13 +293,21 @@ export default function RiskIndexPanel({
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <RiskIndexMap
-          countriesRows={countriesRows}
-          heightClassName={mapHeightClassName}
-          riskRows={rows}
-          view={view}
-        />
-        <div className="space-y-4" data-testid="risk-index-kpi-panel">
+        <div ref={mapHostRef} className="space-y-4">
+          <RiskIndexMap
+            countriesRows={countriesRows}
+            heightClassName={mapHeightClassName}
+            heightPx={mapHeightPx}
+            kpiHeightPx={kpiHeightPx}
+            riskRows={rows}
+            view={view}
+          />
+        </div>
+        <div
+          ref={kpiHostRef}
+          className="space-y-4"
+          data-testid="risk-index-kpi-panel"
+        >
           <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 shadow-fredCard">
             <div className="flex items-center justify-between gap-3">
               <div className="text-xs uppercase tracking-wide text-fred-muted">

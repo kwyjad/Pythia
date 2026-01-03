@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 
 import InfoTooltip from "../../components/InfoTooltip";
@@ -74,8 +75,14 @@ const EIV_TOOLTIP =
 const TRIAGE_TOOLTIP =
   "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (default thresholds: priority ≥ 0.70, watchlist ≥ 0.40; hysteresis ±0.05). Only priority/watchlist hazards are sent to full forecasting; quiet hazards may appear but have no EIV.";
 
-const renderEivHeader = (label: string) => (
-  <span className="inline-flex items-center gap-1">
+const renderHeaderClamp = (content: ReactNode) => (
+  <div className="max-h-[3.6em] overflow-hidden whitespace-normal leading-tight">
+    {content}
+  </div>
+);
+
+const renderEivHeader = (label: ReactNode) => (
+  <span className="inline-flex items-start gap-1">
     {label}
     <span
       className="rounded-full border border-fred-secondary px-1 text-xs text-fred-secondary"
@@ -213,23 +220,6 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     selectedStatuses,
   ]);
 
-  const eivHeaderLabel = useMemo(() => {
-    const metrics = selectedMetrics.length
-      ? selectedMetrics
-      : Array.from(new Set(rows.map((row) => row.metric).filter(Boolean)));
-    const upperMetrics = metrics.map((metric) => metric.toUpperCase());
-    const onlyPa = upperMetrics.length === 1 && upperMetrics[0] === "PA";
-    const onlyFatalities =
-      upperMetrics.length === 1 && upperMetrics[0] === "FATALITIES";
-    if (onlyFatalities) {
-      return "6-Month cumulative expected deaths";
-    }
-    if (onlyPa) {
-      return "6-Month EIV (Peak Month)";
-    }
-    return "6-Month EIV / cumulative expected deaths";
-  }, [rows, selectedMetrics]);
-
   const clearFilters = () => {
     setSelectedCountries([]);
     setQuestionQuery("");
@@ -250,8 +240,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     () => [
       {
         key: "iso3",
-        label: "ISO3",
-        headerClassName: "text-left whitespace-nowrap",
+        label: renderHeaderClamp("ISO3"),
+        headerClassName: "text-left whitespace-normal leading-tight",
         cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.iso3,
         render: (row) => (
@@ -266,27 +256,29 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "country_name",
-        label: "Country",
-        headerClassName: "text-left whitespace-nowrap",
-        cellClassName: "text-left whitespace-nowrap",
+        label: renderHeaderClamp("Country"),
+        headerClassName: "text-left whitespace-normal leading-tight",
+        cellClassName: "text-left",
         sortValue: (row) => row.country_name ?? "",
         render: (row) => row.country_name ?? "",
         defaultSortDirection: "asc",
       },
       {
         key: "question",
-        label: "Question",
-        headerClassName: "text-left",
-        cellClassName: "text-left min-w-[40ch] align-top",
+        label: renderHeaderClamp("Question"),
+        headerClassName: "text-left whitespace-normal leading-tight",
+        cellClassName: "text-left align-top",
         sortValue: (row) => row.wording ?? row.question_id,
         render: (row) => (
           <div>
-            <div className="font-medium text-fred-text">{row.wording}</div>
+            <div className="max-h-[2.8em] overflow-hidden font-medium leading-tight text-fred-text">
+              {row.wording}
+            </div>
             <Link
               href={`/questions/${row.question_id}?hs_run_id=${encodeURIComponent(
                 row.hs_run_id ?? ""
               )}`}
-              className="text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
+              className="text-xs text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
             >
               {row.question_id}
             </Link>
@@ -296,8 +288,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "hazard_code",
-        label: "Hazard",
-        headerClassName: "text-left whitespace-nowrap",
+        label: renderHeaderClamp("Hazard"),
+        headerClassName: "text-left whitespace-normal leading-tight",
         cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.hazard_code,
         render: (row) => row.hazard_code,
@@ -305,8 +297,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "metric",
-        label: "Metric",
-        headerClassName: "text-left whitespace-nowrap",
+        label: renderHeaderClamp("Metric"),
+        headerClassName: "text-left whitespace-normal leading-tight",
         cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.metric,
         render: (row) => row.metric,
@@ -314,8 +306,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "forecast_date",
-        label: "Forecast Date",
-        headerClassName: "text-right whitespace-nowrap",
+        label: renderHeaderClamp("Forecast Date"),
+        headerClassName: "text-right whitespace-normal leading-tight",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => rowForecastMonthKey(row.forecast_date),
         render: (row) => row.forecast_date ?? "",
@@ -323,8 +315,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "first_forecast_month",
-        label: "First Forecast Month",
-        headerClassName: "text-right whitespace-nowrap",
+        label: renderHeaderClamp("First Forecast Month"),
+        headerClassName: "text-right whitespace-normal leading-tight",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => rowYearMonthKey(row.first_forecast_month),
         render: (row) => row.first_forecast_month ?? "",
@@ -332,8 +324,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "last_forecast_month",
-        label: "Last Forecast Month",
-        headerClassName: "text-right whitespace-nowrap",
+        label: renderHeaderClamp("Last Forecast Month"),
+        headerClassName: "text-right whitespace-normal leading-tight",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => rowYearMonthKey(row.last_forecast_month),
         render: (row) => row.last_forecast_month ?? "",
@@ -341,8 +333,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "status",
-        label: "Status",
-        headerClassName: "text-left whitespace-nowrap",
+        label: renderHeaderClamp("Status"),
+        headerClassName: "text-left whitespace-normal leading-tight",
         cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.status ?? "",
         render: (row) => row.status ?? "",
@@ -350,8 +342,8 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "triage_score",
-        label: renderTriageHeader("Triage Score"),
-        headerClassName: "text-right whitespace-nowrap",
+        label: renderHeaderClamp(renderTriageHeader("Triage Score")),
+        headerClassName: "text-right whitespace-normal leading-tight",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => row.triage_score ?? null,
         render: (row) =>
@@ -360,8 +352,17 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       },
       {
         key: "eiv_total",
-        label: renderEivHeader(eivHeaderLabel),
-        headerClassName: "text-right whitespace-nowrap",
+        label: renderHeaderClamp(
+          renderEivHeader(
+            <span className="flex flex-col">
+              <span>6-Month EIV</span>
+              <span className="text-[11px] text-fred-muted">
+                / cumulative expected deaths
+              </span>
+            </span>
+          )
+        ),
+        headerClassName: "text-right whitespace-normal leading-tight",
         cellClassName: "text-right tabular-nums whitespace-nowrap",
         sortValue: (row) => row.eiv_total ?? null,
         render: (row) =>
@@ -369,7 +370,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         defaultSortDirection: "desc",
       },
     ],
-    [eivHeaderLabel]
+    []
   );
 
   return (
@@ -589,16 +590,98 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
           </div>
         </div>
       </div>
-      <SortableTable
-        columns={columns}
-        emptyMessage="No questions available. No data in DB snapshot."
-        rowKey={(row) => row.question_id}
-        rows={filteredRows}
-        initialSortKey="eiv_total"
-        initialSortDirection="desc"
-        tableLayout="auto"
-        dense
-      />
+      <div className="md:hidden">
+        <div className="space-y-3">
+          {filteredRows.map((row) => (
+            <div
+              key={row.question_id}
+              className="rounded-lg border border-fred-secondary bg-fred-surface p-4 shadow-fredCard"
+            >
+              <div className="flex items-center justify-between gap-3 text-xs text-fred-muted">
+                <Link
+                  href={`/countries/${row.iso3}`}
+                  className="text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
+                >
+                  {row.country_name ?? row.iso3}
+                </Link>
+                <span>{row.status ?? "Unknown status"}</span>
+              </div>
+              <div className="mt-2 max-h-[3.2em] overflow-hidden text-sm font-semibold leading-tight text-fred-text">
+                {row.wording}
+              </div>
+              <Link
+                href={`/questions/${row.question_id}?hs_run_id=${encodeURIComponent(
+                  row.hs_run_id ?? ""
+                )}`}
+                className="mt-1 block text-xs text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
+              >
+                {row.question_id}
+              </Link>
+              <div className="mt-3 grid gap-2 text-xs text-fred-text">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-full border border-fred-secondary px-2 py-0.5 text-[11px]">
+                    {row.hazard_code}
+                  </span>
+                  <span className="rounded-full border border-fred-secondary px-2 py-0.5 text-[11px]">
+                    {row.metric}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-fred-muted">Forecast date:</span>{" "}
+                  {row.forecast_date ?? "n/a"}
+                </div>
+                <div>
+                  <span className="text-fred-muted">Window:</span>{" "}
+                  {row.first_forecast_month ?? "n/a"} →{" "}
+                  {row.last_forecast_month ?? "n/a"}
+                </div>
+                <div>
+                  <span className="text-fred-muted">Triage score:</span>{" "}
+                  {row.triage_score != null ? row.triage_score.toFixed(2) : "n/a"}
+                </div>
+                <div>
+                  <span className="text-fred-muted">6-Month EIV:</span>{" "}
+                  {row.eiv_total != null
+                    ? Math.round(row.eiv_total).toLocaleString()
+                    : "n/a"}
+                </div>
+              </div>
+            </div>
+          ))}
+          {filteredRows.length === 0 ? (
+            <div className="rounded-lg border border-fred-secondary bg-fred-surface px-4 py-3 text-sm text-fred-muted">
+              No questions available. No data in DB snapshot.
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <div className="hidden md:block overflow-x-hidden">
+        <SortableTable
+          colGroup={
+            <>
+              <col style={{ width: "6ch" }} />
+              <col style={{ width: "14ch" }} />
+              <col style={{ width: "32ch" }} />
+              <col style={{ width: "6ch" }} />
+              <col style={{ width: "10ch" }} />
+              <col style={{ width: "11ch" }} />
+              <col style={{ width: "11ch" }} />
+              <col style={{ width: "11ch" }} />
+              <col style={{ width: "8ch" }} />
+              <col style={{ width: "8ch" }} />
+              <col style={{ width: "16ch" }} />
+            </>
+          }
+          columns={columns}
+          emptyMessage="No questions available. No data in DB snapshot."
+          rowKey={(row) => row.question_id}
+          rows={filteredRows}
+          initialSortKey="eiv_total"
+          initialSortDirection="desc"
+          tableLayout="fixed"
+          dense
+        />
+      </div>
     </div>
   );
 }
