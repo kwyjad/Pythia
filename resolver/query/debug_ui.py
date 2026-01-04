@@ -903,7 +903,7 @@ def get_hs_triage_all(
         call_1 = tagged.get("PASS_1")
         call_2 = tagged.get("PASS_2")
         if call_1 or call_2:
-            remaining = [call for call in calls if call not in {call_1, call_2}]
+            remaining = [call for call in calls if call is not call_1 and call is not call_2]
             if call_1 is None and remaining:
                 call_1 = remaining[0]
                 remaining = remaining[1:]
