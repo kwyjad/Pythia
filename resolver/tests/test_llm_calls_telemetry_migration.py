@@ -3,12 +3,13 @@ import json
 import pytest
 
 
-def test_llm_calls_telemetry_migration_backfill():
+def test_llm_calls_telemetry_migration_backfill(tmp_path):
     pytest.importorskip("duckdb")
     from resolver.db import duckdb_io
     from scripts.migrate_llm_calls_telemetry import backfill_llm_calls_telemetry
 
-    db_url = "duckdb:///:memory:"
+    db_path = tmp_path / "llm_calls_migration.duckdb"
+    db_url = f"duckdb:///{db_path}"
     conn = duckdb_io.get_db(db_url)
     try:
         conn.execute(
