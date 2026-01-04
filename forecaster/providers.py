@@ -16,7 +16,9 @@ usage, latency, and estimated cost so we can monitor spend across runs.
 
 import asyncio
 import json
+import logging
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -96,9 +98,14 @@ def get_llm_semaphore() -> asyncio.Semaphore:
 # Provider failure tracking (per run)
 # ---------------------------------------------------------------------------
 
-_PROVIDER_FAILURE_THRESHOLD = int(os.getenv("PROVIDER_FAILURE_THRESHOLD", "2") or 2)
-_RUN_PROVIDER_FAILURES: Dict[str, Dict[str, int]] = {}
-_RUN_PROVIDER_DISABLED: Dict[str, set[str]] = {}
+LOGGER = logging.getLogger(__name__)
+
+_PROVIDER_FAILURE_THRESHOLD = int(
+    os.getenv("PYTHIA_PROVIDER_FAILURE_THRESHOLD", os.getenv("PROVIDER_FAILURE_THRESHOLD", "6") or 6)
+)
+_PROVIDER_COOLDOWN_SECONDS = float(os.getenv("PYTHIA_PROVIDER_COOLDOWN_SECONDS", "60") or 60.0)
+_PROVIDER_RESET_ON_SUCCESS = os.getenv("PYTHIA_PROVIDER_RESET_ON_SUCCESS", "1") != "0"
+_RUN_PROVIDER_STATE: Dict[str, Dict[str, Dict[str, float]]] = {}
 
 
 def _resolve_run_key(run_id: str | None = None) -> str:
@@ -115,33 +122,69 @@ def _resolve_run_key(run_id: str | None = None) -> str:
 
 def reset_provider_failures_for_run(run_id: str | None = None) -> None:
     key = _resolve_run_key(run_id)
-    _RUN_PROVIDER_FAILURES.pop(key, None)
-    _RUN_PROVIDER_DISABLED.pop(key, None)
+    _RUN_PROVIDER_STATE.pop(key, None)
 
 
-def _note_provider_failure(provider: str, run_id: str | None = None) -> int:
+def _provider_state_for_run(provider: str, run_id: str | None = None) -> Dict[str, float]:
     key = _resolve_run_key(run_id)
-    run_failures = _RUN_PROVIDER_FAILURES.setdefault(key, {})
-    count = int(run_failures.get(provider, 0)) + 1
-    run_failures[provider] = count
-    if count >= _PROVIDER_FAILURE_THRESHOLD:
-        _RUN_PROVIDER_DISABLED.setdefault(key, set()).add(provider)
-    return count
+    run_state = _RUN_PROVIDER_STATE.setdefault(key, {})
+    state = run_state.setdefault(
+        provider,
+        {"consecutive_failures": 0.0, "cooldown_until_ts": 0.0},
+    )
+    return state
+
+
+def _note_provider_failure(provider: str, run_id: str | None = None) -> Dict[str, float]:
+    state = _provider_state_for_run(provider, run_id)
+    failures = int(state.get("consecutive_failures", 0)) + 1
+    state["consecutive_failures"] = float(failures)
+    LOGGER.debug("Provider failure count incremented: provider=%s failures=%s", provider, failures)
+    if failures >= _PROVIDER_FAILURE_THRESHOLD:
+        cooldown_until = time.time() + _PROVIDER_COOLDOWN_SECONDS
+        state["cooldown_until_ts"] = cooldown_until
+        LOGGER.warning(
+            "Provider cooldown started: provider=%s failures=%s until=%s",
+            provider,
+            failures,
+            cooldown_until,
+        )
+    return state
+
+
+def _note_provider_success(provider: str, run_id: str | None = None) -> None:
+    if not _PROVIDER_RESET_ON_SUCCESS:
+        return
+    state = _provider_state_for_run(provider, run_id)
+    had_failures = int(state.get("consecutive_failures", 0)) > 0
+    had_cooldown = float(state.get("cooldown_until_ts", 0.0)) > 0.0
+    if had_failures or had_cooldown:
+        state["consecutive_failures"] = 0.0
+        state["cooldown_until_ts"] = 0.0
+        LOGGER.info("Provider failure counters reset: provider=%s", provider)
 
 
 def _provider_failures_for_run(provider: str, run_id: str | None = None) -> int:
-    key = _resolve_run_key(run_id)
-    return int(_RUN_PROVIDER_FAILURES.get(key, {}).get(provider, 0))
+    state = _provider_state_for_run(provider, run_id)
+    return int(state.get("consecutive_failures", 0))
 
 
 def is_provider_disabled_for_run(provider: str, run_id: str | None = None) -> bool:
-    key = _resolve_run_key(run_id)
-    return provider in _RUN_PROVIDER_DISABLED.get(key, set())
+    state = _provider_state_for_run(provider, run_id)
+    return time.time() < float(state.get("cooldown_until_ts", 0.0))
 
 
 def disabled_providers_for_run(run_id: str | None = None) -> List[str]:
     key = _resolve_run_key(run_id)
-    return sorted(_RUN_PROVIDER_DISABLED.get(key, set()))
+    run_state = _RUN_PROVIDER_STATE.get(key, {})
+    now = time.time()
+    return sorted(
+        [
+            provider
+            for provider, state in run_state.items()
+            if now < float(state.get("cooldown_until_ts", 0.0))
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -925,11 +968,21 @@ def _is_timeout_error(error: Optional[str]) -> bool:
     return "timeout" in lower_err or "timed out" in lower_err
 
 
-def _should_retry_provider_error(error: Optional[str], retry_after_hint: Optional[float] = None) -> tuple[bool, Optional[float]]:
+def _should_retry_provider_error(
+    error: Optional[str],
+    retry_after_hint: Optional[float] = None,
+    *,
+    purpose: Optional[str] = None,
+    allow_timeout_retry: bool = True,
+) -> tuple[bool, Optional[float]]:
     if not error:
         return False, None
 
     if _is_timeout_error(error):
+        if purpose == "hs_triage":
+            return True, retry_after_hint
+        if allow_timeout_retry:
+            return True, retry_after_hint
         return False, None
 
     lower_err = error.lower()
@@ -1047,13 +1100,31 @@ async def call_chat_ms(
         return "", usage_to_dict(None), f"provider {ms.provider} inactive"
 
     run_key = _resolve_run_key(run_id)
+    state = _provider_state_for_run(ms.provider, run_key)
+    cooldown_until = float(state.get("cooldown_until_ts", 0.0))
+    now = time.time()
+    if cooldown_until and now >= cooldown_until:
+        if state.get("cooldown_until_ts"):
+            LOGGER.info(
+                "Provider cooldown ended: provider=%s run_id=%s",
+                ms.provider,
+                run_key,
+            )
+        state["cooldown_until_ts"] = 0.0
     if is_provider_disabled_for_run(ms.provider, run_key):
+        LOGGER.info(
+            "Provider cooldown active; skipping call: provider=%s run_id=%s",
+            ms.provider,
+            run_key,
+        )
         usage = usage_to_dict(None)
-        usage["provider_disabled_after_failures"] = True
+        usage["cooldown_active"] = True
+        usage["cooldown_until_ts"] = float(state.get("cooldown_until_ts", 0.0))
         usage["provider_failures_in_run"] = _provider_failures_for_run(ms.provider, run_key)
+        usage["attempts_used"] = 0
+        usage["backoffs_sec"] = []
         return "", usage, (
-            f"provider {ms.provider} disabled after {_PROVIDER_FAILURE_THRESHOLD} failures"
-            f" for run {run_key}"
+            f"provider {ms.provider} cooldown active for run {run_key} until {state.get('cooldown_until_ts')}"
         )
 
     start = time.time()
@@ -1066,6 +1137,7 @@ async def call_chat_ms(
     hs_fail_fast_on_retry_after = False
     hs_max_attempts: Optional[int] = None
     hs_usage: Dict[str, Any] = {}
+    backoffs_sec: list[float] = []
     if spd_google:
         model_id_lower = ms.model_id.lower()
         if "gemini-3-flash" in model_id_lower:
@@ -1086,9 +1158,9 @@ async def call_chat_ms(
         max_attempts = max(1, int(os.getenv("PYTHIA_LLM_RETRIES", "3") or 3))
     if hs_triage:
         try:
-            hs_max_attempts = max(1, int(os.getenv("PYTHIA_HS_LLM_MAX_ATTEMPTS", "1") or 1))
+            hs_max_attempts = max(1, int(os.getenv("PYTHIA_HS_LLM_MAX_ATTEMPTS", "3") or 3))
         except Exception:
-            hs_max_attempts = 1
+            hs_max_attempts = 3
         try:
             hs_max_retry_after_sec = max(
                 0.0, float(os.getenv("PYTHIA_HS_LLM_MAX_RETRY_AFTER_SEC", "10") or 10)
@@ -1097,7 +1169,7 @@ async def call_chat_ms(
             hs_max_retry_after_sec = 10.0
         hs_fail_fast_on_retry_after = os.getenv("PYTHIA_HS_LLM_FAIL_FAST_ON_RETRY_AFTER", "1") == "1"
         if ms.provider == "google":
-            hs_timeout_sec = _resolve_timeout("PYTHIA_HS_GEMINI_TIMEOUT_SEC", None, 60.0)
+            hs_timeout_sec = _resolve_timeout("PYTHIA_HS_GEMINI_TIMEOUT_SEC", None, 120.0)
             timeout_sec = hs_timeout_sec
         if hs_max_attempts is not None:
             max_attempts = min(max_attempts, hs_max_attempts)
@@ -1134,7 +1206,13 @@ async def call_chat_ms(
             error = result.error if result and result.error else None
 
         retry_after_hint = result.retry_after if result else None
-        should_retry, retry_after = _should_retry_provider_error(error, retry_after_hint)
+        allow_timeout_retry = os.getenv("PYTHIA_LLM_RETRY_TIMEOUTS", "1") != "0"
+        should_retry, retry_after = _should_retry_provider_error(
+            error,
+            retry_after_hint,
+            purpose=ms.purpose,
+            allow_timeout_retry=allow_timeout_retry,
+        )
         if hs_triage and retry_after_hint is not None:
             hs_usage["retry_after_hint_sec"] = retry_after_hint
             if hs_max_retry_after_sec is not None and retry_after_hint > hs_max_retry_after_sec:
@@ -1147,12 +1225,17 @@ async def call_chat_ms(
         if not should_retry or attempt >= max_attempts:
             break
 
-        backoff = retry_after if retry_after is not None else min(20.0, 2 ** (attempt - 1))
+        if retry_after is not None:
+            backoff = min(20.0, float(retry_after))
+        else:
+            backoff = min(20.0, 1.0 * (2 ** (attempt - 1)))
+        backoff += random.uniform(0.0, 0.5)
         if hs_triage and hs_max_retry_after_sec is not None:
             if backoff > hs_max_retry_after_sec:
                 backoff = hs_max_retry_after_sec
                 hs_usage["retry_after_capped"] = True
             hs_usage["retry_after_used_sec"] = backoff
+        backoffs_sec.append(backoff)
         await asyncio.sleep(backoff)
 
     if result is None:
@@ -1162,6 +1245,8 @@ async def call_chat_ms(
 
     elapsed_ms = int((time.time() - start) * 1000)
     usage = result.usage or usage_to_dict(None)
+    usage["attempts_used"] = attempt
+    usage["backoffs_sec"] = backoffs_sec
     if hs_usage:
         usage.update(hs_usage)
     cost = result.cost_usd if result.cost_usd else estimate_cost_usd(ms.model_id, usage)
@@ -1179,11 +1264,14 @@ async def call_chat_ms(
     if error:
         if spd_google and _is_timeout_error(error):
             return "", usage, error
-        failure_count = _note_provider_failure(ms.provider, run_key)
-        usage["provider_failures_in_run"] = failure_count
-        if is_provider_disabled_for_run(ms.provider, run_key):
-            usage["provider_disabled_after_failures"] = True
+        state = _note_provider_failure(ms.provider, run_key)
+        usage["provider_failures_in_run"] = int(state.get("consecutive_failures", 0))
+        cooldown_until_ts = float(state.get("cooldown_until_ts", 0.0))
+        if cooldown_until_ts > time.time():
+            usage["cooldown_active"] = True
+            usage["cooldown_until_ts"] = cooldown_until_ts
         return "", usage, error
+    _note_provider_success(ms.provider, run_key)
     return result.text or "", usage, ""
 
 

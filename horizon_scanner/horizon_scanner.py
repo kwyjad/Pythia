@@ -31,6 +31,7 @@ from forecaster.providers import (
     ModelSpec,
     call_chat_ms,
     estimate_cost_usd,
+    parse_ensemble_specs,
     reset_provider_failures_for_run,
 )
 from horizon_scanner.db_writer import (
@@ -61,6 +62,7 @@ HS_WATCHLIST_THRESHOLD = float(os.getenv("PYTHIA_HS_WATCHLIST_THRESHOLD", "0.40"
 HS_HYSTERESIS_BAND = float(os.getenv("PYTHIA_HS_HYSTERESIS_BAND", "0.05"))
 HS_EVIDENCE_MAX_SOURCES = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SOURCES", "8"))
 HS_EVIDENCE_MAX_SIGNALS = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SIGNALS", "8"))
+HS_FALLBACK_MODEL_SPECS = os.getenv("PYTHIA_HS_FALLBACK_MODEL_SPECS", "openai:gpt-5.1")
 COUNTRIES_CSV = REPO_ROOT / "resolver" / "data" / "countries.csv"
 EMDAT_SHOCK_MAP = {
     "FL": "flood",
@@ -79,6 +81,8 @@ _COUNTRY_ALIASES = {
     "cote divoire": "CIV",
     "cote d’ivoire": "CIV",
 }
+
+_HS_FALLBACK_SPECS: list[ModelSpec] = []
 
 
 def _norm_country_key(raw: str) -> str:
@@ -241,6 +245,11 @@ def _resolve_hs_model() -> str:
     if model_id:
         return model_id
     return os.getenv("HS_MODEL_ID", "gemini-2.5-flash-lite")
+
+
+def _resolve_hs_fallback_specs() -> list[ModelSpec]:
+    specs = parse_ensemble_specs(HS_FALLBACK_MODEL_SPECS)
+    return [spec for spec in specs if spec.active]
 
 
 def _load_country_registry() -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -519,6 +528,16 @@ def _coerce_score(raw: Any) -> float:
         return 0.0
 
 
+def _coerce_score_or_none(raw: Any) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value != value:
+        return None
+    return value
+
+
 def _coerce_list(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
@@ -539,9 +558,57 @@ def _short_error(raw: str | None, limit: int = 200) -> str:
     return f"{text[:limit]}..."
 
 
+def _status_from_error(error_text: str | None) -> str:
+    if not error_text:
+        return "ok"
+    lowered = str(error_text).lower()
+    if "cooldown active" in lowered:
+        return "cooldown"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "parse failed" in lowered or "json" in lowered:
+        return "parse_error"
+    if "empty response" in lowered:
+        return "empty_response"
+    return "provider_error"
+
+
 def _merge_unique(values_a: list[str], values_b: list[str], limit: int = 6) -> list[str]:
     merged = sorted({value for value in values_a + values_b if value})
     return merged[:limit]
+
+
+async def _repair_hs_triage_json(
+    raw_text: str,
+    *,
+    run_id: str | None = None,
+    fallback_specs: list[ModelSpec],
+) -> tuple[dict[str, Any], dict[str, Any], str, ModelSpec | None]:
+    if not raw_text:
+        return {}, {}, "empty response", None
+    repair_prompt = (
+        "Convert the following into valid JSON ONLY. No prose. Preserve keys/values. "
+        "Output a single JSON object.\n\n"
+        f"{raw_text}"
+    )
+    for spec in fallback_specs:
+        text, usage, error = await call_chat_ms(
+            spec,
+            repair_prompt,
+            temperature=0.0,
+            prompt_key="hs.triage.json_repair",
+            prompt_version="1.0.0",
+            component="HorizonScanner",
+            run_id=run_id,
+        )
+        if error:
+            continue
+        try:
+            obj = _parse_hs_triage_json(text)
+        except Exception as exc:  # noqa: BLE001
+            return {}, usage or {}, f"triage repair parse failed: {type(exc).__name__}: {exc}", spec
+        return obj, usage or {}, "", spec
+    return {}, {}, "triage repair failed", None
 
 
 def _build_pass_hazards(
@@ -560,7 +627,8 @@ def _build_pass_hazards(
         hdata = normalized.get(hz_code) if isinstance(normalized.get(hz_code), dict) else None
         if not hdata:
             pass_hazards[hz_code] = {
-                "score": 0.0,
+                "score": None,
+                "score_valid": False,
                 "drivers": [],
                 "regime_shifts": [],
                 "data_quality": {"status": "missing_in_model_output"},
@@ -572,8 +640,10 @@ def _build_pass_hazards(
         if not isinstance(data_quality, dict):
             data_quality = {"raw": data_quality}
 
+        score_value = _coerce_score_or_none(hdata.get("triage_score"))
         pass_hazards[hz_code] = {
-            "score": _coerce_score(hdata.get("triage_score")),
+            "score": score_value,
+            "score_valid": score_value is not None,
             "drivers": _coerce_list(hdata.get("drivers")),
             "regime_shifts": _coerce_list(hdata.get("regime_shifts")),
             "data_quality": data_quality,
@@ -682,12 +752,23 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
 
 class _TriageCallResult(TypedDict):
     iso3: str
-    error_text: str | None
     response_text: str
+    pass_results: list[dict[str, Any]]
+    final_status: str
+    pass1_status: str
+    pass2_status: str
+    pass1_valid: bool
+    pass2_valid: bool
+    primary_model_id: str
+    fallback_model_id: str | None
+    error_text: str | None
 
 
 async def _call_hs_model(
-    prompt_text: str, *, run_id: str | None = None
+    prompt_text: str,
+    *,
+    run_id: str | None = None,
+    fallback_specs: list[ModelSpec] | None = None,
 ) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     spec = ModelSpec(
         name="Gemini",
@@ -713,7 +794,40 @@ async def _call_hs_model(
 
     usage = usage or {}
     usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
-    return text, usage, error, spec
+    if not error:
+        usage["fallback_used"] = False
+        usage["model_selected"] = f"{spec.provider}:{spec.model_id}"
+        return text, usage, error, spec
+
+    primary_error = _short_error(error)
+    fallback_specs = fallback_specs or []
+    for fallback_spec in fallback_specs:
+        fallback_start = time.time()
+        try:
+            fallback_text, fallback_usage, fallback_error = await call_chat_ms(
+                fallback_spec,
+                prompt_text,
+                temperature=HS_TEMPERATURE,
+                prompt_key="hs.triage.v2",
+                prompt_version="1.0.0",
+                component="HorizonScanner",
+                run_id=run_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            fallback_error = f"provider call error: {exc}"
+            fallback_text = ""
+            fallback_usage = {}
+        fallback_usage = fallback_usage or {}
+        fallback_usage.setdefault("elapsed_ms", int((time.time() - fallback_start) * 1000))
+        fallback_usage["fallback_used"] = True
+        fallback_usage["primary_error"] = primary_error
+        fallback_usage["model_selected"] = f"{fallback_spec.provider}:{fallback_spec.model_id}"
+        if not fallback_error:
+            return fallback_text, fallback_usage, "", fallback_spec
+    usage["fallback_used"] = True
+    usage["primary_error"] = primary_error
+    usage["model_selected"] = f"{spec.provider}:{spec.model_id}"
+    return "", usage, error, spec
 
 
 def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCallResult:
@@ -734,9 +848,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         )
 
         pass_results: list[dict[str, Any]] = []
+        fallback_specs = _HS_FALLBACK_SPECS or _resolve_hs_fallback_specs()
         for pass_idx in (1, 2):
             call_start = time.time()
-            text, usage, error, model_spec = asyncio.run(_call_hs_model(prompt, run_id=run_id))
+            text, usage, error, model_spec = asyncio.run(
+                _call_hs_model(prompt, run_id=run_id, fallback_specs=fallback_specs)
+            )
             usage = usage or {}
             usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
 
@@ -744,6 +861,9 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             triage: Dict[str, Any] = {}
             hazards_dict: Dict[str, Any] = {}
             parse_ok = True
+            json_repair_used = False
+            repair_error: str | None = None
+            repair_model_selected: str | None = None
 
             if error:
                 log_error_text = str(error)
@@ -771,6 +891,23 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                             exc,
                             raw_path,
                         )
+                        repair_obj, repair_usage, repair_error, repair_spec = asyncio.run(
+                            _repair_hs_triage_json(raw, run_id=run_id, fallback_specs=fallback_specs)
+                        )
+                        if not repair_error:
+                            triage = repair_obj
+                            hazards_dict = triage.get("hazards") or {}
+                            parse_ok = True
+                            json_repair_used = True
+                            log_error_text = None
+                            if repair_spec:
+                                repair_model_selected = f"{repair_spec.provider}:{repair_spec.model_id}"
+                            if repair_usage:
+                                usage.setdefault("repair_usage", repair_usage)
+                        else:
+                            repair_model_selected = (
+                                f"{repair_spec.provider}:{repair_spec.model_id}" if repair_spec else None
+                            )
 
             hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
             hazard_codes = sorted({(hz_code or "").upper().strip() for hz_code in hazards_dict.keys()})
@@ -783,6 +920,12 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             )
 
             usage_for_log = dict(usage or {})
+            if json_repair_used:
+                usage_for_log["json_repair_used"] = True
+                if repair_model_selected:
+                    usage_for_log["repair_model_selected"] = repair_model_selected
+            if repair_error:
+                usage_for_log["repair_error"] = _short_error(repair_error)
             if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
                 model_id_for_cost = getattr(model_spec, "model_id", None) or _resolve_hs_model()
                 if model_id_for_cost:
@@ -813,6 +956,11 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                     "hazards": hazards_dict,
                     "error_text": log_error_text,
                     "parse_ok": parse_ok,
+                    "fallback_used": bool(usage_for_log.get("fallback_used")),
+                    "primary_error": usage_for_log.get("primary_error"),
+                    "json_repair_used": json_repair_used,
+                    "repair_error": repair_error,
+                    "model_selected": usage_for_log.get("model_selected"),
                 }
             )
 
@@ -824,7 +972,20 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         for hz_code in expected_hazards:
             score1 = pass_one[hz_code]["score"]
             score2 = pass_two[hz_code]["score"]
-            avg_score = (score1 + score2) / 2
+            score1_valid = bool(pass_one[hz_code].get("score_valid"))
+            score2_valid = bool(pass_two[hz_code].get("score_valid"))
+            if score1_valid and score2_valid:
+                avg_score = (float(score1) + float(score2)) / 2
+                combined_status = "ok"
+            elif score1_valid:
+                avg_score = float(score1)
+                combined_status = "degraded"
+            elif score2_valid:
+                avg_score = float(score2)
+                combined_status = "degraded"
+            else:
+                avg_score = 0.0
+                combined_status = "error"
             combined_hazards[hz_code] = {
                 "triage_score": avg_score,
                 "drivers": _merge_unique(pass_one[hz_code]["drivers"], pass_two[hz_code]["drivers"]),
@@ -833,6 +994,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                     pass_two[hz_code]["regime_shifts"],
                 ),
                 "data_quality": {
+                    "status": combined_status,
                     "score_pass1": score1,
                     "score_pass2": score2,
                     "parse_ok1": bool(pass_results[0]["parse_ok"]),
@@ -864,7 +1026,41 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         )
 
         response_text = "\n\n".join([result["text"] for result in pass_results if result["text"]])
-        return {"iso3": iso3_up, "error_text": overall_error, "response_text": response_text}
+        pass1_status = _status_from_error(pass_results[0]["error_text"])
+        pass2_status = _status_from_error(pass_results[1]["error_text"])
+        if pass1_status == "ok" and pass_results[0].get("fallback_used"):
+            pass1_status = "fallback_used"
+        if pass2_status == "ok" and pass_results[1].get("fallback_used"):
+            pass2_status = "fallback_used"
+        if pass1_status == "ok" and pass_results[0].get("json_repair_used"):
+            pass1_status = "fallback_used"
+        if pass2_status == "ok" and pass_results[1].get("json_repair_used"):
+            pass2_status = "fallback_used"
+        pass1_valid = any(pass_one[hz].get("score_valid") for hz in expected_hazards)
+        pass2_valid = any(pass_two[hz].get("score_valid") for hz in expected_hazards)
+        if pass1_valid and pass2_valid:
+            final_status = "ok"
+        elif pass1_valid or pass2_valid:
+            final_status = "degraded"
+        else:
+            final_status = "failed"
+        fallback_model_id = None
+        if pass_results[0].get("fallback_used") or pass_results[1].get("fallback_used"):
+            if fallback_specs:
+                fallback_model_id = fallback_specs[0].model_id
+        return {
+            "iso3": iso3_up,
+            "error_text": overall_error,
+            "response_text": response_text,
+            "pass_results": pass_results,
+            "final_status": final_status,
+            "pass1_status": pass1_status,
+            "pass2_status": pass2_status,
+            "pass1_valid": pass1_valid,
+            "pass2_valid": pass2_valid,
+            "primary_model_id": _resolve_hs_model(),
+            "fallback_model_id": fallback_model_id,
+        }
     finally:
         con.close()
 
@@ -877,9 +1073,13 @@ def _load_country_list(
     if provided:
         raw_countries = provided
     else:
-        country_list_path = CURRENT_DIR / "hs_country_list.txt"
-        with open(country_list_path, "r", encoding="utf-8") as f:
-            raw_countries = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        env_only = os.getenv("PYTHIA_HS_ONLY_COUNTRIES", "").strip()
+        if env_only:
+            raw_countries = [part.strip() for part in env_only.split(",") if part.strip()]
+        else:
+            country_list_path = CURRENT_DIR / "hs_country_list.txt"
+            with open(country_list_path, "r", encoding="utf-8") as f:
+                raw_countries = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
     resolved: list[Tuple[str, str]] = []
     skipped_entries: list[dict[str, str]] = []
@@ -914,6 +1114,13 @@ def main(countries: list[str] | None = None):
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
+    fallback_specs = _resolve_hs_fallback_specs()
+    if not fallback_specs:
+        raise SystemExit(
+            "HS fallback model required but not active; check OPENAI_API_KEY / config"
+        )
+    global _HS_FALLBACK_SPECS
+    _HS_FALLBACK_SPECS = fallback_specs
 
     country_entries, skipped_entries, requested_countries = _load_country_list(countries)
     if not country_entries:
@@ -929,21 +1136,38 @@ def main(countries: list[str] | None = None):
 
     logger.info("Processing %d countries with max %d workers", len(country_entries), HS_MAX_WORKERS)
 
-    triage_failures: list[_TriageCallResult] = []
+    triage_results: list[_TriageCallResult] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=HS_MAX_WORKERS) as pool:
-        futures = [
-            pool.submit(_run_hs_for_country, run_id, iso3, name)
+        futures = {
+            pool.submit(_run_hs_for_country, run_id, iso3, name): (iso3, name)
             for name, iso3 in country_entries
-        ]
+        }
 
         for fut in concurrent.futures.as_completed(futures):
             try:
                 result = fut.result()
-                if result and result.get("error_text"):
-                    triage_failures.append(result)
+                if result:
+                    triage_results.append(result)
             except Exception:
+                iso3, _name = futures.get(fut, ("", ""))
                 logger.exception("HS triage failed for one country")
+                if iso3:
+                    triage_results.append(
+                        {
+                            "iso3": iso3.upper(),
+                            "error_text": "triage execution failed",
+                            "response_text": "",
+                            "pass_results": [],
+                            "final_status": "failed",
+                            "pass1_status": "provider_error",
+                            "pass2_status": "provider_error",
+                            "pass1_valid": False,
+                            "pass2_valid": False,
+                            "primary_model_id": _resolve_hs_model(),
+                            "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
+                        }
+                    )
 
     iso3_list = [iso3 for (_name, iso3) in country_entries]
     try:
@@ -966,22 +1190,84 @@ def main(countries: list[str] | None = None):
         len(skipped_entries),
     )
 
-    if triage_failures:
-        diagnostics_dir = Path("diagnostics")
-        diagnostics_dir.mkdir(parents=True, exist_ok=True)
-        failures_path = diagnostics_dir / f"hs_triage_failures__{run_id}.json"
-        try:
-            failures_path.write_text(
-                json.dumps(sorted(triage_failures, key=lambda r: r.get("iso3", "")), ensure_ascii=False, indent=2),
-                encoding="utf-8",
+    diagnostics_dir = Path("diagnostics")
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    coverage_rows: list[dict[str, Any]] = []
+    failures_payload: list[dict[str, Any]] = []
+    for result in sorted(triage_results, key=lambda r: r.get("iso3", "")):
+        coverage_rows.append(
+            {
+                "iso3": result.get("iso3"),
+                "pass1_status": result.get("pass1_status"),
+                "pass2_status": result.get("pass2_status"),
+                "primary_model_id": result.get("primary_model_id"),
+                "fallback_model_id": result.get("fallback_model_id"),
+                "final_status": result.get("final_status"),
+            }
+        )
+        if result.get("final_status") != "ok":
+            failures_payload.append(
+                {
+                    "iso3": result.get("iso3"),
+                    "final_status": result.get("final_status"),
+                    "pass1_status": result.get("pass1_status"),
+                    "pass2_status": result.get("pass2_status"),
+                    "pass1_valid": result.get("pass1_valid"),
+                    "pass2_valid": result.get("pass2_valid"),
+                    "primary_model_id": result.get("primary_model_id"),
+                    "fallback_model_id": result.get("fallback_model_id"),
+                    "pass_results": result.get("pass_results", []),
+                }
             )
-            logger.info("Wrote HS triage failure diagnostics to %s", failures_path)
-        except Exception:  # pragma: no cover - best-effort
-            logger.exception("Failed to write HS triage failure diagnostics")
+
+    coverage_path = diagnostics_dir / f"hs_triage_coverage__{run_id}.csv"
+    try:
+        with open(coverage_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "iso3",
+                    "pass1_status",
+                    "pass2_status",
+                    "primary_model_id",
+                    "fallback_model_id",
+                    "final_status",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(coverage_rows)
+        logger.info("Wrote HS triage coverage report to %s", coverage_path)
+    except Exception:  # pragma: no cover - best-effort
+        logger.exception("Failed to write HS triage coverage report")
+
+    failures_path = diagnostics_dir / f"hs_triage_failures__{run_id}.json"
+    try:
+        failures_path.write_text(
+            json.dumps(failures_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Wrote HS triage failure diagnostics to %s", failures_path)
+    except Exception:  # pragma: no cover - best-effort
+        logger.exception("Failed to write HS triage failure diagnostics")
 
     resolved_iso3s = sorted({iso3 for iso3 in iso3_list})
     print(f"HS_RUN_ID={run_id}")
     print(f"HS_RESOLVED_ISO3S={','.join(resolved_iso3s)}")
+    ok_iso3s = sorted(
+        [result.get("iso3") for result in triage_results if result.get("final_status") == "ok"]
+    )
+    degraded_iso3s = sorted(
+        [result.get("iso3") for result in triage_results if result.get("final_status") == "degraded"]
+    )
+    failed_iso3s = sorted(
+        [result.get("iso3") for result in triage_results if result.get("final_status") == "failed"]
+    )
+    rerun_iso3s = sorted({*degraded_iso3s, *failed_iso3s})
+    print(f"HS_TRIAGE_OK_ISO3S={','.join([iso3 for iso3 in ok_iso3s if iso3])}")
+    print(f"HS_TRIAGE_DEGRADED_ISO3S={','.join([iso3 for iso3 in degraded_iso3s if iso3])}")
+    print(f"HS_TRIAGE_FAILED_ISO3S={','.join([iso3 for iso3 in failed_iso3s if iso3])}")
+    print(f"HS_TRIAGE_RERUN_ISO3S={','.join([iso3 for iso3 in rerun_iso3s if iso3])}")
+    print(f"HS_TRIAGE_COVERAGE_CSV={coverage_path}")
 
 
 if __name__ == "__main__":

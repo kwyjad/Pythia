@@ -192,3 +192,167 @@ def test_get_hs_triage_all_call_statuses():
     assert ecu_fl["call_2_status"] == "no_call"
     assert ecu_fl["why_null"] == "call_failures:parse_error,no_call"
     assert diagnostics["rows_with_invalid_score_value"] == 1
+
+
+def test_hs_triage_long_response_not_truncated():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE hs_triage (
+            run_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            triage_score DOUBLE,
+            tier TEXT,
+            created_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE llm_calls (
+            hs_run_id TEXT,
+            phase TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            model_id TEXT,
+            created_at TIMESTAMP,
+            response_text TEXT,
+            triage_score DOUBLE,
+            parse_error TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO hs_triage VALUES
+          ('hs_20240303', 'USA', 'ACE', 0.42, 'watch', '2024-03-03 09:00:00')
+        """
+    )
+    long_prefix = "x" * 2105
+    response_text = (
+        f"{long_prefix} {{\"hazards\":[{{\"hazard_code\":\"ACE\",\"triage_score\":0.65}}]}}"
+    )
+    conn.execute(
+        """
+        INSERT INTO llm_calls VALUES
+          ('hs_20240303', 'hs_triage', 'USA', NULL, 'gemini',
+           '2024-03-03 09:10:00', ?, NULL, NULL)
+        """,
+        [response_text],
+    )
+
+    rows, _ = get_hs_triage_all(conn, "hs_20240303")
+    by_key = {(row["iso3"], row["hazard_code"]): row for row in rows}
+
+    usa_ace = by_key[("USA", "ACE")]
+    assert usa_ace["triage_score_1"] == 0.65
+    assert usa_ace["triage_score_avg_source"] == "calls"
+
+
+def test_hs_triage_error_text_status_mapping():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE hs_triage (
+            run_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            triage_score DOUBLE,
+            tier TEXT,
+            created_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE llm_calls (
+            hs_run_id TEXT,
+            phase TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            model_id TEXT,
+            created_at TIMESTAMP,
+            response_text TEXT,
+            triage_score DOUBLE,
+            parse_error TEXT,
+            error_text TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO hs_triage VALUES
+          ('hs_20240404', 'BRA', 'FL', 0.12, 'watch', '2024-04-04 08:00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO llm_calls VALUES
+          ('hs_20240404', 'hs_triage', 'BRA', NULL, 'gemini',
+           '2024-04-04 08:10:00', NULL, NULL, NULL,
+           'provider disabled after quota reached')
+        """
+    )
+
+    rows, _ = get_hs_triage_all(conn, "hs_20240404")
+    by_key = {(row["iso3"], row["hazard_code"]): row for row in rows}
+
+    bra_fl = by_key[("BRA", "FL")]
+    assert bra_fl["call_1_status"] == "error:provider_disabled"
+    assert bra_fl["why_null"] == "call_failures:error:provider_disabled,no_call"
+
+
+def test_hs_triage_pass_order_mapping():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE hs_triage (
+            run_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            triage_score DOUBLE,
+            tier TEXT,
+            created_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE llm_calls (
+            hs_run_id TEXT,
+            phase TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            model_id TEXT,
+            created_at TIMESTAMP,
+            response_text TEXT,
+            triage_score DOUBLE,
+            parse_error TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO hs_triage VALUES
+          ('hs_20240505', 'IND', 'HW', 0.21, 'watch', '2024-05-05 07:00:00')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO llm_calls VALUES
+          ('hs_20240505', 'hs_triage', 'IND', 'PASS_2', 'gemini',
+           '2024-05-05 07:05:00',
+           '{"hazards":[{"hazard_code":"HW","triage_score":0.8}]}', NULL, NULL),
+          ('hs_20240505', 'hs_triage', 'IND', 'PASS_1', 'gemini',
+           '2024-05-05 07:01:00',
+           '{"hazards":[{"hazard_code":"HW","triage_score":0.2}]}', NULL, NULL)
+        """
+    )
+
+    rows, _ = get_hs_triage_all(conn, "hs_20240505")
+    by_key = {(row["iso3"], row["hazard_code"]): row for row in rows}
+
+    ind_hw = by_key[("IND", "HW")]
+    assert ind_hw["triage_score_1"] == 0.2
+    assert ind_hw["triage_score_2"] == 0.8

@@ -662,21 +662,26 @@ def get_hs_triage_all(
         llm_parse_col = _pick_column(llm_cols, ["parse_error"])
         llm_model_col = _pick_column(llm_cols, ["model_id", "model_name"])
         llm_provider_col = _pick_column(llm_cols, ["provider"])
+        llm_hazard_col = _pick_column(llm_cols, ["hazard_code", "hazard"])
         llm_status_col = _pick_column(llm_cols, ["status"])
         llm_error_type_col = _pick_column(llm_cols, ["error_type"])
         llm_error_message_col = _pick_column(llm_cols, ["error_message"])
+        llm_error_text_col = _pick_column(llm_cols, ["error_text"])
         llm_scores_json_col = _pick_column(llm_cols, ["hazard_scores_json"])
         llm_scores_parse_ok_col = _pick_column(llm_cols, ["hazard_scores_parse_ok"])
         llm_response_format_col = _pick_column(llm_cols, ["response_format"])
 
-        if llm_run_col and llm_phase_col:
+        if llm_run_col and llm_phase_col and llm_iso_col:
             created_expr = f"{llm_ts_col} AS created_at" if llm_ts_col else "NULL AS created_at"
             response_expr = (
-                f"SUBSTR({llm_response_col}, 1, 2000) AS response_text"
+                f"{llm_response_col} AS response_text"
                 if llm_response_col
                 else "NULL AS response_text"
             )
             iso_expr = f"UPPER({llm_iso_col}) AS iso3" if llm_iso_col else "NULL AS iso3"
+            call_tag_expr = (
+                f"{llm_hazard_col} AS call_tag" if llm_hazard_col else "NULL AS call_tag"
+            )
             parse_expr = f"{llm_parse_col} AS parse_error" if llm_parse_col else "NULL AS parse_error"
             model_expr = f"{llm_model_col} AS model_id" if llm_model_col else "NULL AS model_id"
             provider_expr = f"{llm_provider_col} AS provider" if llm_provider_col else "NULL AS provider"
@@ -688,6 +693,11 @@ def get_hs_triage_all(
                 f"{llm_error_message_col} AS error_message"
                 if llm_error_message_col
                 else "NULL AS error_message"
+            )
+            error_text_expr = (
+                f"{llm_error_text_col} AS error_text"
+                if llm_error_text_col
+                else "NULL AS error_text"
             )
             scores_json_expr = (
                 f"{llm_scores_json_col} AS hazard_scores_json"
@@ -704,10 +714,23 @@ def get_hs_triage_all(
                 if llm_response_format_col
                 else "NULL AS response_format"
             )
+            llm_where = f"{llm_phase_col} = 'hs_triage' AND {llm_run_col} = ?"
+            pass_order_expr = "3"
+            if llm_hazard_col:
+                pass_order_expr = (
+                    f"CASE"
+                    f" WHEN {llm_hazard_col} IS NULL THEN 3"
+                    f" WHEN UPPER({llm_hazard_col}) = 'PASS_1' THEN 1"
+                    f" WHEN UPPER({llm_hazard_col}) = 'PASS_2' THEN 2"
+                    f" ELSE 3"
+                    f" END"
+                )
+            ts_order_expr = f"{llm_ts_col} DESC NULLS LAST" if llm_ts_col else "1"
             llm_sql = f"""
                 SELECT
                   {created_expr},
                   {iso_expr},
+                  {call_tag_expr},
                   {response_expr},
                   {parse_expr},
                   {model_expr},
@@ -715,23 +738,30 @@ def get_hs_triage_all(
                   {status_expr},
                   {error_type_expr},
                   {error_message_expr},
+                  {error_text_expr},
                   {scores_json_expr},
                   {scores_parse_ok_expr},
                   {response_format_expr}
-                FROM llm_calls
-                WHERE {llm_phase_col} = 'hs_triage'
-                  AND {llm_run_col} = ?
+                FROM (
+                  SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY UPPER({llm_iso_col})
+                      ORDER BY {pass_order_expr}, {ts_order_expr}
+                    ) AS rn
+                  FROM llm_calls
+                  WHERE {llm_where}
+                ) ranked_calls
+                WHERE rn <= 2
             """
             llm_params: list[Any] = [run_id]
             if iso3 and llm_iso_col:
-                llm_sql += f" AND UPPER({llm_iso_col}) = ?"
+                llm_sql = llm_sql.replace(
+                    llm_where,
+                    f"{llm_where} AND UPPER({llm_iso_col}) = ?",
+                )
                 llm_params.append(iso3.upper())
-            if llm_ts_col:
-                llm_sql += f" ORDER BY {llm_ts_col} DESC NULLS LAST"
-            else:
-                llm_sql += " ORDER BY 1"
-            llm_sql += " LIMIT ?"
-            llm_params.append(limit * 6)
+            llm_sql += " ORDER BY iso3"
 
             try:
                 llm_df = conn.execute(llm_sql, llm_params).fetchdf()
@@ -757,6 +787,9 @@ def get_hs_triage_all(
                     status_raw = row.get("status")
                     status_value = str(status_raw).strip().lower() if status_raw else ""
                     error_type = row.get("error_type")
+                    error_message = row.get("error_message")
+                    error_text = row.get("error_text")
+                    error_text_value = str(error_text).strip() if error_text else ""
                     scores_json = row.get("hazard_scores_json")
                     scores_parse_ok_value = row.get("hazard_scores_parse_ok")
                     scores_parse_ok = False
@@ -789,6 +822,22 @@ def get_hs_triage_all(
                             invalid_scores,
                             json_parsed_ok,
                         ) = _extract_hazard_scores_with_diagnostics(response_text)
+                    structured_error_present = any(
+                        value
+                        for value in (status_raw, error_type, error_message)
+                        if value is not None and str(value).strip()
+                    )
+                    legacy_error_status = ""
+                    if not structured_error_present and error_text_value:
+                        lowered_error = error_text_value.lower()
+                        if "disabled after" in lowered_error:
+                            legacy_error_status = "error:provider_disabled"
+                        elif "read timed out" in lowered_error or "timeout" in lowered_error:
+                            legacy_error_status = "error:timeout"
+                        elif "triage parse failed" in lowered_error or "jsondecodeerror" in lowered_error:
+                            legacy_error_status = "parse_error"
+                        else:
+                            legacy_error_status = "error:provider_error"
                     if status_value == "error":
                         error_type_str = (
                             str(error_type).strip().lower() if error_type else "unknown"
@@ -797,27 +846,32 @@ def get_hs_triage_all(
                         hazard_scores = {}
                         hazards_seen = set()
                         invalid_scores = set()
-                    elif status_value == "ok":
-                        call_status = "ok" if hazard_scores else "parse_failed"
+                    elif legacy_error_status:
+                        call_status = legacy_error_status
+                        hazard_scores = {}
+                        hazards_seen = set()
+                        invalid_scores = set()
                     elif parse_error_present:
                         call_status = "parse_error"
+                    elif hazard_scores:
+                        call_status = "ok"
                     elif not response_text_present:
                         call_status = "response_missing"
-                    elif json_parsed_ok and not hazard_scores:
-                        call_status = "parse_failed"
                     else:
-                        call_status = "ok"
+                        call_status = "parse_failed"
                     call_status_counts[call_status] = call_status_counts.get(call_status, 0) + 1
                     diagnostics["hazard_scores_extracted"] += len(hazard_scores)
                     diagnostics["invalid_score_hazards"] += len(invalid_scores)
                     calls_for_iso.append(
                         {
                             "created_at": row.get("created_at"),
+                            "call_tag": row.get("call_tag"),
                             "model_id": row.get("model_id"),
                             "provider": row.get("provider"),
                             "status": status_raw,
                             "error_type": error_type,
-                            "error_message": row.get("error_message"),
+                            "error_message": error_message,
+                            "error_text": error_text,
                             "response_format": row.get("response_format"),
                             "parse_error_present": parse_error_present,
                             "response_text_present": response_text_present,
@@ -834,13 +888,38 @@ def get_hs_triage_all(
         if str(iso_val).strip()
     }
     rows: list[dict[str, Any]] = []
+
+    def select_calls(calls: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if not calls:
+            return None, None
+        tagged = {}
+        for call in calls:
+            tag = call.get("call_tag")
+            if tag is None:
+                continue
+            tag_value = str(tag).strip().upper()
+            if tag_value in {"PASS_1", "PASS_2"}:
+                tagged[tag_value] = call
+        call_1 = tagged.get("PASS_1")
+        call_2 = tagged.get("PASS_2")
+        if call_1 or call_2:
+            remaining = [call for call in calls if call is not call_1 and call is not call_2]
+            if call_1 is None and remaining:
+                call_1 = remaining[0]
+                remaining = remaining[1:]
+            if call_2 is None and remaining:
+                call_2 = remaining[0]
+            return call_1, call_2
+        call_1 = calls[0] if len(calls) > 0 else None
+        call_2 = calls[1] if len(calls) > 1 else None
+        return call_1, call_2
+
     for row in base_df.to_dict(orient="records"):
         iso_val = row.get("iso3")
         hazard_val = row.get("hazard_code")
         hazard_key = str(hazard_val).upper() if hazard_val is not None else ""
         call_candidates = llm_calls.get(str(iso_val), [])
-        call_1 = call_candidates[0] if len(call_candidates) > 0 else None
-        call_2 = call_candidates[1] if len(call_candidates) > 1 else None
+        call_1, call_2 = select_calls(call_candidates)
         score_1 = (
             call_1.get("hazard_scores", {}).get(hazard_key) if call_1 else None
         )
@@ -849,6 +928,7 @@ def get_hs_triage_all(
         )
         score_values = [score for score in (score_1, score_2) if score is not None]
         score_avg = sum(score_values) / len(score_values) if score_values else None
+        score_avg_source = "calls" if score_values else "none"
         base_score = row.get("triage_score")
         if score_avg is None and base_score is not None:
             try:
@@ -857,6 +937,7 @@ def get_hs_triage_all(
                 fallback_score = None
             if fallback_score is not None and fallback_score == fallback_score:
                 score_avg = fallback_score
+                score_avg_source = "hs_triage_fallback"
                 diagnostics["avg_from_hs_triage_score"] += 1
                 diagnostics["score_avg_from_hs_triage"] += 1
         if score_avg is not None and score_values:
@@ -956,6 +1037,7 @@ def get_hs_triage_all(
                 "triage_score_1": score_1,
                 "triage_score_2": score_2,
                 "triage_score_avg": score_avg,
+                "triage_score_avg_source": score_avg_source,
                 "is_null_avg": is_null_avg,
                 "call_1_status": call_1_status,
                 "call_2_status": call_2_status,

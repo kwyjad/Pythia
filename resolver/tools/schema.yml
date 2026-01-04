@@ -546,6 +546,101 @@ entities:
       - name: created_at
         type: datetime
         required: false
+  db.llm_calls:
+    kind: database
+    allow_extra_columns: false
+    description: LLM call telemetry and diagnostics across HS, research, and forecasting.
+    columns:
+      - name: call_id
+        type: string
+        required: true
+      - name: run_id
+        type: string
+        required: false
+      - name: hs_run_id
+        type: string
+        required: false
+      - name: question_id
+        type: string
+        required: false
+      - name: call_type
+        type: string
+        required: false
+      - name: phase
+        type: string
+        required: false
+      - name: model_name
+        type: string
+        required: false
+      - name: provider
+        type: string
+        required: false
+      - name: model_id
+        type: string
+        required: false
+      - name: prompt_text
+        type: string
+        required: false
+      - name: response_text
+        type: string
+        required: false
+      - name: parsed_json
+        type: string
+        required: false
+      - name: usage_json
+        type: string
+        required: false
+      - name: elapsed_ms
+        type: integer
+        required: false
+      - name: prompt_tokens
+        type: integer
+        required: false
+      - name: completion_tokens
+        type: integer
+        required: false
+      - name: total_tokens
+        type: integer
+        required: false
+      - name: cost_usd
+        type: number
+        required: false
+      - name: error_text
+        type: string
+        required: false
+      - name: status
+        type: enum
+        enum: [ok, error]
+        required: false
+      - name: error_type
+        type: enum
+        enum: [timeout, rate_limit, parse_error, provider_disabled, provider_error, unknown]
+        required: false
+      - name: error_message
+        type: string
+        required: false
+      - name: response_format
+        type: enum
+        enum: [fenced_json, json, text, empty]
+        required: false
+      - name: hazard_scores_json
+        type: string
+        required: false
+      - name: hazard_scores_parse_ok
+        type: boolean
+        required: false
+      - name: timestamp
+        type: datetime
+        required: false
+      - name: iso3
+        type: string
+        required: false
+      - name: hazard_code
+        type: string
+        required: false
+      - name: metric
+        type: string
+        required: false
   context.facts_last12:
     kind: context
     description: LLM context bundle summarising monthly new-series PIN/PA totals.

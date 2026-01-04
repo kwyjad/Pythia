@@ -33,6 +33,11 @@ on:
         required: false
         default: "pythia-resolver-db"
         type: string
+      hs_only_countries:
+        description: "Optional: comma-separated ISO3s/country names to rerun HS triage."
+        required: false
+        default: ""
+        type: string
   schedule:
     # Run at 03:00 Europe/Istanbul on the 1st of each month (00:00 UTC)
     - cron: "0 0 1 * *"
@@ -68,6 +73,7 @@ jobs:
       PYTHIA_FORECASTER_SELF_SEARCH_MAX_CALLS_PER_MODEL: "1"
       PYTHIA_FORECASTER_SELF_SEARCH_MAX_SOURCES: "6"
       HS_MODEL_ID: gemini-3-flash-preview
+      PYTHIA_HS_ONLY_COUNTRIES: ${{ github.event.inputs.hs_only_countries }}
       PYTHIA_BLOCK_PROVIDERS: xai
       PYTHIA_SPD_ENSEMBLE_SPECS: openai:gpt-5.1,anthropic:claude-opus-4-5-20251101,google:gemini-3-pro-preview,google:gemini-3-flash-preview
       PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
@@ -378,10 +384,23 @@ jobs:
             echo "GEMINI_API_KEY is set (value hidden)."
           fi
 
+      - name: Diagnostics — OPENAI_API_KEY presence
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "ERROR: OPENAI_API_KEY is NOT set."
+            echo "Set it under: Settings > Secrets and variables > Actions."
+            exit 1
+          else
+            echo "OPENAI_API_KEY is set (value hidden)."
+          fi
+
       # Step 6: Run the main Python script (as a module)
       - name: Run Horizon Scanner
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -e
           mkdir -p diagnostics
@@ -389,6 +408,11 @@ jobs:
           python -m horizon_scanner.horizon_scanner | tee diagnostics/hs_stdout.txt
           HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
           HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_TRIAGE_OK_ISO3S=$(grep -E '^HS_TRIAGE_OK_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_TRIAGE_DEGRADED_ISO3S=$(grep -E '^HS_TRIAGE_DEGRADED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_TRIAGE_FAILED_ISO3S=$(grep -E '^HS_TRIAGE_FAILED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_TRIAGE_RERUN_ISO3S=$(grep -E '^HS_TRIAGE_RERUN_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_TRIAGE_COVERAGE_CSV=$(grep -E '^HS_TRIAGE_COVERAGE_CSV=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
           if [ -z "${HS_RUN_ID}" ]; then
             echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
             exit 1
@@ -396,12 +420,72 @@ jobs:
           {
             echo "HS_RUN_ID=${HS_RUN_ID}"
             echo "HS_RESOLVED_ISO3S=${HS_RESOLVED_ISO3S}"
+            echo "HS_TRIAGE_OK_ISO3S=${HS_TRIAGE_OK_ISO3S}"
+            echo "HS_TRIAGE_DEGRADED_ISO3S=${HS_TRIAGE_DEGRADED_ISO3S}"
+            echo "HS_TRIAGE_FAILED_ISO3S=${HS_TRIAGE_FAILED_ISO3S}"
+            echo "HS_TRIAGE_RERUN_ISO3S=${HS_TRIAGE_RERUN_ISO3S}"
+            echo "HS_TRIAGE_COVERAGE_CSV=${HS_TRIAGE_COVERAGE_CSV}"
           } >> "$GITHUB_ENV"
           {
             echo "HS_RUN_ID=${HS_RUN_ID}"
             echo "HS_RESOLVED_ISO3S=${HS_RESOLVED_ISO3S}"
+            echo "HS_TRIAGE_OK_ISO3S=${HS_TRIAGE_OK_ISO3S}"
+            echo "HS_TRIAGE_DEGRADED_ISO3S=${HS_TRIAGE_DEGRADED_ISO3S}"
+            echo "HS_TRIAGE_FAILED_ISO3S=${HS_TRIAGE_FAILED_ISO3S}"
+            echo "HS_TRIAGE_RERUN_ISO3S=${HS_TRIAGE_RERUN_ISO3S}"
+            echo "HS_TRIAGE_COVERAGE_CSV=${HS_TRIAGE_COVERAGE_CSV}"
           } >> "$GITHUB_OUTPUT"
           echo "=== horizon_scanner.horizon_scanner completed ==="
+
+      - name: Summarize HS triage coverage
+        env:
+          HS_RUN_ID: ${{ env.HS_RUN_ID }}
+          HS_TRIAGE_OK_ISO3S: ${{ env.HS_TRIAGE_OK_ISO3S }}
+          HS_TRIAGE_DEGRADED_ISO3S: ${{ env.HS_TRIAGE_DEGRADED_ISO3S }}
+          HS_TRIAGE_FAILED_ISO3S: ${{ env.HS_TRIAGE_FAILED_ISO3S }}
+          HS_TRIAGE_RERUN_ISO3S: ${{ env.HS_TRIAGE_RERUN_ISO3S }}
+          HS_TRIAGE_COVERAGE_CSV: ${{ env.HS_TRIAGE_COVERAGE_CSV }}
+        run: |
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            ok_count=$(python - <<'PY'
+          import os
+          vals = [v for v in os.environ.get("HS_TRIAGE_OK_ISO3S", "").split(",") if v.strip()]
+          print(len(vals))
+          PY
+            )
+            degraded_count=$(python - <<'PY'
+          import os
+          vals = [v for v in os.environ.get("HS_TRIAGE_DEGRADED_ISO3S", "").split(",") if v.strip()]
+          print(len(vals))
+          PY
+            )
+            failed_count=$(python - <<'PY'
+          import os
+          vals = [v for v in os.environ.get("HS_TRIAGE_FAILED_ISO3S", "").split(",") if v.strip()]
+          print(len(vals))
+          PY
+            )
+            {
+              echo "### HS triage coverage"
+              echo "- HS run: ${HS_RUN_ID}"
+              echo "- Ok countries: ${ok_count}"
+              echo "- Degraded countries: ${degraded_count}"
+              echo "- Failed countries: ${failed_count}"
+              echo "- Rerun ISO3s: ${HS_TRIAGE_RERUN_ISO3S}"
+              echo "- Coverage CSV: ${HS_TRIAGE_COVERAGE_CSV}"
+              echo "- Failures JSON: diagnostics/hs_triage_failures__${HS_RUN_ID}.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload HS triage coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hs-triage-coverage
+          path: |
+            diagnostics/hs_stdout.txt
+            diagnostics/hs_triage_coverage__*.csv
+            diagnostics/hs_triage_failures__*.json
 
       - name: Assert HS triage outputs
         id: assert_hs_triage
