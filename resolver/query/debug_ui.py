@@ -662,6 +662,7 @@ def get_hs_triage_all(
         llm_parse_col = _pick_column(llm_cols, ["parse_error"])
         llm_model_col = _pick_column(llm_cols, ["model_id", "model_name"])
         llm_provider_col = _pick_column(llm_cols, ["provider"])
+        llm_hazard_col = _pick_column(llm_cols, ["hazard_code", "hazard"])
         llm_status_col = _pick_column(llm_cols, ["status"])
         llm_error_type_col = _pick_column(llm_cols, ["error_type"])
         llm_error_message_col = _pick_column(llm_cols, ["error_message"])
@@ -713,6 +714,7 @@ def get_hs_triage_all(
                 if llm_response_format_col
                 else "NULL AS response_format"
             )
+            llm_where = f"{llm_phase_col} = 'hs_triage' AND {llm_run_col} = ?"
             pass_order_expr = "3"
             if llm_hazard_col:
                 pass_order_expr = (
@@ -748,14 +750,16 @@ def get_hs_triage_all(
                       ORDER BY {pass_order_expr}, {ts_order_expr}
                     ) AS rn
                   FROM llm_calls
-                  WHERE {llm_phase_col} = 'hs_triage'
-                    AND {llm_run_col} = ?
+                  WHERE {llm_where}
                 ) ranked_calls
                 WHERE rn <= 2
             """
             llm_params: list[Any] = [run_id]
             if iso3 and llm_iso_col:
-                llm_sql += f" AND UPPER(iso3) = ?"
+                llm_sql = llm_sql.replace(
+                    llm_where,
+                    f"{llm_where} AND UPPER({llm_iso_col}) = ?",
+                )
                 llm_params.append(iso3.upper())
             llm_sql += " ORDER BY iso3"
 
