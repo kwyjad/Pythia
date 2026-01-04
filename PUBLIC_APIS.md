@@ -27,6 +27,7 @@
 - `GET /v1/question_bundle`
   - Query params: `question_id` (required), `hs_run_id`, `forecaster_run_id`, `include_llm_calls` (bool, default false), `include_transcripts` (bool, default false), `limit_llm_calls` (int, default 200).
   - Returns a bundle containing: the question row, HS run/scenarios/country report, ensemble SPD rows plus per-model SPD rows, question context/resolutions (plus `context.scores` when available), and optional `llm_calls` (including transcripts only when requested).
+  - `llm_calls` may include internal-only diagnostic fields (`status`, `error_type`, `error_message`, `hazard_scores_json`, `hazard_scores_parse_ok`, `response_format`) that are not part of the public contract.
 - `GET /v1/questions`
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`, `triage_date` (YYYY-MM-DD).
 - `GET /v1/diagnostics/kpi_scopes`
@@ -71,9 +72,11 @@
     - `n_countries`, `avg_cost_per_country`, `median_cost_per_country`
 - `GET /v1/resolver/connector_status`
   - Returns `rows` with `source` (ACLED, IDMC, EM-DAT), `last_updated` (YYYY-MM-DD or null), and `rows_scanned`.
+  - Optional `diagnostics` includes `facts_source_table`, `fallback_used`, `missing_tables_checked`, `date_column_used`, and `rows_total`.
 - `GET /v1/resolver/country_facts`
   - Query params: `iso3` (required 3-letter code), `limit` (optional, default 5000).
   - Returns `rows` for the requested ISO3 with `iso3`, `hazard`, `hazard_code`, `source_id`, `year`, `month`, `metric`, and `value`.
+  - Optional `diagnostics` includes `facts_source_table`, `fallback_used`, `missing_tables_checked`, and `rows_returned`.
 
 ## resolver.query.db_reader
 

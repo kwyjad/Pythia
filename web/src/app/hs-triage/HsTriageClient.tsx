@@ -23,6 +23,9 @@ type HsTriageRow = {
   triage_score_1: number | null;
   triage_score_2: number | null;
   triage_score_avg: number | null;
+  call_1_status?: string | null;
+  call_2_status?: string | null;
+  why_null?: string | null;
 };
 
 type HsTriageResponse = {
@@ -50,11 +53,51 @@ type HsTriageClientProps = {
 const formatScore = (value: number | null) =>
   value == null ? "—" : value.toFixed(2);
 
+const monthNames = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const formatYearMonth = (value: string) => {
+  const parts = value.split("-");
+  if (parts.length !== 2) {
+    return value;
+  }
+  const year = parts[0];
+  const monthIndex = Number(parts[1]) - 1;
+  if (!year || monthIndex < 0 || monthIndex >= monthNames.length) {
+    return value;
+  }
+  return `${monthNames[monthIndex]} ${year}`;
+};
+
+const extractYearMonth = (run: HsRunRow) => {
+  if (run.triage_date && run.triage_date.length >= 7) {
+    return run.triage_date.slice(0, 7);
+  }
+  const runIdMatch = run.run_id.match(/hs_(\d{4})(\d{2})/i);
+  if (runIdMatch) {
+    return `${runIdMatch[1]}-${runIdMatch[2]}`;
+  }
+  return null;
+};
+
 export default function HsTriageClient({
   initialRuns,
   initialRunId,
   initialError,
 }: HsTriageClientProps) {
+  const [selectedMonth, setSelectedMonth] = useState("");
   const [selectedRun, setSelectedRun] = useState(initialRunId);
   const [iso3Filter, setIso3Filter] = useState("");
   const [countryFilter, setCountryFilter] = useState("");
@@ -65,6 +108,52 @@ export default function HsTriageClient({
   );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
+
+  const runsByMonth = useMemo(() => {
+    const monthMap = new Map<string, HsRunRow[]>();
+    initialRuns.forEach((run) => {
+      const yearMonth = extractYearMonth(run);
+      if (!yearMonth) {
+        return;
+      }
+      const runs = monthMap.get(yearMonth) ?? [];
+      runs.push(run);
+      monthMap.set(yearMonth, runs);
+    });
+    const months = Array.from(monthMap.keys()).sort((a, b) =>
+      b.localeCompare(a)
+    );
+    months.forEach((month) => {
+      const runs = monthMap.get(month) ?? [];
+      runs.sort((a, b) => {
+        const aDate = a.triage_date ?? a.run_id;
+        const bDate = b.triage_date ?? b.run_id;
+        return bDate.localeCompare(aDate);
+      });
+      monthMap.set(month, runs);
+    });
+    return { months, monthMap };
+  }, [initialRuns]);
+
+  useEffect(() => {
+    if (!runsByMonth.months.length) {
+      return;
+    }
+    if (!selectedMonth) {
+      setSelectedMonth(runsByMonth.months[0]);
+    }
+  }, [runsByMonth.months, selectedMonth]);
+
+  useEffect(() => {
+    if (!selectedMonth) {
+      return;
+    }
+    const runsForMonth = runsByMonth.monthMap.get(selectedMonth) ?? [];
+    const nextRunId = runsForMonth[0]?.run_id ?? "";
+    if (nextRunId && nextRunId !== selectedRun) {
+      setSelectedRun(nextRunId);
+    }
+  }, [runsByMonth.monthMap, selectedMonth, selectedRun]);
 
   useEffect(() => {
     if (!selectedRun) return;
@@ -201,6 +290,27 @@ export default function HsTriageClient({
         sortValue: (row) => row.triage_score_avg,
         defaultSortDirection: "desc",
       },
+      {
+        key: "call_1_status",
+        label: "Call 1 Status",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs text-fred-muted",
+        render: (row) => row.call_1_status ?? "",
+      },
+      {
+        key: "call_2_status",
+        label: "Call 2 Status",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs text-fred-muted",
+        render: (row) => row.call_2_status ?? "",
+      },
+      {
+        key: "why_null",
+        label: "Why null",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs text-fred-muted",
+        render: (row) => row.why_null ?? "",
+      },
     ],
     []
   );
@@ -209,18 +319,25 @@ export default function HsTriageClient({
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-xs text-fred-text">
-          Run
+          Triage month
           <select
             className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
-            value={selectedRun}
-            onChange={(event) => setSelectedRun(event.target.value)}
+            value={selectedMonth}
+            onChange={(event) => setSelectedMonth(event.target.value)}
           >
-            {initialRuns.map((run) => (
-              <option key={run.run_id} value={run.run_id}>
-                {run.run_id}
+            {runsByMonth.months.map((month) => (
+              <option key={month} value={month}>
+                {formatYearMonth(month)}
               </option>
             ))}
           </select>
+          <span className="text-[11px] text-fred-muted">
+            Using run: {selectedRun || "—"}
+          </span>
+          <span className="text-[11px] text-fred-muted">
+            Available months: {runsByMonth.months.length} • Runs this month:{" "}
+            {runsByMonth.monthMap.get(selectedMonth)?.length ?? 0}
+          </span>
         </label>
         <label className="flex flex-col gap-1 text-xs text-fred-text">
           ISO3
@@ -307,6 +424,9 @@ export default function HsTriageClient({
               <col style={{ width: "10ch" }} />
               <col style={{ width: "10ch" }} />
               <col style={{ width: "10ch" }} />
+              <col style={{ width: "12ch" }} />
+              <col style={{ width: "12ch" }} />
+              <col style={{ width: "20ch" }} />
             </>
           }
         />

@@ -12,6 +12,12 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from pythia.db.schema import connect, ensure_schema
+from pythia.db.util import ensure_llm_calls_columns
+from resolver.query.debug_ui import (
+    _extract_hazard_scores_with_diagnostics,
+    _extract_json_candidate,
+    _FENCED_JSON_PATTERN,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -89,6 +95,42 @@ def log_hs_llm_call(
     provider = getattr(model_spec, "provider", None)
     model_id = getattr(model_spec, "model_id", None)
 
+    error_message = str(error_text_local).strip() if error_text_local else ""
+    status = "error" if error_message else "ok"
+    error_type = None
+    if error_message:
+        lowered = error_message.lower()
+        if "timeout" in lowered:
+            error_type = "timeout"
+        elif "rate" in lowered and "limit" in lowered:
+            error_type = "rate_limit"
+        elif "parse" in lowered:
+            error_type = "parse_error"
+        else:
+            error_type = "provider_error"
+
+    response_format = None
+    if response_text:
+        if _FENCED_JSON_PATTERN.search(response_text):
+            response_format = "fenced_json"
+        elif _extract_json_candidate(response_text):
+            response_format = "json"
+        else:
+            response_format = "text"
+
+    hazard_scores: dict[str, float] = {}
+    hazard_scores_parse_ok = False
+    if status == "ok":
+        hazard_scores, _, _, _ = _extract_hazard_scores_with_diagnostics(response_text)
+        hazard_scores_parse_ok = bool(hazard_scores)
+
+    hazard_scores_json = None
+    if hazard_scores:
+        try:
+            hazard_scores_json = json.dumps(hazard_scores, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            hazard_scores_json = None
+
     call_id = f"hs_{hs_run_id}_{iso3_up}_{hz_up}_{int(time.time() * 1000)}"
     ts = datetime.utcnow()
 
@@ -105,6 +147,7 @@ def log_hs_llm_call(
     try:
         # Make sure llm_calls exists with the expected schema.
         ensure_schema(con)
+        ensure_llm_calls_columns(con)
 
         con.execute(
             """
@@ -128,11 +171,17 @@ def log_hs_llm_call(
                 total_tokens,
                 cost_usd,
                 error_text,
+                status,
+                error_type,
+                error_message,
+                hazard_scores_json,
+                hazard_scores_parse_ok,
+                response_format,
                 timestamp,
                 iso3,
                 hazard_code,
                 metric
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 call_id,
@@ -154,6 +203,12 @@ def log_hs_llm_call(
                 total_tokens,
                 cost_usd,
                 error_text_local,
+                status,
+                error_type,
+                error_message[:500] if error_message else None,
+                hazard_scores_json,
+                hazard_scores_parse_ok if hazard_scores_json is not None else None,
+                response_format,
                 ts,
                 iso3_up,
                 hz_up,
