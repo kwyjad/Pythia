@@ -403,6 +403,10 @@ def get_hs_triage_all(
         "parsed_scores": 0,
         "null_scores": 0,
         "total_calls": 0,
+        "avg_from_hs_triage_score": 0,
+        "hazard_code_normalized": True,
+        "rows_returned": 0,
+        "rows_with_avg": 0,
     }
     if not _table_exists(conn, "hs_triage"):
         diagnostics["notes"] = ["hs_triage_missing"]
@@ -412,6 +416,7 @@ def get_hs_triage_all(
     run_col = _pick_column(columns, ["run_id", "hs_run_id"])
     iso_col = _pick_column(columns, ["iso3", "country_iso3"])
     hazard_col = _pick_column(columns, ["hazard_code", "hazard"])
+    score_col = _pick_column(columns, ["triage_score", "score"])
     tier_col = _pick_column(columns, ["tier", "triage_tier"])
     ts_col = _pick_column(columns, ["created_at", "timestamp"])
 
@@ -420,8 +425,11 @@ def get_hs_triage_all(
         return [], diagnostics
 
     created_expr = f"{ts_col} AS created_at" if ts_col else "NULL AS created_at"
+    score_expr = f"{score_col} AS triage_score" if score_col else "NULL AS triage_score"
     tier_expr = f"{tier_col} AS tier" if tier_col else "NULL AS tier"
-    hazard_expr = f"{hazard_col} AS hazard_code" if hazard_col else "NULL AS hazard_code"
+    hazard_expr = (
+        f"UPPER({hazard_col}) AS hazard_code" if hazard_col else "NULL AS hazard_code"
+    )
     iso_expr = f"UPPER({iso_col}) AS iso3" if iso_col else "NULL AS iso3"
 
     sql = f"""
@@ -429,6 +437,7 @@ def get_hs_triage_all(
           {run_col} AS run_id,
           {iso_expr},
           {hazard_expr},
+          {score_expr},
           {tier_expr},
           {created_expr}
         FROM hs_triage
@@ -439,8 +448,8 @@ def get_hs_triage_all(
         sql += f" AND UPPER({iso_col}) = ?"
         params.append(iso3.upper())
     if hazard_code and hazard_col:
-        sql += f" AND {hazard_col} = ?"
-        params.append(hazard_code)
+        sql += f" AND UPPER({hazard_col}) = ?"
+        params.append(hazard_code.upper())
     if ts_col:
         sql += f" ORDER BY {ts_col} DESC NULLS LAST"
     else:
@@ -484,7 +493,7 @@ def get_hs_triage_all(
             )
             iso_expr = f"UPPER({llm_iso_col}) AS iso3" if llm_iso_col else "NULL AS iso3"
             hazard_expr = (
-                f"{llm_hazard_col} AS hazard_code"
+                f"UPPER({llm_hazard_col}) AS hazard_code"
                 if llm_hazard_col
                 else "NULL AS hazard_code"
             )
@@ -504,8 +513,8 @@ def get_hs_triage_all(
                 llm_sql += f" AND UPPER({llm_iso_col}) = ?"
                 llm_params.append(iso3.upper())
             if hazard_code and llm_hazard_col:
-                llm_sql += f" AND {llm_hazard_col} = ?"
-                llm_params.append(hazard_code)
+                llm_sql += f" AND UPPER({llm_hazard_col}) = ?"
+                llm_params.append(hazard_code.upper())
             if llm_ts_col:
                 llm_sql += f" ORDER BY {llm_ts_col} DESC NULLS LAST"
             else:
@@ -544,6 +553,17 @@ def get_hs_triage_all(
         score_2 = score_candidates[1] if len(score_candidates) > 1 else None
         score_values = [score for score in (score_1, score_2) if score is not None]
         score_avg = sum(score_values) / len(score_values) if score_values else None
+        base_score = row.get("triage_score")
+        if score_avg is None and base_score is not None:
+            try:
+                fallback_score = float(base_score)
+            except (TypeError, ValueError):
+                fallback_score = None
+            if fallback_score is not None and fallback_score == fallback_score:
+                score_avg = fallback_score
+                diagnostics["avg_from_hs_triage_score"] += 1
+        if score_avg is not None:
+            diagnostics["rows_with_avg"] += 1
         created_at = row.get("created_at")
         if hasattr(created_at, "date"):
             triage_date = created_at.date().isoformat()
@@ -556,6 +576,7 @@ def get_hs_triage_all(
                 "triage_date": triage_date,
                 "run_id": row.get("run_id"),
                 "iso3": iso_val,
+                "hazard_code": hazard_val,
                 "country": country_map.get(str(iso_val).upper(), iso_val) if iso_val else None,
                 "triage_tier": row.get("tier"),
                 "triage_model": model_map.get(run_id),
@@ -571,6 +592,7 @@ def get_hs_triage_all(
             (item.get("triage_date") or ""),
         )
     )
+    diagnostics["rows_returned"] = len(rows)
     return rows, diagnostics
 
 

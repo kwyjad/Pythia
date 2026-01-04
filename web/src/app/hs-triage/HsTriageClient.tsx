@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { apiGet } from "../../lib/api";
+import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
 type HsRunRow = {
   run_id: string;
@@ -14,6 +15,7 @@ type HsTriageRow = {
   triage_date: string | null;
   run_id: string;
   iso3: string;
+  hazard_code: string | null;
   country: string | null;
   triage_tier: string | null;
   triage_model: string | null;
@@ -28,6 +30,9 @@ type HsTriageResponse = {
     parsed_scores?: number;
     null_scores?: number;
     total_calls?: number;
+    rows_with_avg?: number;
+    rows_returned?: number;
+    avg_from_hs_triage_score?: number;
   };
 };
 
@@ -38,7 +43,7 @@ type HsTriageClientProps = {
 };
 
 const formatScore = (value: number | null) =>
-  value == null ? "" : value.toFixed(2);
+  value == null ? "—" : value.toFixed(2);
 
 export default function HsTriageClient({
   initialRuns,
@@ -47,6 +52,7 @@ export default function HsTriageClient({
 }: HsTriageClientProps) {
   const [selectedRun, setSelectedRun] = useState(initialRunId);
   const [iso3Filter, setIso3Filter] = useState("");
+  const [countryFilter, setCountryFilter] = useState("");
   const [hazardFilter, setHazardFilter] = useState("");
   const [rows, setRows] = useState<HsTriageRow[]>([]);
   const [diagnostics, setDiagnostics] = useState<HsTriageResponse["diagnostics"]>(
@@ -54,7 +60,6 @@ export default function HsTriageClient({
   );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
-  const [sortKey, setSortKey] = useState<"iso3" | "avg">("iso3");
 
   useEffect(() => {
     if (!selectedRun) return;
@@ -91,20 +96,102 @@ export default function HsTriageClient({
     };
   }, [selectedRun, iso3Filter, hazardFilter]);
 
-  const sortedRows = useMemo(() => {
-    const copied = [...rows];
-    if (sortKey === "avg") {
-      return copied.sort((a, b) => {
-        const aScore = a.triage_score_avg ?? -Infinity;
-        const bScore = b.triage_score_avg ?? -Infinity;
-        if (aScore !== bScore) {
-          return bScore - aScore;
-        }
-        return a.iso3.localeCompare(b.iso3);
-      });
-    }
-    return copied.sort((a, b) => a.iso3.localeCompare(b.iso3));
-  }, [rows, sortKey]);
+  const filteredRows = useMemo(() => {
+    const normalizedCountry = countryFilter.trim().toLowerCase();
+    const visibleRows = rows.filter((row) =>
+      normalizedCountry
+        ? row.country?.toLowerCase().includes(normalizedCountry)
+        : true
+    );
+    return [...visibleRows].sort((a, b) => {
+      const isoCompare = a.iso3.localeCompare(b.iso3);
+      if (isoCompare !== 0) {
+        return isoCompare;
+      }
+      return (a.hazard_code ?? "").localeCompare(b.hazard_code ?? "");
+    });
+  }, [countryFilter, rows]);
+
+  const columns = useMemo<Array<SortableColumn<HsTriageRow>>>(
+    () => [
+      {
+        key: "triage_date",
+        label: "Triage Date",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.triage_date ?? "",
+        sortValue: (row) => row.triage_date ?? "",
+      },
+      {
+        key: "run_id",
+        label: "Run ID",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.run_id,
+      },
+      {
+        key: "iso3",
+        label: "ISO3",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs font-semibold",
+        render: (row) => row.iso3,
+      },
+      {
+        key: "country",
+        label: "Country",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.country ?? "",
+      },
+      {
+        key: "hazard_code",
+        label: "Hazard",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.hazard_code ?? "",
+      },
+      {
+        key: "triage_tier",
+        label: "Triage Tier",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.triage_tier ?? "",
+      },
+      {
+        key: "triage_model",
+        label: "Triage Model",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.triage_model ?? "",
+      },
+      {
+        key: "triage_score_1",
+        label: "Score 1",
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => formatScore(row.triage_score_1),
+        sortValue: (row) => row.triage_score_1,
+      },
+      {
+        key: "triage_score_2",
+        label: "Score 2",
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => formatScore(row.triage_score_2),
+        sortValue: (row) => row.triage_score_2,
+      },
+      {
+        key: "triage_score_avg",
+        label: "Score Avg",
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => formatScore(row.triage_score_avg),
+        sortValue: (row) => row.triage_score_avg,
+        defaultSortDirection: "desc",
+      },
+    ],
+    []
+  );
 
   return (
     <div className="space-y-4">
@@ -133,6 +220,15 @@ export default function HsTriageClient({
           />
         </label>
         <label className="flex flex-col gap-1 text-xs text-fred-text">
+          Country
+          <input
+            className="w-[18ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
+            placeholder="e.g. Ukraine"
+            value={countryFilter}
+            onChange={(event) => setCountryFilter(event.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-fred-text">
           Hazard
           <input
             className="w-[10ch] rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
@@ -141,17 +237,6 @@ export default function HsTriageClient({
             onChange={(event) => setHazardFilter(event.target.value)}
           />
         </label>
-        <label className="flex items-center gap-2 text-xs text-fred-text">
-          Sort
-          <select
-            className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
-            value={sortKey}
-            onChange={(event) => setSortKey(event.target.value as "iso3" | "avg")}
-          >
-            <option value="iso3">ISO3</option>
-            <option value="avg">Avg score</option>
-          </select>
-        </label>
       </div>
 
       {diagnostics ? (
@@ -159,6 +244,11 @@ export default function HsTriageClient({
           Parsed scores: {diagnostics.parsed_scores ?? 0} • Null scores: {" "}
           {diagnostics.null_scores ?? 0} • Calls scanned: {" "}
           {diagnostics.total_calls ?? 0}
+          <div>
+            Rows with avg: {diagnostics.rows_with_avg ?? 0} /{" "}
+            {diagnostics.rows_returned ?? rows.length} • Avg from hs_triage:{" "}
+            {diagnostics.avg_from_hs_triage_score ?? 0}
+          </div>
         </div>
       ) : null}
 
@@ -169,95 +259,36 @@ export default function HsTriageClient({
       ) : null}
 
       <div className="overflow-x-auto rounded-lg border border-fred-secondary bg-fred-surface">
-        <table className="w-full table-fixed border-collapse text-sm">
-          <colgroup>
-            <col style={{ width: "10ch" }} />
-            <col style={{ width: "18ch" }} />
-            <col style={{ width: "6ch" }} />
-            <col style={{ width: "18ch" }} />
-            <col style={{ width: "12ch" }} />
-            <col style={{ width: "16ch" }} />
-            <col style={{ width: "10ch" }} />
-            <col style={{ width: "10ch" }} />
-            <col style={{ width: "10ch" }} />
-          </colgroup>
-          <thead className="bg-fred-bg text-fred-primary">
-            <tr>
-              <th className="px-3 py-2 text-left text-xs uppercase tracking-wide">
-                Triage Date
-              </th>
-              <th className="px-3 py-2 text-left text-xs uppercase tracking-wide">
-                Run ID
-              </th>
-              <th className="px-3 py-2 text-left text-xs uppercase tracking-wide">
-                ISO3
-              </th>
-              <th className="px-3 py-2 text-left text-xs uppercase tracking-wide">
-                Country
-              </th>
-              <th className="px-3 py-2 text-left text-xs uppercase tracking-wide">
-                Triage Tier
-              </th>
-              <th className="px-3 py-2 text-left text-xs uppercase tracking-wide">
-                Triage Model
-              </th>
-              <th className="px-3 py-2 text-right text-xs uppercase tracking-wide">
-                Score 1
-              </th>
-              <th className="px-3 py-2 text-right text-xs uppercase tracking-wide">
-                Score 2
-              </th>
-              <th className="px-3 py-2 text-right text-xs uppercase tracking-wide">
-                Score Avg
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-fred-border text-fred-text">
-            {sortedRows.map((row) => (
-              <tr key={`${row.run_id}-${row.iso3}-${row.triage_date ?? ""}`}>
-                <td className="px-3 py-2 text-left text-xs">
-                  {row.triage_date ?? ""}
-                </td>
-                <td className="px-3 py-2 text-left text-xs">{row.run_id}</td>
-                <td className="px-3 py-2 text-left text-xs font-semibold">
-                  {row.iso3}
-                </td>
-                <td className="px-3 py-2 text-left text-xs">
-                  {row.country ?? ""}
-                </td>
-                <td className="px-3 py-2 text-left text-xs">
-                  {row.triage_tier ?? ""}
-                </td>
-                <td className="px-3 py-2 text-left text-xs">
-                  {row.triage_model ?? ""}
-                </td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums">
-                  {formatScore(row.triage_score_1)}
-                </td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums">
-                  {formatScore(row.triage_score_2)}
-                </td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums">
-                  {formatScore(row.triage_score_avg)}
-                </td>
-              </tr>
-            ))}
-            {!isLoading && sortedRows.length === 0 ? (
-              <tr>
-                <td className="px-3 py-3 text-fred-muted" colSpan={9}>
-                  No HS triage rows found for this run.
-                </td>
-              </tr>
-            ) : null}
-            {isLoading ? (
-              <tr>
-                <td className="px-3 py-3 text-fred-muted" colSpan={9}>
-                  Loading HS triage rows...
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
+        <SortableTable
+          columns={columns}
+          rows={isLoading ? [] : filteredRows}
+          rowKey={(row) =>
+            `${row.run_id}-${row.iso3}-${row.hazard_code ?? "unknown"}-${
+              row.triage_date ?? ""
+            }`
+          }
+          initialSortKey="triage_score_avg"
+          initialSortDirection="desc"
+          emptyMessage={
+            isLoading
+              ? "Loading HS triage rows..."
+              : "No HS triage rows found for this run."
+          }
+          colGroup={
+            <>
+              <col style={{ width: "10ch" }} />
+              <col style={{ width: "18ch" }} />
+              <col style={{ width: "6ch" }} />
+              <col style={{ width: "18ch" }} />
+              <col style={{ width: "8ch" }} />
+              <col style={{ width: "12ch" }} />
+              <col style={{ width: "16ch" }} />
+              <col style={{ width: "10ch" }} />
+              <col style={{ width: "10ch" }} />
+              <col style={{ width: "10ch" }} />
+            </>
+          }
+        />
       </div>
     </div>
   );
