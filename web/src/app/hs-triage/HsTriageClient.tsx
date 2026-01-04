@@ -16,6 +16,7 @@ type HsTriageRow = {
   run_id: string;
   iso3: string;
   hazard_code: string | null;
+  hazard_label: string | null;
   country: string | null;
   triage_tier: string | null;
   triage_model: string | null;
@@ -33,6 +34,10 @@ type HsTriageResponse = {
     rows_with_avg?: number;
     rows_returned?: number;
     avg_from_hs_triage_score?: number;
+    countries_with_two_calls?: number;
+    countries_with_one_call?: number;
+    score_avg_from_calls?: number;
+    score_avg_from_hs_triage?: number;
   };
 };
 
@@ -145,10 +150,17 @@ export default function HsTriageClient({
       },
       {
         key: "hazard_code",
-        label: "Hazard",
+        label: "Hazard Code",
         headerClassName: "text-xs uppercase tracking-wide",
         cellClassName: "text-xs",
         render: (row) => row.hazard_code ?? "",
+      },
+      {
+        key: "hazard_label",
+        label: "Hazard Label",
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs",
+        render: (row) => row.hazard_label ?? "",
       },
       {
         key: "triage_tier",
@@ -249,6 +261,14 @@ export default function HsTriageClient({
             {diagnostics.rows_returned ?? rows.length} • Avg from hs_triage:{" "}
             {diagnostics.avg_from_hs_triage_score ?? 0}
           </div>
+          <div>
+            Countries with two calls: {diagnostics.countries_with_two_calls ?? 0} •{" "}
+            one call: {diagnostics.countries_with_one_call ?? 0}
+          </div>
+          <div>
+            Avg from calls: {diagnostics.score_avg_from_calls ?? 0} • avg from
+            hs_triage: {diagnostics.score_avg_from_hs_triage ?? 0}
+          </div>
         </div>
       ) : null}
 
@@ -281,6 +301,7 @@ export default function HsTriageClient({
               <col style={{ width: "6ch" }} />
               <col style={{ width: "18ch" }} />
               <col style={{ width: "8ch" }} />
+              <col style={{ width: "16ch" }} />
               <col style={{ width: "12ch" }} />
               <col style={{ width: "16ch" }} />
               <col style={{ width: "10ch" }} />

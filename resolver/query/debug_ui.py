@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -18,6 +19,15 @@ from resolver.query.downloads import _load_country_registry, _load_triage_models
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
     LOGGER.addHandler(logging.NullHandler())
+
+HAZARD_LABELS = {
+    "ACE": "Armed Conflict",
+    "DI": "Displacement Inflow",
+    "DR": "Drought",
+    "FL": "Flood",
+    "HW": "Heatwave",
+    "TC": "Tropical Cyclone",
+}
 
 
 def _table_exists(conn, table: str) -> bool:
@@ -372,6 +382,71 @@ _TRIAGE_SCORE_PATTERN = re.compile(
 )
 
 
+def _coerce_hazard_score(value: Any) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if score != score or score < 0 or score > 1:
+        return None
+    return score
+
+
+def _extract_hazard_scores(response_text: str | None) -> dict[str, float]:
+    if not response_text:
+        return {}
+    try:
+        payload = json.loads(response_text.strip())
+    except json.JSONDecodeError:
+        return {}
+    except TypeError:
+        return {}
+
+    scores: dict[str, float] = {}
+
+    def record(code: Any, value: Any) -> None:
+        if code is None:
+            return
+        code_str = str(code).strip().upper()
+        if not code_str:
+            return
+        score = _coerce_hazard_score(value)
+        if score is None:
+            return
+        scores[code_str] = score
+
+    def handle_item(item: Any) -> None:
+        if isinstance(item, dict):
+            code = item.get("hazard_code") or item.get("code")
+            score = item.get("triage_score") if "triage_score" in item else item.get("score")
+            record(code, score)
+
+    if isinstance(payload, list):
+        for item in payload:
+            handle_item(item)
+        return scores
+
+    if isinstance(payload, dict):
+        hazards = payload.get("hazards")
+        if isinstance(hazards, list):
+            for item in hazards:
+                handle_item(item)
+            return scores
+        results = payload.get("results")
+        if isinstance(results, list):
+            for item in results:
+                handle_item(item)
+            return scores
+
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                score = value.get("triage_score") if "triage_score" in value else value.get("score")
+                record(key, score)
+            else:
+                record(key, value)
+    return scores
+
+
 def _extract_triage_score(value: Any, response_text: str | None) -> float | None:
     if value is not None:
         try:
@@ -407,6 +482,13 @@ def get_hs_triage_all(
         "hazard_code_normalized": True,
         "rows_returned": 0,
         "rows_with_avg": 0,
+        "calls_grouped_by_iso3": 0,
+        "countries_with_two_calls": 0,
+        "countries_with_one_call": 0,
+        "hazard_scores_extracted": 0,
+        "hazard_scores_missing": 0,
+        "score_avg_from_calls": 0,
+        "score_avg_from_hs_triage": 0,
     }
     if not _table_exists(conn, "hs_triage"):
         diagnostics["notes"] = ["hs_triage_missing"]
@@ -470,40 +552,31 @@ def get_hs_triage_all(
     country_map = _load_country_registry()
     model_map = _load_triage_models(conn)
 
-    llm_scores: dict[tuple[str | None, str | None], list[float | None]] = {}
+    llm_scores: dict[str, list[dict[str, float]]] = {}
     if _table_exists(conn, "llm_calls"):
         llm_cols = _table_columns(conn, "llm_calls")
         llm_run_col = _pick_column(llm_cols, ["hs_run_id", "run_id"])
         llm_iso_col = _pick_column(llm_cols, ["iso3", "country_iso3"])
-        llm_hazard_col = _pick_column(llm_cols, ["hazard_code", "hazard"])
         llm_phase_col = _pick_column(llm_cols, ["phase"])
         llm_ts_col = _pick_column(llm_cols, ["created_at", "timestamp"])
-        llm_score_col = _pick_column(llm_cols, ["triage_score", "score"])
         llm_response_col = _pick_column(llm_cols, ["response_text", "response", "completion"])
+        llm_parse_col = _pick_column(llm_cols, ["parse_error"])
 
         if llm_run_col and llm_phase_col:
             created_expr = f"{llm_ts_col} AS created_at" if llm_ts_col else "NULL AS created_at"
-            score_expr = (
-                f"{llm_score_col} AS triage_score" if llm_score_col else "NULL AS triage_score"
-            )
             response_expr = (
                 f"SUBSTR({llm_response_col}, 1, 2000) AS response_text"
                 if llm_response_col
                 else "NULL AS response_text"
             )
             iso_expr = f"UPPER({llm_iso_col}) AS iso3" if llm_iso_col else "NULL AS iso3"
-            hazard_expr = (
-                f"UPPER({llm_hazard_col}) AS hazard_code"
-                if llm_hazard_col
-                else "NULL AS hazard_code"
-            )
+            parse_expr = f"{llm_parse_col} AS parse_error" if llm_parse_col else "NULL AS parse_error"
             llm_sql = f"""
                 SELECT
                   {created_expr},
                   {iso_expr},
-                  {hazard_expr},
-                  {score_expr},
-                  {response_expr}
+                  {response_expr},
+                  {parse_expr}
                 FROM llm_calls
                 WHERE {llm_phase_col} = 'hs_triage'
                   AND {llm_run_col} = ?
@@ -512,9 +585,6 @@ def get_hs_triage_all(
             if iso3 and llm_iso_col:
                 llm_sql += f" AND UPPER({llm_iso_col}) = ?"
                 llm_params.append(iso3.upper())
-            if hazard_code and llm_hazard_col:
-                llm_sql += f" AND UPPER({llm_hazard_col}) = ?"
-                llm_params.append(hazard_code.upper())
             if llm_ts_col:
                 llm_sql += f" ORDER BY {llm_ts_col} DESC NULLS LAST"
             else:
@@ -531,26 +601,28 @@ def get_hs_triage_all(
             if llm_df is not None and not llm_df.empty:
                 for row in llm_df.to_dict(orient="records"):
                     iso_val = row.get("iso3")
-                    hazard_val = row.get("hazard_code")
-                    key = (iso_val, hazard_val)
-                    scores = llm_scores.setdefault(key, [])
-                    if len(scores) >= 2:
+                    if not iso_val:
                         continue
-                    score = _extract_triage_score(row.get("triage_score"), row.get("response_text"))
+                    scores_for_iso = llm_scores.setdefault(str(iso_val), [])
+                    if len(scores_for_iso) >= 2:
+                        continue
                     diagnostics["total_calls"] += 1
-                    if score is None:
-                        diagnostics["null_scores"] += 1
-                    else:
-                        diagnostics["parsed_scores"] += 1
-                    scores.append(score)
+                    hazard_scores = _extract_hazard_scores(row.get("response_text"))
+                    diagnostics["hazard_scores_extracted"] += len(hazard_scores)
+                    scores_for_iso.append(hazard_scores)
 
     rows: list[dict[str, Any]] = []
     for row in base_df.to_dict(orient="records"):
         iso_val = row.get("iso3")
         hazard_val = row.get("hazard_code")
-        score_candidates = llm_scores.get((iso_val, hazard_val), [])
-        score_1 = score_candidates[0] if len(score_candidates) > 0 else None
-        score_2 = score_candidates[1] if len(score_candidates) > 1 else None
+        hazard_key = str(hazard_val).upper() if hazard_val is not None else ""
+        score_candidates = llm_scores.get(str(iso_val), [])
+        score_1 = (
+            score_candidates[0].get(hazard_key) if len(score_candidates) > 0 else None
+        )
+        score_2 = (
+            score_candidates[1].get(hazard_key) if len(score_candidates) > 1 else None
+        )
         score_values = [score for score in (score_1, score_2) if score is not None]
         score_avg = sum(score_values) / len(score_values) if score_values else None
         base_score = row.get("triage_score")
@@ -562,6 +634,9 @@ def get_hs_triage_all(
             if fallback_score is not None and fallback_score == fallback_score:
                 score_avg = fallback_score
                 diagnostics["avg_from_hs_triage_score"] += 1
+                diagnostics["score_avg_from_hs_triage"] += 1
+        if score_avg is not None and score_values:
+            diagnostics["score_avg_from_calls"] += 1
         if score_avg is not None:
             diagnostics["rows_with_avg"] += 1
         created_at = row.get("created_at")
@@ -577,6 +652,7 @@ def get_hs_triage_all(
                 "run_id": row.get("run_id"),
                 "iso3": iso_val,
                 "hazard_code": hazard_val,
+                "hazard_label": HAZARD_LABELS.get(hazard_key, hazard_val),
                 "country": country_map.get(str(iso_val).upper(), iso_val) if iso_val else None,
                 "triage_tier": row.get("tier"),
                 "triage_model": model_map.get(run_id),
@@ -592,6 +668,27 @@ def get_hs_triage_all(
             (item.get("triage_date") or ""),
         )
     )
+    calls_grouped = len(llm_scores)
+    diagnostics["calls_grouped_by_iso3"] = calls_grouped
+    diagnostics["countries_with_two_calls"] = sum(
+        1 for scores in llm_scores.values() if len(scores) >= 2
+    )
+    diagnostics["countries_with_one_call"] = sum(
+        1 for scores in llm_scores.values() if len(scores) == 1
+    )
+    expected_pairs = 0
+    extracted_pairs = 0
+    for item in rows:
+        score_candidates = llm_scores.get(str(item.get("iso3")), [])
+        expected_pairs += min(2, len(score_candidates))
+        extracted_pairs += sum(
+            1
+            for value in (item.get("triage_score_1"), item.get("triage_score_2"))
+            if value is not None
+        )
+    diagnostics["hazard_scores_missing"] = max(expected_pairs - extracted_pairs, 0)
+    diagnostics["parsed_scores"] = diagnostics["hazard_scores_extracted"]
+    diagnostics["null_scores"] = diagnostics["hazard_scores_missing"]
     diagnostics["rows_returned"] = len(rows)
     return rows, diagnostics
 
