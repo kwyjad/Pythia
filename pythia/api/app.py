@@ -35,6 +35,8 @@ from pythia.api.models import (
     LlmCallsBundle,
     QuestionBundleResponse,
 )
+from pythia.db.schema import connect as db_connect
+from pythia.db.util import ensure_llm_calls_columns
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
@@ -238,6 +240,18 @@ def _startup_sync():
         maybe_sync_latest_db()
     except DbSyncError as exc:
         logger.warning("DB sync failed during startup: %s", exc)
+    con = None
+    try:
+        con = db_connect(read_only=False)
+        ensure_llm_calls_columns(con)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DB schema sync failed during startup: %s", exc)
+    finally:
+        try:
+            if con is not None:
+                con.close()
+        except Exception:
+            pass
 
 
 def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -2770,12 +2784,12 @@ def get_countries():
 @app.get("/v1/resolver/connector_status")
 def get_resolver_connector_status():
     con = _con()
-    rows = get_connector_last_updated(con)
+    rows, diagnostics = get_connector_last_updated(con)
     summary = ", ".join(
         f"{row.get('source')}={row.get('last_updated')}" for row in rows
     )
     logger.info("Resolver connector status rows=%s updates=%s", len(rows), summary)
-    return {"rows": rows}
+    return {"rows": rows, "diagnostics": diagnostics}
 
 
 @app.get("/v1/resolver/country_facts")
@@ -2787,8 +2801,8 @@ def get_resolver_country_facts(
     if not re.fullmatch(r"[A-Z]{3}", iso3_value or ""):
         raise HTTPException(status_code=400, detail="iso3 must be a 3-letter code")
     con = _con()
-    rows = get_country_facts(con, iso3_value, limit=limit)
-    return {"rows": rows, "iso3": iso3_value}
+    rows, diagnostics = get_country_facts(con, iso3_value, limit=limit)
+    return {"rows": rows, "iso3": iso3_value, "diagnostics": diagnostics}
 
 
 @app.get("/v1/downloads/forecasts.xlsx")

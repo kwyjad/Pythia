@@ -381,6 +381,8 @@ _TRIAGE_SCORE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_FENCED_JSON_PATTERN = re.compile(r"```json\s*([\s\S]*?)\s*```", re.IGNORECASE)
+
 
 def _coerce_hazard_score(value: Any) -> float | None:
     try:
@@ -392,17 +394,81 @@ def _coerce_hazard_score(value: Any) -> float | None:
     return score
 
 
-def _extract_hazard_scores(response_text: str | None) -> dict[str, float]:
-    if not response_text:
-        return {}
+def _extract_json_candidate(text: str | None) -> str | None:
+    if not text:
+        return None
+    match = _FENCED_JSON_PATTERN.search(text)
+    if match:
+        return match.group(1).strip()
+    brace_match = re.search(r"\{[\s\S]*\}", text)
+    bracket_match = re.search(r"\[[\s\S]*\]", text)
+    if brace_match and bracket_match:
+        brace_text = brace_match.group(0)
+        bracket_text = bracket_match.group(0)
+        return brace_text if len(brace_text) >= len(bracket_text) else bracket_text
+    if brace_match:
+        return brace_match.group(0)
+    if bracket_match:
+        return bracket_match.group(0)
+    return None
+
+
+def _as_float01(value: Any) -> float | None:
+    if value is None:
+        return None
     try:
-        payload = json.loads(response_text.strip())
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.endswith("%"):
+                parsed = float(cleaned[:-1].strip()) / 100
+            else:
+                parsed = float(cleaned)
+        else:
+            parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed:
+        return None
+    if parsed < 0 or parsed > 1:
+        return None
+    return parsed
+
+
+def _normalize_score_mapping(
+    mapping: dict[Any, Any],
+) -> tuple[dict[str, float], set[str]]:
+    scores: dict[str, float] = {}
+    invalid_scores: set[str] = set()
+    for key, value in mapping.items():
+        if key is None:
+            continue
+        code_str = str(key).strip().upper()
+        if not code_str:
+            continue
+        score = _as_float01(value)
+        if score is None:
+            if value is not None:
+                invalid_scores.add(code_str)
+            continue
+        scores[code_str] = score
+    return scores, invalid_scores
+
+
+def _extract_hazard_scores_with_diagnostics(
+    response_text: str | None,
+) -> tuple[dict[str, float], set[str]]:
+    candidate = _extract_json_candidate(response_text)
+    if not candidate:
+        return {}, set()
+    try:
+        payload = json.loads(candidate)
     except json.JSONDecodeError:
-        return {}
+        return {}, set()
     except TypeError:
-        return {}
+        return {}, set()
 
     scores: dict[str, float] = {}
+    invalid_scores: set[str] = set()
 
     def record(code: Any, value: Any) -> None:
         if code is None:
@@ -410,8 +476,10 @@ def _extract_hazard_scores(response_text: str | None) -> dict[str, float]:
         code_str = str(code).strip().upper()
         if not code_str:
             return
-        score = _coerce_hazard_score(value)
+        score = _as_float01(value)
         if score is None:
+            if value is not None:
+                invalid_scores.add(code_str)
             return
         scores[code_str] = score
 
@@ -421,29 +489,46 @@ def _extract_hazard_scores(response_text: str | None) -> dict[str, float]:
             score = item.get("triage_score") if "triage_score" in item else item.get("score")
             record(code, score)
 
+    def handle_mapping(mapping: dict[Any, Any]) -> None:
+        for key, value in mapping.items():
+            if isinstance(value, dict):
+                score = value.get("triage_score") if "triage_score" in value else value.get("score")
+                if score is not None:
+                    record(key, score)
+                else:
+                    handle_item(value)
+            else:
+                record(key, value)
+
     if isinstance(payload, list):
         for item in payload:
             handle_item(item)
-        return scores
+        return scores, invalid_scores
 
     if isinstance(payload, dict):
         hazards = payload.get("hazards")
+        if isinstance(hazards, dict):
+            handle_mapping(hazards)
+            return scores, invalid_scores
         if isinstance(hazards, list):
             for item in hazards:
                 handle_item(item)
-            return scores
+            return scores, invalid_scores
         results = payload.get("results")
+        if isinstance(results, dict):
+            handle_mapping(results)
+            return scores, invalid_scores
         if isinstance(results, list):
             for item in results:
                 handle_item(item)
-            return scores
+            return scores, invalid_scores
 
-        for key, value in payload.items():
-            if isinstance(value, dict):
-                score = value.get("triage_score") if "triage_score" in value else value.get("score")
-                record(key, score)
-            else:
-                record(key, value)
+        handle_mapping(payload)
+    return scores, invalid_scores
+
+
+def _extract_hazard_scores(response_text: str | None) -> dict[str, float]:
+    scores, _ = _extract_hazard_scores_with_diagnostics(response_text)
     return scores
 
 
@@ -552,7 +637,15 @@ def get_hs_triage_all(
     country_map = _load_country_registry()
     model_map = _load_triage_models(conn)
 
-    llm_scores: dict[str, list[dict[str, float]]] = {}
+    llm_calls: dict[str, list[dict[str, Any]]] = {}
+    call_status_counts: dict[str, int] = {
+        "ok": 0,
+        "parse_error": 0,
+        "response_missing": 0,
+        "parse_failed": 0,
+        "no_call": 0,
+    }
+    why_null_counts: dict[str, int] = {}
     if _table_exists(conn, "llm_calls"):
         llm_cols = _table_columns(conn, "llm_calls")
         llm_run_col = _pick_column(llm_cols, ["hs_run_id", "run_id"])
@@ -561,6 +654,14 @@ def get_hs_triage_all(
         llm_ts_col = _pick_column(llm_cols, ["created_at", "timestamp"])
         llm_response_col = _pick_column(llm_cols, ["response_text", "response", "completion"])
         llm_parse_col = _pick_column(llm_cols, ["parse_error"])
+        llm_model_col = _pick_column(llm_cols, ["model_id", "model_name"])
+        llm_provider_col = _pick_column(llm_cols, ["provider"])
+        llm_status_col = _pick_column(llm_cols, ["status"])
+        llm_error_type_col = _pick_column(llm_cols, ["error_type"])
+        llm_error_message_col = _pick_column(llm_cols, ["error_message"])
+        llm_scores_json_col = _pick_column(llm_cols, ["hazard_scores_json"])
+        llm_scores_parse_ok_col = _pick_column(llm_cols, ["hazard_scores_parse_ok"])
+        llm_response_format_col = _pick_column(llm_cols, ["response_format"])
 
         if llm_run_col and llm_phase_col:
             created_expr = f"{llm_ts_col} AS created_at" if llm_ts_col else "NULL AS created_at"
@@ -571,12 +672,46 @@ def get_hs_triage_all(
             )
             iso_expr = f"UPPER({llm_iso_col}) AS iso3" if llm_iso_col else "NULL AS iso3"
             parse_expr = f"{llm_parse_col} AS parse_error" if llm_parse_col else "NULL AS parse_error"
+            model_expr = f"{llm_model_col} AS model_id" if llm_model_col else "NULL AS model_id"
+            provider_expr = f"{llm_provider_col} AS provider" if llm_provider_col else "NULL AS provider"
+            status_expr = f"{llm_status_col} AS status" if llm_status_col else "NULL AS status"
+            error_type_expr = (
+                f"{llm_error_type_col} AS error_type" if llm_error_type_col else "NULL AS error_type"
+            )
+            error_message_expr = (
+                f"{llm_error_message_col} AS error_message"
+                if llm_error_message_col
+                else "NULL AS error_message"
+            )
+            scores_json_expr = (
+                f"{llm_scores_json_col} AS hazard_scores_json"
+                if llm_scores_json_col
+                else "NULL AS hazard_scores_json"
+            )
+            scores_parse_ok_expr = (
+                f"{llm_scores_parse_ok_col} AS hazard_scores_parse_ok"
+                if llm_scores_parse_ok_col
+                else "NULL AS hazard_scores_parse_ok"
+            )
+            response_format_expr = (
+                f"{llm_response_format_col} AS response_format"
+                if llm_response_format_col
+                else "NULL AS response_format"
+            )
             llm_sql = f"""
                 SELECT
                   {created_expr},
                   {iso_expr},
                   {response_expr},
-                  {parse_expr}
+                  {parse_expr},
+                  {model_expr},
+                  {provider_expr},
+                  {status_expr},
+                  {error_type_expr},
+                  {error_message_expr},
+                  {scores_json_expr},
+                  {scores_parse_ok_expr},
+                  {response_format_expr}
                 FROM llm_calls
                 WHERE {llm_phase_col} = 'hs_triage'
                   AND {llm_run_col} = ?
@@ -603,25 +738,99 @@ def get_hs_triage_all(
                     iso_val = row.get("iso3")
                     if not iso_val:
                         continue
-                    scores_for_iso = llm_scores.setdefault(str(iso_val), [])
-                    if len(scores_for_iso) >= 2:
+                    calls_for_iso = llm_calls.setdefault(str(iso_val), [])
+                    if len(calls_for_iso) >= 2:
                         continue
                     diagnostics["total_calls"] += 1
-                    hazard_scores = _extract_hazard_scores(row.get("response_text"))
+                    response_text = row.get("response_text")
+                    parse_error = row.get("parse_error")
+                    response_text_present = bool(
+                        response_text is not None and str(response_text).strip()
+                    )
+                    parse_error_present = bool(parse_error is not None and str(parse_error).strip())
+                    status_raw = row.get("status")
+                    status_value = str(status_raw).strip().lower() if status_raw else ""
+                    error_type = row.get("error_type")
+                    scores_json = row.get("hazard_scores_json")
+                    scores_parse_ok_value = row.get("hazard_scores_parse_ok")
+                    scores_parse_ok = False
+                    if scores_parse_ok_value is True:
+                        scores_parse_ok = True
+                    elif scores_parse_ok_value is not None:
+                        scores_parse_ok = str(scores_parse_ok_value).strip().lower() in {
+                            "true",
+                            "1",
+                            "yes",
+                        }
+                    hazard_scores: dict[str, float] = {}
+                    invalid_scores: set[str] = set()
+                    if scores_parse_ok and scores_json:
+                        try:
+                            parsed_scores = json.loads(scores_json)
+                        except (TypeError, ValueError):
+                            parsed_scores = None
+                        if isinstance(parsed_scores, dict):
+                            hazard_scores, invalid_scores = _normalize_score_mapping(
+                                parsed_scores
+                            )
+                    if not hazard_scores and status_value != "error":
+                        hazard_scores, invalid_scores = _extract_hazard_scores_with_diagnostics(
+                            response_text
+                        )
+                    if status_value == "error":
+                        error_type_str = (
+                            str(error_type).strip().lower() if error_type else "unknown"
+                        )
+                        call_status = f"error:{error_type_str}"
+                        hazard_scores = {}
+                        invalid_scores = set()
+                    elif status_value == "ok":
+                        call_status = "ok" if hazard_scores else "parse_failed"
+                    elif parse_error_present:
+                        call_status = "parse_error"
+                    elif not response_text_present:
+                        call_status = "response_missing"
+                    elif not hazard_scores:
+                        call_status = "parse_failed"
+                    else:
+                        call_status = "ok"
+                    call_status_counts[call_status] = call_status_counts.get(call_status, 0) + 1
                     diagnostics["hazard_scores_extracted"] += len(hazard_scores)
-                    scores_for_iso.append(hazard_scores)
+                    calls_for_iso.append(
+                        {
+                            "created_at": row.get("created_at"),
+                            "model_id": row.get("model_id"),
+                            "provider": row.get("provider"),
+                            "status": status_raw,
+                            "error_type": error_type,
+                            "error_message": row.get("error_message"),
+                            "response_format": row.get("response_format"),
+                            "parse_error_present": parse_error_present,
+                            "response_text_present": response_text_present,
+                            "hazard_scores": hazard_scores,
+                            "invalid_scores": invalid_scores,
+                            "call_status": call_status,
+                        }
+                    )
 
+    iso_values = {
+        str(iso_val)
+        for iso_val in base_df["iso3"].dropna().astype(str).tolist()
+        if str(iso_val).strip()
+    }
     rows: list[dict[str, Any]] = []
     for row in base_df.to_dict(orient="records"):
         iso_val = row.get("iso3")
         hazard_val = row.get("hazard_code")
         hazard_key = str(hazard_val).upper() if hazard_val is not None else ""
-        score_candidates = llm_scores.get(str(iso_val), [])
+        call_candidates = llm_calls.get(str(iso_val), [])
+        call_1 = call_candidates[0] if len(call_candidates) > 0 else None
+        call_2 = call_candidates[1] if len(call_candidates) > 1 else None
         score_1 = (
-            score_candidates[0].get(hazard_key) if len(score_candidates) > 0 else None
+            call_1.get("hazard_scores", {}).get(hazard_key) if call_1 else None
         )
         score_2 = (
-            score_candidates[1].get(hazard_key) if len(score_candidates) > 1 else None
+            call_2.get("hazard_scores", {}).get(hazard_key) if call_2 else None
         )
         score_values = [score for score in (score_1, score_2) if score is not None]
         score_avg = sum(score_values) / len(score_values) if score_values else None
@@ -639,6 +848,7 @@ def get_hs_triage_all(
             diagnostics["score_avg_from_calls"] += 1
         if score_avg is not None:
             diagnostics["rows_with_avg"] += 1
+        is_null_avg = score_avg is None
         created_at = row.get("created_at")
         if hasattr(created_at, "date"):
             triage_date = created_at.date().isoformat()
@@ -646,6 +856,73 @@ def get_hs_triage_all(
             triage_date = str(created_at).split(" ")[0]
         else:
             triage_date = None
+        call_1_status = call_1.get("call_status") if call_1 else "no_call"
+        call_2_status = call_2.get("call_status") if call_2 else "no_call"
+
+        def hazard_reason(call: dict[str, Any] | None) -> str:
+            if not call:
+                return "no_call"
+            status = call.get("call_status")
+            if status != "ok":
+                return str(status)
+            hazard_scores = call.get("hazard_scores") or {}
+            invalid_scores = call.get("invalid_scores") or set()
+            if hazard_key in hazard_scores:
+                return "ok"
+            if hazard_key in invalid_scores:
+                return "invalid_score_value"
+            return "hazard_missing_in_response"
+
+        reason_1 = hazard_reason(call_1)
+        reason_2 = hazard_reason(call_2)
+        def is_non_ok(status: str) -> bool:
+            return status.startswith("error:") or status in {
+                "parse_failed",
+                "parse_error",
+                "response_missing",
+            }
+
+        why_null = ""
+        if not (score_1 is not None and score_2 is not None):
+            if call_1_status == "no_call" and call_2_status == "no_call":
+                why_null = "no_calls"
+            elif reason_1 == "invalid_score_value" or reason_2 == "invalid_score_value":
+                why_null = "invalid_score_value"
+            elif is_non_ok(call_1_status) and is_non_ok(call_2_status):
+                why_null = f"call_failures:{call_1_status},{call_2_status}"
+            elif (
+                call_1_status == "ok"
+                and reason_1 == "hazard_missing_in_response"
+                and call_2_status == "no_call"
+            ):
+                why_null = "hazard_missing_in_call1"
+            elif (
+                call_1_status == "ok"
+                and reason_1 == "hazard_missing_in_response"
+                and call_2_status == "ok"
+                and reason_2 == "hazard_missing_in_response"
+            ):
+                why_null = "hazard_missing_in_both_calls"
+            elif (
+                call_1_status == "ok"
+                and reason_1 == "hazard_missing_in_response"
+                and call_2_status == "ok"
+                and reason_2 == "ok"
+            ):
+                why_null = "hazard_missing_in_call1"
+            elif (
+                call_1_status == "ok"
+                and reason_1 == "ok"
+                and call_2_status == "ok"
+                and reason_2 == "hazard_missing_in_response"
+            ):
+                why_null = "hazard_missing_in_call2"
+            elif is_non_ok(call_1_status) and call_2_status == "no_call":
+                why_null = f"call_failures:{call_1_status},no_call"
+            elif is_non_ok(call_2_status) and call_1_status == "no_call":
+                why_null = f"call_failures:no_call,{call_2_status}"
+        if why_null:
+            why_null_counts[why_null] = why_null_counts.get(why_null, 0) + 1
         rows.append(
             {
                 "triage_date": triage_date,
@@ -659,6 +936,10 @@ def get_hs_triage_all(
                 "triage_score_1": score_1,
                 "triage_score_2": score_2,
                 "triage_score_avg": score_avg,
+                "is_null_avg": is_null_avg,
+                "call_1_status": call_1_status,
+                "call_2_status": call_2_status,
+                "why_null": why_null,
             }
         )
 
@@ -668,19 +949,19 @@ def get_hs_triage_all(
             (item.get("triage_date") or ""),
         )
     )
-    calls_grouped = len(llm_scores)
+    calls_grouped = len(llm_calls)
     diagnostics["calls_grouped_by_iso3"] = calls_grouped
     diagnostics["countries_with_two_calls"] = sum(
-        1 for scores in llm_scores.values() if len(scores) >= 2
+        1 for scores in llm_calls.values() if len(scores) >= 2
     )
     diagnostics["countries_with_one_call"] = sum(
-        1 for scores in llm_scores.values() if len(scores) == 1
+        1 for scores in llm_calls.values() if len(scores) == 1
     )
     expected_pairs = 0
     extracted_pairs = 0
     for item in rows:
-        score_candidates = llm_scores.get(str(item.get("iso3")), [])
-        expected_pairs += min(2, len(score_candidates))
+        call_candidates = llm_calls.get(str(item.get("iso3")), [])
+        expected_pairs += min(2, len(call_candidates))
         extracted_pairs += sum(
             1
             for value in (item.get("triage_score_1"), item.get("triage_score_2"))
@@ -689,6 +970,14 @@ def get_hs_triage_all(
     diagnostics["hazard_scores_missing"] = max(expected_pairs - extracted_pairs, 0)
     diagnostics["parsed_scores"] = diagnostics["hazard_scores_extracted"]
     diagnostics["null_scores"] = diagnostics["hazard_scores_missing"]
+    if iso_values:
+        missing_calls = 0
+        for iso_val in iso_values:
+            count = len(llm_calls.get(str(iso_val), []))
+            missing_calls += max(2 - count, 0)
+        call_status_counts["no_call"] += missing_calls
+    diagnostics["call_status_counts"] = call_status_counts
+    diagnostics["why_null_counts"] = why_null_counts
     diagnostics["rows_returned"] = len(rows)
     return rows, diagnostics
 

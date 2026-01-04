@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   hazard_code TEXT,
   metric TEXT,
   phase TEXT,
+  status TEXT,                         -- ok|error
+  error_type TEXT,                     -- timeout|rate_limit|provider_error|parse_error
+  error_message TEXT,                  -- truncated message
+  hazard_scores_json TEXT,             -- JSON map hazard_code -> score
+  hazard_scores_parse_ok BOOLEAN,
+  response_format TEXT,                -- json|fenced_json|text
   created_at TIMESTAMP DEFAULT now()
 );
 

@@ -13,6 +13,27 @@ import json
 from datetime import datetime
 
 
+def ensure_llm_calls_columns(conn: duckdb.DuckDBPyConnection) -> None:
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = 'llm_calls'"
+        ).fetchone()
+        if not row or not row[0]:
+            return
+    except Exception:  # noqa: BLE001
+        return
+    columns = [
+        ("status", "TEXT"),
+        ("error_type", "TEXT"),
+        ("error_message", "TEXT"),
+        ("hazard_scores_json", "TEXT"),
+        ("hazard_scores_parse_ok", "BOOLEAN"),
+        ("response_format", "TEXT"),
+    ]
+    for name, col_type in columns:
+        conn.execute(f"ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS {name} {col_type}")
+
+
 def write_llm_call(
     conn: duckdb.DuckDBPyConnection,
     component: str,
@@ -31,6 +52,7 @@ def write_llm_call(
 ) -> None:
     """Insert a single LLM call record into the llm_calls table."""
 
+    ensure_llm_calls_columns(conn)
     tokens_in = int(usage.get("prompt_tokens", 0)) if isinstance(usage, Mapping) else 0
     tokens_out = int(usage.get("completion_tokens", 0)) if isinstance(usage, Mapping) else 0
     conn.execute(
@@ -95,6 +117,7 @@ def log_web_research_call(
 ) -> None:
     """Best-effort logger for web research calls into llm_calls."""
 
+    ensure_llm_calls_columns(conn)
     usage_dict = usage or {}
     try:
         prompt_tokens = int(usage_dict.get("prompt_tokens", 0))
