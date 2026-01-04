@@ -136,7 +136,6 @@ def backfill_llm_calls_telemetry(
 
         response_filter = (
             "WHERE (response_format IS NULL OR TRIM(response_format) = '')"
-            " AND response_text IS NOT NULL AND TRIM(response_text) <> ''"
             f"{where_sql}"
         )
         rows = conn.execute(
