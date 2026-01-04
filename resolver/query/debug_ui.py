@@ -436,8 +436,9 @@ def _as_float01(value: Any) -> float | None:
 
 def _normalize_score_mapping(
     mapping: dict[Any, Any],
-) -> tuple[dict[str, float], set[str]]:
+) -> tuple[dict[str, float], set[str], set[str]]:
     scores: dict[str, float] = {}
+    hazards_seen: set[str] = set()
     invalid_scores: set[str] = set()
     for key, value in mapping.items():
         if key is None:
@@ -445,29 +446,31 @@ def _normalize_score_mapping(
         code_str = str(key).strip().upper()
         if not code_str:
             continue
+        hazards_seen.add(code_str)
         score = _as_float01(value)
         if score is None:
             if value is not None:
                 invalid_scores.add(code_str)
             continue
         scores[code_str] = score
-    return scores, invalid_scores
+    return scores, hazards_seen, invalid_scores
 
 
 def _extract_hazard_scores_with_diagnostics(
     response_text: str | None,
-) -> tuple[dict[str, float], set[str]]:
+) -> tuple[dict[str, float], set[str], set[str], bool]:
     candidate = _extract_json_candidate(response_text)
     if not candidate:
-        return {}, set()
+        return {}, set(), set(), False
     try:
         payload = json.loads(candidate)
     except json.JSONDecodeError:
-        return {}, set()
+        return {}, set(), set(), False
     except TypeError:
-        return {}, set()
+        return {}, set(), set(), False
 
     scores: dict[str, float] = {}
+    hazards_seen: set[str] = set()
     invalid_scores: set[str] = set()
 
     def record(code: Any, value: Any) -> None:
@@ -476,6 +479,7 @@ def _extract_hazard_scores_with_diagnostics(
         code_str = str(code).strip().upper()
         if not code_str:
             return
+        hazards_seen.add(code_str)
         score = _as_float01(value)
         if score is None:
             if value is not None:
@@ -503,32 +507,32 @@ def _extract_hazard_scores_with_diagnostics(
     if isinstance(payload, list):
         for item in payload:
             handle_item(item)
-        return scores, invalid_scores
+        return scores, hazards_seen, invalid_scores, True
 
     if isinstance(payload, dict):
         hazards = payload.get("hazards")
         if isinstance(hazards, dict):
             handle_mapping(hazards)
-            return scores, invalid_scores
+            return scores, hazards_seen, invalid_scores, True
         if isinstance(hazards, list):
             for item in hazards:
                 handle_item(item)
-            return scores, invalid_scores
+            return scores, hazards_seen, invalid_scores, True
         results = payload.get("results")
         if isinstance(results, dict):
             handle_mapping(results)
-            return scores, invalid_scores
+            return scores, hazards_seen, invalid_scores, True
         if isinstance(results, list):
             for item in results:
                 handle_item(item)
-            return scores, invalid_scores
+            return scores, hazards_seen, invalid_scores, True
 
         handle_mapping(payload)
-    return scores, invalid_scores
+    return scores, hazards_seen, invalid_scores, True
 
 
 def _extract_hazard_scores(response_text: str | None) -> dict[str, float]:
-    scores, _ = _extract_hazard_scores_with_diagnostics(response_text)
+    scores, _, _, _ = _extract_hazard_scores_with_diagnostics(response_text)
     return scores
 
 
@@ -574,6 +578,8 @@ def get_hs_triage_all(
         "hazard_scores_missing": 0,
         "score_avg_from_calls": 0,
         "score_avg_from_hs_triage": 0,
+        "invalid_score_hazards": 0,
+        "rows_with_invalid_score_value": 0,
     }
     if not _table_exists(conn, "hs_triage"):
         diagnostics["notes"] = ["hs_triage_missing"]
@@ -763,26 +769,33 @@ def get_hs_triage_all(
                             "yes",
                         }
                     hazard_scores: dict[str, float] = {}
+                    hazards_seen: set[str] = set()
                     invalid_scores: set[str] = set()
+                    json_parsed_ok = False
                     if scores_parse_ok and scores_json:
                         try:
                             parsed_scores = json.loads(scores_json)
                         except (TypeError, ValueError):
                             parsed_scores = None
                         if isinstance(parsed_scores, dict):
-                            hazard_scores, invalid_scores = _normalize_score_mapping(
+                            hazard_scores, hazards_seen, invalid_scores = _normalize_score_mapping(
                                 parsed_scores
                             )
+                            json_parsed_ok = True
                     if not hazard_scores and status_value != "error":
-                        hazard_scores, invalid_scores = _extract_hazard_scores_with_diagnostics(
-                            response_text
-                        )
+                        (
+                            hazard_scores,
+                            hazards_seen,
+                            invalid_scores,
+                            json_parsed_ok,
+                        ) = _extract_hazard_scores_with_diagnostics(response_text)
                     if status_value == "error":
                         error_type_str = (
                             str(error_type).strip().lower() if error_type else "unknown"
                         )
                         call_status = f"error:{error_type_str}"
                         hazard_scores = {}
+                        hazards_seen = set()
                         invalid_scores = set()
                     elif status_value == "ok":
                         call_status = "ok" if hazard_scores else "parse_failed"
@@ -790,12 +803,13 @@ def get_hs_triage_all(
                         call_status = "parse_error"
                     elif not response_text_present:
                         call_status = "response_missing"
-                    elif not hazard_scores:
+                    elif json_parsed_ok and not hazard_scores:
                         call_status = "parse_failed"
                     else:
                         call_status = "ok"
                     call_status_counts[call_status] = call_status_counts.get(call_status, 0) + 1
                     diagnostics["hazard_scores_extracted"] += len(hazard_scores)
+                    diagnostics["invalid_score_hazards"] += len(invalid_scores)
                     calls_for_iso.append(
                         {
                             "created_at": row.get("created_at"),
@@ -808,6 +822,7 @@ def get_hs_triage_all(
                             "parse_error_present": parse_error_present,
                             "response_text_present": response_text_present,
                             "hazard_scores": hazard_scores,
+                            "hazards_seen": hazards_seen,
                             "invalid_scores": invalid_scores,
                             "call_status": call_status,
                         }
@@ -862,15 +877,18 @@ def get_hs_triage_all(
         def hazard_reason(call: dict[str, Any] | None) -> str:
             if not call:
                 return "no_call"
-            status = call.get("call_status")
-            if status != "ok":
-                return str(status)
             hazard_scores = call.get("hazard_scores") or {}
+            hazards_seen = call.get("hazards_seen") or set()
             invalid_scores = call.get("invalid_scores") or set()
             if hazard_key in hazard_scores:
                 return "ok"
             if hazard_key in invalid_scores:
                 return "invalid_score_value"
+            status = call.get("call_status")
+            if status != "ok":
+                return str(status)
+            if hazard_key in hazards_seen:
+                return "hazard_missing_in_response"
             return "hazard_missing_in_response"
 
         reason_1 = hazard_reason(call_1)
@@ -923,6 +941,8 @@ def get_hs_triage_all(
                 why_null = f"call_failures:no_call,{call_2_status}"
         if why_null:
             why_null_counts[why_null] = why_null_counts.get(why_null, 0) + 1
+            if why_null == "invalid_score_value":
+                diagnostics["rows_with_invalid_score_value"] += 1
         rows.append(
             {
                 "triage_date": triage_date,

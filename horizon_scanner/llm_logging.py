@@ -121,7 +121,7 @@ def log_hs_llm_call(
     hazard_scores: dict[str, float] = {}
     hazard_scores_parse_ok = False
     if status == "ok":
-        hazard_scores, _ = _extract_hazard_scores_with_diagnostics(response_text)
+        hazard_scores, _, _, _ = _extract_hazard_scores_with_diagnostics(response_text)
         hazard_scores_parse_ok = bool(hazard_scores)
 
     hazard_scores_json = None

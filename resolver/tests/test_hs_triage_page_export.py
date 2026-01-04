@@ -174,7 +174,7 @@ def test_get_hs_triage_all_call_statuses():
         """
     )
 
-    rows, _ = get_hs_triage_all(conn, "hs_20240202")
+    rows, diagnostics = get_hs_triage_all(conn, "hs_20240202")
     by_key = {(row["iso3"], row["hazard_code"]): row for row in rows}
 
     col_tc = by_key[("COL", "TC")]
@@ -191,3 +191,4 @@ def test_get_hs_triage_all_call_statuses():
     assert ecu_fl["call_1_status"] == "parse_error"
     assert ecu_fl["call_2_status"] == "no_call"
     assert ecu_fl["why_null"] == "call_failures:parse_error,no_call"
+    assert diagnostics["rows_with_invalid_score_value"] == 1
