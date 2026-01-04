@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Mapping, Any
 
 import duckdb
 import json
 from datetime import datetime
+
+
+_FENCED_JSON_PATTERN = re.compile(r"```json\s*[\s\S]*?```", re.IGNORECASE)
 
 
 def ensure_llm_calls_columns(conn: duckdb.DuckDBPyConnection) -> None:
@@ -26,12 +30,53 @@ def ensure_llm_calls_columns(conn: duckdb.DuckDBPyConnection) -> None:
         ("status", "TEXT"),
         ("error_type", "TEXT"),
         ("error_message", "TEXT"),
+        ("response_format", "TEXT"),
         ("hazard_scores_json", "TEXT"),
         ("hazard_scores_parse_ok", "BOOLEAN"),
-        ("response_format", "TEXT"),
     ]
     for name, col_type in columns:
         conn.execute(f"ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS {name} {col_type}")
+
+
+def derive_status(error_text: str | None) -> str:
+    if error_text and str(error_text).strip():
+        return "error"
+    return "ok"
+
+
+def derive_error_type(error_text: str | None) -> str | None:
+    if not error_text or not str(error_text).strip():
+        return None
+    lowered = str(error_text).lower()
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "429" in lowered or ("rate" in lowered and "limit" in lowered):
+        return "rate_limit"
+    if "disabled after" in lowered or "cooldown active" in lowered:
+        return "provider_disabled"
+    if "parse failed" in lowered or "jsondecodeerror" in lowered:
+        return "parse_error"
+    return "provider_error"
+
+
+def derive_error_message(error_text: str | None, max_len: int = 500) -> str | None:
+    if not error_text or not str(error_text).strip():
+        return None
+    text = str(error_text).strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len]
+
+
+def derive_response_format(response_text: str | None) -> str:
+    if not response_text or not str(response_text).strip():
+        return "empty"
+    text = str(response_text).strip()
+    if _FENCED_JSON_PATTERN.search(text):
+        return "fenced_json"
+    if text.startswith("{") or text.startswith("["):
+        return "json"
+    return "text"
 
 
 def write_llm_call(
@@ -137,14 +182,20 @@ def log_web_research_call(
         cost_usd = 0.0
 
     usage_json = json.dumps(usage_dict or {}, ensure_ascii=False)
+    status = derive_status(error_text)
+    error_type = derive_error_type(error_text)
+    error_message = derive_error_message(error_text)
+    response_format = derive_response_format(response_text)
     conn.execute(
         """
         INSERT INTO llm_calls (
             call_id, run_id, hs_run_id, question_id, call_type, phase,
             model_name, provider, model_id, prompt_text, response_text, parsed_json,
             usage_json, elapsed_ms, prompt_tokens, completion_tokens, total_tokens,
-            cost_usd, error_text, timestamp, iso3, hazard_code, metric
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cost_usd, error_text, status, error_type, error_message, response_format,
+            hazard_scores_json, hazard_scores_parse_ok,
+            timestamp, iso3, hazard_code, metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             str(uuid.uuid4()),
@@ -166,6 +217,12 @@ def log_web_research_call(
             total_tokens,
             cost_usd,
             error_text,
+            status,
+            error_type,
+            error_message,
+            response_format,
+            None,
+            None,
             datetime.utcnow(),
             iso3,
             hazard_code,

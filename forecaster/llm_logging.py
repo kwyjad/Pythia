@@ -12,6 +12,13 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from pythia.db.schema import connect, ensure_schema
+from pythia.db.util import (
+    derive_error_message,
+    derive_error_type,
+    derive_response_format,
+    derive_status,
+    ensure_llm_calls_columns,
+)
 from forecaster.providers import estimate_cost_usd
 from forecaster.providers import ModelSpec
 
@@ -169,10 +176,15 @@ async def log_forecaster_llm_call(
     parsed_payload = parsed_json() if callable(parsed_json) else parsed_json
 
     usage_json = json.dumps(usage, ensure_ascii=False)
+    status = derive_status(error_text_local)
+    error_type = derive_error_type(error_text_local)
+    error_message = derive_error_message(error_text_local)
+    response_format = derive_response_format(response)
 
     try:
         con = connect(read_only=False)
         ensure_schema(con)
+        ensure_llm_calls_columns(con)
         con.execute(
             """
             INSERT INTO llm_calls (
@@ -195,11 +207,17 @@ async def log_forecaster_llm_call(
                 total_tokens,
                 cost_usd,
                 error_text,
+                status,
+                error_type,
+                error_message,
+                response_format,
+                hazard_scores_json,
+                hazard_scores_parse_ok,
                 timestamp,
                 iso3,
                 hazard_code,
                 metric
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 call_id,
@@ -221,6 +239,12 @@ async def log_forecaster_llm_call(
                 total_tokens,
                 cost_usd,
                 error_text_local,
+                status,
+                error_type,
+                error_message,
+                response_format,
+                None,
+                None,
                 ts,
                 iso3,
                 hazard_code,

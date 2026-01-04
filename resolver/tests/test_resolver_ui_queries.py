@@ -145,3 +145,103 @@ def test_resolver_ui_fallback_when_facts_resolved_empty():
     assert len(rows) == 1
     assert diagnostics["facts_source_table"] == "facts_deltas"
     assert diagnostics["fallback_used"] is True
+
+
+def test_resolver_ui_acled_monthly_fatalities_union():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            value_new DOUBLE,
+            value_stock DOUBLE,
+            series_semantics TEXT,
+            as_of TEXT,
+            source_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE acled_monthly_fatalities (
+            iso3 TEXT,
+            month DATE,
+            fatalities DOUBLE,
+            updated_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO facts_deltas VALUES
+          ('2024-03', 'AFG', 'FL', 'pa', 5, NULL, 'new', '2024-03-01', 'EM-DAT'),
+          ('2024-03', 'AFG', 'ACE', 'pa', 20, NULL, 'new', '2024-03-18', 'IDMC')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO acled_monthly_fatalities VALUES
+          ('AFG', '2024-03-01', 12, '2024-03-20 00:00:00')
+        """
+    )
+
+    rows, diagnostics = get_country_facts(conn, "AFG")
+    sources = {row["source_id"] for row in rows}
+    assert "ACLED" in sources
+    assert diagnostics["acled_table_present"] is True
+    assert diagnostics["acled_rows_added"] == 1
+
+    status_rows, status_diagnostics = get_connector_last_updated(conn)
+    status_by_source = {row["source"]: row for row in status_rows}
+    assert status_by_source["ACLED"]["rows_scanned"] == 1
+    assert status_by_source["ACLED"]["last_updated"] == "2024-03-20"
+    assert status_diagnostics["acled_status_source_table"] == "acled_monthly_fatalities"
+    assert status_diagnostics["acled_status_date_column_used"] == "updated_at"
+
+
+def test_resolver_ui_acled_deduplicates_monthly_rows():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            value_new DOUBLE,
+            value_stock DOUBLE,
+            series_semantics TEXT,
+            as_of TEXT,
+            source_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE acled_monthly_fatalities (
+            iso3 TEXT,
+            month DATE,
+            fatalities DOUBLE
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO facts_deltas VALUES
+          ('2024-03', 'AFG', 'ACE', 'fatalities', 10, NULL, 'new', '2024-03-20', 'ACLED')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO acled_monthly_fatalities VALUES
+          ('AFG', '2024-03-01', 10)
+        """
+    )
+
+    rows, diagnostics = get_country_facts(conn, "AFG")
+    acled_rows = [row for row in rows if row["source_id"] == "ACLED"]
+    assert len(acled_rows) == 1
+    assert diagnostics["acled_rows_added"] == 0

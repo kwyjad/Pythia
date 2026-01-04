@@ -21,3 +21,7 @@
 - ci(idmc): zero-row guardrails, staging bootstrap, and improved summary with config path.
 - fix(dtm): prefer resolver/config for shared loader, surface config_path_used & countries_mode, restore fast tests.
 - fix(ci): repair summarize_connectors indentation, add syntax guard, and ensure import sanity test covers the module.
+- fix(hs-triage): stop truncating responses, map PASS_1/PASS_2 calls, use legacy error_text, and expose average source.
+- fix(hs-triage): add provider cooldowns + retries, guaranteed fallback/repair, rerun lists, and coverage artifacts.
+- fix(db): add llm_calls telemetry columns with migration/backfill helper and schema docs.
+- fix(resolver-ui): include ACLED status and country facts from acled_monthly_fatalities.

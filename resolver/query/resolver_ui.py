@@ -88,6 +88,14 @@ def _table_has_rows(conn, table: str) -> bool:
         return False
 
 
+def _has_acled_monthly_table(conn) -> bool:
+    return _table_exists(conn, "acled_monthly_fatalities")
+
+
+def _acled_monthly_columns(conn) -> set[str]:
+    return _table_columns(conn, "acled_monthly_fatalities")
+
+
 def _pick_facts_source(conn) -> tuple[dict[str, Any], dict[str, Any]]:
     diagnostics: dict[str, Any] = {
         "facts_source_table": None,
@@ -195,6 +203,9 @@ def _coerce_float(value: Any) -> float | None:
 def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     source_info, diagnostics = _pick_facts_source(conn)
+    acled_table_present = _has_acled_monthly_table(conn)
+    diagnostics["acled_status_source_table"] = source_info.get("table") if source_info else None
+    diagnostics["acled_status_date_column_used"] = None
     if not source_info:
         LOGGER.warning("facts source missing; connector status unavailable.")
         return [
@@ -225,6 +236,43 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
         date_expr = _ym_proxy_expr()
         diagnostics["date_column_used"] = "ym_proxy"
 
+    def fetch_acled_status() -> dict[str, Any] | None:
+        if not acled_table_present:
+            return None
+        if not _table_has_rows(conn, "acled_monthly_fatalities"):
+            diagnostics["acled_status_source_table"] = "acled_monthly_fatalities"
+            diagnostics["acled_status_date_column_used"] = "none"
+            return {
+                "source": "ACLED",
+                "last_updated": None,
+                "rows_scanned": 0,
+            }
+        acled_columns = _acled_monthly_columns(conn)
+        if "updated_at" in acled_columns:
+            acled_date_expr = _max_date_expr("updated_at")
+            diagnostics["acled_status_date_column_used"] = "updated_at"
+        elif "month" in acled_columns:
+            acled_date_expr = _max_date_expr("month")
+            diagnostics["acled_status_date_column_used"] = "month"
+        else:
+            acled_date_expr = "NULL"
+            diagnostics["acled_status_date_column_used"] = "none"
+        diagnostics["acled_status_source_table"] = "acled_monthly_fatalities"
+        query = f"""
+            SELECT
+              MAX({acled_date_expr}) AS last_updated,
+              COUNT(*) AS rows_scanned
+            FROM acled_monthly_fatalities
+        """
+        row = conn.execute(query).fetchone()
+        max_date = row[0] if row else None
+        count = int(row[1] or 0) if row else 0
+        return {
+            "source": "ACLED",
+            "last_updated": _format_date(max_date),
+            "rows_scanned": count,
+        }
+
     def fetch_status(source: str, clause: str, params: list[str]) -> dict[str, Any]:
         query = f"""
             SELECT
@@ -242,8 +290,14 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
             "rows_scanned": count,
         }
 
+    acled_status = fetch_acled_status()
+    if acled_status is None:
+        acled_status = fetch_status("ACLED", "lower(source_id) LIKE ?", ["%acled%"])
+        diagnostics["acled_status_source_table"] = table
+        diagnostics["acled_status_date_column_used"] = diagnostics.get("date_column_used")
+
     rows = [
-        fetch_status("ACLED", "lower(source_id) LIKE ?", ["%acled%"]),
+        acled_status,
         fetch_status("IDMC", "lower(source_id) LIKE ?", ["%idmc%"]),
         fetch_status(
             "EM-DAT",
@@ -319,6 +373,81 @@ def get_country_facts(
                 "value": _coerce_float(record.get("value")),
             }
         )
+
+    existing_keys = {
+        (
+            row.get("iso3"),
+            row.get("hazard_code"),
+            row.get("year"),
+            row.get("month"),
+            row.get("metric"),
+            row.get("source_id"),
+        )
+        for row in rows
+    }
+
+    diagnostics["acled_table_present"] = _has_acled_monthly_table(conn)
+    diagnostics["acled_rows_added"] = 0
+    diagnostics["acled_country_rows_total"] = 0
+
+    if diagnostics["acled_table_present"]:
+        acled_columns = _acled_monthly_columns(conn)
+        iso_col = "iso3" if "iso3" in acled_columns else None
+        month_col = "month" if "month" in acled_columns else None
+        fatalities_col = None
+        for candidate in ("fatalities", "fatalities_total", "fatalities_sum"):
+            if candidate in acled_columns:
+                fatalities_col = candidate
+                break
+        source_expr = (
+            "COALESCE(source, 'ACLED') AS source_id" if "source" in acled_columns else "'ACLED' AS source_id"
+        )
+
+        if iso_col and month_col and fatalities_col:
+            count_row = conn.execute(
+                f"SELECT COUNT(*) FROM acled_monthly_fatalities WHERE UPPER({iso_col}) = UPPER(?)",
+                [iso3],
+            ).fetchone()
+            diagnostics["acled_country_rows_total"] = int(count_row[0] or 0) if count_row else 0
+
+            acled_query = f"""
+                SELECT
+                  UPPER({iso_col}) AS iso3,
+                  STRFTIME(TRY_CAST({month_col} AS DATE), '%Y-%m') AS ym,
+                  {source_expr},
+                  CAST({fatalities_col} AS DOUBLE) AS value
+                FROM acled_monthly_fatalities
+                WHERE UPPER({iso_col}) = UPPER(?)
+                ORDER BY {month_col} DESC NULLS LAST
+                LIMIT ?
+            """
+            acled_df = conn.execute(acled_query, [iso3, min(limit, 5000)]).fetchdf()
+            if not acled_df.empty:
+                for record in acled_df.to_dict(orient="records"):
+                    ym = str(record.get("ym") or "").strip()
+                    parts = ym.split("-") if ym else []
+                    year = int(parts[0]) if len(parts) >= 2 and parts[0].isdigit() else None
+                    month = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+                    if month is not None and (month < 1 or month > 12):
+                        month = None
+                    source_id = record.get("source_id") or "ACLED"
+                    key = (str(iso3).upper(), "ACE", year, month, "FATALITIES", source_id)
+                    if key in existing_keys:
+                        continue
+                    existing_keys.add(key)
+                    rows.append(
+                        {
+                            "iso3": str(iso3 or "").upper(),
+                            "hazard": HAZARD_LABELS.get("ACE"),
+                            "hazard_code": "ACE",
+                            "source_id": source_id,
+                            "year": year,
+                            "month": month,
+                            "metric": "FATALITIES",
+                            "value": _coerce_float(record.get("value")),
+                        }
+                    )
+                    diagnostics["acled_rows_added"] += 1
 
     diagnostics["rows_returned"] = len(rows)
     return rows, diagnostics

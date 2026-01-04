@@ -111,6 +111,13 @@ PYTHIA_LLM_PROFILE=test python -m forecaster.cli --mode pythia --limit 50 --purp
   - `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC`, `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`
   - `PYTHIA_GOOGLE_SPD_RETRIES`
 - **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.1,google:gemini-3-flash-preview`).
+- **HS triage resilience**:
+  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (default `openai:gpt-5.1`, required to keep HS triage running when Gemini fails).
+  - `PYTHIA_HS_ONLY_COUNTRIES` (comma-separated ISO3s/names to rerun HS triage for a subset).
+  - `PYTHIA_PROVIDER_FAILURE_THRESHOLD`, `PYTHIA_PROVIDER_COOLDOWN_SECONDS`, `PYTHIA_PROVIDER_RESET_ON_SUCCESS`
+  - `PYTHIA_LLM_RETRY_TIMEOUTS` (set `0` to opt out of timeout retries outside HS triage)
+  - `PYTHIA_HS_LLM_MAX_ATTEMPTS` (defaults to 3 for HS triage retries)
+  - `PYTHIA_HS_GEMINI_TIMEOUT_SEC` (defaults to 120s for HS triage)
 
 ## Running in GitHub Actions
 
@@ -129,6 +136,19 @@ PYTHIA_LLM_PROFILE=test python -m forecaster.cli --mode pythia --limit 50 --purp
 - **Debug bundle**: `debug/pytia_debug_bundle__<run_id>.md` (artifact)
 - **SPD compare JSON**: `debug/spd_compare_smoke` or `debug/spd_compare_tests`
 - **Diagnostics**: `diagnostics/` (DB signatures, compare JSON, latency summaries)
+- **HS triage coverage**: `diagnostics/hs_triage_coverage__<HS_RUN_ID>.csv` and `diagnostics/hs_triage_failures__<HS_RUN_ID>.json`
+
+### DB migrations
+- Upgrade legacy `llm_calls` telemetry columns with:
+```bash
+python scripts/migrate_llm_calls_telemetry.py --db duckdb:///path/to/resolver.duckdb
+```
+
+### HS triage reruns
+- After the HS run completes, stdout includes `HS_TRIAGE_RERUN_ISO3S=...`. To re-run just those countries:
+```bash
+PYTHIA_HS_ONLY_COUNTRIES="<ISO3S>" python -m horizon_scanner.horizon_scanner
+```
 
 ## GitHub Secrets setup
 
