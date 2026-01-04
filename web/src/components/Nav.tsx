@@ -52,6 +52,12 @@ const Nav = () => {
           </Link>
           <Link
             className="text-fred-primary font-semibold hover:text-fred-secondary"
+            href="/resolver"
+          >
+            Resolver
+          </Link>
+          <Link
+            className="text-fred-primary font-semibold hover:text-fred-secondary"
             href="/costs"
           >
             Costs
@@ -134,6 +140,12 @@ const Nav = () => {
               href="/questions"
             >
               Forecasts
+            </Link>
+            <Link
+              className="text-fred-primary font-semibold hover:text-fred-secondary"
+              href="/resolver"
+            >
+              Resolver
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"

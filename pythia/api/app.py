@@ -60,6 +60,7 @@ from resolver.query.debug_ui import (
     get_country_run_summary,
     list_hs_runs,
 )
+from resolver.query.resolver_ui import get_connector_last_updated, get_country_facts
 from pythia.buckets import BUCKET_SPECS
 from resolver.query import eiv_sql
 
@@ -2764,6 +2765,30 @@ def get_countries():
     if df.empty:
         return {"rows": []}
     return {"rows": _rows_from_df(df)}
+
+
+@app.get("/v1/resolver/connector_status")
+def get_resolver_connector_status():
+    con = _con()
+    rows = get_connector_last_updated(con)
+    summary = ", ".join(
+        f"{row.get('source')}={row.get('last_updated')}" for row in rows
+    )
+    logger.info("Resolver connector status rows=%s updates=%s", len(rows), summary)
+    return {"rows": rows}
+
+
+@app.get("/v1/resolver/country_facts")
+def get_resolver_country_facts(
+    iso3: str = Query(..., description="ISO3 country code"),
+    limit: int = Query(5000, description="Maximum rows to return"),
+):
+    iso3_value = (iso3 or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", iso3_value or ""):
+        raise HTTPException(status_code=400, detail="iso3 must be a 3-letter code")
+    con = _con()
+    rows = get_country_facts(con, iso3_value, limit=limit)
+    return {"rows": rows, "iso3": iso3_value}
 
 
 @app.get("/v1/downloads/forecasts.xlsx")

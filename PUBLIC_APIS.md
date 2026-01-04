@@ -15,6 +15,7 @@
     - `/v1/llm/costs`, `/v1/llm/costs/summary`
     - `/v1/costs/total`, `/v1/costs/monthly`, `/v1/costs/runs`, `/v1/costs/latencies`, `/v1/costs/run_runtimes`
     - `/v1/downloads/total_costs.csv`, `/v1/downloads/monthly_costs.csv`, `/v1/downloads/run_costs.csv`
+    - `/v1/resolver/connector_status`, `/v1/resolver/country_facts`
     - `/v1/calibration/weights`, `/v1/calibration/advice`
   - **Admin (token required)**: Action endpoints (e.g., `POST /v1/run`).
     - Server token is sourced from `PYTHIA_API_TOKEN` (preferred) or `PYTHIA_API_KEY` (legacy fallback).
@@ -68,6 +69,11 @@
     - `phase` (phase group for `by_phase`)
     - `total_cost_usd`, `n_questions`, `avg_cost_per_question`, `median_cost_per_question`
     - `n_countries`, `avg_cost_per_country`, `median_cost_per_country`
+- `GET /v1/resolver/connector_status`
+  - Returns `rows` with `source` (ACLED, IDMC, EM-DAT), `last_updated` (YYYY-MM-DD or null), and `rows_scanned`.
+- `GET /v1/resolver/country_facts`
+  - Query params: `iso3` (required 3-letter code), `limit` (optional, default 5000).
+  - Returns `rows` for the requested ISO3 with `iso3`, `hazard`, `hazard_code`, `source_id`, `year`, `month`, `metric`, and `value`.
 
 ## resolver.query.db_reader
 
