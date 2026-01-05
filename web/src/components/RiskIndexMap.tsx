@@ -114,15 +114,6 @@ const eivFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0,
 });
 
-const perCapitaFormatter = new Intl.NumberFormat(undefined, {
-  style: "percent",
-  minimumFractionDigits: 3,
-  maximumFractionDigits: 8,
-});
-
-const formatValueLabel = (value: number, isPerCapita: boolean) =>
-  isPerCapita ? perCapitaFormatter.format(value) : eivFormatter.format(value);
-
 const parseViewBox = (viewBox: string | null) => {
   if (!viewBox) return null;
   const parts = viewBox
@@ -140,7 +131,7 @@ const SvgMarkup = memo(function SvgMarkup({ svgText }: { svgText: string }) {
   const html = useMemo(() => ({ __html: svgText }), [svgText]);
   return (
     <div
-      aria-label="Risk index world map"
+      aria-label="Exposure index world map"
       className="h-full w-full [&_svg]:h-full [&_svg]:w-full"
       dangerouslySetInnerHTML={html}
     />
@@ -176,6 +167,16 @@ export default function RiskIndexMap({
   const domReplaceCountRef = useRef<number>(0);
   const svgNodeVersionRef = useRef<number>(0);
   const resolvedHeightClassName = heightClassName ?? "h-[360px]";
+  const perCapitaDigits = view === "FATALITIES_PC" ? 5 : 2;
+  const perCapitaFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat(undefined, {
+        style: "percent",
+        minimumFractionDigits: perCapitaDigits,
+        maximumFractionDigits: perCapitaDigits,
+      }),
+    [perCapitaDigits]
+  );
   const [debugEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     const debugQuery =
@@ -228,6 +229,10 @@ export default function RiskIndexMap({
   }, []);
 
   const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
+  const formatValueLabel = (value: number, isPerCapitaValue: boolean) =>
+    isPerCapitaValue
+      ? perCapitaFormatter.format(value)
+      : eivFormatter.format(value);
 
   const hasQuestionsIso3 = useMemo(() => {
     const set = new Set<string>();
@@ -800,6 +805,7 @@ export default function RiskIndexMap({
     breaks,
     hasQuestionsIso3,
     isPerCapita,
+    perCapitaFormatter,
     debugEnabled,
     riskRows,
     resolvedHeightClassName,

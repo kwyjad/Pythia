@@ -65,9 +65,9 @@ def test_costs_total_aggregations():
     assert row["n_questions"] == 3
     assert row["avg_cost_per_question"] == pytest.approx(16.0 / 3.0)
     assert row["median_cost_per_question"] == pytest.approx(6.0)
-    assert row["n_countries"] == 3
-    assert row["avg_cost_per_country"] == pytest.approx(16.0 / 3.0)
-    assert row["median_cost_per_country"] == pytest.approx(6.0)
+    assert row["n_countries"] == 4
+    assert row["avg_cost_per_country"] == pytest.approx(16.0 / 4.0)
+    assert row["median_cost_per_country"] == pytest.approx(3.5)
 
     by_model = tables["by_model"]
     assert by_model["total_cost_usd"].sum() == pytest.approx(16.0)
@@ -84,7 +84,7 @@ def test_costs_total_aggregations():
     assert gpt35["avg_cost_per_question"] == pytest.approx(7.0)
     assert custom["avg_cost_per_question"] == pytest.approx(1.0)
     assert gpt4["n_countries"] == 2
-    assert gpt35["n_countries"] == 1
+    assert gpt35["n_countries"] == 2
 
     by_phase = tables["by_phase"]
     assert by_phase["total_cost_usd"].sum() == pytest.approx(16.0)

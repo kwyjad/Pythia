@@ -121,6 +121,14 @@ def main() -> None:
             {"file": str(risk_map_path)},
         )
 
+    package_json_path = Path("web/package.json")
+    package_json_content = package_json_path.read_text(encoding="utf-8")
+    if "\"d3-geo\"" in package_json_content:
+        fail_guardrail(
+            "web/package.json must not include d3-geo dependency.",
+            {"file": str(package_json_path)},
+        )
+
     world_svg_path = Path("web/public/maps/world.svg")
     world_svg_content = world_svg_path.read_text(encoding="utf-8")
 
@@ -277,9 +285,21 @@ def main() -> None:
     about_page_path = Path("web/src/app/about/page.tsx")
     ai_prompts_path = Path("web/src/app/about/AiPromptsSection.tsx")
     prompts_path = Path("forecaster/prompts.py")
+    nav_path = Path("web/src/components/Nav.tsx")
     about_page_content = about_page_path.read_text(encoding="utf-8")
     ai_prompts_content = ai_prompts_path.read_text(encoding="utf-8")
     prompts_content = prompts_path.read_text(encoding="utf-8")
+    nav_content = nav_path.read_text(encoding="utf-8")
+    if "const ABOUT_MD" not in about_page_content or "# Welcome!" not in about_page_content:
+        fail_guardrail(
+            "About page must include ABOUT_MD and a Welcome header.",
+            {"file": str(about_page_path)},
+        )
+    if 'href="/about"' not in nav_content:
+        fail_guardrail(
+            "Navigation must include /about link.",
+            {"file": str(nav_path)},
+        )
     ai_combined = "\n".join([about_page_content, ai_prompts_content])
     ai_markers = [
         "AI Prompts",

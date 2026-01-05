@@ -30,7 +30,7 @@ const Nav = () => {
             className="text-fred-primary font-semibold hover:text-fred-secondary"
             href="/"
           >
-            Risk Index
+            Exposure Index
           </Link>
           <Link
             className="text-fred-primary font-semibold hover:text-fred-secondary"
@@ -121,7 +121,7 @@ const Nav = () => {
               className="text-fred-primary font-semibold hover:text-fred-secondary"
               href="/"
             >
-              Risk Index
+              Exposure Index
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"

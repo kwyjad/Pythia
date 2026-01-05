@@ -70,6 +70,7 @@
     - `phase` (phase group for `by_phase`)
     - `total_cost_usd`, `n_questions`, `avg_cost_per_question`, `median_cost_per_question`
     - `n_countries`, `avg_cost_per_country`, `median_cost_per_country`
+      - `n_countries` counts distinct country-triage instances (`run_id × iso3`) at the requested grain.
 - `GET /v1/resolver/connector_status`
   - Returns `rows` with `source` (ACLED, IDMC, EM-DAT), `last_updated` (YYYY-MM-DD or null), and `rows_scanned`.
   - Optional `diagnostics` includes `facts_source_table`, `fallback_used`, `missing_tables_checked`, `date_column_used`, and `rows_total`.

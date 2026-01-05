@@ -205,9 +205,13 @@ export default function RiskIndexPanel({
     return entries.sort(([a], [b]) => a.localeCompare(b));
   }, [selectedScope]);
 
-  const resolvedMapHeightClassName =
+  const defaultMapHeightClassName =
     mapHeightClassName ??
     "h-[360px] sm:h-[420px] md:h-[520px] lg:h-[720px]";
+  const paEivMapHeightClassName =
+    "h-[360px] sm:h-[420px] md:h-[520px] lg:h-[520px]";
+  const resolvedMapHeightClassName =
+    view === "PA_EIV" ? paEivMapHeightClassName : defaultMapHeightClassName;
 
   return (
     <div className="space-y-4">
@@ -301,30 +305,30 @@ export default function RiskIndexPanel({
                 }
               />
             </div>
-            <div className="mt-3">
-              <KpiCard
-                label="Countries Triaged"
-                value={selectedScope?.countries_triaged ?? 0}
-              />
-              {showKpiDebug ? (
-                <div className="mt-1 text-[11px] text-fred-muted">
-                  countries_triaged_source:{" "}
-                  {String(
-                    kpiData.diagnostics?.countries_triaged_source ?? "unknown"
-                  )}
-                </div>
-              ) : null}
-            </div>
-            <p className="mt-3 text-xs text-fred-muted">
-              {kpiData.explanations?.[0] ??
-                "Questions can exceed forecasts when some runs stop at triage or research."}
-            </p>
-            <div className="mt-4">
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div>
+                <KpiCard
+                  label="Countries Triaged"
+                  value={selectedScope?.countries_triaged ?? 0}
+                />
+                {showKpiDebug ? (
+                  <div className="mt-1 text-[11px] text-fred-muted">
+                    countries_triaged_source:{" "}
+                    {String(
+                      kpiData.diagnostics?.countries_triaged_source ?? "unknown"
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <KpiCard
                 label="Resolved questions"
                 value={selectedScope?.resolved_questions ?? 0}
               />
             </div>
+            <p className="mt-3 text-xs text-fred-muted">
+              {kpiData.explanations?.[0] ??
+                "Questions can exceed forecasts when some runs stop at triage or research."}
+            </p>
             <div className="mt-4">
               <div className="text-xs uppercase tracking-wide text-fred-muted">
                 Forecasts by hazard type
@@ -355,12 +359,13 @@ export default function RiskIndexPanel({
         </div>
       </div>
 
-      <div className="w-full overflow-x-auto rounded-lg border border-fred-secondary bg-fred-surface">
+      <div className="w-full max-h-[520px] overflow-x-auto overflow-y-auto rounded-lg border border-fred-secondary bg-fred-surface">
         <RiskIndexTable
           mode={isPerCapita ? "percap" : "raw"}
           rows={rows}
           targetMonth={targetMonth}
           metric={metric}
+          stickyHeader
         />
       </div>
     </div>

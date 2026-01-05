@@ -26,6 +26,7 @@ type SortableTableProps<T> = {
   tableLayout?: "fixed" | "auto";
   dense?: boolean;
   colGroup?: React.ReactNode;
+  stickyHeader?: boolean;
 };
 
 const compareValues = (
@@ -60,6 +61,7 @@ export default function SortableTable<T>({
   tableLayout = "fixed",
   dense = false,
   colGroup,
+  stickyHeader = false,
 }: SortableTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | undefined>(initialSortKey);
   const [sortDirection, setSortDirection] =
@@ -111,7 +113,11 @@ export default function SortableTable<T>({
   return (
     <table className={`w-full ${layoutClass} border-collapse text-sm`}>
       {colGroup ? <colgroup>{colGroup}</colgroup> : null}
-      <thead className="bg-fred-bg text-fred-primary">
+      <thead
+        className={`bg-fred-bg text-fred-primary ${
+          stickyHeader ? "sticky top-0 z-10" : ""
+        }`}
+      >
         <tr>
           {visibleColumns.map((column) => (
             <th

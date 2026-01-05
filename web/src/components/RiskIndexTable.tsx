@@ -16,14 +16,6 @@ const POPULATION_TOOLTIP = "Population missing for this country in the current s
 const formatNumber = (value: number | null | undefined) =>
   typeof value === "number" ? Math.round(value).toLocaleString() : null;
 
-const perCapitaFormatter = new Intl.NumberFormat(undefined, {
-  style: "percent",
-  minimumFractionDigits: 3,
-  maximumFractionDigits: 8,
-});
-const formatPerCapita = (value: number | null | undefined) =>
-  typeof value === "number" ? perCapitaFormatter.format(value) : null;
-
 const parseTargetMonth = (targetMonth?: string | null): Date | null => {
   if (!targetMonth) {
     return null;
@@ -50,6 +42,7 @@ type RiskIndexTableProps = {
   targetMonth?: string | null;
   mode: "raw" | "percap";
   metric?: string | null;
+  stickyHeader?: boolean;
 };
 
 const renderEivHeader = (label: string) => (
@@ -71,8 +64,21 @@ export default function RiskIndexTable({
   targetMonth,
   mode,
   metric,
+  stickyHeader = false,
 }: RiskIndexTableProps) {
   const metricUpper = (metric ?? "").toUpperCase();
+  const perCapitaDigits = metricUpper === "FATALITIES" ? 5 : 2;
+  const perCapitaFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat(undefined, {
+        style: "percent",
+        minimumFractionDigits: perCapitaDigits,
+        maximumFractionDigits: perCapitaDigits,
+      }),
+    [perCapitaDigits]
+  );
+  const formatPerCapita = (value: number | null | undefined) =>
+    typeof value === "number" ? perCapitaFormatter.format(value) : null;
   const totalLabel =
     metricUpper === "FATALITIES"
       ? "6-Month cumulative expected deaths"
@@ -266,7 +272,7 @@ export default function RiskIndexTable({
       },
       ...metricColumns,
     ];
-  }, [mode, monthLabel]);
+  }, [mode, monthLabel, perCapitaFormatter]);
 
   const emptyMessage = targetMonth
     ? `No rows returned for ${targetMonth}.`
@@ -280,6 +286,7 @@ export default function RiskIndexTable({
       initialSortDirection="desc"
       rowKey={(row) => row.iso3}
       rows={rows}
+      stickyHeader={stickyHeader}
     />
   );
 }
