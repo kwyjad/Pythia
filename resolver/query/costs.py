@@ -207,6 +207,14 @@ def _load_llm_calls(conn) -> pd.DataFrame:
     run_key = df["run_id"].where(df["run_id"].notna(), df["hs_run_id"])
     df["run_id"] = run_key
 
+    has_country_instance = df["run_id"].notna() & df["iso3"].notna()
+    df["country_instance"] = None
+    df.loc[has_country_instance, "country_instance"] = (
+        df.loc[has_country_instance, "run_id"]
+        + ":"
+        + df.loc[has_country_instance, "iso3"]
+    )
+
     created_at = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
     df["year"] = created_at.dt.year.astype("Int64")
     df["month"] = created_at.dt.month.astype("Int64")
@@ -217,6 +225,7 @@ def _load_llm_calls(conn) -> pd.DataFrame:
             "run_id",
             "question_id",
             "iso3",
+            "country_instance",
             "phase",
             "model",
             "cost_usd",
@@ -287,8 +296,17 @@ def _compute_summary(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
     summary = _attach_entity_stats(
         total, df, group_cols, "question_id", "n_questions", "avg_cost_per_question", "median_cost_per_question"
     )
+    country_entity_col = "iso3"
+    if "country_instance" in df.columns and not df["country_instance"].isna().all():
+        country_entity_col = "country_instance"
     summary = _attach_entity_stats(
-        summary, df, group_cols, "iso3", "n_countries", "avg_cost_per_country", "median_cost_per_country"
+        summary,
+        df,
+        group_cols,
+        country_entity_col,
+        "n_countries",
+        "avg_cost_per_country",
+        "median_cost_per_country",
     )
     return summary
 

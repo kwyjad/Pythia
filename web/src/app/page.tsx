@@ -52,7 +52,7 @@ export default async function OverviewPage() {
   return (
     <div className="space-y-6">
       <section className="space-y-2">
-        <h1 className="text-3xl font-semibold">Risk Index</h1>
+        <h1 className="text-3xl font-semibold">Humanitarian Exposure Index</h1>
         <p className="text-sm text-fred-text">
           Last updated:{" "}
           <span className="text-fred-text font-medium">
