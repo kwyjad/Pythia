@@ -466,11 +466,13 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
     pivot = (
         merged.sort_values(pivot_index + ["bucket"])
         .drop_duplicates(subset=pivot_index + ["bucket"], keep="first")
+        # Keep groups with NULL triage/RC fields; dropna=True would drop all rows.
         .pivot_table(
             index=pivot_index,
             columns="bucket",
             values="probability",
             aggfunc="first",
+            dropna=False,
         )
     )
 
