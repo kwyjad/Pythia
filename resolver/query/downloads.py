@@ -24,6 +24,24 @@ if not LOGGER.handlers:  # pragma: no cover - silence library default
 _WARNING_FLAGS: set[str] = set()
 
 
+def _extract_year_month(series: pd.Series) -> pd.Series:
+    if series is None or series.empty:
+        return pd.Series(dtype="object")
+    raw = series.astype(str)
+    extracted = raw.str.extract(r"^(\d{4}-\d{2})", expand=False)
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        null_mask = extracted.isna()
+        missing_count = int(null_mask.sum())
+        if missing_count:
+            sample_values = raw[null_mask].head(3).tolist()
+            LOGGER.debug(
+                "forecast_month parsing: %d rows missing YYYY-MM, sample=%s",
+                missing_count,
+                sample_values,
+            )
+    return extracted
+
+
 def _warn_once(key: str, message: str) -> None:
     if key in _WARNING_FLAGS:
         return
@@ -467,10 +485,12 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         [f"SPD_{idx}" for idx in range(1, 6)]
     ].fillna(0.0)
 
-    pivot["forecast_month"] = pivot["forecast_month"].astype(str)
-    pivot[["year", "month"]] = pivot["forecast_month"].str.split("-", expand=True)
-    pivot["year"] = pd.to_numeric(pivot["year"], errors="coerce")
-    pivot["month"] = pd.to_numeric(pivot["month"], errors="coerce")
+    raw_forecast_month = pivot["forecast_month"]
+    pivot["forecast_month"] = _extract_year_month(raw_forecast_month).fillna(
+        raw_forecast_month.astype(str).str.slice(0, 7)
+    )
+    pivot["year"] = pd.to_numeric(pivot["forecast_month"].str.slice(0, 4), errors="coerce")
+    pivot["month"] = pd.to_numeric(pivot["forecast_month"].str.slice(5, 7), errors="coerce")
 
     hazard_centroids: dict[tuple[str, str, int], float] = {}
     wildcard_centroids: dict[tuple[str, int], float] = {}
