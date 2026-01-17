@@ -41,6 +41,12 @@ from horizon_scanner.db_writer import (
     log_hs_country_reports_to_db,
     log_hs_run_to_db,
 )
+from horizon_scanner.regime_change import (
+    coerce_regime_change,
+    compute_level,
+    compute_score,
+    should_force_full_spd,
+)
 from horizon_scanner.prompts import build_hs_triage_prompt
 from horizon_scanner.llm_logging import log_hs_llm_call
 from pythia.db.schema import connect as pythia_connect, ensure_schema
@@ -578,6 +584,27 @@ def _merge_unique(values_a: list[str], values_b: list[str], limit: int = 6) -> l
     return merged[:limit]
 
 
+def _merge_unique_signals(
+    signals_a: list[dict[str, Any]],
+    signals_b: list[dict[str, Any]],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in signals_a + signals_b:
+        if not isinstance(entry, dict):
+            continue
+        key = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+        if len(merged) >= limit:
+            break
+    merged.sort(key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+    return merged[:limit]
+
+
 async def _repair_hs_triage_json(
     raw_text: str,
     *,
@@ -626,6 +653,7 @@ def _build_pass_hazards(
     for hz_code in expected_hazards:
         hdata = normalized.get(hz_code) if isinstance(normalized.get(hz_code), dict) else None
         if not hdata:
+            regime_change = coerce_regime_change(None)
             pass_hazards[hz_code] = {
                 "score": None,
                 "score_valid": False,
@@ -633,6 +661,12 @@ def _build_pass_hazards(
                 "regime_shifts": [],
                 "data_quality": {"status": "missing_in_model_output"},
                 "scenario_stub": "",
+                "rc_valid": regime_change.get("valid", False),
+                "rc_likelihood": regime_change.get("likelihood"),
+                "rc_magnitude": regime_change.get("magnitude"),
+                "rc_direction": regime_change.get("direction"),
+                "rc_window": regime_change.get("window"),
+                "rc_json": regime_change,
             }
             continue
 
@@ -641,6 +675,7 @@ def _build_pass_hazards(
             data_quality = {"raw": data_quality}
 
         score_value = _coerce_score_or_none(hdata.get("triage_score"))
+        regime_change = coerce_regime_change(hdata.get("regime_change"))
         pass_hazards[hz_code] = {
             "score": score_value,
             "score_valid": score_value is not None,
@@ -648,6 +683,12 @@ def _build_pass_hazards(
             "regime_shifts": _coerce_list(hdata.get("regime_shifts")),
             "data_quality": data_quality,
             "scenario_stub": str(hdata.get("scenario_stub") or ""),
+            "rc_valid": regime_change.get("valid", False),
+            "rc_likelihood": regime_change.get("likelihood"),
+            "rc_magnitude": regime_change.get("magnitude"),
+            "rc_direction": regime_change.get("direction"),
+            "rc_window": regime_change.get("window"),
+            "rc_json": regime_change,
         }
 
     return pass_hazards
@@ -663,6 +704,13 @@ def tier_from_score(score: float) -> str:
     if score >= HS_WATCHLIST_THRESHOLD - HS_HYSTERESIS_BAND:
         return "quiet"
     return "quiet"
+
+
+def _is_missing_regime_change_column_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "regime_change" in message and (
+        "column" in message or "no such column" in message or "does not exist" in message
+    )
 
 
 def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text: str | None = None) -> None:
@@ -712,6 +760,7 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 regime_shifts = []
                 data_quality = {"status": "error", "error_text": placeholder_reason}
                 scenario_stub = ""
+                regime_change = coerce_regime_change(None)
             else:
                 score = float(hdata.get("triage_score") or 0.0)
                 drivers = hdata.get("drivers") or []
@@ -720,32 +769,99 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 if not isinstance(data_quality, dict):
                     data_quality = {"raw": data_quality}
                 scenario_stub = hdata.get("scenario_stub") or ""
+                regime_change = coerce_regime_change(hdata.get("regime_change"))
 
             tier = tier_from_score(score)
-            need_full_spd = tier in {"priority", "watchlist"}
+            regime_change_score = compute_score(
+                regime_change.get("likelihood"), regime_change.get("magnitude")
+            )
+            regime_change_level = compute_level(
+                regime_change.get("likelihood"),
+                regime_change.get("magnitude"),
+                regime_change_score,
+            )
+            force_full_spd = should_force_full_spd(regime_change_level, regime_change_score)
+            need_full_spd = tier in {"priority", "watchlist"} or force_full_spd
+            logger.debug(
+                "HS triage regime change | run_id=%s iso3=%s hazard=%s likelihood=%s magnitude=%s "
+                "direction=%s window=%s score=%.3f level=%s force_full_spd=%s",
+                run_id,
+                iso3_up,
+                hz_up,
+                regime_change.get("likelihood"),
+                regime_change.get("magnitude"),
+                regime_change.get("direction"),
+                regime_change.get("window"),
+                regime_change_score,
+                regime_change_level,
+                force_full_spd,
+            )
 
-            con.execute(
-                """
-                INSERT INTO hs_triage (
-                    run_id, iso3, hazard_code,
-                    tier, triage_score, need_full_spd,
-                    drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            insert_payload = [
+                run_id,
+                iso3_up,
+                hz_up,
+                tier,
+                score,
+                need_full_spd,
+                json.dumps(drivers),
+                json.dumps(regime_shifts),
+                json.dumps(data_quality),
+                scenario_stub,
+                regime_change.get("likelihood"),
+                regime_change.get("magnitude"),
+                regime_change_score,
+                regime_change_level,
+                regime_change.get("direction"),
+                regime_change.get("window"),
+                json.dumps(regime_change),
+            ]
+            try:
+                con.execute(
+                    """
+                    INSERT INTO hs_triage (
+                        run_id, iso3, hazard_code,
+                        tier, triage_score, need_full_spd,
+                        drivers_json, regime_shifts_json, data_quality_json, scenario_stub,
+                        regime_change_likelihood, regime_change_magnitude, regime_change_score,
+                        regime_change_level, regime_change_direction, regime_change_window,
+                        regime_change_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    insert_payload,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
+            except Exception as exc:  # noqa: BLE001
+                if not _is_missing_regime_change_column_error(exc):
+                    raise
+                logger.warning(
+                    "HS triage: regime_change columns missing; retrying legacy insert | run_id=%s iso3=%s hazard=%s",
                     run_id,
                     iso3_up,
                     hz_up,
-                    tier,
-                    score,
-                    need_full_spd,
-                    json.dumps(drivers),
-                    json.dumps(regime_shifts),
-                    json.dumps(data_quality),
-                    scenario_stub,
-                ],
-            )
+                )
+                con.execute(
+                    """
+                    INSERT INTO hs_triage (
+                        run_id, iso3, hazard_code,
+                        tier, triage_score, need_full_spd,
+                        drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        run_id,
+                        iso3_up,
+                        hz_up,
+                        tier,
+                        score,
+                        need_full_spd,
+                        json.dumps(drivers),
+                        json.dumps(regime_shifts),
+                        json.dumps(data_quality),
+                        scenario_stub,
+                    ],
+                )
     finally:
         con.close()
 
@@ -784,7 +900,7 @@ async def _call_hs_model(
             prompt_text,
             temperature=HS_TEMPERATURE,
             prompt_key="hs.triage.v2",
-            prompt_version="1.0.0",
+            prompt_version="1.1.0",
             component="HorizonScanner",
             run_id=run_id,
         )
@@ -809,7 +925,7 @@ async def _call_hs_model(
                 prompt_text,
                 temperature=HS_TEMPERATURE,
                 prompt_key="hs.triage.v2",
-                prompt_version="1.0.0",
+                prompt_version="1.1.0",
                 component="HorizonScanner",
                 run_id=run_id,
             )
@@ -986,6 +1102,69 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
             else:
                 avg_score = 0.0
                 combined_status = "error"
+            rc1_valid = bool(pass_one[hz_code].get("rc_valid"))
+            rc2_valid = bool(pass_two[hz_code].get("rc_valid"))
+            rc1_likelihood = pass_one[hz_code].get("rc_likelihood")
+            rc2_likelihood = pass_two[hz_code].get("rc_likelihood")
+            rc1_magnitude = pass_one[hz_code].get("rc_magnitude")
+            rc2_magnitude = pass_two[hz_code].get("rc_magnitude")
+            rc1_direction = pass_one[hz_code].get("rc_direction") or "unclear"
+            rc2_direction = pass_two[hz_code].get("rc_direction") or "unclear"
+            rc1_window = pass_one[hz_code].get("rc_window") or ""
+            rc2_window = pass_two[hz_code].get("rc_window") or ""
+
+            if rc1_valid and rc2_valid:
+                rc_likelihood = (float(rc1_likelihood) + float(rc2_likelihood)) / 2
+                rc_magnitude = (float(rc1_magnitude) + float(rc2_magnitude)) / 2
+                rc_valid = True
+                rc_status = "ok"
+                if rc1_direction == "unclear" or rc2_direction == "unclear":
+                    rc_direction = "unclear"
+                elif rc1_direction == rc2_direction:
+                    rc_direction = rc1_direction
+                else:
+                    rc_direction = "mixed"
+                if rc1_window == rc2_window:
+                    rc_window = rc1_window
+                elif rc1_window and not rc2_window:
+                    rc_window = rc1_window
+                elif rc2_window and not rc1_window:
+                    rc_window = rc2_window
+                else:
+                    rc_window = ""
+            elif rc1_valid:
+                rc_likelihood = float(rc1_likelihood)
+                rc_magnitude = float(rc1_magnitude)
+                rc_valid = True
+                rc_status = "degraded"
+                rc_direction = rc1_direction
+                rc_window = rc1_window
+            elif rc2_valid:
+                rc_likelihood = float(rc2_likelihood)
+                rc_magnitude = float(rc2_magnitude)
+                rc_valid = True
+                rc_status = "degraded"
+                rc_direction = rc2_direction
+                rc_window = rc2_window
+            else:
+                rc_likelihood = 0.0
+                rc_magnitude = 0.0
+                rc_valid = False
+                rc_status = "error"
+                rc_direction = "unclear"
+                rc_window = ""
+
+            rc1_json = pass_one[hz_code].get("rc_json") or {}
+            rc2_json = pass_two[hz_code].get("rc_json") or {}
+            rc_bullets = _merge_unique(
+                rc1_json.get("rationale_bullets") or [],
+                rc2_json.get("rationale_bullets") or [],
+            )
+            rc_signals = _merge_unique_signals(
+                rc1_json.get("trigger_signals") or [],
+                rc2_json.get("trigger_signals") or [],
+            )
+
             combined_hazards[hz_code] = {
                 "triage_score": avg_score,
                 "drivers": _merge_unique(pass_one[hz_code]["drivers"], pass_two[hz_code]["drivers"]),
@@ -993,6 +1172,16 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                     pass_one[hz_code]["regime_shifts"],
                     pass_two[hz_code]["regime_shifts"],
                 ),
+                "regime_change": {
+                    "likelihood": rc_likelihood,
+                    "direction": rc_direction,
+                    "magnitude": rc_magnitude,
+                    "window": rc_window,
+                    "rationale_bullets": rc_bullets,
+                    "trigger_signals": rc_signals,
+                    "valid": rc_valid,
+                    "status": rc_status,
+                },
                 "data_quality": {
                     "status": combined_status,
                     "score_pass1": score1,
