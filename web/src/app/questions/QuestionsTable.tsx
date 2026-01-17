@@ -23,6 +23,7 @@ type QuestionsRow = {
   triage_score?: number | null;
   triage_tier?: string | null;
   triage_need_full_spd?: boolean | null;
+  regime_change_score?: number | null;
 };
 
 type QuestionsTableProps = {
@@ -74,6 +75,7 @@ const EIV_TOOLTIP =
 
 const TRIAGE_TOOLTIP =
   "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (default thresholds: priority ≥ 0.70, watchlist ≥ 0.40; hysteresis ±0.05). Only priority/watchlist hazards are sent to full forecasting; quiet hazards may appear but have no EIV.";
+const RC_SCORE_TOOLTIP = "Regime change score (probability × magnitude).";
 
 const renderHeaderClamp = (content: ReactNode) => (
   <div className="max-h-[3.6em] overflow-hidden whitespace-normal leading-tight">
@@ -97,6 +99,13 @@ const renderTriageHeader = (label: string) => (
   <span className="inline-flex items-center gap-1">
     {label}
     <InfoTooltip text={TRIAGE_TOOLTIP} />
+  </span>
+);
+
+const renderRcHeader = (label: string) => (
+  <span className="inline-flex items-center gap-1">
+    {label}
+    <InfoTooltip text={RC_SCORE_TOOLTIP} />
   </span>
 );
 
@@ -351,6 +360,18 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         defaultSortDirection: "desc",
       },
       {
+        key: "regime_change_score",
+        label: renderHeaderClamp(renderRcHeader("RC Score")),
+        headerClassName: "text-right whitespace-normal leading-tight",
+        cellClassName: "text-right tabular-nums whitespace-nowrap",
+        sortValue: (row) => row.regime_change_score ?? null,
+        render: (row) =>
+          row.regime_change_score != null
+            ? row.regime_change_score.toFixed(2)
+            : "",
+        defaultSortDirection: "desc",
+      },
+      {
         key: "eiv_total",
         label: renderHeaderClamp(
           renderEivHeader(
@@ -383,6 +404,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       "10ch",
       "10ch",
       "10ch",
+      "7ch",
       "7ch",
       "7ch",
       "12ch",
@@ -667,6 +689,12 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 <div>
                   <span className="text-fred-muted">Triage score:</span>{" "}
                   {row.triage_score != null ? row.triage_score.toFixed(2) : "n/a"}
+                </div>
+                <div>
+                  <span className="text-fred-muted">RC score:</span>{" "}
+                  {row.regime_change_score != null
+                    ? row.regime_change_score.toFixed(2)
+                    : "n/a"}
                 </div>
                 <div>
                   <span className="text-fred-muted">6-Month EIV:</span>{" "}

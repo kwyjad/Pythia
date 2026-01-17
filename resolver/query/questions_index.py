@@ -484,6 +484,11 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
     score_col = _pick_column(hs_cols, ["triage_score", "score"])
     need_col = _pick_column(hs_cols, ["need_full_spd", "triage_need_full_spd"])
     created_col = _pick_column(hs_cols, ["created_at", "timestamp"])
+    rc_likelihood_col = _pick_column(hs_cols, ["regime_change_likelihood"])
+    rc_direction_col = _pick_column(hs_cols, ["regime_change_direction"])
+    rc_magnitude_col = _pick_column(hs_cols, ["regime_change_magnitude"])
+    rc_score_col = _pick_column(hs_cols, ["regime_change_score"])
+    rc_level_col = _pick_column(hs_cols, ["regime_change_level"])
 
     if not (run_col and iso_col and hazard_col and tier_col and score_col and need_col):
         return {}
@@ -505,6 +510,31 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
 
     created_expr = created_col or "NULL"
     triage_ts_expr = f"TRY_CAST({created_expr} AS TIMESTAMP)"
+    rc_likelihood_expr = (
+        f"{rc_likelihood_col} AS regime_change_likelihood"
+        if rc_likelihood_col
+        else "NULL AS regime_change_likelihood"
+    )
+    rc_direction_expr = (
+        f"{rc_direction_col} AS regime_change_direction"
+        if rc_direction_col
+        else "NULL AS regime_change_direction"
+    )
+    rc_magnitude_expr = (
+        f"{rc_magnitude_col} AS regime_change_magnitude"
+        if rc_magnitude_col
+        else "NULL AS regime_change_magnitude"
+    )
+    rc_score_expr = (
+        f"{rc_score_col} AS regime_change_score"
+        if rc_score_col
+        else "NULL AS regime_change_score"
+    )
+    rc_level_expr = (
+        f"{rc_level_col} AS regime_change_level"
+        if rc_level_col
+        else "NULL AS regime_change_level"
+    )
     sql = f"""
         WITH qlist(question_id, hs_run_id, iso3, hazard_code) AS (
             VALUES {", ".join(values)}
@@ -517,6 +547,11 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
               {tier_col} AS triage_tier,
               {score_col} AS triage_score,
               {need_col} AS triage_need_full_spd,
+              {rc_likelihood_expr},
+              {rc_direction_expr},
+              {rc_magnitude_expr},
+              {rc_score_expr},
+              {rc_level_expr},
               {triage_ts_expr} AS triage_ts,
               ROW_NUMBER() OVER (
                 PARTITION BY {run_col}, {iso_col}, {hazard_col}
@@ -529,6 +564,11 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
           triage_latest.triage_score,
           triage_latest.triage_tier,
           triage_latest.triage_need_full_spd,
+          triage_latest.regime_change_likelihood,
+          triage_latest.regime_change_direction,
+          triage_latest.regime_change_magnitude,
+          triage_latest.regime_change_score,
+          triage_latest.regime_change_level,
           STRFTIME(triage_latest.triage_ts, '%Y-%m-%d') AS triage_date
         FROM qlist
         LEFT JOIN triage_latest
@@ -550,6 +590,11 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
         triage_score,
         triage_tier,
         triage_need_full_spd,
+        regime_change_likelihood,
+        regime_change_direction,
+        regime_change_magnitude,
+        regime_change_score,
+        regime_change_level,
         triage_date,
     ) in triage_rows or []:
         if not question_id:
@@ -559,6 +604,25 @@ def compute_questions_triage_summary(conn, rows: list[dict[str, Any]]) -> dict[s
             "triage_tier": str(triage_tier) if triage_tier is not None else None,
             "triage_need_full_spd": (
                 bool(triage_need_full_spd) if triage_need_full_spd is not None else None
+            ),
+            "regime_change_likelihood": (
+                float(regime_change_likelihood)
+                if regime_change_likelihood is not None
+                else None
+            ),
+            "regime_change_direction": (
+                str(regime_change_direction) if regime_change_direction is not None else None
+            ),
+            "regime_change_magnitude": (
+                float(regime_change_magnitude)
+                if regime_change_magnitude is not None
+                else None
+            ),
+            "regime_change_score": (
+                float(regime_change_score) if regime_change_score is not None else None
+            ),
+            "regime_change_level": (
+                int(regime_change_level) if regime_change_level is not None else None
             ),
             "triage_date": str(triage_date) if triage_date is not None else None,
         }

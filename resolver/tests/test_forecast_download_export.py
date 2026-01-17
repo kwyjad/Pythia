@@ -231,6 +231,10 @@ def test_build_forecast_spd_export():
         "EIV",
         "triage_score",
         "triage_tier",
+        "regime_change_likelihood",
+        "regime_change_direction",
+        "regime_change_magnitude",
+        "regime_change_score",
         "hs_run_ID",
     ]
     assert list(df.columns) == expected_columns

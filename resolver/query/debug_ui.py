@@ -580,6 +580,7 @@ def get_hs_triage_all(
         "score_avg_from_hs_triage": 0,
         "invalid_score_hazards": 0,
         "rows_with_invalid_score_value": 0,
+        "notes": [],
     }
     if not _table_exists(conn, "hs_triage"):
         diagnostics["notes"] = ["hs_triage_missing"]
@@ -592,6 +593,10 @@ def get_hs_triage_all(
     score_col = _pick_column(columns, ["triage_score", "score"])
     tier_col = _pick_column(columns, ["tier", "triage_tier"])
     ts_col = _pick_column(columns, ["created_at", "timestamp"])
+    rc_prob_col = _pick_column(columns, ["regime_change_likelihood"])
+    rc_dir_col = _pick_column(columns, ["regime_change_direction"])
+    rc_mag_col = _pick_column(columns, ["regime_change_magnitude"])
+    rc_score_col = _pick_column(columns, ["regime_change_score"])
 
     if not run_col:
         diagnostics["notes"] = ["run_id_missing"]
@@ -604,6 +609,29 @@ def get_hs_triage_all(
         f"UPPER({hazard_col}) AS hazard_code" if hazard_col else "NULL AS hazard_code"
     )
     iso_expr = f"UPPER({iso_col}) AS iso3" if iso_col else "NULL AS iso3"
+    rc_prob_expr = (
+        f"{rc_prob_col} AS regime_change_likelihood"
+        if rc_prob_col
+        else "NULL AS regime_change_likelihood"
+    )
+    rc_dir_expr = (
+        f"{rc_dir_col} AS regime_change_direction"
+        if rc_dir_col
+        else "NULL AS regime_change_direction"
+    )
+    rc_mag_expr = (
+        f"{rc_mag_col} AS regime_change_magnitude"
+        if rc_mag_col
+        else "NULL AS regime_change_magnitude"
+    )
+    rc_score_expr = (
+        f"{rc_score_col} AS regime_change_score"
+        if rc_score_col
+        else "NULL AS regime_change_score"
+    )
+
+    if not (rc_prob_col and rc_dir_col and rc_mag_col and rc_score_col):
+        diagnostics["notes"].append("hs_triage_rc_columns_missing")
 
     sql = f"""
         SELECT
@@ -612,6 +640,10 @@ def get_hs_triage_all(
           {hazard_expr},
           {score_expr},
           {tier_expr},
+          {rc_prob_expr},
+          {rc_dir_expr},
+          {rc_mag_expr},
+          {rc_score_expr},
           {created_expr}
         FROM hs_triage
         WHERE {run_col} = ?
@@ -1039,6 +1071,10 @@ def get_hs_triage_all(
                 "triage_score_avg": score_avg,
                 "triage_score_avg_source": score_avg_source,
                 "is_null_avg": is_null_avg,
+                "regime_change_likelihood": row.get("regime_change_likelihood"),
+                "regime_change_direction": row.get("regime_change_direction"),
+                "regime_change_magnitude": row.get("regime_change_magnitude"),
+                "regime_change_score": row.get("regime_change_score"),
                 "call_1_status": call_1_status,
                 "call_2_status": call_2_status,
                 "why_null": why_null,

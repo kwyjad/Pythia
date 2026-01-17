@@ -10,6 +10,7 @@ import type {
   RiskIndexResponse,
   RiskView,
 } from "../lib/types";
+import InfoTooltip from "./InfoTooltip";
 import KpiCard from "./KpiCard";
 import RiskIndexMap from "./RiskIndexMap";
 import RiskIndexTable from "./RiskIndexTable";
@@ -83,6 +84,9 @@ const HAZARD_LABELS: Record<string, string> = {
   VO: "Volcano",
   WH: "Wildfire",
 };
+
+const RC_LEVEL_TOOLTIP =
+  "Highest regime change (RC) level per country in the latest HS run.";
 
 export default function RiskIndexPanel({
   initialResponse,
@@ -198,6 +202,16 @@ export default function RiskIndexPanel({
   };
 
   const selectedScope = kpiData.scopes?.selected_run;
+  const rcLevelCounts = useMemo(() => {
+    const counts = { level1: 0, level2: 0, level3: 0 };
+    countriesRows.forEach((row) => {
+      const level = row.highest_rc_level;
+      if (level === 1) counts.level1 += 1;
+      if (level === 2) counts.level2 += 1;
+      if (level === 3) counts.level3 += 1;
+    });
+    return counts;
+  }, [countriesRows]);
   const hazardEntries = useMemo(() => {
     const entries = Object.entries(
       selectedScope?.forecasts_by_hazard ?? {}
@@ -325,6 +339,32 @@ export default function RiskIndexPanel({
                 value={selectedScope?.resolved_questions ?? 0}
               />
             </div>
+            <div className="mt-3 grid grid-cols-3 gap-3">
+              <KpiCard
+                label={
+                  <span className="inline-flex items-center gap-1">
+                    RC L1 countries <InfoTooltip text={RC_LEVEL_TOOLTIP} />
+                  </span>
+                }
+                value={rcLevelCounts.level1}
+              />
+              <KpiCard
+                label={
+                  <span className="inline-flex items-center gap-1">
+                    RC L2 countries <InfoTooltip text={RC_LEVEL_TOOLTIP} />
+                  </span>
+                }
+                value={rcLevelCounts.level2}
+              />
+              <KpiCard
+                label={
+                  <span className="inline-flex items-center gap-1">
+                    RC L3 countries <InfoTooltip text={RC_LEVEL_TOOLTIP} />
+                  </span>
+                }
+                value={rcLevelCounts.level3}
+              />
+            </div>
             <p className="mt-3 text-xs text-fred-muted">
               {kpiData.explanations?.[0] ??
                 "Questions can exceed forecasts when some runs stop at triage or research."}
@@ -361,6 +401,7 @@ export default function RiskIndexPanel({
 
       <div className="w-full max-h-[520px] overflow-x-auto overflow-y-auto rounded-lg border border-fred-secondary bg-fred-surface">
         <RiskIndexTable
+          countriesRows={countriesRows}
           mode={isPerCapita ? "percap" : "raw"}
           rows={rows}
           targetMonth={targetMonth}

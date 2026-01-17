@@ -55,6 +55,8 @@ export type CountriesRow = {
   country_name?: string | null;
   last_triaged?: string | null;
   last_forecasted?: string | null;
+  highest_rc_level?: number | null;
+  highest_rc_score?: number | null;
 };
 
 export type CountriesResponse = {
@@ -100,6 +102,11 @@ export type QuestionsResponse = {
     triage_tier?: string | null;
     triage_need_full_spd?: boolean | null;
     triage_date?: string | null;
+    regime_change_likelihood?: number | null;
+    regime_change_direction?: string | null;
+    regime_change_magnitude?: number | null;
+    regime_change_score?: number | null;
+    regime_change_level?: number | null;
     status?: string | null;
     wording?: string | null;
   }>;

@@ -309,6 +309,19 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
       ? triage.triage_score.toFixed(2)
       : asString(triage.triage_score) ?? "—";
   const triageTier = asString(triage.tier) ?? "—";
+  const rcProbability =
+    typeof triage.regime_change_likelihood === "number"
+      ? triage.regime_change_likelihood.toFixed(2)
+      : asString(triage.regime_change_likelihood) ?? "—";
+  const rcDirection = asString(triage.regime_change_direction) ?? "—";
+  const rcMagnitude =
+    typeof triage.regime_change_magnitude === "number"
+      ? triage.regime_change_magnitude.toFixed(2)
+      : asString(triage.regime_change_magnitude) ?? "—";
+  const rcScore =
+    typeof triage.regime_change_score === "number"
+      ? triage.regime_change_score.toFixed(2)
+      : asString(triage.regime_change_score) ?? "—";
   const webSearchModels = getModelNamesForPhases(byPhase, [
     "hs_web_research",
     "research_web_research",
@@ -420,7 +433,7 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
       <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
         <h2 className="text-lg font-semibold">Summary</h2>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           {[
             { label: "Status", value: status },
             { label: "Forecast date", value: forecastDate },
@@ -430,6 +443,10 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
             },
             { label: "Triage score", value: triageScore },
             { label: "Triage tier", value: triageTier },
+            { label: "RC probability", value: rcProbability },
+            { label: "RC direction", value: rcDirection },
+            { label: "RC magnitude", value: rcMagnitude },
+            { label: "RC score", value: rcScore },
             { label: "Web search", value: webSearchModels },
             { label: "HS triage", value: hsTriageDisplay },
             { label: "Research", value: getModelNamesForPhase(byPhase, "research_v2") },

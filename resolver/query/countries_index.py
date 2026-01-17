@@ -14,6 +14,14 @@ LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
     LOGGER.addHandler(logging.NullHandler())
 
+_INFO_FLAGS: set[str] = set()
+
+
+def _info_once(key: str, message: str) -> None:
+    if key in _INFO_FLAGS:
+        return
+    _INFO_FLAGS.add(key)
+    LOGGER.info(message)
 
 def _table_exists(conn, table: str) -> bool:
     try:
@@ -78,6 +86,8 @@ def _base_rows(conn) -> dict[str, dict[str, Any]]:
             "n_forecasted": 0,
             "last_triaged": None,
             "last_forecasted": None,
+            "highest_rc_level": None,
+            "highest_rc_score": None,
         }
     return base
 
@@ -183,6 +193,107 @@ def _update_forecasts(conn, base: dict[str, dict[str, Any]]) -> None:
             base[key]["last_forecasted"] = last_forecasted
 
 
+def _latest_hs_run_id(conn) -> str | None:
+    if _table_exists(conn, "hs_runs"):
+        hs_cols = _table_columns(conn, "hs_runs")
+        run_col = _pick_column(hs_cols, ["hs_run_id", "run_id"])
+        if run_col:
+            if "created_at" in hs_cols and "generated_at" in hs_cols:
+                ts_expr = "COALESCE(created_at, generated_at)"
+            elif "created_at" in hs_cols:
+                ts_expr = "created_at"
+            elif "generated_at" in hs_cols:
+                ts_expr = "generated_at"
+            else:
+                ts_expr = None
+            if ts_expr:
+                row = conn.execute(
+                    f"""
+                    SELECT {run_col}
+                    FROM hs_runs
+                    ORDER BY {ts_expr} DESC NULLS LAST
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row and row[0]:
+                    return str(row[0])
+
+    if not _table_exists(conn, "hs_triage"):
+        return None
+
+    triage_cols = _table_columns(conn, "hs_triage")
+    run_col = _pick_column(triage_cols, ["run_id", "hs_run_id"])
+    if not run_col:
+        return None
+    if "created_at" in triage_cols:
+        order_expr = "created_at DESC NULLS LAST"
+    else:
+        order_expr = f"{run_col} DESC NULLS LAST"
+    row = conn.execute(
+        f"""
+        SELECT {run_col}
+        FROM hs_triage
+        ORDER BY {order_expr}
+        LIMIT 1
+        """
+    ).fetchone()
+    if row and row[0]:
+        return str(row[0])
+    return None
+
+
+def _update_highest_rc(conn, base: dict[str, dict[str, Any]]) -> None:
+    if not base:
+        return
+    if not _table_exists(conn, "hs_triage"):
+        return
+
+    hs_cols = _table_columns(conn, "hs_triage")
+    run_col = _pick_column(hs_cols, ["run_id", "hs_run_id"])
+    iso_col = _pick_column(hs_cols, ["iso3"])
+    level_col = _pick_column(hs_cols, ["regime_change_level"])
+    score_col = _pick_column(hs_cols, ["regime_change_score"])
+
+    if not (run_col and iso_col and level_col and score_col):
+        _info_once(
+            "highest_rc_missing_columns",
+            "Skipping highest_rc fields; hs_triage missing regime_change columns.",
+        )
+        return
+
+    run_id = _latest_hs_run_id(conn)
+    if not run_id:
+        return
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+              UPPER({iso_col}) AS iso3,
+              MAX({level_col}) AS highest_rc_level,
+              MAX({score_col}) AS highest_rc_score
+            FROM hs_triage
+            WHERE {run_col} = ?
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            [run_id],
+        ).fetchall()
+    except Exception:
+        LOGGER.exception("Failed to compute highest_rc fields")
+        return
+
+    for iso3, highest_rc_level, highest_rc_score in rows or []:
+        key = str(iso3).upper() if iso3 else None
+        if key and key in base:
+            base[key]["highest_rc_level"] = (
+                int(highest_rc_level) if highest_rc_level is not None else None
+            )
+            base[key]["highest_rc_score"] = (
+                float(highest_rc_score) if highest_rc_score is not None else None
+            )
+
+
 def compute_countries_index(conn) -> list[dict[str, Any]]:
     if conn is None:
         return []
@@ -200,5 +311,6 @@ def compute_countries_index(conn) -> list[dict[str, Any]]:
 
     _update_last_triaged(conn, base)
     _update_forecasts(conn, base)
+    _update_highest_rc(conn, base)
 
     return [base[key] for key in sorted(base)]

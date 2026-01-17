@@ -131,7 +131,7 @@ const SvgMarkup = memo(function SvgMarkup({ svgText }: { svgText: string }) {
   const html = useMemo(() => ({ __html: svgText }), [svgText]);
   return (
     <div
-      aria-label="Exposure index world map"
+      aria-label="Forecast index world map"
       className="h-full w-full [&_svg]:h-full [&_svg]:w-full"
       dangerouslySetInnerHTML={html}
     />
@@ -243,6 +243,18 @@ export default function RiskIndexMap({
       }
     });
     return set;
+  }, [countriesRows]);
+
+  const rcByIso3 = useMemo(() => {
+    const map = new Map<string, number>();
+    countriesRows.forEach((row) => {
+      const iso3 = (row.iso3 ?? "").toUpperCase();
+      const level = row.highest_rc_level;
+      if (iso3 && (level === 1 || level === 2 || level === 3)) {
+        map.set(iso3, level);
+      }
+    });
+    return map;
   }, [countriesRows]);
 
   const valueByIso3 = useMemo(() => {
@@ -358,6 +370,16 @@ export default function RiskIndexMap({
     const iso3Elements = Array.from(
       svgHost.querySelectorAll<SVGElement>("[data-iso3]")
     );
+    const iso3ElementMap = new Map<string, SVGElement[]>();
+    iso3Elements.forEach((element) => {
+      const iso3 = (element.getAttribute("data-iso3") || "").toUpperCase();
+      if (!iso3) {
+        return;
+      }
+      const existing = iso3ElementMap.get(iso3) ?? [];
+      existing.push(element);
+      iso3ElementMap.set(iso3, existing);
+    });
     const paths = iso3Elements.flatMap((el) => {
       if (el.tagName.toLowerCase() === "path") {
         return [el as SVGPathElement];
@@ -372,6 +394,91 @@ export default function RiskIndexMap({
       palette.c4,
       palette.c5,
     ];
+    if (svgEl) {
+      const existingOverlay = svgEl.querySelector("#rc-overlay");
+      if (existingOverlay && existingOverlay.parentNode) {
+        existingOverlay.parentNode.removeChild(existingOverlay);
+      }
+      if (rcByIso3.size > 0) {
+        const overlay = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "g"
+        );
+        overlay.setAttribute("id", "rc-overlay");
+        svgEl.appendChild(overlay);
+        const rcColors: Record<number, string> = {
+          1: "#facc15",
+          2: "#fb923c",
+          3: "#ef4444",
+        };
+        rcByIso3.forEach((level, iso3) => {
+          const elements = iso3ElementMap.get(iso3) ?? [];
+          if (!elements.length) {
+            return;
+          }
+          let minX: number | null = null;
+          let minY: number | null = null;
+          let maxX: number | null = null;
+          let maxY: number | null = null;
+          elements.forEach((element) => {
+            const targetPaths =
+              element.tagName.toLowerCase() === "path"
+                ? [element as SVGPathElement]
+                : Array.from(element.querySelectorAll<SVGPathElement>("path"));
+            targetPaths.forEach((path) => {
+              try {
+                const bbox = path.getBBox();
+                if (
+                  Number.isFinite(bbox.x) &&
+                  Number.isFinite(bbox.y) &&
+                  Number.isFinite(bbox.width) &&
+                  Number.isFinite(bbox.height)
+                ) {
+                  const nextMinX = bbox.x;
+                  const nextMinY = bbox.y;
+                  const nextMaxX = bbox.x + bbox.width;
+                  const nextMaxY = bbox.y + bbox.height;
+                  minX = minX == null ? nextMinX : Math.min(minX, nextMinX);
+                  minY = minY == null ? nextMinY : Math.min(minY, nextMinY);
+                  maxX = maxX == null ? nextMaxX : Math.max(maxX, nextMaxX);
+                  maxY = maxY == null ? nextMaxY : Math.max(maxY, nextMaxY);
+                }
+              } catch {
+                // getBBox can throw if element isn't rendered.
+              }
+            });
+          });
+          if (minX == null || minY == null || maxX == null || maxY == null) {
+            return;
+          }
+          const width = maxX - minX;
+          const height = maxY - minY;
+          if (!Number.isFinite(width) || !Number.isFinite(height)) {
+            return;
+          }
+          const radius = Math.max(2, Math.min(8, Math.min(width, height) * 0.2));
+          const circle = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "circle"
+          );
+          circle.setAttribute("cx", String(minX + width / 2));
+          circle.setAttribute("cy", String(minY + height / 2));
+          circle.setAttribute("r", String(radius));
+          circle.setAttribute("fill", rcColors[level] ?? rcColors[1]);
+          circle.setAttribute("stroke", "rgba(15, 23, 42, 0.75)");
+          circle.setAttribute("stroke-width", "0.8");
+          circle.setAttribute("vector-effect", "non-scaling-stroke");
+          circle.setAttribute("opacity", "0.9");
+          const title = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "title"
+          );
+          title.textContent = `${iso3} • RC Level ${level}`;
+          circle.appendChild(title);
+          overlay.appendChild(circle);
+        });
+      }
+    }
     if (iso3Elements.length < 150) {
       warnings.push(
         "World map asset invalid: expected 150+ country paths with data-iso3. Check web/public/maps/world.svg."
@@ -808,6 +915,7 @@ export default function RiskIndexMap({
     perCapitaFormatter,
     debugEnabled,
     riskRows,
+    rcByIso3,
     resolvedHeightClassName,
   ]);
 

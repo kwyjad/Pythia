@@ -224,10 +224,34 @@ def _latest_triage(conn) -> pd.DataFrame:
     tier_col = _pick_column(cols, ["tier"])
     score_col = _pick_column(cols, ["triage_score"])
     created_col = _pick_column(cols, ["created_at"])
+    rc_likelihood_col = _pick_column(cols, ["regime_change_likelihood"])
+    rc_direction_col = _pick_column(cols, ["regime_change_direction"])
+    rc_magnitude_col = _pick_column(cols, ["regime_change_magnitude"])
+    rc_score_col = _pick_column(cols, ["regime_change_score"])
 
     tier_expr = f"{tier_col} AS tier" if tier_col else "NULL AS tier"
     score_expr = f"{score_col} AS triage_score" if score_col else "NULL AS triage_score"
     created_expr = f"{created_col} AS created_at" if created_col else "NULL AS created_at"
+    rc_likelihood_expr = (
+        f"{rc_likelihood_col} AS regime_change_likelihood"
+        if rc_likelihood_col
+        else "NULL AS regime_change_likelihood"
+    )
+    rc_direction_expr = (
+        f"{rc_direction_col} AS regime_change_direction"
+        if rc_direction_col
+        else "NULL AS regime_change_direction"
+    )
+    rc_magnitude_expr = (
+        f"{rc_magnitude_col} AS regime_change_magnitude"
+        if rc_magnitude_col
+        else "NULL AS regime_change_magnitude"
+    )
+    rc_score_expr = (
+        f"{rc_score_col} AS regime_change_score"
+        if rc_score_col
+        else "NULL AS regime_change_score"
+    )
 
     df = conn.execute(
         f"""
@@ -237,6 +261,10 @@ def _latest_triage(conn) -> pd.DataFrame:
             hazard_code,
             {tier_expr},
             {score_expr},
+            {rc_likelihood_expr},
+            {rc_direction_expr},
+            {rc_magnitude_expr},
+            {rc_score_expr},
             {created_expr}
         FROM hs_triage
         """
@@ -275,6 +303,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "EIV",
         "triage_score",
         "triage_tier",
+        "regime_change_likelihood",
+        "regime_change_direction",
+        "regime_change_magnitude",
+        "regime_change_score",
         "hs_run_ID",
     ]
 
@@ -370,6 +402,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
     else:
         merged["tier"] = None
         merged["triage_score"] = None
+        merged["regime_change_likelihood"] = None
+        merged["regime_change_direction"] = None
+        merged["regime_change_magnitude"] = None
+        merged["regime_change_score"] = None
 
     merged.rename(columns={"tier": "triage_tier"}, inplace=True)
 
@@ -403,6 +439,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "hs_run_id",
         "triage_score",
         "triage_tier",
+        "regime_change_likelihood",
+        "regime_change_direction",
+        "regime_change_magnitude",
+        "regime_change_score",
     ]
 
     pivot = (
@@ -496,6 +536,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
             "EIV": pivot["EIV"],
             "triage_score": pivot.get("triage_score"),
             "triage_tier": pivot.get("triage_tier"),
+            "regime_change_likelihood": pivot.get("regime_change_likelihood"),
+            "regime_change_direction": pivot.get("regime_change_direction"),
+            "regime_change_magnitude": pivot.get("regime_change_magnitude"),
+            "regime_change_score": pivot.get("regime_change_score"),
             "hs_run_ID": pivot["hs_run_id"],
         }
     )

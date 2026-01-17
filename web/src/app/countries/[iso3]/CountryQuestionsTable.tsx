@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo } from "react";
 
+import InfoTooltip from "../../../components/InfoTooltip";
 import SortableTable, { SortableColumn } from "../../../components/SortableTable";
 
 type CountryQuestionRow = {
@@ -19,6 +20,7 @@ type CountryQuestionRow = {
   eiv_total?: number | null;
   triage_score?: number | null;
   triage_date?: string | null;
+  regime_change_score?: number | null;
 };
 
 type CountryQuestionsTableProps = {
@@ -89,6 +91,18 @@ const buildColumns = (eivLabel: string): Array<SortableColumn<CountryQuestionRow
     sortValue: (row) => row.metric ?? "",
     defaultSortDirection: "asc",
     render: (row) => row.metric ?? "—",
+  },
+  {
+    key: "regime_change_score",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        RC Score{" "}
+        <InfoTooltip text="Regime change score (probability × magnitude)." />
+      </span>
+    ),
+    sortValue: (row) => row.regime_change_score ?? null,
+    defaultSortDirection: "desc",
+    render: (row) => formatNumber(row.regime_change_score),
   },
   {
     key: "triage_score",
