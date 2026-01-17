@@ -44,8 +44,11 @@ Return strictly JSON with this shape:
 }
 - Focus on authoritative, recent sources (last 120 days).
 - Do not include URLs in the JSON text.
-Query: Afghanistan (AFG) humanitarian risk outlook - fetch grounded recent signals (last 120 days)
-across conflict, displacement, disasters, food security, and political stability.`}</pre>
+Query: Afghanistan (AFG) horizon scan web research focused on out-of-pattern/regime-change triggers and
+baseline continuation signals (last 120 days). Recent signals formatted like:
+TAIL-UP | month_2-3 | UP | <signal>; TAIL-DOWN | month_1-2 | DOWN | <signal>; BASELINE | month_1-6 | MIXED | <signal>.
+Hazard triggers: ACE ceasefire collapse/offensive; DI border policy/forced returns; FL/TC seasonal outlook/SST/ENSO/landfall;
+DR/HW rainfall deficit/heat index/water rationing/food price spikes.`}</pre>
           <div className="mt-2 flex flex-wrap gap-3">
             {sourceLink(
               "https://github.com/kwyjad/Pythia/blob/main/pythia/web_research/backends/gemini_grounding.py"

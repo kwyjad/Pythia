@@ -197,6 +197,36 @@ def test_build_research_prompt_v2_di_note() -> None:
     assert "incoming displacement flows" in prompt_text
 
 
+def test_build_research_prompt_v2_includes_rc_block_when_elevated() -> None:
+    question = {
+        "question_id": "q-rc",
+        "iso3": "AFG",
+        "hazard_code": "ACE",
+        "metric": "PA",
+        "resolution_source": "ACLED",
+    }
+    resolver_features = {"source": "none"}
+    hs_triage_entry = {
+        "regime_change_level": 2,
+        "regime_change_score": 0.35,
+        "regime_change_likelihood": 0.7,
+        "regime_change_direction": "up",
+        "regime_change_magnitude": 0.5,
+        "regime_change_window": "month_2-3",
+    }
+
+    prompt_text = prompts.build_research_prompt_v2(
+        question=question,
+        hs_triage_entry=hs_triage_entry,
+        resolver_features=resolver_features,
+        model_info={},
+    )
+
+    assert "HS REGIME CHANGE" in prompt_text
+    assert "RC ELEVATED" in prompt_text
+    assert "regime_shift_signals" in prompt_text
+
+
 def test_build_spd_prompt_v2_includes_wording() -> None:
     question = {
         "question_id": "q-wording",
@@ -220,6 +250,38 @@ def test_build_spd_prompt_v2_includes_wording() -> None:
 
     assert "Natural-language question:" in prompt_text
     assert '"How many?"' in prompt_text
+
+
+def test_build_spd_prompt_v2_includes_rc_guidance_and_self_search() -> None:
+    question = {
+        "question_id": "q-rc-spd",
+        "iso3": "ETH",
+        "hazard_code": "ACE",
+        "metric": "FATALITIES",
+        "resolution_source": "ACLED",
+        "wording": "Conflict fatalities in ETH?",
+    }
+    history_summary = {"source": "ACLED"}
+    hs_triage_entry = {
+        "regime_change_level": 3,
+        "regime_change_score": 0.48,
+        "regime_change_likelihood": 0.6,
+        "regime_change_direction": "up",
+        "regime_change_magnitude": 0.5,
+        "regime_change_window": "month_1-3",
+    }
+    research_json = {"base_rate": {"qualitative_summary": "test"}}
+
+    prompt_text = prompts.build_spd_prompt_v2(
+        question=question,
+        history_summary=history_summary,
+        hs_triage_entry=hs_triage_entry,
+        research_json=research_json,
+    )
+
+    assert "REGIME CHANGE GUIDANCE" in prompt_text
+    assert "RC:" in prompt_text
+    assert "NEED_WEB_EVIDENCE" in prompt_text
 
 
 def test_build_spd_prompt_uses_target_month_keys_for_pa() -> None:
