@@ -457,35 +457,51 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "hs_run_id",
         "triage_score",
         "triage_tier",
+    ]
+    rc_columns = [
         "regime_change_likelihood",
         "regime_change_direction",
         "regime_change_magnitude",
         "regime_change_score",
     ]
+    for rc_col in rc_columns:
+        if rc_col in merged.columns:
+            pivot_index.append(rc_col)
+
+    merged["_created_at"] = pd.to_datetime(merged.get("created_at"), errors="coerce")
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        null_created = merged["_created_at"].isna()
+        null_count = int(null_created.sum())
+        if null_count:
+            sample_values = merged.loc[null_created, "created_at"].head(3).tolist()
+            LOGGER.debug(
+                "forecast export: %d rows missing created_at, sample=%s",
+                null_count,
+                sample_values,
+            )
+
+    sort_columns = pivot_index + ["bucket", "_created_at"]
+    ascending = [True] * (len(pivot_index) + 1) + [False]
+    if "run_id" in merged.columns:
+        sort_columns.append("run_id")
+        ascending.append(False)
+
+    dedup = merged.sort_values(sort_columns, ascending=ascending).drop_duplicates(
+        subset=pivot_index + ["bucket"], keep="first"
+    )
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        dropped = len(merged) - len(dedup)
+        if dropped:
+            LOGGER.debug("forecast export: dropped %d duplicate bucket rows", dropped)
 
     pivot = (
-        merged.sort_values(pivot_index + ["bucket"])
-        .drop_duplicates(subset=pivot_index + ["bucket"], keep="first")
-        # Keep groups with NULL triage/RC fields; dropna=True would drop all rows.
-        .pivot_table(
-            index=pivot_index,
-            columns="bucket",
-            values="probability",
-            aggfunc="first",
-            dropna=False,
-        )
+        dedup.set_index(pivot_index + ["bucket"])["probability"]
+        .unstack("bucket")
+        .reindex(columns=[1, 2, 3, 4, 5])
+        .fillna(0.0)
     )
-
     pivot.columns = [f"SPD_{int(col)}" for col in pivot.columns]
     pivot = pivot.reset_index()
-
-    for idx in range(1, 6):
-        col = f"SPD_{idx}"
-        if col not in pivot.columns:
-            pivot[col] = 0.0
-    pivot[[f"SPD_{idx}" for idx in range(1, 6)]] = pivot[
-        [f"SPD_{idx}" for idx in range(1, 6)]
-    ].fillna(0.0)
 
     raw_forecast_month = pivot["forecast_month"]
     pivot["forecast_month"] = _extract_year_month(raw_forecast_month).fillna(
