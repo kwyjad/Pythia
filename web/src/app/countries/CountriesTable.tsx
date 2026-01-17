@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo } from "react";
 
+import InfoTooltip from "../../components/InfoTooltip";
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
 type CountriesRow = {
@@ -12,6 +13,8 @@ type CountriesRow = {
   last_triaged?: string | null; // YYYY-MM-DD
   n_questions: number;
   n_forecasted: number;
+  highest_rc_level?: number | null;
+  highest_rc_score?: number | null;
 };
 
 type CountriesTableProps = {
@@ -19,6 +22,8 @@ type CountriesTableProps = {
 };
 
 export default function CountriesTable({ rows }: CountriesTableProps) {
+  const rcTooltip =
+    "Highest RC score (probability × magnitude) across hazards for the latest HS run.";
   const columns = useMemo<Array<SortableColumn<CountriesRow>>>(
     () => [
       {
@@ -45,6 +50,34 @@ export default function CountriesTable({ rows }: CountriesTableProps) {
         sortValue: (row) => row.country_name ?? "",
         render: (row) => row.country_name ?? "",
         defaultSortDirection: "asc",
+      },
+      {
+        key: "highest_rc_score",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            Highest RC Score <InfoTooltip text={rcTooltip} />
+          </span>
+        ),
+        headerClassName: "text-right",
+        cellClassName: "text-right tabular-nums",
+        sortValue: (row) => {
+          const score = row.highest_rc_score;
+          if (typeof score !== "number") {
+            return null;
+          }
+          const level = row.highest_rc_level ?? 0;
+          return score + level / 100;
+        },
+        render: (row) => {
+          const score = row.highest_rc_score;
+          if (typeof score !== "number") {
+            return "—";
+          }
+          const level = row.highest_rc_level;
+          const levelLabel = typeof level === "number" ? `L${level} • ` : "";
+          return `${levelLabel}${score.toFixed(2)}`;
+        },
+        defaultSortDirection: "desc",
       },
       {
         key: "n_questions",

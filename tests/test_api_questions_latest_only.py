@@ -188,5 +188,7 @@ def test_countries_endpoint_returns_counts(api_env: None) -> None:
             "n_forecasted": 1,
             "last_triaged": "2024-02-01",
             "last_forecasted": "2024-02-10",
+            "highest_rc_level": None,
+            "highest_rc_score": None,
         }
     ]

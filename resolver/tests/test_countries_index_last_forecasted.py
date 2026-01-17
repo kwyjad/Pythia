@@ -69,5 +69,7 @@ def test_compute_countries_index_last_forecasted() -> None:
             "n_forecasted": 2,
             "last_triaged": "2024-03-01",
             "last_forecasted": "2024-02-15",
+            "highest_rc_level": None,
+            "highest_rc_score": None,
         }
     ]

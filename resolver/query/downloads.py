@@ -24,6 +24,24 @@ if not LOGGER.handlers:  # pragma: no cover - silence library default
 _WARNING_FLAGS: set[str] = set()
 
 
+def _extract_year_month(series: pd.Series) -> pd.Series:
+    if series is None or series.empty:
+        return pd.Series(dtype="object")
+    raw = series.astype(str)
+    extracted = raw.str.extract(r"^(\d{4}-\d{2})", expand=False)
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        null_mask = extracted.isna()
+        missing_count = int(null_mask.sum())
+        if missing_count:
+            sample_values = raw[null_mask].head(3).tolist()
+            LOGGER.debug(
+                "forecast_month parsing: %d rows missing YYYY-MM, sample=%s",
+                missing_count,
+                sample_values,
+            )
+    return extracted
+
+
 def _warn_once(key: str, message: str) -> None:
     if key in _WARNING_FLAGS:
         return
@@ -224,10 +242,34 @@ def _latest_triage(conn) -> pd.DataFrame:
     tier_col = _pick_column(cols, ["tier"])
     score_col = _pick_column(cols, ["triage_score"])
     created_col = _pick_column(cols, ["created_at"])
+    rc_likelihood_col = _pick_column(cols, ["regime_change_likelihood"])
+    rc_direction_col = _pick_column(cols, ["regime_change_direction"])
+    rc_magnitude_col = _pick_column(cols, ["regime_change_magnitude"])
+    rc_score_col = _pick_column(cols, ["regime_change_score"])
 
     tier_expr = f"{tier_col} AS tier" if tier_col else "NULL AS tier"
     score_expr = f"{score_col} AS triage_score" if score_col else "NULL AS triage_score"
     created_expr = f"{created_col} AS created_at" if created_col else "NULL AS created_at"
+    rc_likelihood_expr = (
+        f"{rc_likelihood_col} AS regime_change_likelihood"
+        if rc_likelihood_col
+        else "NULL AS regime_change_likelihood"
+    )
+    rc_direction_expr = (
+        f"{rc_direction_col} AS regime_change_direction"
+        if rc_direction_col
+        else "NULL AS regime_change_direction"
+    )
+    rc_magnitude_expr = (
+        f"{rc_magnitude_col} AS regime_change_magnitude"
+        if rc_magnitude_col
+        else "NULL AS regime_change_magnitude"
+    )
+    rc_score_expr = (
+        f"{rc_score_col} AS regime_change_score"
+        if rc_score_col
+        else "NULL AS regime_change_score"
+    )
 
     df = conn.execute(
         f"""
@@ -237,6 +279,10 @@ def _latest_triage(conn) -> pd.DataFrame:
             hazard_code,
             {tier_expr},
             {score_expr},
+            {rc_likelihood_expr},
+            {rc_direction_expr},
+            {rc_magnitude_expr},
+            {rc_score_expr},
             {created_expr}
         FROM hs_triage
         """
@@ -275,6 +321,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "EIV",
         "triage_score",
         "triage_tier",
+        "regime_change_likelihood",
+        "regime_change_direction",
+        "regime_change_magnitude",
+        "regime_change_score",
         "hs_run_ID",
     ]
 
@@ -370,6 +420,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
     else:
         merged["tier"] = None
         merged["triage_score"] = None
+        merged["regime_change_likelihood"] = None
+        merged["regime_change_direction"] = None
+        merged["regime_change_magnitude"] = None
+        merged["regime_change_score"] = None
 
     merged.rename(columns={"tier": "triage_tier"}, inplace=True)
 
@@ -404,33 +458,57 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "triage_score",
         "triage_tier",
     ]
+    rc_columns = [
+        "regime_change_likelihood",
+        "regime_change_direction",
+        "regime_change_magnitude",
+        "regime_change_score",
+    ]
+    for rc_col in rc_columns:
+        if rc_col in merged.columns:
+            pivot_index.append(rc_col)
+
+    merged["_created_at"] = pd.to_datetime(merged.get("created_at"), errors="coerce")
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        null_created = merged["_created_at"].isna()
+        null_count = int(null_created.sum())
+        if null_count:
+            sample_values = merged.loc[null_created, "created_at"].head(3).tolist()
+            LOGGER.debug(
+                "forecast export: %d rows missing created_at, sample=%s",
+                null_count,
+                sample_values,
+            )
+
+    sort_columns = pivot_index + ["bucket", "_created_at"]
+    ascending = [True] * (len(pivot_index) + 1) + [False]
+    if "run_id" in merged.columns:
+        sort_columns.append("run_id")
+        ascending.append(False)
+
+    dedup = merged.sort_values(sort_columns, ascending=ascending).drop_duplicates(
+        subset=pivot_index + ["bucket"], keep="first"
+    )
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        dropped = len(merged) - len(dedup)
+        if dropped:
+            LOGGER.debug("forecast export: dropped %d duplicate bucket rows", dropped)
 
     pivot = (
-        merged.sort_values(pivot_index + ["bucket"])
-        .drop_duplicates(subset=pivot_index + ["bucket"], keep="first")
-        .pivot_table(
-            index=pivot_index,
-            columns="bucket",
-            values="probability",
-            aggfunc="first",
-        )
+        dedup.set_index(pivot_index + ["bucket"])["probability"]
+        .unstack("bucket")
+        .reindex(columns=[1, 2, 3, 4, 5])
+        .fillna(0.0)
     )
-
     pivot.columns = [f"SPD_{int(col)}" for col in pivot.columns]
     pivot = pivot.reset_index()
 
-    for idx in range(1, 6):
-        col = f"SPD_{idx}"
-        if col not in pivot.columns:
-            pivot[col] = 0.0
-    pivot[[f"SPD_{idx}" for idx in range(1, 6)]] = pivot[
-        [f"SPD_{idx}" for idx in range(1, 6)]
-    ].fillna(0.0)
-
-    pivot["forecast_month"] = pivot["forecast_month"].astype(str)
-    pivot[["year", "month"]] = pivot["forecast_month"].str.split("-", expand=True)
-    pivot["year"] = pd.to_numeric(pivot["year"], errors="coerce")
-    pivot["month"] = pd.to_numeric(pivot["month"], errors="coerce")
+    raw_forecast_month = pivot["forecast_month"]
+    pivot["forecast_month"] = _extract_year_month(raw_forecast_month).fillna(
+        raw_forecast_month.astype(str).str.slice(0, 7)
+    )
+    pivot["year"] = pd.to_numeric(pivot["forecast_month"].str.slice(0, 4), errors="coerce")
+    pivot["month"] = pd.to_numeric(pivot["forecast_month"].str.slice(5, 7), errors="coerce")
 
     hazard_centroids: dict[tuple[str, str, int], float] = {}
     wildcard_centroids: dict[tuple[str, int], float] = {}
@@ -496,6 +574,10 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
             "EIV": pivot["EIV"],
             "triage_score": pivot.get("triage_score"),
             "triage_tier": pivot.get("triage_tier"),
+            "regime_change_likelihood": pivot.get("regime_change_likelihood"),
+            "regime_change_direction": pivot.get("regime_change_direction"),
+            "regime_change_magnitude": pivot.get("regime_change_magnitude"),
+            "regime_change_score": pivot.get("regime_change_score"),
             "hs_run_ID": pivot["hs_run_id"],
         }
     )

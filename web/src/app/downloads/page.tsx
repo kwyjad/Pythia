@@ -24,7 +24,8 @@ const DownloadsPage = () => {
             Forecast SPD &amp; EIV export
           </h2>
           <p className="text-sm text-fred-text">
-            One row per ISO3, hazard, model, and forecast month.
+            One row per ISO3, hazard, model, and forecast month. Includes
+            regime-change probability, direction, magnitude, and score columns.
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <a

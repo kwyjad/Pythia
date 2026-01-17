@@ -30,6 +30,9 @@
   - `llm_calls` may include internal-only diagnostic fields (`status`, `error_type`, `error_message`, `hazard_scores_json`, `hazard_scores_parse_ok`, `response_format`) that are not part of the public contract.
 - `GET /v1/questions`
   - When `latest_only=true`, each row includes nullable triage fields: `triage_score`, `triage_tier`, `triage_need_full_spd`, `triage_date` (YYYY-MM-DD).
+  - When `latest_only=true`, each row may include nullable regime change fields: `regime_change_likelihood`, `regime_change_direction`, `regime_change_magnitude`, `regime_change_score`, `regime_change_level`.
+- `GET /v1/countries`
+  - Each row includes nullable `highest_rc_level` and `highest_rc_score` fields sourced from the latest HS triage run.
 - `GET /v1/diagnostics/kpi_scopes`
   - Query params: `metric_scope` (`PA` or `FATALITIES`, default `PA`), `year_month` (optional `YYYY-MM`).
   - Returns KPI counts for three scopes in a single payload:
@@ -46,11 +49,11 @@
   - For `FATALITIES`, monthly values sum hazards, and `total` is the sum across months 1–6.
 - `GET /v1/downloads/forecasts.csv`
   - Streams a CSV export with one row per ISO3 × hazard × model × forecast_month.
-  - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `hs_run_ID`.
+  - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `regime_change_likelihood`, `regime_change_direction`, `regime_change_magnitude`, `regime_change_score`, `hs_run_ID`.
 - `GET /v1/downloads/forecasts.xlsx`
   - Streams an Excel export with one row per ISO3 × hazard × model × forecast_month.
   - If the Excel dependency is unavailable, responds with a redirect to `/v1/downloads/forecasts.csv`.
-  - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `hs_run_ID`.
+  - Columns (in order): `ISO`, `country_name`, `year`, `month`, `forecast_month`, `metric`, `hazard`, `model`, `SPD_1..SPD_5`, `EIV`, `triage_score`, `triage_tier`, `regime_change_likelihood`, `regime_change_direction`, `regime_change_magnitude`, `regime_change_score`, `hs_run_ID`.
 - `GET /v1/downloads/triage.csv`
   - Streams a CSV export with one row per run × country.
   - Columns (in order): `Triage Year`, `Triage Month`, `Triage Date`, `Run ID`, `Triage model`, `ISO3`, `Country`, `Triage Score`, `Triage Tier`.

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useMemo } from "react";
 
-import type { RiskIndexRow } from "../lib/types";
+import type { CountriesRow, RiskIndexRow } from "../lib/types";
 import InfoTooltip from "./InfoTooltip";
 import SortableTable, { SortableColumn } from "./SortableTable";
 
@@ -12,6 +12,8 @@ const EIV_TOOLTIP =
 const PER_CAPITA_TOOLTIP =
   "Per-capita = surge-adjusted EIV ÷ population. Displayed as percent of population (worst month across months 1–6). 6-month Total = peak month (duration D is recorded but not applied yet).";
 const POPULATION_TOOLTIP = "Population missing for this country in the current snapshot.";
+const RC_SCORE_TOOLTIP =
+  "Highest RC score (probability × magnitude) across hazards for the latest HS run.";
 
 const formatNumber = (value: number | null | undefined) =>
   typeof value === "number" ? Math.round(value).toLocaleString() : null;
@@ -39,6 +41,7 @@ const formatMonthLabel = (date: Date): string =>
 
 type RiskIndexTableProps = {
   rows: RiskIndexRow[];
+  countriesRows?: CountriesRow[];
   targetMonth?: string | null;
   mode: "raw" | "percap";
   metric?: string | null;
@@ -61,6 +64,7 @@ const renderPerCapitaHeader = (label: string) => (
 
 export default function RiskIndexTable({
   rows,
+  countriesRows = [],
   targetMonth,
   mode,
   metric,
@@ -88,6 +92,16 @@ export default function RiskIndexTable({
     baseMonth
       ? formatMonthLabel(addMonthsUTC(baseMonth, index - 1))
       : `M${index}`;
+  const rcByIso3 = useMemo(() => {
+    const map = new Map<string, CountriesRow>();
+    countriesRows.forEach((row) => {
+      const iso3 = row.iso3?.toUpperCase?.();
+      if (iso3) {
+        map.set(iso3, row);
+      }
+    });
+    return map;
+  }, [countriesRows]);
 
   const perCapitaCell = (
     value: number | null | undefined,
@@ -259,6 +273,36 @@ export default function RiskIndexTable({
         defaultSortDirection: "asc",
       },
       {
+        key: "highest_rc_score",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            Highest RC Score <InfoTooltip text={RC_SCORE_TOOLTIP} />
+          </span>
+        ),
+        headerClassName: "w-32 text-right",
+        cellClassName: "w-32 text-right tabular-nums",
+        sortValue: (row) => {
+          const rcRow = rcByIso3.get(row.iso3.toUpperCase());
+          const score = rcRow?.highest_rc_score;
+          if (typeof score !== "number") {
+            return null;
+          }
+          const level = rcRow?.highest_rc_level ?? 0;
+          return score + level / 100;
+        },
+        render: (row) => {
+          const rcRow = rcByIso3.get(row.iso3.toUpperCase());
+          const score = rcRow?.highest_rc_score;
+          if (typeof score !== "number") {
+            return "—";
+          }
+          const level = rcRow?.highest_rc_level;
+          const levelLabel = typeof level === "number" ? `L${level} • ` : "";
+          return `${levelLabel}${score.toFixed(2)}`;
+        },
+        defaultSortDirection: "desc",
+      },
+      {
         key: "n_hazards_forecasted",
         label: "Hazards forecasted",
         headerClassName: "w-24 text-right",
@@ -272,7 +316,7 @@ export default function RiskIndexTable({
       },
       ...metricColumns,
     ];
-  }, [mode, monthLabel, perCapitaFormatter]);
+  }, [mode, monthLabel, perCapitaFormatter, rcByIso3]);
 
   const emptyMessage = targetMonth
     ? `No rows returned for ${targetMonth}.`

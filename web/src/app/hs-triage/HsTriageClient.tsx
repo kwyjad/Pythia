@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { apiGet } from "../../lib/api";
+import InfoTooltip from "../../components/InfoTooltip";
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
 type HsRunRow = {
@@ -23,6 +24,10 @@ type HsTriageRow = {
   triage_score_1: number | null;
   triage_score_2: number | null;
   triage_score_avg: number | null;
+  regime_change_likelihood?: number | null;
+  regime_change_direction?: string | null;
+  regime_change_magnitude?: number | null;
+  regime_change_score?: number | null;
   call_1_status?: string | null;
   call_2_status?: string | null;
   why_null?: string | null;
@@ -52,6 +57,16 @@ type HsTriageClientProps = {
 
 const formatScore = (value: number | null) =>
   value == null ? "—" : value.toFixed(2);
+
+const formatDirection = (value: string | null | undefined) =>
+  value == null || value === "" ? "—" : value;
+
+const RC_PROB_TOOLTIP =
+  "Likelihood (0–1) that an out-of-pattern shift occurs in the 1–6 month window.";
+const RC_DIR_TOOLTIP = "Direction of change: up/down/mixed/unclear.";
+const RC_MAG_TOOLTIP =
+  "Conditional impact size (0–1) if the shift occurs.";
+const RC_SCORE_TOOLTIP = "Probability × magnitude (0–1).";
 
 const monthNames = [
   "January",
@@ -212,7 +227,7 @@ export default function HsTriageClient({
         key: "triage_date",
         label: "Triage Date",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.triage_date ?? "",
         sortValue: (row) => row.triage_date ?? "",
       },
@@ -220,49 +235,49 @@ export default function HsTriageClient({
         key: "run_id",
         label: "Run ID",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.run_id,
       },
       {
         key: "iso3",
         label: "ISO3",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs font-semibold",
+        cellClassName: "text-xs font-semibold truncate",
         render: (row) => row.iso3,
       },
       {
         key: "country",
         label: "Country",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.country ?? "",
       },
       {
         key: "hazard_code",
         label: "Hazard Code",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.hazard_code ?? "",
       },
       {
         key: "hazard_label",
         label: "Hazard Label",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.hazard_label ?? "",
       },
       {
         key: "triage_tier",
         label: "Triage Tier",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.triage_tier ?? "",
       },
       {
         key: "triage_model",
         label: "Triage Model",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs",
+        cellClassName: "text-xs truncate",
         render: (row) => row.triage_model ?? "",
       },
       {
@@ -291,24 +306,72 @@ export default function HsTriageClient({
         defaultSortDirection: "desc",
       },
       {
+        key: "regime_change_likelihood",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            RC Prob <InfoTooltip text={RC_PROB_TOOLTIP} />
+          </span>
+        ),
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => formatScore(row.regime_change_likelihood ?? null),
+        sortValue: (row) => row.regime_change_likelihood,
+      },
+      {
+        key: "regime_change_direction",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            RC Dir <InfoTooltip text={RC_DIR_TOOLTIP} />
+          </span>
+        ),
+        headerClassName: "text-xs uppercase tracking-wide",
+        cellClassName: "text-xs truncate",
+        render: (row) => formatDirection(row.regime_change_direction),
+        sortValue: (row) => row.regime_change_direction ?? "",
+      },
+      {
+        key: "regime_change_magnitude",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            RC Mag <InfoTooltip text={RC_MAG_TOOLTIP} />
+          </span>
+        ),
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => formatScore(row.regime_change_magnitude ?? null),
+        sortValue: (row) => row.regime_change_magnitude,
+      },
+      {
+        key: "regime_change_score",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            RC Score <InfoTooltip text={RC_SCORE_TOOLTIP} />
+          </span>
+        ),
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => formatScore(row.regime_change_score ?? null),
+        sortValue: (row) => row.regime_change_score,
+      },
+      {
         key: "call_1_status",
         label: "Call 1 Status",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs text-fred-muted",
+        cellClassName: "text-xs text-fred-muted truncate",
         render: (row) => row.call_1_status ?? "",
       },
       {
         key: "call_2_status",
         label: "Call 2 Status",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs text-fred-muted",
+        cellClassName: "text-xs text-fred-muted truncate",
         render: (row) => row.call_2_status ?? "",
       },
       {
         key: "why_null",
         label: "Why null",
         headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs text-fred-muted",
+        cellClassName: "text-xs text-fred-muted truncate",
         render: (row) => row.why_null ?? "",
       },
     ],
@@ -406,6 +469,8 @@ export default function HsTriageClient({
           }
           initialSortKey="triage_score_avg"
           initialSortDirection="desc"
+          dense
+          tableLayout="fixed"
           emptyMessage={
             isLoading
               ? "Loading HS triage rows..."
@@ -413,20 +478,24 @@ export default function HsTriageClient({
           }
           colGroup={
             <>
-              <col style={{ width: "10ch" }} />
-              <col style={{ width: "18ch" }} />
+              <col style={{ width: "9ch" }} />
+              <col style={{ width: "14ch" }} />
               <col style={{ width: "6ch" }} />
-              <col style={{ width: "18ch" }} />
+              <col style={{ width: "16ch" }} />
+              <col style={{ width: "6ch" }} />
+              <col style={{ width: "12ch" }} />
+              <col style={{ width: "10ch" }} />
+              <col style={{ width: "12ch" }} />
+              <col style={{ width: "7ch" }} />
+              <col style={{ width: "7ch" }} />
               <col style={{ width: "8ch" }} />
-              <col style={{ width: "16ch" }} />
-              <col style={{ width: "12ch" }} />
-              <col style={{ width: "16ch" }} />
+              <col style={{ width: "7ch" }} />
+              <col style={{ width: "8ch" }} />
+              <col style={{ width: "7ch" }} />
+              <col style={{ width: "7ch" }} />
               <col style={{ width: "10ch" }} />
               <col style={{ width: "10ch" }} />
-              <col style={{ width: "10ch" }} />
-              <col style={{ width: "12ch" }} />
-              <col style={{ width: "12ch" }} />
-              <col style={{ width: "20ch" }} />
+              <col style={{ width: "14ch" }} />
             </>
           }
         />
