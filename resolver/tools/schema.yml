@@ -546,6 +546,72 @@ entities:
       - name: created_at
         type: datetime
         required: false
+  db.hs_triage:
+    kind: database
+    allow_extra_columns: false
+    description: HS triage outputs for each iso3/hazard.
+    columns:
+      - name: run_id
+        type: string
+        required: true
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: tier
+        type: string
+        required: true
+      - name: triage_score
+        type: number
+        required: true
+      - name: need_full_spd
+        type: boolean
+        required: true
+      - name: drivers_json
+        type: string
+        required: false
+      - name: regime_shifts_json
+        type: string
+        required: false
+      - name: data_quality_json
+        type: string
+        required: false
+      - name: scenario_stub
+        type: string
+        required: false
+      - name: regime_change_likelihood
+        type: number
+        required: false
+        description: Likelihood of out-of-pattern regime change in the next 1-6 months (0-1).
+      - name: regime_change_magnitude
+        type: number
+        required: false
+        description: Magnitude of the potential regime change (0-1).
+      - name: regime_change_score
+        type: number
+        required: false
+        description: Likelihood * magnitude regime-change score.
+      - name: regime_change_level
+        type: integer
+        required: false
+        description: Regime-change severity level derived from thresholds.
+      - name: regime_change_direction
+        type: string
+        required: false
+        description: Direction of change (up, down, mixed, unclear).
+      - name: regime_change_window
+        type: string
+        required: false
+        description: Time window for regime-change risk (month_1..month_6, month_1-2, month_3-4, month_5-6).
+      - name: regime_change_json
+        type: string
+        required: false
+        description: Normalized regime-change payload as JSON.
+      - name: created_at
+        type: datetime
+        required: false
   db.llm_calls:
     kind: database
     allow_extra_columns: false

@@ -144,6 +144,13 @@ def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
             regime_shifts_json TEXT,
             data_quality_json TEXT,
             scenario_stub TEXT,
+            regime_change_likelihood DOUBLE,
+            regime_change_magnitude DOUBLE,
+            regime_change_score DOUBLE,
+            regime_change_level INTEGER,
+            regime_change_direction TEXT,
+            regime_change_window TEXT,
+            regime_change_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
@@ -158,6 +165,13 @@ def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
             "regime_shifts_json": "TEXT",
             "data_quality_json": "TEXT",
             "scenario_stub": "TEXT",
+            "regime_change_likelihood": "DOUBLE",
+            "regime_change_magnitude": "DOUBLE",
+            "regime_change_score": "DOUBLE",
+            "regime_change_level": "INTEGER",
+            "regime_change_direction": "TEXT",
+            "regime_change_window": "TEXT",
+            "regime_change_json": "TEXT",
             "created_at": "TIMESTAMP",
         },
     )
