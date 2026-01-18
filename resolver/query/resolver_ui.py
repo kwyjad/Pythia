@@ -163,6 +163,73 @@ def _pick_facts_source(conn) -> tuple[dict[str, Any], dict[str, Any]]:
     return {}, diagnostics
 
 
+def _pick_facts_source_for_status(conn) -> tuple[dict[str, Any], dict[str, Any]]:
+    diagnostics: dict[str, Any] = {
+        "facts_source_table": None,
+        "fallback_used": False,
+        "missing_tables_checked": [],
+        "notes": [],
+    }
+    if conn is None:
+        diagnostics["notes"].append("conn_missing")
+        return {}, diagnostics
+
+    candidates = [
+        {
+            "table": "facts_resolved",
+            "value_expr": "value",
+            "has_hazard_label": True,
+            "required": {"iso3", "ym", "hazard_code", "metric", "value", "source_id"},
+        },
+        {
+            "table": "facts_deltas",
+            "value_expr": None,
+            "has_hazard_label": False,
+            "required": {"iso3", "ym", "hazard_code", "metric", "source_id"},
+        },
+        {
+            "table": "facts_monthly_deltas",
+            "value_expr": "value",
+            "has_hazard_label": False,
+            "required": {"iso3", "ym", "hazard_code", "metric", "value", "source_id"},
+        },
+    ]
+
+    for candidate in candidates:
+        table = candidate["table"]
+        if not _table_exists(conn, table):
+            diagnostics["missing_tables_checked"].append(table)
+            continue
+        columns = _table_columns(conn, table)
+        if not candidate["required"].issubset(columns):
+            diagnostics["notes"].append(f"{table}_columns_missing")
+            continue
+        value_expr = candidate.get("value_expr")
+        if table == "facts_deltas":
+            if "value_new" in columns and "value_stock" in columns:
+                value_expr = "COALESCE(value_new, value_stock)"
+            elif "value_new" in columns:
+                value_expr = "value_new"
+            elif "value_stock" in columns:
+                value_expr = "value_stock"
+            else:
+                diagnostics["notes"].append("facts_deltas_value_missing")
+                continue
+        if not _table_has_rows(conn, table):
+            diagnostics["notes"].append(f"{table}_empty")
+            continue
+        diagnostics["facts_source_table"] = table
+        diagnostics["fallback_used"] = table != "facts_resolved"
+        return {
+            "table": table,
+            "value_expr": value_expr,
+            "has_hazard_label": candidate["has_hazard_label"],
+        }, diagnostics
+
+    diagnostics["notes"].append("facts_source_unavailable")
+    return {}, diagnostics
+
+
 def _metric_display(metric: str | None) -> str | None:
     if metric is None:
         return None
@@ -200,6 +267,12 @@ def _coerce_float(value: Any) -> float | None:
     return out
 
 
+def _max_iso_date(value_a: str | None, value_b: str | None) -> str | None:
+    if value_a and value_b:
+        return value_a if value_a >= value_b else value_b
+    return value_a or value_b
+
+
 def _status_from_facts(
     conn, label: str, source_filter_sql: str, params: list[str]
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -223,7 +296,7 @@ def _status_from_facts(
         diagnostics["notes"].append("conn_missing")
         return status, diagnostics
 
-    source_info, diagnostics = _pick_facts_source(conn)
+    source_info, diagnostics = _pick_facts_source_for_status(conn)
     table = source_info.get("table") if source_info else None
     status["diagnostics"]["table_used"] = table
     if not source_info or not table:
@@ -334,6 +407,13 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
 
     if acled_status is None:
         acled_status = acled_facts_status
+    else:
+        acled_status["last_updated"] = _max_iso_date(
+            acled_status.get("last_updated"),
+            acled_facts_status.get("last_updated"),
+        )
+        acled_status.setdefault("diagnostics", {})
+        acled_status["diagnostics"]["last_updated_source"] = "max(facts_created_at, acled_updated_at)"
 
     rows = [acled_status, idmc_status, emdat_status]
 
