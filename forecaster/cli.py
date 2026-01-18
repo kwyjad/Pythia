@@ -182,6 +182,30 @@ class PythiaQuestion:
     pythia_metadata_json: Optional[str]
     scenario_ids_json: Optional[str] = None
 
+
+def _dedupe_sources_by_url(sources: list[Any]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for src in sources:
+        if isinstance(src, dict):
+            url = str(src.get("url") or "").strip()
+            if not url:
+                continue
+            if url in seen_urls:
+                continue
+            deduped.append(src)
+            seen_urls.add(url)
+        elif isinstance(src, str):
+            url = src.strip()
+            if not url:
+                continue
+            if url in seen_urls:
+                continue
+            deduped.append({"title": url, "url": url})
+            seen_urls.add(url)
+    return deduped
+
+
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
@@ -2361,10 +2385,51 @@ def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[s
     }
 
 
+def _truncate_tail_pack_signals(signals: list[str], max_bullets: int) -> list[str]:
+    buckets = {
+        "TRIGGER": [],
+        "DAMPENER": [],
+        "BASELINE": [],
+        "OTHER": [],
+    }
+    for item in signals:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        upper = text.upper()
+        if upper.startswith("TRIGGER"):
+            buckets["TRIGGER"].append(text)
+        elif upper.startswith("DAMPENER"):
+            buckets["DAMPENER"].append(text)
+        elif upper.startswith("BASELINE"):
+            buckets["BASELINE"].append(text)
+        else:
+            buckets["OTHER"].append(text)
+
+    ordered: list[str] = []
+    for key in ("TRIGGER", "DAMPENER", "BASELINE", "OTHER"):
+        ordered.extend(buckets[key])
+
+    truncated = ordered[: max(0, max_bullets)]
+    LOG.debug(
+        "Tail pack signals truncated: in=%d out=%d trigger=%d dampener=%d baseline=%d other=%d",
+        len(signals),
+        len(truncated),
+        len(buckets["TRIGGER"]),
+        len(buckets["DAMPENER"]),
+        len(buckets["BASELINE"]),
+        len(buckets["OTHER"]),
+    )
+    return truncated
+
+
 def _load_hs_hazard_tail_pack(
     hs_run_id: str,
     iso3: str,
     hazard_code: str,
+    max_signals: int | None = None,
 ) -> Optional[Dict[str, Any]]:
     iso3_up = (iso3 or "").upper()
     hazard_up = (hazard_code or "").upper()
@@ -2376,6 +2441,7 @@ def _load_hs_hazard_tail_pack(
         try:
             table_info = con.execute("PRAGMA table_info('hs_hazard_tail_packs')").fetchall()
         except Exception:
+            LOG.debug("HS hazard tail pack table missing for %s/%s", iso3_up, hazard_up)
             return None
         if not table_info:
             return None
@@ -2421,6 +2487,9 @@ def _load_hs_hazard_tail_pack(
     except Exception:
         recent_signals = []
 
+    if max_signals is not None and isinstance(recent_signals, list):
+        recent_signals = _truncate_tail_pack_signals(recent_signals, max_signals)
+
     return {
         "query": query or "",
         "report_markdown": row[0] or "",
@@ -2435,6 +2504,7 @@ def _load_hs_hazard_tail_pack(
             "rc_window": rc_window,
             "created_at": str(created_at) if created_at is not None else None,
             "grounding_debug": grounding_debug if isinstance(grounding_debug, dict) else {},
+            "truncated_to": max_signals if max_signals is not None else None,
         },
     }
 
@@ -4182,6 +4252,60 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 "sources": [],
                 "grounded": False,
             }
+        else:
+            research_json = dict(research_json)
+
+        def _coerce_float(value: Any) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _coerce_int(value: Any) -> int | None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        rc_level = _coerce_int(hs_entry.get("regime_change_level"))
+        rc_score = _coerce_float(hs_entry.get("regime_change_score"))
+        if rc_level is None:
+            rc_payload = hs_entry.get("regime_change")
+            if isinstance(rc_payload, dict):
+                rc_score = rc_score if rc_score is not None else _coerce_float(rc_payload.get("score"))
+                rc_level = _coerce_int(rc_payload.get("level"))
+
+        rc_elevated = False
+        if rc_level is not None:
+            rc_elevated = rc_level >= 2
+        elif rc_score is not None:
+            rc_elevated = rc_score >= 0.30
+
+        if rc_elevated:
+            max_signals = int(os.getenv("PYTHIA_SPD_TAIL_PACKS_MAX_SIGNALS", "12"))
+            try:
+                tail_pack = _load_hs_hazard_tail_pack(
+                    hs_run_id,
+                    iso3,
+                    hz,
+                    max_signals=max_signals,
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOG.debug("SPD tail pack load failed for %s/%s: %s", iso3, hz, exc)
+                tail_pack = None
+            if tail_pack:
+                research_json["hs_hazard_tail_pack"] = tail_pack
+                merged_sources = _dedupe_sources_by_url(
+                    (research_json.get("sources") or []) + (tail_pack.get("sources") or [])
+                )
+                research_json["sources"] = merged_sources
+                LOG.debug(
+                    "SPD tail pack injected for %s/%s: bullets=%d sources=%d",
+                    iso3,
+                    hz,
+                    len(tail_pack.get("recent_signals") or []),
+                    len(merged_sources),
+                )
 
         target_months = rec.get("target_months") or rec.get("target_month")
         target_month = _first_target_month(target_months)
