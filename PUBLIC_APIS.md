@@ -77,7 +77,8 @@
 - `GET /v1/resolver/connector_status`
   - Returns `rows` with `source` (ACLED, IDMC, EM-DAT), `last_updated` (YYYY-MM-DD or null), and `rows_scanned`.
   - Optional `diagnostics` includes `facts_source_table`, `fallback_used`, `missing_tables_checked`, `date_column_used`, and `rows_total`.
-  - ACLED status prefers `acled_monthly_fatalities` when available and adds `acled_status_source_table` + `acled_status_date_column_used`.
+  - `last_updated` prefers `created_at` when available (then `publication_date`, `as_of_date`, `as_of`, and `ym_proxy` fallback).
+  - ACLED status prefers the selected facts table when ACLED facts are present; it falls back to `acled_monthly_fatalities` only when facts are absent. Diagnostics include `acled_status_source_table` and `acled_status_date_column_used`.
 - `GET /v1/resolver/country_facts`
   - Query params: `iso3` (required 3-letter code), `limit` (optional, default 5000).
   - Returns `rows` for the requested ISO3 with `iso3`, `hazard`, `hazard_code`, `source_id`, `year`, `month`, `metric`, and `value`.
