@@ -2,6 +2,13 @@
 
 Minimal Next.js dashboard scaffold for the Pythia API.
 
+## Pages
+- **Forecast Index (Overview)**: Humanitarian Impact Forecast Index with RC KPI counts and RC map markers (highest RC level per country).
+- **Forecasts** (`/questions`): Latest forecast table, including RC score/triage fields from `/v1/questions?latest_only=true`.
+- **HS Triage** (`/hs-triage`): Run-level triage table with RC likelihood/direction/magnitude/score columns.
+- **Countries** (`/countries`): Highest RC level/score per country from `/v1/countries`.
+- **Downloads** (`/downloads`): Forecast SPD/EIV export with RC columns plus triage/cost exports.
+
 ## Setup
 
 ```bash
