@@ -182,6 +182,30 @@ class PythiaQuestion:
     pythia_metadata_json: Optional[str]
     scenario_ids_json: Optional[str] = None
 
+
+def _dedupe_sources_by_url(sources: list[Any]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for src in sources:
+        if isinstance(src, dict):
+            url = str(src.get("url") or "").strip()
+            if not url:
+                continue
+            if url in seen_urls:
+                continue
+            deduped.append(src)
+            seen_urls.add(url)
+        elif isinstance(src, str):
+            url = src.strip()
+            if not url:
+                continue
+            if url in seen_urls:
+                continue
+            deduped.append({"title": url, "url": url})
+            seen_urls.add(url)
+    return deduped
+
+
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
@@ -2361,6 +2385,130 @@ def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[s
     }
 
 
+def _truncate_tail_pack_signals(signals: list[str], max_bullets: int) -> list[str]:
+    buckets = {
+        "TRIGGER": [],
+        "DAMPENER": [],
+        "BASELINE": [],
+        "OTHER": [],
+    }
+    for item in signals:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        upper = text.upper()
+        if upper.startswith("TRIGGER"):
+            buckets["TRIGGER"].append(text)
+        elif upper.startswith("DAMPENER"):
+            buckets["DAMPENER"].append(text)
+        elif upper.startswith("BASELINE"):
+            buckets["BASELINE"].append(text)
+        else:
+            buckets["OTHER"].append(text)
+
+    ordered: list[str] = []
+    for key in ("TRIGGER", "DAMPENER", "BASELINE", "OTHER"):
+        ordered.extend(buckets[key])
+
+    truncated = ordered[: max(0, max_bullets)]
+    LOG.debug(
+        "Tail pack signals truncated: in=%d out=%d trigger=%d dampener=%d baseline=%d other=%d",
+        len(signals),
+        len(truncated),
+        len(buckets["TRIGGER"]),
+        len(buckets["DAMPENER"]),
+        len(buckets["BASELINE"]),
+        len(buckets["OTHER"]),
+    )
+    return truncated
+
+
+def _load_hs_hazard_tail_pack(
+    hs_run_id: str,
+    iso3: str,
+    hazard_code: str,
+    max_signals: int | None = None,
+) -> Optional[Dict[str, Any]]:
+    iso3_up = (iso3 or "").upper()
+    hazard_up = (hazard_code or "").upper()
+    if not hs_run_id or not iso3_up or not hazard_up:
+        return None
+
+    con = connect(read_only=True)
+    try:
+        try:
+            table_info = con.execute("PRAGMA table_info('hs_hazard_tail_packs')").fetchall()
+        except Exception:
+            LOG.debug("HS hazard tail pack table missing for %s/%s", iso3_up, hazard_up)
+            return None
+        if not table_info:
+            return None
+        row = con.execute(
+            """
+            SELECT report_markdown, sources_json, grounded, grounding_debug_json, structural_context,
+                   recent_signals_json, rc_level, rc_score, rc_direction, rc_window, query, created_at
+            FROM hs_hazard_tail_packs
+            WHERE hs_run_id = ? AND upper(iso3) = upper(?) AND upper(hazard_code) = upper(?)
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            [hs_run_id, iso3_up, hazard_up],
+        ).fetchone()
+    finally:
+        con.close()
+
+    if not row:
+        return None
+
+    sources_raw = row[1] or "[]"
+    grounded_val = row[2] if len(row) > 2 else False
+    grounding_debug_raw = row[3] if len(row) > 3 else "{}"
+    structural_context = row[4] if len(row) > 4 else ""
+    recent_signals_raw = row[5] if len(row) > 5 else "[]"
+    rc_level = row[6] if len(row) > 6 else None
+    rc_score = row[7] if len(row) > 7 else None
+    rc_direction = row[8] if len(row) > 8 else None
+    rc_window = row[9] if len(row) > 9 else None
+    query = row[10] if len(row) > 10 else ""
+    created_at = row[11] if len(row) > 11 else None
+
+    try:
+        sources = json.loads(sources_raw)
+    except Exception:
+        sources = []
+    try:
+        grounding_debug = json.loads(grounding_debug_raw)
+    except Exception:
+        grounding_debug = {}
+    try:
+        recent_signals = json.loads(recent_signals_raw)
+    except Exception:
+        recent_signals = []
+
+    if max_signals is not None and isinstance(recent_signals, list):
+        recent_signals = _truncate_tail_pack_signals(recent_signals, max_signals)
+
+    return {
+        "query": query or "",
+        "report_markdown": row[0] or "",
+        "sources": sources if isinstance(sources, list) else [],
+        "structural_context": structural_context or "",
+        "recent_signals": recent_signals if isinstance(recent_signals, list) else [],
+        "grounded": bool(grounded_val) or bool(sources),
+        "debug": {
+            "rc_level": rc_level,
+            "rc_score": rc_score,
+            "rc_direction": rc_direction,
+            "rc_window": rc_window,
+            "created_at": str(created_at) if created_at is not None else None,
+            "grounding_debug": grounding_debug if isinstance(grounding_debug, dict) else {},
+            "truncated_to": max_signals if max_signals is not None else None,
+        },
+    }
+
+
 def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> str:
     iso3 = (question_row.get("iso3") or "").upper()
     hazard = (question_row.get("hazard_code") or "").upper()
@@ -3787,6 +3935,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
 
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
+        hazard_tail_pack: dict[str, Any] | None = None
         retriever_enabled = _retriever_enabled()
         if retriever_enabled or os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1":
             try:
@@ -3814,8 +3963,27 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
                 question_evidence_pack = None
+            try:
+                hazard_tail_pack = _load_hs_hazard_tail_pack(hs_run_id, iso3, hz)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("HS hazard tail pack load failed for %s/%s: %s", iso3, hz, exc)
+                hazard_tail_pack = None
 
         merged_evidence_pack = merge_evidence_packs(hs_evidence_pack, question_evidence_pack)
+        if hazard_tail_pack:
+            if hs_evidence_pack is None:
+                hs_evidence_pack = {}
+            hs_evidence_pack["hazard_tail_pack"] = hazard_tail_pack
+            merged_evidence_pack = merge_evidence_packs(
+                merged_evidence_pack,
+                {
+                    **hazard_tail_pack,
+                    "recent_signals": (hazard_tail_pack.get("recent_signals") or [])[:12],
+                },
+                max_sources=12,
+                max_signals=12,
+            )
+            merged_evidence_pack["hs_hazard_tail_pack"] = hazard_tail_pack
 
         prompt = build_research_prompt_v2(
             question={
@@ -4084,6 +4252,60 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 "sources": [],
                 "grounded": False,
             }
+        else:
+            research_json = dict(research_json)
+
+        def _coerce_float(value: Any) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _coerce_int(value: Any) -> int | None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        rc_level = _coerce_int(hs_entry.get("regime_change_level"))
+        rc_score = _coerce_float(hs_entry.get("regime_change_score"))
+        if rc_level is None:
+            rc_payload = hs_entry.get("regime_change")
+            if isinstance(rc_payload, dict):
+                rc_score = rc_score if rc_score is not None else _coerce_float(rc_payload.get("score"))
+                rc_level = _coerce_int(rc_payload.get("level"))
+
+        rc_elevated = False
+        if rc_level is not None:
+            rc_elevated = rc_level >= 2
+        elif rc_score is not None:
+            rc_elevated = rc_score >= 0.30
+
+        if rc_elevated:
+            max_signals = int(os.getenv("PYTHIA_SPD_TAIL_PACKS_MAX_SIGNALS", "12"))
+            try:
+                tail_pack = _load_hs_hazard_tail_pack(
+                    hs_run_id,
+                    iso3,
+                    hz,
+                    max_signals=max_signals,
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOG.debug("SPD tail pack load failed for %s/%s: %s", iso3, hz, exc)
+                tail_pack = None
+            if tail_pack:
+                research_json["hs_hazard_tail_pack"] = tail_pack
+                merged_sources = _dedupe_sources_by_url(
+                    (research_json.get("sources") or []) + (tail_pack.get("sources") or [])
+                )
+                research_json["sources"] = merged_sources
+                LOG.debug(
+                    "SPD tail pack injected for %s/%s: bullets=%d sources=%d",
+                    iso3,
+                    hz,
+                    len(tail_pack.get("recent_signals") or []),
+                    len(merged_sources),
+                )
 
         target_months = rec.get("target_months") or rec.get("target_month")
         target_month = _first_target_month(target_months)

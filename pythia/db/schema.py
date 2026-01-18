@@ -476,6 +476,47 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        _ensure_table_and_columns(
+            con,
+            "hs_hazard_tail_packs",
+            """
+            CREATE TABLE IF NOT EXISTS hs_hazard_tail_packs (
+                hs_run_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                rc_level INTEGER,
+                rc_score DOUBLE,
+                rc_direction TEXT,
+                rc_window TEXT,
+                query TEXT,
+                report_markdown TEXT,
+                sources_json TEXT,
+                grounded BOOLEAN,
+                grounding_debug_json TEXT,
+                structural_context TEXT,
+                recent_signals_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            {
+                "hs_run_id": "TEXT",
+                "iso3": "TEXT",
+                "hazard_code": "TEXT",
+                "rc_level": "INTEGER",
+                "rc_score": "DOUBLE",
+                "rc_direction": "TEXT",
+                "rc_window": "TEXT",
+                "query": "TEXT",
+                "report_markdown": "TEXT",
+                "sources_json": "TEXT",
+                "grounded": "BOOLEAN",
+                "grounding_debug_json": "TEXT",
+                "structural_context": "TEXT",
+                "recent_signals_json": "TEXT",
+                "created_at": "TIMESTAMP",
+            },
+        )
+
         _ensure_question_run_metrics_table(con)
 
         _ensure_table_and_columns(

@@ -1256,6 +1256,15 @@ def build_spd_prompt_v2(
         "- Level 2: treat base rate as less reliable; widen posterior; ensure non-trivial tail mass in the RC direction unless rebutted.\n"
         "- Level 3: explicitly model a regime-shift scenario; avoid narrow SPDs; tails must be meaningfully represented if direction is UP/DOWN.\n\n"
     )
+    tail_pack_guidance = (
+        "HAZARD TAIL PACK (if provided):\n"
+        "- The evidence JSON may include `hs_hazard_tail_pack`.\n"
+        "- Use its `recent_signals` bullets as trigger/counter-trigger evidence.\n"
+        "- TRIGGER supports a regime-shift hypothesis (tail risk).\n"
+        "- DAMPENER argues against the shift (stay closer to base rate).\n"
+        "- BASELINE supports continuation.\n"
+        "- Up to 12 bullets are included; absence does not imply no evidence exists.\n\n"
+    )
 
     rc_self_search_line = ""
     if rc_level_effective >= 2:
@@ -1287,6 +1296,7 @@ def build_spd_prompt_v2(
         f"{_json_dumps_for_prompt(research_json, indent=2)}\n"
         "```\n\n"
         f"{rc_guidance}"
+        f"{tail_pack_guidance}"
         "Buckets:\n"
         f"- These buckets represent {unit_phrase} at the country level.\n"
         f"- Bucket labels: {bucket_list_str}\n\n"

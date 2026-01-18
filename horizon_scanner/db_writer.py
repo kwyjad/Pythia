@@ -526,6 +526,92 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> No
     con.close()
 
 
+def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict]) -> None:
+    con = connect(read_only=False)
+    ensure_schema(con)
+
+    for pack in packs:
+        iso3 = (pack.get("iso3") or "").upper()
+        hazard_code = (pack.get("hazard_code") or "").upper()
+        query = pack.get("query") or ""
+        markdown = pack.get("markdown") or pack.get("report_markdown") or ""
+        sources = pack.get("sources") or []
+        if not isinstance(sources, list):
+            sources = [sources]
+        sources_json = json.dumps(sources, ensure_ascii=False)
+        grounded = bool(pack.get("grounded"))
+        grounding_debug_json = json.dumps(pack.get("grounding_debug") or {}, ensure_ascii=False)
+        structural_context = pack.get("structural_context") or ""
+        recent_signals = pack.get("recent_signals") or []
+        if not isinstance(recent_signals, list):
+            recent_signals = [str(recent_signals)]
+        recent_signals_json = json.dumps(recent_signals, ensure_ascii=False)
+        rc_level = pack.get("rc_level")
+        rc_score = pack.get("rc_score")
+        rc_direction = pack.get("rc_direction")
+        rc_window = pack.get("rc_window")
+
+        logging.debug(
+            "Deleting hs_hazard_tail_packs row for hs_run_id=%s iso3=%s hazard_code=%s",
+            hs_run_id,
+            iso3,
+            hazard_code,
+        )
+        con.execute(
+            "DELETE FROM hs_hazard_tail_packs WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ?;",
+            [hs_run_id, iso3, hazard_code],
+        )
+        logging.debug(
+            "Inserting hs_hazard_tail_packs row for hs_run_id=%s iso3=%s hazard_code=%s rc_level=%s rc_score=%s sources=%d signals=%d markdown_len=%d",
+            hs_run_id,
+            iso3,
+            hazard_code,
+            rc_level,
+            rc_score,
+            len(sources),
+            len(recent_signals),
+            len(markdown),
+        )
+        con.execute(
+            """
+            INSERT INTO hs_hazard_tail_packs (
+                hs_run_id,
+                iso3,
+                hazard_code,
+                rc_level,
+                rc_score,
+                rc_direction,
+                rc_window,
+                query,
+                report_markdown,
+                sources_json,
+                grounded,
+                grounding_debug_json,
+                structural_context,
+                recent_signals_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            [
+                hs_run_id,
+                iso3,
+                hazard_code,
+                rc_level,
+                rc_score,
+                rc_direction,
+                rc_window,
+                query,
+                markdown,
+                sources_json,
+                grounded,
+                grounding_debug_json,
+                structural_context,
+                recent_signals_json,
+            ],
+        )
+
+    con.close()
+
+
 def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> None:
     con = connect(read_only=False)
     ensure_schema(con)
