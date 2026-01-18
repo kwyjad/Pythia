@@ -103,6 +103,54 @@ def test_resolver_ui_fallback_to_facts_deltas():
     assert status_diagnostics["fallback_used"] is True
 
 
+def test_resolver_ui_status_prefers_facts_deltas_over_monthly_view():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            value_new DOUBLE,
+            value_stock DOUBLE,
+            series_semantics TEXT,
+            as_of TEXT,
+            created_at TIMESTAMP,
+            source_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO facts_deltas VALUES
+          ('2026-01', 'AFG', 'ACE', 'pa', 20, NULL, 'new', NULL, '2026-01-17 12:00:00', 'IDMC'),
+          ('2026-01', 'AFG', 'FL', 'pa', 5, NULL, 'new', NULL, '2026-01-17 09:00:00', 'EM-DAT')
+        """
+    )
+    conn.execute(
+        """
+        CREATE VIEW facts_monthly_deltas AS
+        SELECT
+          ym,
+          iso3,
+          hazard_code,
+          metric,
+          COALESCE(value_new, value_stock) AS value,
+          source_id
+        FROM facts_deltas
+        """
+    )
+
+    rows, _ = get_connector_last_updated(conn)
+    rows_by_source = {row["source"]: row for row in rows}
+
+    assert rows_by_source["IDMC"]["last_updated"] == "2026-01-17"
+    assert rows_by_source["EM-DAT"]["last_updated"] == "2026-01-17"
+    assert rows_by_source["IDMC"]["diagnostics"]["table_used"] == "facts_deltas"
+    assert rows_by_source["EM-DAT"]["diagnostics"]["table_used"] == "facts_deltas"
+
+
 def test_resolver_ui_fallback_when_facts_resolved_empty():
     conn = duckdb.connect(":memory:")
     conn.execute(
@@ -327,7 +375,7 @@ def test_connector_last_updated_uses_acled_table_rows_over_facts():
     rows, diagnostics = get_connector_last_updated(conn)
     rows_by_source = {row["source"]: row for row in rows}
 
-    assert rows_by_source["ACLED"]["last_updated"] == "2025-12-18"
+    assert rows_by_source["ACLED"]["last_updated"] == "2026-01-17"
     assert rows_by_source["ACLED"]["rows_scanned"] == 2
     assert diagnostics["acled_status_source_table"] == "acled_monthly_fatalities"
 
@@ -404,3 +452,51 @@ def test_connector_last_updated_acled_month_fallback_when_updated_at_missing():
 
     assert rows_by_source["ACLED"]["last_updated"] == "2026-01-01"
     assert diagnostics["acled_status_date_column_used"] == "month"
+
+
+def test_connector_last_updated_acled_prefers_facts_created_at_when_acled_table_stale():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            value_new DOUBLE,
+            value_stock DOUBLE,
+            series_semantics TEXT,
+            as_of TEXT,
+            created_at TIMESTAMP,
+            source_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE acled_monthly_fatalities (
+            iso3 TEXT,
+            month DATE,
+            fatalities DOUBLE,
+            updated_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO facts_deltas VALUES
+          ('2026-01', 'AFG', 'ACE', 'events', 1, NULL, 'new', '2026-01-01', '2026-01-17 12:00:00', '')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO acled_monthly_fatalities VALUES
+          ('AFG', '2025-12-01', 12, '2025-12-18 00:00:00')
+        """
+    )
+
+    rows, _ = get_connector_last_updated(conn)
+    rows_by_source = {row["source"]: row for row in rows}
+
+    assert rows_by_source["ACLED"]["rows_scanned"] == 1
+    assert rows_by_source["ACLED"]["last_updated"] == "2026-01-17"
