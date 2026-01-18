@@ -2361,6 +2361,84 @@ def _load_hs_country_evidence_pack(hs_run_id: str, iso3: str) -> Optional[Dict[s
     }
 
 
+def _load_hs_hazard_tail_pack(
+    hs_run_id: str,
+    iso3: str,
+    hazard_code: str,
+) -> Optional[Dict[str, Any]]:
+    iso3_up = (iso3 or "").upper()
+    hazard_up = (hazard_code or "").upper()
+    if not hs_run_id or not iso3_up or not hazard_up:
+        return None
+
+    con = connect(read_only=True)
+    try:
+        try:
+            table_info = con.execute("PRAGMA table_info('hs_hazard_tail_packs')").fetchall()
+        except Exception:
+            return None
+        if not table_info:
+            return None
+        row = con.execute(
+            """
+            SELECT report_markdown, sources_json, grounded, grounding_debug_json, structural_context,
+                   recent_signals_json, rc_level, rc_score, rc_direction, rc_window, query, created_at
+            FROM hs_hazard_tail_packs
+            WHERE hs_run_id = ? AND upper(iso3) = upper(?) AND upper(hazard_code) = upper(?)
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            [hs_run_id, iso3_up, hazard_up],
+        ).fetchone()
+    finally:
+        con.close()
+
+    if not row:
+        return None
+
+    sources_raw = row[1] or "[]"
+    grounded_val = row[2] if len(row) > 2 else False
+    grounding_debug_raw = row[3] if len(row) > 3 else "{}"
+    structural_context = row[4] if len(row) > 4 else ""
+    recent_signals_raw = row[5] if len(row) > 5 else "[]"
+    rc_level = row[6] if len(row) > 6 else None
+    rc_score = row[7] if len(row) > 7 else None
+    rc_direction = row[8] if len(row) > 8 else None
+    rc_window = row[9] if len(row) > 9 else None
+    query = row[10] if len(row) > 10 else ""
+    created_at = row[11] if len(row) > 11 else None
+
+    try:
+        sources = json.loads(sources_raw)
+    except Exception:
+        sources = []
+    try:
+        grounding_debug = json.loads(grounding_debug_raw)
+    except Exception:
+        grounding_debug = {}
+    try:
+        recent_signals = json.loads(recent_signals_raw)
+    except Exception:
+        recent_signals = []
+
+    return {
+        "query": query or "",
+        "report_markdown": row[0] or "",
+        "sources": sources if isinstance(sources, list) else [],
+        "structural_context": structural_context or "",
+        "recent_signals": recent_signals if isinstance(recent_signals, list) else [],
+        "grounded": bool(grounded_val) or bool(sources),
+        "debug": {
+            "rc_level": rc_level,
+            "rc_score": rc_score,
+            "rc_direction": rc_direction,
+            "rc_window": rc_window,
+            "created_at": str(created_at) if created_at is not None else None,
+            "grounding_debug": grounding_debug if isinstance(grounding_debug, dict) else {},
+        },
+    }
+
+
 def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> str:
     iso3 = (question_row.get("iso3") or "").upper()
     hazard = (question_row.get("hazard_code") or "").upper()
@@ -3787,6 +3865,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
 
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
+        hazard_tail_pack: dict[str, Any] | None = None
         retriever_enabled = _retriever_enabled()
         if retriever_enabled or os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1":
             try:
@@ -3814,8 +3893,27 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
                 question_evidence_pack = None
+            try:
+                hazard_tail_pack = _load_hs_hazard_tail_pack(hs_run_id, iso3, hz)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("HS hazard tail pack load failed for %s/%s: %s", iso3, hz, exc)
+                hazard_tail_pack = None
 
         merged_evidence_pack = merge_evidence_packs(hs_evidence_pack, question_evidence_pack)
+        if hazard_tail_pack:
+            if hs_evidence_pack is None:
+                hs_evidence_pack = {}
+            hs_evidence_pack["hazard_tail_pack"] = hazard_tail_pack
+            merged_evidence_pack = merge_evidence_packs(
+                merged_evidence_pack,
+                {
+                    **hazard_tail_pack,
+                    "recent_signals": (hazard_tail_pack.get("recent_signals") or [])[:12],
+                },
+                max_sources=12,
+                max_signals=12,
+            )
+            merged_evidence_pack["hs_hazard_tail_pack"] = hazard_tail_pack
 
         prompt = build_research_prompt_v2(
             question={

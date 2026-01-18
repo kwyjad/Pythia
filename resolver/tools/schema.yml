@@ -612,6 +612,56 @@ entities:
       - name: created_at
         type: datetime
         required: false
+  db.hs_hazard_tail_packs:
+    kind: database
+    allow_extra_columns: false
+    description: HS hazard tail packs with hazard-scoped research follow-ups for elevated regime change.
+    columns:
+      - name: hs_run_id
+        type: string
+        required: true
+      - name: iso3
+        type: string
+        required: true
+      - name: hazard_code
+        type: string
+        required: true
+      - name: rc_level
+        type: integer
+        required: false
+      - name: rc_score
+        type: number
+        required: false
+      - name: rc_direction
+        type: string
+        required: false
+      - name: rc_window
+        type: string
+        required: false
+      - name: query
+        type: string
+        required: false
+      - name: report_markdown
+        type: string
+        required: false
+      - name: sources_json
+        type: string
+        required: false
+      - name: grounded
+        type: boolean
+        required: false
+      - name: grounding_debug_json
+        type: string
+        required: false
+      - name: structural_context
+        type: string
+        required: false
+      - name: recent_signals_json
+        type: string
+        required: false
+      - name: created_at
+        type: datetime
+        required: false
   db.llm_calls:
     kind: database
     allow_extra_columns: false
