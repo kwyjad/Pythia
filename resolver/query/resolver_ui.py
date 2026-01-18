@@ -72,12 +72,12 @@ def _format_date(value: Any) -> str | None:
     return text or None
 
 
-def _max_date_expr(column: str) -> str:
-    return f"TRY_CAST(CAST({column} AS VARCHAR) AS DATE)"
+def _timestamp_expr(column: str) -> str:
+    return f"TRY_CAST(CAST({column} AS VARCHAR) AS TIMESTAMP)"
 
 
 def _ym_proxy_expr() -> str:
-    return "TRY_CAST(CAST(ym || '-01' AS VARCHAR) AS DATE)"
+    return "TRY_CAST(CAST(ym || '-01' AS VARCHAR) AS TIMESTAMP)"
 
 
 def _table_has_rows(conn, table: str) -> bool:
@@ -200,133 +200,147 @@ def _coerce_float(value: Any) -> float | None:
     return out
 
 
-def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    source_info, diagnostics = _pick_facts_source(conn)
-    acled_table_present = _has_acled_monthly_table(conn)
-    diagnostics["connector_status_date_column_priority"] = [
-        "created_at",
-        "publication_date",
-        "as_of_date",
-        "as_of",
-        "ym_proxy",
-    ]
-    diagnostics["acled_status_source_table"] = source_info.get("table") if source_info else None
-    diagnostics["acled_status_date_column_used"] = None
-    diagnostics["acled_facts_rows_scanned"] = 0
-    diagnostics["acled_facts_clause_used"] = None
-    if not source_info:
-        LOGGER.warning("facts source missing; connector status unavailable.")
-        return [
-            {"source": "ACLED", "last_updated": None, "rows_scanned": 0},
-            {"source": "IDMC", "last_updated": None, "rows_scanned": 0},
-            {"source": "EM-DAT", "last_updated": None, "rows_scanned": 0},
-        ], diagnostics
+def _status_from_facts(
+    conn, label: str, source_filter_sql: str, params: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    status: dict[str, Any] = {
+        "source": label,
+        "last_updated": None,
+        "rows_scanned": 0,
+        "diagnostics": {
+            "table_used": None,
+            "date_expr": "coalesce(created_at, publication_date, as_of_date, as_of, ym_proxy)",
+            "filter_used": label,
+        },
+    }
+    diagnostics: dict[str, Any] = {
+        "facts_source_table": None,
+        "fallback_used": False,
+        "missing_tables_checked": [],
+        "notes": [],
+    }
+    if conn is None:
+        diagnostics["notes"].append("conn_missing")
+        return status, diagnostics
 
-    table = source_info["table"]
+    source_info, diagnostics = _pick_facts_source(conn)
+    table = source_info.get("table") if source_info else None
+    status["diagnostics"]["table_used"] = table
+    if not source_info or not table:
+        return status, diagnostics
+
     columns = _table_columns(conn, table)
     if "source_id" not in columns:
-        LOGGER.warning("%s missing source_id; connector status unavailable.", table)
-        return [
-            {"source": "ACLED", "last_updated": None, "rows_scanned": 0},
-            {"source": "IDMC", "last_updated": None, "rows_scanned": 0},
-            {"source": "EM-DAT", "last_updated": None, "rows_scanned": 0},
-        ], diagnostics
+        diagnostics["notes"].append("source_id_missing")
+        return status, diagnostics
 
-    date_column = None
+    date_exprs: list[str] = []
     for candidate in ("created_at", "publication_date", "as_of_date", "as_of"):
         if candidate in columns:
-            date_column = candidate
-            break
-    if date_column:
-        date_expr = _max_date_expr(date_column)
-        diagnostics["date_column_used"] = date_column
-    else:
-        date_expr = _ym_proxy_expr()
-        diagnostics["date_column_used"] = "ym_proxy"
+            date_exprs.append(_timestamp_expr(candidate))
+    if "ym" in columns:
+        date_exprs.append(_ym_proxy_expr())
+    date_expr = f"COALESCE({', '.join(date_exprs)})" if date_exprs else "NULL"
 
-    def fetch_acled_status() -> dict[str, Any] | None:
-        if not acled_table_present:
-            return None
-        if not _table_has_rows(conn, "acled_monthly_fatalities"):
-            diagnostics["acled_status_source_table"] = "acled_monthly_fatalities"
-            diagnostics["acled_status_date_column_used"] = "none"
-            return {
-                "source": "ACLED",
-                "last_updated": None,
-                "rows_scanned": 0,
-            }
-        acled_columns = _acled_monthly_columns(conn)
-        if "updated_at" in acled_columns:
-            acled_date_expr = _max_date_expr("updated_at")
-            diagnostics["acled_status_date_column_used"] = "updated_at"
-        elif "month" in acled_columns:
-            acled_date_expr = _max_date_expr("month")
-            diagnostics["acled_status_date_column_used"] = "month"
-        else:
-            acled_date_expr = "NULL"
-            diagnostics["acled_status_date_column_used"] = "none"
-        diagnostics["acled_status_source_table"] = "acled_monthly_fatalities"
-        query = f"""
-            SELECT
-              MAX({acled_date_expr}) AS last_updated,
-              COUNT(*) AS rows_scanned
-            FROM acled_monthly_fatalities
-        """
-        row = conn.execute(query).fetchone()
-        max_date = row[0] if row else None
-        count = int(row[1] or 0) if row else 0
-        return {
-            "source": "ACLED",
-            "last_updated": _format_date(max_date),
-            "rows_scanned": count,
-        }
+    query = f"""
+        SELECT
+          MAX({date_expr}) AS last_updated,
+          COUNT(*) AS rows_scanned
+        FROM {table}
+        WHERE {source_filter_sql}
+    """
+    row = conn.execute(query, params).fetchone()
+    max_date = row[0] if row else None
+    count = int(row[1] or 0) if row else 0
+    status["last_updated"] = _format_date(max_date)
+    status["rows_scanned"] = count
+    return status, diagnostics
 
-    def fetch_status(source: str, clause: str, params: list[str]) -> dict[str, Any]:
-        query = f"""
-            SELECT
-              MAX({date_expr}) AS last_updated,
-              COUNT(*) AS rows_scanned
-            FROM {table}
-            WHERE {clause}
-        """
-        row = conn.execute(query, params).fetchone()
-        max_date = row[0] if row else None
-        count = int(row[1] or 0) if row else 0
-        return {
-            "source": source,
-            "last_updated": _format_date(max_date),
-            "rows_scanned": count,
-        }
+
+def _status_from_acled_table(conn) -> dict[str, Any] | None:
+    if conn is None:
+        return None
+    if not _table_exists(conn, "acled_monthly_fatalities"):
+        return None
+
+    columns = _acled_monthly_columns(conn)
+    updated_expr = _timestamp_expr("updated_at") if "updated_at" in columns else "NULL"
+    created_expr = _timestamp_expr("created_at") if "created_at" in columns else "NULL"
+    ingested_expr = _timestamp_expr("ingested_at") if "ingested_at" in columns else "NULL"
+    month_expr = "TRY_CAST(CAST(month AS VARCHAR) AS DATE)" if "month" in columns else "NULL"
+
+    query = f"""
+        SELECT
+          MAX({updated_expr}) AS updated_at_max,
+          MAX({created_expr}) AS created_at_max,
+          MAX({ingested_expr}) AS ingested_at_max,
+          MAX({month_expr}) AS month_max,
+          COUNT(*) AS rows_scanned
+        FROM acled_monthly_fatalities
+    """
+    row = conn.execute(query).fetchone()
+    updated_at_max, created_at_max, ingested_at_max, month_max, count = row or (
+        None,
+        None,
+        None,
+        None,
+        0,
+    )
+
+    date_column_used = "none"
+    last_updated = None
+    if updated_at_max is not None:
+        date_column_used = "updated_at"
+        last_updated = updated_at_max
+    elif created_at_max is not None:
+        date_column_used = "created_at"
+        last_updated = created_at_max
+    elif ingested_at_max is not None:
+        date_column_used = "ingested_at"
+        last_updated = ingested_at_max
+    elif month_max is not None:
+        date_column_used = "month"
+        last_updated = month_max
+
+    return {
+        "source": "ACLED",
+        "last_updated": _format_date(last_updated),
+        "rows_scanned": int(count or 0),
+        "diagnostics": {
+            "table_used": "acled_monthly_fatalities",
+            "date_column_used": date_column_used,
+        },
+    }
+
+
+def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    acled_status = _status_from_acled_table(conn)
 
     acled_facts_clause = (
         "(lower(source_id) LIKE '%acled%' OR lower(source_id) = 'acled_client' "
         "OR ((source_id IS NULL OR TRIM(CAST(source_id AS VARCHAR)) = '') "
         "AND lower(metric) IN ('events', 'fatalities_battle_month', 'fatalities')))"
     )
-    diagnostics["acled_facts_clause_used"] = "source_id_or_signature_blank"
-    acled_from_facts = fetch_status("ACLED", acled_facts_clause, [])
-    diagnostics["acled_facts_rows_scanned"] = int(acled_from_facts.get("rows_scanned") or 0)
-    if acled_from_facts["rows_scanned"] > 0:
-        acled_status = acled_from_facts
-        diagnostics["acled_status_source_table"] = table
-        diagnostics["acled_status_date_column_used"] = diagnostics.get("date_column_used")
-    else:
-        acled_status = fetch_acled_status()
-        if acled_status is None:
-            acled_status = acled_from_facts
-            diagnostics["acled_status_source_table"] = table
-            diagnostics["acled_status_date_column_used"] = diagnostics.get("date_column_used")
 
-    rows = [
-        acled_status,
-        fetch_status("IDMC", "lower(source_id) LIKE ?", ["%idmc%"]),
-        fetch_status(
-            "EM-DAT",
-            "(lower(source_id) LIKE ? OR lower(source_id) LIKE ?)",
-            ["%em-dat%", "%emdat%"],
-        ),
-    ]
+    acled_facts_status, facts_diagnostics = _status_from_facts(conn, "ACLED", acled_facts_clause, [])
+    idmc_status, _ = _status_from_facts(conn, "IDMC", "lower(source_id) LIKE ?", ["%idmc%"])
+    emdat_status, _ = _status_from_facts(
+        conn,
+        "EM-DAT",
+        "(lower(source_id) LIKE ? OR lower(source_id) LIKE ?)",
+        ["%em-dat%", "%emdat%"],
+    )
+
+    if acled_status is None:
+        acled_status = acled_facts_status
+
+    rows = [acled_status, idmc_status, emdat_status]
+
+    diagnostics = facts_diagnostics
+    acled_diag = acled_status.get("diagnostics", {})
+    diagnostics["acled_status_source_table"] = acled_diag.get("table_used")
+    diagnostics["acled_status_date_column_used"] = acled_diag.get("date_column_used")
     diagnostics["rows_total"] = sum(int(row["rows_scanned"]) for row in rows)
     return rows, diagnostics
 
