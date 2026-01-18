@@ -204,8 +204,17 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
     rows: list[dict[str, Any]] = []
     source_info, diagnostics = _pick_facts_source(conn)
     acled_table_present = _has_acled_monthly_table(conn)
+    diagnostics["connector_status_date_column_priority"] = [
+        "created_at",
+        "publication_date",
+        "as_of_date",
+        "as_of",
+        "ym_proxy",
+    ]
     diagnostics["acled_status_source_table"] = source_info.get("table") if source_info else None
     diagnostics["acled_status_date_column_used"] = None
+    diagnostics["acled_facts_rows_scanned"] = 0
+    diagnostics["acled_facts_clause_used"] = None
     if not source_info:
         LOGGER.warning("facts source missing; connector status unavailable.")
         return [
@@ -225,7 +234,7 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
         ], diagnostics
 
     date_column = None
-    for candidate in ("as_of_date", "publication_date", "as_of"):
+    for candidate in ("created_at", "publication_date", "as_of_date", "as_of"):
         if candidate in columns:
             date_column = candidate
             break
@@ -290,11 +299,24 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
             "rows_scanned": count,
         }
 
-    acled_status = fetch_acled_status()
-    if acled_status is None:
-        acled_status = fetch_status("ACLED", "lower(source_id) LIKE ?", ["%acled%"])
+    acled_facts_clause = (
+        "(lower(source_id) LIKE '%acled%' OR lower(source_id) = 'acled_client' "
+        "OR ((source_id IS NULL OR TRIM(CAST(source_id AS VARCHAR)) = '') "
+        "AND lower(metric) IN ('events', 'fatalities_battle_month', 'fatalities')))"
+    )
+    diagnostics["acled_facts_clause_used"] = "source_id_or_signature_blank"
+    acled_from_facts = fetch_status("ACLED", acled_facts_clause, [])
+    diagnostics["acled_facts_rows_scanned"] = int(acled_from_facts.get("rows_scanned") or 0)
+    if acled_from_facts["rows_scanned"] > 0:
+        acled_status = acled_from_facts
         diagnostics["acled_status_source_table"] = table
         diagnostics["acled_status_date_column_used"] = diagnostics.get("date_column_used")
+    else:
+        acled_status = fetch_acled_status()
+        if acled_status is None:
+            acled_status = acled_from_facts
+            diagnostics["acled_status_source_table"] = table
+            diagnostics["acled_status_date_column_used"] = diagnostics.get("date_column_used")
 
     rows = [
         acled_status,

@@ -245,3 +245,84 @@ def test_resolver_ui_acled_deduplicates_monthly_rows():
     acled_rows = [row for row in rows if row["source_id"] == "ACLED"]
     assert len(acled_rows) == 1
     assert diagnostics["acled_rows_added"] == 0
+
+
+def test_connector_last_updated_uses_created_at_when_present():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            value_new DOUBLE,
+            value_stock DOUBLE,
+            series_semantics TEXT,
+            as_of TEXT,
+            created_at TIMESTAMP,
+            source_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO facts_deltas VALUES
+          ('2026-01', 'AFG', 'ACE', 'fatalities', 10, NULL, 'new', '2026-01-01', '2026-01-17 12:00:00', 'ACLED')
+        """
+    )
+
+    rows, diagnostics = get_connector_last_updated(conn)
+    rows_by_source = {row["source"]: row for row in rows}
+
+    assert rows_by_source["ACLED"]["last_updated"] == "2026-01-17"
+    assert diagnostics["date_column_used"] == "created_at"
+
+
+def test_connector_last_updated_prefers_facts_over_acled_monthly_when_facts_present_even_if_source_id_blank():
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            value_new DOUBLE,
+            value_stock DOUBLE,
+            series_semantics TEXT,
+            as_of TEXT,
+            created_at TIMESTAMP,
+            source_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE acled_monthly_fatalities (
+            iso3 TEXT,
+            month DATE,
+            fatalities DOUBLE,
+            updated_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO facts_deltas VALUES
+          ('2026-01', 'AFG', 'ACE', 'events', 1, NULL, 'new', '2026-01-01', '2026-01-17 12:00:00', '')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO acled_monthly_fatalities VALUES
+          ('AFG', '2025-12-01', 12, '2025-12-18 00:00:00')
+        """
+    )
+
+    rows, diagnostics = get_connector_last_updated(conn)
+    rows_by_source = {row["source"]: row for row in rows}
+
+    assert rows_by_source["ACLED"]["last_updated"] == "2026-01-17"
+    assert rows_by_source["ACLED"]["rows_scanned"] == 1
+    assert diagnostics["acled_status_source_table"] == "facts_deltas"
