@@ -119,8 +119,17 @@ def _build_hs_evidence_query(country_name: str, iso3: str) -> str:
     name = (country_name or "").strip()
     label = f"{name} ({iso3_val})" if name else iso3_val
     return (
-        f"{label} humanitarian risk outlook - fetch grounded recent signals (last 120 days) "
-        "across conflict, displacement, disasters, food security, and political stability. "
+        f"{label} horizon scan web research focused on out-of-pattern/regime-change triggers and "
+        "baseline continuation signals from the last 120 days across conflict, displacement, "
+        "disasters, food security, and political stability. Recent signals must be bullets "
+        "formatted like: TAIL-UP | month_2-3 | UP | <signal>; TAIL-DOWN | month_1-2 | DOWN | <signal>; "
+        "BASELINE | month_1-6 | MIXED | <signal>. Provide observable trigger indicators "
+        "(policy moves, troop mobilization, rainfall anomalies, river gauge alerts, border closures, "
+        "camp saturation, UNHCR/IOM updates). Hazard trigger vocabulary: "
+        "ACE: ceasefire collapse, major offensive, external intervention, election violence. "
+        "DI: border policy, forced returns, new corridor, camp capacity, UNHCR/IOM updates. "
+        "FL/TC: seasonal outlook, rainfall anomalies, SST/ENSO, landfall/track, dam releases. "
+        "DR/HW: rainfall deficit, vegetation stress, heat index warnings, water rationing, food price spikes. "
         "Also include concise structural drivers (max 8 lines) as background context."
     )
 
@@ -172,6 +181,7 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
     pack: dict[str, Any] | None = None
     try:
         query = _build_hs_evidence_query(country_name, iso3)
+        logger.debug("HS web research query for %s: %s", iso3, query)
         model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip() if retriever_enabled else None
         pack = dict(
             fetch_evidence_pack(

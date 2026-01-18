@@ -885,6 +885,64 @@ def build_research_prompt_v2(
     resolution_source = question.get("resolution_source", "")
     wording = question.get("wording") or question.get("title") or ""
     model_info = model_info or {}
+    rc_scalar_keys = {
+        "regime_change_level",
+        "regime_change_score",
+        "regime_change_likelihood",
+        "regime_change_direction",
+        "regime_change_magnitude",
+        "regime_change_window",
+    }
+    rc_scalar_present = any(key in hs_triage_entry for key in rc_scalar_keys)
+
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    regime_change_level = _coerce_int(hs_triage_entry.get("regime_change_level"))
+    regime_change_score = _coerce_float(hs_triage_entry.get("regime_change_score"))
+    regime_change_likelihood = _coerce_float(hs_triage_entry.get("regime_change_likelihood"))
+    regime_change_direction = hs_triage_entry.get("regime_change_direction")
+    regime_change_magnitude = _coerce_float(hs_triage_entry.get("regime_change_magnitude"))
+    regime_change_window = hs_triage_entry.get("regime_change_window")
+
+    if not rc_scalar_present:
+        rc_payload = hs_triage_entry.get("regime_change")
+        if isinstance(rc_payload, dict):
+            regime_change_likelihood = _coerce_float(rc_payload.get("likelihood"))
+            regime_change_direction = rc_payload.get("direction")
+            regime_change_magnitude = _coerce_float(rc_payload.get("magnitude"))
+            regime_change_window = rc_payload.get("window")
+
+    rc_elevated = bool(
+        (regime_change_level in {2, 3})
+        or (regime_change_score is not None and regime_change_score >= 0.30)
+    )
+    rc_fields_present = any(
+        value not in (None, "")
+        for value in (
+            regime_change_level,
+            regime_change_score,
+            regime_change_likelihood,
+            regime_change_direction,
+            regime_change_magnitude,
+            regime_change_window,
+        )
+    )
+    rc_level_display = regime_change_level if regime_change_level is not None else "n/a"
+    rc_score_display = regime_change_score if regime_change_score is not None else "n/a"
+    rc_likelihood_display = regime_change_likelihood if regime_change_likelihood is not None else "n/a"
+    rc_direction_display = regime_change_direction if regime_change_direction not in (None, "") else "n/a"
+    rc_magnitude_display = regime_change_magnitude if regime_change_magnitude is not None else "n/a"
+    rc_window_display = regime_change_window if regime_change_window not in (None, "") else "n/a"
 
     di_note = ""
     if hazard == "DI":
@@ -926,6 +984,21 @@ def build_research_prompt_v2(
         f"- Metric: {metric}\n"
         f"- Resolution dataset: {resolution_source}\n"
     )
+    rc_block = ["HS REGIME CHANGE FLAG (from HS triage)"]
+    if rc_fields_present:
+        rc_block.extend(
+            [
+                f"- RC level: {rc_level_display}",
+                f"- RC score: {rc_score_display} (probability × magnitude)",
+                f"- RC probability: {rc_likelihood_display}",
+                f"- RC direction: {rc_direction_display}",
+                f"- RC magnitude: {rc_magnitude_display}",
+                f"- RC window: {rc_window_display}",
+            ]
+        )
+    else:
+        rc_block.append("(no RC fields provided; treat as unflagged)")
+    parts.append("\n".join(rc_block))
 
     parts.append("Question metadata:\n```json\n" + _json_dumps_for_prompt(question, indent=2) + "\n```")
     parts.append("Natural-language question:\n" + f"\"{wording}\"")
@@ -956,6 +1029,13 @@ def build_research_prompt_v2(
         + "3. Identify specific regime-shift mechanisms that could make the next 6–12 months differ markedly from the past.\n"
         + "4. Note important data gaps and uncertainties.\n\n"
         + "Emphasise major deviations from the historical base rate only when strongly supported by evidence.\n\n"
+        + (
+            "RC ELEVATED: You MUST include at least 1 item in `regime_shift_signals`. "
+            "If you disagree with HS, include a `regime_shift_signals` entry whose description starts with `Rebuttal:` "
+            "set likelihood to `low`, and cite sources.\n\n"
+            if rc_elevated
+            else "`regime_shift_signals` may be empty unless you find credible triggers.\n\n"
+        )
         + "Return a single JSON object:\n\n"
         + RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA
         + "\n\nAll URLs in `sources` must be real (no placeholders). If no sources are available, return `sources: []` and `grounded: false`. Set `grounded` to true only when at least one real URL remains after validation. Your `grounded` value will be overridden unless those URLs are verified by the system.\n\n"
@@ -1041,6 +1121,66 @@ def build_spd_prompt_v2(
     resolution_source = (question.get("resolution_source") or "").upper()
     wording = question.get("wording") or question.get("title") or ""
 
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    rc_level = _coerce_int(hs_triage_entry.get("regime_change_level"))
+    rc_score = _coerce_float(hs_triage_entry.get("regime_change_score"))
+    rc_prob = _coerce_float(hs_triage_entry.get("regime_change_likelihood"))
+    rc_dir = hs_triage_entry.get("regime_change_direction")
+    rc_mag = _coerce_float(hs_triage_entry.get("regime_change_magnitude"))
+    rc_window = hs_triage_entry.get("regime_change_window")
+
+    rc_scalar_present = any(
+        key in hs_triage_entry
+        for key in (
+            "regime_change_level",
+            "regime_change_score",
+            "regime_change_likelihood",
+            "regime_change_direction",
+            "regime_change_magnitude",
+            "regime_change_window",
+        )
+    )
+
+    if not rc_scalar_present:
+        rc_payload = hs_triage_entry.get("regime_change")
+        if isinstance(rc_payload, dict):
+            rc_prob = _coerce_float(rc_payload.get("likelihood"))
+            rc_dir = rc_payload.get("direction")
+            rc_mag = _coerce_float(rc_payload.get("magnitude"))
+            rc_window = rc_payload.get("window")
+
+    if rc_level is not None:
+        rc_level_effective = rc_level
+    elif rc_score is not None:
+        if rc_score >= 0.45:
+            rc_level_effective = 3
+        elif rc_score >= 0.30:
+            rc_level_effective = 2
+        elif rc_score >= 0.20 and rc_prob is not None and rc_prob >= 0.35:
+            rc_level_effective = 1
+        else:
+            rc_level_effective = 0
+    else:
+        rc_level_effective = 0
+
+    rc_level_display = rc_level if rc_level is not None else "n/a"
+    rc_score_display = rc_score if rc_score is not None else "n/a"
+    rc_prob_display = rc_prob if rc_prob is not None else "n/a"
+    rc_dir_display = rc_dir if rc_dir not in (None, "") else "n/a"
+    rc_mag_display = rc_mag if rc_mag is not None else "n/a"
+    rc_window_display = rc_window if rc_window not in (None, "") else "n/a"
+
     forecast_keys = _forecast_month_keys_from_question(question, horizon_months=6)
     forecast_labels: list[str] = []
     if forecast_keys:
@@ -1102,6 +1242,28 @@ def build_spd_prompt_v2(
             "You MUST use exactly these six keys in the `spds` object (no extra months).\n\n"
         )
 
+    rc_guidance = (
+        "REGIME CHANGE GUIDANCE (RC):\n"
+        f"- RC level: {rc_level_display}\n"
+        f"- RC score: {rc_score_display}\n"
+        f"- RC probability: {rc_prob_display}\n"
+        f"- RC direction: {rc_dir_display}\n"
+        f"- RC magnitude: {rc_mag_display}\n"
+        f"- RC window: {rc_window_display}\n"
+        "Guidance by RC level:\n"
+        "- Level 0: base-rate normal; still consider tails.\n"
+        "- Level 1: sanity-check base-rate anchoring; consider modest tail widening.\n"
+        "- Level 2: treat base rate as less reliable; widen posterior; ensure non-trivial tail mass in the RC direction unless rebutted.\n"
+        "- Level 3: explicitly model a regime-shift scenario; avoid narrow SPDs; tails must be meaningfully represented if direction is UP/DOWN.\n\n"
+    )
+
+    rc_self_search_line = ""
+    if rc_level_effective >= 2:
+        rc_self_search_line = (
+            "If sources/signals are sparse in the merged evidence, you may respond with:\n"
+            f"NEED_WEB_EVIDENCE: {iso3} {hazard} leading indicators next 3 months escalation trigger OR de-escalation trigger humanitarian\n\n"
+        )
+
     return (
         "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
         "Your task is to produce a six-month PROBABILITY DISTRIBUTION over five impact buckets for the question below, where each month’s probabilities sum to 1.0.\n\n"
@@ -1124,6 +1286,7 @@ def build_spd_prompt_v2(
         "```json\n"
         f"{_json_dumps_for_prompt(research_json, indent=2)}\n"
         "```\n\n"
+        f"{rc_guidance}"
         "Buckets:\n"
         f"- These buckets represent {unit_phrase} at the country level.\n"
         f"- Bucket labels: {bucket_list_str}\n\n"
@@ -1136,11 +1299,13 @@ def build_spd_prompt_v2(
         f"{base_rate_note}"
         "- If Resolver history is missing (`source` = \"none\"), rely on HS + research to shape the base rate.\n"
         "- Think explicitly about tail risks (extreme buckets) but keep their probabilities calibrated.\n\n"
+        f"{rc_self_search_line}"
         "If you need more evidence before forecasting, output EXACTLY one line:\n"
         "NEED_WEB_EVIDENCE: <your query>\n"
         "Otherwise, produce the forecast JSON.\n\n"
         "Output instructions:\n"
         "- Return ONLY a single JSON object with this schema (no extra commentary):\n\n"
+        "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n\n"
         "```json\n"
         "{\n"
         '  "spds": {\n'
