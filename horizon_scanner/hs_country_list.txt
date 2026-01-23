@@ -1,54 +1,121 @@
 # List countries to be analysed here, one per line. Lines starting with # will be ignored
-Azerbaijan
+Afghanistan
+Armenia
+Burundi
+Cote d'Ivoire
+Democratic Republic of Congo
+Ecuador
+Egypt
+Ethiopia
+Haiti
+Iran
+Iraq
+Kenya
+Lebanon
+Libya
+Madagascar
+Mexico
+Myanmar
+Niger
+Nigeria
+North Korea
+Pakistan
+Palestine
+Philippines
+Russia
+Somalia
+South Sudan
+Sudan
+Syria
+Taiwan
+Turkey
+Venezuela
+Yemen
+Zimbabwe
+Bangladesh
+Belarus
+Benin
+Bolivia
 Bosnia-Herzegovina
-Brazil
-Botswana
-Canada
+Burkina Faso
+Cambodia
+Cape Verde
+Chad
 Chile
-Congo
-Costa Rica
-Dominican Republic
-Algeria
-Western Sahara
-Fiji
-Gabon
-Ghana
-Gambia
-Honduras
+Colombia
+Comoros
 Croatia
-Indonesia
+Cuba
+Cyprus
+Djibouti
+Equatorial Guinea
+Eritrea
+Guatemala
+Guinea Conakry
+Guinea-Bissau
+Guyana
+India
+Israel
+Cameroon
+Central African Republic
+China
+El Salvador
+Georgia
+Ghana
 Jordan
-South Korea (Republic of)
+Kazakhstan
+Kosovo
+Kyrgyzstan
 Laos
 Liberia
-Sri Lanka
-Lesotho
-Morocco
-Maldives
-Mali
-Mongolia
 Malawi
-Malaysia
+Mali
+Moldova
+Mozambique
+Namibia
 Nicaragua
-Nepal
-Panama
-Peru
-Papua New Guinea
 Poland
-Kosovo
-Rwanda
-Solomon Islands
-Sierra Leone
 Serbia
-Suriname
-Eswatini
-Togo
+South Africa
 Tajikistan
-Turkmenistan
-Timor-Leste
-Tunisia
+Tanzania
+Thailand
+Togo
 Uganda
 Ukraine
 Uzbekistan
+Algeria
+Azerbaijan
+Botswana
+Brazil
+Canada
+Congo
+Costa Rica
+Dominican Republic
+Eswatini
+Fiji
+Gabon
+Gambia
+Honduras
+Indonesia
+Lesotho
+Malaysia
+Maldives
+Mongolia
+Morocco
+Nepal
+Panama
+Papua New Guinea
+Peru
+Rwanda
+Sierra Leone
+Solomon Islands
+South Korea (Republic of)
+Sri Lanka
+Suriname
+Timor-Leste
+Tunisia
+Turkmenistan
 Vietnam
+Western Sahara
 Zambia
