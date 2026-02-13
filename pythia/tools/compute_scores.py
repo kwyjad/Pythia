@@ -193,28 +193,29 @@ def compute_scores(db_url: str) -> None:
             LOGGER.info("compute_scores: resolutions table is empty; nothing to do.")
             return
 
+        # Each resolution row now has its own horizon_m, so each horizon is
+        # scored against its own calendar month's ground truth.
         q_sql = """
           SELECT
             q.question_id,
             q.iso3,
             q.hazard_code,
             upper(q.metric) AS metric,
-            q.target_month,
+            r.horizon_m,
             r.value AS resolved_value
           FROM questions q
           JOIN resolutions r
             ON q.question_id = r.question_id
-           AND q.target_month = r.observed_month
           JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
           WHERE upper(q.metric) IN ('PA','FATALITIES')
-          ORDER BY q.question_id
+          ORDER BY q.question_id, r.horizon_m
         """
         qrows = conn.execute(q_sql).fetchall()
-        LOGGER.info("Found %d question_ids with resolutions for scoring.", len(qrows))
+        LOGGER.info("Found %d (question, horizon) pairs with resolutions for scoring.", len(qrows))
 
         n_written = 0
 
-        for question_id, iso3, hazard_code, metric, target_month, resolved_value in qrows:
+        for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
             class_bins = _class_bins(metric, hazard_code)
             if not class_bins:
                 LOGGER.debug("Unsupported metric %s for question %s; skipping.", metric, question_id)
@@ -223,85 +224,86 @@ def compute_scores(db_url: str) -> None:
             if j is None:
                 continue
 
-            for horizon_m in range(1, 7):
-                spd_e = _load_spd(
+            # Score ensemble for this specific horizon
+            spd_e = _load_spd(
+                conn,
+                question_id=question_id,
+                horizon_m=horizon_m,
+                class_bins=class_bins,
+                table="ensemble",
+            )
+            if spd_e:
+                brier_e = _brier(spd_e, j)
+                log_e = _log_score(spd_e, j)
+                crps_e = _crps_like(spd_e, j)
+
+                conn.execute(
+                    """
+                    DELETE FROM scores
+                    WHERE question_id = ? AND horizon_m = ? AND metric = ? AND model_name IS NULL
+                    """,
+                    [question_id, horizon_m, metric],
+                )
+                now = datetime.utcnow()
+                conn.executemany(
+                    """
+                    INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (question_id, horizon_m, metric, "brier", None, brier_e, now),
+                        (question_id, horizon_m, metric, "log", None, log_e, now),
+                        (question_id, horizon_m, metric, "crps", None, crps_e, now),
+                    ],
+                )
+                n_written += 3
+
+            # Score individual models for this specific horizon
+            model_rows = conn.execute(
+                """
+                  SELECT DISTINCT model_name
+                  FROM forecasts_raw
+                  WHERE question_id = ? AND horizon_m = ?
+                  ORDER BY model_name
+                """,
+                [question_id, horizon_m],
+            ).fetchall()
+            for (model_name,) in model_rows:
+                spd_m = _load_spd(
                     conn,
                     question_id=question_id,
                     horizon_m=horizon_m,
                     class_bins=class_bins,
-                    table="ensemble",
+                    table="raw",
+                    model_name=model_name,
                 )
-                if spd_e:
-                    brier_e = _brier(spd_e, j)
-                    log_e = _log_score(spd_e, j)
-                    crps_e = _crps_like(spd_e, j)
+                if not spd_m:
+                    continue
 
-                    conn.execute(
-                        """
-                        DELETE FROM scores
-                        WHERE question_id = ? AND horizon_m = ? AND metric = ? AND model_name IS NULL
-                        """,
-                        [question_id, horizon_m, metric],
-                    )
-                    now = datetime.utcnow()
-                    conn.executemany(
-                        """
-                        INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (question_id, horizon_m, metric, "brier", None, brier_e, now),
-                            (question_id, horizon_m, metric, "log", None, log_e, now),
-                            (question_id, horizon_m, metric, "crps", None, crps_e, now),
-                        ],
-                    )
-                    n_written += 3
+                brier_m = _brier(spd_m, j)
+                log_m = _log_score(spd_m, j)
+                crps_m = _crps_like(spd_m, j)
 
-                model_rows = conn.execute(
+                conn.execute(
                     """
-                      SELECT DISTINCT model_name
-                      FROM forecasts_raw
-                      WHERE question_id = ? AND horizon_m = ?
-                      ORDER BY model_name
+                    DELETE FROM scores
+                    WHERE question_id = ? AND horizon_m = ? AND metric = ? AND model_name = ?
                     """,
-                    [question_id, horizon_m],
-                ).fetchall()
-                for (model_name,) in model_rows:
-                    spd_m = _load_spd(
-                        conn,
-                        question_id=question_id,
-                        horizon_m=horizon_m,
-                        class_bins=class_bins,
-                        table="raw",
-                        model_name=model_name,
-                    )
-                    if not spd_m:
-                        continue
-
-                    brier_m = _brier(spd_m, j)
-                    log_m = _log_score(spd_m, j)
-                    crps_m = _crps_like(spd_m, j)
-
-                    conn.execute(
-                        """
-                        DELETE FROM scores
-                        WHERE question_id = ? AND horizon_m = ? AND metric = ? AND model_name = ?
-                        """,
-                        [question_id, horizon_m, metric, model_name],
-                    )
-                    now = datetime.utcnow()
-                    conn.executemany(
-                        """
-                        INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (question_id, horizon_m, metric, "brier", model_name, brier_m, now),
-                            (question_id, horizon_m, metric, "log", model_name, log_m, now),
-                            (question_id, horizon_m, metric, "crps", model_name, crps_m, now),
-                        ],
-                    )
-                    n_written += 3
+                    [question_id, horizon_m, metric, model_name],
+                )
+                now = datetime.utcnow()
+                conn.executemany(
+                    """
+                    INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (question_id, horizon_m, metric, "brier", model_name, brier_m, now),
+                        (question_id, horizon_m, metric, "log", model_name, log_m, now),
+                        (question_id, horizon_m, metric, "crps", model_name, crps_m, now),
+                    ],
+                )
+                n_written += 3
 
         LOGGER.info("compute_scores: wrote %d score rows.", n_written)
     finally:
