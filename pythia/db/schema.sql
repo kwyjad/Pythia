@@ -102,14 +102,15 @@ CREATE TABLE IF NOT EXISTS forecasts_ensemble (
   PRIMARY KEY (question_id, horizon_m, class_bin)
 );
 
--- Resolutions (link to Resolver monthly deltas)
+-- Resolutions (per-horizon ground truth from Resolver)
 CREATE TABLE IF NOT EXISTS resolutions (
   question_id TEXT,
-  observed_month TEXT,                   -- YYYY-MM equals target_month
+  horizon_m INTEGER,                     -- 1-6 matching the forecast horizon
+  observed_month TEXT,                   -- YYYY-MM calendar month for this horizon
   value DOUBLE,
   source_snapshot_ym TEXT,               -- resolver snapshot month used
   created_at TIMESTAMP DEFAULT now(),
-  PRIMARY KEY (question_id, observed_month)
+  PRIMARY KEY (question_id, horizon_m)
 );
 
 -- Scores (model and ensemble)
