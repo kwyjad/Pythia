@@ -100,10 +100,10 @@ def compute_score(likelihood: float | None, magnitude: float | None) -> float:
 
 
 def compute_level(likelihood: float | None, magnitude: float | None, score: float | None) -> int:
-    lvl0_likelihood = _env_float("PYTHIA_HS_RC_LEVEL0_LIKELIHOOD", 0.35)
-    lvl0_score = _env_float("PYTHIA_HS_RC_LEVEL0_SCORE", 0.20)
-    lvl1_likelihood = _env_float("PYTHIA_HS_RC_LEVEL1_LIKELIHOOD", 0.35)
-    lvl1_score = _env_float("PYTHIA_HS_RC_LEVEL1_SCORE", 0.20)
+    lvl0_likelihood = _env_float("PYTHIA_HS_RC_LEVEL0_LIKELIHOOD", 0.45)
+    lvl0_score = _env_float("PYTHIA_HS_RC_LEVEL0_SCORE", 0.25)
+    lvl1_likelihood = _env_float("PYTHIA_HS_RC_LEVEL1_LIKELIHOOD", 0.45)
+    lvl1_score = _env_float("PYTHIA_HS_RC_LEVEL1_SCORE", 0.25)
     lvl2_likelihood = _env_float("PYTHIA_HS_RC_LEVEL2_LIKELIHOOD", 0.60)
     lvl2_magnitude = _env_float("PYTHIA_HS_RC_LEVEL2_MAGNITUDE", 0.50)
     lvl3_likelihood = _env_float("PYTHIA_HS_RC_LEVEL3_LIKELIHOOD", 0.75)
@@ -244,3 +244,80 @@ def coerce_regime_change(obj: Any) -> dict[str, Any]:
     if raw.get("status"):
         normalized["status"] = str(raw.get("status"))
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# Run-level distribution sanity check (B4)
+# ---------------------------------------------------------------------------
+
+# Maximum fraction of hazard-country assessments allowed at each RC level
+# before a warning is emitted.  Env-overridable for tuning.
+_DIST_WARN_L1_FRAC = _env_float("PYTHIA_HS_RC_DIST_WARN_L1_FRAC", 0.25)
+_DIST_WARN_L2_FRAC = _env_float("PYTHIA_HS_RC_DIST_WARN_L2_FRAC", 0.15)
+_DIST_WARN_L3_FRAC = _env_float("PYTHIA_HS_RC_DIST_WARN_L3_FRAC", 0.08)
+
+
+def check_rc_distribution(
+    levels: list[int],
+    *,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Check the distribution of RC levels across a full HS run.
+
+    Parameters
+    ----------
+    levels : list[int]
+        One RC level (0-3) per hazard-country assessment in the run.
+    run_id : str, optional
+        Identifier for log messages.
+
+    Returns
+    -------
+    dict with keys:
+        total, counts (dict level→count), fractions (dict level→frac),
+        warnings (list[str])  — empty if distribution looks healthy.
+    """
+    total = len(levels)
+    if total == 0:
+        return {"total": 0, "counts": {}, "fractions": {}, "warnings": []}
+
+    counts: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+    for lvl in levels:
+        counts[lvl] = counts.get(lvl, 0) + 1
+
+    fracs = {lvl: cnt / total for lvl, cnt in counts.items()}
+
+    warnings: list[str] = []
+    warn_thresholds = {
+        1: _DIST_WARN_L1_FRAC,
+        2: _DIST_WARN_L2_FRAC,
+        3: _DIST_WARN_L3_FRAC,
+    }
+    for lvl, threshold in warn_thresholds.items():
+        if fracs.get(lvl, 0) > threshold:
+            pct = fracs[lvl] * 100
+            thr_pct = threshold * 100
+            msg = (
+                f"RC distribution warning: L{lvl} assigned to {counts[lvl]}/{total} "
+                f"assessments ({pct:.1f}%), exceeding {thr_pct:.0f}% threshold"
+            )
+            warnings.append(msg)
+            logger.warning("HS run %s: %s", run_id, msg)
+
+    if not warnings:
+        logger.info(
+            "HS run %s: RC distribution healthy — L0=%d L1=%d L2=%d L3=%d (total=%d)",
+            run_id,
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            total,
+        )
+
+    return {
+        "total": total,
+        "counts": counts,
+        "fractions": fracs,
+        "warnings": warnings,
+    }
