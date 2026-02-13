@@ -43,6 +43,7 @@ from horizon_scanner.db_writer import (
     log_hs_run_to_db,
 )
 from horizon_scanner.regime_change import (
+    check_rc_distribution,
     coerce_regime_change,
     compute_level,
     compute_score,
@@ -1639,6 +1640,26 @@ def main(countries: list[str] | None = None):
         len(country_entries),
         len(skipped_entries),
     )
+
+    # --- Run-level RC distribution sanity check ---
+    try:
+        _con = pythia_connect(read_only=True)
+        try:
+            rc_rows = _con.execute(
+                "SELECT regime_change_level FROM hs_triage WHERE run_id = ?",
+                [run_id],
+            ).fetchall()
+            rc_levels = [int(row[0]) for row in rc_rows if row[0] is not None]
+        finally:
+            _con.close()
+
+        if rc_levels:
+            dist_result = check_rc_distribution(rc_levels, run_id=run_id)
+            if dist_result.get("warnings"):
+                for w in dist_result["warnings"]:
+                    logger.warning("HS %s", w)
+    except Exception:  # pragma: no cover - best-effort diagnostics
+        logger.debug("RC distribution check skipped (could not read hs_triage)", exc_info=True)
 
     diagnostics_dir = Path("diagnostics")
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
