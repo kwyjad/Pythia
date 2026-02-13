@@ -88,9 +88,9 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
       JOIN questions q ON q.question_id = s.question_id
       JOIN resolutions r
         ON r.question_id = s.question_id
-       AND r.observed_month = q.target_month
+       AND r.horizon_m = s.horizon_m
       JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
-      WHERE q.target_month <= ?
+      WHERE r.observed_month <= ?
     """
     rows = conn.execute(sql, [as_of_month]).fetchall()
 
@@ -253,8 +253,7 @@ def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> Non
               avg_brier DOUBLE,
               avg_log DOUBLE,
               avg_crps DOUBLE,
-              created_at TIMESTAMP DEFAULT now(),
-              PRIMARY KEY (as_of_month, hazard_code, metric, model_name)
+              created_at TIMESTAMP DEFAULT now()
             )
             """
         )

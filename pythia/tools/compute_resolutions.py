@@ -19,6 +19,8 @@ LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
+NUM_HORIZONS = 6
+
 
 def _table_exists(conn, name: str) -> bool:
     try:
@@ -68,15 +70,28 @@ def _shift_month(month_anchor: date, delta_months: int) -> date:
     return date(year, month, 1)
 
 
+def horizon_to_calendar_month(window_start_date: date, horizon_m: int) -> str:
+    """Return 'YYYY-MM' for the calendar month corresponding to horizon_m.
+
+    horizon_m is 1-based: horizon_m=1 corresponds to window_start_date,
+    horizon_m=2 corresponds to one month after window_start_date, etc.
+    """
+    shifted = _shift_month(window_start_date, horizon_m - 1)
+    return f"{shifted.year:04d}-{shifted.month:02d}"
+
+
 def _eligible_cutoff_month(today: date, lag_day: int = 15) -> str:
-    """Return the latest target_month (YYYY-MM) eligible for resolution."""
+    """Return the latest calendar month eligible for resolution.
+
+    A month is eligible once we reach the ``lag_day`` of the following month.
+    """
 
     month_anchor = date(today.year, today.month, 1)
     months_back = 1 if today.day >= lag_day else 2
     eligible_month = _shift_month(month_anchor, -months_back)
     cutoff = f"{eligible_month.year:04d}-{eligible_month.month:02d}"
     LOGGER.info(
-        "Resolution cutoff using lag_day=%d and today=%s is target_month <= %s",
+        "Resolution cutoff using lag_day=%d and today=%s is calendar_month <= %s",
         lag_day,
         today.isoformat(),
         cutoff,
@@ -84,35 +99,41 @@ def _eligible_cutoff_month(today: date, lag_day: int = 15) -> str:
     return cutoff
 
 
-def _resolve_pa_for_question(
+def _resolve_value(
     conn,
     iso3: str,
     hazard_code: str,
-    target_month: str,
+    calendar_month: str,
+    metric: str,
 ) -> Optional[tuple[float, Optional[str]]]:
-    """
-    Resolve PA for a given (iso3, hazard_code, target_month) from Resolver.
+    """Resolve a single metric for (iso3, hazard_code, calendar_month) from Resolver.
 
     Uses facts_resolved as canonical and trusts Resolver's source prioritisation.
     """
 
-    sql = (
-        """
+    if metric == "PA":
+        metric_filter = "lower(metric) IN ('affected','people_affected','pa')"
+    elif metric == "FATALITIES":
+        metric_filter = "lower(metric) = 'fatalities'"
+    else:
+        return None
+
+    sql = f"""
         SELECT value, snapshot_ym
         FROM facts_resolved
         WHERE iso3 = ?
           AND hazard_code = ?
           AND ym = ?
-          AND lower(metric) IN ('affected','people_affected','pa')
+          AND {metric_filter}
         ORDER BY snapshot_ym DESC
         LIMIT 1
-        """
-    )
+    """
     try:
-        row = conn.execute(sql, [iso3, hazard_code, target_month]).fetchone()
+        row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
     except Exception as exc:  # pragma: no cover - defensive logging
         LOGGER.error(
-            "Resolver PA query failed for %s/%s/%s: %r", iso3, hazard_code, target_month, exc
+            "Resolver %s query failed for %s/%s/%s: %r",
+            metric, iso3, hazard_code, calendar_month, exc,
         )
         return None
     if not row:
@@ -121,54 +142,48 @@ def _resolve_pa_for_question(
     return float(value), (snapshot_ym if snapshot_ym is not None else None)
 
 
-def _resolve_fatalities_for_question(
-    conn,
-    iso3: str,
-    hazard_code: str,
-    target_month: str,
-) -> Optional[tuple[float, Optional[str]]]:
-    """
-    Resolve conflict fatalities for a given (iso3, hazard_code, target_month).
+def _ensure_resolutions_table(conn) -> None:
+    """Create the resolutions table if it does not exist, and add horizon_m
+    column if missing (migration for existing databases)."""
 
-    Looks in facts_resolved for lower(metric)='fatalities'.
-    """
-
-    sql = (
+    conn.execute(
         """
-        SELECT value, snapshot_ym
-        FROM facts_resolved
-        WHERE iso3 = ?
-          AND hazard_code = ?
-          AND ym = ?
-          AND lower(metric) = 'fatalities'
-        ORDER BY snapshot_ym DESC
-        LIMIT 1
+        CREATE TABLE IF NOT EXISTS resolutions (
+          question_id TEXT,
+          horizon_m INTEGER,
+          observed_month TEXT,
+          value DOUBLE,
+          source_snapshot_ym TEXT,
+          created_at TIMESTAMP DEFAULT now(),
+          PRIMARY KEY (question_id, horizon_m)
+        )
         """
     )
+    # Migration: add horizon_m column if table predates this change
+    existing = set()
     try:
-        row = conn.execute(sql, [iso3, hazard_code, target_month]).fetchone()
-    except Exception as exc:  # pragma: no cover - defensive logging
-        LOGGER.error(
-            "Resolver fatalities query failed for %s/%s/%s: %r",
-            iso3,
-            hazard_code,
-            target_month,
-            exc,
-        )
-        return None
-    if not row:
-        return None
-    value, snapshot_ym = row
-    return float(value), (snapshot_ym if snapshot_ym is not None else None)
+        for row in conn.execute("PRAGMA table_info('resolutions')").fetchall():
+            existing.add(str(row[1]).lower())
+    except Exception:
+        pass
+    if "horizon_m" not in existing:
+        try:
+            conn.execute("ALTER TABLE resolutions ADD COLUMN horizon_m INTEGER")
+        except Exception:
+            pass
 
 
 def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
     """
     Compute and upsert resolutions for eligible questions.
 
+    For each question, resolves all 6 horizon months independently.  Each
+    horizon month maps to a distinct calendar month derived from the
+    question's ``window_start_date``.
+
     Rules:
       - Only metrics PA and FATALITIES are processed.
-      - A month is eligible once we reach the 15th of the following month.
+      - A calendar month is eligible once we reach the 15th of the following month.
       - Uses Resolver's facts_resolved as canonical (no source arbitration here).
     """
 
@@ -179,18 +194,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
     conn = _open_db(db_url)
 
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS resolutions (
-              question_id TEXT,
-              observed_month TEXT,
-              value DOUBLE,
-              source_snapshot_ym TEXT,
-              created_at TIMESTAMP DEFAULT now(),
-              PRIMARY KEY (question_id, observed_month)
-            )
-            """
-        )
+        _ensure_resolutions_table(conn)
 
         # Early exit if questions table doesn't exist or is empty
         if not _table_exists(conn, "questions"):
@@ -202,80 +206,119 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             LOGGER.info("compute_resolutions: questions table is empty; nothing to do.")
             return
 
-        query_sql = (
-            """
+        query_sql = """
             SELECT
               q.question_id,
               q.iso3,
               q.hazard_code,
               upper(q.metric) AS metric,
-              q.target_month
+              q.target_month,
+              q.window_start_date
             FROM questions q
             JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
             WHERE q.status IN ('active','resolved')
-              AND q.target_month <= ?
               AND upper(q.metric) IN ('PA','FATALITIES')
             ORDER BY q.question_id
-            """
-        )
-        rows = conn.execute(query_sql, [cutoff_month]).fetchall()
+        """
+        rows = conn.execute(query_sql).fetchall()
         LOGGER.info(
-            "Found %d candidate questions to resolve (target_month <= %s).", len(rows), cutoff_month
+            "Found %d candidate questions for resolution (cutoff_month=%s).",
+            len(rows), cutoff_month,
         )
 
         written = 0
-        for question_id, iso3, hazard_code, metric, target_month in rows:
+        for question_id, iso3, hazard_code, metric, target_month, window_start_date in rows:
             iso3_norm = (iso3 or "").upper()
             hazard_norm = (hazard_code or "").upper()
             metric_norm = (metric or "").upper()
 
-            if metric_norm == "PA":
-                resolved = _resolve_pa_for_question(conn, iso3_norm, hazard_norm, target_month)
-            elif metric_norm == "FATALITIES":
-                resolved = _resolve_fatalities_for_question(conn, iso3_norm, hazard_norm, target_month)
-            else:
+            if metric_norm not in ("PA", "FATALITIES"):
                 continue
 
-            if resolved is None:
-                LOGGER.debug(
-                    "No resolution found for %s (%s/%s/%s).",
-                    question_id,
-                    iso3_norm,
-                    hazard_norm,
-                    target_month,
+            # Derive the window_start_date as a Python date
+            if window_start_date is not None:
+                if isinstance(window_start_date, str):
+                    try:
+                        parts = window_start_date.split("-")
+                        ws_date = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                    except Exception:
+                        ws_date = None
+                elif isinstance(window_start_date, date):
+                    ws_date = window_start_date
+                else:
+                    ws_date = None
+            else:
+                ws_date = None
+
+            # Fallback: if window_start_date is not available, derive from
+            # target_month (which is the 6th month in the window).
+            if ws_date is None and target_month:
+                try:
+                    parts = target_month.split("-")
+                    tm_date = date(int(parts[0]), int(parts[1]), 1)
+                    ws_date = _shift_month(tm_date, -(NUM_HORIZONS - 1))
+                except Exception:
+                    LOGGER.warning(
+                        "Cannot derive window_start_date for %s; skipping.", question_id
+                    )
+                    continue
+
+            if ws_date is None:
+                LOGGER.warning(
+                    "No window_start_date or target_month for %s; skipping.", question_id
                 )
                 continue
 
-            value, snapshot_ym = resolved
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO resolutions (
-                  question_id,
-                  observed_month,
-                  value,
-                  source_snapshot_ym,
-                  created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                [
+            for horizon_m in range(1, NUM_HORIZONS + 1):
+                cal_month = horizon_to_calendar_month(ws_date, horizon_m)
+
+                # Only resolve months that are past the eligibility cutoff
+                if cal_month > cutoff_month:
+                    continue
+
+                resolved = _resolve_value(
+                    conn, iso3_norm, hazard_norm, cal_month, metric_norm,
+                )
+                if resolved is None:
+                    LOGGER.debug(
+                        "No resolution for %s h%d (%s/%s/%s).",
+                        question_id, horizon_m, iso3_norm, hazard_norm, cal_month,
+                    )
+                    continue
+
+                value, snapshot_ym = resolved
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO resolutions (
+                      question_id,
+                      horizon_m,
+                      observed_month,
+                      value,
+                      source_snapshot_ym,
+                      created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        question_id,
+                        horizon_m,
+                        cal_month,
+                        float(value),
+                        snapshot_ym,
+                        datetime.utcnow(),
+                    ],
+                )
+                written += 1
+                LOGGER.info(
+                    "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f snapshot_ym=%s",
                     question_id,
-                    target_month,
-                    float(value),
-                    snapshot_ym,
-                    datetime.utcnow(),
-                ],
-            )
-            written += 1
-            LOGGER.info(
-                "Resolved %s (%s/%s/%s %s) -> value=%.1f snapshot_ym=%s",
-                question_id,
-                iso3_norm,
-                hazard_norm,
-                target_month,
-                metric_norm,
-                value,
-                snapshot_ym or "<none>",
-            )
+                    horizon_m,
+                    iso3_norm,
+                    hazard_norm,
+                    cal_month,
+                    metric_norm,
+                    value,
+                    snapshot_ym or "<none>",
+                )
 
         LOGGER.info("compute_resolutions: wrote %d resolution rows.", written)
     finally:
