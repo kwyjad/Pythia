@@ -119,13 +119,13 @@ def _resolve_value(
         return None
 
     sql = f"""
-        SELECT value, snapshot_ym
+        SELECT value, created_at
         FROM facts_resolved
         WHERE iso3 = ?
           AND hazard_code = ?
           AND ym = ?
           AND {metric_filter}
-        ORDER BY snapshot_ym DESC
+        ORDER BY created_at DESC
         LIMIT 1
     """
     try:
@@ -138,8 +138,8 @@ def _resolve_value(
         return None
     if not row:
         return None
-    value, snapshot_ym = row
-    return float(value), (snapshot_ym if snapshot_ym is not None else None)
+    value, created_at = row
+    return float(value), (str(created_at) if created_at is not None else None)
 
 
 def _ensure_resolutions_table(conn) -> None:
@@ -286,7 +286,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     )
                     continue
 
-                value, snapshot_ym = resolved
+                value, source_ts = resolved
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO resolutions (
@@ -303,13 +303,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         horizon_m,
                         cal_month,
                         float(value),
-                        snapshot_ym,
+                        source_ts,
                         datetime.utcnow(),
                     ],
                 )
                 written += 1
                 LOGGER.info(
-                    "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f snapshot_ym=%s",
+                    "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f source_ts=%s",
                     question_id,
                     horizon_m,
                     iso3_norm,
@@ -317,7 +317,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     cal_month,
                     metric_norm,
                     value,
-                    snapshot_ym or "<none>",
+                    source_ts or "<none>",
                 )
 
         LOGGER.info("compute_resolutions: wrote %d resolution rows.", written)
