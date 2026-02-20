@@ -14,7 +14,9 @@ from typing import Iterable
 
 import pandas as pd
 
+from .adapters.acled import ACLEDAdapter
 from .adapters.base import CANONICAL_COLUMNS, BaseAdapter
+from .adapters.idmc import IDMCAdapter
 from .adapters.ifrc import IFRCAdapter
 
 LOGGER = logging.getLogger(__name__)
@@ -22,6 +24,8 @@ LOGGER = logging.getLogger(__name__)
 ADAPTER_REGISTRY: dict[str, type[BaseAdapter]] = {
     "ifrc_go": IFRCAdapter,
     "ifrc": IFRCAdapter,
+    "acled": ACLEDAdapter,
+    "idmc": IDMCAdapter,
 }
 
 
@@ -76,18 +80,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.period:
         LOGGER.info("Normalizing period %s", args.period)
 
+    errors: list[str] = []
     for source in sources:
         adapter = _build_adapter(source)
         try:
             canonical = adapter.normalize(input_dir)
+        except FileNotFoundError:
+            LOGGER.warning("%s: staging CSV not found — skipping", source)
+            continue
         except Exception:
             LOGGER.exception("%s: normalization failed", source)
-            raise
+            errors.append(source)
+            continue
 
         output_path = output_dir / f"{source}.csv"
         LOGGER.info("%s: writing %s rows to %s", source, len(canonical), output_path)
         _write_canonical(canonical, output_path)
 
+    if errors:
+        LOGGER.error("Normalization failed for: %s", ", ".join(errors))
+        return 1
     return 0
 
 

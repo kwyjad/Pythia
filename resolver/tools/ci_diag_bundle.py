@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUNDLE_NAME = "diagnostics.zip"
 FILES_TO_STAMP: tuple[tuple[str, str], ...] = (
     ("resolver/db/duckdb_io.py", "resolver.db.duckdb_io"),
-    ("resolver/tools/export_facts.py", "resolver.tools.export_facts"),
+    ("resolver/tools/run_pipeline.py", "resolver.tools.run_pipeline"),
     ("resolver/query/db_reader.py", "resolver.query.db_reader"),
     ("resolver/query/selectors.py", "resolver.query.selectors"),
     ("resolver/cli/resolver_cli.py", "resolver.cli.resolver_cli"),

@@ -5,16 +5,8 @@
 
 # resolver/ingestion/config/source_priority.yml
 # Highest (top) → lowest (bottom) precedence for monthly STOCK resolution.
-- IPC            # canonical for food insecurity PIN/IPC phases
-- UNHCR          # refugees/asylum-seekers stock
-- DTM            # IOM displacement/IDPs stock
-- WHO PHE        # official public health emergency figures
-- IFRC           # RC/RC operations situation reports (near-real-time)
-- EMDAT          # CRED disaster impacts (curated, sometimes lagged)
-- WFP            # RAM/mVAM survey-based estimates (authoritative but not “official stock”)
-- GDACS          # event alerts/severity; useful but not a stock authority
-- ReliefWeb      # curated aggregator (structured API)
-- ReliefWeb PDF  # unstructured extraction; keep below API-based RW
-- HDX            # portal/host; prefer underlying source when available
-- WorldPop       # baseline denominator (not PIN/PA stock)
-- ACLED          # conflict events (not PIN/PA stock)
+# Active connectors only — EM-DAT retained as historical read-only.
+- ifrc_go        # IFRC Montandon situation reports
+- ACLED          # conflict events and fatalities
+- IDMC           # internal displacement (Helix API)
+- EMDAT          # historical read-only (CRED disaster impacts)

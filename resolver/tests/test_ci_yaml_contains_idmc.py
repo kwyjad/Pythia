@@ -43,40 +43,31 @@ def test_backfill_runs_direct_idmc_step() -> None:
     assert "--end   \"${{ steps.window.outputs.end_iso }}\"" in run_script
 
 
-def test_backfill_uses_db_flag_for_idmc_writer() -> None:
+def test_backfill_export_duckdb_uses_load_and_derive() -> None:
+    """Verify the export-duckdb job uses load_and_derive pipeline."""
     data = _load_yaml(WF_BACKFILL)
-    ingest = data.get("jobs", {}).get("export-duckdb", {})
-    steps = ingest.get("steps", [])
-    assert isinstance(steps, list)
-    writer = next(
-        step
-        for step in steps
-        if isinstance(step, dict) and step.get("name") == "Load IDMC facts into DuckDB (auxiliary)"
-    )
-    run_script = writer.get("run")
-    assert isinstance(run_script, str)
-    assert "--db \"${RESOLVER_DB_URL}\"" in run_script
-    assert "--db-url" not in run_script
-
-
-def test_backfill_export_uses_db_flag_and_freeze_is_disabled() -> None:
-    yaml_data = _load_yaml(WF_BACKFILL)
-    derive_job = yaml_data.get("jobs", {}).get("export-duckdb", {})
+    derive_job = data.get("jobs", {}).get("export-duckdb", {})
     steps = derive_job.get("steps", [])
     assert isinstance(steps, list)
-    export_step = next(
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    assert "Load, derive, and export to DuckDB" in names
+
+    lda_step = next(
         step
         for step in steps
-        if isinstance(step, dict) and step.get("name") == "Export canonical facts"
+        if isinstance(step, dict) and step.get("name") == "Load, derive, and export to DuckDB"
     )
-    export_run = export_step.get("run")
-    assert isinstance(export_run, str)
-    assert "--db \"${{ env.RESOLVER_DB_URL }}\"" in export_run
-    assert "--db-url" not in export_run
+    run_script = lda_step.get("run")
+    assert isinstance(run_script, str)
+    assert "load_and_derive" in run_script
 
-    names = [step.get("name") for step in steps if isinstance(step, dict)]
-    assert "Derive and freeze monthly snapshots" not in names
-    assert "Derive & Freeze (write DuckDB)" not in names
+    # Ensure deleted modules are NOT referenced
+    all_runs = " ".join(
+        step.get("run", "") for step in steps if isinstance(step, dict)
+    )
+    assert "resolver.tools.export_facts" not in all_runs
+    assert "resolver.cli.emdat_to_duckdb" not in all_runs
+    assert "resolver.cli.idmc_to_duckdb" not in all_runs
 
 
 def test_backfill_schedule_and_months_back_defaults() -> None:

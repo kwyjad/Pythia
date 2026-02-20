@@ -3,54 +3,33 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-# Policy knobs (kept here so we don't hardcode in code)
+# Precedence policy — 3 active connectors + EM-DAT (historical read-only)
 metric_preference: [in_need, affected]   # PIN first, else PA
-tiers:
-  - ["unhcr_api", "unhcr_odp", "ifrc_go", "who", "ipc", "wfp_mvam", "dtm", "acled"]
-  - ["hdx", "emdat", "gdacs"]
-  - ["reliefweb", "reliefweb_pdf", "media"]  # reliefweb_pdf stays Tier 2 (same as ReliefWeb API)
-source_precedence:                       # highest → lowest (legacy policy tiers)
-  - inter_agency_plan
-  - ifrc_or_gov_sitrep
-  - un_cluster_snapshot
-  - who
-  - reputable_ingo_un
-  - dtm                                   # DTM alongside HDX for movement PIN
-  - hdx                                   # HDX connector (between direct agency and media)
-  - reliefweb
-  - media_discovery_only
 
-# Map source_type/publisher patterns to the policy tiers above
+tiers:
+  - ["ifrc_montandon", "acled"]
+  - ["idmc"]
+  - ["emdat"]                            # historical read-only (no connector)
+
+source_precedence:
+  - ifrc_or_gov_sitrep
+  - acled
+  - idmc
+  - emdat_historical
+
 source_mapping:
-  inter_agency_plan:
-    source_type: ["appeal", "sitrep"]
-    publisher: ["OCHA"]                  # includes HNO/HRP/Flash/Addendum, OCHA sitreps
   ifrc_or_gov_sitrep:
     source_type: ["sitrep", "gov"]
-    publisher: ["IFRC", "NDMA", "AFAD", "NDRMC"]
-  un_cluster_snapshot:
-    source_type: ["cluster"]
-    publisher: ["UNHCR", "IOM-DTM", "WHO", "IPC"]
-  who:
-    source_type: ["official"]
-    publisher: ["WHO"]
-  reputable_ingo_un:
-    source_type: ["agency", "other"]
-    publisher: ["EM-DAT", "CRED/EM-DAT", "GDACS", "Copernicus EMS", "UNOSAT", "FEWS NET", "WFP mVAM"]
-  dtm:
-    source_type: ["cluster", "agency"]
-    publisher: ["IOM-DTM"]
-  hdx:
+    publisher: ["IFRC"]
+  acled:
+    source_type: ["other"]
+    publisher: ["ACLED"]
+  idmc:
     source_type: ["agency"]
-    publisher: ["HDX (CKAN)"]
-  reliefweb:
-    source_type: ["media", "appeal", "sitrep"]
-    publisher: ["ReliefWeb"]
-  agency:
+    publisher: ["IDMC"]
+  emdat_historical:
     source_type: ["agency"]
-    publisher: ["*"]                     # any other agency-like source
-  media_discovery_only:
-    source_type: ["media"]
+    publisher: ["EM-DAT", "CRED/EM-DAT"]
 
 conflict_rule:
   threshold_pct: 20
@@ -61,11 +40,6 @@ cutoff:
   lag_days_allowed: 7
 
 lags:
-  ipc: 7d
-  who: 2d
-  dtm: 2d
   acled: 2d
-  hdx: 3d
-  emdat: 7d
-  gdacs: 1d
-  wfp_mvam: 3d
+  ifrc_montandon: 2d
+  idmc: 3d
