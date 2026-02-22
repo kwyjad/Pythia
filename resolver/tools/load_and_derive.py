@@ -52,26 +52,55 @@ class PeriodMonths:
     @classmethod
     def from_label(cls, label: str) -> "PeriodMonths":
         normalized = label.strip()
+
+        # ── Format 1: quarterly label  YYYYQ# ──────────────────────
         match = re.fullmatch(r"(\d{4})Q([1-4])", normalized)
-        if not match:
-            if re.match(r"(?i)^(ci|dev|test)", normalized):
-                now = dt.datetime.now(dt.timezone.utc)
-                quarter = (now.month - 1) // 3 + 1
-                alias_label = f"{now.year}Q{quarter}"
-                return cls.from_label(alias_label)
-            raise ValueError(
-                "Invalid --period label %r. Expected format YYYYQ#, e.g. 2025Q4. "
-                "Labels starting with 'ci', 'dev', or 'test' are mapped to the "
-                "current UTC quarter." % (label,)
+        if match:
+            year = int(match.group(1))
+            quarter = int(match.group(2))
+            start_month = (quarter - 1) * 3 + 1
+            months = tuple(
+                f"{year}-{month:02d}"
+                for month in range(start_month, start_month + 3)
             )
-        year = int(match.group(1))
-        quarter = int(match.group(2))
-        start_month = (quarter - 1) * 3 + 1
-        months = tuple(
-            f"{year}-{month:02d}"
-            for month in range(start_month, start_month + 3)
+            return cls(label=f"{year}Q{quarter}", months=months)
+
+        # ── Format 2: date-range label  YYYY-MM-DD_YYYY-MM-DD ─────
+        range_match = re.fullmatch(
+            r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})", normalized
         )
-        return cls(label=f"{year}Q{quarter}", months=months)
+        if range_match:
+            start_date = dt.date.fromisoformat(range_match.group(1))
+            end_date = dt.date.fromisoformat(range_match.group(2))
+            months: list[str] = []
+            cur = start_date.replace(day=1)
+            end_first = end_date.replace(day=1)
+            while cur <= end_first:
+                months.append(cur.strftime("%Y-%m"))
+                if cur.month == 12:
+                    cur = cur.replace(year=cur.year + 1, month=1)
+                else:
+                    cur = cur.replace(month=cur.month + 1)
+            if not months:
+                raise ValueError(
+                    "Date-range period %r produced zero months "
+                    "(start > end?)." % (label,)
+                )
+            return cls(label=normalized, months=tuple(months))
+
+        # ── Format 3: ci / dev / test aliases → current UTC quarter ─
+        if re.match(r"(?i)^(ci|dev|test)", normalized):
+            now = dt.datetime.now(dt.timezone.utc)
+            quarter = (now.month - 1) // 3 + 1
+            alias_label = f"{now.year}Q{quarter}"
+            return cls.from_label(alias_label)
+
+        raise ValueError(
+            "Invalid --period label %r. Expected YYYYQ# (e.g. 2025Q4) or "
+            "date range YYYY-MM-DD_YYYY-MM-DD (e.g. 2024-01-01_2024-12-31). "
+            "Labels starting with 'ci', 'dev', or 'test' are mapped to the "
+            "current UTC quarter." % (label,)
+        )
 
 
 def _configure_logging(verbose: bool) -> None:

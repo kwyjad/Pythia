@@ -35,6 +35,32 @@ def test_period_months_alias_uses_current_quarter(monkeypatch: pytest.MonkeyPatc
     assert period.months == ("2024-04", "2024-05", "2024-06")
 
 
+def test_period_months_date_range_single_quarter() -> None:
+    period = PeriodMonths.from_label("2025-10-01_2025-12-31")
+    assert period.label == "2025-10-01_2025-12-31"
+    assert period.months == ("2025-10", "2025-11", "2025-12")
+
+
+def test_period_months_date_range_cross_year() -> None:
+    period = PeriodMonths.from_label("2023-03-01_2026-02-28")
+    assert period.label == "2023-03-01_2026-02-28"
+    # Should generate 36 months: 2023-03 through 2026-02
+    assert len(period.months) == 36
+    assert period.months[0] == "2023-03"
+    assert period.months[-1] == "2026-02"
+
+
+def test_period_months_date_range_single_month() -> None:
+    period = PeriodMonths.from_label("2025-06-01_2025-06-30")
+    assert period.label == "2025-06-01_2025-06-30"
+    assert period.months == ("2025-06",)
+
+
+def test_period_months_date_range_reversed_raises() -> None:
+    with pytest.raises(ValueError, match="zero months"):
+        PeriodMonths.from_label("2026-03-01_2025-01-01")
+
+
 def test_period_months_invalid_label() -> None:
     with pytest.raises(ValueError) as excinfo:
         PeriodMonths.from_label("foo")
