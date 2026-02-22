@@ -80,7 +80,7 @@ HS_TAIL_PACKS_MAX_SIGNALS = int(
     os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_SIGNALS", str(HS_EVIDENCE_MAX_SIGNALS))
 )
 COUNTRIES_CSV = REPO_ROOT / "resolver" / "data" / "countries.csv"
-EMDAT_SHOCK_MAP = {
+NATURAL_HAZARD_CODES = {
     "FL": "flood",
     "DR": "drought",
     "TC": "tropical_cyclone",
@@ -588,52 +588,54 @@ def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
             "notes": "No IDMC/DTM flows in DB for this country (common).",
         }
 
-    # Natural hazards (EM-DAT PA)
+    # Natural hazards (IFRC Montandon PA via facts_resolved)
     features["natural_hazards"] = {}
-    for hz_code, shock_type in EMDAT_SHOCK_MAP.items():
+    for hz_code in NATURAL_HAZARD_CODES:
         try:
-            emdat_rows = con.execute(
+            nh_rows = con.execute(
                 """
-                SELECT ym, pa
-                FROM emdat_pa
-                WHERE upper(iso3) = ? AND lower(shock_type) = ?
+                SELECT ym, value
+                FROM facts_resolved
+                WHERE upper(iso3) = ?
+                  AND hazard_code = ?
+                  AND lower(metric) IN ('affected', 'in_need', 'pa')
                 ORDER BY ym
                 """,
-                [iso3, shock_type],
+                [iso3, hz_code],
             ).fetchall()
         except Exception as exc:  # pragma: no cover - defensive fallback
             logger.warning(
-                "Resolver EM-DAT features failed for %s/%s: %s",
+                "Resolver IFRC features failed for %s/%s: %s",
                 iso3,
                 hz_code,
                 exc,
             )
-            emdat_rows = None
+            nh_rows = None
 
-        if emdat_rows:
+        if nh_rows:
             nh_series: list[tuple[str, float]] = []
-            for ym_val, pa_val in emdat_rows:
+            for ym_val, pa_val in nh_rows:
                 try:
                     nh_series.append((_coerce_ym(ym_val), float(pa_val or 0.0)))
                 except Exception:
                     continue
             values_only = [v for _ym, v in nh_series]
             features["natural_hazards"][hz_code] = {
-                "source": "EM-DAT",
+                "source": "IFRC",
                 "history_length": len(nh_series),
                 "recent_mean": sum(values_only[-6:]) / len(values_only[-6:]) if values_only[-6:] else None,
                 "recent_max": max(values_only) if values_only else None,
                 "trend": _trend_from(values_only),
                 "last_6_values": _last_values(nh_series),
                 "data_quality": "medium",
-                "notes": "EM-DAT PA history (often sparse or missing for some hazards).",
+                "notes": "IFRC Montandon PA history (may be sparse for some hazards/countries).",
             }
         else:
             features["natural_hazards"][hz_code] = {
-                "source": "EM-DAT",
+                "source": "IFRC",
                 "history_length": 0,
                 "data_quality": "low",
-                "notes": "No EM-DAT PA history for this hazard/country (common).",
+                "notes": "No IFRC Montandon PA history for this hazard/country.",
             }
 
     con.close()

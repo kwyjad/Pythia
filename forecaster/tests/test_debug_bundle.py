@@ -51,7 +51,20 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
                 weights_profile TEXT,
                 created_at TIMESTAMP,
                 status TEXT,
-                human_explanation TEXT
+                human_explanation TEXT,
+                model_name TEXT
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE forecasts_raw (
+                run_id TEXT,
+                question_id TEXT,
+                model_name TEXT,
+                month_index INTEGER,
+                bucket_index INTEGER,
+                probability DOUBLE
             )
             """
         )
@@ -145,7 +158,7 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
                 "wording": "Test question",
             }
         ]
-        md = build_debug_bundle_markdown(con, "duckdb:///fake.duckdb", "fc_test", question_types)
+        md = build_debug_bundle_markdown(con, "duckdb:///fake.duckdb", "fc_test", "hs_test", question_types, [])
     finally:
         con.close()
 

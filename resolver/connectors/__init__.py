@@ -12,13 +12,14 @@ from typing import Sequence
 from .protocol import CANONICAL_COLUMNS, Connector
 from .acled import AcledConnector
 from .idmc import IdmcConnector
+from .ifrc_montandon import IfrcMontandonConnector
 
 # Add new connectors here.  The orchestrator (run_pipeline.py) iterates
 # this registry to discover which sources to pull.
 REGISTRY: dict[str, type] = {
     "acled": AcledConnector,
     "idmc": IdmcConnector,
-    # "ifrc_montandon": IfrcMontandonConnector,  # uncomment when ready
+    "ifrc_montandon": IfrcMontandonConnector,
 }
 
 

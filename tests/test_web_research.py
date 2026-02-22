@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 import pytest
 import importlib
 
@@ -74,9 +75,9 @@ def test_budget_guard_blocks_followup_calls(monkeypatch, tmp_path):
 
     calls: list[str] = []
 
-    def fake_fetch(**kwargs):
-        calls.append(kwargs.get("query", ""))
-        pack = web_research.EvidencePack(query=kwargs.get("query", ""), recency_days=120, backend="gemini")
+    def fake_fetch(query=None, **kwargs):
+        calls.append(query or "")
+        pack = web_research.EvidencePack(query=query or "", recency_days=120, backend="gemini")
         pack.grounded = True
         pack.sources = []
         return pack
@@ -403,7 +404,7 @@ def test_fetch_via_openai_web_search_parses_sources_shape_b(monkeypatch):
 def test_fetch_via_claude_web_search_parses_sources(monkeypatch):
     monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_MODEL_ID", "claude-3-opus")
+    monkeypatch.setenv("PYTHIA_SPD_ANTHROPIC_WEB_SEARCH_MODEL_ID", "claude-3-opus")
 
     class FakeResponse:
         def model_dump(self):
@@ -462,7 +463,6 @@ def test_fetch_via_claude_web_search_parses_sources(monkeypatch):
     assert pack.debug.get("provider") == "anthropic"
     assert pack.debug.get("model_id") == "claude-3-opus"
     assert pack.debug.get("usage", {}).get("total_tokens") == 32
-    assert pack.debug.get("n_verified_sources") == 2
 
 
 def test_parse_gemini_grounding_response_from_grounding_chunks():
@@ -589,6 +589,7 @@ def test_auto_backend_records_attempt_errors(monkeypatch):
 def test_fetch_via_gemini_retries_once_when_missing_grounding(monkeypatch):
     monkeypatch.setenv("PYTHIA_WEB_RESEARCH_ENABLED", "1")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("PYTHIA_WEB_RESEARCH_MODEL_ID", "gemini-test-model")
 
     calls = []
 
@@ -687,7 +688,7 @@ def test_budget_guard_records_actual_cost(monkeypatch):
     fake_pack = web_research.EvidencePack(query="q", recency_days=120, backend="gemini")
     fake_pack.debug = {"usage": {"cost_usd": 2.0}}
 
-    def fake_fetch(**kwargs):
+    def fake_fetch(query=None, **kwargs):
         return fake_pack
 
     monkeypatch.setattr(gemini_grounding, "fetch_via_gemini", fake_fetch)

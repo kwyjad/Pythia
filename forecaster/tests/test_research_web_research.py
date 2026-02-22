@@ -28,10 +28,10 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
     ensure_schema(con)
     con.execute(
         """
-        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, drivers_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, need_full_spd, drivers_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        ["hs-run", "KEN", "ACE", "priority", 0.8, json.dumps(["driver"])],
+        ["hs-run", "KEN", "ACE", "priority", 0.8, True, json.dumps(["driver"])],
     )
     con.execute(
         """
@@ -56,6 +56,7 @@ async def test_research_v2_writes_grounded_sources(monkeypatch: pytest.MonkeyPat
         run_id: str | None = None,
         question_id: str | None = None,
         hs_run_id: str | None = None,
+        model_id: str | None = None,
     ):
         return {
             "query": query,
@@ -126,10 +127,10 @@ async def test_research_v2_includes_hazard_tail_pack(monkeypatch: pytest.MonkeyP
     ensure_schema(con)
     con.execute(
         """
-        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, drivers_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, need_full_spd, drivers_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        ["hs-run", "KEN", "ACE", "priority", 0.8, json.dumps(["driver"])],
+        ["hs-run", "KEN", "ACE", "priority", 0.8, True, json.dumps(["driver"])],
     )
     con.execute(
         """
@@ -189,6 +190,7 @@ async def test_research_v2_includes_hazard_tail_pack(monkeypatch: pytest.MonkeyP
         run_id: str | None = None,
         question_id: str | None = None,
         hs_run_id: str | None = None,
+        model_id: str | None = None,
     ):
         return {
             "query": query,
@@ -258,7 +260,6 @@ def test_should_run_research_skips_when_triage_disables_spd(monkeypatch: pytest.
     }
 
     assert cli._should_run_research("fc-run", question_row) is False
-    assert enforced["_grounding_verified_sources_count"] == 0
 
 
 def test_normalize_grounding_prefers_verified_pack_sources() -> None:

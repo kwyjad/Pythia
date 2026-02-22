@@ -326,8 +326,8 @@ export default function ResolverClient({
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Connector last updated</h2>
-        <div className="grid gap-4 md:grid-cols-3">
-          {["ACLED", "IDMC", "EM-DAT"].map((source) => {
+        <div className="grid gap-4 md:grid-cols-4">
+          {["ACLED", "IDMC", "IFRC"].map((source) => {
             const row = connectorStatus.find((item) => item.source === source);
             return (
               <div
@@ -346,6 +346,22 @@ export default function ResolverClient({
               </div>
             );
           })}
+          {(() => {
+            const row = connectorStatus.find((item) => item.source === "EM-DAT");
+            return (
+              <div className="rounded-lg border border-fred-secondary/50 bg-fred-surface/50 px-4 py-3 opacity-60">
+                <div className="text-sm font-semibold text-fred-muted">
+                  EM-DAT <span className="font-normal">(historical)</span>
+                </div>
+                <div className="text-xl font-semibold text-fred-muted">
+                  {row?.last_updated ?? "Discontinued"}
+                </div>
+                <div className="text-xs text-fred-muted">
+                  Rows scanned: {row?.rows_scanned?.toLocaleString() ?? "0"}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </section>
 

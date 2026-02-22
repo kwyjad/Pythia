@@ -176,3 +176,97 @@ class TestIdmcConnectorContract:
         assert len(df) == 2
         assert set(df["iso3"]) == {"AFG", "ETH"}
         validate_canonical(df, source="idmc")
+
+
+# ---------------------------------------------------------------------------
+# IFRC Montandon connector (offline — mock collect_rows)
+# ---------------------------------------------------------------------------
+
+
+class TestIfrcMontandonConnectorContract:
+    """Verify IFRC Montandon wrapper returns the canonical schema."""
+
+    def _make_fixture_rows(self):
+        """Build minimal IFRC GO-style rows (List[List[str]])."""
+        return [
+            [
+                "SDN-FL-ifrcgo-12345",   # event_id
+                "Sudan",                  # country_name
+                "SDN",                    # iso3
+                "FL",                     # hazard_code
+                "Flood",                  # hazard_label
+                "natural",                # hazard_class
+                "affected",               # metric
+                "stock",                  # series_semantics
+                "75000",                  # value
+                "persons",                # unit
+                "2025-01-15",             # as_of_date
+                "2025-01-16",             # publication_date
+                "IFRC",                   # publisher
+                "sitrep",                 # source_type
+                "https://go.ifrc.org",    # source_url
+                "Sudan Floods DREF",      # doc_title
+                "Extracted affected via num_affected from IFRC GO field report.",
+                "api",                    # method
+                "med",                    # confidence
+                "1",                      # revision
+                "2025-01-16T12:00:00Z",   # ingested_at
+            ],
+            [
+                "BGD-TC-ifrcgo-67890",
+                "Bangladesh",
+                "BGD",
+                "TC",
+                "Tropical Cyclone",
+                "natural",
+                "in_need",
+                "stock",
+                "120000",
+                "persons",
+                "2025-02-01",
+                "2025-02-02",
+                "IFRC",
+                "sitrep",
+                "https://go.ifrc.org",
+                "Cyclone Appeal",
+                "Extracted in_need via people in need from IFRC GO appeal.",
+                "api",
+                "med",
+                "1",
+                "2025-02-02T08:00:00Z",
+            ],
+        ]
+
+    def test_ifrc_montandon_connector_maps_to_canonical(self, monkeypatch):
+        """Monkey-patch collect_rows to avoid hitting the API."""
+        fixture_rows = self._make_fixture_rows()
+        monkeypatch.setattr(
+            "resolver.ingestion.ifrc_go_client.collect_rows",
+            lambda: fixture_rows,
+        )
+        monkeypatch.delenv("RESOLVER_INGESTION_MODE", raising=False)
+
+        from resolver.connectors.ifrc_montandon import IfrcMontandonConnector
+
+        connector = IfrcMontandonConnector()
+        df = connector.fetch_and_normalize()
+
+        assert list(df.columns) == CANONICAL_COLUMNS
+        assert len(df) == 2
+        assert set(df["iso3"]) == {"SDN", "BGD"}
+        assert set(df["hazard_code"]) == {"FL", "TC"}
+        assert df.iloc[0]["publisher"] == "IFRC"
+        assert df.iloc[0]["series_semantics"] == "stock"
+        validate_canonical(df, source="ifrc_montandon")
+
+    def test_ifrc_montandon_stubs_mode_returns_empty(self, monkeypatch):
+        """In stubs mode the connector should return empty without calling the API."""
+        monkeypatch.setenv("RESOLVER_INGESTION_MODE", "stubs")
+
+        from resolver.connectors.ifrc_montandon import IfrcMontandonConnector
+
+        connector = IfrcMontandonConnector()
+        df = connector.fetch_and_normalize()
+
+        assert list(df.columns) == CANONICAL_COLUMNS
+        assert len(df) == 0

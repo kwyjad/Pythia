@@ -17,7 +17,7 @@ from forecaster import providers
 def test_call_chat_ms_handles_multiple_event_loops(monkeypatch):
     providers._LLM_SEMAPHORES.clear()
 
-    def fake_provider_call(provider, prompt, model, temperature):
+    def fake_provider_call(provider, prompt, model, temperature, *, timeout_sec=None, thinking_level=None):
         return providers.ProviderResult("ok", providers.usage_to_dict(None), 0.0, model)
 
     monkeypatch.setattr(providers, "_call_provider_sync", fake_provider_call)

@@ -318,8 +318,11 @@ def fetch_evidence_pack(
                     "selected_backend": pack.backend,
                     "n_verified_sources": len(pack.sources),
                     "auto_attempts": attempted,
+                    "auto_fallback_backend": fallback_backend or None,
                 }
-                if not pack.sources and not pack.error:
+                if not pack.sources and not fallback_backend:
+                    pack.error = {"type": "no_backend_available", "message": "all backends failed and no fallback configured"}
+                elif not pack.sources and not pack.error:
                     pack.error = {"type": "grounding_missing", "message": "no verified sources from any backend"}
             elif backend in {"gemini", "google"}:
                 module, import_err = _load_backend_module("gemini_grounding")

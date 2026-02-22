@@ -60,4 +60,10 @@ def test_write_hs_triage_filters_unknown_hazards(monkeypatch, tmp_path):
     with duckdb.connect(str(db_path), read_only=True) as con_check:
         rows = con_check.execute("SELECT hazard_code, drivers_json FROM hs_triage").fetchall()
 
-    assert rows == [("ACE", json.dumps(["x"]))]
+    assert len(rows) == 6
+    codes = {r[0] for r in rows}
+    assert "CONFLICT" not in codes
+    assert ("ACE", json.dumps(["x"])) in rows
+    # Non-LLM hazards get empty driver lists
+    for code in ("DI", "DR", "FL", "HW", "TC"):
+        assert (code, "[]") in rows

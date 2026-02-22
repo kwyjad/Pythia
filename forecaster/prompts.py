@@ -127,7 +127,7 @@ def build_scoring_resolution_block(
 
     Uses hazard_code + metric + optional resolution_source to explain:
       - What "affected" means for this question.
-      - Which source is used (EM-DAT, IDMC/DTM, ACLED).
+      - Which source is used (IFRC Montandon, IDMC/DTM, ACLED).
       - That we use Brier scores on the SPD buckets.
 
     This is inserted early in the SPD prompt.
@@ -152,10 +152,10 @@ def build_scoring_resolution_block(
         source_label = "ACLED conflict fatalities"
     else:
         meaning = (
-            "“affected” means people affected by the hazard as EM-DAT defines "
-            "and records them for this hazard and country."
+            "“affected” means people affected by the hazard as recorded by "
+            "IFRC Montandon (the Global Crisis Data Bank) for this hazard and country."
         )
-        source_label = "EM-DAT people affected"
+        source_label = "IFRC Montandon people affected"
 
     lines = []
     lines.append("SCORING & RESOLUTION")
@@ -199,7 +199,7 @@ def build_time_horizon_block(
     elif m == "PA" and (hz in {"ACO", "ACE", "CU", "DI"} or "IDMC" in src or "DTM" in src):
         source_label = "IDMC/DTM"
     else:
-        source_label = "EM-DAT"
+        source_label = "IFRC Montandon"
 
     ws = window_start_date.isoformat() if window_start_date else ""
     we = window_end_date.isoformat() if window_end_date else ""
@@ -632,10 +632,10 @@ def build_resolution_text_and_quantity_description(
 
     resolution_text = (
         "People affected (PA) will be measured using Resolver's canonical PA metric for "
-        "this natural hazard and country, based primarily on EM-DAT data."
+        "this natural hazard and country, based primarily on IFRC Montandon data."
     )
     quantity_description = (
-        f"Monthly people affected (PA) in {iso3} by {hazard_label} as recorded by EM-DAT "
+        f"Monthly people affected (PA) in {iso3} by {hazard_label} as recorded by IFRC Montandon "
         "(including both directly and indirectly affected people)."
     )
     return resolution_text, quantity_description
@@ -1021,7 +1021,7 @@ def build_research_prompt_v2(
     parts.append("Model/data notes:\n```json\n" + _json_dumps_for_prompt(model_info, indent=2) + "\n```")
 
     tasks_block = (
-        "Use Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; EM-DAT is patchy; DTM is contextual only.\n"
+        "Use Resolver as one imperfect signal. ACLED is generally strong for conflict fatalities; IDMC has short history for displacement; IFRC Montandon may be sparse for some hazards/countries; DTM is contextual only.\n"
         + di_note
         + "Your tasks:\n\n"
         + base_rate_task
@@ -1217,7 +1217,7 @@ def build_spd_prompt_v2(
     hazard_nat_note = ""
     if hazard in {"DR", "FL", "HW", "TC"} and metric == "PA":
         hazard_nat_note = (
-            "- For this natural hazard PA question, treat PA as **people affected by the hazard** as EM-DAT would record them (injured, displaced, needing assistance), not as conflict fatalities or IDP metrics.\n"
+            "- For this natural hazard PA question, treat PA as **people affected by the hazard** as IFRC Montandon would record them (injured, displaced, needing assistance), not as conflict fatalities or IDP metrics.\n"
         )
 
     bucket_list_str = ", ".join([f'\"{b}\"' for b in buckets])
@@ -1283,7 +1283,7 @@ def build_spd_prompt_v2(
         f"{_json_dumps_for_prompt(question, indent=2)}\n"
         "```\n\n"
         f"{horizon_note}"
-        "Resolver history summary (Resolver is one imperfect source; ACLED strong, IDMC short, EM-DAT patchy):\n"
+        "Resolver history summary (Resolver is one imperfect source; ACLED strong, IDMC short, IFRC Montandon may be sparse):\n"
         "```json\n"
         f"{_json_dumps_for_prompt(history_summary, indent=2)}\n"
         "```\n\n"

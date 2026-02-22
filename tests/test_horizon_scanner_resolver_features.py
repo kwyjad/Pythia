@@ -43,27 +43,28 @@ def test_build_resolver_features_handles_month_column(monkeypatch):
     )
     con.execute(
         """
-        CREATE TABLE emdat_pa (
+        CREATE TABLE facts_resolved (
             iso3 TEXT,
-            shock_type TEXT,
+            hazard_code TEXT,
             ym DATE,
-            pa DOUBLE,
+            metric TEXT,
+            value DOUBLE,
             source_id TEXT
         );
         """
     )
     con.execute(
         """
-        INSERT INTO emdat_pa (iso3, shock_type, ym, pa, source_id) VALUES
-            ('ETH', 'flood', DATE '2024-12-01', 10.0, 'src'),
-            ('ETH', 'flood', DATE '2025-01-01', 20.0, 'src'),
-            ('ETH', 'drought', DATE '2025-02-01', 5.0, 'src');
+        INSERT INTO facts_resolved (iso3, hazard_code, ym, metric, value, source_id) VALUES
+            ('ETH', 'FL', DATE '2024-12-01', 'affected', 10.0, 'ifrc'),
+            ('ETH', 'FL', DATE '2025-01-01', 'affected', 20.0, 'ifrc'),
+            ('ETH', 'DR', DATE '2025-02-01', 'affected', 5.0, 'ifrc');
         """
     )
 
-    import pythia.db.schema as schema_mod
+    import horizon_scanner.horizon_scanner as hs_mod
 
-    monkeypatch.setattr(schema_mod, "connect", lambda read_only=False: con)
+    monkeypatch.setattr(hs_mod, "pythia_connect", lambda read_only=False: con)
 
     features = _build_resolver_features_for_country("ETH")
 

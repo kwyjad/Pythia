@@ -63,7 +63,7 @@ For ACLED-derived conflict monitoring we apply an explicit **conflict onset** ru
 > The exact `hazard_class` values come from `resolver/data/shocks.csv`. Use these class rules; refine per sub-type as needed.
 
 - **Hydro-meteorological (e.g., tropical cyclone/typhoon, severe storm, flood, storm surge, heavy rainfall):**  
-  Prefer **official “people affected”** from OCHA/IFRC/Gov sitreps when PIN absent. If multiple updates exist, apply precedence + conflict rule. If still missing, use standardized disaster totals from recognized repositories (e.g., EM-DAT) as last resort.  
+  Prefer **official "people affected"** from IFRC Montandon (GO field reports, appeals, situation reports) when PIN absent. If multiple updates exist, apply precedence + conflict rule. EM-DAT historical data retained as fallback for periods predating IFRC Montandon coverage.  
   → `metric=affected`, `proxy_for=PIN`, `confidence=med`.
 
 - **Drought / Food insecurity:**  

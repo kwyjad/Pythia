@@ -22,7 +22,7 @@ concurrency:
         required: false
         default: "false"
       only_connector:
-        description: "Optional connector name for --only (e.g. acled, idmc)"
+        description: "Optional connector name for --only (acled_client, idmc, ifrc_go_client)"
         required: false
         default: ""
       log_level:
@@ -467,7 +467,7 @@ jobs:
           python -m scripts.ci.compute_backfill_window
 
       - name: Run ACLED → DuckDB backfill
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled' }}
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled' || inputs.only_connector == 'acled_client' }}
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then

@@ -45,7 +45,7 @@ Everything is written to a single **DuckDB system of record**, so each run is re
 
 ### 1) Build the factual baseline (Resolver → database)
 
-Fred starts with structured historical data: monthly facts, deltas, and snapshots. This baseline (ACLED for conflict fatalities, IDMC for displacement, and EM-DAT for people affected by flood, drought or cyclone) serves two purposes:
+Fred starts with structured historical data: monthly facts, deltas, and snapshots. This baseline (ACLED for conflict fatalities, IDMC for displacement, and IFRC Montandon for people affected by flood, drought, cyclone or heat wave) serves two purposes:
 
 1) it provides context and priors for triage, research, and forecasting, and  
 2) it becomes the reference for later scoring and calibration.

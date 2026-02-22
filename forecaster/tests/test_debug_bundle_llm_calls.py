@@ -50,19 +50,40 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
                 weights_profile TEXT,
                 created_at TIMESTAMP,
                 status TEXT,
-                human_explanation TEXT
+                human_explanation TEXT,
+                model_name TEXT
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE forecasts_raw (
+                run_id TEXT,
+                question_id TEXT,
+                model_name TEXT,
+                month_index INTEGER,
+                bucket_index INTEGER,
+                probability DOUBLE
             )
             """
         )
         con.execute(
             """
             CREATE TABLE llm_calls (
-                component TEXT,
+                call_type TEXT,
                 phase TEXT,
+                provider TEXT,
+                model_id TEXT,
                 model_name TEXT,
-                success BOOLEAN,
+                temperature DOUBLE,
                 run_id TEXT,
                 question_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                prompt_text TEXT,
+                response_text TEXT,
+                error_text TEXT,
                 usage_json TEXT,
                 created_at TIMESTAMP
             )
@@ -108,9 +129,9 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
         con.execute(
             """
             INSERT INTO llm_calls (
-                component, phase, model_name, success, run_id, question_id, usage_json, created_at
+                call_type, phase, provider, model_id, model_name, run_id, question_id, usage_json, created_at
             ) VALUES (
-                'research', 'research_v2', 'gemini-test', TRUE, 'fc_test', 'Q1',
+                'research', 'research_v2', 'google', 'gemini-test', 'gemini-test', 'fc_test', 'Q1',
                 '{"total_tokens": 21}', CURRENT_TIMESTAMP
             )
             """
@@ -130,10 +151,9 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
             }
         ]
 
-        md = build_debug_bundle_markdown(con, "duckdb:///fake.duckdb", "fc_test", questions)
+        md = build_debug_bundle_markdown(con, "duckdb:///fake.duckdb", "fc_test", "hs_test", questions, [])
     finally:
         con.close()
 
-    assert "#### 1.5.2 llm_calls model calls" in md
-    assert "| research | research_v2 | gemini-test | 1 | 1 |" in md
-    assert "llm_calls not run-scoped" not in md
+    assert "### 1.4 LLM calls by phase/provider/model_id (this run)" in md
+    assert "| research_v2 | google | gemini-test | 1 | 0 |" in md

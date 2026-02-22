@@ -13,6 +13,11 @@ from typing import Any, Dict, List, Set
 
 from pythia.web_research.types import EvidencePack, EvidenceSource
 
+try:
+    from anthropic import Anthropic  # type: ignore
+except ImportError:
+    Anthropic = None  # type: ignore
+
 
 def _response_to_dict(resp: Any) -> Dict[str, Any]:
     if isinstance(resp, dict):
@@ -110,9 +115,7 @@ def fetch_via_claude_web_search(
         pack.debug = {"error": "missing_api_key"}
         return pack
 
-    try:
-        from anthropic import Anthropic  # type: ignore
-    except ImportError:
+    if Anthropic is None:
         pack.error = {"type": "missing_dependency", "message": "pip install anthropic to enable Claude web search"}
         pack.debug = {"error": "missing_dependency"}
         return pack

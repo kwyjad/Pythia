@@ -39,6 +39,7 @@ def test_hs_country_report_persisted_when_web_research_enabled(monkeypatch: pyte
         run_id: str | None = None,
         question_id: str | None = None,
         hs_run_id: str | None = None,
+        model_id: str | None = None,
     ):
         calls["query"] = query
         calls["purpose"] = purpose

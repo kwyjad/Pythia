@@ -186,8 +186,16 @@ def collect_rows() -> List[List[str]]:
 
     base = cfg["base_url"]
     page_size = int(cfg["page_size"])
-    since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(cfg["window_days"]))
-    since = since_dt.date().isoformat()
+
+    # Respect RESOLVER_START_ISO if set (e.g. by the backfill workflow),
+    # otherwise fall back to the configured window_days.
+    start_iso = os.getenv("RESOLVER_START_ISO", "").strip()
+    if start_iso:
+        since = start_iso[:10]
+        dbg(f"using RESOLVER_START_ISO={since}")
+    else:
+        since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(cfg["window_days"]))
+        since = since_dt.date().isoformat()
 
     token = os.getenv("GO_API_TOKEN", "").strip()
     headers = {

@@ -35,6 +35,7 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
     from pythia.db.schema import ensure_schema
 
     db_path = Path(tmp_path) / "scenarios_test.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
 
     con = duckdb.connect(str(db_path))
     try:
@@ -102,22 +103,10 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
         )
         con.execute(
             """
-            CREATE TABLE IF NOT EXISTS hs_triage (
-                run_id TEXT,
-                iso3 TEXT,
-                hazard_code TEXT,
-                tier TEXT,
-                triage_score DOUBLE,
-                created_at TIMESTAMP
-            )
-            """
-        )
-        con.execute(
-            """
             INSERT INTO hs_triage (
-                run_id, iso3, hazard_code, tier, triage_score, created_at
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd, created_at
             ) VALUES (
-                'hs_test', 'ETH', 'ACE', 'priority', 0.9, CURRENT_TIMESTAMP
+                'hs_test', 'ETH', 'ACE', 'priority', 0.9, TRUE, CURRENT_TIMESTAMP
             )
             """
         )
@@ -138,7 +127,8 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
             None,
         )
 
-    monkeypatch.setattr(scenario_writer, "call_chat_ms", fake_call_chat_ms)
+    import forecaster.providers as _providers
+    monkeypatch.setattr(_providers, "call_chat_ms", fake_call_chat_ms)
 
     scenario_writer.run_scenarios_for_run("fc_scen")
 
