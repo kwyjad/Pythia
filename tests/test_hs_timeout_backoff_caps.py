@@ -124,5 +124,5 @@ def test_non_hs_retry_after_unclamped(monkeypatch):
 
     assert text == ""
     assert error
-    assert sleep_calls == [800]
-    assert "retry_after_capped" not in usage
+    assert len(sleep_calls) == 1
+    assert 20.0 <= sleep_calls[0] <= 20.5  # 20s global cap + jitter

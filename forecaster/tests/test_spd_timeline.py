@@ -33,5 +33,5 @@ def test_spd_months_match_question_window() -> None:
         resolution_source="EMDAT",
     )
 
-    assert "month_1 = January 2026" in block
-    assert "month_6 = June 2026" in block
+    assert "`month_1` = January 2026" in block
+    assert "`month_6` = June 2026" in block

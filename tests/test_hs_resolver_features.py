@@ -7,7 +7,6 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
-import pythia.db.schema as schema_mod
 from horizon_scanner import horizon_scanner as hs_mod
 
 
@@ -41,20 +40,21 @@ def test_build_resolver_features_handles_acled_month(monkeypatch, tmp_path):
     )
     con.execute(
         """
-        CREATE TABLE emdat_pa (
+        CREATE TABLE facts_resolved (
             iso3 TEXT,
-            shock_type TEXT,
+            hazard_code TEXT,
             ym DATE,
-            pa DOUBLE,
+            metric TEXT,
+            value DOUBLE,
             source_id TEXT
         );
         """
     )
     con.execute(
         """
-        INSERT INTO emdat_pa (iso3, shock_type, ym, pa, source_id) VALUES
-            ('ETH', 'flood', DATE '2024-12-01', 10.0, 'src'),
-            ('ETH', 'heat_wave', DATE '2025-01-01', 2.0, 'src');
+        INSERT INTO facts_resolved (iso3, hazard_code, ym, metric, value, source_id) VALUES
+            ('ETH', 'FL', DATE '2024-12-01', 'affected', 10.0, 'ifrc'),
+            ('ETH', 'HW', DATE '2025-01-01', 'affected', 2.0, 'ifrc');
         """
     )
     con.close()
@@ -62,7 +62,7 @@ def test_build_resolver_features_handles_acled_month(monkeypatch, tmp_path):
     def fake_connect(read_only=False):
         return duckdb.connect(str(db_path), read_only=read_only)
 
-    monkeypatch.setattr(schema_mod, "connect", fake_connect)
+    monkeypatch.setattr(hs_mod, "pythia_connect", fake_connect)
 
     feats = hs_mod._build_resolver_features_for_country("ETH")
     assert "conflict" in feats

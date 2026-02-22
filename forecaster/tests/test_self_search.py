@@ -25,7 +25,7 @@ def test_extract_self_search_query_basic() -> None:
 async def test_spd_self_search_triggers_follow_up(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
 
-    def fake_call_chat_ms(ms, prompt, **_kwargs):
+    async def fake_call_chat_ms(ms, prompt, **_kwargs):
         prompts.append(prompt)
         if len(prompts) == 1:
             return (
@@ -43,6 +43,7 @@ async def test_spd_self_search_triggers_follow_up(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cli, "run_self_search", lambda *args, **kwargs: {"sources": [{"url": "http://example.com"}]})
     monkeypatch.setenv("PYTHIA_FORECASTER_SELF_SEARCH", "1")
     monkeypatch.setenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_MODEL_SELF_SEARCH_ENABLED", "1")
     monkeypatch.setenv("PYTHIA_FORECASTER_SELF_SEARCH_MAX_CALLS_PER_MODEL", "1")
 
     text, usage, error, _ = await cli._call_spd_model_for_spec(
@@ -63,7 +64,7 @@ async def test_spd_self_search_triggers_follow_up(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_spd_self_search_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_call_chat_ms(ms, prompt, **_kwargs):
+    async def fake_call_chat_ms(ms, prompt, **_kwargs):
         return "NEED_WEB_EVIDENCE: more info", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}, None
 
     monkeypatch.setattr(cli, "call_chat_ms", fake_call_chat_ms)

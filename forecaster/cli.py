@@ -254,12 +254,7 @@ HZ_QUERY_MAP = {
     "DI": "DISPLACEMENT",
 }
 
-EMDAT_SHOCK_MAP = {
-    "FL": "flood",
-    "DR": "drought",
-    "TC": "tropical cyclone",
-    "HW": "heat wave",
-}
+NATURAL_HAZARD_CODES = {"FL", "DR", "TC", "HW"}
 
 IDMC_HZ_MAP = {"ACE", "DI"}
 
@@ -595,57 +590,57 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
             return summary
 
         if m == "PA" and hz in {"FL", "DR", "TC", "HW"}:
-            shock = _map_hazard_to_emdat_shock(hazard_code)
             try:
                 rows = con.execute(
                     """
-                    SELECT ym, pa
-                    FROM emdat_pa
+                    SELECT ym, value
+                    FROM facts_resolved
                     WHERE iso3 = ?
-                      AND shock_type = ?
+                      AND hazard_code = ?
+                      AND lower(metric) IN ('affected', 'in_need', 'pa')
                     ORDER BY ym
                     """,
-                    [iso3, shock],
+                    [iso3, hz],
                 ).fetchall()
             except Exception as exc:
                 logging.warning(
-                    "EM-DAT history query failed for %s/%s: %s", iso3, shock, exc
+                    "IFRC history query failed for %s/%s: %s", iso3, hz, exc
                 )
                 return {
-                    "source": "EM-DAT",
+                    "source": "IFRC",
                     "history_length_months": 0,
                     "recent_mean": None,
                     "recent_max": None,
                     "trend": "uncertain",
                     "last_6m_values": [],
                     "data_quality": "low",
-                    "notes": f"EM-DAT history unavailable: {type(exc).__name__}",
+                    "notes": f"IFRC history unavailable: {type(exc).__name__}",
                 }
 
             if not rows:
                 return {
-                    "source": "EM-DAT",
+                    "source": "IFRC",
                     "history_length_months": 0,
                     "recent_mean": None,
                     "recent_max": None,
                     "trend": "uncertain",
                     "last_6m_values": [],
                     "data_quality": "low",
-                    "notes": "No reliable EM-DAT history for this country/hazard; treat base rate as unknown.",
+                    "notes": "No reliable IFRC Montandon history for this country/hazard; treat base rate as unknown.",
                 }
 
             month_to_value = {str(r[0]): r[1] for r in rows}
             month_to_value, dropped_future, unparseable_keys = _sanitize_month_series(month_to_value)
             if not month_to_value:
                 summary_empty = {
-                    "source": "EM-DAT",
+                    "source": "IFRC",
                     "history_length_months": 0,
                     "recent_mean": None,
                     "recent_max": None,
                     "trend": "uncertain",
                     "last_6m_values": [],
                     "data_quality": "low",
-                    "notes": "EM-DAT history was filtered out (future or invalid months).",
+                    "notes": "IFRC history was filtered out (future or invalid months).",
                 }
                 sanity_empty: Dict[str, Any] = {}
                 if dropped_future:
@@ -670,7 +665,7 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                     trend = "flat"
 
             summary = {
-                "source": "EM-DAT",
+                "source": "IFRC",
                 "history_length_months": n,
                 "recent_mean": sum(recent) / len(recent),
                 "recent_max": max(recent),
@@ -679,7 +674,7 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                     {"ym": ym, "value": float(val)} for ym, val in ordered_items[-min(n, 6) :]
                 ],
                 "data_quality": "medium",
-                "notes": "EM-DAT often only records large disasters; treat as a noisy base-rate signal.",
+                "notes": "IFRC Montandon may be sparse for smaller disasters; treat as a noisy base-rate signal.",
             }
             sanity: Dict[str, Any] = {}
             if dropped_future:
@@ -1675,22 +1670,21 @@ def _write_spd_members_v2_to_db(
         except Exception:
             pass
 
-def _load_emdat_pa_history(
+def _load_ifrc_pa_history(
     iso3: str,
     hazard_code: str,
     *,
     months: int = 36,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Load a 36-month EM-DAT 'people affected' history for a given ISO3 +
-    Pythia hazard code.
+    Load a 36-month IFRC Montandon 'people affected' history for a given
+    ISO3 + Pythia hazard code.
 
-    Uses the emdat_pa table as the single source of truth for monthly PA
-    values.
+    Queries facts_resolved (where IFRC Montandon connector data lands)
+    for natural hazard PA metrics.
     """
 
     hz = (hazard_code or "").upper()
-    shock_type = EMDAT_SHOCK_MAP.get(hz, hz.lower())
 
     try:
         con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
@@ -1700,19 +1694,20 @@ def _load_emdat_pa_history(
     try:
         rows = con.execute(
             """
-            SELECT ym, pa, shock_type, COALESCE(source_id, '') AS source_id
-            FROM emdat_pa
+            SELECT ym, value, COALESCE(source_id, '') AS source_id
+            FROM facts_resolved
             WHERE iso3 = ?
-              AND lower(shock_type) = ?
+              AND hazard_code = ?
+              AND lower(metric) IN ('affected', 'in_need', 'pa')
             ORDER BY ym DESC
             LIMIT ?
             """,
-            [iso3, shock_type.lower(), months],
+            [iso3, hz, months],
         ).fetchall()
     except Exception as exc:
         con.close()
         return "", {
-            "error": f"emdat_query_error:{type(exc).__name__}",
+            "error": f"ifrc_query_error:{type(exc).__name__}",
             "history_rows_detail": [],
             "summary_text": "",
         }
@@ -1724,15 +1719,14 @@ def _load_emdat_pa_history(
 
     history: List[Dict[str, Any]] = []
     values: List[float] = []
-    for ym, pa_val, shock_type_val, source_id in rows:
+    for ym, pa_val, source_id in rows:
         ym_str = str(ym)
         v = float(pa_val or 0.0)
         history.append(
             {
                 "ym": ym_str,
                 "value": v,
-                "source": "EM-DAT",
-                "shock_type": shock_type_val,
+                "source": "IFRC",
                 "source_id": source_id,
             }
         )
@@ -1741,7 +1735,7 @@ def _load_emdat_pa_history(
     history_for_table = list(reversed(history))
 
     summary_lines: List[str] = [
-        "### EM-DAT people affected — 36-month history (Resolver)",
+        "### IFRC Montandon people affected — 36-month history (Resolver)",
         "",
         f"- Months available: {len(history)}",
         f"- Min monthly PA: {min(values):,.0f}",
@@ -2022,8 +2016,8 @@ def _load_pa_history_block(
     if m == "PA" and hz in IDMC_HZ_MAP:
         return _load_idmc_pa_history(iso3, hazard_code, months=months)
 
-    if m == "PA" and hz in EMDAT_SHOCK_MAP:
-        return _load_emdat_pa_history(iso3, hazard_code, months=months)
+    if m == "PA" and hz in NATURAL_HAZARD_CODES:
+        return _load_ifrc_pa_history(iso3, hazard_code, months=months)
 
     return "", {"error": "no_mapping", "history_rows_detail": [], "summary_text": ""}
 

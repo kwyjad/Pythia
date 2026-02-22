@@ -398,6 +398,12 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
 
     acled_facts_status, facts_diagnostics = _status_from_facts(conn, "ACLED", acled_facts_clause, [])
     idmc_status, _ = _status_from_facts(conn, "IDMC", "lower(source_id) LIKE ?", ["%idmc%"])
+    ifrc_status, _ = _status_from_facts(
+        conn,
+        "IFRC",
+        "(lower(source_id) LIKE ? OR lower(source_id) LIKE ?)",
+        ["%ifrc%", "%ifrc_montandon%"],
+    )
     emdat_status, _ = _status_from_facts(
         conn,
         "EM-DAT",
@@ -415,7 +421,7 @@ def get_connector_last_updated(conn) -> tuple[list[dict[str, Any]], dict[str, An
         acled_status.setdefault("diagnostics", {})
         acled_status["diagnostics"]["last_updated_source"] = "max(facts_created_at, acled_updated_at)"
 
-    rows = [acled_status, idmc_status, emdat_status]
+    rows = [acled_status, idmc_status, ifrc_status, emdat_status]
 
     diagnostics = facts_diagnostics
     acled_diag = acled_status.get("diagnostics", {})

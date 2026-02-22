@@ -5,8 +5,8 @@
 
 # resolver/ingestion/config/source_priority.yml
 # Highest (top) → lowest (bottom) precedence for monthly STOCK resolution.
-# Active connectors only — EM-DAT retained as historical read-only.
-- ifrc_go        # IFRC Montandon situation reports
+# Active connectors only — EM-DAT retained as historical read-only (replaced by IFRC Montandon).
+- ifrc_go        # IFRC Montandon (active, natural hazard PA: FL, DR, TC, HW)
 - ACLED          # conflict events and fatalities
 - IDMC           # internal displacement (Helix API)
-- EMDAT          # historical read-only (CRED disaster impacts)
+- EMDAT          # historical read-only, no active connector (legacy CRED disaster impacts)

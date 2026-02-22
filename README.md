@@ -286,7 +286,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 ## Known limitations and challenges
 - **Gemini 3 grounding**: grounding support for Gemini 3 preview is subject to provider support and may lag until early 2026.
 - **Retriever fallback**: if retriever calls fail, research can fall back to unverified sources.
-- **EM-DAT sparsity**: historical data gaps can reduce base-rate strength.
+- **IFRC Montandon sparsity**: natural hazard PA data may be sparse for some hazards/countries, reducing base-rate strength.
 - **IDMC month-key issue**: occasionally inconsistent month keys are tolerated and cleaned downstream.
 - **Occasional “200 but ungrounded”**: some web search calls can return success without verified sources.
 

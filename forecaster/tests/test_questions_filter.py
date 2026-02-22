@@ -24,12 +24,12 @@ def test_epoch_loader_prefers_latest_hs_and_scopes_iso3(
 
         con.execute(
             """
-            INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score,
+            INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
                                    drivers_json, regime_shifts_json, data_quality_json, scenario_stub)
             VALUES
-                ('hs_20250101T000000', 'SOM', 'DR', 'watchlist', 0.5, '[]', '[]', '{}', ''),
-                ('hs_20250201T000000', 'SOM', 'DR', 'priority',  0.8, '[]', '[]', '{}', ''),
-                ('hs_20250115T000000', 'ETH', 'DR', 'watchlist', 0.4, '[]', '[]', '{}', '')
+                ('hs_20250101T000000', 'SOM', 'DR', 'watchlist', 0.5, TRUE, '[]', '[]', '{}', ''),
+                ('hs_20250201T000000', 'SOM', 'DR', 'priority',  0.8, TRUE, '[]', '[]', '{}', ''),
+                ('hs_20250115T000000', 'ETH', 'DR', 'watchlist', 0.4, TRUE, '[]', '[]', '{}', '')
             """
         )
 
@@ -78,10 +78,10 @@ def test_loader_defaults_to_hs_iso3s_and_excludes_aco(
 
         con.execute(
             """
-            INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score,
+            INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
                                    drivers_json, regime_shifts_json, data_quality_json, scenario_stub)
             VALUES
-                ('hs_20250101T000000', 'SOM', 'DR', 'priority', 0.7, '[]', '[]', '{}', '')
+                ('hs_20250101T000000', 'SOM', 'DR', 'priority', 0.7, TRUE, '[]', '[]', '{}', '')
             """
         )
 

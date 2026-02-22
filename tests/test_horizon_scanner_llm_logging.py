@@ -97,7 +97,7 @@ def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch
     response_text = f"```json\n{json.dumps(triage_payload)}\n```"
     usage = {"elapsed_ms": 120, "total_tokens": 10}
 
-    async def _fake_call(prompt_text: str, *, run_id: str | None = None):
+    async def _fake_call(prompt_text: str, *, run_id: str | None = None, fallback_specs=None):
         return response_text, usage, None, ModelSpec(name="Test", provider="test", model_id="test-model")
 
     monkeypatch.setattr(horizon_scanner, "_call_hs_model", _fake_call)
@@ -115,11 +115,13 @@ def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch
     finally:
         con.close()
 
-    assert len(llm_rows) == 1, "Expected one hs_triage llm_calls row per country"
-    phase, iso3, hazard_code = llm_rows[0]
-    assert phase == "hs_triage"
-    assert iso3 == "ETH"
-    assert hazard_code == ""
+    assert len(llm_rows) == 2, "Expected two hs_triage llm_calls rows per country (one per pass)"
+    for row in llm_rows:
+        phase, iso3, hazard_code = row
+        assert phase == "hs_triage"
+        assert iso3 == "ETH"
+        assert hazard_code in ("PASS_1", "PASS_2")
 
-    hazard_codes = [row[0] for row in triage_rows]
-    assert hazard_codes == ["DR", "FL"]
+    hazard_codes = {row[0] for row in triage_rows}
+    assert "DR" in hazard_codes
+    assert "FL" in hazard_codes

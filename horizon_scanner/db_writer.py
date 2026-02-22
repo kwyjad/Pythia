@@ -19,45 +19,45 @@ HAZARD_CONFIG = {
         "label": "Flood",
         "class": "Natural",
         "metric_default": "PA",
-        "question_type": "emdat_pa",
+        "question_type": "ifrc_pa",
         "question_template": (
             "How many people will be affected by riverine or flash flooding "
-            "in {country_name} between {start_date} and {end_date}, as reported by EM-DAT?"
+            "in {country_name} between {start_date} and {end_date}, as reported by IFRC Montandon?"
         ),
-        "resolution_source": "EM-DAT",
+        "resolution_source": "IFRC",
     },
     "DR": {
         "label": "Drought",
         "class": "Natural",
         "metric_default": "PA",
-        "question_type": "emdat_pa",
+        "question_type": "ifrc_pa",
         "question_template": (
             "How many people will be affected by drought in {country_name} "
-            "between {start_date} and {end_date}, as reported by EM-DAT?"
+            "between {start_date} and {end_date}, as reported by IFRC Montandon?"
         ),
-        "resolution_source": "EM-DAT",
+        "resolution_source": "IFRC",
     },
     "TC": {
         "label": "Tropical Cyclone",
         "class": "Natural",
         "metric_default": "PA",
-        "question_type": "emdat_pa",
+        "question_type": "ifrc_pa",
         "question_template": (
             "How many people will be affected by tropical cyclones in {country_name} "
-            "between {start_date} and {end_date}, as reported by EM-DAT?"
+            "between {start_date} and {end_date}, as reported by IFRC Montandon?"
         ),
-        "resolution_source": "EM-DAT",
+        "resolution_source": "IFRC",
     },
     "HW": {
         "label": "Heat Wave",
         "class": "Natural",
         "metric_default": "PA",
-        "question_type": "emdat_pa",
+        "question_type": "ifrc_pa",
         "question_template": (
             "How many people will be affected by heat waves in {country_name} "
-            "between {start_date} and {end_date}, as reported by EM-DAT?"
+            "between {start_date} and {end_date}, as reported by IFRC Montandon?"
         ),
-        "resolution_source": "EM-DAT",
+        "resolution_source": "IFRC",
     },
     "ACO": {
         "label": "Armed Conflict Onset",
