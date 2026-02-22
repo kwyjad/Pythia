@@ -190,9 +190,19 @@ def _insert_dataframe(conn, table: str, frame: pd.DataFrame) -> int:
     return len(frame)
 
 
-def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
+def _load_into_db(
+    conn,
+    canonical: pd.DataFrame,
+    *,
+    loaded_sources: list[str] | None = None,
+) -> dict[str, int]:
     init_schema(conn)
     _ensure_facts_raw_table(conn)
+
+    # Determine which sources are being loaded so we only delete *their* rows.
+    if loaded_sources is None:
+        loaded_sources = sorted(canonical["source"].dropna().unique().tolist())
+    LOGGER.info("Loaded sources for scoped delete: %s", loaded_sources)
 
     raw_counts = _insert_dataframe(conn, "facts_raw", canonical[CANONICAL_COLUMNS])
     LOGGER.info("facts_raw inserted rows: %s", raw_counts)
@@ -223,7 +233,10 @@ def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
             "provenance_source": stock["source"],
             "provenance_rank": None,
         })
-        delete_months(conn, "facts_resolved", stock_resolved["ym"].unique())
+        delete_months(
+            conn, "facts_resolved", stock_resolved["ym"].unique(),
+            sources=loaded_sources,
+        )
         resolved_rows = _insert_dataframe(conn, "facts_resolved", stock_resolved)
     else:
         resolved_rows = 0
@@ -245,7 +258,10 @@ def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
             "rebase_flag": 0,
             "delta_negative_clamped": 0,
         })
-        delete_months(conn, "facts_deltas", new_frame["ym"].unique())
+        delete_months(
+            conn, "facts_deltas", new_frame["ym"].unique(),
+            sources=loaded_sources,
+        )
         deltas_rows = _insert_dataframe(conn, "facts_deltas", new_frame)
     LOGGER.info("facts_deltas inserted rows (from canonical new): %s", deltas_rows)
 
@@ -256,10 +272,32 @@ def _load_into_db(conn, canonical: pd.DataFrame) -> dict[str, int]:
     }
 
 
-def delete_months(conn, table: str, months: Iterable[str]) -> None:
+def delete_months(
+    conn,
+    table: str,
+    months: Iterable[str],
+    *,
+    sources: Iterable[str] | None = None,
+) -> None:
+    """Delete rows for the given months, optionally scoped to *sources*.
+
+    When *sources* is provided the DELETE is narrowed to rows whose
+    ``source_id`` matches one of the given values.  This prevents a
+    partial-connector run from wiping rows that belong to other connectors.
+    """
     unique_months = sorted({str(m) for m in months if m})
+    unique_sources = (
+        sorted({str(s) for s in sources if s}) if sources is not None else None
+    )
     for month in unique_months:
-        conn.execute(f"DELETE FROM {table} WHERE ym = ?", [month])
+        if unique_sources:
+            src_ph = ",".join(["?"] * len(unique_sources))
+            conn.execute(
+                f"DELETE FROM {table} WHERE ym = ? AND source_id IN ({src_ph})",
+                [month, *unique_sources],
+            )
+        else:
+            conn.execute(f"DELETE FROM {table} WHERE ym = ?", [month])
 
 
 def _derive_deltas(
@@ -267,16 +305,33 @@ def _derive_deltas(
     period: PeriodMonths,
     *,
     allow_negatives: bool = True,
+    sources: list[str] | None = None,
 ) -> int:
-    placeholders = ",".join(["?"] * len(period.months))
+    """Derive monthly deltas from ``facts_resolved`` stock rows.
+
+    When *sources* is provided, only rows matching those ``source_id``
+    values are read and only those sources' existing deltas are replaced.
+    This prevents a partial-connector run from discarding deltas that
+    belong to connectors not loaded in this run.
+    """
+    month_ph = ",".join(["?"] * len(period.months))
+    params: list[str] = list(period.months)
+
+    if sources:
+        src_ph = ",".join(["?"] * len(sources))
+        source_clause = f" AND source_id IN ({src_ph})"
+        params.extend(sources)
+    else:
+        source_clause = ""
+
     query = f"""
         SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric,
                unit, value, as_of_date, source_id, event_id
         FROM facts_resolved
-        WHERE ym IN ({placeholders})
+        WHERE ym IN ({month_ph}){source_clause}
         ORDER BY iso3, hazard_code, metric, unit, source_id, ym
     """
-    frame = conn.execute(query, list(period.months)).df()
+    frame = conn.execute(query, params).df()
     if frame.empty:
         LOGGER.info(
             "No facts_resolved rows found for period %s; skipping delta derivation",
@@ -323,7 +378,9 @@ def _derive_deltas(
         return 0
 
     output = pd.DataFrame.from_records(records)
-    delete_months(conn, "facts_deltas", output["ym"].unique())
+    delete_months(
+        conn, "facts_deltas", output["ym"].unique(), sources=sources,
+    )
     written = _insert_dataframe(conn, "facts_deltas", output)
     LOGGER.info("facts_deltas inserted rows (derived): %s", written)
     return written
@@ -428,14 +485,19 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     try:
         canonical = _read_canonical_dir(canonical_dir)
-        counts = _load_into_db(conn, canonical)
+        loaded_sources = sorted(
+            canonical["source"].dropna().unique().tolist()
+        )
+        LOGGER.info("Sources in canonical data: %s", loaded_sources)
+        counts = _load_into_db(conn, canonical, loaded_sources=loaded_sources)
         LOGGER.info("Loaded canonical counts: %s", counts)
         prioritized = resolve_sources(conn)
         LOGGER.info(
             "Applied source resolution: %s prioritized rows", prioritized
         )
         derived = _derive_deltas(
-            conn, period, allow_negatives=bool(args.allow_negatives)
+            conn, period, allow_negatives=bool(args.allow_negatives),
+            sources=loaded_sources,
         )
         LOGGER.info("Derived %s delta rows for period %s", derived, period.label)
         export_dir = Path(args.snapshots_root).expanduser().resolve() / args.period
