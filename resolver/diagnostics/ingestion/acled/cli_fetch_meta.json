@@ -1,0 +1,18 @@
+{
+  "base_url": "https://acleddata.com/api/acled/read",
+  "countries": null,
+  "end": "2023-02-28",
+  "fields_param": true,
+  "fields_value": "event_date|iso3|country|fatalities",
+  "page_size": 5000,
+  "params_keys": [
+    "_format",
+    "event_date",
+    "event_date_where",
+    "fields",
+    "limit",
+    "page"
+  ],
+  "result_rows": 2,
+  "start": "2023-02-01"
+}
