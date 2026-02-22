@@ -611,7 +611,7 @@ jobs:
             --out "${CANONICAL_DIR}" \
             --sources ifrc_go,acled,idmc \
             --period "${PERIOD_LABEL}" \
-            --log-level "${LOG_LEVEL:-INFO}" || true
+            --log-level "${LOG_LEVEL:-INFO}"
 
           if python -m resolver.tools.load_and_derive \
             --period "${PERIOD_LABEL}" \
