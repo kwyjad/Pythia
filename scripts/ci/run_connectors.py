@@ -11,6 +11,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -387,10 +388,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         rc = try_with_optional_debug(cmd, log_path, connector_env)
         status = "ok" if rc == 0 else "error"
         reason = None if rc == 0 else f"exit code {rc}"
+        written_rows = 0
+        try:
+            log_text = log_path.read_text(encoding="utf-8")
+            m = re.search(r"rows=(\d+)", log_text)
+            if m:
+                written_rows = int(m.group(1))
+        except Exception:
+            pass
         result = diagnostics_finalize_run(
             diagnostics_ctx,
             status,
             reason=reason,
+            counts={"fetched": written_rows, "normalized": written_rows, "written": written_rows},
             extras={
                 "exit_code": rc,
                 "log_path": str(log_path),
