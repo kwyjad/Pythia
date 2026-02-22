@@ -1,3 +1,2 @@
-dtmapi==0.1.5
 pytest-timeout==2.3.1
 pytest-xdist==3.6.1

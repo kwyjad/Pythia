@@ -63,8 +63,15 @@ def test_runner_writes_to_staging_root(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setenv("RESOLVER_STAGING_DIR", str(base_dir))
     monkeypatch.setenv("RESOLVER_START_ISO", "2025-07-01")
     monkeypatch.setenv("RESOLVER_END_ISO", "2025-09-30")
+    monkeypatch.setenv("ACLED_REFRESH_TOKEN", "fake-token-for-test")
+    # Clear RESOLVER_OUTPUT_DIR which may have been leaked by other tests
+    # (e.g. run_all_stubs.main() sets os.environ directly)
+    monkeypatch.delenv("RESOLVER_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("RESOLVER_OUTPUT_PATH", raising=False)
+    # Reset STAGING which may have been mutated by other tests
+    monkeypatch.setattr(run_all_stubs, "STAGING", run_all_stubs.ROOT.parent / "staging")
 
-    connector_names = ["ifrc_go_client.py", "ipc_client.py"]
+    connector_names = ["ifrc_go_client.py", "acled_client.py"]
     specs: list[run_all_stubs.ConnectorSpec] = []
     writer_map: dict[str, tuple[Path, list[list[str]]]] = {}
 
@@ -114,6 +121,7 @@ def test_runner_writes_to_staging_root(tmp_path: Path, monkeypatch: pytest.Monke
 
     monkeypatch.setattr(run_all_stubs, "_build_specs", fake_build_specs)
     monkeypatch.setattr(run_all_stubs, "_invoke_connector", fake_invoke)
+    monkeypatch.setattr(run_all_stubs, "_should_skip", lambda filename: None)
 
     exit_code = run_all_stubs.main([])
     assert exit_code == 0

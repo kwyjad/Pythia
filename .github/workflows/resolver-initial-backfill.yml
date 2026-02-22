@@ -22,7 +22,7 @@ concurrency:
         required: false
         default: "false"
       only_connector:
-        description: "Optional connector name for --only (e.g. dtm_client)"
+        description: "Optional connector name for --only (e.g. acled, idmc)"
         required: false
         default: ""
       log_level:
@@ -44,30 +44,6 @@ concurrency:
           - allow
           - warn
           - fail
-      no_date_filter:
-        description: "DTM: disable the date window filter (sanity check)"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
-      fake_on_timeout:
-        description: "Write clearly-marked fake DTM rows if network times out"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
-      force_fake:
-        description: "Force fake DTM rows (skip network)"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
   schedule:
     # Run at 03:00 UTC on the 15th of each month
     - cron: "0 3 15 * *"
@@ -105,22 +81,15 @@ jobs:
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
       ACLED_ACCESS_KEY: ${{ secrets.ACLED_ACCESS_KEY }}
-      DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
-      EMDAT_NETWORK: "1"
-      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
-      EMDAT_SOURCE: "api"  # explicit override (safety)
       IDMC_API_TOKEN: ${{ secrets.IDMC_API_TOKEN }}
       IDMC_REQ_PER_SEC: 0.3
       IDMC_MAX_CONCURRENCY: 1
       IDMC_ALLOW_HDX_FALLBACK: "1"
       IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
-      CONNECTOR_LIST: dtm_client,emdat_client
       RESOLVER_OUTPUT_DIR: resolver/staging
       LOG_LEVEL: ${{ inputs.log_level }}
       EMPTY_POLICY: ${{ inputs.empty_policy }}
-      NO_DATE_FILTER: ${{ inputs.no_date_filter }}
-      DTM_CONFIG_PATH: resolver/config/dtm.yml
       IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
       IDMC_HELIX_ENV: RELEASE
       RESOLVER_EXPORT_ENABLE_FLOW: "1"
@@ -143,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -c constraints-ci.txt -e '.[db,connectors]'
+          pip install -c constraints-ci.txt -e '.[db,ingestion]'
 
       - name: Compute backfill window
         id: window
@@ -325,12 +294,6 @@ jobs:
           rm -rf resolver/staging || true
           rm -rf diagnostics/ingestion || true
 
-      - name: Probe DTM reachability
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m scripts.ci.probe_dtm_reachability || true
-
       - name: Probe IDMC reachability
         shell: bash
         run: |
@@ -373,7 +336,6 @@ jobs:
           IDMC_HTTP_VERIFY: "true"
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"
-          RESOLVER_SKIP_DTM: "1"
         shell: bash
         run: |
           set -euo pipefail
@@ -382,70 +344,20 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm}
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-          DTM_ARGS=""
-          if [ "${EMPTY_POLICY:-allow}" = "fail" ]; then
-            DTM_ARGS="--strict-empty"
-          fi
-          if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
-            if [ -n "${DTM_ARGS}" ]; then
-              DTM_ARGS="${DTM_ARGS} --no-date-filter"
-            else
-              DTM_ARGS="--no-date-filter"
-            fi
-          fi
-          if [ "${EMPTY_POLICY:-allow}" = "allow" ]; then
-            if [ -n "${DTM_ARGS}" ]; then
-              DTM_ARGS="${DTM_ARGS} --soft-timeouts"
-            else
-              DTM_ARGS="--soft-timeouts"
-            fi
-          fi
-          CMD_ARGS=(--extra-args "dtm_client=${DTM_ARGS}")
-          if [ "${NO_DATE_FILTER:-false}" = "true" ]; then
-            CMD_ARGS+=(--extra-env "dtm_client=DTM_NO_DATE_FILTER=1")
-          fi
-          if [ "${EMPTY_POLICY:-allow}" = "allow" ]; then
-            CMD_ARGS+=(--extra-env "dtm_client=DTM_SOFT_TIMEOUTS=1")
-          fi
-          if [ "${{ inputs.fake_on_timeout }}" = "true" ]; then
-            CMD_ARGS+=(--extra-env "dtm_client=DTM_FAKE_ON_TIMEOUT=1")
-          fi
-          if [ "${{ inputs.force_fake }}" = "true" ]; then
-            CMD_ARGS+=(--extra-env "dtm_client=DTM_FORCE_FAKE=1")
-          fi
-          # While diagnosing IDMC runs, you can append --debug via:
-          # CMD_ARGS+=(--extra-args "idmc=--debug")
           CONNECTOR_EXIT=0
-          python -m scripts.ci.run_connectors "${CMD_ARGS[@]}" || CONNECTOR_EXIT=$?
+          python -m scripts.ci.run_connectors || CONNECTOR_EXIT=$?
           exit ${CONNECTOR_EXIT}
-
-      - name: UNHCR ODP → DuckDB (odp_timeseries_raw)
-        if: ${{ false }} # Disabled: connector not in current backfill set (DTM, IDMC, EM-DAT, ACLED only).
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          python -m resolver.cli.odp_json_to_duckdb \
-            --db "${BACKFILL_DB_PATH}" \
-            --config "resolver/ingestion/config/unhcr_odp.yml" \
-            --normalizers "resolver/ingestion/config/odp_normalizers.yml" \
-            --log-level "${LOG_LEVEL:-INFO}"
-        continue-on-error: true
 
       - name: Ensure diagnostics dirs exist (post-run)
         if: always()
         run: |
-          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,dtm,export_preview}
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
           : > diagnostics/ingestion/raw/KEEP.txt
           : > diagnostics/ingestion/metrics/KEEP.txt
           : > diagnostics/ingestion/samples/KEEP.txt
           : > diagnostics/ingestion/export_preview/KEEP.txt
-          : > diagnostics/ingestion/dtm/KEEP.txt
 
       - name: Prepare diagnostics dir
         run: mkdir -p diagnostics/ingestion
@@ -467,11 +379,10 @@ jobs:
       - name: Prime ingestion artifact placeholders
         if: always()
         run: |
-          mkdir -p diagnostics/ingestion/{raw,metrics,samples,dtm,export_preview}
+          mkdir -p diagnostics/ingestion/{raw,metrics,samples,export_preview}
           : > diagnostics/ingestion/raw/KEEP.txt
           : > diagnostics/ingestion/metrics/KEEP.txt
           : > diagnostics/ingestion/samples/KEEP.txt
-          : > diagnostics/ingestion/dtm/KEEP.txt
           : > diagnostics/ingestion/export_preview/KEEP.txt
 
       - name: Upload connector logs
@@ -490,30 +401,6 @@ jobs:
           path: |
             diagnostics/ingestion/
           retention-days: 30
-
-      - name: Upload DTM raw diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtm-diagnostics-raw
-          path: diagnostics/ingestion/raw/
-          if-no-files-found: warn
-
-      - name: Upload DTM metrics diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtm-diagnostics-metrics
-          path: diagnostics/ingestion/metrics/
-          if-no-files-found: warn
-
-      - name: Upload DTM samples diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtm-diagnostics-samples
-          path: diagnostics/ingestion/samples/
-          if-no-files-found: warn
 
       - name: Upload ingestion outputs
         uses: actions/upload-artifact@v4
@@ -563,7 +450,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -c constraints-ci.txt -e '.[db,connectors]'
+          pip install -c constraints-ci.txt -e '.[db,ingestion]'
 
       - name: Download ingestion bundle
         uses: actions/download-artifact@v4
@@ -641,7 +528,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install -e .[db]
+          pip install -c constraints-ci.txt -e '.[db,ingestion]'
 
       - name: Download ingestion bundle
         uses: actions/download-artifact@v4
@@ -685,27 +572,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run EM-DAT PA backfill into resolver.duckdb
-        if: ${{ always() && env.EMDAT_API_KEY != '' }}
-        env:
-          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
-        run: |
-          set -euo pipefail
-
-          DB_URL="${RESOLVER_DB_URL:-duckdb:///${GITHUB_WORKSPACE}/data/resolver.duckdb}"
-
-          END_ISO="$(date -u +%Y-%m-%d)"
-          END_YEAR="${END_ISO%%-*}"
-          START_YEAR=$((END_YEAR - 5))
-
-          echo "Running EM-DAT PA backfill from ${START_YEAR} to ${END_YEAR} into ${DB_URL}"
-          python -m resolver.cli.emdat_to_duckdb \
-            --from "${START_YEAR}" \
-            --to "${END_YEAR}" \
-            --db "${DB_URL}" \
-            --network
-
-      - name: Export canonical facts
+      - name: Load, derive, and export to DuckDB
         run: |
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
@@ -713,52 +580,57 @@ jobs:
             export PYTHONDEVMODE=1
             export PYTHONWARNINGS=default
           fi
-          mkdir -p resolver/exports/backfill
           mkdir -p diagnostics/ingestion
           python -m scripts.ci.append_stage_to_summary \
-            --section "Derive-freeze stage: Export canonical facts (start)" \
+            --section "Derive-freeze stage: Load and derive (start)" \
             --status start || true
-          if python -m resolver.tools.export_facts \
+
+          # Determine period label from backfill window
+          PERIOD_LABEL="$(python -c "
+          import os, datetime as dt
+          s = os.environ.get('BACKFILL_START_ISO','')
+          e = os.environ.get('BACKFILL_END_ISO','')
+          if s and e:
+              sd = dt.date.fromisoformat(s[:10])
+              ed = dt.date.fromisoformat(e[:10])
+              sq = (sd.month-1)//3+1
+              eq = (ed.month-1)//3+1
+              if sd.year==ed.year and sq==eq:
+                  print(f'{sd.year}Q{sq}')
+              else:
+                  print(f'{s[:10]}_{e[:10]}')
+          else:
+              print('unknown')
+          ")"
+
+          # Normalize raw staging CSVs → canonical 12-column schema
+          CANONICAL_DIR="resolver/staging/${PERIOD_LABEL}/canonical"
+          mkdir -p "${CANONICAL_DIR}"
+          python -m resolver.transform.normalize \
             --in resolver/staging \
-            --out resolver/exports/backfill \
-            --config resolver/tools/export_config.yml \
-            --write-db 1 \
-            --db "${{ env.RESOLVER_DB_URL }}" \
-            --append-summary diagnostics/ingestion/summary.md; then
+            --out "${CANONICAL_DIR}" \
+            --sources ifrc_go,acled,idmc \
+            --period "${PERIOD_LABEL}" \
+            --log-level "${LOG_LEVEL:-INFO}" || true
+
+          if python -m resolver.tools.load_and_derive \
+            --period "${PERIOD_LABEL}" \
+            --staging-root resolver/staging \
+            --snapshots-root data/snapshots \
+            --db "${BACKFILL_DB_PATH}" \
+            --allow-negatives 1; then
             python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Export canonical facts (end)" \
+              --section "Derive-freeze stage: Load and derive (end)" \
               --status success || true
           else
             python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Export canonical facts (failed)" \
+              --section "Derive-freeze stage: Load and derive (failed)" \
               --status failed || true
             exit 1
           fi
-
-      - name: Load IDMC facts into DuckDB (auxiliary)
         env:
-          RESOLVER_WRITE_DB: "1"
-          RESOLVER_WRITE_TO_DUCKDB: "1"
-          RESOLVER_EXPORT_ENABLE_IDMC: "1"
-          WRITE_TO_DUCKDB: "1"
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          if [ -d "resolver/staging/idmc" ]; then
-            mkdir -p diagnostics/ingestion/export_preview
-            python -m resolver.cli.idmc_to_duckdb \
-                --staging-dir resolver/staging/idmc \
-                --out diagnostics/ingestion/export_preview \
-                --db "${RESOLVER_DB_URL}" \
-                --write-db \
-                --append-summary diagnostics/ingestion/summary.md
-          else
-            echo "ℹ️ No resolver/staging/idmc directory; skipping auxiliary IDMC→DB step."
-          fi
+          BACKFILL_START_ISO: ${{ needs.ingest.outputs.start_iso }}
+          BACKFILL_END_ISO: ${{ needs.ingest.outputs.end_iso }}
 
       - name: Verify DuckDB counts
         env:

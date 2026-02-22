@@ -5,6 +5,8 @@ from typing import Generator
 
 import pytest
 import yaml
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 duckdb = pytest.importorskip("duckdb")

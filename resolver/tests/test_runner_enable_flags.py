@@ -15,23 +15,28 @@ def _prepare_runner(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("RESOLVER_FORCE_ENABLE", raising=False)
     monkeypatch.delenv("RESOLVER_INCLUDE_STUBS", raising=False)
     monkeypatch.delenv("RESOLVER_INGESTION_MODE", raising=False)
+    monkeypatch.delenv("RESOLVER_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("RESOLVER_STAGING_DIR", raising=False)
+    monkeypatch.delenv("RESOLVER_OUTPUT_PATH", raising=False)
 
     import resolver.ingestion.run_all_stubs as run_all_stubs
 
     module = importlib.reload(run_all_stubs)
 
     monkeypatch.setattr(module, "ROOT", tmp_path)
-    module.CONFIG_DIR = tmp_path / "config"
-    module.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    module.LOGS_DIR = tmp_path / "logs"
-    module.STAGING = tmp_path / "staging"
-    module.STAGING.mkdir(parents=True, exist_ok=True)
-    module.CONFIG_OVERRIDES = {
-        "wfp_mvam": module.CONFIG_DIR / "wfp_mvam_sources.yml",
-    }
-    module.SUMMARY_TARGETS = {}
-    module.REAL = ["wfp_mvam_client.py"]
-    module.STUBS = []
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(module, "LOGS_DIR", tmp_path / "logs")
+    staging = tmp_path / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(module, "STAGING", staging)
+    monkeypatch.setattr(module, "CONFIG_OVERRIDES", {
+        "wfp_mvam": config_dir / "wfp_mvam_sources.yml",
+    })
+    monkeypatch.setattr(module, "SUMMARY_TARGETS", {})
+    monkeypatch.setattr(module, "REAL", ["wfp_mvam_client.py"])
+    monkeypatch.setattr(module, "STUBS", [])
 
     base_logger = logging.getLogger("resolver.ingestion.runner.test")
     base_logger.handlers.clear()

@@ -14,7 +14,6 @@ from typing import Any, Mapping, Optional, Sequence
 _ENV_DEFAULTS: Mapping[str, str] = {
     "IDMC_NETWORK_MODE": "fixture",
     "IDMC_ALLOW_HDX_FALLBACK": "0",
-    "DTM_SOFT_TIMEOUTS": "1",
     "PYTEST_PROC_TIMEOUT": "60",
 }
 

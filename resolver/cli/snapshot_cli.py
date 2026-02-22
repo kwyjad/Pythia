@@ -3,7 +3,12 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Resolver snapshot orchestration CLI."""
+"""Resolver snapshot orchestration CLI.
+
+Uses the new connector-based pipeline (``resolver.tools.run_pipeline``)
+to fetch, validate, enrich, resolve precedence, compute deltas, and
+optionally write to DuckDB — then freezes a monthly snapshot.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,6 @@ import argparse
 import calendar
 import datetime as dt
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -20,17 +24,15 @@ from resolver.tools.build_forecaster_features import (
     FeatureBuildError,
     build_features as build_forecaster_features,
 )
-from resolver.tools.export_facts import (
-    DEFAULT_CONFIG as DEFAULT_EXPORT_CONFIG,
-    ExportError,
-    export_facts,
-)
 from resolver.tools.freeze_snapshot import SnapshotError, freeze_snapshot
+from resolver.tools.run_pipeline import PipelineResult, run_pipeline
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_STAGING = ROOT / "staging"
-DEFAULT_EXPORTS = ROOT / "exports"
 DEFAULT_SNAPSHOTS = ROOT / "snapshots"
+
+
+class PipelineError(Exception):
+    """Raised when the pipeline fails."""
 
 
 def _parse_bool_flag(value: str | bool | None) -> Optional[bool]:
@@ -56,95 +58,35 @@ def _month_cutoff(ym: str) -> str:
     return f"{year:04d}-{month:02d}-{last_day:02d}"
 
 
-def _run_subprocess(args: list[str]) -> None:
-    completed = subprocess.run(args)
-    if completed.returncode != 0:
-        raise SnapshotError(
-            f"Command failed ({completed.returncode}): {' '.join(args)}"
-        )
-
-
-def _validate_facts(facts_path: Path) -> None:
-    _run_subprocess([
-        sys.executable,
-        "-m",
-        "resolver.tools.validate_facts",
-        "--facts",
-        str(facts_path),
-    ])
-
-
 def make_monthly(args: argparse.Namespace) -> int:
     ym = args.ym
-    cutoff = _month_cutoff(ym)
+    _month_cutoff(ym)  # validate format
 
-    staging = Path(args.staging)
-    exports_dir = Path(args.exports_dir)
     snapshots_dir = Path(args.outdir)
-    export_cfg = Path(args.export_config)
     write_db = _parse_bool_flag(args.write_db)
     db_url = args.db_url
 
-    if not staging.exists():
-        raise SnapshotError(f"Staging path not found: {staging}")
-    exports_dir.mkdir(parents=True, exist_ok=True)
+    connector_names = args.connectors or None
+    dry_run = write_db is False or (write_db is None and not db_url)
+
     snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-    export_result = export_facts(
-        inp=staging,
-        config_path=export_cfg,
-        out_dir=exports_dir,
-        write_db=write_db,
-        db_url=db_url,
+    # --- Run the new connector-based pipeline ---
+    pipeline_result: PipelineResult = run_pipeline(
+        db_url=db_url if not dry_run else None,
+        connectors=connector_names,
+        dry_run=dry_run,
     )
 
-    _validate_facts(export_result.csv_path)
+    if pipeline_result.total_facts == 0:
+        raise PipelineError("Pipeline produced 0 facts — nothing to snapshot")
 
-    _run_subprocess(
-        [
-            sys.executable,
-            "-m",
-            "resolver.tools.precedence_engine",
-            "--facts",
-            str(export_result.csv_path),
-            "--cutoff",
-            cutoff,
-            "--outdir",
-            str(exports_dir),
-        ]
-    )
+    errors = [cr for cr in pipeline_result.connector_results if cr.status == "error"]
+    if errors:
+        names = ", ".join(cr.name for cr in errors)
+        print(f"⚠️  Connectors with errors: {names}", file=sys.stderr)
 
-    resolved_csv = exports_dir / "resolved.csv"
-    if not resolved_csv.exists():
-        raise SnapshotError(f"precedence_engine did not produce {resolved_csv}")
-
-    deltas_csv = exports_dir / "deltas.csv"
-    _run_subprocess(
-        [
-            sys.executable,
-            "-m",
-            "resolver.tools.make_deltas",
-            "--resolved",
-            str(resolved_csv),
-            "--out",
-            str(deltas_csv),
-        ]
-    )
-
-    if not deltas_csv.exists():
-        raise SnapshotError("make_deltas did not produce deltas.csv")
-
-    snapshot = freeze_snapshot(
-        facts=export_result.csv_path,
-        month=ym,
-        outdir=snapshots_dir,
-        overwrite=args.overwrite,
-        deltas=deltas_csv,
-        resolved_csv=resolved_csv,
-        write_db=write_db,
-        db_url=db_url,
-    )
-
+    # --- Build forecaster features ---
     try:
         features_frame = build_forecaster_features(
             snapshots_dir=snapshots_dir,
@@ -153,13 +95,12 @@ def make_monthly(args: argparse.Namespace) -> int:
     except FeatureBuildError as exc:
         raise SnapshotError(f"Failed to build resolver features: {exc}") from exc
 
-    manifest_data = json.loads(snapshot.manifest.read_text(encoding="utf-8"))
-    resolved_rows = manifest_data.get("resolved_rows", manifest_data.get("rows", 0))
-    print("✅ Monthly snapshot complete")
-    print(f"Month: {snapshot.ym}")
-    print(f"Exports dir: {exports_dir}")
-    print(f"Snapshot dir: {snapshot.out_dir}")
-    print(f"Resolved rows: {resolved_rows}")
+    print("✅ Monthly pipeline complete")
+    print(f"Month: {ym}")
+    print(f"Total facts: {pipeline_result.total_facts}")
+    print(f"Resolved rows: {pipeline_result.resolved_rows}")
+    print(f"Delta rows: {pipeline_result.delta_rows}")
+    print(f"DB written: {pipeline_result.db_written}")
     print(f"Resolver features rows: {len(features_frame)}")
     return 0
 
@@ -195,18 +136,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     make = subparsers.add_parser(
         "make-monthly",
-        help="Export, validate, and freeze the monthly snapshot",
+        help="Run pipeline connectors, resolve, and snapshot",
     )
     make.add_argument("--ym", required=True, help="Target year-month (YYYY-MM)")
     make.add_argument(
-        "--staging",
-        default=str(DEFAULT_STAGING),
-        help="Path to staging inputs for export_facts",
-    )
-    make.add_argument(
-        "--exports-dir",
-        default=str(DEFAULT_EXPORTS),
-        help="Directory for intermediate exports",
+        "--connectors",
+        nargs="*",
+        default=None,
+        help="Run only these connectors (default: all registered)",
     )
     make.add_argument(
         "--outdir",
@@ -214,15 +151,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Snapshot base directory",
     )
     make.add_argument(
-        "--export-config",
-        default=str(DEFAULT_EXPORT_CONFIG),
-        help="Path to export_config.yml",
-    )
-    make.add_argument(
         "--write-db",
         default=None,
         choices=["0", "1"],
-        help="Set to 1 or 0 to force-enable or disable DuckDB writes (defaults to auto via RESOLVER_DB_URL)",
+        help="Set to 1 or 0 to force-enable or disable DuckDB writes",
     )
     make.add_argument(
         "--db-url",
@@ -259,7 +191,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
     try:
         return func(args)
-    except (SnapshotError, ExportError) as exc:
+    except (SnapshotError, PipelineError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

@@ -11,7 +11,6 @@ import pytest
 pytest.importorskip("duckdb")
 
 from resolver.db import duckdb_io
-from resolver.tools import export_facts, freeze_snapshot
 
 
 def _basic_facts_frame() -> pd.DataFrame:
@@ -102,65 +101,6 @@ def test_init_schema_creates_all_tables_and_keys(tmp_path: Path) -> None:
         duckdb_io.init_schema(conn)
     finally:
         conn.close()
-
-@pytest.mark.legacy_freeze
-@pytest.mark.xfail(
-    reason="Legacy freeze_snapshot pipeline is retired and replaced by DB-backed snapshot builder."
-)
-def test_dual_writes_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    db_path = tmp_path / "resolver.duckdb"
-    monkeypatch.setenv("RESOLVER_DB_URL", f"duckdb:///{db_path}")
-
-    conn = duckdb_io.get_db(str(db_path))
-    duckdb_io.init_schema(conn)
-    conn.close()
-
-    facts = _basic_facts_frame()
-
-    export_facts._maybe_write_to_db(facts_resolved=facts)
-
-    manifest = {
-        "created_at_utc": "2024-01-31T00:00:00Z",
-        "source_commit_sha": "abc123",
-        "rows": len(facts),
-    }
-    facts_out = tmp_path / "facts.parquet"
-
-    freeze_snapshot._maybe_write_db(
-        ym="2024-01",
-        facts_df=facts,
-        validated_facts_df=facts,
-        preview_df=facts,
-        resolved_df=facts,
-        deltas_df=None,
-        manifest=manifest,
-        facts_out=facts_out,
-        deltas_out=None,
-    )
-    freeze_snapshot._maybe_write_db(
-        ym="2024-01",
-        facts_df=facts,
-        validated_facts_df=facts,
-        preview_df=facts,
-        resolved_df=facts,
-        deltas_df=None,
-        manifest=manifest,
-        facts_out=facts_out,
-        deltas_out=None,
-    )
-
-    conn = duckdb_io.get_db(str(db_path))
-    facts_rows = conn.execute(
-        "SELECT COUNT(*) FROM facts_resolved WHERE ym = '2024-01'"
-    ).fetchone()[0]
-    snapshots_rows = conn.execute(
-        "SELECT COUNT(*) FROM snapshots WHERE ym = '2024-01'"
-    ).fetchone()[0]
-    conn.close()
-
-    assert facts_rows == 2
-    assert snapshots_rows == 1
-
 
 def test_semantics_canonicalisation(tmp_path: Path) -> None:
     db_path = tmp_path / "semantics.duckdb"

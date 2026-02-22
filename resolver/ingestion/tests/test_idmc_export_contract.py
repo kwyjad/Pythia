@@ -57,7 +57,7 @@ def test_build_resolution_ready_facts_contract():
     assert len(facts) == 2
     assert (facts["metric"] == FLOW_METRIC).all()
     assert (facts["series_semantics"] == FLOW_SERIES_SEMANTICS).all()
-    assert (facts["source"] == "IDMC").all()
+    assert (facts["source"] == "idmc_idu").all()
     assert not facts.duplicated(["iso3", "as_of_date", "metric"]).any()
     assert (facts["value"] >= 0).all()
 

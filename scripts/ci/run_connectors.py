@@ -40,15 +40,8 @@ from resolver.ingestion.diagnostics_emitter import (
 
 DEFAULT_CONNECTORS: List[str] = [
     "acled_client",
-    "dtm_client",
     "ifrc_go_client",
     "idmc",
-    "ipc_client",
-    "reliefweb_client",
-    "unhcr_client",
-    "unhcr_odp_client",
-    "wfp_mvam_client",
-    "who_phe_client",
 ]
 
 _IDMC_DEFAULT_ENV = {

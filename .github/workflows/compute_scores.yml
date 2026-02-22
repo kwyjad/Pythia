@@ -8,7 +8,7 @@ name: Pythia — Compute SPD Scores
 
 on:
   workflow_run:
-    workflows: ["Resolver — Initial Backfill"]
+    workflows: ["Pythia — Compute Resolutions"]
     types: [completed]
 
   # Optional manual trigger

@@ -19,13 +19,6 @@ from . import _synthetic_testdata
 from resolver.tests.fixtures.bootstrap_fast_exports import FastExports, build_fast_exports
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
-    """Ensure DTM integration tests run unless explicitly skipped."""
-    skip_value = os.environ.get("RESOLVER_SKIP_DTM")
-    if skip_value is None or skip_value.lower() not in {"1", "true", "yes"}:
-        os.environ.pop("RESOLVER_SKIP_DTM", None)
-
-
 @pytest.fixture(scope="session", autouse=True)
 def _fast_tests_offline_env() -> None:
     """Default fast-test runs to offline-friendly settings and diagnostics."""
@@ -37,7 +30,6 @@ def _fast_tests_offline_env() -> None:
         "IDMC_ALLOW_HDX_FALLBACK": "0",
         "IDMC_TEST_NO_SLEEP": "1",
         "IDMC_HELIX_CLIENT_ID": "",
-        "DTM_SOFT_TIMEOUTS": "1",
         "PYTEST_PROC_TIMEOUT": "60",
     }
     for key, value in defaults.items():
@@ -251,12 +243,6 @@ def fast_staging_dir() -> Path:
     if not staging_dir.exists():
         pytest.skip("staging fixtures unavailable")
     return staging_dir
-
-
-@pytest.fixture(autouse=True)
-def _unset_skip_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure per-test environments do not inherit RESOLVER_SKIP_DTM."""
-    monkeypatch.delenv("RESOLVER_SKIP_DTM", raising=False)
 
 
 if os.environ.get("RUN_EXPORTS_TESTS") == "1":

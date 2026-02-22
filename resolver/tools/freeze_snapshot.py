@@ -61,14 +61,6 @@ from resolver.common import get_logger
 from resolver.helpers.series_semantics import normalize_series_semantics
 from resolver.tools.schema_validate import load_schema
 
-try:
-    from resolver.tools.export_facts import (
-        _prepare_resolved_for_db as exporter_prepare_resolved_for_db,
-        _prepare_deltas_for_db as exporter_prepare_deltas_for_db,
-    )
-except Exception:  # pragma: no cover - defensive: fall back to local implementations
-    exporter_prepare_resolved_for_db = None  # type: ignore
-    exporter_prepare_deltas_for_db = None  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[1]      # .../resolver
 REPO_ROOT = ROOT.parent
@@ -425,14 +417,10 @@ def _fallback_prepare_deltas_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame 
 
 
 def _prepare_resolved_frame_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
-    if callable(exporter_prepare_resolved_for_db):  # type: ignore[arg-type]
-        return exporter_prepare_resolved_for_db(df)
     return _fallback_prepare_resolved_for_db(df)
 
 
 def _prepare_deltas_frame_for_db(df: "pd.DataFrame | None") -> "pd.DataFrame | None":
-    if callable(exporter_prepare_deltas_for_db):  # type: ignore[arg-type]
-        return exporter_prepare_deltas_for_db(df)
     return _fallback_prepare_deltas_for_db(df)
 
 def run_validator(facts_path: Path) -> None:

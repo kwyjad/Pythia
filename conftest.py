@@ -111,6 +111,7 @@ def _prepare_worker_db(base_url: str | None, workerid: Optional[str]) -> str | N
 
 if XDIST_AVAILABLE:
 
+    @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(node):  # pragma: no cover - xdist only
         base_url = os.environ.get("RESOLVER_DB_URL")
         node.workerinput["resolver_db_url_base"] = base_url

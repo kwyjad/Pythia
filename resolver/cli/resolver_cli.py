@@ -70,10 +70,7 @@ if os.getenv("RESOLVER_DEBUG") == "1":
 
 DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
 
-_SUBCOMMANDS: dict[str, str] = {
-    "idmc-to-duckdb": "resolver.cli.idmc_to_duckdb",
-    "emdat-to-duckdb": "resolver.cli.emdat_to_duckdb",
-}
+_SUBCOMMANDS: dict[str, str] = {}
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"

@@ -64,8 +64,8 @@ def test_resolve_sources_prefers_configured_priority(tmp_path):
                     "as_of": "2024-01-15",
                     "as_of_date": "2024-01-15",
                     "publication_date": "2024-01-20",
-                    "publisher": "IPC",
-                    "source_id": "IPC",
+                    "publisher": "ACLED",
+                    "source_id": "ACLED",
                     "source_type": None,
                     "source_url": None,
                     "doc_title": None,
@@ -91,8 +91,8 @@ def test_resolve_sources_prefers_configured_priority(tmp_path):
                     "as_of": "2024-01-15",
                     "as_of_date": "2024-01-15",
                     "publication_date": "2024-01-18",
-                    "publisher": "ReliefWeb",
-                    "source_id": "ReliefWeb",
+                    "publisher": "IDMC",
+                    "source_id": "IDMC",
                     "source_type": None,
                     "source_url": None,
                     "doc_title": None,
@@ -118,8 +118,8 @@ def test_resolve_sources_prefers_configured_priority(tmp_path):
                     "as_of": "2024-02-15",
                     "as_of_date": "2024-02-15",
                     "publication_date": "2024-02-20",
-                    "publisher": "ReliefWeb",
-                    "source_id": "ReliefWeb",
+                    "publisher": "IDMC",
+                    "source_id": "IDMC",
                     "source_type": None,
                     "source_url": None,
                     "doc_title": None,
@@ -161,12 +161,12 @@ def test_resolve_sources_prefers_configured_priority(tmp_path):
     first = rows.iloc[0]
     second = rows.iloc[1]
 
-    assert first["source_id"] == "IPC"
-    assert first["provenance_source"] == "IPC"
-    assert first["provenance_rank"] == 1
+    assert first["source_id"] == "ACLED"
+    assert first["provenance_source"] == "ACLED"
+    assert first["provenance_rank"] == 2  # ACLED is 2nd in source_precedence
     assert first["value"] == 100
 
-    assert second["source_id"] == "ReliefWeb"
-    assert second["provenance_source"] == "ReliefWeb"
+    assert second["source_id"] == "IDMC"
+    assert second["provenance_source"] == "IDMC"
     assert second["provenance_rank"] > first["provenance_rank"]
     assert second["value"] == 120

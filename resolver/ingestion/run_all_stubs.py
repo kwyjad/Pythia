@@ -67,9 +67,7 @@ DIAGNOSTICS_DIR = PROJECT_ROOT / "diagnostics" / "ingestion"
 DIAGNOSTICS_REPORT = DIAGNOSTICS_DIR / "connectors_report.jsonl"
 RESOLVER_DEBUG = bool(int(os.getenv("RESOLVER_DEBUG", "0") or 0))
 
-CONFIG_OVERRIDES = {
-    "wfp_mvam": CONFIG_DIR / "wfp_mvam_sources.yml",
-}
+CONFIG_OVERRIDES: Dict[str, Path] = {}
 
 SMOKE_ENV_DEFAULTS = {
     "RESOLVER_MAX_PAGES": "2",
@@ -125,7 +123,7 @@ def _module_name_from_path(py_path: Path) -> str:
 INGESTION_MODE = (os.environ.get("RESOLVER_INGESTION_MODE") or "").strip().lower()
 INCLUDE_STUBS = os.environ.get("RESOLVER_INCLUDE_STUBS", "0") == "1"
 FAIL_ON_STUB_ERROR = os.environ.get("RESOLVER_FAIL_ON_STUB_ERROR", "0") == "1"
-FORCE_DTM_STUB = os.environ.get("RESOLVER_FORCE_DTM_STUB", "0") == "1"
+FORCE_DTM_STUB = False  # DTM removed; kept for compatibility
 
 _SELECTED_DEFAULT = (os.environ.get("SELECTED") or "list").strip().lower() or "list"
 if _SELECTED_DEFAULT not in {"list", "fetch"}:
@@ -134,50 +132,14 @@ SELECTED_MODE = _SELECTED_DEFAULT
 
 REAL = [
     "ifrc_go_client.py",
-    "reliefweb_client.py",
-    "unhcr_client.py",
-    "unhcr_odp_client.py",
-    "who_phe_client.py",
-    "ipc_client.py",
-    "wfp_mvam_client.py",
     "acled_client.py",
-    "dtm_client.py",
-    "hdx_client.py",
-    "emdat_client.py",
-    "gdacs_client.py",
-    "worldpop_client.py",
 ]
 
 CONNECTOR_OUTPUTS: Dict[str, str] = {
     "ifrc_go_client.py": "ifrc_go.csv",
-    "reliefweb_client.py": "reliefweb.csv",
-    "unhcr_client.py": "unhcr.csv",
-    "unhcr_odp_client.py": "unhcr_odp.csv",
-    "who_phe_client.py": "who_phe.csv",
-    "ipc_client.py": "ipc.csv",
-    "wfp_mvam_client.py": "wfp_mvam.csv",
     "acled_client.py": "acled.csv",
-    "dtm_client.py": "dtm_displacement.csv",
-    "hdx_client.py": "hdx.csv",
-    "emdat_client.py": "emdat_pa.csv",
-    "gdacs_client.py": "gdacs_signals.csv",
-    "worldpop_client.py": "worldpop_denominators.csv",
     "ifrc_go_stub.py": "ifrc_go.csv",
-    "reliefweb_stub.py": "reliefweb.csv",
-    "unhcr_stub.py": "unhcr.csv",
-    "hdx_stub.py": "hdx.csv",
-    "who_stub.py": "who.csv",
-    "ipc_stub.py": "ipc.csv",
-    "emdat_stub.py": "emdat.csv",
-    "gdacs_stub.py": "gdacs.csv",
-    "copernicus_stub.py": "copernicus.csv",
-    "unosat_stub.py": "unosat.csv",
     "acled_stub.py": "acled.csv",
-    "ucdp_stub.py": "ucdp.csv",
-    "fews_stub.py": "fews.csv",
-    "wfp_mvam_stub.py": "wfp_mvam.csv",
-    "gov_ndma_stub.py": "gov_ndma.csv",
-    "dtm_stub.py": "dtm.csv",
 }
 
 SUMMARY_TARGETS = {
@@ -186,102 +148,21 @@ SUMMARY_TARGETS = {
         "filename": CONNECTOR_OUTPUTS["ifrc_go_client.py"],
         "config": CONFIG_DIR / "ifrc_go.yml",
     },
-    "reliefweb_client.py": {
-        "label": "ReliefWeb",
-        "filename": CONNECTOR_OUTPUTS["reliefweb_client.py"],
-        "config": CONFIG_DIR / "reliefweb.yml",
-    },
-    "unhcr_client.py": {
-        "label": "UNHCR",
-        "filename": CONNECTOR_OUTPUTS["unhcr_client.py"],
-        "config": CONFIG_DIR / "unhcr.yml",
-    },
-    "unhcr_odp_client.py": {
-        "label": "UNHCR-ODP",
-        "filename": CONNECTOR_OUTPUTS["unhcr_odp_client.py"],
-        "config": None,
-    },
-    "who_phe_client.py": {
-        "label": "WHO-PHE",
-        "filename": CONNECTOR_OUTPUTS["who_phe_client.py"],
-        "config": CONFIG_DIR / "who_phe.yml",
-    },
-    "ipc_client.py": {
-        "label": "IPC",
-        "filename": CONNECTOR_OUTPUTS["ipc_client.py"],
-        "config": CONFIG_DIR / "ipc.yml",
-    },
-    "wfp_mvam_client.py": {
-        "label": "WFP-mVAM",
-        "filename": CONNECTOR_OUTPUTS["wfp_mvam_client.py"],
-        "config": CONFIG_DIR / "wfp_mvam_sources.yml",
-    },
     "acled_client.py": {
         "label": "ACLED",
         "filename": CONNECTOR_OUTPUTS["acled_client.py"],
         "config": CONFIG_DIR / "acled.yml",
     },
-    "dtm_client.py": {
-        "label": "DTM",
-        "filename": CONNECTOR_OUTPUTS["dtm_client.py"],
-        "config": CONFIG_DIR / "dtm.yml",
-    },
-    "gdacs_client.py": {
-        "label": "GDACS",
-        "filename": CONNECTOR_OUTPUTS["gdacs_client.py"],
-        "config": CONFIG_DIR / "gdacs.yml",
-    },
-    "emdat_client.py": {
-        "label": "EM-DAT",
-        "filename": CONNECTOR_OUTPUTS["emdat_client.py"],
-        "config": CONFIG_DIR / "emdat.yml",
-    },
-    "worldpop_client.py": {
-        "label": "WorldPop",
-        "filename": CONNECTOR_OUTPUTS["worldpop_client.py"],
-        "config": CONFIG_DIR / "worldpop.yml",
-    },
 }
 
 STUBS = [
     "ifrc_go_stub.py",
-    "reliefweb_stub.py",
-    "unhcr_stub.py",
-    "hdx_stub.py",
-    "who_stub.py",
-    "ipc_stub.py",
-    "emdat_stub.py",
-    "gdacs_stub.py",
-    "copernicus_stub.py",
-    "unosat_stub.py",
     "acled_stub.py",
-    "ucdp_stub.py",
-    "fews_stub.py",
-    "wfp_mvam_stub.py",
-    "gov_ndma_stub.py",
 ]
-
-if FORCE_DTM_STUB:
-    REAL = [name for name in REAL if name != "dtm_client.py"]
-    if "dtm_stub.py" not in STUBS:
-        STUBS.insert(0, "dtm_stub.py")
-else:
-    STUBS = [name for name in STUBS if name != "dtm_stub.py"]
 
 SKIP_ENVS = {
     "ifrc_go_client.py": ("RESOLVER_SKIP_IFRCGO", "IFRC GO connector"),
-    "reliefweb_client.py": ("RESOLVER_SKIP_RELIEFWEB", "ReliefWeb connector"),
-    "unhcr_client.py": ("RESOLVER_SKIP_UNHCR", "UNHCR connector"),
-    "unhcr_odp_client.py": ("RESOLVER_SKIP_UNHCR_ODP", "UNHCR ODP connector"),
     "acled_client.py": ("RESOLVER_SKIP_ACLED", "ACLED connector"),
-    "dtm_client.py": ("RESOLVER_SKIP_DTM", "DTM connector"),
-    "emdat_client.py": ("RESOLVER_SKIP_EMDAT", "EM-DAT connector"),
-    "gdacs_client.py": ("RESOLVER_SKIP_GDACS", "GDACS connector"),
-    "who_phe_client.py": ("RESOLVER_SKIP_WHO", "WHO PHE connector"),
-    "ipc_client.py": ("RESOLVER_SKIP_IPC", "IPC connector"),
-    "hdx_client.py": ("RESOLVER_SKIP_HDX", "HDX connector"),
-    "worldpop_client.py": ("RESOLVER_SKIP_WORLDPOP", "WorldPop connector"),
-    "wfp_mvam_client.py": ("RESOLVER_SKIP_WFP_MVAM", "WFP mVAM connector"),
 }
 
 SECRET_GATES: Dict[str, Dict[str, object]] = {
@@ -293,20 +174,6 @@ SECRET_GATES: Dict[str, Dict[str, object]] = {
             ("ACLED_USERNAME", "ACLED_PASSWORD"),
         ],
         "message": "missing ACLED_REFRESH_TOKEN/ACLED_TOKEN credentials",
-    },
-    "unhcr_odp_client.py": {
-        "alternatives": [
-            (
-                "UNHCR_ODP_USERNAME",
-                "UNHCR_ODP_PASSWORD",
-                "UNHCR_ODP_CLIENT_ID",
-                "UNHCR_ODP_CLIENT_SECRET",
-            ),
-        ],
-        "message": (
-            "missing UNHCR_ODP_USERNAME/UNHCR_ODP_PASSWORD/UNHCR_ODP_CLIENT_ID/"
-            "UNHCR_ODP_CLIENT_SECRET"
-        ),
     },
 }
 
