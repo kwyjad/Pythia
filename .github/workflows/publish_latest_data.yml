@@ -5,6 +5,7 @@ on:
     workflows:
       - "Horizon Scanner Triage"
       - "Resolver — Initial Backfill"
+      - "Pythia — Compute Calibration Weights & Advice"
     types: [completed]
 
 permissions:
