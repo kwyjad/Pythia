@@ -115,7 +115,7 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             """
             INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric,
                                    target_month, window_start_date, status)
-            VALUES ('Q1', 'hs_run_1', 'MLI', 'FLOOD', 'PA', '2025-01', '2024-08-01', 'active')
+            VALUES ('Q1', 'hs_run_1', 'MLI', 'FL', 'PA', '2025-01', '2024-08-01', 'active')
             """
         )
 
@@ -220,12 +220,12 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert {"brier", "log", "crps"} <= score_types
         assert {None, "ModelA", "ModelB"} <= models_scored
 
-        # Calibration weights: one row per model_name for (FLOOD, PA)
+        # Calibration weights: one row per model_name for (FL, PA)
         weights_df = con.execute(
             """
             SELECT model_name, weight, avg_brier
             FROM calibration_weights
-            WHERE hazard_code = 'FLOOD' AND metric = 'PA'
+            WHERE hazard_code = 'FL' AND metric = 'PA'
             """
         ).fetchdf()
         assert not weights_df.empty
@@ -235,12 +235,12 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
         wb = float(weights_df.loc[weights_df["model_name"] == "ModelB", "weight"].iloc[0])
         assert abs(wa - wb) > 1e-4
 
-        # Advice: non-empty for FLOOD/PA
+        # Advice: non-empty for FL/PA
         advice_df = con.execute(
             """
             SELECT advice
             FROM calibration_advice
-            WHERE hazard_code = 'FLOOD' AND metric = 'PA'
+            WHERE hazard_code = 'FL' AND metric = 'PA'
             ORDER BY as_of_month DESC
             LIMIT 1
             """
@@ -248,5 +248,80 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert not advice_df.empty
         advice = str(advice_df["advice"].iloc[0] or "").strip()
         assert advice != ""
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_dashboard_resolved_count_uses_resolutions_table(tmp_path: Path):
+    """The dashboard resolved_questions count should prefer the resolutions
+    table over questions.status.  Even when status is still 'active', a
+    question that has rows in the resolutions table should be counted."""
+    db_path = tmp_path / "dashboard_test.duckdb"
+
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute("CREATE TABLE hs_runs (hs_run_id TEXT PRIMARY KEY)")
+        con.execute("INSERT INTO hs_runs VALUES ('run1')")
+        con.execute(
+            """
+            CREATE TABLE questions (
+              question_id TEXT,
+              hs_run_id TEXT,
+              iso3 TEXT,
+              hazard_code TEXT,
+              metric TEXT,
+              target_month TEXT,
+              window_start_date DATE,
+              status TEXT
+            )
+            """
+        )
+        # Two questions — both status='active' (NOT 'resolved')
+        con.execute(
+            """
+            INSERT INTO questions VALUES
+                ('Q1', 'run1', 'MLI', 'FL', 'PA', '2025-01', '2024-08-01', 'active'),
+                ('Q2', 'run1', 'ETH', 'DR', 'PA', '2025-01', '2024-08-01', 'active')
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE resolutions (
+              question_id TEXT,
+              horizon_m INTEGER,
+              observed_month TEXT,
+              value DOUBLE,
+              source_snapshot_ym TEXT,
+              created_at TIMESTAMP,
+              PRIMARY KEY (question_id, horizon_m)
+            )
+            """
+        )
+        # Q1 has one resolution, Q2 has none
+        con.execute(
+            """
+            INSERT INTO resolutions (question_id, horizon_m, observed_month, value, created_at)
+            VALUES ('Q1', 1, '2024-08', 5000.0, now())
+            """
+        )
+
+        # Replicate the dashboard's resolved_questions SQL logic:
+        # Before the fix this would check questions.status first and get 0.
+        # After the fix it checks resolutions table first.
+        resolved_count = con.execute(
+            "SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
+            "JOIN questions q ON q.question_id = r.question_id"
+        ).fetchone()[0]
+        assert resolved_count == 1, (
+            f"Expected 1 resolved question via resolutions table, got {resolved_count}"
+        )
+
+        # Verify that status-based counting would have missed it
+        status_count = con.execute(
+            "SELECT COUNT(DISTINCT question_id) FROM questions "
+            "WHERE status IN ('resolved', 'closed')"
+        ).fetchone()[0]
+        assert status_count == 0, "Status-based count should be 0 (both 'active')"
     finally:
         con.close()

@@ -21,6 +21,10 @@ if not LOGGER.handlers:
 
 NUM_HORIZONS = 6
 
+# Hazards without a resolution data source.  Remove entries once a source
+# is available (e.g. when a DI resolution connector is added).
+UNRESOLVABLE_HAZARDS: set[str] = {"DI"}
+
 
 def _table_exists(conn, name: str) -> bool:
     try:
@@ -99,6 +103,69 @@ def _eligible_cutoff_month(today: date, lag_day: int = 15) -> str:
     return cutoff
 
 
+def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
+    """Return the latest ``YYYY-MM`` for which source data exists.
+
+    This determines which calendar months are eligible for resolution.
+    If a source has data covering 2026-01, forecasts for months up to and
+    including 2026-01 are eligible.  Months beyond that are not yet
+    resolvable because data sources have not been refreshed for them.
+    """
+    max_yms: list[str] = []
+
+    if metric == "PA":
+        for table, filt in [
+            ("facts_resolved",
+             "lower(metric) IN ('affected','people_affected','pa','displaced')"),
+            ("facts_deltas",
+             "lower(metric) IN "
+             "('new_displacements','affected','people_affected','pa','displaced')"),
+        ]:
+            if _table_exists(conn, table):
+                try:
+                    row = conn.execute(
+                        f"SELECT MAX(ym) FROM {table} WHERE {filt}"
+                    ).fetchone()
+                    if row and row[0]:
+                        max_yms.append(str(row[0]))
+                except Exception:
+                    pass
+        if _table_exists(conn, "emdat_pa"):
+            try:
+                row = conn.execute("SELECT MAX(ym) FROM emdat_pa").fetchone()
+                if row and row[0]:
+                    max_yms.append(str(row[0]))
+            except Exception:
+                pass
+
+    elif metric == "FATALITIES":
+        for table, filt in [
+            ("facts_resolved", "lower(metric) = 'fatalities'"),
+            ("facts_deltas", "lower(metric) = 'fatalities'"),
+        ]:
+            if _table_exists(conn, table):
+                try:
+                    row = conn.execute(
+                        f"SELECT MAX(ym) FROM {table} WHERE {filt}"
+                    ).fetchone()
+                    if row and row[0]:
+                        max_yms.append(str(row[0]))
+                except Exception:
+                    pass
+        if _table_exists(conn, "acled_monthly_fatalities"):
+            try:
+                row = conn.execute(
+                    "SELECT MAX(strftime(month, '%Y-%m')) "
+                    "FROM acled_monthly_fatalities"
+                ).fetchone()
+                if row and row[0]:
+                    max_yms.append(str(row[0]))
+            except Exception:
+                pass
+
+    return max(max_yms) if max_yms else None
+
+
 # Hazard-code → EM-DAT shock_type mapping for emdat_pa table lookups.
 _HAZARD_TO_EMDAT_SHOCK: dict[str, str] = {
     "FL": "flood",
@@ -115,7 +182,7 @@ def _try_facts_resolved(
     if not _table_exists(conn, "facts_resolved"):
         return None
     if metric == "PA":
-        metric_filter = "lower(metric) IN ('affected','people_affected','pa')"
+        metric_filter = "lower(metric) IN ('affected','people_affected','pa','displaced')"
     elif metric == "FATALITIES":
         metric_filter = "lower(metric) = 'fatalities'"
     else:
@@ -144,7 +211,7 @@ def _try_facts_deltas(
     if metric == "PA":
         metric_filter = (
             "lower(metric) IN "
-            "('new_displacements','affected','people_affected','pa')"
+            "('new_displacements','affected','people_affected','pa','displaced')"
         )
     elif metric == "FATALITIES":
         metric_filter = "lower(metric) = 'fatalities'"
@@ -292,14 +359,19 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
 
     Rules:
       - Only metrics PA and FATALITIES are processed.
-      - A calendar month is eligible once we reach the 15th of the following month.
-      - Checks facts_resolved, facts_deltas, emdat_pa, and acled_monthly_fatalities.
+      - Hazards in ``UNRESOLVABLE_HAZARDS`` are skipped (no data source).
+      - Eligibility is **data-driven**: a calendar month is eligible when
+        at least one source table has data covering that month (determined
+        via ``_data_freshness_cutoff``).
+      - When an eligible month has no matching row in any source table the
+        resolution defaults to ``0.0`` (no humanitarian impact reported).
+      - Checks facts_resolved, facts_deltas, emdat_pa, and
+        acled_monthly_fatalities.
     """
 
     if today is None:
         today = date.today()
 
-    cutoff_month = _eligible_cutoff_month(today)
     conn = _open_db(db_url)
 
     try:
@@ -314,6 +386,15 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         if q_count == 0:
             LOGGER.info("compute_resolutions: questions table is empty; nothing to do.")
             return
+
+        # Data-driven eligibility: latest month for which source data exists.
+        pa_data_cutoff = _data_freshness_cutoff(conn, "PA")
+        fat_data_cutoff = _data_freshness_cutoff(conn, "FATALITIES")
+        LOGGER.info(
+            "Data freshness cutoffs: PA=%s, FATALITIES=%s",
+            pa_data_cutoff or "<none>",
+            fat_data_cutoff or "<none>",
+        )
 
         query_sql = """
             SELECT
@@ -331,17 +412,27 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         """
         rows = conn.execute(query_sql).fetchall()
         LOGGER.info(
-            "Found %d candidate questions for resolution (cutoff_month=%s).",
-            len(rows), cutoff_month,
+            "Found %d candidate questions for resolution.",
+            len(rows),
         )
 
         written = 0
+        resolved_from_source = 0
+        resolved_as_zero = 0
+        skipped_no_data_coverage = 0
+        skipped_unresolvable_hazard = 0
+
         for question_id, iso3, hazard_code, metric, target_month, window_start_date in rows:
             iso3_norm = (iso3 or "").upper()
             hazard_norm = (hazard_code or "").upper()
             metric_norm = (metric or "").upper()
 
             if metric_norm not in ("PA", "FATALITIES"):
+                continue
+
+            # Skip hazards without a resolution data source.
+            if hazard_norm in UNRESOLVABLE_HAZARDS:
+                skipped_unresolvable_hazard += 1
                 continue
 
             # Derive the window_start_date as a Python date
@@ -378,24 +469,32 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 )
                 continue
 
+            # Select the per-metric data freshness cutoff.
+            data_cutoff = (
+                pa_data_cutoff if metric_norm == "PA" else fat_data_cutoff
+            )
+
             for horizon_m in range(1, NUM_HORIZONS + 1):
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
 
-                # Only resolve months that are past the eligibility cutoff
-                if cal_month > cutoff_month:
+                # Only resolve months for which source data exists.
+                if data_cutoff is None or cal_month > data_cutoff:
+                    skipped_no_data_coverage += 1
                     continue
 
                 resolved = _resolve_value(
                     conn, iso3_norm, hazard_norm, cal_month, metric_norm,
                 )
                 if resolved is None:
-                    LOGGER.debug(
-                        "No resolution for %s h%d (%s/%s/%s).",
-                        question_id, horizon_m, iso3_norm, hazard_norm, cal_month,
-                    )
-                    continue
+                    # No impact data found — default to zero (no reported
+                    # humanitarian impact for this hazard/country/month).
+                    value: float = 0.0
+                    source_ts: Optional[str] = None
+                    resolved_as_zero += 1
+                else:
+                    value, source_ts = resolved
+                    resolved_from_source += 1
 
-                value, source_ts = resolved
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO resolutions (
@@ -426,10 +525,37 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     cal_month,
                     metric_norm,
                     value,
-                    source_ts or "<none>",
+                    source_ts or "<zero-default>",
                 )
 
-        LOGGER.info("compute_resolutions: wrote %d resolution rows.", written)
+        # Update question status for fully-resolved questions.
+        try:
+            conn.execute(
+                """
+                UPDATE questions SET status = 'resolved'
+                WHERE question_id IN (
+                    SELECT question_id FROM resolutions
+                    GROUP BY question_id
+                    HAVING COUNT(DISTINCT horizon_m) = ?
+                ) AND status = 'active'
+                """,
+                [NUM_HORIZONS],
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to update question statuses: %s", exc)
+
+        LOGGER.info(
+            "compute_resolutions: %d questions processed, %d resolution rows "
+            "written (%d from source data, %d defaulted to 0.0), "
+            "%d horizon-months skipped (no data coverage yet), "
+            "%d questions skipped (unresolvable hazard).",
+            len(rows),
+            written,
+            resolved_from_source,
+            resolved_as_zero,
+            skipped_no_data_coverage,
+            skipped_unresolvable_hazard,
+        )
     finally:
         _close_db(conn)
 
