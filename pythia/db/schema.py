@@ -691,6 +691,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "status": "TEXT",
                 "spd_json": "TEXT",
                 "human_explanation": "TEXT",
+                "horizon_m": "INTEGER",
+                "class_bin": "TEXT",
+                "p": "DOUBLE",
             },
         )
 
