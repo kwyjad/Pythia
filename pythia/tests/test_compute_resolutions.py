@@ -15,8 +15,10 @@ duckdb = pytest.importorskip("duckdb")
 from pythia.tools.compute_resolutions import (
     _resolve_value,
     _try_facts_deltas,
+    _try_facts_resolved,
     _try_emdat_pa,
     _try_acled_fatalities,
+    _data_freshness_cutoff,
     horizon_to_calendar_month,
     compute_resolutions,
 )
@@ -733,5 +735,456 @@ def test_compute_resolutions_multi_table(tmp_path: Path, monkeypatch: pytest.Mon
 
         assert len(pa_rows) == 1, f"Expected 1 PA resolution, got {len(pa_rows)}"
         assert pa_rows[0] == ("Q_PA", 1, "2024-08", 7500.0)
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# _data_freshness_cutoff
+# ---------------------------------------------------------------------------
+
+
+class TestDataFreshnessCutoff:
+    def test_pa_cutoff_from_facts_resolved(self, multi_table_db):
+        multi_table_db.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, created_at)
+            VALUES
+                ('2025-09', 'MLI', 'FL', 'affected', 100.0, '2025-10-01 00:00:00'),
+                ('2025-12', 'ETH', 'DR', 'pa', 200.0, '2026-01-01 00:00:00')
+            """
+        )
+        cutoff = _data_freshness_cutoff(multi_table_db, "PA")
+        assert cutoff == "2025-12"
+
+    def test_fatalities_cutoff_from_acled(self, multi_table_db):
+        multi_table_db.execute(
+            """
+            INSERT INTO acled_monthly_fatalities (iso3, month, fatalities, updated_at)
+            VALUES
+                ('SOM', '2025-10-01', 50, '2025-11-15 00:00:00'),
+                ('SOM', '2026-01-01', 80, '2026-02-15 00:00:00')
+            """
+        )
+        cutoff = _data_freshness_cutoff(multi_table_db, "FATALITIES")
+        assert cutoff == "2026-01"
+
+    def test_empty_tables_return_none(self, multi_table_db):
+        assert _data_freshness_cutoff(multi_table_db, "PA") is None
+        assert _data_freshness_cutoff(multi_table_db, "FATALITIES") is None
+
+    def test_pa_cutoff_includes_displaced(self, multi_table_db):
+        """The 'displaced' metric from IFRC GO should contribute to the PA cutoff."""
+        multi_table_db.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, created_at)
+            VALUES ('2026-01', 'MLI', 'FL', 'displaced', 5000.0, '2026-02-01 00:00:00')
+            """
+        )
+        cutoff = _data_freshness_cutoff(multi_table_db, "PA")
+        assert cutoff == "2026-01"
+
+
+# ---------------------------------------------------------------------------
+# 'displaced' metric resolution
+# ---------------------------------------------------------------------------
+
+
+class TestDisplacedMetric:
+    def test_displaced_resolves_via_facts_resolved(self, resolver_db):
+        """The 'displaced' metric from IFRC GO should be matched by PA lookups."""
+        resolver_db.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, created_at)
+            VALUES ('2025-01', 'MLI', 'FL', 'displaced', 42000.0, '2025-02-10 08:00:00')
+            """
+        )
+        result = _resolve_value(resolver_db, "MLI", "FL", "2025-01", "PA")
+        assert result is not None
+        assert result[0] == 42000.0
+
+    def test_displaced_resolves_via_facts_deltas(self, multi_table_db):
+        """The 'displaced' metric should also be found in facts_deltas."""
+        multi_table_db.execute(
+            """
+            INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, value_new, created_at)
+            VALUES ('2025-06', 'ETH', 'FL', 'displaced', 8500.0, '2025-07-10 00:00:00')
+            """
+        )
+        result = _try_facts_deltas(multi_table_db, "ETH", "FL", "2025-06", "PA")
+        assert result is not None
+        assert result[0] == 8500.0
+
+
+# ---------------------------------------------------------------------------
+# Zero-default and data-driven eligibility (E2E)
+# ---------------------------------------------------------------------------
+
+
+def _setup_e2e_db(con, extra_tables=True):
+    """Create the minimal Pythia + Resolver schema for E2E resolution tests."""
+    con.execute(
+        """
+        CREATE TABLE facts_resolved (
+            ym TEXT NOT NULL,
+            iso3 TEXT NOT NULL,
+            hazard_code TEXT NOT NULL,
+            hazard_label TEXT,
+            hazard_class TEXT,
+            metric TEXT NOT NULL,
+            series_semantics TEXT NOT NULL DEFAULT '',
+            value DOUBLE,
+            unit TEXT,
+            as_of DATE,
+            as_of_date VARCHAR,
+            publication_date VARCHAR,
+            publisher TEXT,
+            source_id TEXT,
+            source_type TEXT,
+            source_url TEXT,
+            doc_title TEXT,
+            definition_text TEXT,
+            precedence_tier TEXT,
+            event_id TEXT,
+            proxy_for TEXT,
+            confidence TEXT,
+            provenance_source TEXT,
+            provenance_rank INTEGER,
+            series TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT facts_resolved_unique
+                UNIQUE (ym, iso3, hazard_code, metric, series_semantics)
+        )
+        """
+    )
+    if extra_tables:
+        con.execute(
+            """
+            CREATE TABLE facts_deltas (
+                ym TEXT NOT NULL,
+                iso3 TEXT NOT NULL,
+                hazard_code TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value_new DOUBLE,
+                value_stock DOUBLE,
+                series_semantics TEXT NOT NULL DEFAULT 'new',
+                as_of VARCHAR,
+                source_id TEXT,
+                series TEXT,
+                rebase_flag INTEGER,
+                first_observation INTEGER,
+                delta_negative_clamped INTEGER,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT facts_deltas_unique UNIQUE (ym, iso3, hazard_code, metric)
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE acled_monthly_fatalities (
+                iso3 TEXT,
+                month DATE,
+                fatalities BIGINT,
+                source TEXT,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+    con.execute("CREATE TABLE hs_runs (hs_run_id TEXT PRIMARY KEY)")
+    con.execute("INSERT INTO hs_runs VALUES ('run1')")
+    con.execute(
+        """
+        CREATE TABLE questions (
+            question_id TEXT,
+            hs_run_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            target_month TEXT,
+            window_start_date DATE,
+            status TEXT
+        )
+        """
+    )
+
+
+@pytest.mark.db
+def test_zero_default_when_no_source_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """When source data exists for the period (setting the cutoff) but not
+    for this specific country/hazard, the resolution should default to 0.0."""
+    db_path = tmp_path / "e2e_zero.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        # Question for MLI/FL/PA with window 2025-07 to 2025-12
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_ZERO', 'run1', 'MLI', 'FL', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # Source data exists for ANOTHER country, setting the PA cutoff to 2025-08.
+        # No data for MLI/FL at all.
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-08', 'ETH', 'DR', 'affected', 999.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT question_id, horizon_m, value "
+            "FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        # Horizons h1=2025-07 and h2=2025-08 are <= cutoff 2025-08
+        assert len(rows) == 2, f"Expected 2 resolution rows, got {len(rows)}: {rows}"
+        for qid, h, val in rows:
+            assert val == 0.0, f"Expected 0.0 for h{h}, got {val}"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_zero_default_mixed_with_real_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """h1 has real source data, h2 should default to zero."""
+    db_path = tmp_path / "e2e_mixed.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_MIX', 'run1', 'MLI', 'FL', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # Real data for h1 (2025-07), plus another row setting cutoff to 2025-08.
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES
+                ('2025-07', 'MLI', 'FL', 'affected', 5000.0),
+                ('2025-08', 'ETH', 'DR', 'affected', 100.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, value FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0] == (1, 5000.0), f"h1 should have real value, got {rows[0]}"
+        assert rows[1] == (2, 0.0), f"h2 should default to 0.0, got {rows[1]}"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_di_hazard_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """DI (Displacement Influx) questions should be skipped — no resolution source."""
+    db_path = tmp_path / "e2e_di.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_DI', 'run1', 'MLI', 'DI', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # Provide PA data so the cutoff is set.
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-12', 'ETH', 'FL', 'affected', 100.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        count = con.execute("SELECT COUNT(*) FROM resolutions").fetchone()[0]
+        assert count == 0, f"DI questions should not resolve, got {count} rows"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_ineligible_horizons_not_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Horizons beyond the data freshness cutoff should not be resolved."""
+    db_path = tmp_path / "e2e_cutoff.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        # Window: 2025-07 to 2025-12 (h1=Jul, h2=Aug, ..., h6=Dec)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_CUT', 'run1', 'MLI', 'FL', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # Data freshness: only up to 2025-09 (h1=Jul, h2=Aug, h3=Sep eligible)
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-09', 'ETH', 'FL', 'affected', 100.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        resolved_horizons = [r[0] for r in rows]
+        # h1=2025-07, h2=2025-08, h3=2025-09 are <= cutoff 2025-09
+        assert resolved_horizons == [1, 2, 3], (
+            f"Only h1-h3 should be resolved, got {resolved_horizons}"
+        )
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_status_update_after_full_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """When all 6 horizons are resolved, questions.status should be updated to 'resolved'."""
+    db_path = tmp_path / "e2e_status.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        # Window: 2024-08 to 2025-01 (h1=Aug, ..., h6=Jan)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_ST', 'run1', 'MLI', 'FL', 'PA', '2025-01', '2024-08-01', 'active')
+            """
+        )
+        # Data covers all 6 months (cutoff >= 2025-01)
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-01', 'ETH', 'FL', 'affected', 100.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        # All 6 horizons should be resolved (zero-default)
+        count = con.execute("SELECT COUNT(*) FROM resolutions WHERE question_id = 'Q_ST'").fetchone()[0]
+        assert count == 6, f"Expected 6 resolutions, got {count}"
+
+        status = con.execute(
+            "SELECT status FROM questions WHERE question_id = 'Q_ST'"
+        ).fetchone()[0]
+        assert status == "resolved", f"Expected status='resolved', got '{status}'"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_displaced_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Questions should resolve from facts_deltas rows with metric='displaced'."""
+    db_path = tmp_path / "e2e_displaced.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_DISP', 'run1', 'MLI', 'FL', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # IFRC GO displacement data for h1 and h2
+        con.execute(
+            """
+            INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, value_new, created_at)
+            VALUES
+                ('2025-07', 'MLI', 'FL', 'displaced', 3000.0, '2025-08-10 00:00:00'),
+                ('2025-08', 'MLI', 'FL', 'displaced', 7000.0, '2025-09-10 00:00:00')
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, value FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        # h1 and h2 should resolve from displaced data (cutoff = 2025-08)
+        assert len(rows) == 2, f"Expected 2 resolutions, got {len(rows)}"
+        assert rows[0] == (1, 3000.0)
+        assert rows[1] == (2, 7000.0)
     finally:
         con.close()

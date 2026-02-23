@@ -2458,19 +2458,19 @@ def diagnostics_kpi_scopes(
         else:
             notes.append("countries_ignored_missing_column")
 
-        if has_status:
-            resolved_sql = f"{base_sql} AND q.status IN ('resolved', 'closed')"
-            scope["resolved_questions"] = _count(
-                f"SELECT COUNT(DISTINCT q.question_id) {resolved_sql}",
-                question_ids_params + metric_params + status_params,
-                "scope_resolved_failed",
-            )
-        elif _table_has_columns(con, "resolutions", ["question_id"]):
+        if _table_has_columns(con, "resolutions", ["question_id"]):
             scope["resolved_questions"] = _count(
                 f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
                 f"JOIN ({question_ids_sql}) src ON src.question_id = r.question_id",
                 question_ids_params,
                 "scope_resolutions_failed",
+            )
+        elif has_status:
+            resolved_sql = f"{base_sql} AND q.status IN ('resolved', 'closed')"
+            scope["resolved_questions"] = _count(
+                f"SELECT COUNT(DISTINCT q.question_id) {resolved_sql}",
+                question_ids_params + metric_params + status_params,
+                "scope_resolved_failed",
             )
         else:
             notes.append("resolved_questions_unavailable")
@@ -2587,18 +2587,18 @@ def diagnostics_kpi_scopes(
         else:
             notes.append("countries_ignored_missing_column")
 
-        if has_status:
+        if _table_has_columns(con, "resolutions", ["question_id"]):
+            scope["resolved_questions"] = _count(
+                "SELECT COUNT(DISTINCT question_id) FROM resolutions",
+                [],
+                "scope_resolutions_failed",
+            )
+        elif has_status:
             resolved_sql = f"{base_sql} AND q.status IN ('resolved', 'closed')"
             scope["resolved_questions"] = _count(
                 f"SELECT COUNT(DISTINCT q.question_id) {resolved_sql}",
                 metric_params + status_params,
                 "scope_resolved_failed",
-            )
-        elif _table_has_columns(con, "resolutions", ["question_id"]):
-            scope["resolved_questions"] = _count(
-                "SELECT COUNT(DISTINCT question_id) FROM resolutions",
-                [],
-                "scope_resolutions_failed",
             )
         else:
             notes.append("resolved_questions_unavailable")
