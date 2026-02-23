@@ -7,16 +7,18 @@ enabled: true
 base_url: "https://goadmin.ifrc.org/api/v2/"
 user_agent: "forecaster-resolver/1.0 (github.com/oughtinc/Pythia)"
 window_days: 45
-page_size: 100
+page_size: 500   # IFRC GO allows up to 1000; 500 balances speed vs memory
 
 # Endpoints we will poll (Admin v2 per GO wiki)
 endpoints:
-  field_report: "field-report/"
-  appeal: "appeal/"
+  event: "event/"                         # emergency events (structured dtype + impact)
+  field_report: "field-report/"           # ground-level field reports
+  appeal: "appeal/"                       # DREFs + Emergency Appeals
   situation_report: "situation_report/"   # document-style sitreps
 
 # Source type mapping per endpoint/type
 source_type_map:
+  event: "event"
   field_report: "sitrep"
   appeal: "appeal"
   situation_report: "sitrep"
