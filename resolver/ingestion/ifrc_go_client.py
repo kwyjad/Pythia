@@ -53,6 +53,42 @@ COLUMNS = [
 NUM_WINDOW_RE = re.compile(r"([0-9][0-9., ]{0,15})")
 PHRASE_PAD = 80
 
+# ---------------------------------------------------------------------------
+# Structured disaster-type → hazard_code mapping (IFRC GO Admin v2 dtype IDs)
+# ---------------------------------------------------------------------------
+DTYPE_TO_HAZARD: dict[int, str] = {
+    12: "FL",    # Flood
+    27: "FL",    # Pluvial/Flash Flood
+    20: "DR",    # Drought
+    4:  "TC",    # Cyclone
+    23: "TC",    # Storm Surge
+    19: "HW",    # Heat Wave
+    14: "CW",    # Cold Wave
+    6:  "ACE",   # Complex Emergency
+    7:  "CU",    # Civil Unrest
+    5:  "DI",    # Population Movement
+    1:  "PHE",   # Epidemic
+    66: "PHE",   # Biological Emergency
+    2:  "EQ",    # Earthquake
+    8:  "VO",    # Volcanic Eruption
+    11: "TS",    # Tsunami
+    24: "LS",    # Landslide
+    15: "FIRE",  # Fire
+    21: "FI",    # Food Insecurity
+}
+
+# ---------------------------------------------------------------------------
+# Multi-metric extraction from structured API fields
+# ---------------------------------------------------------------------------
+IMPACT_FIELDS = [
+    # (primary_field, gov_variant, other_variant, metric_name, unit)
+    ("num_affected",  "gov_num_affected",  "other_num_affected",  "affected",   "persons"),
+    ("num_dead",      "gov_num_dead",      "other_num_dead",      "fatalities", "persons"),
+    ("num_injured",   "gov_num_injured",   "other_num_injured",   "injured",    "persons"),
+    ("num_displaced", "gov_num_displaced", "other_num_displaced", "displaced",  "persons"),
+    ("num_missing",   "gov_num_missing",   "other_num_missing",   "missing",    "persons"),
+]
+
 def _debug() -> bool:
     return os.getenv("RESOLVER_DEBUG", "") == "1"
 
@@ -84,13 +120,76 @@ def load_registries():
 def norm(s: str) -> str:
     return (s or "").strip().lower()
 
-def detect_hazard(text: str, cfg: Dict[str, Any]) -> Optional[str]:
+def _dtype_id_from_record(rec: dict) -> Optional[int]:
+    """Extract the numeric dtype ID from an IFRC GO API record."""
+    dt_obj = (
+        rec.get("dtype")
+        or rec.get("dtype_details")
+        or rec.get("disaster_type_details")
+        or rec.get("disaster_type")
+        or {}
+    )
+    if isinstance(dt_obj, dict):
+        did = dt_obj.get("id")
+        if did is not None:
+            try:
+                return int(did)
+            except (ValueError, TypeError):
+                pass
+    elif isinstance(dt_obj, (int, float)):
+        return int(dt_obj)
+    elif isinstance(dt_obj, list) and dt_obj:
+        first = dt_obj[0]
+        if isinstance(first, dict):
+            did = first.get("id")
+            if did is not None:
+                try:
+                    return int(did)
+                except (ValueError, TypeError):
+                    pass
+    return None
+
+
+def detect_hazard(text: str, cfg: Dict[str, Any], record: Optional[dict] = None) -> Optional[str]:
+    # Priority 1: structured dtype field from API record
+    if record is not None:
+        dtype_id = _dtype_id_from_record(record)
+        if dtype_id is not None and dtype_id in DTYPE_TO_HAZARD:
+            return DTYPE_TO_HAZARD[dtype_id]
+
+    # Priority 2: keyword matching on text (existing logic)
     t = norm(text)
     for code, keys in cfg["hazard_keywords"].items():
         for k in keys:
             if k in t:
                 return code
     return None
+
+def extract_all_metrics(rec: dict) -> List[Tuple[str, int, str, str]]:
+    """Extract ALL available impact metrics from structured API fields.
+
+    Returns a list of (metric, value, unit, source_field) tuples — one per
+    non-null impact field found.  For each metric the best (max) value across
+    primary/gov/other variants is used.
+    """
+    results: List[Tuple[str, int, str, str]] = []
+    for primary, gov, other, metric, unit in IMPACT_FIELDS:
+        candidates: List[Tuple[int, str]] = []
+        for fld in (primary, gov, other):
+            raw = rec.get(fld)
+            if raw in (None, "", 0, "0"):
+                continue
+            try:
+                val = int(float(str(raw).replace(",", "")))
+                if val > 0:
+                    candidates.append((val, fld))
+            except Exception:
+                continue
+        if candidates:
+            val, source_fld = max(candidates, key=lambda x: x[0])
+            results.append((metric, val, unit, source_fld))
+    return results
+
 
 def extract_metric_record_first(rec: dict, cfg: Dict[str, Any]) -> Optional[Tuple[str,int,str,str]]:
     # Try numeric fields directly if present
@@ -218,15 +317,30 @@ def collect_rows() -> List[List[str]]:
             offset = 0
             page_count = 0
             older_pages_in_row = 0
+            # Drop-reason counters for observability
+            _n_fetched = 0
+            _n_kept = 0
+            _n_dup_or_old = 0
+            _n_no_country = 0
+            _n_no_hazard = 0
+            _n_no_metric = 0
             while True:
                 params = {
                     "limit": page_size,
                     "offset": offset,
                     "ordering": "-created_at",
                     "fields": (
-                        "id,title,name,summary,description,created_at,updated_at,report_date,"
-                        "document_url,external_link,source,disaster_type,disaster_type_details,"
-                        "countries,countries_details,num_affected,people_in_need,affected"
+                        "id,title,name,summary,description,created_at,updated_at,"
+                        "report_date,disaster_start_date,"
+                        "document_url,external_link,source,"
+                        "dtype,disaster_type,disaster_type_details,"
+                        "countries,countries_details,"
+                        "num_affected,people_in_need,affected,"
+                        "num_dead,num_injured,num_displaced,num_missing,"
+                        "gov_num_affected,gov_num_dead,gov_num_injured,gov_num_displaced,"
+                        "other_num_affected,other_num_dead,other_num_injured,other_num_displaced,"
+                        "epi_cases,epi_confirmed_cases,epi_num_dead,"
+                        "num_beneficiaries"
                     ),
                     filter_key: since,
                 }
@@ -260,20 +374,25 @@ def collect_rows() -> List[List[str]]:
                 for r in results:
                     rid = str(r.get("id") or "")
                     if not rid or rid in seen_ids:
+                        _n_dup_or_old += 1
                         continue
+
+                    _n_fetched += 1
 
                     created = str(r.get("created_at") or "")[:10]
                     updated = str(r.get("updated_at") or "")[:10]
                     if (not created or created < since) and (not updated or updated < since):
+                        _n_dup_or_old += 1
                         continue
 
                     iso_pairs = iso3_pairs_from_go(countries, r)
                     if not iso_pairs:
+                        _n_no_country += 1
                         continue
 
                     title = str(r.get("title") or r.get("name") or "")
                     summary = str(r.get("summary") or r.get("description") or "")
-                    dtype = ""
+                    dtype_name = ""
                     dt_obj = (
                         r.get("disaster_type_details")
                         or r.get("disaster_type")
@@ -281,30 +400,42 @@ def collect_rows() -> List[List[str]]:
                         or {}
                     )
                     if isinstance(dt_obj, dict):
-                        dtype = dt_obj.get("name") or ""
+                        dtype_name = dt_obj.get("name") or ""
                     elif isinstance(dt_obj, list) and dt_obj:
-                        dtype = (dt_obj[0].get("name") or "") if isinstance(dt_obj[0], dict) else ""
+                        dtype_name = (dt_obj[0].get("name") or "") if isinstance(dt_obj[0], dict) else ""
 
-                    hz_text = " ".join([title, summary, dtype])
-                    hazard_code = detect_hazard(hz_text, cfg)
+                    hz_text = " ".join([title, summary, dtype_name])
+                    hazard_code = detect_hazard(hz_text, cfg, record=r)
                     if not hazard_code:
+                        _n_no_hazard += 1
                         continue
 
                     srow = shocks[shocks["hazard_code"] == hazard_code]
                     if srow.empty:
+                        _n_no_hazard += 1
                         continue
                     hz_label = srow.iloc[0]["hazard_label"]
                     hz_class = srow.iloc[0]["hazard_class"]
 
-                    metric_pack = extract_metric_record_first(r, cfg)
-                    if not metric_pack:
-                        metric_pack = extract_metric_text(" ".join([title, summary]), cfg)
-                    if not metric_pack:
-                        continue
+                    # Multi-metric extraction: try structured fields first,
+                    # then fall back to single-metric text regex.
+                    metric_packs = extract_all_metrics(r)
+                    if not metric_packs:
+                        single = extract_metric_record_first(r, cfg)
+                        if not single:
+                            single = extract_metric_text(" ".join([title, summary]), cfg)
+                        if single:
+                            metric_packs = [single]
+                        else:
+                            _n_no_metric += 1
+                            continue
 
-                    metric, value, unit, why = metric_pack
-
-                    as_of = (str(r.get("report_date") or r.get("updated_at") or created) or "")[:10]
+                    as_of = (str(
+                        r.get("report_date")
+                        or r.get("disaster_start_date")
+                        or r.get("updated_at")
+                        or created
+                    ) or "")[:10]
                     pub = created or as_of
 
                     url = (
@@ -318,38 +449,41 @@ def collect_rows() -> List[List[str]]:
 
                     emitted = False
                     for country_name, iso3 in iso_pairs:
-                        event_id = f"{iso3}-{hazard_code}-ifrcgo-{r.get('id','0')}"
-                        rows.append([
-                            event_id,
-                            country_name,
-                            iso3,
-                            hazard_code,
-                            hz_label,
-                            hz_class,
-                            metric,
-                            "stock",
-                            str(value),
-                            unit,
-                            as_of,
-                            pub,
-                            "IFRC",
-                            map_source_type(key, cfg),
-                            url,
-                            doc_title,
-                            f"Extracted {metric} via {why} from IFRC GO {key.replace('_',' ')}.",
-                            "api",
-                            "med",
-                            1,
-                            dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        ])
-                        emitted = True
-                        made_rows += 1
+                        for metric, value, unit, why in metric_packs:
+                            event_id = f"{iso3}-{hazard_code}-{metric}-ifrcgo-{r.get('id','0')}"
+                            rows.append([
+                                event_id,
+                                country_name,
+                                iso3,
+                                hazard_code,
+                                hz_label,
+                                hz_class,
+                                metric,
+                                "stock",
+                                str(value),
+                                unit,
+                                as_of,
+                                pub,
+                                "IFRC",
+                                map_source_type(key, cfg),
+                                url,
+                                doc_title,
+                                f"Extracted {metric} via {why} from IFRC GO {key.replace('_',' ')}.",
+                                "api",
+                                "med",
+                                1,
+                                dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            ])
+                            emitted = True
+                            made_rows += 1
+                            if made_rows >= MAX_RESULTS:
+                                break
                         if made_rows >= MAX_RESULTS:
-                            dbg(f"[{key}:{pass_name}] hit MAX_RESULTS={MAX_RESULTS}, stopping")
                             break
 
                     if emitted:
                         seen_ids.add(rid)
+                        _n_kept += 1
 
                     if made_rows >= MAX_RESULTS:
                         break
@@ -364,6 +498,20 @@ def collect_rows() -> List[List[str]]:
                     continue
                 else:
                     break
+            # Log per-pass drop-reason summary for observability
+            _log_pass_summary(
+                pass_name, _n_fetched, _n_kept,
+                _n_dup_or_old, _n_no_country, _n_no_hazard, _n_no_metric,
+            )
+
+        def _log_pass_summary(pass_name, n_fetched, n_kept, n_dup_or_old, n_no_country, n_no_hazard, n_no_metric):
+            dbg(
+                f"[{key}:{pass_name}] fetched={n_fetched} kept={n_kept}"
+                f" | dropped: dup_or_old={n_dup_or_old}"
+                f" no_country={n_no_country}"
+                f" no_hazard={n_no_hazard}"
+                f" no_metric={n_no_metric}"
+            )
 
         run_pass("created", "created_at__gte")
         if made_rows < MAX_RESULTS:

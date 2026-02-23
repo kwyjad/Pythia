@@ -20,12 +20,24 @@ if not LOGGER.handlers:  # pragma: no cover - silence library default
 
 HAZARD_LABELS = {
     "ACE": "Armed Conflict",
+    "ACC": "Ceasefire",
+    "ACO": "Armed Conflict - Onset",
     "CONFLICT": "Armed Conflict",
+    "CU": "Civil Unrest",
+    "CW": "Cold Wave",
     "DI": "Displacement Inflow",
     "DR": "Drought",
+    "EC": "Economic Crisis",
+    "EQ": "Earthquake",
+    "FI": "Food Insecurity",
+    "FIRE": "Fire",
     "FL": "Flood",
     "HW": "Heatwave",
+    "LS": "Landslide",
+    "PHE": "Public Health Emergency",
     "TC": "Tropical Cyclone",
+    "TS": "Tsunami",
+    "VO": "Volcanic Eruption",
 }
 
 
@@ -296,37 +308,69 @@ def _status_from_facts(
         diagnostics["notes"].append("conn_missing")
         return status, diagnostics
 
-    source_info, diagnostics = _pick_facts_source_for_status(conn)
-    table = source_info.get("table") if source_info else None
-    status["diagnostics"]["table_used"] = table
-    if not source_info or not table:
-        return status, diagnostics
+    # Check ALL candidate tables for this connector's data, not just the
+    # first non-empty one.  Different connectors store data in different
+    # tables (e.g. IFRC → facts_resolved, IDMC → facts_deltas), so a
+    # single-table pick misses connectors whose data lives elsewhere.
+    # NOTE: facts_monthly_deltas is a VIEW over facts_deltas; including it
+    # would double-count rows, so we only check the two base tables.
+    candidate_tables = ["facts_resolved", "facts_deltas"]
+    best_count = 0
+    best_date = None
+    tables_checked: list[str] = []
 
-    columns = _table_columns(conn, table)
-    if "source_id" not in columns:
-        diagnostics["notes"].append("source_id_missing")
-        return status, diagnostics
+    for table in candidate_tables:
+        if not _table_exists(conn, table):
+            diagnostics["missing_tables_checked"].append(table)
+            continue
+        columns = _table_columns(conn, table)
+        if "source_id" not in columns:
+            continue
 
-    date_exprs: list[str] = []
-    for candidate in ("created_at", "publication_date", "as_of_date", "as_of"):
-        if candidate in columns:
-            date_exprs.append(_timestamp_expr(candidate))
-    if "ym" in columns:
-        date_exprs.append(_ym_proxy_expr())
-    date_expr = f"COALESCE({', '.join(date_exprs)})" if date_exprs else "NULL"
+        date_exprs: list[str] = []
+        for col in ("created_at", "publication_date", "as_of_date", "as_of"):
+            if col in columns:
+                date_exprs.append(_timestamp_expr(col))
+        if "ym" in columns:
+            date_exprs.append(_ym_proxy_expr())
+        date_expr = f"COALESCE({', '.join(date_exprs)})" if date_exprs else "NULL"
 
-    query = f"""
-        SELECT
-          MAX({date_expr}) AS last_updated,
-          COUNT(*) AS rows_scanned
-        FROM {table}
-        WHERE {source_filter_sql}
-    """
-    row = conn.execute(query, params).fetchone()
-    max_date = row[0] if row else None
-    count = int(row[1] or 0) if row else 0
-    status["last_updated"] = _format_date(max_date)
-    status["rows_scanned"] = count
+        query = f"""
+            SELECT
+              MAX({date_expr}) AS last_updated,
+              COUNT(*) AS rows_scanned
+            FROM {table}
+            WHERE {source_filter_sql}
+        """
+        try:
+            row = conn.execute(query, params).fetchone()
+        except Exception:
+            continue
+        if not row:
+            continue
+
+        tbl_date = row[0]
+        tbl_count = int(row[1] or 0)
+
+        if tbl_count > 0:
+            tables_checked.append(table)
+
+        # Accumulate counts across tables; keep the most recent date.
+        best_count += tbl_count
+        if tbl_date is not None:
+            if best_date is None or str(tbl_date) > str(best_date):
+                best_date = tbl_date
+
+    if tables_checked:
+        diagnostics["facts_source_table"] = tables_checked[0]
+        diagnostics["fallback_used"] = "facts_resolved" not in tables_checked
+        diagnostics["notes"].append(f"tables_with_rows={','.join(tables_checked)}")
+    else:
+        diagnostics["notes"].append("no_tables_had_rows")
+
+    status["diagnostics"]["table_used"] = ",".join(tables_checked) if tables_checked else None
+    status["last_updated"] = _format_date(best_date)
+    status["rows_scanned"] = best_count
     return status, diagnostics
 
 

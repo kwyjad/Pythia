@@ -99,6 +99,117 @@ def _eligible_cutoff_month(today: date, lag_day: int = 15) -> str:
     return cutoff
 
 
+# Hazard-code → EM-DAT shock_type mapping for emdat_pa table lookups.
+_HAZARD_TO_EMDAT_SHOCK: dict[str, str] = {
+    "FL": "flood",
+    "DR": "drought",
+    "TC": "tropical_cyclone",
+    "HW": "heatwave",
+}
+
+
+def _try_facts_resolved(
+    conn, iso3: str, hazard_code: str, calendar_month: str, metric: str,
+) -> Optional[tuple[float, Optional[str]]]:
+    """Look up in ``facts_resolved`` (IFRC stock data, highest priority)."""
+    if not _table_exists(conn, "facts_resolved"):
+        return None
+    if metric == "PA":
+        metric_filter = "lower(metric) IN ('affected','people_affected','pa')"
+    elif metric == "FATALITIES":
+        metric_filter = "lower(metric) = 'fatalities'"
+    else:
+        return None
+    sql = f"""
+        SELECT value, created_at
+        FROM facts_resolved
+        WHERE iso3 = ? AND hazard_code = ? AND ym = ? AND {metric_filter}
+        ORDER BY created_at DESC LIMIT 1
+    """
+    try:
+        row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
+def _try_facts_deltas(
+    conn, iso3: str, hazard_code: str, calendar_month: str, metric: str,
+) -> Optional[tuple[float, Optional[str]]]:
+    """Look up in ``facts_deltas`` (IDMC flow data, etc.)."""
+    if not _table_exists(conn, "facts_deltas"):
+        return None
+    if metric == "PA":
+        metric_filter = (
+            "lower(metric) IN "
+            "('new_displacements','affected','people_affected','pa')"
+        )
+    elif metric == "FATALITIES":
+        metric_filter = "lower(metric) = 'fatalities'"
+    else:
+        return None
+    sql = f"""
+        SELECT COALESCE(value_new, value_stock) AS value, created_at
+        FROM facts_deltas
+        WHERE iso3 = ? AND hazard_code = ? AND ym = ? AND {metric_filter}
+        ORDER BY created_at DESC LIMIT 1
+    """
+    try:
+        row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
+def _try_emdat_pa(
+    conn, iso3: str, hazard_code: str, calendar_month: str,
+) -> Optional[tuple[float, Optional[str]]]:
+    """Look up people-affected in the ``emdat_pa`` table."""
+    if not _table_exists(conn, "emdat_pa"):
+        return None
+    shock_type = _HAZARD_TO_EMDAT_SHOCK.get(hazard_code)
+    if not shock_type:
+        return None
+    sql = """
+        SELECT pa, as_of_date
+        FROM emdat_pa
+        WHERE iso3 = ? AND ym = ? AND shock_type = ?
+        ORDER BY as_of_date DESC LIMIT 1
+    """
+    try:
+        row = conn.execute(sql, [iso3, calendar_month, shock_type]).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
+def _try_acled_fatalities(
+    conn, iso3: str, calendar_month: str,
+) -> Optional[tuple[float, Optional[str]]]:
+    """Look up fatalities in ``acled_monthly_fatalities``."""
+    if not _table_exists(conn, "acled_monthly_fatalities"):
+        return None
+    sql = """
+        SELECT fatalities, updated_at
+        FROM acled_monthly_fatalities
+        WHERE iso3 = ? AND strftime(month, '%Y-%m') = ?
+        LIMIT 1
+    """
+    try:
+        row = conn.execute(sql, [iso3, calendar_month]).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
 def _resolve_value(
     conn,
     iso3: str,
@@ -106,40 +217,38 @@ def _resolve_value(
     calendar_month: str,
     metric: str,
 ) -> Optional[tuple[float, Optional[str]]]:
-    """Resolve a single metric for (iso3, hazard_code, calendar_month) from Resolver.
+    """Resolve a single metric for (iso3, hazard_code, calendar_month).
 
-    Uses facts_resolved as canonical and trusts Resolver's source prioritisation.
+    Checks multiple Resolver tables in priority order:
+      1. ``facts_resolved`` — IFRC stock data (highest source priority)
+      2. ``facts_deltas``   — IDMC flow data and derived deltas
+      3. ``emdat_pa``       — EM-DAT people-affected (PA metric only)
+      4. ``acled_monthly_fatalities`` — ACLED fatalities (FATALITIES only)
     """
 
+    # 1. facts_resolved (IFRC stock rows, highest priority)
+    result = _try_facts_resolved(conn, iso3, hazard_code, calendar_month, metric)
+    if result is not None:
+        return result
+
+    # 2. facts_deltas (IDMC new_displacements, derived deltas, etc.)
+    result = _try_facts_deltas(conn, iso3, hazard_code, calendar_month, metric)
+    if result is not None:
+        return result
+
+    # 3. emdat_pa for PA metric on natural hazards
     if metric == "PA":
-        metric_filter = "lower(metric) IN ('affected','people_affected','pa')"
-    elif metric == "FATALITIES":
-        metric_filter = "lower(metric) = 'fatalities'"
-    else:
-        return None
+        result = _try_emdat_pa(conn, iso3, hazard_code, calendar_month)
+        if result is not None:
+            return result
 
-    sql = f"""
-        SELECT value, created_at
-        FROM facts_resolved
-        WHERE iso3 = ?
-          AND hazard_code = ?
-          AND ym = ?
-          AND {metric_filter}
-        ORDER BY created_at DESC
-        LIMIT 1
-    """
-    try:
-        row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
-    except Exception as exc:  # pragma: no cover - defensive logging
-        LOGGER.error(
-            "Resolver %s query failed for %s/%s/%s: %r",
-            metric, iso3, hazard_code, calendar_month, exc,
-        )
-        return None
-    if not row:
-        return None
-    value, created_at = row
-    return float(value), (str(created_at) if created_at is not None else None)
+    # 4. acled_monthly_fatalities for FATALITIES metric
+    if metric == "FATALITIES":
+        result = _try_acled_fatalities(conn, iso3, calendar_month)
+        if result is not None:
+            return result
+
+    return None
 
 
 def _ensure_resolutions_table(conn) -> None:
@@ -184,7 +293,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
     Rules:
       - Only metrics PA and FATALITIES are processed.
       - A calendar month is eligible once we reach the 15th of the following month.
-      - Uses Resolver's facts_resolved as canonical (no source arbitration here).
+      - Checks facts_resolved, facts_deltas, emdat_pa, and acled_monthly_fatalities.
     """
 
     if today is None:
