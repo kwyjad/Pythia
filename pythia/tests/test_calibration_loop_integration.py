@@ -100,6 +100,9 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
               horizon_m INTEGER,
               class_bin TEXT,
               p DOUBLE,
+              month_index INTEGER,
+              bucket_index INTEGER,
+              probability DOUBLE,
               run_id TEXT,
               created_at TIMESTAMP
             )
@@ -160,19 +163,18 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             "ModelA": [0.2, 0.5, 0.2, 0.05, 0.05],
             "ModelB": [0.05, 0.7, 0.15, 0.05, 0.05],
         }
+        bin_labels = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
         for model_name, spd in model_spds.items():
             for h in range(1, 7):
-                for bin_label, p in zip(
-                    ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"],
-                    spd,
-                ):
+                for bucket_idx, (bin_label, p) in enumerate(zip(bin_labels, spd), start=1):
                     con.execute(
                         """
                         INSERT INTO forecasts_raw (question_id, model_name, horizon_m,
-                                                   class_bin, p, run_id, created_at)
-                        VALUES ('Q1', ?, ?, ?, ?, 'forecaster_run_1', now())
+                                                   class_bin, p, month_index, bucket_index,
+                                                   probability, run_id, created_at)
+                        VALUES ('Q1', ?, ?, ?, ?, ?, ?, ?, 'forecaster_run_1', now())
                         """,
-                        [model_name, h, bin_label, p],
+                        [model_name, h, bin_label, p, h, bucket_idx, p],
                     )
 
     finally:

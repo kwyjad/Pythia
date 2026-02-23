@@ -1407,6 +1407,7 @@ def _write_spd_raw_to_db(
                     continue
                 for bucket_idx, prob in enumerate(probs, start=1):
                     try:
+                        cb = class_bins[bucket_idx - 1] if 0 <= bucket_idx - 1 < len(class_bins) else str(bucket_idx)
                         con.execute(
                             """
                             INSERT INTO forecasts_raw (
@@ -1421,8 +1422,11 @@ def _write_spd_raw_to_db(
                                 cost_usd,
                                 prompt_tokens,
                                 completion_tokens,
-                                total_tokens
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                                total_tokens,
+                                horizon_m,
+                                class_bin,
+                                p
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                             """,
                             [
                                 run_id,
@@ -1437,6 +1441,9 @@ def _write_spd_raw_to_db(
                                 prompt_tokens,
                                 completion_tokens,
                                 total_tokens,
+                                month_idx,
+                                cb,
+                                float(prob),
                             ],
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -1638,13 +1645,15 @@ def _write_spd_members_v2_to_db(
                     probs_vec = [1.0 / bucket_count] * bucket_count
                 spd_json_payload["spds"][month_key] = {"probs": probs_vec}
                 for bucket_index, prob in enumerate(probs_vec[:bucket_count], start=1):
+                    cb = class_bins[bucket_index - 1] if 0 <= bucket_index - 1 < len(class_bins) else str(bucket_index)
                     con.execute(
                         """
                         INSERT INTO forecasts_raw (
                             run_id, question_id, model_name, month_index, bucket_index,
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
-                            completion_tokens, total_tokens, status, spd_json, human_explanation
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL)
+                            completion_tokens, total_tokens, status, spd_json, human_explanation,
+                            horizon_m, class_bin, p
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -1660,6 +1669,9 @@ def _write_spd_members_v2_to_db(
                             completion_tokens,
                             total_tokens,
                             json.dumps(spd_json_payload),
+                            month_index,
+                            cb,
+                            float(prob),
                         ],
                     )
     except Exception as exc:  # noqa: BLE001
@@ -4109,13 +4121,15 @@ def _write_spd_outputs(
             if not probs:
                 continue
             for bucket_index, prob in enumerate(list(probs)[: len(bucket_labels)], start=1):
+                cb = bucket_labels[bucket_index - 1] if 0 <= bucket_index - 1 < len(bucket_labels) else str(bucket_index)
                 con.execute(
                     """
                     INSERT INTO forecasts_raw (
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
-                        total_tokens, status, spd_json, human_explanation
-                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?)
+                        total_tokens, status, spd_json, human_explanation,
+                        horizon_m, class_bin, p
+                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -4131,6 +4145,9 @@ def _write_spd_outputs(
                         usage.get("total_tokens"),
                         _json_dumps_for_db(spd_payload),
                         human_explanation,
+                        month_idx,
+                        cb,
+                        float(prob),
                     ],
                 )
                 con.execute(

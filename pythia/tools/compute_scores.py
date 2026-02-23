@@ -140,25 +140,43 @@ def _load_spd(
           WHERE question_id = ? AND horizon_m = ?
         """
         params: List[object] = [question_id, horizon_m]
+
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except Exception as exc:
+            LOGGER.error("SPD query failed for %s horizon %s: %r", question_id, horizon_m, exc)
+            return None
+
+        if not rows:
+            return None
+
+        by_bin: Dict[str, float] = {cb: float(p) for cb, p in rows}
+        vec = [by_bin.get(cb, 0.0) for cb in class_bins]
     else:
+        # forecasts_raw stores data using month_index / bucket_index / probability.
+        # Map bucket_index (1-based) back to class_bins positions.
         sql = """
-          SELECT class_bin, p
+          SELECT COALESCE(bucket_index, 0), COALESCE(probability, 0.0)
           FROM forecasts_raw
-          WHERE question_id = ? AND horizon_m = ? AND model_name = ?
+          WHERE question_id = ? AND month_index = ? AND model_name = ?
         """
         params = [question_id, horizon_m, model_name]
 
-    try:
-        rows = conn.execute(sql, params).fetchall()
-    except Exception as exc:
-        LOGGER.error("SPD query failed for %s horizon %s: %r", question_id, horizon_m, exc)
-        return None
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except Exception as exc:
+            LOGGER.error("SPD query failed for %s horizon %s: %r", question_id, horizon_m, exc)
+            return None
 
-    if not rows:
-        return None
+        if not rows:
+            return None
 
-    by_bin: Dict[str, float] = {cb: float(p) for cb, p in rows}
-    vec = [by_bin.get(cb, 0.0) for cb in class_bins]
+        vec = [0.0] * len(class_bins)
+        for bucket_idx, prob in rows:
+            idx = int(bucket_idx) - 1  # bucket_index is 1-based
+            if 0 <= idx < len(class_bins):
+                vec[idx] = float(prob)
+
     total = float(sum(vec))
     if total <= 0.0:
         return [1.0 / float(len(class_bins)) for _ in class_bins]
@@ -263,7 +281,7 @@ def compute_scores(db_url: str) -> None:
                 """
                   SELECT DISTINCT model_name
                   FROM forecasts_raw
-                  WHERE question_id = ? AND horizon_m = ?
+                  WHERE question_id = ? AND month_index = ?
                   ORDER BY model_name
                 """,
                 [question_id, horizon_m],
