@@ -19,6 +19,7 @@ from pythia.tools.compute_resolutions import (
     _try_emdat_pa,
     _try_acled_fatalities,
     _data_freshness_cutoff,
+    _llm_derived_window_starts,
     horizon_to_calendar_month,
     compute_resolutions,
 )
@@ -1186,5 +1187,281 @@ def test_displaced_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         assert len(rows) == 2, f"Expected 2 resolutions, got {len(rows)}"
         assert rows[0] == (1, 3000.0)
         assert rows[1] == (2, 7000.0)
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# _llm_derived_window_starts — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestLlmDerivedWindowStarts:
+    def test_basic(self, tmp_path: Path):
+        """Two questions with different timestamps → correct window starts."""
+        db_path = tmp_path / "llm_ws.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(
+            """
+            CREATE TABLE llm_calls (
+                question_id TEXT,
+                timestamp TIMESTAMP
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO llm_calls (question_id, timestamp) VALUES
+                ('Q_A', '2025-12-15 10:00:00'),
+                ('Q_A', '2025-12-20 12:00:00'),
+                ('Q_B', '2026-01-05 08:00:00')
+            """
+        )
+        result = _llm_derived_window_starts(con)
+        con.close()
+        # Q_A earliest = Dec 2025 → window_start = Jan 2026
+        assert result["Q_A"] == date(2026, 1, 1)
+        # Q_B earliest = Jan 2026 → window_start = Feb 2026
+        assert result["Q_B"] == date(2026, 2, 1)
+
+    def test_empty_table(self, tmp_path: Path):
+        """Empty llm_calls → empty dict."""
+        db_path = tmp_path / "llm_empty.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(
+            "CREATE TABLE llm_calls (question_id TEXT, timestamp TIMESTAMP)"
+        )
+        result = _llm_derived_window_starts(con)
+        con.close()
+        assert result == {}
+
+    def test_no_llm_calls_table(self, tmp_path: Path):
+        """When llm_calls table doesn't exist → empty dict (no crash)."""
+        db_path = tmp_path / "no_llm.duckdb"
+        con = duckdb.connect(str(db_path))
+        result = _llm_derived_window_starts(con)
+        con.close()
+        assert result == {}
+
+    def test_null_timestamps_skipped(self, tmp_path: Path):
+        """Rows with NULL timestamps should be ignored."""
+        db_path = tmp_path / "llm_null.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(
+            "CREATE TABLE llm_calls (question_id TEXT, timestamp TIMESTAMP)"
+        )
+        con.execute(
+            """
+            INSERT INTO llm_calls (question_id, timestamp) VALUES
+                ('Q_OK', '2025-12-15 10:00:00'),
+                ('Q_NULL', NULL)
+            """
+        )
+        result = _llm_derived_window_starts(con)
+        con.close()
+        assert "Q_OK" in result
+        assert "Q_NULL" not in result
+
+    def test_year_rollover(self, tmp_path: Path):
+        """Forecast in December → window_start in January of next year."""
+        db_path = tmp_path / "llm_rollover.duckdb"
+        con = duckdb.connect(str(db_path))
+        con.execute(
+            "CREATE TABLE llm_calls (question_id TEXT, timestamp TIMESTAMP)"
+        )
+        con.execute(
+            """
+            INSERT INTO llm_calls (question_id, timestamp) VALUES
+                ('Q_DEC', '2025-12-31 23:59:59')
+            """
+        )
+        result = _llm_derived_window_starts(con)
+        con.close()
+        assert result["Q_DEC"] == date(2026, 1, 1)
+
+
+# ---------------------------------------------------------------------------
+# LLM-window priority: overrides overwritten questions table window
+# ---------------------------------------------------------------------------
+
+
+def _setup_e2e_db_with_llm_calls(con, extra_tables=True):
+    """Like _setup_e2e_db but also creates llm_calls table."""
+    _setup_e2e_db(con, extra_tables=extra_tables)
+    con.execute(
+        """
+        CREATE TABLE llm_calls (
+            call_id TEXT,
+            run_id TEXT,
+            hs_run_id TEXT,
+            question_id TEXT,
+            timestamp TIMESTAMP
+        )
+        """
+    )
+
+
+@pytest.mark.db
+def test_resolution_uses_llm_window_over_question_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When llm_calls has a December forecast but questions table was
+    overwritten by a February HS run, resolutions should use the
+    December-derived window (2026-01-01), not the February one (2026-03-01)."""
+    db_path = tmp_path / "e2e_llm_override.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db_with_llm_calls(con)
+        # Question's window_start_date was OVERWRITTEN by Feb HS run → 2026-03-01
+        # Original forecast was December → window should be 2026-01-01
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_OVR', 'run1', 'MLI', 'FL', 'PA', '2026-08', '2026-03-01', 'active')
+            """
+        )
+        # llm_calls shows the REAL forecast was in December 2025
+        con.execute(
+            """
+            INSERT INTO llm_calls (call_id, question_id, timestamp)
+            VALUES ('call1', 'Q_OVR', '2025-12-15 14:00:00')
+            """
+        )
+        # Source data available up to 2026-02
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES
+                ('2026-01', 'MLI', 'FL', 'affected', 3500.0),
+                ('2026-02', 'ETH', 'FL', 'affected', 100.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, observed_month, value "
+            "FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        # LLM forecast in Dec → window_start = 2026-01-01
+        # h1=2026-01 (data exists: 3500), h2=2026-02 (zero-default, cutoff=2026-02)
+        # If the overwritten window (2026-03-01) were used, h1=2026-03 > cutoff → 0 rows
+        assert len(rows) >= 1, (
+            f"Expected at least 1 resolution row (using LLM window), got {len(rows)}: {rows}"
+        )
+        assert rows[0] == (1, "2026-01", 3500.0), (
+            f"h1 should be 2026-01 (from LLM window), got {rows[0]}"
+        )
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_resolution_falls_back_to_question_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When no llm_calls row exists, fall back to q.window_start_date."""
+    db_path = tmp_path / "e2e_fallback_q.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db_with_llm_calls(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_FB', 'run1', 'MLI', 'FL', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # No llm_calls row for Q_FB → should use window_start_date from questions
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-08', 'MLI', 'FL', 'affected', 2000.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, observed_month FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        # window_start=2025-07-01 → h1=2025-07, h2=2025-08
+        # cutoff=2025-08 → h1 and h2 eligible
+        assert len(rows) == 2
+        assert rows[0][1] == "2025-07"
+        assert rows[1][1] == "2025-08"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_resolution_falls_back_to_target_month(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """When no llm_calls row exists AND no window_start_date, derive from target_month."""
+    db_path = tmp_path / "e2e_fallback_tm.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db_with_llm_calls(con)
+        # No window_start_date, only target_month
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_TM', 'run1', 'MLI', 'FL', 'PA', '2025-12', NULL, 'active')
+            """
+        )
+        # Data up to 2025-08
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-08', 'ETH', 'FL', 'affected', 100.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, observed_month FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        # target_month=2025-12 → window_start = 2025-12 - 5 months = 2025-07
+        # h1=2025-07, h2=2025-08, cutoff=2025-08 → 2 rows
+        assert len(rows) == 2
+        assert rows[0][1] == "2025-07"
+        assert rows[1][1] == "2025-08"
     finally:
         con.close()

@@ -613,11 +613,35 @@ def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict]) -> None:
 
 
 def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> None:
+    """Persist Horizon Scanner questions to the ``questions`` table.
+
+    **Preservation semantics**: if a ``question_id`` already exists in the
+    table the row is **not** overwritten.  This is critical for research
+    integrity — the original ``window_start_date``, ``target_month``,
+    ``wording``, and other metadata captured at the time of the first
+    forecast must be retained so that downstream resolution and scoring
+    pipelines operate on the correct forecast window.
+
+    Only genuinely new questions (unseen ``question_id``) are inserted.
+    """
     con = connect(read_only=False)
     ensure_schema(con)
 
+    inserted = 0
+    skipped_existing = 0
+
     for q in question_rows:
         question_id = q["question_id"]
+
+        # Preserve original question metadata — never overwrite.
+        existing = con.execute(
+            "SELECT 1 FROM questions WHERE question_id = ?",
+            [question_id],
+        ).fetchone()
+        if existing:
+            skipped_existing += 1
+            continue
+
         scenario_ids = q.get("scenario_ids") or []
         scenario_ids_json = json.dumps(scenario_ids, ensure_ascii=False)
 
@@ -626,7 +650,6 @@ def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> Non
         meta.setdefault("purpose", "hs_pipeline")
         pythia_metadata_json = json.dumps(meta, ensure_ascii=False)
 
-        con.execute("DELETE FROM questions WHERE question_id = ?;", [question_id])
         con.execute(
             """
             INSERT INTO questions (
@@ -659,6 +682,15 @@ def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> Non
                 pythia_metadata_json,
             ],
         )
+        inserted += 1
+
+    logging.info(
+        "log_hs_questions_to_db: %d new questions inserted, %d existing preserved "
+        "(hs_run_id=%s).",
+        inserted,
+        skipped_existing,
+        hs_run_id,
+    )
 
     con.close()
 
