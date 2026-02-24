@@ -318,6 +318,48 @@ def _resolve_value(
     return None
 
 
+def _llm_derived_window_starts(conn) -> dict[str, date]:
+    """Return ``{question_id: window_start_date}`` derived from the earliest
+    LLM forecast timestamp for each question.
+
+    ``window_start`` is the first day of the month **after** the earliest
+    forecast.  E.g. a forecast made on 2025-12-15 → window_start = 2026-01-01.
+
+    This is immune to HS-run overwrites because ``llm_calls`` is append-only
+    and never deleted or replaced by newer Horizon Scanner runs.
+    """
+    sql = """
+        SELECT question_id,
+               MIN(timestamp) AS earliest_ts
+        FROM llm_calls
+        WHERE question_id IS NOT NULL
+          AND timestamp IS NOT NULL
+        GROUP BY question_id
+    """
+    try:
+        rows = conn.execute(sql).fetchall()
+    except Exception:
+        # llm_calls table may not exist in test or early-stage DBs
+        return {}
+
+    result: dict[str, date] = {}
+    for qid, earliest_ts in rows:
+        try:
+            if isinstance(earliest_ts, str):
+                dt = datetime.fromisoformat(earliest_ts)
+            else:
+                dt = earliest_ts
+            # window_start = first day of month AFTER the forecast
+            y, m = dt.year, dt.month + 1
+            if m > 12:
+                y += 1
+                m = 1
+            result[str(qid)] = date(y, m, 1)
+        except Exception:
+            continue
+    return result
+
+
 def _ensure_resolutions_table(conn) -> None:
     """Create the resolutions table if it does not exist, and add horizon_m
     column if missing (migration for existing databases)."""
@@ -416,11 +458,21 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             len(rows),
         )
 
+        # LLM-derived window starts: immune to HS-run overwrites because
+        # llm_calls is append-only.
+        llm_windows = _llm_derived_window_starts(conn)
+        if llm_windows:
+            LOGGER.info(
+                "LLM-derived window_start_date available for %d questions.",
+                len(llm_windows),
+            )
+
         written = 0
         resolved_from_source = 0
         resolved_as_zero = 0
         skipped_no_data_coverage = 0
         skipped_unresolvable_hazard = 0
+        llm_window_overrides = 0
 
         for question_id, iso3, hazard_code, metric, target_month, window_start_date in rows:
             iso3_norm = (iso3 or "").upper()
@@ -435,8 +487,36 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 skipped_unresolvable_hazard += 1
                 continue
 
-            # Derive the window_start_date as a Python date
-            if window_start_date is not None:
+            # ── 3-tier window_start_date derivation ──────────────────────
+            #
+            # Priority 1: LLM-derived window (from llm_calls.timestamp).
+            #   This is immune to HS-run overwrites because llm_calls is
+            #   append-only and never modified by Horizon Scanner runs.
+            #
+            # Priority 2: q.window_start_date from the questions table.
+            #
+            # Priority 3: Derive from target_month (the 6th horizon month).
+            # ─────────────────────────────────────────────────────────────
+
+            ws_date: Optional[date] = llm_windows.get(question_id)
+
+            if ws_date is not None:
+                # Check if this overrides a different value from the questions table
+                q_ws: Optional[date] = None
+                if window_start_date is not None:
+                    if isinstance(window_start_date, str):
+                        try:
+                            parts = window_start_date.split("-")
+                            q_ws = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                        except Exception:
+                            pass
+                    elif isinstance(window_start_date, date):
+                        q_ws = window_start_date
+                if q_ws is not None and q_ws != ws_date:
+                    llm_window_overrides += 1
+
+            # Priority 2: questions table window_start_date
+            if ws_date is None and window_start_date is not None:
                 if isinstance(window_start_date, str):
                     try:
                         parts = window_start_date.split("-")
@@ -447,11 +527,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     ws_date = window_start_date
                 else:
                     ws_date = None
-            else:
-                ws_date = None
 
-            # Fallback: if window_start_date is not available, derive from
-            # target_month (which is the 6th month in the window).
+            # Priority 3: derive from target_month
             if ws_date is None and target_month:
                 try:
                     parts = target_month.split("-")
@@ -548,13 +625,15 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "compute_resolutions: %d questions processed, %d resolution rows "
             "written (%d from source data, %d defaulted to 0.0), "
             "%d horizon-months skipped (no data coverage yet), "
-            "%d questions skipped (unresolvable hazard).",
+            "%d questions skipped (unresolvable hazard), "
+            "%d window_start overrides from llm_calls.",
             len(rows),
             written,
             resolved_from_source,
             resolved_as_zero,
             skipped_no_data_coverage,
             skipped_unresolvable_hazard,
+            llm_window_overrides,
         )
     finally:
         _close_db(conn)
