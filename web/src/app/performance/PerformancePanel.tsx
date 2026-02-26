@@ -56,6 +56,33 @@ const VIEW_LABELS: { key: ViewMode; label: string }[] = [
   { key: "by_model", label: "By Model" },
 ];
 
+/** Check if a model_name represents an ensemble method. */
+const isEnsembleModel = (name: string | null): boolean => {
+  if (name == null) return true;
+  const lower = name.toLowerCase();
+  return lower.startsWith("ensemble");
+};
+
+/** Pick the preferred ensemble model name from available model names. */
+const pickDefaultEnsemble = (models: string[]): string | null => {
+  // Prefer ensemble_bayesmc_v2, then any ensemble_, then first available
+  const bayesmc = models.find((m) =>
+    m.toLowerCase().includes("ensemble_bayesmc"),
+  );
+  if (bayesmc) return bayesmc;
+  const anyEnsemble = models.find((m) =>
+    m.toLowerCase().startsWith("ensemble"),
+  );
+  if (anyEnsemble) return anyEnsemble;
+  return models[0] ?? null;
+};
+
+/** Friendly display name for a model. */
+const displayModelName = (name: string | null): string => {
+  if (name == null) return "Ensemble";
+  return name;
+};
+
 const formatScore = (value: number | null | undefined) => {
   if (value == null) return "\u2014";
   return value.toLocaleString(undefined, {
@@ -69,33 +96,9 @@ const formatInt = (value: number | null | undefined) => {
   return value.toLocaleString();
 };
 
-/** Compute a weighted average of `field` across `rows`, weighted by n_samples. */
-function weightedAvg(
-  rows: PerformanceSummaryRow[],
-  scoreType: string,
-): { avg: number | null; nQuestions: number; nSamples: number } {
-  const matching = rows.filter((r) => r.score_type === scoreType);
-  let totalWeight = 0;
-  let weightedSum = 0;
-  let nQuestions = 0;
-  let nSamples = 0;
-  for (const r of matching) {
-    if (r.avg_value != null && r.n_samples > 0) {
-      weightedSum += r.avg_value * r.n_samples;
-      totalWeight += r.n_samples;
-    }
-    nQuestions += r.n_questions;
-    nSamples += r.n_samples;
-  }
-  return {
-    avg: totalWeight > 0 ? weightedSum / totalWeight : null,
-    nQuestions,
-    nSamples,
-  };
-}
-
-function weightedAvgRun(
-  rows: PerformanceRunRow[],
+/** Compute a weighted average of `scoreType` across rows, weighted by n_samples. */
+function weightedAvg<T extends { score_type: string; avg_value: number | null; n_samples: number; n_questions: number }>(
+  rows: T[],
   scoreType: string,
 ): { avg: number | null; nQuestions: number; nSamples: number } {
   const matching = rows.filter((r) => r.score_type === scoreType);
@@ -256,6 +259,28 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
   const [data, setData] = useState<PerformanceScoresResponse>(initialData);
   const [loading, setLoading] = useState(false);
 
+  // ---- Detect available ensemble models ------------------------------------
+
+  const ensembleModels = useMemo(() => {
+    const names = new Set<string>();
+    for (const row of data.summary_rows) {
+      if (row.model_name && isEnsembleModel(row.model_name)) {
+        names.add(row.model_name);
+      }
+    }
+    return Array.from(names).sort();
+  }, [data]);
+
+  const [selectedEnsemble, setSelectedEnsemble] = useState<string | null>(null);
+
+  // Pick the default ensemble model (once we have the data)
+  const activeEnsemble = useMemo(() => {
+    if (selectedEnsemble && ensembleModels.includes(selectedEnsemble)) {
+      return selectedEnsemble;
+    }
+    return pickDefaultEnsemble(ensembleModels);
+  }, [selectedEnsemble, ensembleModels]);
+
   // ---- Fetch when metric changes -------------------------------------------
 
   const handleMetricChange = async (newMetric: string | null) => {
@@ -279,8 +304,11 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
   // ---- KPI cards -----------------------------------------------------------
 
   const kpiStats = useMemo(() => {
-    const ensembleRows = data.summary_rows.filter((r) => r.model_name == null);
-    const allHazards = new Set(ensembleRows.map((r) => r.hazard_code));
+    // Use the active ensemble model for headline stats
+    const ensembleRows = activeEnsemble
+      ? data.summary_rows.filter((r) => r.model_name === activeEnsemble)
+      : data.summary_rows.filter((r) => isEnsembleModel(r.model_name));
+    const allHazards = new Set(data.summary_rows.map((r) => r.hazard_code));
     const allModels = new Set(
       data.summary_rows.map((r) => r.model_name).filter(Boolean),
     );
@@ -293,35 +321,46 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
       totalQuestions: brier.nQuestions,
       overallBrier: brier.avg,
     };
-  }, [data]);
+  }, [data, activeEnsemble]);
 
   // ---- Total view ----------------------------------------------------------
+  // Show one row per model, each aggregated across all hazards.
 
   const totalRows = useMemo((): PivotedRow[] => {
-    const ensembleRows = data.summary_rows.filter((r) => r.model_name == null);
-    if (ensembleRows.length === 0) return [];
-    const brier = weightedAvg(ensembleRows, "brier");
-    const log = weightedAvg(ensembleRows, "log");
-    const crps = weightedAvg(ensembleRows, "crps");
-    return [
-      {
-        key: "ensemble-total",
-        label: "Ensemble (all hazards)",
+    const groups = new Map<string, PerformanceSummaryRow[]>();
+    for (const row of data.summary_rows) {
+      const modelKey = row.model_name ?? "__null__";
+      const existing = groups.get(modelKey) ?? [];
+      existing.push(row);
+      groups.set(modelKey, existing);
+    }
+    const result: PivotedRow[] = [];
+    for (const [modelKey, rows] of groups) {
+      const brier = weightedAvg(rows, "brier");
+      const log = weightedAvg(rows, "log");
+      const crps = weightedAvg(rows, "crps");
+      result.push({
+        key: modelKey,
+        label: displayModelName(modelKey === "__null__" ? null : modelKey),
         avg_brier: brier.avg,
         avg_log: log.avg,
         avg_crps: crps.avg,
         n_questions: brier.nQuestions,
         n_samples: brier.nSamples,
-      },
-    ];
+      });
+    }
+    return result;
   }, [data]);
 
   // ---- By Hazard view ------------------------------------------------------
+  // Show one row per hazard, using the active ensemble model's scores.
 
   const hazardRows = useMemo((): PivotedRow[] => {
-    const ensembleRows = data.summary_rows.filter((r) => r.model_name == null);
+    const filtered = activeEnsemble
+      ? data.summary_rows.filter((r) => r.model_name === activeEnsemble)
+      : data.summary_rows;
     const groups = new Map<string, PerformanceSummaryRow[]>();
-    for (const row of ensembleRows) {
+    for (const row of filtered) {
       const existing = groups.get(row.hazard_code) ?? [];
       existing.push(row);
       groups.set(row.hazard_code, existing);
@@ -342,22 +381,26 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
       });
     }
     return result;
-  }, [data]);
+  }, [data, activeEnsemble]);
 
   // ---- By Run view ---------------------------------------------------------
+  // Show one row per run, using the active ensemble model's scores.
 
   const runRows = useMemo((): RunPivotedRow[] => {
+    const filtered = activeEnsemble
+      ? data.run_rows.filter((r) => r.model_name === activeEnsemble)
+      : data.run_rows;
     const groups = new Map<string, PerformanceRunRow[]>();
-    for (const row of data.run_rows) {
+    for (const row of filtered) {
       const existing = groups.get(row.hs_run_id) ?? [];
       existing.push(row);
       groups.set(row.hs_run_id, existing);
     }
     const result: RunPivotedRow[] = [];
     for (const [runId, rows] of groups) {
-      const brier = weightedAvgRun(rows, "brier");
-      const log = weightedAvgRun(rows, "log");
-      const crps = weightedAvgRun(rows, "crps");
+      const brier = weightedAvg(rows, "brier");
+      const log = weightedAvg(rows, "log");
+      const crps = weightedAvg(rows, "crps");
       const runDate = rows[0]?.run_date ?? null;
       result.push({
         key: runId,
@@ -371,14 +414,15 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
       });
     }
     return result;
-  }, [data]);
+  }, [data, activeEnsemble]);
 
   // ---- By Model view -------------------------------------------------------
+  // Show one row per model, aggregated across all hazards.
 
   const modelRows = useMemo((): PivotedRow[] => {
     const groups = new Map<string, PerformanceSummaryRow[]>();
     for (const row of data.summary_rows) {
-      const modelKey = row.model_name ?? "__ensemble__";
+      const modelKey = row.model_name ?? "__null__";
       const existing = groups.get(modelKey) ?? [];
       existing.push(row);
       groups.set(modelKey, existing);
@@ -390,7 +434,7 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
       const crps = weightedAvg(rows, "crps");
       result.push({
         key: modelKey,
-        label: modelKey === "__ensemble__" ? "Ensemble" : modelKey,
+        label: displayModelName(modelKey === "__null__" ? null : modelKey),
         avg_brier: brier.avg,
         avg_log: log.avg,
         avg_crps: crps.avg,
@@ -456,6 +500,22 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
           <option value="FATALITIES">Fatalities</option>
         </select>
 
+        {/* Ensemble selector (shown for By Hazard and By Run views) */}
+        {(view === "by_hazard" || view === "by_run") &&
+        ensembleModels.length > 0 ? (
+          <select
+            className="rounded-md border border-fred-secondary bg-fred-surface px-3 py-1.5 text-sm text-fred-text"
+            value={activeEnsemble ?? ""}
+            onChange={(e) => setSelectedEnsemble(e.target.value || null)}
+          >
+            {ensembleModels.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        ) : null}
+
         {loading ? (
           <span className="text-xs text-fred-muted">Loading...</span>
         ) : null}
@@ -477,7 +537,7 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
               initialSortKey="avg_brier"
               initialSortDirection="asc"
               tableLayout="auto"
-              emptyMessage="No ensemble scores available."
+              emptyMessage="No scores available."
             />
           )}
 
