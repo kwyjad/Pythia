@@ -987,30 +987,32 @@ def get_questions(
         if run_col:
             sql += f", {run_col}"
         df = _execute(con, sql, params).fetchdf()
-        return {"rows": _rows_from_df(df)}
-
-    # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
-    cte, _ = _latest_questions_view(
-        con,
-        iso3=iso3,
-        hazard_code=hazard_code,
-        metric=metric,
-        target_month=target_month,
-        status=status,
-    )
-    sql = cte + """
-    SELECT *
-    FROM latest_q
-    """
-    if run_id and run_col:
-        sql += f" WHERE {run_col} = :run_id"
+        rows = _rows_from_df(df)
     else:
-        sql += " WHERE rn = 1"
-    if run_id and run_col:
-        sql += " AND rn = 1"
-    sql += " ORDER BY target_month, iso3, hazard_code, metric"
-    df = _execute(con, sql, params).fetchdf()
-    rows = _rows_from_df(df)
+        # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
+        cte, _ = _latest_questions_view(
+            con,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            target_month=target_month,
+            status=status,
+        )
+        sql = cte + """
+        SELECT *
+        FROM latest_q
+        """
+        if run_id and run_col:
+            sql += f" WHERE {run_col} = :run_id"
+        else:
+            sql += " WHERE rn = 1"
+        if run_id and run_col:
+            sql += " AND rn = 1"
+        sql += " ORDER BY target_month, iso3, hazard_code, metric"
+        df = _execute(con, sql, params).fetchdf()
+        rows = _rows_from_df(df)
+
+    # Enrich with forecast and triage summaries.
     triage_summary: dict[str, dict[str, Any]] = {}
     try:
         question_ids = [row["question_id"] for row in rows if row.get("question_id")]
@@ -1037,6 +1039,11 @@ def get_questions(
         row["triage_tier"] = triage.get("triage_tier")
         row["triage_need_full_spd"] = triage.get("triage_need_full_spd")
         row["triage_date"] = triage.get("triage_date")
+        row["regime_change_likelihood"] = triage.get("regime_change_likelihood")
+        row["regime_change_direction"] = triage.get("regime_change_direction")
+        row["regime_change_magnitude"] = triage.get("regime_change_magnitude")
+        row["regime_change_score"] = triage.get("regime_change_score")
+        row["regime_change_level"] = triage.get("regime_change_level")
     return {"rows": rows}
 
 
@@ -1453,6 +1460,99 @@ def get_calibration_advice(
         "found": True,
         "as_of_month": as_of_month,
         "rows": _rows_from_df(df),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Performance scores
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/performance/scores")
+def performance_scores(
+    metric: Optional[str] = Query(None, description="PA or FATALITIES"),
+):
+    """Return aggregated scoring metrics (Brier, Log, CRPS) for the performance page.
+
+    Returns two result sets:
+    - ``summary_rows``: scores aggregated across all runs, grouped by
+      (hazard_code, metric, score_type, model_name).  Powers the Total,
+      By Hazard, and By Model views.
+    - ``run_rows``: ensemble-only scores grouped by HS run (and hazard/metric/
+      score_type).  Powers the By Run view.
+    """
+    con = _con()
+
+    if not _table_exists(con, "scores") or not _table_exists(con, "questions"):
+        return {"summary_rows": [], "run_rows": []}
+
+    params: dict = {}
+    metric_filter = ""
+    if metric:
+        metric_filter = "AND UPPER(q.metric) = UPPER(:metric)"
+        params["metric"] = metric.upper()
+
+    # Query 1 -- summary rows (all models including ensemble)
+    sql_summary = f"""
+        SELECT
+          q.hazard_code,
+          UPPER(q.metric) AS metric,
+          s.score_type,
+          s.model_name,
+          COUNT(*) AS n_samples,
+          COUNT(DISTINCT s.question_id) AS n_questions,
+          AVG(s.value) AS avg_value
+        FROM scores s
+        JOIN questions q ON q.question_id = s.question_id
+        WHERE 1=1 {metric_filter}
+        GROUP BY q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
+        ORDER BY q.hazard_code, UPPER(q.metric), s.score_type,
+                 s.model_name NULLS FIRST
+    """
+    df_summary = _execute(con, sql_summary, params).fetchdf()
+
+    # Query 2 -- per-run rows (ensemble only)
+    has_hs_runs = _table_exists(con, "hs_runs")
+    if has_hs_runs:
+        sql_runs = f"""
+            SELECT
+              q.hs_run_id,
+              STRFTIME(MAX(h.generated_at), '%Y-%m-%d') AS run_date,
+              q.hazard_code,
+              UPPER(q.metric) AS metric,
+              s.score_type,
+              COUNT(*) AS n_samples,
+              COUNT(DISTINCT s.question_id) AS n_questions,
+              AVG(s.value) AS avg_value
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
+            WHERE s.model_name IS NULL {metric_filter}
+            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type
+            ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type
+        """
+    else:
+        sql_runs = f"""
+            SELECT
+              q.hs_run_id,
+              NULL AS run_date,
+              q.hazard_code,
+              UPPER(q.metric) AS metric,
+              s.score_type,
+              COUNT(*) AS n_samples,
+              COUNT(DISTINCT s.question_id) AS n_questions,
+              AVG(s.value) AS avg_value
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            WHERE s.model_name IS NULL {metric_filter}
+            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type
+            ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type
+        """
+    df_runs = _execute(con, sql_runs, params).fetchdf()
+
+    return {
+        "summary_rows": _rows_from_df(df_summary),
+        "run_rows": _rows_from_df(df_runs),
     }
 
 
@@ -2761,10 +2861,15 @@ def diagnostics_kpi_scopes(
 
 
 @app.get("/v1/countries")
-def get_countries():
+def get_countries(
+    metric_scope: Optional[str] = Query(None),
+    year_month: Optional[str] = Query(None),
+):
     con = _con()
     try:
-        rows = compute_countries_index(con)
+        rows = compute_countries_index(
+            con, metric_scope=metric_scope, year_month=year_month
+        )
         return {"rows": rows}
     except Exception:
         logger.exception("Failed to compute countries index, falling back.")
@@ -2772,29 +2877,37 @@ def get_countries():
     if not _table_exists(con, "questions"):
         return {"rows": []}
 
+    metric_filter = ""
+    params: list[str] = []
+    if metric_scope:
+        metric_filter = "WHERE UPPER(q.metric) = ?"
+        params = [metric_scope.upper()]
+
     if _table_exists(con, "forecasts_ensemble"):
-        sql = """
+        sql = f"""
           SELECT
             q.iso3,
             COUNT(DISTINCT q.question_id) AS n_questions,
             COUNT(DISTINCT fe.question_id) AS n_forecasted
           FROM questions q
           LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+          {metric_filter}
           GROUP BY q.iso3
           ORDER BY q.iso3
         """
     else:
-        sql = """
+        sql = f"""
           SELECT
             q.iso3,
             COUNT(DISTINCT q.question_id) AS n_questions,
             0 AS n_forecasted
           FROM questions q
+          {metric_filter}
           GROUP BY q.iso3
           ORDER BY q.iso3
         """
 
-    df = con.execute(sql).fetchdf()
+    df = con.execute(sql, params).fetchdf()
     if df.empty:
         return {"rows": []}
     return {"rows": _rows_from_df(df)}

@@ -44,7 +44,12 @@ export default async function OverviewPage() {
     console.warn("Risk index unavailable:", error);
   }
   try {
-    countries = await apiGet<CountriesResponse>("/countries");
+    countries = await apiGet<CountriesResponse>("/countries", {
+      metric_scope: "PA",
+      ...(kpiScopes.selected_month
+        ? { year_month: kpiScopes.selected_month }
+        : {}),
+    });
   } catch (error) {
     console.warn("Countries unavailable:", error);
   }

@@ -64,6 +64,12 @@ const Nav = () => {
           </Link>
           <Link
             className="text-fred-primary font-semibold hover:text-fred-secondary"
+            href="/performance"
+          >
+            Performance
+          </Link>
+          <Link
+            className="text-fred-primary font-semibold hover:text-fred-secondary"
             href="/downloads"
           >
             Downloads
@@ -152,6 +158,12 @@ const Nav = () => {
               href="/costs"
             >
               Costs
+            </Link>
+            <Link
+              className="text-fred-primary font-semibold hover:text-fred-secondary"
+              href="/performance"
+            >
+              Performance
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"

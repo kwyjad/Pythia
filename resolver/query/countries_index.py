@@ -60,18 +60,33 @@ def _pick_column(columns: set[str], candidates: list[str]) -> str | None:
     return None
 
 
-def _base_rows(conn) -> dict[str, dict[str, Any]]:
+def _base_rows(
+    conn,
+    metric_scope: str | None = None,
+    hs_run_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
     base = {}
     try:
+        clauses: list[str] = []
+        params: list[str] = []
+        if metric_scope:
+            clauses.append("UPPER(metric) = ?")
+            params.append(metric_scope.upper())
+        if hs_run_id:
+            clauses.append("hs_run_id = ?")
+            params.append(hs_run_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(
-            """
+            f"""
             SELECT
               UPPER(iso3) AS iso3,
               COUNT(DISTINCT question_id) AS n_questions
             FROM questions
+            {where}
             GROUP BY 1
             ORDER BY 1
-            """
+            """,
+            params,
         ).fetchall()
     except Exception:
         LOGGER.exception("Failed to query base country rows")
@@ -193,6 +208,58 @@ def _update_forecasts(conn, base: dict[str, dict[str, Any]]) -> None:
             base[key]["last_forecasted"] = last_forecasted
 
 
+def _hs_run_id_for_month(conn, year_month: str) -> str | None:
+    """Return the HS run ID whose timestamp falls within *year_month* (YYYY-MM).
+
+    Prefers ``hs_runs``; falls back to ``hs_triage.created_at``.
+    Returns the most-recent run in that month, or ``None``.
+    """
+    if _table_exists(conn, "hs_runs"):
+        hs_cols = _table_columns(conn, "hs_runs")
+        run_col = _pick_column(hs_cols, ["hs_run_id", "run_id"])
+        if run_col:
+            if "created_at" in hs_cols and "generated_at" in hs_cols:
+                ts_expr = "COALESCE(created_at, generated_at)"
+            elif "created_at" in hs_cols:
+                ts_expr = "created_at"
+            elif "generated_at" in hs_cols:
+                ts_expr = "generated_at"
+            else:
+                ts_expr = None
+            if ts_expr:
+                row = conn.execute(
+                    f"""
+                    SELECT {run_col}
+                    FROM hs_runs
+                    WHERE STRFTIME({ts_expr}, '%Y-%m') = ?
+                    ORDER BY {ts_expr} DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    [year_month],
+                ).fetchone()
+                if row and row[0]:
+                    return str(row[0])
+
+    if _table_exists(conn, "hs_triage"):
+        triage_cols = _table_columns(conn, "hs_triage")
+        run_col = _pick_column(triage_cols, ["run_id", "hs_run_id"])
+        if run_col and "created_at" in triage_cols:
+            row = conn.execute(
+                f"""
+                SELECT DISTINCT {run_col}
+                FROM hs_triage
+                WHERE STRFTIME(created_at, '%Y-%m') = ?
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                [year_month],
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+
+    return None
+
+
 def _latest_hs_run_id(conn) -> str | None:
     if _table_exists(conn, "hs_runs"):
         hs_cols = _table_columns(conn, "hs_runs")
@@ -242,7 +309,18 @@ def _latest_hs_run_id(conn) -> str | None:
     return None
 
 
-def _update_highest_rc(conn, base: dict[str, dict[str, Any]]) -> None:
+def _update_highest_rc(
+    conn,
+    base: dict[str, dict[str, Any]],
+    hs_run_id: str | None = None,
+) -> None:
+    """Populate ``highest_rc_level`` / ``highest_rc_score`` in *base*.
+
+    When *hs_run_id* is given, RC data is taken from that single run (used when
+    the caller has a specific run-month context).  When it is ``None``, RC data
+    is joined through the ``questions`` table so each country gets RC values
+    only from the run(s) that produced its questions.
+    """
     if not base:
         return
     if not _table_exists(conn, "hs_triage"):
@@ -261,24 +339,41 @@ def _update_highest_rc(conn, base: dict[str, dict[str, Any]]) -> None:
         )
         return
 
-    run_id = _latest_hs_run_id(conn)
-    if not run_id:
-        return
-
     try:
-        rows = conn.execute(
-            f"""
-            SELECT
-              UPPER({iso_col}) AS iso3,
-              MAX({level_col}) AS highest_rc_level,
-              MAX({score_col}) AS highest_rc_score
-            FROM hs_triage
-            WHERE {run_col} = ?
-            GROUP BY 1
-            ORDER BY 1
-            """,
-            [run_id],
-        ).fetchall()
+        if hs_run_id:
+            # Single-run mode: take RC from the specified run only.
+            rows = conn.execute(
+                f"""
+                SELECT
+                  UPPER({iso_col}) AS iso3,
+                  MAX({level_col}) AS highest_rc_level,
+                  MAX({score_col}) AS highest_rc_score
+                FROM hs_triage
+                WHERE {run_col} = ?
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                [hs_run_id],
+            ).fetchall()
+        else:
+            # Per-country mode: join through questions so each country's RC
+            # comes from the same run(s) that produced its questions.  This
+            # avoids leaking RC data from a newer run onto countries whose
+            # questions belong to an older run that predates RC scoring.
+            rows = conn.execute(
+                f"""
+                SELECT
+                  UPPER(ht.{iso_col}) AS iso3,
+                  MAX(ht.{level_col}) AS highest_rc_level,
+                  MAX(ht.{score_col}) AS highest_rc_score
+                FROM hs_triage ht
+                JOIN questions q
+                  ON q.hs_run_id = ht.{run_col}
+                 AND UPPER(q.iso3) = UPPER(ht.{iso_col})
+                GROUP BY 1
+                ORDER BY 1
+                """,
+            ).fetchall()
     except Exception:
         LOGGER.exception("Failed to compute highest_rc fields")
         return
@@ -294,7 +389,11 @@ def _update_highest_rc(conn, base: dict[str, dict[str, Any]]) -> None:
             )
 
 
-def compute_countries_index(conn) -> list[dict[str, Any]]:
+def compute_countries_index(
+    conn,
+    metric_scope: str | None = None,
+    year_month: str | None = None,
+) -> list[dict[str, Any]]:
     if conn is None:
         return []
     if not _table_exists(conn, "questions"):
@@ -305,12 +404,24 @@ def compute_countries_index(conn) -> list[dict[str, Any]]:
         LOGGER.warning("questions table missing iso3/question_id columns.")
         return []
 
-    base = _base_rows(conn)
+    # Resolve the HS run for the requested month (or latest).
+    hs_run_id: str | None = None
+    if year_month:
+        hs_run_id = _hs_run_id_for_month(conn, year_month)
+    if not hs_run_id:
+        hs_run_id = _latest_hs_run_id(conn)
+
+    # Filter base rows by metric and run.
+    run_filter = hs_run_id if year_month else None
+    base = _base_rows(conn, metric_scope=metric_scope, hs_run_id=run_filter)
     if not base:
         return []
 
     _update_last_triaged(conn, base)
     _update_forecasts(conn, base)
-    _update_highest_rc(conn, base)
+    # When a specific month is requested, use that run's RC data.
+    # Otherwise let _update_highest_rc join through questions so each
+    # country's RC comes from the run(s) that produced its questions.
+    _update_highest_rc(conn, base, hs_run_id=hs_run_id if year_month else None)
 
     return [base[key] for key in sorted(base)]
