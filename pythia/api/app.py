@@ -1511,7 +1511,7 @@ def performance_scores(
     """
     df_summary = _execute(con, sql_summary, params).fetchdf()
 
-    # Query 2 -- per-run rows (ensemble only)
+    # Query 2 -- per-run rows (all models, including named ensembles)
     has_hs_runs = _table_exists(con, "hs_runs")
     if has_hs_runs:
         sql_runs = f"""
@@ -1521,15 +1521,17 @@ def performance_scores(
               q.hazard_code,
               UPPER(q.metric) AS metric,
               s.score_type,
+              s.model_name,
               COUNT(*) AS n_samples,
               COUNT(DISTINCT s.question_id) AS n_questions,
               AVG(s.value) AS avg_value
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
-            WHERE s.model_name IS NULL {metric_filter}
-            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type
-            ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type
+            WHERE 1=1 {metric_filter}
+            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
+            ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type,
+                     s.model_name NULLS FIRST
         """
     else:
         sql_runs = f"""
@@ -1539,14 +1541,16 @@ def performance_scores(
               q.hazard_code,
               UPPER(q.metric) AS metric,
               s.score_type,
+              s.model_name,
               COUNT(*) AS n_samples,
               COUNT(DISTINCT s.question_id) AS n_questions,
               AVG(s.value) AS avg_value
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
-            WHERE s.model_name IS NULL {metric_filter}
-            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type
-            ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type
+            WHERE 1=1 {metric_filter}
+            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
+            ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type,
+                     s.model_name NULLS FIRST
         """
     df_runs = _execute(con, sql_runs, params).fetchdf()
 

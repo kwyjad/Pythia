@@ -128,6 +128,7 @@ export type PerformanceRunRow = {
   hazard_code: string;
   metric: string;
   score_type: string;
+  model_name: string | null;
   n_samples: number;
   n_questions: number;
   avg_value: number | null;

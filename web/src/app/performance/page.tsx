@@ -26,6 +26,13 @@ export default async function PerformancePage() {
         </p>
       </section>
 
+      <div className="w-full bg-yellow-400 px-4 py-3 text-center text-sm text-black">
+        NOTE: These are preliminary scores from early runs with Fred changing
+        resolution sources for climate hazards midstream. Climate hazard
+        baselines and resolution data is spotty. Performance will be
+        artificially poor until resolution issues can be resolved.
+      </div>
+
       {loadError ? (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
           {loadError}
