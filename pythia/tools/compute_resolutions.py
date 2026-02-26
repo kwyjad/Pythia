@@ -84,23 +84,16 @@ def horizon_to_calendar_month(window_start_date: date, horizon_m: int) -> str:
     return f"{shifted.year:04d}-{shifted.month:02d}"
 
 
-def _eligible_cutoff_month(today: date, lag_day: int = 15) -> str:
-    """Return the latest calendar month eligible for resolution.
+def _calendar_cutoff(today: date) -> str:
+    """Return the latest calendar month that is fully complete.
 
-    A month is eligible once we reach the ``lag_day`` of the following month.
+    Rule: max resolvable month = ``current_month - 1``.  In February 2026,
+    this returns ``"2026-01"`` (January is the last complete month).
+    This prevents resolving against partial-month data that the Resolver
+    uploads mid-month.
     """
-
-    month_anchor = date(today.year, today.month, 1)
-    months_back = 1 if today.day >= lag_day else 2
-    eligible_month = _shift_month(month_anchor, -months_back)
-    cutoff = f"{eligible_month.year:04d}-{eligible_month.month:02d}"
-    LOGGER.info(
-        "Resolution cutoff using lag_day=%d and today=%s is calendar_month <= %s",
-        lag_day,
-        today.isoformat(),
-        cutoff,
-    )
-    return cutoff
+    prev = _shift_month(date(today.year, today.month, 1), -1)
+    return f"{prev.year:04d}-{prev.month:02d}"
 
 
 def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
@@ -429,13 +422,23 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             LOGGER.info("compute_resolutions: questions table is empty; nothing to do.")
             return
 
-        # Data-driven eligibility: latest month for which source data exists.
+        # Calendar cutoff: previous complete month (prevents partial-month data).
+        cal_cutoff = _calendar_cutoff(today)
+
+        # Data-driven guard: don't resolve beyond what sources actually cover.
         pa_data_cutoff = _data_freshness_cutoff(conn, "PA")
         fat_data_cutoff = _data_freshness_cutoff(conn, "FATALITIES")
+
+        # Effective cutoff: min(calendar, data) per metric.
+        # Calendar prevents partial-month resolution; data guard prevents
+        # resolving months for which no source data has been loaded yet.
+        pa_cutoff = min(cal_cutoff, pa_data_cutoff) if pa_data_cutoff else cal_cutoff
+        fat_cutoff = min(cal_cutoff, fat_data_cutoff) if fat_data_cutoff else cal_cutoff
         LOGGER.info(
-            "Data freshness cutoffs: PA=%s, FATALITIES=%s",
-            pa_data_cutoff or "<none>",
-            fat_data_cutoff or "<none>",
+            "Effective cutoffs: PA=%s (calendar=%s, data=%s), "
+            "FATALITIES=%s (calendar=%s, data=%s)",
+            pa_cutoff, cal_cutoff, pa_data_cutoff or "<none>",
+            fat_cutoff, cal_cutoff, fat_data_cutoff or "<none>",
         )
 
         query_sql = """
@@ -546,9 +549,9 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 )
                 continue
 
-            # Select the per-metric data freshness cutoff.
+            # Select the per-metric effective cutoff.
             data_cutoff = (
-                pa_data_cutoff if metric_norm == "PA" else fat_data_cutoff
+                pa_cutoff if metric_norm == "PA" else fat_cutoff
             )
 
             for horizon_m in range(1, NUM_HORIZONS + 1):
