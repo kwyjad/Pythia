@@ -7,6 +7,9 @@ const TOTAL_COSTS_URL = `${API_BASE}/downloads/total_costs.csv`;
 const MONTHLY_COSTS_URL = `${API_BASE}/downloads/monthly_costs.csv`;
 const RUN_COSTS_URL = `${API_BASE}/downloads/run_costs.csv`;
 const TRIAGE_DOWNLOAD_URL = `${API_BASE}/downloads/triage.csv`;
+const SCORES_ENSEMBLE_MEAN_URL = `${API_BASE}/downloads/scores_ensemble_mean.csv`;
+const SCORES_ENSEMBLE_BAYESMC_URL = `${API_BASE}/downloads/scores_ensemble_bayesmc.csv`;
+const SCORES_MODEL_URL = `${API_BASE}/downloads/scores_model.csv`;
 
 const DownloadsPage = () => {
   return (
@@ -39,6 +42,37 @@ const DownloadsPage = () => {
               className="text-xs text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
             >
               Excel (if available; otherwise downloads CSV)
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-6">
+        <div className="space-y-2">
+          <h2 className="text-lg font-semibold">Performance scores</h2>
+          <p className="text-sm text-fred-text">
+            Scoring data (Brier, Log Loss, CRPS) for ensemble and individual
+            models. Per-question exports include full 6-month SPD forecasts,
+            EIV, resolutions, and triage data.
+          </p>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <a
+              href={SCORES_ENSEMBLE_MEAN_URL}
+              className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 font-semibold text-white hover:opacity-90"
+            >
+              Ensemble Mean scores (CSV)
+            </a>
+            <a
+              className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
+              href={SCORES_ENSEMBLE_BAYESMC_URL}
+            >
+              Ensemble BayesMC scores (CSV)
+            </a>
+            <a
+              className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
+              href={SCORES_MODEL_URL}
+            >
+              Model summary scores (CSV)
             </a>
           </div>
         </div>

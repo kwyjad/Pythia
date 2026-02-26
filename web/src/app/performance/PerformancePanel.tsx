@@ -27,8 +27,11 @@ type PivotedRow = {
   key: string;
   label: string;
   avg_brier: number | null;
+  median_brier: number | null;
   avg_log: number | null;
+  median_log: number | null;
   avg_crps: number | null;
+  median_crps: number | null;
   n_questions: number;
   n_samples: number;
 };
@@ -39,8 +42,11 @@ type RunPivotedRow = {
   hs_run_id: string;
   run_date: string | null;
   avg_brier: number | null;
+  median_brier: number | null;
   avg_log: number | null;
+  median_log: number | null;
   avg_crps: number | null;
+  median_crps: number | null;
   n_questions: number;
   n_samples: number;
 };
@@ -56,6 +62,16 @@ const VIEW_LABELS: { key: ViewMode; label: string }[] = [
   { key: "by_model", label: "By Model" },
 ];
 
+// Shared tooltip texts (consistent across all views)
+const TOOLTIP_BRIER =
+  "Brier score measures the accuracy of probabilistic predictions. Lower is better. Range: 0 (perfect) to 1.";
+const TOOLTIP_LOG =
+  "Logarithmic scoring rule. Lower is better. Heavily penalises confident wrong predictions. Range: 0 (perfect) to +\u221E.";
+const TOOLTIP_CRPS =
+  "Continuous Ranked Probability Score. Lower is better. Measures full distribution accuracy. Range: 0 (perfect) to +\u221E.";
+const TOOLTIP_SAMPLES =
+  "Number of individual scored data points (question \u00D7 horizon combinations). Each question can produce multiple samples across different forecast horizons.";
+
 /** Check if a model_name represents an ensemble method. */
 const isEnsembleModel = (name: string | null): boolean => {
   if (name == null) return true;
@@ -65,7 +81,6 @@ const isEnsembleModel = (name: string | null): boolean => {
 
 /** Pick the preferred ensemble model name from available model names. */
 const pickDefaultEnsemble = (models: string[]): string | null => {
-  // Prefer ensemble_bayesmc_v2, then any ensemble_, then first available
   const bayesmc = models.find((m) =>
     m.toLowerCase().includes("ensemble_bayesmc"),
   );
@@ -96,26 +111,46 @@ const formatInt = (value: number | null | undefined) => {
   return value.toLocaleString();
 };
 
-/** Compute a weighted average of `scoreType` across rows, weighted by n_samples. */
-function weightedAvg<T extends { score_type: string; avg_value: number | null; n_samples: number; n_questions: number }>(
+/** Compute weighted average + weighted median of `scoreType` across rows. */
+function aggregateScore<
+  T extends {
+    score_type: string;
+    avg_value: number | null;
+    median_value: number | null;
+    n_samples: number;
+    n_questions: number;
+  },
+>(
   rows: T[],
   scoreType: string,
-): { avg: number | null; nQuestions: number; nSamples: number } {
+): {
+  avg: number | null;
+  median: number | null;
+  nQuestions: number;
+  nSamples: number;
+} {
   const matching = rows.filter((r) => r.score_type === scoreType);
   let totalWeight = 0;
-  let weightedSum = 0;
+  let weightedSumAvg = 0;
+  let weightedSumMedian = 0;
+  let medianWeight = 0;
   let nQuestions = 0;
   let nSamples = 0;
   for (const r of matching) {
     if (r.avg_value != null && r.n_samples > 0) {
-      weightedSum += r.avg_value * r.n_samples;
+      weightedSumAvg += r.avg_value * r.n_samples;
       totalWeight += r.n_samples;
+    }
+    if (r.median_value != null && r.n_samples > 0) {
+      weightedSumMedian += r.median_value * r.n_samples;
+      medianWeight += r.n_samples;
     }
     nQuestions += r.n_questions;
     nSamples += r.n_samples;
   }
   return {
-    avg: totalWeight > 0 ? weightedSum / totalWeight : null,
+    avg: totalWeight > 0 ? weightedSumAvg / totalWeight : null,
+    median: medianWeight > 0 ? weightedSumMedian / medianWeight : null,
     nQuestions,
     nSamples,
   };
@@ -131,14 +166,15 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     label: "Name",
     sortValue: (row) => row.label,
     defaultSortDirection: "asc",
-    render: (row) => <span className="font-medium text-fred-text">{row.label}</span>,
+    render: (row) => (
+      <span className="font-medium text-fred-text">{row.label}</span>
+    ),
   },
   {
     key: "avg_brier",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg Brier{" "}
-        <InfoTooltip text="Brier score measures the accuracy of probabilistic predictions. Lower is better. Range: 0 (perfect) to 1." />
+        Avg Brier <InfoTooltip text={TOOLTIP_BRIER} />
       </span>
     ),
     sortValue: (row) => row.avg_brier,
@@ -146,11 +182,17 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     render: (row) => formatScore(row.avg_brier),
   },
   {
+    key: "median_brier",
+    label: "Mdn Brier",
+    sortValue: (row) => row.median_brier,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.median_brier),
+  },
+  {
     key: "avg_log",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg Log Loss{" "}
-        <InfoTooltip text="Logarithmic scoring rule. Lower is better. Heavily penalises confident wrong predictions." />
+        Avg Log Loss <InfoTooltip text={TOOLTIP_LOG} />
       </span>
     ),
     sortValue: (row) => row.avg_log,
@@ -158,16 +200,29 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     render: (row) => formatScore(row.avg_log),
   },
   {
+    key: "median_log",
+    label: "Mdn Log Loss",
+    sortValue: (row) => row.median_log,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.median_log),
+  },
+  {
     key: "avg_crps",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg CRPS{" "}
-        <InfoTooltip text="Continuous Ranked Probability Score. Lower is better. Measures full distribution accuracy." />
+        Avg CRPS <InfoTooltip text={TOOLTIP_CRPS} />
       </span>
     ),
     sortValue: (row) => row.avg_crps,
     defaultSortDirection: "asc",
     render: (row) => formatScore(row.avg_crps),
+  },
+  {
+    key: "median_crps",
+    label: "Mdn CRPS",
+    sortValue: (row) => row.median_crps,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.median_crps),
   },
   {
     key: "n_questions",
@@ -178,7 +233,11 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
   },
   {
     key: "n_samples",
-    label: "Samples",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        Samples <InfoTooltip text={TOOLTIP_SAMPLES} />
+      </span>
+    ),
     sortValue: (row) => row.n_samples,
     defaultSortDirection: "desc",
     render: (row) => formatInt(row.n_samples),
@@ -201,8 +260,7 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
     key: "avg_brier",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg Brier{" "}
-        <InfoTooltip text="Brier score measures the accuracy of probabilistic predictions. Lower is better." />
+        Avg Brier <InfoTooltip text={TOOLTIP_BRIER} />
       </span>
     ),
     sortValue: (row) => row.avg_brier,
@@ -210,11 +268,17 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
     render: (row) => formatScore(row.avg_brier),
   },
   {
+    key: "median_brier",
+    label: "Mdn Brier",
+    sortValue: (row) => row.median_brier,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.median_brier),
+  },
+  {
     key: "avg_log",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg Log Loss{" "}
-        <InfoTooltip text="Logarithmic scoring rule. Lower is better." />
+        Avg Log Loss <InfoTooltip text={TOOLTIP_LOG} />
       </span>
     ),
     sortValue: (row) => row.avg_log,
@@ -222,16 +286,29 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
     render: (row) => formatScore(row.avg_log),
   },
   {
+    key: "median_log",
+    label: "Mdn Log Loss",
+    sortValue: (row) => row.median_log,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.median_log),
+  },
+  {
     key: "avg_crps",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg CRPS{" "}
-        <InfoTooltip text="Continuous Ranked Probability Score. Lower is better." />
+        Avg CRPS <InfoTooltip text={TOOLTIP_CRPS} />
       </span>
     ),
     sortValue: (row) => row.avg_crps,
     defaultSortDirection: "asc",
     render: (row) => formatScore(row.avg_crps),
+  },
+  {
+    key: "median_crps",
+    label: "Mdn CRPS",
+    sortValue: (row) => row.median_crps,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.median_crps),
   },
   {
     key: "n_questions",
@@ -242,7 +319,11 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
   },
   {
     key: "n_samples",
-    label: "Samples",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        Samples <InfoTooltip text={TOOLTIP_SAMPLES} />
+      </span>
+    ),
     sortValue: (row) => row.n_samples,
     defaultSortDirection: "desc",
     render: (row) => formatInt(row.n_samples),
@@ -253,7 +334,9 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
 // Component
 // ---------------------------------------------------------------------------
 
-export default function PerformancePanel({ initialData }: PerformancePanelProps) {
+export default function PerformancePanel({
+  initialData,
+}: PerformancePanelProps) {
   const [view, setView] = useState<ViewMode>("total");
   const [metric, setMetric] = useState<string | null>(null);
   const [data, setData] = useState<PerformanceScoresResponse>(initialData);
@@ -271,9 +354,10 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
     return Array.from(names).sort();
   }, [data]);
 
-  const [selectedEnsemble, setSelectedEnsemble] = useState<string | null>(null);
+  const [selectedEnsemble, setSelectedEnsemble] = useState<string | null>(
+    null,
+  );
 
-  // Pick the default ensemble model (once we have the data)
   const activeEnsemble = useMemo(() => {
     if (selectedEnsemble && ensembleModels.includes(selectedEnsemble)) {
       return selectedEnsemble;
@@ -304,7 +388,6 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
   // ---- KPI cards -----------------------------------------------------------
 
   const kpiStats = useMemo(() => {
-    // Use the active ensemble model for headline stats
     const ensembleRows = activeEnsemble
       ? data.summary_rows.filter((r) => r.model_name === activeEnsemble)
       : data.summary_rows.filter((r) => isEnsembleModel(r.model_name));
@@ -313,7 +396,7 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
       data.summary_rows.map((r) => r.model_name).filter(Boolean),
     );
     const allRuns = new Set(data.run_rows.map((r) => r.hs_run_id));
-    const brier = weightedAvg(ensembleRows, "brier");
+    const brier = aggregateScore(ensembleRows, "brier");
     return {
       hazards: allHazards.size,
       models: allModels.size,
@@ -323,68 +406,67 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
     };
   }, [data, activeEnsemble]);
 
-  // ---- Total view ----------------------------------------------------------
-  // Show one row per model, each aggregated across all hazards.
+  // ---- Helper to build pivoted rows from summary data ----------------------
 
-  const totalRows = useMemo((): PivotedRow[] => {
+  function buildPivoted(
+    rows: PerformanceSummaryRow[],
+    groupBy: (r: PerformanceSummaryRow) => string,
+    labelFor: (key: string) => string,
+  ): PivotedRow[] {
     const groups = new Map<string, PerformanceSummaryRow[]>();
-    for (const row of data.summary_rows) {
-      const modelKey = row.model_name ?? "__null__";
-      const existing = groups.get(modelKey) ?? [];
+    for (const row of rows) {
+      const gk = groupBy(row);
+      const existing = groups.get(gk) ?? [];
       existing.push(row);
-      groups.set(modelKey, existing);
+      groups.set(gk, existing);
     }
     const result: PivotedRow[] = [];
-    for (const [modelKey, rows] of groups) {
-      const brier = weightedAvg(rows, "brier");
-      const log = weightedAvg(rows, "log");
-      const crps = weightedAvg(rows, "crps");
+    for (const [gk, gRows] of groups) {
+      const brier = aggregateScore(gRows, "brier");
+      const log = aggregateScore(gRows, "log");
+      const crps = aggregateScore(gRows, "crps");
       result.push({
-        key: modelKey,
-        label: displayModelName(modelKey === "__null__" ? null : modelKey),
+        key: gk,
+        label: labelFor(gk),
         avg_brier: brier.avg,
+        median_brier: brier.median,
         avg_log: log.avg,
+        median_log: log.median,
         avg_crps: crps.avg,
+        median_crps: crps.median,
         n_questions: brier.nQuestions,
         n_samples: brier.nSamples,
       });
     }
     return result;
-  }, [data]);
+  }
+
+  // ---- Total view ----------------------------------------------------------
+
+  const totalRows = useMemo(
+    (): PivotedRow[] =>
+      buildPivoted(
+        data.summary_rows,
+        (r) => r.model_name ?? "__null__",
+        (k) => displayModelName(k === "__null__" ? null : k),
+      ),
+    [data],
+  );
 
   // ---- By Hazard view ------------------------------------------------------
-  // Show one row per hazard, using the active ensemble model's scores.
 
   const hazardRows = useMemo((): PivotedRow[] => {
     const filtered = activeEnsemble
       ? data.summary_rows.filter((r) => r.model_name === activeEnsemble)
       : data.summary_rows;
-    const groups = new Map<string, PerformanceSummaryRow[]>();
-    for (const row of filtered) {
-      const existing = groups.get(row.hazard_code) ?? [];
-      existing.push(row);
-      groups.set(row.hazard_code, existing);
-    }
-    const result: PivotedRow[] = [];
-    for (const [hazard, rows] of groups) {
-      const brier = weightedAvg(rows, "brier");
-      const log = weightedAvg(rows, "log");
-      const crps = weightedAvg(rows, "crps");
-      result.push({
-        key: hazard,
-        label: hazard,
-        avg_brier: brier.avg,
-        avg_log: log.avg,
-        avg_crps: crps.avg,
-        n_questions: brier.nQuestions,
-        n_samples: brier.nSamples,
-      });
-    }
-    return result;
+    return buildPivoted(
+      filtered,
+      (r) => r.hazard_code,
+      (k) => k,
+    );
   }, [data, activeEnsemble]);
 
   // ---- By Run view ---------------------------------------------------------
-  // Show one row per run, using the active ensemble model's scores.
 
   const runRows = useMemo((): RunPivotedRow[] => {
     const filtered = activeEnsemble
@@ -397,18 +479,21 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
       groups.set(row.hs_run_id, existing);
     }
     const result: RunPivotedRow[] = [];
-    for (const [runId, rows] of groups) {
-      const brier = weightedAvg(rows, "brier");
-      const log = weightedAvg(rows, "log");
-      const crps = weightedAvg(rows, "crps");
-      const runDate = rows[0]?.run_date ?? null;
+    for (const [runId, gRows] of groups) {
+      const brier = aggregateScore(gRows, "brier");
+      const log = aggregateScore(gRows, "log");
+      const crps = aggregateScore(gRows, "crps");
+      const runDate = gRows[0]?.run_date ?? null;
       result.push({
         key: runId,
         hs_run_id: runId,
         run_date: runDate,
         avg_brier: brier.avg,
+        median_brier: brier.median,
         avg_log: log.avg,
+        median_log: log.median,
         avg_crps: crps.avg,
+        median_crps: crps.median,
         n_questions: brier.nQuestions,
         n_samples: brier.nSamples,
       });
@@ -417,33 +502,16 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
   }, [data, activeEnsemble]);
 
   // ---- By Model view -------------------------------------------------------
-  // Show one row per model, aggregated across all hazards.
 
-  const modelRows = useMemo((): PivotedRow[] => {
-    const groups = new Map<string, PerformanceSummaryRow[]>();
-    for (const row of data.summary_rows) {
-      const modelKey = row.model_name ?? "__null__";
-      const existing = groups.get(modelKey) ?? [];
-      existing.push(row);
-      groups.set(modelKey, existing);
-    }
-    const result: PivotedRow[] = [];
-    for (const [modelKey, rows] of groups) {
-      const brier = weightedAvg(rows, "brier");
-      const log = weightedAvg(rows, "log");
-      const crps = weightedAvg(rows, "crps");
-      result.push({
-        key: modelKey,
-        label: displayModelName(modelKey === "__null__" ? null : modelKey),
-        avg_brier: brier.avg,
-        avg_log: log.avg,
-        avg_crps: crps.avg,
-        n_questions: brier.nQuestions,
-        n_samples: brier.nSamples,
-      });
-    }
-    return result;
-  }, [data]);
+  const modelRows = useMemo(
+    (): PivotedRow[] =>
+      buildPivoted(
+        data.summary_rows,
+        (r) => r.model_name ?? "__null__",
+        (k) => displayModelName(k === "__null__" ? null : k),
+      ),
+    [data],
+  );
 
   // ---- Render --------------------------------------------------------------
 
@@ -454,7 +522,10 @@ export default function PerformancePanel({ initialData }: PerformancePanelProps)
     <div className="space-y-6">
       {/* KPI cards */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-        <KpiCard label="Scored Questions" value={formatInt(kpiStats.totalQuestions)} />
+        <KpiCard
+          label="Scored Questions"
+          value={formatInt(kpiStats.totalQuestions)}
+        />
         <KpiCard label="Hazards" value={formatInt(kpiStats.hazards)} />
         <KpiCard label="Models" value={formatInt(kpiStats.models)} />
         <KpiCard label="HS Runs" value={formatInt(kpiStats.runs)} />

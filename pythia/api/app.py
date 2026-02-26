@@ -48,7 +48,12 @@ from resolver.query.costs import (
     build_latencies_runs,
     build_run_runtimes,
 )
-from resolver.query.downloads import build_forecast_spd_export, build_triage_export
+from resolver.query.downloads import (
+    build_ensemble_scores_export,
+    build_forecast_spd_export,
+    build_model_scores_export,
+    build_triage_export,
+)
 from resolver.query.kpi_scopes import compute_countries_triaged_for_month_with_source
 from resolver.query.questions_index import (
     compute_questions_forecast_summary,
@@ -1501,7 +1506,8 @@ def performance_scores(
           s.model_name,
           COUNT(*) AS n_samples,
           COUNT(DISTINCT s.question_id) AS n_questions,
-          AVG(s.value) AS avg_value
+          AVG(s.value) AS avg_value,
+          MEDIAN(s.value) AS median_value
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
         WHERE 1=1 {metric_filter}
@@ -1524,7 +1530,8 @@ def performance_scores(
               s.model_name,
               COUNT(*) AS n_samples,
               COUNT(DISTINCT s.question_id) AS n_questions,
-              AVG(s.value) AS avg_value
+              AVG(s.value) AS avg_value,
+              MEDIAN(s.value) AS median_value
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
@@ -1544,7 +1551,8 @@ def performance_scores(
               s.model_name,
               COUNT(*) AS n_samples,
               COUNT(DISTINCT s.question_id) AS n_questions,
-              AVG(s.value) AS avg_value
+              AVG(s.value) AS avg_value,
+              MEDIAN(s.value) AS median_value
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             WHERE 1=1 {metric_filter}
@@ -2572,11 +2580,13 @@ def diagnostics_kpi_scopes(
         if _table_has_columns(con, "resolutions", ["question_id"]):
             res_sql = (
                 f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
-                f"JOIN ({question_ids_sql}) src ON src.question_id = r.question_id"
+                f"JOIN ({question_ids_sql}) src ON src.question_id = r.question_id "
+                f"JOIN questions q ON r.question_id = q.question_id "
+                f"WHERE 1=1{metric_sql}"
             )
-            res_params = list(question_ids_params)
+            res_params = list(question_ids_params) + metric_params
             if forecast_window_ym and _table_has_columns(con, "resolutions", ["observed_month"]):
-                res_sql += " WHERE r.observed_month >= ? AND r.observed_month < ?"
+                res_sql += " AND r.observed_month >= ? AND r.observed_month < ?"
                 res_params.extend(forecast_window_ym)
             scope["resolved_questions"] = _count(
                 res_sql, res_params, "scope_resolutions_failed",
@@ -2705,8 +2715,10 @@ def diagnostics_kpi_scopes(
 
         if _table_has_columns(con, "resolutions", ["question_id"]):
             scope["resolved_questions"] = _count(
-                "SELECT COUNT(DISTINCT question_id) FROM resolutions",
-                [],
+                f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
+                f"JOIN questions q ON r.question_id = q.question_id "
+                f"WHERE 1=1{metric_sql}",
+                metric_params,
                 "scope_resolutions_failed",
             )
         elif has_status:
@@ -3098,6 +3110,97 @@ def download_run_costs_csv():
 
     buffer.seek(0)
     headers = {"Content-Disposition": 'attachment; filename="run_costs.csv"'}
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/scores_ensemble_mean.csv")
+def download_scores_ensemble_mean_csv():
+    con = _con()
+    try:
+        df = build_ensemble_scores_export(con, "ensemble_mean")
+    except Exception as exc:
+        logger.exception("Failed to build ensemble_mean scores export")
+        raise HTTPException(
+            status_code=500, detail="Failed to build ensemble_mean scores export"
+        ) from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize ensemble_mean scores export")
+        raise HTTPException(
+            status_code=500, detail="Failed to serialize ensemble_mean scores export"
+        ) from exc
+
+    buffer.seek(0)
+    headers = {
+        "Content-Disposition": 'attachment; filename="scores_ensemble_mean.csv"'
+    }
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/scores_ensemble_bayesmc.csv")
+def download_scores_ensemble_bayesmc_csv():
+    con = _con()
+    try:
+        df = build_ensemble_scores_export(con, "ensemble_bayesmc")
+    except Exception as exc:
+        logger.exception("Failed to build ensemble_bayesmc scores export")
+        raise HTTPException(
+            status_code=500, detail="Failed to build ensemble_bayesmc scores export"
+        ) from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize ensemble_bayesmc scores export")
+        raise HTTPException(
+            status_code=500, detail="Failed to serialize ensemble_bayesmc scores export"
+        ) from exc
+
+    buffer.seek(0)
+    headers = {
+        "Content-Disposition": 'attachment; filename="scores_ensemble_bayesmc.csv"'
+    }
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/scores_model.csv")
+def download_scores_model_csv():
+    con = _con()
+    try:
+        df = build_model_scores_export(con)
+    except Exception as exc:
+        logger.exception("Failed to build model scores export")
+        raise HTTPException(
+            status_code=500, detail="Failed to build model scores export"
+        ) from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize model scores export")
+        raise HTTPException(
+            status_code=500, detail="Failed to serialize model scores export"
+        ) from exc
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="scores_model.csv"'}
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv; charset=utf-8",

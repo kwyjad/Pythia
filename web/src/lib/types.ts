@@ -120,6 +120,7 @@ export type PerformanceSummaryRow = {
   n_samples: number;
   n_questions: number;
   avg_value: number | null;
+  median_value: number | null;
 };
 
 export type PerformanceRunRow = {
@@ -132,6 +133,7 @@ export type PerformanceRunRow = {
   n_samples: number;
   n_questions: number;
   avg_value: number | null;
+  median_value: number | null;
 };
 
 export type PerformanceScoresResponse = {
