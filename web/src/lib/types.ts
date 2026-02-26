@@ -112,6 +112,32 @@ export type QuestionsResponse = {
   }>;
 };
 
+export type PerformanceSummaryRow = {
+  hazard_code: string;
+  metric: string;
+  score_type: string;
+  model_name: string | null;
+  n_samples: number;
+  n_questions: number;
+  avg_value: number | null;
+};
+
+export type PerformanceRunRow = {
+  hs_run_id: string;
+  run_date: string | null;
+  hazard_code: string;
+  metric: string;
+  score_type: string;
+  n_samples: number;
+  n_questions: number;
+  avg_value: number | null;
+};
+
+export type PerformanceScoresResponse = {
+  summary_rows: PerformanceSummaryRow[];
+  run_rows: PerformanceRunRow[];
+};
+
 export type QuestionBundleResponse = {
   question: Record<string, unknown>;
   hs?:

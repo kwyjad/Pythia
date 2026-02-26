@@ -99,7 +99,6 @@ const CountryPage = async ({ params }: CountryPageProps) => {
   try {
     const response = await apiGet<QuestionsResponse>("/questions", {
       iso3,
-      latest_only: true,
     });
     questions = response.rows.map((row) => {
       const firstForecastMonth = row.target_month ?? null;
@@ -133,7 +132,7 @@ const CountryPage = async ({ params }: CountryPageProps) => {
         </Link>
         <h1 className="text-3xl font-semibold text-fred-primary">{countryName}</h1>
         <p className="text-sm text-fred-text">
-          Latest questions for {countryName} ({iso3})
+          All questions for {countryName} ({iso3})
         </p>
       </section>
 

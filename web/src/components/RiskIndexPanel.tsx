@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 
 import { apiGet } from "../lib/api";
 import type {
+  CountriesResponse,
   CountriesRow,
   DiagnosticsKpiScopesResponse,
   RiskIndexResponse,
@@ -98,6 +99,7 @@ export default function RiskIndexPanel({
   const [rows, setRows] = useState(initialResponse.rows ?? []);
   const [targetMonth, setTargetMonth] = useState(initialResponse.target_month);
   const [metric, setMetric] = useState(initialResponse.metric);
+  const [countries, setCountries] = useState<CountriesRow[]>(countriesRows);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kpiData, setKpiData] = useState(kpiScopes);
@@ -110,6 +112,21 @@ export default function RiskIndexPanel({
   const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
   const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
+
+  const fetchCountries = async (
+    metricScope: string,
+    runMonth: string | null
+  ) => {
+    try {
+      const response = await apiGet<CountriesResponse>("/countries", {
+        metric_scope: metricScope,
+        ...(runMonth ? { year_month: runMonth } : {}),
+      });
+      setCountries(response.rows ?? []);
+    } catch (fetchError) {
+      console.warn("Countries unavailable:", fetchError);
+    }
+  };
 
   const fetchKpiScopes = async (
     metricScope: string,
@@ -159,7 +176,9 @@ export default function RiskIndexPanel({
             response.target_month !== forecastTargetMonthForRun
         )
       );
-      void fetchKpiScopes(metricScopeForView(nextView), selectedRunMonth);
+      const nextMetricScope = metricScopeForView(nextView);
+      void fetchKpiScopes(nextMetricScope, selectedRunMonth);
+      void fetchCountries(nextMetricScope, selectedRunMonth);
     } catch (fetchError) {
       console.warn("Risk index unavailable:", fetchError);
       setError("Risk index unavailable (API error).");
@@ -174,7 +193,9 @@ export default function RiskIndexPanel({
     setIsLoading(true);
     setError(null);
     try {
-      await fetchKpiScopes(metricScopeForView(view), yearMonth);
+      const currentMetricScope = metricScopeForView(view);
+      await fetchKpiScopes(currentMetricScope, yearMonth);
+      void fetchCountries(currentMetricScope, yearMonth);
       const forecastTargetMonthForRun = addMonthsYYYYMM(yearMonth, 1);
       const response = await apiGet<RiskIndexResponse>("/risk_index", {
         ...buildParams(view),
@@ -204,14 +225,14 @@ export default function RiskIndexPanel({
   const selectedScope = kpiData.scopes?.selected_run;
   const rcLevelCounts = useMemo(() => {
     const counts = { level1: 0, level2: 0, level3: 0 };
-    countriesRows.forEach((row) => {
+    countries.forEach((row) => {
       const level = row.highest_rc_level;
       if (level === 1) counts.level1 += 1;
       if (level === 2) counts.level2 += 1;
       if (level === 3) counts.level3 += 1;
     });
     return counts;
-  }, [countriesRows]);
+  }, [countries]);
   const hazardEntries = useMemo(() => {
     const entries = Object.entries(
       selectedScope?.forecasts_by_hazard ?? {}
@@ -281,7 +302,7 @@ export default function RiskIndexPanel({
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-4">
           <RiskIndexMap
-            countriesRows={countriesRows}
+            countriesRows={countries}
             heightClassName={resolvedMapHeightClassName}
             riskRows={rows}
             view={view}
@@ -401,7 +422,7 @@ export default function RiskIndexPanel({
 
       <div className="w-full max-h-[520px] overflow-x-auto overflow-y-auto rounded-lg border border-fred-secondary bg-fred-surface">
         <RiskIndexTable
-          countriesRows={countriesRows}
+          countriesRows={countries}
           mode={isPerCapita ? "percap" : "raw"}
           rows={rows}
           targetMonth={targetMonth}
