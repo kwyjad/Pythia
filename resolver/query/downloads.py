@@ -679,3 +679,454 @@ def build_triage_export(con) -> pd.DataFrame:
     )
 
     return output.sort_values(["Run ID", "ISO3"]).reset_index(drop=True)[columns]
+
+
+def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
+    """Build per-question scores export for a specific ensemble model.
+
+    Args:
+        con: DuckDB connection.
+        model_filter: substring to match model_name in scores table
+            (e.g. ``'ensemble_mean'`` or ``'ensemble_bayesmc'``).
+
+    Returns a DataFrame with 56 columns matching the Scores_ensemble template.
+    """
+
+    columns: list[str] = [
+        "question_id",
+        "run_id",
+        "run_date",
+        "country_iso3",
+        "country_name",
+        "hazard_type",
+        "metric",
+        "triage_score",
+        "triage_class",
+        "rc_score",
+        "rc_class",
+    ]
+    for m in range(1, 7):
+        for b in range(1, 6):
+            columns.append(f"month{m}_bin{b}_forecast")
+    for m in range(1, 7):
+        columns.append(f"eiv_month{m}")
+    for m in range(1, 7):
+        columns.append(f"resolution_month{m}")
+    columns.extend(["brier", "log_loss", "crps"])
+
+    empty = pd.DataFrame(columns=columns)
+    if con is None:
+        return empty
+
+    for tbl in ("questions", "scores"):
+        if not _table_exists(con, tbl):
+            return empty
+
+    # ── 1. Identify the score model name ──────────────────────────────
+    model_names = con.execute(
+        "SELECT DISTINCT model_name FROM scores "
+        "WHERE LOWER(CAST(model_name AS VARCHAR)) LIKE ?",
+        [f"%{model_filter.lower()}%"],
+    ).fetchdf()
+    if model_names.empty:
+        _warn_once(
+            f"no_score_model:{model_filter}",
+            f"No scores found for model matching '{model_filter}'",
+        )
+        return empty
+    score_model = str(model_names.iloc[0]["model_name"])
+
+    # ── 2. Questions + scores (avg across horizons) ───────────────────
+    base = con.execute(
+        """
+        SELECT
+            q.question_id,
+            q.hs_run_id,
+            q.iso3,
+            q.hazard_code,
+            UPPER(q.metric) AS metric,
+            q.target_month,
+            AVG(CASE WHEN s.score_type = 'brier' THEN s.value END) AS brier,
+            AVG(CASE WHEN s.score_type = 'log'   THEN s.value END) AS log_loss,
+            AVG(CASE WHEN s.score_type = 'crps'  THEN s.value END) AS crps
+        FROM scores s
+        JOIN questions q ON s.question_id = q.question_id
+        WHERE s.model_name = ?
+        GROUP BY q.question_id, q.hs_run_id, q.iso3,
+                 q.hazard_code, UPPER(q.metric), q.target_month
+        """,
+        [score_model],
+    ).fetchdf()
+    if base.empty:
+        return empty
+
+    base["iso3"] = base["iso3"].astype(str).str.upper()
+    base["hazard_code"] = base["hazard_code"].astype(str).str.upper()
+
+    # ── 3. Run dates ──────────────────────────────────────────────────
+    if _table_exists(con, "hs_runs"):
+        runs = con.execute(
+            "SELECT hs_run_id, STRFTIME(generated_at, '%Y-%m-%d') AS run_date "
+            "FROM hs_runs"
+        ).fetchdf()
+        base = base.merge(runs, on="hs_run_id", how="left")
+    else:
+        base["run_date"] = None
+
+    # ── 4. Triage & regime-change data ────────────────────────────────
+    _add_triage_columns(con, base)
+
+    # ── 5. Forecasts → month×bin columns + EIV ────────────────────────
+    _add_forecast_columns(con, base, model_filter)
+
+    # ── 6. Resolutions per horizon ────────────────────────────────────
+    _add_resolution_columns(con, base)
+
+    # ── 7. Country names ──────────────────────────────────────────────
+    country_map = _load_country_registry()
+    base["country_name"] = base["iso3"].map(country_map).fillna(base["iso3"])
+
+    # ── 8. Final output ───────────────────────────────────────────────
+    output = pd.DataFrame(
+        {
+            "question_id": base["question_id"],
+            "run_id": base["hs_run_id"],
+            "run_date": base.get("run_date"),
+            "country_iso3": base["iso3"],
+            "country_name": base["country_name"],
+            "hazard_type": base["hazard_code"],
+            "metric": base["metric"],
+            "triage_score": base.get("triage_score"),
+            "triage_class": base.get("triage_class"),
+            "rc_score": base.get("rc_score"),
+            "rc_class": base.get("rc_class"),
+        }
+    )
+    for m in range(1, 7):
+        for b in range(1, 6):
+            col = f"month{m}_bin{b}_forecast"
+            output[col] = base.get(col)
+    for m in range(1, 7):
+        output[f"eiv_month{m}"] = base.get(f"eiv_month{m}")
+    for m in range(1, 7):
+        output[f"resolution_month{m}"] = base.get(f"resolution_month{m}")
+    output["brier"] = base["brier"]
+    output["log_loss"] = base["log_loss"]
+    output["crps"] = base["crps"]
+
+    return (
+        output.sort_values(["run_id", "country_iso3", "hazard_type"])
+        .reset_index(drop=True)[columns]
+    )
+
+
+# ── helpers for build_ensemble_scores_export ──────────────────────────
+
+
+def _add_triage_columns(con, df: pd.DataFrame) -> None:
+    """Merge triage_score, triage_class, rc_score, rc_class into *df* in-place."""
+
+    for col in ("triage_score", "triage_class", "rc_score", "rc_class"):
+        df[col] = None
+
+    if not _table_exists(con, "hs_triage"):
+        return
+
+    cols = _table_columns(con, "hs_triage")
+    if not {"run_id", "iso3", "hazard_code"}.issubset(cols):
+        return
+
+    score_expr = "triage_score" if "triage_score" in cols else "NULL"
+    tier_expr = "tier" if "tier" in cols else "NULL"
+    rc_score_expr = "regime_change_score" if "regime_change_score" in cols else "NULL"
+    rc_level_expr = "regime_change_level" if "regime_change_level" in cols else "NULL"
+    created_expr = "created_at" if "created_at" in cols else "NULL"
+
+    triage = con.execute(
+        f"""
+        SELECT
+            run_id,
+            iso3,
+            hazard_code,
+            {score_expr}   AS triage_score,
+            {tier_expr}    AS triage_class,
+            {rc_score_expr} AS rc_score,
+            {rc_level_expr} AS rc_class,
+            {created_expr}  AS created_at
+        FROM hs_triage
+        """
+    ).fetchdf()
+
+    if triage.empty:
+        return
+
+    triage["iso3"] = triage["iso3"].astype(str).str.upper()
+    triage["hazard_code"] = triage["hazard_code"].astype(str).str.upper()
+
+    # keep latest per (run_id, iso3, hazard_code)
+    if "created_at" in triage.columns:
+        triage["_ts"] = pd.to_datetime(triage["created_at"], errors="coerce")
+        triage = triage.sort_values("_ts").drop_duplicates(
+            subset=["run_id", "iso3", "hazard_code"], keep="last"
+        )
+        triage.drop(columns=["_ts", "created_at"], inplace=True)
+    else:
+        triage = triage.drop_duplicates(
+            subset=["run_id", "iso3", "hazard_code"], keep="last"
+        )
+
+    merged = df.merge(
+        triage,
+        left_on=["hs_run_id", "iso3", "hazard_code"],
+        right_on=["run_id", "iso3", "hazard_code"],
+        how="left",
+        suffixes=("", "_t"),
+    )
+
+    for col in ("triage_score", "triage_class", "rc_score", "rc_class"):
+        src = f"{col}_t" if f"{col}_t" in merged.columns else col
+        df[col] = merged[src].values
+
+    return
+
+
+def _add_forecast_columns(con, df: pd.DataFrame, model_filter: str) -> None:
+    """Add month×bin forecast columns and EIV columns to *df* in-place."""
+
+    # initialise columns
+    for m in range(1, 7):
+        for b in range(1, 6):
+            df[f"month{m}_bin{b}_forecast"] = None
+    for m in range(1, 7):
+        df[f"eiv_month{m}"] = None
+
+    if not _table_exists(con, "forecasts_ensemble"):
+        return
+
+    fe_cols = _table_columns(con, "forecasts_ensemble")
+    model_col = _pick_column(fe_cols, ["model_name", "model"])
+    month_col = _pick_column(fe_cols, ["month_index", "horizon_m"])
+    bucket_col = _pick_column(fe_cols, ["bucket_index", "class_bin"])
+    prob_col = _pick_column(fe_cols, ["probability", "p", "prob"])
+
+    if not all([model_col, month_col, bucket_col, prob_col]):
+        return
+
+    # find model in forecasts_ensemble
+    fc_models = con.execute(
+        f"SELECT DISTINCT {model_col} FROM forecasts_ensemble "
+        f"WHERE LOWER(CAST({model_col} AS VARCHAR)) LIKE ?",
+        [f"%{model_filter.lower()}%"],
+    ).fetchdf()
+    if fc_models.empty:
+        return
+    fc_model = str(fc_models.iloc[0][model_col])
+
+    status_col = _pick_column(fe_cols, ["status"])
+    status_filter = (
+        f"AND LOWER(CAST({status_col} AS VARCHAR)) = 'ok'" if status_col else ""
+    )
+
+    fc = con.execute(
+        f"""
+        SELECT
+            question_id,
+            {month_col}  AS month_idx,
+            {bucket_col} AS bucket_idx,
+            {prob_col}   AS prob
+        FROM forecasts_ensemble
+        WHERE {model_col} = ?
+          AND {prob_col} IS NOT NULL
+          AND {month_col} IS NOT NULL
+          AND {bucket_col} IS NOT NULL
+          {status_filter}
+        """,
+        [fc_model],
+    ).fetchdf()
+
+    if fc.empty:
+        return
+
+    fc["month_idx"] = pd.to_numeric(fc["month_idx"], errors="coerce")
+    fc["prob"] = pd.to_numeric(fc["prob"], errors="coerce")
+
+    bucket_numeric = pd.to_numeric(fc["bucket_idx"], errors="coerce")
+    if bucket_numeric.isna().any():
+        label = fc["bucket_idx"].astype(str).str.strip().str.lower()
+        pa_map = {"<10k": 1, "10k-<50k": 2, "50k-<250k": 3, "250k-<500k": 4, ">=500k": 5}
+        fatal_map = {"<5": 1, "5-<25": 2, "25-<100": 3, "100-<500": 4, ">=500": 5}
+        bucket_numeric = bucket_numeric.fillna(label.map(pa_map)).fillna(label.map(fatal_map))
+    fc["bucket_idx"] = pd.to_numeric(bucket_numeric, errors="coerce")
+
+    fc = fc.dropna(subset=["month_idx", "bucket_idx", "prob"])
+    fc["month_idx"] = fc["month_idx"].astype(int)
+    fc["bucket_idx"] = fc["bucket_idx"].astype(int)
+    fc = fc[(fc["month_idx"] >= 1) & (fc["month_idx"] <= 6)]
+    fc = fc[(fc["bucket_idx"] >= 1) & (fc["bucket_idx"] <= 5)]
+
+    fc = fc.drop_duplicates(
+        subset=["question_id", "month_idx", "bucket_idx"], keep="first"
+    )
+
+    fc["col_name"] = (
+        "month" + fc["month_idx"].astype(str)
+        + "_bin" + fc["bucket_idx"].astype(str)
+        + "_forecast"
+    )
+    pivoted = fc.pivot_table(
+        index="question_id", columns="col_name", values="prob", aggfunc="first"
+    ).reset_index()
+
+    merged = df[["question_id"]].merge(pivoted, on="question_id", how="left")
+    for m in range(1, 7):
+        for b in range(1, 6):
+            col = f"month{m}_bin{b}_forecast"
+            if col in merged.columns:
+                df[col] = merged[col].values
+
+    # ── EIV computation ───────────────────────────────────────────────
+    hazard_centroids: dict[tuple[str, str, int], float] = {}
+    wildcard_centroids: dict[tuple[str, int], float] = {}
+    if _table_exists(con, "bucket_centroids"):
+        bc = con.execute(
+            "SELECT hazard_code, metric, bucket_index, centroid FROM bucket_centroids"
+        ).fetchdf()
+        if not bc.empty:
+            bc["hazard_code"] = bc["hazard_code"].astype(str).str.upper()
+            bc["metric"] = bc["metric"].astype(str).str.upper()
+            bc["bucket_index"] = pd.to_numeric(bc["bucket_index"], errors="coerce")
+            bc["centroid"] = pd.to_numeric(bc["centroid"], errors="coerce")
+            for _, row in bc.dropna().iterrows():
+                h, met, bi, c = (
+                    str(row["hazard_code"]),
+                    str(row["metric"]),
+                    int(row["bucket_index"]),
+                    float(row["centroid"]),
+                )
+                if h == "*":
+                    wildcard_centroids[(met, bi)] = c
+                else:
+                    hazard_centroids[(h, met, bi)] = c
+
+    def _centroid(hazard: str, metric: str, bucket: int) -> float:
+        key = (hazard, metric, bucket)
+        if key in hazard_centroids:
+            return hazard_centroids[key]
+        wkey = (metric, bucket)
+        if wkey in wildcard_centroids:
+            return wildcard_centroids[wkey]
+        return eiv_sql.centroid_from_defaults(metric, bucket) or 0.0
+
+    for m in range(1, 7):
+        eiv_vals = []
+        for _, row in df.iterrows():
+            hazard = str(row.get("hazard_code", "")).upper()
+            metric = str(row.get("metric", "")).upper()
+            total = 0.0
+            any_missing = False
+            for b in range(1, 6):
+                prob = row.get(f"month{m}_bin{b}_forecast")
+                if pd.isna(prob) or prob is None:
+                    any_missing = True
+                    break
+                total += float(prob) * _centroid(hazard, metric, b)
+            eiv_vals.append(None if any_missing else total)
+        df[f"eiv_month{m}"] = eiv_vals
+
+
+def _add_resolution_columns(con, df: pd.DataFrame) -> None:
+    """Add resolution_month1..6 columns to *df* in-place."""
+
+    for m in range(1, 7):
+        df[f"resolution_month{m}"] = None
+
+    if not _table_exists(con, "resolutions"):
+        return
+
+    res = con.execute(
+        "SELECT question_id, horizon_m, value FROM resolutions"
+    ).fetchdf()
+    if res.empty:
+        return
+
+    res["horizon_m"] = pd.to_numeric(res["horizon_m"], errors="coerce")
+    res["value"] = pd.to_numeric(res["value"], errors="coerce")
+    res = res.dropna(subset=["horizon_m"])
+    res["horizon_m"] = res["horizon_m"].astype(int)
+    res = res[(res["horizon_m"] >= 1) & (res["horizon_m"] <= 6)]
+
+    res["col_name"] = "resolution_month" + res["horizon_m"].astype(str)
+    piv = res.pivot_table(
+        index="question_id", columns="col_name", values="value", aggfunc="first"
+    ).reset_index()
+
+    merged = df[["question_id"]].merge(piv, on="question_id", how="left")
+    for m in range(1, 7):
+        col = f"resolution_month{m}"
+        if col in merged.columns:
+            df[col] = merged[col].values
+
+
+def build_model_scores_export(con) -> pd.DataFrame:
+    """Build aggregated model-level scores export.
+
+    Returns a DataFrame with 16 columns matching the Scores_model template.
+    """
+
+    columns = [
+        "forecast_model",
+        "hazard",
+        "metric",
+        "forecasts",
+        "average_brier",
+        "average_log_loss",
+        "average_crps",
+        "median_brier",
+        "median_log_loss",
+        "median_crps",
+        "min_brier",
+        "min_log_loss",
+        "min_crps",
+        "max_brier",
+        "max_log_loss",
+        "max_crps",
+    ]
+
+    empty = pd.DataFrame(columns=columns)
+    if con is None:
+        return empty
+
+    for tbl in ("questions", "scores"):
+        if not _table_exists(con, tbl):
+            return empty
+
+    df = con.execute(
+        """
+        SELECT
+            COALESCE(s.model_name, 'ensemble') AS forecast_model,
+            q.hazard_code                      AS hazard,
+            UPPER(q.metric)                    AS metric,
+            COUNT(DISTINCT s.question_id)      AS forecasts,
+            AVG(   CASE WHEN s.score_type = 'brier' THEN s.value END) AS average_brier,
+            AVG(   CASE WHEN s.score_type = 'log'   THEN s.value END) AS average_log_loss,
+            AVG(   CASE WHEN s.score_type = 'crps'  THEN s.value END) AS average_crps,
+            MEDIAN(CASE WHEN s.score_type = 'brier' THEN s.value END) AS median_brier,
+            MEDIAN(CASE WHEN s.score_type = 'log'   THEN s.value END) AS median_log_loss,
+            MEDIAN(CASE WHEN s.score_type = 'crps'  THEN s.value END) AS median_crps,
+            MIN(   CASE WHEN s.score_type = 'brier' THEN s.value END) AS min_brier,
+            MIN(   CASE WHEN s.score_type = 'log'   THEN s.value END) AS min_log_loss,
+            MIN(   CASE WHEN s.score_type = 'crps'  THEN s.value END) AS min_crps,
+            MAX(   CASE WHEN s.score_type = 'brier' THEN s.value END) AS max_brier,
+            MAX(   CASE WHEN s.score_type = 'log'   THEN s.value END) AS max_log_loss,
+            MAX(   CASE WHEN s.score_type = 'crps'  THEN s.value END) AS max_crps
+        FROM scores s
+        JOIN questions q ON s.question_id = q.question_id
+        GROUP BY s.model_name, q.hazard_code, UPPER(q.metric)
+        ORDER BY forecast_model, hazard, metric
+        """
+    ).fetchdf()
+
+    if df.empty:
+        return empty
+
+    return df[columns].reset_index(drop=True)
