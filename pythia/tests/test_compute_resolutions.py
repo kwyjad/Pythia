@@ -19,6 +19,7 @@ from pythia.tools.compute_resolutions import (
     _try_emdat_pa,
     _try_acled_fatalities,
     _data_freshness_cutoff,
+    _calendar_cutoff,
     _llm_derived_window_starts,
     horizon_to_calendar_month,
     compute_resolutions,
@@ -1463,5 +1464,152 @@ def test_resolution_falls_back_to_target_month(
         assert len(rows) == 2
         assert rows[0][1] == "2025-07"
         assert rows[1][1] == "2025-08"
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# _calendar_cutoff  — max resolvable month = previous complete calendar month
+# ---------------------------------------------------------------------------
+
+
+class TestCalendarCutoff:
+    """Unit tests for _calendar_cutoff."""
+
+    def test_february_returns_january(self):
+        assert _calendar_cutoff(date(2026, 2, 15)) == "2026-01"
+
+    def test_march_returns_february(self):
+        assert _calendar_cutoff(date(2026, 3, 1)) == "2026-02"
+
+    def test_january_returns_previous_december(self):
+        assert _calendar_cutoff(date(2026, 1, 31)) == "2025-12"
+
+
+# ---------------------------------------------------------------------------
+# Effective cutoff = min(calendar, data)
+# ---------------------------------------------------------------------------
+
+
+class TestEffectiveCutoff:
+    """The effective cutoff per metric should be min(calendar, data)."""
+
+    def test_calendar_caps_partial_month(self):
+        """When data has partial Feb but calendar says Jan, effective = Jan."""
+        cal = "2026-01"  # calendar cutoff (today=Feb)
+        data = "2026-02"  # data freshness (partial Feb exists)
+        assert min(cal, data) == "2026-01"
+
+    def test_data_caps_when_behind_calendar(self):
+        """When data only goes to Nov but calendar says Jan, effective = Nov."""
+        cal = "2026-01"
+        data = "2025-11"
+        assert min(cal, data) == "2025-11"
+
+    def test_equal_cutoffs(self):
+        """When both agree, the value is the same."""
+        cal = "2026-01"
+        data = "2026-01"
+        assert min(cal, data) == "2026-01"
+
+
+# ---------------------------------------------------------------------------
+# E2E: partial month data must not cause resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.db
+def test_no_resolution_for_partial_month(tmp_path, monkeypatch):
+    """Even if source data exists for February, the calendar cutoff (today=Feb)
+    must prevent resolution of h2=Feb horizons."""
+    db_path = tmp_path / "partial.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+
+        # Question: target_month=2026-06, window_start=2026-01 (December HS run)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('TST_FL_PA', 'run1', 'TST', 'FL', 'PA', '2026-06', '2026-01-01', 'active')
+            """
+        )
+
+        # Source data through February (partial)
+        # h1=Jan, h2=Feb — with data existing for both months
+        con.execute("""
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2026-01', 'TST', 'FL', 'affected', 100.0),
+                   ('2026-02', 'TST', 'FL', 'affected', 50.0)
+        """)
+    finally:
+        con.close()
+
+    # Run resolver as if today is February 15, 2026
+    # Calendar cutoff = 2026-01 (previous complete month)
+    # h1=2026-01 should resolve, h2=2026-02 should NOT
+    compute_resolutions(db_url=db_url, today=date(2026, 2, 15))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, observed_month FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected 1 resolution (h1 only), got {len(rows)}: {rows}"
+        assert rows[0][0] == 1
+        assert rows[0][1] == "2026-01"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_january_forecasts_not_resolved_in_february(tmp_path, monkeypatch):
+    """A January HS run's first horizon is February. In February (calendar
+    cutoff = January), none of its horizons should resolve."""
+    db_path = tmp_path / "jan_run.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+
+        # January run: window_start=2026-02 (first horizon is Feb)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('TST_FL_PA', 'run1', 'TST', 'FL', 'PA', '2026-07', '2026-02-01', 'active')
+            """
+        )
+
+        # Data exists for Feb (partial) and Jan
+        con.execute("""
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2026-01', 'TST', 'FL', 'affected', 100.0),
+                   ('2026-02', 'TST', 'FL', 'affected', 50.0)
+        """)
+    finally:
+        con.close()
+
+    # Calendar cutoff in Feb = 2026-01. h1=2026-02 > cutoff → 0 resolutions
+    compute_resolutions(db_url=db_url, today=date(2026, 2, 15))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        count = con.execute("SELECT COUNT(*) FROM resolutions").fetchone()[0]
+        assert count == 0, f"Expected 0 resolutions for Jan run in Feb, got {count}"
     finally:
         con.close()

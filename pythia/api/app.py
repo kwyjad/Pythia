@@ -317,6 +317,12 @@ def _month_window(year: int, month: int) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _shift_ym(year: int, month: int, delta: int) -> tuple[int, int]:
+    """Shift a (year, month) pair by ``delta`` months."""
+    total = (year * 12 + (month - 1)) + delta
+    return total // 12, (total % 12) + 1
+
+
 def _parse_year_month(value: Optional[str]) -> Optional[tuple[int, int]]:
     if not value:
         return None
@@ -2421,6 +2427,7 @@ def diagnostics_kpi_scopes(
         question_ids_sql: str,
         question_ids_params: List[Any],
         status_filter: Optional[str] = None,
+        forecast_window_ym: Optional[tuple] = None,
     ) -> Dict[str, Any]:
         scope: Dict[str, Any] = {
             "questions": 0,
@@ -2459,11 +2466,16 @@ def diagnostics_kpi_scopes(
             notes.append("countries_ignored_missing_column")
 
         if _table_has_columns(con, "resolutions", ["question_id"]):
-            scope["resolved_questions"] = _count(
+            res_sql = (
                 f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
-                f"JOIN ({question_ids_sql}) src ON src.question_id = r.question_id",
-                question_ids_params,
-                "scope_resolutions_failed",
+                f"JOIN ({question_ids_sql}) src ON src.question_id = r.question_id"
+            )
+            res_params = list(question_ids_params)
+            if forecast_window_ym and _table_has_columns(con, "resolutions", ["observed_month"]):
+                res_sql += " WHERE r.observed_month >= ? AND r.observed_month < ?"
+                res_params.extend(forecast_window_ym)
+            scope["resolved_questions"] = _count(
+                res_sql, res_params, "scope_resolutions_failed",
             )
         elif has_status:
             resolved_sql = f"{base_sql} AND q.status IN ('resolved', 'closed')"
@@ -2702,8 +2714,15 @@ def diagnostics_kpi_scopes(
                     f"WHERE {question_source_ts} >= ? AND {question_source_ts} < ?"
                 )
                 question_ids_params = [start_iso, end_iso]
+                _fw_start = _shift_ym(parsed[0], parsed[1], 1)
+                _fw_end = _shift_ym(parsed[0], parsed[1], 7)
+                forecast_window_ym = (
+                    f"{_fw_start[0]:04d}-{_fw_start[1]:02d}",
+                    f"{_fw_end[0]:04d}-{_fw_end[1]:02d}",
+                )
                 selected_scope = _scope_from_question_ids(
-                    question_ids_sql, question_ids_params
+                    question_ids_sql, question_ids_params,
+                    forecast_window_ym=forecast_window_ym,
                 )
                 countries_triaged, triaged_source = (
                     compute_countries_triaged_for_month_with_source(con, selected_month)
