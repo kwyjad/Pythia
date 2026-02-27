@@ -198,6 +198,10 @@ uvicorn pythia.api.app:app --reload --port 8000
 cd web && npm install && npm run dev
 ```
 
+## Prompt editing
+
+Before editing any of the 3 prompt source files (`forecaster/prompts.py`, `horizon_scanner/prompts.py`, `pythia/web_research/backends/gemini_grounding.py`), always run `bash scripts/snapshot_prompts.sh` first. This archives the current prompts before changes so the About page can show historical versions. Commit the snapshot alongside the prompt edits.
+
 ## Code conventions
 
 - Copyright header on every file: `# Pythia / Copyright (c) 2025 Kevin Wyjad`

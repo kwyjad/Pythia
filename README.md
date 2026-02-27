@@ -349,6 +349,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - **Interpreting question_run_metrics**: `question_run_metrics` (if present) records wall-clock vs compute vs queue time per question; see `scripts/dump_pythia_debug_bundle.py`.
 
 ## Cross-links
+- Non-technical system overview: [`docs/fred_overview.md`](docs/fred_overview.md)
 - Config: [`pythia/config.yaml`](pythia/config.yaml)
 - Model costs: [`pythia/model_costs.json`](pythia/model_costs.json)
 - Horizon Scanner: [`horizon_scanner/horizon_scanner.py`](horizon_scanner/horizon_scanner.py)
