@@ -70,7 +70,17 @@ HS_WATCHLIST_THRESHOLD = float(os.getenv("PYTHIA_HS_WATCHLIST_THRESHOLD", "0.40"
 HS_HYSTERESIS_BAND = float(os.getenv("PYTHIA_HS_HYSTERESIS_BAND", "0.05"))
 HS_EVIDENCE_MAX_SOURCES = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SOURCES", "8"))
 HS_EVIDENCE_MAX_SIGNALS = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SIGNALS", "8"))
-HS_FALLBACK_MODEL_SPECS = os.getenv("PYTHIA_HS_FALLBACK_MODEL_SPECS", "openai:gpt-5.1")
+def _hs_fallback_default() -> str:
+    try:
+        from pythia.llm_profiles import get_purpose_model
+        val = get_purpose_model("hs_fallback")
+        if val:
+            return val
+    except Exception:
+        pass
+    return "openai:gpt-5.1"
+
+HS_FALLBACK_MODEL_SPECS = os.getenv("PYTHIA_HS_FALLBACK_MODEL_SPECS") or _hs_fallback_default()
 HS_TAIL_PACKS_ENABLED = os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED", "0") == "1"
 HS_TAIL_PACKS_MAX_PER_COUNTRY = int(os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_PER_COUNTRY", "2"))
 HS_TAIL_PACKS_MAX_SOURCES = int(

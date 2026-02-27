@@ -1,0 +1,29 @@
+{
+  "_comment": "Cost per 1,000 tokens [input, output] in USD. Keys match model_id values.",
+
+  "gpt-5-nano":                    [0.00005, 0.00040],
+  "openai/gpt-5-nano":             [0.00005, 0.00040],
+  "gpt-5.1":                       [0.00125, 0.01000],
+  "openai/gpt-5.1":                [0.00125, 0.01000],
+
+  "gemini-2.5-flash-lite":         [0.00010, 0.00040],
+  "google/gemini-2.5-flash-lite":  [0.00010, 0.00040],
+  "gemini-3-flash-preview":        [0.00050, 0.00300],
+  "google/gemini-3-flash-preview": [0.00050, 0.00300],
+  "gemini-3-pro-preview":          [0.00200, 0.01200],
+  "google/gemini-3-pro-preview":   [0.00200, 0.01200],
+  "gemini-3.1-pro-preview":        [0.00200, 0.01200],
+  "google/gemini-3.1-pro-preview": [0.00200, 0.01200],
+
+  "claude-haiku-4-5-20251001":           [0.00100, 0.00500],
+  "anthropic/claude-haiku-4-5-20251001": [0.00100, 0.00500],
+  "claude-opus-4-5-20251101":            [0.00500, 0.02500],
+  "anthropic/claude-opus-4-5-20251101":  [0.00500, 0.02500],
+  "claude-sonnet-4-6":                   [0.00300, 0.01500],
+  "anthropic/claude-sonnet-4-6":         [0.00300, 0.01500],
+
+  "grok-4-0709":                   [0.00300, 0.01500],
+  "xai/grok-4-0709":               [0.00300, 0.01500],
+  "grok-4-1-fast-reasoning":       [0.00030, 0.00050],
+  "xai/grok-4-1-fast-reasoning":   [0.00030, 0.00050]
+}

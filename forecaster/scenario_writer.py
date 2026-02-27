@@ -193,12 +193,31 @@ async def _run_scenario_for_question(
         hs_triage_entry=triage or {},
     )
 
-    from forecaster.providers import call_chat_ms, ModelSpec  # local import to avoid cycles
+    from forecaster.providers import call_chat_ms, ModelSpec, _provider_display_name  # local import to avoid cycles
+
+    # Resolve scenario model: env var → config → hardcoded default
+    _sw_provider = "google"
+    _sw_model_id = "gemini-3-flash-preview"
+    env_val = os.getenv("PYTHIA_SCENARIO_MODEL_ID")
+    if env_val:
+        _sw_model_id = env_val.strip()
+    else:
+        try:
+            from pythia.llm_profiles import get_purpose_model
+            val = get_purpose_model("scenario_writer")
+            if val and ":" in val:
+                _sw_provider, _sw_model_id = val.split(":", 1)
+                _sw_provider = _sw_provider.strip().lower()
+                _sw_model_id = _sw_model_id.strip()
+            elif val:
+                _sw_model_id = val.strip()
+        except Exception:
+            pass
 
     ms = ModelSpec(
-        name="Gemini",
-        provider="google",
-        model_id=os.getenv("PYTHIA_SCENARIO_MODEL_ID", "gemini-3-flash-preview"),
+        name=_provider_display_name(_sw_provider, _sw_model_id),
+        provider=_sw_provider,
+        model_id=_sw_model_id,
         active=True,
         purpose="scenario_v2",
     )

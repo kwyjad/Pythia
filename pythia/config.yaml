@@ -35,32 +35,34 @@ researcher:
     max_calls_per_question: null   # hard cap; null = unlimited
 
 llm:
-  # Active profile for all LLM-using components: "test" (cheap) or "prod" (frontier).
-  # Can be overridden by the PYTHIA_LLM_PROFILE env var.
+  # Active profile: "test" (cheap) or "prod" (frontier).
+  # Override via PYTHIA_LLM_PROFILE env var.
   profile: "prod"
 
   profiles:
     test:
       # Cheap models for development / CI
-      google:    "gemini-2.5-flash-lite"
+      ensemble:
+        - google:gemini-2.5-flash-lite
 
     prod:
-      # Frontier / production models
-      openai:    "gpt-5.1"
-      google:    "gemini-3-flash-preview"
-      anthropic: "claude-opus-4-5-20251101"
-      xai:       "grok-4-0709"
+      # SPD forecast ensemble — add/remove models by editing this list.
+      # Format: provider:model_id  (one per line)
+      ensemble:
+        - openai:gpt-5.1
+        - anthropic:claude-sonnet-4-6
+        - google:gemini-3.1-pro-preview
+        - google:gemini-3-flash-preview
+
+      # Purpose-specific model overrides (optional, defaults to ensemble members)
+      hs_fallback: openai:gpt-5.1
+      scenario_writer: google:gemini-3-flash-preview
 
 forecaster:
   horizons: [1,2,3,4,5,6]
   metrics: ["PIN","PA"]
   class_bins: ["<5k","5k-<25k","25k-<100k","100k-<500k",">=500k"]
   aggregator: { strategy: "Bayes_MC", version: "1.0.0" }
-  providers:
-    openai:    { enabled: true,  model: "gpt-5.1", env_key: "OPENAI_API_KEY" }
-    anthropic: { enabled: true,  model: "claude-opus-4-5-20251101", env_key: "ANTHROPIC_API_KEY" }
-    google:    { enabled: true,  model: "gemini-3-flash-preview", env_key: "GEMINI_API_KEY" }
-    xai:       { enabled: true,  model: "grok-4-0709", env_key: "XAI_API_KEY" }
 
 ranking:
   representative_values:

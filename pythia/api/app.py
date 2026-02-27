@@ -52,6 +52,7 @@ from resolver.query.downloads import (
     build_ensemble_scores_export,
     build_forecast_spd_export,
     build_model_scores_export,
+    build_rationale_export,
     build_triage_export,
 )
 from resolver.query.kpi_scopes import compute_countries_triaged_for_month_with_source
@@ -3201,6 +3202,44 @@ def download_scores_model_csv():
 
     buffer.seek(0)
     headers = {"Content-Disposition": 'attachment; filename="scores_model.csv"'}
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.get("/v1/downloads/rationales.csv")
+def download_rationales_csv(
+    hazard: str = Query(..., description="Hazard code filter (e.g. FL, DR, TC)"),
+    model: str | None = Query(None, description="Model name filter (e.g. OpenAI, Claude, Gemini Flash)"),
+):
+    con = _con()
+    try:
+        df = build_rationale_export(con, hazard_code=hazard, model_name=model)
+    except Exception as exc:
+        logger.exception("Failed to build rationale export")
+        raise HTTPException(
+            status_code=500, detail="Failed to build rationale export"
+        ) from exc
+
+    buffer = StringIO()
+    try:
+        df.to_csv(buffer, index=False)
+    except Exception as exc:
+        logger.exception("Failed to serialize rationale export")
+        raise HTTPException(
+            status_code=500, detail="Failed to serialize rationale export"
+        ) from exc
+
+    parts = ["rationales", hazard.strip().upper()]
+    if model:
+        safe_model = re.sub(r"[^a-zA-Z0-9_-]", "_", model)
+        parts.append(safe_model)
+    filename = "_".join(parts) + ".csv"
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv; charset=utf-8",

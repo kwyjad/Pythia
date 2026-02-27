@@ -10,6 +10,7 @@ Pythia is an end-to-end AI forecasting system for humanitarian questions. It sca
 - [Hazard Tail Packs (HTP): hazard-specific trigger evidence](#hazard-tail-packs-htp-hazard-specific-trigger-evidence)
 - [Retriever web research (shared evidence packs)](#retriever-web-research-shared-evidence-packs)
 - [Data model / DuckDB tables](#data-model--duckdb-tables)
+- [Model management](#model-management)
 - [Quickstart (local)](#quickstart-local)
 - [Running in GitHub Actions](#running-in-github-actions)
 - [Dashboard](#dashboard)
@@ -114,6 +115,52 @@ Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](
 - **Questions + research**: `questions`, `question_research`
 - **Forecasts**: `forecasts_raw`, `forecasts_ensemble`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`
+
+## Model management
+
+The forecast ensemble and purpose-specific models are configured in [`pythia/config.yaml`](pythia/config.yaml) under `llm.profiles`. Each profile contains a single `ensemble` list in `provider:model_id` format. To add, remove, or swap a model, edit this list.
+
+```yaml
+llm:
+  profile: "prod"        # or "test"; override with PYTHIA_LLM_PROFILE
+
+  profiles:
+    test:
+      ensemble:
+        - google:gemini-2.5-flash-lite
+
+    prod:
+      ensemble:
+        - openai:gpt-5.1
+        - anthropic:claude-sonnet-4-6
+        - google:gemini-3.1-pro-preview
+        - google:gemini-3-flash-preview
+
+      # Purpose-specific overrides (optional)
+      hs_fallback: openai:gpt-5.1
+      scenario_writer: google:gemini-3-flash-preview
+```
+
+### Changing models
+
+- **Swap a model**: change the `provider:model_id` line in the ensemble list.
+- **Add a model**: add a new line. Multiple models from the same provider are supported (e.g. two Google models).
+- **Remove a model**: delete the line.
+- **Add a new provider**: requires adding a `call_<provider>()` function and dispatch branch in `forecaster/providers.py`, plus an entry in `_PROVIDER_ENV_KEYS`.
+
+### Model costs
+
+Per-model cost rates are stored in [`pythia/model_costs.json`](pythia/model_costs.json) as `[input, output]` cost per 1,000 tokens in USD. When switching to a new model ID, add its cost entry to this file.
+
+### Purpose-specific overrides
+
+The `hs_fallback` and `scenario_writer` keys under a profile set the default model for HS triage fallback and scenario generation respectively. These can still be overridden at runtime via `PYTHIA_HS_FALLBACK_MODEL_SPECS` and `PYTHIA_SCENARIO_MODEL_ID` env vars.
+
+### Env var overrides
+
+- `PYTHIA_SPD_ENSEMBLE_SPECS`: overrides the entire SPD ensemble at runtime (comma-separated `provider:model_id` pairs).
+- `PYTHIA_BLOCK_PROVIDERS`: comma-separated provider names to exclude (e.g. `xai`).
+- `PYTHIA_SPD_GOOGLE_MODEL_ID`: overrides all Google model IDs in the SPD ensemble.
 
 ## Quickstart (local)
 
@@ -236,6 +283,8 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - There is no `pythia/config.py`; all runtime defaults live in the YAML + env vars.
 - `app.db_url` defines DuckDB; `PYTHIA_DB_URL` overrides at runtime.
 - `llm.profile` selects the default model bundle; override with `PYTHIA_LLM_PROFILE`.
+- `llm.profiles.<name>.ensemble` defines the forecast ensemble; see [Model management](#model-management).
+- [`pythia/model_costs.json`](pythia/model_costs.json) contains per-model cost rates.
 
 ### Key env vars
 - **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
@@ -256,7 +305,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
   - `PYTHIA_GOOGLE_SPD_RETRIES`
 - **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.1,google:gemini-3-flash-preview`).
 - **HS triage resilience**:
-  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (default `openai:gpt-5.1`, required to keep HS triage running when Gemini fails).
+  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.1`; keeps HS triage running when Gemini fails).
   - `PYTHIA_HS_ONLY_COUNTRIES` (comma-separated ISO3s/names to rerun HS triage for a subset).
   - `PYTHIA_PROVIDER_FAILURE_THRESHOLD`, `PYTHIA_PROVIDER_COOLDOWN_SECONDS`, `PYTHIA_PROVIDER_RESET_ON_SUCCESS`
   - `PYTHIA_LLM_RETRY_TIMEOUTS` (set `0` to opt out of timeout retries outside HS triage)
@@ -294,13 +343,14 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - **No questions generated**: HS may mark all tiers quiet. Check `hs_triage` in DuckDB and confirm your country list (`horizon_scanner/hs_country_list.txt`) and `hazards_allowed` in config.
 - **No hazard tail packs**: confirm `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED=1`, web research enabled (`PYTHIA_WEB_RESEARCH_ENABLED=1` plus retriever or HS web search), and RC Level ≥2 for the hazard. Tail packs are limited to 2 hazards per country.
 - **RC fields missing in API**: ensure `hs_triage` has `regime_change_*` columns (`pythia/db/schema.py`) and that `latest_only=true` is set on `/v1/questions`.
-- **No active models**: verify `PYTHIA_LLM_PROFILE`, `forecaster.providers` config, and provider API keys.
+- **No active models**: verify `PYTHIA_LLM_PROFILE`, `llm.profiles` ensemble config in `pythia/config.yaml`, and provider API keys.
 - **Debug bundle too large for step summary**: artifacts still exist under `debug/` even if GitHub Step Summary truncates.
 - **Slow runs**: Gemini tails can dominate latency. Tune `PYTHIA_LLM_CONCURRENCY`, `FORECASTER_*_MAX_WORKERS`, and SPD timeouts.
 - **Interpreting question_run_metrics**: `question_run_metrics` (if present) records wall-clock vs compute vs queue time per question; see `scripts/dump_pythia_debug_bundle.py`.
 
 ## Cross-links
 - Config: [`pythia/config.yaml`](pythia/config.yaml)
+- Model costs: [`pythia/model_costs.json`](pythia/model_costs.json)
 - Horizon Scanner: [`horizon_scanner/horizon_scanner.py`](horizon_scanner/horizon_scanner.py)
 - Regime Change docs: [`docs/hs_regime_change.md`](docs/hs_regime_change.md)
 - Hazard Tail Packs docs: [`docs/hs_hazard_tail_packs.md`](docs/hs_hazard_tail_packs.md)

@@ -191,74 +191,25 @@ def disabled_providers_for_run(run_id: str | None = None) -> List[str]:
 # Configuration helpers
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PROVIDER_CONFIG: Dict[str, Dict[str, Any]] = {
-    "openai": {
-        "enabled": True,
-        "model": "",
-        "env_key": "OPENAI_API_KEY",
-        "display_name": "OpenAI",
-    },
-    "anthropic": {
-        "enabled": True,
-        "model": "",
-        "env_key": "ANTHROPIC_API_KEY",
-        "display_name": "Claude",
-    },
-    "google": {
-        "enabled": True,
-        "model": "",
-        "env_key": "GEMINI_API_KEY",
-        "display_name": "Gemini",
-    },
-    "xai": {
-        "enabled": True,
-        "model": "",
-        "env_key": "XAI_API_KEY",
-        "display_name": "Grok",
-    },
+# Provider env-key registry — only needs updating when adding a *new provider*
+# (which also requires a new call_* function in _call_provider_sync).
+_PROVIDER_ENV_KEYS: Dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
 }
 
 _cfg = load_cfg()
 _app_cfg = _cfg.get("app", {}) if isinstance(_cfg, dict) else {}
 _forecaster_cfg = _cfg.get("forecaster", {}) if isinstance(_cfg, dict) else {}
-_provider_overrides = _forecaster_cfg.get("providers", {}) if isinstance(_forecaster_cfg, dict) else {}
 
 
-def _merge_provider_config() -> Dict[str, Dict[str, Any]]:
-    merged: Dict[str, Dict[str, Any]] = {}
-    # start with defaults so we always have sane values
-    for key, defaults in _DEFAULT_PROVIDER_CONFIG.items():
-        merged[key] = dict(defaults)
-    # apply overrides from config.yaml
-    for key, override in _provider_overrides.items():
-        if not isinstance(override, dict):
-            continue
-        base = merged.setdefault(key, {})
-        for ok, ov in override.items():
-            base[ok] = ov
-
-    profile_models: Dict[str, str] = {}
-    try:
-        profile_models = get_current_models()
-    except Exception:
-        profile_models = {}
-
-    for provider_name, entry in merged.items():
-        model = str(entry.get("model") or "").strip()
-        if not model and profile_models:
-            profile_model = profile_models.get(provider_name)
-            if profile_model:
-                entry["model"] = profile_model
-    return merged
-
-
-_provider_config = _merge_provider_config()
-
-
-def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any]) -> str:
-    explicit = cfg.get("display_name")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | None = None) -> str:
+    if cfg:
+        explicit = cfg.get("display_name")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
     base_names = {
         "openai": "OpenAI",
         "anthropic": "Claude",
@@ -315,41 +266,16 @@ if _DB_PATH and _DB_PATH not in {":memory:", ""}:
 _FORECASTER_PROMPT_VERSION = str(_forecaster_cfg.get("prompt_version", "1.0.0"))
 
 
+# --- Populate _PROVIDER_STATES from env-key registry ---
 _PROVIDER_STATES: Dict[str, Dict[str, Any]] = {}
-_MODEL_SPECS: List[ModelSpec] = []
-_BLOCKED_PROVIDERS: set[str] = set()
-
-for provider_name, cfg_entry in _provider_config.items():
-    env_key = str(cfg_entry.get("env_key", "")).strip()
-    api_key = os.getenv(env_key, "").strip() if env_key else ""
-    model_id = str(cfg_entry.get("model", "")).strip()
-    enabled_flag = bool(cfg_entry.get("enabled", False))
-    weight = float(cfg_entry.get("weight", 1.0) or 1.0)
-    display_name = _provider_display_name(provider_name, model_id, cfg_entry)
-    active = bool(enabled_flag and api_key and model_id)
-
-    _PROVIDER_STATES[provider_name] = {
-        "api_key": api_key,
-        "model": model_id,
-        "env_key": env_key,
-        "enabled": enabled_flag,
-        "active": active,
-        "display_name": display_name,
-        "weight": weight,
+for _prov_name, _env_key in _PROVIDER_ENV_KEYS.items():
+    _api_key = os.getenv(_env_key, "").strip()
+    _PROVIDER_STATES[_prov_name] = {
+        "api_key": _api_key,
+        "env_key": _env_key,
+        "enabled": True,
+        "weight": 1.0,
     }
-
-    _MODEL_SPECS.append(
-        ModelSpec(
-            name=display_name,
-            provider=provider_name,
-            model_id=model_id,
-            weight=weight,
-            active=active,
-        )
-    )
-
-
-KNOWN_MODELS: List[str] = [spec.name for spec in _MODEL_SPECS]
 
 
 def _parse_blocked_providers() -> set[str]:
@@ -362,16 +288,13 @@ def _parse_blocked_providers() -> set[str]:
     return blocked
 
 
-_BLOCKED_PROVIDERS = _parse_blocked_providers()
+_BLOCKED_PROVIDERS: set[str] = _parse_blocked_providers()
 
 
 def _apply_provider_block(specs: List[ModelSpec]) -> List[ModelSpec]:
     if not _BLOCKED_PROVIDERS:
         return list(specs)
     return [spec for spec in specs if spec.provider not in _BLOCKED_PROVIDERS]
-
-
-DEFAULT_ENSEMBLE: List[ModelSpec] = _apply_provider_block([spec for spec in _MODEL_SPECS if spec.active])
 
 
 def summarize_model_specs(specs: List[ModelSpec]) -> str:
@@ -395,13 +318,11 @@ def default_ensemble_summary() -> str:
 # SPD ensemble helpers
 def _make_model_spec(provider: str, model_id: str, *, purpose: Optional[str] = None) -> ModelSpec:
     provider_l = (provider or "").strip().lower()
-    cfg = _provider_config.get(provider_l, {})
-    name = _provider_display_name(provider_l, model_id, cfg)
+    name = _provider_display_name(provider_l, model_id)
     state = _PROVIDER_STATES.get(provider_l, {})
     weight = float(state.get("weight", 1.0) or 1.0)
     api_key_present = bool(state.get("api_key"))
-    enabled_flag = bool(state.get("enabled"))
-    active = bool(api_key_present and enabled_flag and model_id)
+    active = bool(api_key_present and model_id)
     return ModelSpec(
         name=name,
         provider=provider_l,
@@ -438,40 +359,54 @@ def parse_ensemble_specs(spec_str: str | None) -> List[ModelSpec]:
     return _apply_provider_block(specs)
 
 
-def _build_spd_default_ensemble() -> List[ModelSpec]:
-    """
-    Build the default SPD ensemble.
+def _load_ensemble_from_config() -> List[ModelSpec]:
+    """Read the active profile's ``ensemble`` list from config.yaml.
 
-    Includes OpenAI + Anthropic + two Gemini entries (pro + flash) when available,
-    with provider blocks applied.
+    Falls back to the legacy ``forecaster.providers`` format or an empty list.
     """
 
-    specs: List[ModelSpec] = []
+    try:
+        from pythia.llm_profiles import get_ensemble_list
+        ensemble_list = get_ensemble_list()
+    except Exception:
+        ensemble_list = []
 
-    # Reuse existing default specs when present for OpenAI/Anthropic/Google.
-    for provider in ("openai", "anthropic", "google"):
-        for ms in _MODEL_SPECS:
-            if ms.provider == provider:
-                specs.append(ModelSpec(**ms.__dict__))
-                break
+    if ensemble_list:
+        spec_str = ",".join(str(e) for e in ensemble_list)
+        return parse_ensemble_specs(spec_str)
 
-    # Ensure both Gemini models are present for SPD diversity.
-    specs.append(_make_model_spec("google", "gemini-3-pro-preview"))
-    specs.append(_make_model_spec("google", "gemini-3-flash-preview"))
+    # Legacy fallback: read from forecaster.providers (if present)
+    legacy_providers = _forecaster_cfg.get("providers", {}) if isinstance(_forecaster_cfg, dict) else {}
+    if isinstance(legacy_providers, dict) and legacy_providers:
+        parts: List[str] = []
+        for prov, entry in legacy_providers.items():
+            if isinstance(entry, dict):
+                model = str(entry.get("model", "")).strip()
+                if model:
+                    parts.append(f"{prov}:{model}")
+        if parts:
+            return parse_ensemble_specs(",".join(parts))
 
-    # Deduplicate identical provider+model_id combos while preserving order.
-    seen: set[tuple[str, str]] = set()
-    deduped: List[ModelSpec] = []
-    for ms in specs:
-        key = (ms.provider, ms.model_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(ms)
-
-    return _apply_provider_block(deduped)
+    return []
 
 
+# --- Build model lists from config ---
+_config_ensemble: List[ModelSpec] = _load_ensemble_from_config()
+
+# Populate _PROVIDER_STATES with model info from ensemble (first model per provider)
+for _ms in _config_ensemble:
+    _state = _PROVIDER_STATES.setdefault(_ms.provider, {
+        "api_key": "", "env_key": _PROVIDER_ENV_KEYS.get(_ms.provider, ""), "enabled": True, "weight": 1.0,
+    })
+    if "model" not in _state:
+        _state["model"] = _ms.model_id
+        _state["display_name"] = _ms.name
+
+_MODEL_SPECS: List[ModelSpec] = list(_config_ensemble)
+KNOWN_MODELS: List[str] = [spec.name for spec in _MODEL_SPECS]
+DEFAULT_ENSEMBLE: List[ModelSpec] = _apply_provider_block([spec for spec in _MODEL_SPECS if spec.active])
+
+# SPD ensemble: env var override takes precedence, otherwise use config ensemble
 SPD_ENSEMBLE_OVERRIDE: List[ModelSpec] = parse_ensemble_specs(os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", ""))
 
 
@@ -501,7 +436,7 @@ def _apply_spd_google_model_override(specs: List[ModelSpec]) -> List[ModelSpec]:
 
 
 SPD_ENSEMBLE: List[ModelSpec] = _apply_spd_google_model_override(
-    SPD_ENSEMBLE_OVERRIDE or _build_spd_default_ensemble()
+    SPD_ENSEMBLE_OVERRIDE or list(DEFAULT_ENSEMBLE)
 )
 
 # backwards-compatible aliases reused elsewhere in the forecaster package
@@ -545,31 +480,36 @@ def _get_or_client() -> httpx.AsyncClient:
 # Usage / cost helpers
 # ---------------------------------------------------------------------------
 
-# Cost per 1,000 tokens for known models (USD). Keys should match ModelSpec.model_id
-# entries so we can estimate costs directly from provider usage metadata.
-MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = {
-    # Budget / testing models
-    "gpt-5-nano": (0.00005, 0.00040),
-    "openai/gpt-5-nano": (0.00005, 0.00040),
-    "gemini-2.5-flash-lite": (0.0001, 0.0004),
-    "google/gemini-2.5-flash-lite": (0.0001, 0.0004),
-    "claude-haiku-4-5-20251001": (0.00100, 0.00500),
-    "anthropic/claude-haiku-4-5-20251001": (0.00100, 0.00500),
-    "grok-4-1-fast-reasoning": (0.00030, 0.00050),
-    "xai/grok-4-1-fast-reasoning": (0.00030, 0.00050),
+# Cost per 1,000 tokens for known models (USD). Loaded from pythia/model_costs.json
+# so that adding a new model's cost only requires editing a JSON file, not Python code.
 
-    # Production / frontier models
-    "gpt-5.1": (0.00125, 0.01000),
-    "openai/gpt-5.1": (0.00125, 0.01000),
-    "gemini-3-flash-preview": (0.00050, 0.00300),
-    "google/gemini-3-flash-preview": (0.00050, 0.00300),
-    "gemini-3-pro-preview": (0.00200, 0.01200),
-    "google/gemini-3-pro-preview": (0.00200, 0.01200),
-    "claude-opus-4-5-20251101": (0.00500, 0.02500),
-    "anthropic/claude-opus-4-5-20251101": (0.00500, 0.02500),
-    "grok-4-0709": (0.00300, 0.01500),
-    "xai/grok-4-0709": (0.00300, 0.01500),
-}
+def _load_model_costs_json() -> Dict[str, tuple[float, float]]:
+    """Load model cost data from ``pythia/model_costs.json``."""
+    import pathlib
+
+    try:
+        import pythia
+        costs_path = pathlib.Path(pythia.__file__).parent / "model_costs.json"
+    except Exception:
+        costs_path = pathlib.Path(__file__).parent.parent / "pythia" / "model_costs.json"
+    try:
+        with open(costs_path) as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    result: Dict[str, tuple[float, float]] = {}
+    for key, value in raw.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            try:
+                result[key] = (float(value[0]), float(value[1]))
+            except (ValueError, TypeError):
+                continue
+    return result
+
+
+MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = _load_model_costs_json()
 
 _MODEL_PRICES: Optional[Dict[str, Dict[str, float]]] = None
 

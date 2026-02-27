@@ -1130,3 +1130,116 @@ def build_model_scores_export(con) -> pd.DataFrame:
         return empty
 
     return df[columns].reset_index(drop=True)
+
+
+def build_rationale_export(
+    con,
+    hazard_code: str,
+    model_name: str | None = None,
+) -> pd.DataFrame:
+    """Build deduplicated LLM rationale export filtered by hazard and optionally model.
+
+    Returns one row per (question_id, model_name) containing the human_explanation
+    text and contextual columns.  The same explanation is stored on every
+    (month_index, bucket_index) row, so SELECT DISTINCT collapses the duplicates.
+    """
+
+    columns = [
+        "question_id",
+        "run_id",
+        "hs_run_id",
+        "iso3",
+        "country_name",
+        "hazard_code",
+        "metric",
+        "target_month",
+        "model_name",
+        "human_explanation",
+    ]
+
+    empty = pd.DataFrame(columns=columns)
+
+    if con is None or not _table_exists(con, "questions"):
+        return empty
+
+    hazard_upper = hazard_code.strip().upper()
+
+    sub_queries: list[str] = []
+    params: list[str] = []
+
+    # ── forecasts_raw (per-model forecasts) ──────────────────────────
+    if _table_exists(con, "forecasts_raw"):
+        raw_cols = _table_columns(con, "forecasts_raw")
+        if "human_explanation" in raw_cols:
+            raw_sql = (
+                "SELECT DISTINCT"
+                "  fr.question_id,"
+                "  fr.run_id,"
+                "  q.hs_run_id,"
+                "  q.iso3,"
+                "  q.hazard_code,"
+                "  q.metric,"
+                "  q.target_month,"
+                "  fr.model_name,"
+                "  fr.human_explanation"
+                " FROM forecasts_raw fr"
+                " JOIN questions q ON fr.question_id = q.question_id"
+                " WHERE UPPER(q.hazard_code) = ?"
+                "  AND fr.human_explanation IS NOT NULL"
+                "  AND TRIM(CAST(fr.human_explanation AS VARCHAR)) != ''"
+            )
+            params.append(hazard_upper)
+            if model_name:
+                raw_sql += " AND LOWER(CAST(fr.model_name AS VARCHAR)) LIKE ?"
+                params.append(f"%{model_name.lower()}%")
+            sub_queries.append(raw_sql)
+
+    # ── forecasts_ensemble (aggregated forecasts) ────────────────────
+    if _table_exists(con, "forecasts_ensemble"):
+        ens_cols = _table_columns(con, "forecasts_ensemble")
+        if "human_explanation" in ens_cols:
+            ens_sql = (
+                "SELECT DISTINCT"
+                "  fe.question_id,"
+                "  fe.run_id,"
+                "  q.hs_run_id,"
+                "  fe.iso3,"
+                "  fe.hazard_code,"
+                "  fe.metric,"
+                "  q.target_month,"
+                "  fe.model_name,"
+                "  fe.human_explanation"
+                " FROM forecasts_ensemble fe"
+                " JOIN questions q ON fe.question_id = q.question_id"
+                " WHERE UPPER(fe.hazard_code) = ?"
+                "  AND fe.human_explanation IS NOT NULL"
+                "  AND TRIM(CAST(fe.human_explanation AS VARCHAR)) != ''"
+            )
+            params.append(hazard_upper)
+            if model_name:
+                ens_sql += " AND LOWER(CAST(fe.model_name AS VARCHAR)) LIKE ?"
+                params.append(f"%{model_name.lower()}%")
+            sub_queries.append(ens_sql)
+
+    if not sub_queries:
+        return empty
+
+    full_sql = " UNION ALL ".join(sub_queries)
+    full_sql += " ORDER BY iso3, metric, model_name, question_id"
+
+    df = con.execute(full_sql, params).fetchdf()
+
+    if df.empty:
+        return empty
+
+    df["iso3"] = df["iso3"].astype(str).str.upper()
+    df["hazard_code"] = df["hazard_code"].astype(str).str.upper()
+    df["metric"] = df["metric"].astype(str).str.upper()
+
+    country_map = _load_country_registry()
+    df["country_name"] = df["iso3"].map(country_map).fillna(df["iso3"])
+
+    output = pd.DataFrame({col: df.get(col) for col in columns})
+    return output.sort_values(
+        ["iso3", "metric", "model_name", "question_id"]
+    ).reset_index(drop=True)

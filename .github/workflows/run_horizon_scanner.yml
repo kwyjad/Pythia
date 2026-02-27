@@ -75,7 +75,7 @@ jobs:
       HS_MODEL_ID: gemini-3-flash-preview
       PYTHIA_HS_ONLY_COUNTRIES: ${{ github.event.inputs.hs_only_countries }}
       PYTHIA_BLOCK_PROVIDERS: xai
-      PYTHIA_SPD_ENSEMBLE_SPECS: openai:gpt-5.1,anthropic:claude-opus-4-5-20251101,google:gemini-3-pro-preview,google:gemini-3-flash-preview
+      PYTHIA_SPD_ENSEMBLE_SPECS: openai:gpt-5.1,anthropic:claude-sonnet-4-6,google:gemini-3.1-pro-preview,google:gemini-3-flash-preview
       PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
       PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""
       PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC: "90"
