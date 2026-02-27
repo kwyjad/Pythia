@@ -320,6 +320,16 @@ def main() -> None:
             },
         )
 
+    # Prompt content is now extracted dynamically at build time via
+    # prompt_extractor.ts rather than hardcoded in the TSX component.
+    # Verify the extraction pipeline exists and the Python source contains
+    # the required markers.
+    extractor_path = Path("web/src/lib/prompt_extractor.ts")
+    if not extractor_path.exists():
+        fail_guardrail(
+            "Prompt extractor missing — dynamic prompt extraction will fail.",
+            {"file": str(extractor_path)},
+        )
     prompt_markers = [
         "FORECASTING INSTRUCTIONS (Bayesian SPD)",
         "Final JSON output (IMPORTANT)",
@@ -328,11 +338,6 @@ def main() -> None:
         "Conflict fatalities buckets",
     ]
     for marker in prompt_markers:
-        if marker not in ai_prompts_content:
-            fail_guardrail(
-                "AI Prompts section missing prompt marker.",
-                {"marker": marker, "file": str(ai_prompts_path)},
-            )
         if marker not in prompts_content:
             fail_guardrail(
                 "Prompt source missing required marker.",

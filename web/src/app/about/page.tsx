@@ -8,7 +8,7 @@ import {
 import { renderSimpleMarkdown } from "../../lib/simple_markdown";
 import AiPromptsSection from "./AiPromptsSection";
 
-const WELCOME_MD = `## Welcome!
+const ABOUT_MD = `## Welcome!
 
 Fred is an experimental humanitarian impact forecasting system. Its objective is to test the effectiveness of LLM as horizon scanning and forecasting agents in the humanitarian space. Fred started operation in December 2025. Its first "stable" run (i.e. with a standard set of models and processes) was in January 2026. Fred runs monthly and will update with new forecasts at the start of each month.
 
@@ -58,7 +58,7 @@ export default async function AboutPage() {
         </p>
       </header>
       <article className="max-w-none">
-        {renderSimpleMarkdown(WELCOME_MD)}
+        {renderSimpleMarkdown(ABOUT_MD)}
         {overviewMd && renderSimpleMarkdown(overviewMd)}
         <AiPromptsSection
           currentPrompts={prompts}

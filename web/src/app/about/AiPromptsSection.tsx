@@ -78,7 +78,7 @@ const PANELS: PanelConfig[] = [
     title: "Research brief",
     description: (
       <p>
-        The researcher prompt produces a concise brief with explicit headings so
+        The Researcher prompt produces a concise brief with explicit headings so
         forecasters can update their priors quickly. In production, a v2 builder
         wraps this template with structured context blocks (question metadata,
         resolver history, HS triage, merged evidence, regime change flags).
