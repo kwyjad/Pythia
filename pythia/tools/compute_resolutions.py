@@ -96,6 +96,59 @@ def _calendar_cutoff(today: date) -> str:
     return f"{prev.year:04d}-{prev.month:02d}"
 
 
+def _purge_stale_resolutions(conn, cutoff: str) -> None:
+    """Delete resolutions (and orphaned scores) with observed_month beyond *cutoff*.
+
+    This prevents stale rows — written by earlier pipeline runs before the
+    calendar-cutoff guard was in place — from persisting indefinitely and
+    blocking correct ``INSERT OR REPLACE`` when the calendar advances.
+    """
+    if not _table_exists(conn, "resolutions"):
+        return
+
+    stale = conn.execute(
+        "SELECT COUNT(*) FROM resolutions WHERE observed_month > ?", [cutoff]
+    ).fetchone()[0]
+    if stale == 0:
+        return
+
+    # Delete orphaned scores first (referential-integrity-safe order).
+    if _table_exists(conn, "scores"):
+        conn.execute(
+            """
+            DELETE FROM scores
+            WHERE (question_id, horizon_m) IN (
+                SELECT question_id, horizon_m FROM resolutions
+                WHERE observed_month > ?
+            )
+            """,
+            [cutoff],
+        )
+
+    # Delete the stale resolutions themselves.
+    conn.execute("DELETE FROM resolutions WHERE observed_month > ?", [cutoff])
+
+    # Revert question status: questions that no longer have all 6 horizons
+    # resolved should go back to 'active'.
+    if _table_exists(conn, "questions"):
+        conn.execute(
+            """
+            UPDATE questions SET status = 'active'
+            WHERE status = 'resolved'
+              AND question_id NOT IN (
+                  SELECT question_id FROM resolutions
+                  GROUP BY question_id
+                  HAVING COUNT(DISTINCT horizon_m) = ?
+              )
+            """,
+            [NUM_HORIZONS],
+        )
+
+    LOGGER.info(
+        "Purged %d stale resolution rows (observed_month > %s).", stale, cutoff
+    )
+
+
 def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
     """Return the latest ``YYYY-MM`` for which source data exists.
 
@@ -424,6 +477,10 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
 
         # Calendar cutoff: previous complete month (prevents partial-month data).
         cal_cutoff = _calendar_cutoff(today)
+
+        # Purge any stale resolutions beyond the cutoff (left over from
+        # earlier pipeline runs before the calendar guard was added).
+        _purge_stale_resolutions(conn, cal_cutoff)
 
         # Data-driven guard: don't resolve beyond what sources actually cover.
         pa_data_cutoff = _data_freshness_cutoff(conn, "PA")
