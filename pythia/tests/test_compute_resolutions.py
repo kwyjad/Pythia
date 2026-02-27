@@ -20,6 +20,7 @@ from pythia.tools.compute_resolutions import (
     _try_acled_fatalities,
     _data_freshness_cutoff,
     _calendar_cutoff,
+    _purge_stale_resolutions,
     _llm_derived_window_starts,
     horizon_to_calendar_month,
     compute_resolutions,
@@ -1611,5 +1612,254 @@ def test_january_forecasts_not_resolved_in_february(tmp_path, monkeypatch):
     try:
         count = con.execute("SELECT COUNT(*) FROM resolutions").fetchone()[0]
         assert count == 0, f"Expected 0 resolutions for Jan run in Feb, got {count}"
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# _purge_stale_resolutions — cleans up rows beyond calendar cutoff
+# ---------------------------------------------------------------------------
+
+_RESOLUTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS resolutions (
+    question_id TEXT,
+    horizon_m INTEGER,
+    observed_month TEXT,
+    value DOUBLE,
+    source_snapshot_ym TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (question_id, horizon_m)
+)
+"""
+
+
+@pytest.mark.db
+def test_stale_resolutions_purged(tmp_path, monkeypatch):
+    """Pre-seeded resolutions with observed_month beyond the calendar cutoff
+    should be deleted when compute_resolutions runs."""
+    db_path = tmp_path / "purge.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(_RESOLUTIONS_DDL)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_STALE', 'run1', 'MLI', 'FL', 'PA', '2026-06', '2026-01-01', 'active')
+            """
+        )
+        # Pre-seed stale resolutions (observed_month beyond cutoff)
+        con.execute(
+            """
+            INSERT INTO resolutions (question_id, horizon_m, observed_month, value)
+            VALUES ('Q_STALE', 2, '2026-02', 100.0),
+                   ('Q_STALE', 3, '2026-03', 200.0),
+                   ('Q_STALE', 4, '2026-04', 300.0)
+            """
+        )
+        # Also seed a valid resolution (should survive)
+        con.execute(
+            """
+            INSERT INTO resolutions (question_id, horizon_m, observed_month, value)
+            VALUES ('Q_STALE', 1, '2026-01', 50.0)
+            """
+        )
+    finally:
+        con.close()
+
+    # Calendar cutoff in Feb = 2026-01.  h2-h4 should be purged.
+    compute_resolutions(db_url=db_url, today=date(2026, 2, 15))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, observed_month FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected only h1 to survive, got {rows}"
+        assert rows[0] == (1, "2026-01")
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_stale_purge_resets_question_status(tmp_path, monkeypatch):
+    """A question marked 'resolved' (all 6 horizons) should revert to 'active'
+    after stale horizons are purged."""
+    db_path = tmp_path / "purge_status.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(_RESOLUTIONS_DDL)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_STAT', 'run1', 'MLI', 'FL', 'PA', '2026-06', '2026-01-01', 'resolved')
+            """
+        )
+        # All 6 horizons resolved (h1=Jan valid, h2-h6=Feb+ stale)
+        for h in range(1, 7):
+            om = f"2026-{h:02d}"
+            con.execute(
+                "INSERT INTO resolutions (question_id, horizon_m, observed_month, value) "
+                "VALUES ('Q_STAT', ?, ?, 0.0)",
+                [h, om],
+            )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url, today=date(2026, 2, 15))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        status = con.execute(
+            "SELECT status FROM questions WHERE question_id = 'Q_STAT'"
+        ).fetchone()[0]
+        assert status == "active", f"Expected 'active' after purge, got '{status}'"
+
+        count = con.execute("SELECT COUNT(*) FROM resolutions").fetchone()[0]
+        assert count == 1, f"Expected 1 surviving resolution (h1), got {count}"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_stale_purge_cascades_to_scores(tmp_path, monkeypatch):
+    """Orphaned scores for purged resolutions should also be deleted."""
+    db_path = tmp_path / "purge_scores.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(_RESOLUTIONS_DDL)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_SC', 'run1', 'MLI', 'FL', 'PA', '2026-06', '2026-01-01', 'active')
+            """
+        )
+        # Stale resolution
+        con.execute(
+            """
+            INSERT INTO resolutions (question_id, horizon_m, observed_month, value)
+            VALUES ('Q_SC', 2, '2026-02', 100.0)
+            """
+        )
+        # Valid resolution
+        con.execute(
+            """
+            INSERT INTO resolutions (question_id, horizon_m, observed_month, value)
+            VALUES ('Q_SC', 1, '2026-01', 50.0)
+            """
+        )
+        # Scores table with entries for both horizons
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scores (
+                question_id TEXT,
+                horizon_m INTEGER,
+                metric TEXT,
+                score_type TEXT,
+                model_name TEXT,
+                value DOUBLE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO scores (question_id, horizon_m, metric, score_type, value)
+            VALUES ('Q_SC', 1, 'PA', 'brier', 0.1),
+                   ('Q_SC', 2, 'PA', 'brier', 0.2)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url, today=date(2026, 2, 15))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        # Stale score (h2) should be deleted; valid score (h1) should remain
+        score_rows = con.execute(
+            "SELECT horizon_m FROM scores ORDER BY horizon_m"
+        ).fetchall()
+        assert len(score_rows) == 1, f"Expected 1 score row, got {score_rows}"
+        assert score_rows[0][0] == 1
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_valid_resolutions_not_purged(tmp_path, monkeypatch):
+    """Resolutions with observed_month <= cutoff must survive the purge."""
+    db_path = tmp_path / "purge_valid.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(_RESOLUTIONS_DDL)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_OK', 'run1', 'MLI', 'FL', 'PA', '2026-06', '2026-01-01', 'active')
+            """
+        )
+        # Valid resolutions (observed_month <= cutoff 2026-01)
+        con.execute(
+            """
+            INSERT INTO resolutions (question_id, horizon_m, observed_month, value)
+            VALUES ('Q_OK', 1, '2026-01', 50.0)
+            """
+        )
+        # Also seed source data so h1 can be recomputed (should match)
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2026-01', 'MLI', 'FL', 'affected', 50.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url, today=date(2026, 2, 15))
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, observed_month, value FROM resolutions ORDER BY horizon_m"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected 1 resolution, got {rows}"
+        assert rows[0][0] == 1
+        assert rows[0][1] == "2026-01"
     finally:
         con.close()
