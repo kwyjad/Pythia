@@ -46,6 +46,9 @@ from horizon_scanner.hs_triage_grounding_prompts import (
 )
 from horizon_scanner.seasonal_filter import get_active_hazards
 from pythia.db.schema import connect as pythia_connect
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
@@ -96,6 +99,51 @@ _ACE_LOW_ACTIVITY_DEFAULTS: Dict[str, Any] = {
     "status": "acled_low_activity",
 }
 
+<<<<<<< Updated upstream
+=======
+
+# ---------------------------------------------------------------------------
+# ACLED low-activity filter for ACE
+# ---------------------------------------------------------------------------
+
+def _is_ace_low_activity(iso3: str) -> bool:
+    """Return True if ACLED data shows negligible conflict activity.
+
+    Criteria (both must hold):
+      - 0 fatalities in the 2 most recent months of data
+      - <25 total fatalities in the last 12 months of data
+
+    If no ACLED data exists for the country, returns True (no data =
+    no known conflict = low activity).  On DB errors, returns False
+    (fail open — run triage rather than silently skip it).
+    """
+    try:
+        con = pythia_connect(read_only=True)
+        rows = con.execute(
+            """
+            SELECT month, fatalities
+            FROM acled_monthly_fatalities
+            WHERE iso3 = ?
+            ORDER BY month DESC
+            LIMIT 12
+            """,
+            [iso3],
+        ).fetchall()
+        con.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("ACLED low-activity check failed for %s — defaulting to active", iso3)
+        return False
+
+    if not rows:
+        return True
+
+    fatalities = [int(r[1]) for r in rows]  # Ordered most-recent-first
+    last_2m = sum(fatalities[:min(2, len(fatalities))])
+    last_12m = sum(fatalities)
+
+    return last_2m == 0 and last_12m < 25
+
+>>>>>>> Stashed changes
 
 # ---------------------------------------------------------------------------
 # ACLED low-activity filter for ACE
