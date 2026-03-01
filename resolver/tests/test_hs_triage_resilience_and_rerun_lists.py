@@ -5,6 +5,9 @@ import pytest
 
 from forecaster import providers
 from horizon_scanner import horizon_scanner
+from horizon_scanner import regime_change_llm as rc_llm_mod
+from horizon_scanner import triage as triage_mod
+from horizon_scanner import _utils as hs_utils_mod
 
 
 class DummyConn:
@@ -112,15 +115,22 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
         component: str = "",
         run_id: str | None = None,
     ) -> tuple[str, dict[str, Any], str]:
-        if prompt_key == "hs.triage.json_repair":
-            return "{\"hazards\":{\"ACE\":{\"triage_score\":0.5}}}", {"total_tokens": 1}, ""
+        if "json_repair" in prompt_key:
+            return "{\"hazards\":{\"ACE\":{\"triage_score\":0.5,\"regime_change\":{\"likelihood\":0.05,\"magnitude\":0.05,\"direction\":\"unclear\"}}}}", {"total_tokens": 1}, ""
+        if "regime_change" in prompt_key:
+            return "not json", {"total_tokens": 1}, ""
         return "not json", {"total_tokens": 1}, ""
 
+    monkeypatch.setattr(providers, "call_chat_ms", fake_call_chat_ms)
     monkeypatch.setattr(horizon_scanner, "call_chat_ms", fake_call_chat_ms)
+    monkeypatch.setattr(rc_llm_mod, "call_chat_ms", fake_call_chat_ms)
+    monkeypatch.setattr(triage_mod, "call_chat_ms", fake_call_chat_ms)
     monkeypatch.setattr(horizon_scanner, "_build_resolver_features_for_country", lambda *_: {})
     monkeypatch.setattr(horizon_scanner, "_maybe_build_country_evidence_pack", lambda *_: None)
     monkeypatch.setattr(horizon_scanner, "_write_hs_triage", lambda *_: None)
     monkeypatch.setattr(horizon_scanner, "log_hs_llm_call", lambda **_: None)
+    monkeypatch.setattr(rc_llm_mod, "log_hs_llm_call", lambda **_: None)
+    monkeypatch.setattr(triage_mod, "log_hs_llm_call", lambda **_: None)
     monkeypatch.setattr(horizon_scanner, "pythia_connect", lambda **_: DummyConn())
     monkeypatch.chdir(tmp_path)
 
