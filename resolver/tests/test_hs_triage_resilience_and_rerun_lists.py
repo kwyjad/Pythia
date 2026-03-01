@@ -84,7 +84,7 @@ def test_hs_triage_fallback_used(monkeypatch):
         providers.ModelSpec(
             name="OpenAI",
             provider="openai",
-            model_id="gpt-5.1",
+            model_id="gpt-5.2",
             active=True,
             purpose="hs_triage",
         )
@@ -170,7 +170,7 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
         providers.ModelSpec(
             name="OpenAI",
             provider="openai",
-            model_id="gpt-5.1",
+            model_id="gpt-5.2",
             active=True,
             purpose="hs_triage",
         )
@@ -193,7 +193,7 @@ def test_hs_triage_rerun_lists(monkeypatch, capsys, tmp_path):
         providers.ModelSpec(
             name="OpenAI",
             provider="openai",
-            model_id="gpt-5.1",
+            model_id="gpt-5.2",
             active=True,
             purpose="hs_triage",
         )
@@ -221,7 +221,7 @@ def test_hs_triage_rerun_lists(monkeypatch, capsys, tmp_path):
             "pass1_valid": status != "failed",
             "pass2_valid": status == "ok",
             "primary_model_id": "gemini-test",
-            "fallback_model_id": "gpt-5.1",
+            "fallback_model_id": "gpt-5.2",
         }
 
     monkeypatch.setattr(horizon_scanner, "_run_hs_for_country", fake_run)

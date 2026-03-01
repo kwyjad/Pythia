@@ -80,7 +80,7 @@ def _hs_fallback_default() -> str:
             return val
     except Exception:
         pass
-    return "openai:gpt-5.1"
+    return "openai:gpt-5.2"
 
 HS_FALLBACK_MODEL_SPECS = os.getenv("PYTHIA_HS_FALLBACK_MODEL_SPECS") or _hs_fallback_default()
 HS_TAIL_PACKS_ENABLED = os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED", "0") == "1"
@@ -405,7 +405,7 @@ def _resolve_hs_model() -> str:
     model_id = (GEMINI_MODEL_ID or "").strip()
     if model_id:
         return model_id
-    return os.getenv("HS_MODEL_ID", "gemini-2.5-flash-lite")
+    return os.getenv("HS_MODEL_ID", "gemini-3-flash-preview")
 
 
 def _resolve_hs_fallback_specs() -> list[ModelSpec]:

@@ -83,7 +83,7 @@ def _select_gemini_model() -> str:
     if profile_model:
         return str(profile_model).strip()
     # Fallback, if needed:
-    return "gemini-2.5-flash-lite"
+    return "gemini-3-flash-preview"
 
 
 # --- Debug hook: last error message from research step (for human log & CSV) ---

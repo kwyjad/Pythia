@@ -24,7 +24,7 @@ def resolve_hs_model() -> str:
     model_id = (GEMINI_MODEL_ID or "").strip()
     if model_id:
         return model_id
-    return os.getenv("HS_MODEL_ID", "gemini-2.5-flash-lite")
+    return os.getenv("HS_MODEL_ID", "gemini-3-flash-preview")
 
 
 # ---------------------------------------------------------------------------

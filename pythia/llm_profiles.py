@@ -39,7 +39,7 @@ def get_current_models() -> Dict[str, str]:
     falls back to the legacy flat provider→model_id mapping.
 
     Example return:
-      {"openai": "gpt-5.1", "google": "gemini-3-flash-preview",
+      {"openai": "gpt-5.2", "google": "gemini-3-flash-preview",
        "anthropic": "claude-sonnet-4-6"}
     """
 
@@ -88,7 +88,7 @@ def get_purpose_model(purpose: str) -> str | None:
     """Read a purpose-specific model override from the active profile.
 
     E.g. ``get_purpose_model("hs_fallback")`` reads
-    ``llm.profiles.prod.hs_fallback`` → ``"openai:gpt-5.1"``.
+    ``llm.profiles.prod.hs_fallback`` → ``"openai:gpt-5.2"``.
     """
 
     cfg = load_cfg()
