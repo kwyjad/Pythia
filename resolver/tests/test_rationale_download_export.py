@@ -114,13 +114,13 @@ def test_deduplication():
         con,
         question_id="q1",
         run_id="run-1",
-        model_name="OpenAI-gpt-5.1",
+        model_name="OpenAI-gpt-5.2",
         human_explanation="Base rate is 12k. Upward trend from flooding signals.",
     )
 
     df = build_rationale_export(con, hazard_code="FL")
     assert len(df) == 1
-    assert df.iloc[0]["model_name"] == "OpenAI-gpt-5.1"
+    assert df.iloc[0]["model_name"] == "OpenAI-gpt-5.2"
     assert "Base rate" in df.iloc[0]["human_explanation"]
 
 
@@ -159,7 +159,7 @@ def test_model_filter():
         "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
-        con, question_id="q1", run_id="r1", model_name="OpenAI-gpt-5.1",
+        con, question_id="q1", run_id="r1", model_name="OpenAI-gpt-5.2",
         human_explanation="OpenAI rationale.",
     )
     _insert_raw_rows(
@@ -220,7 +220,7 @@ def test_both_tables_union():
         "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
-        con, question_id="q1", run_id="r1", model_name="OpenAI-gpt-5.1",
+        con, question_id="q1", run_id="r1", model_name="OpenAI-gpt-5.2",
         human_explanation="Per-model rationale.",
     )
     _insert_ensemble_rows(
@@ -232,7 +232,7 @@ def test_both_tables_union():
     df = build_rationale_export(con, hazard_code="FL")
     assert len(df) == 2
     models = set(df["model_name"])
-    assert "OpenAI-gpt-5.1" in models
+    assert "OpenAI-gpt-5.2" in models
     assert "ensemble_mean_v2" in models
 
 

@@ -198,6 +198,8 @@ _PROVIDER_ENV_KEYS: Dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GEMINI_API_KEY",
     "xai": "XAI_API_KEY",
+    "kimi": "KIMI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
 }
 
 _cfg = load_cfg()
@@ -215,6 +217,8 @@ def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | N
         "anthropic": "Claude",
         "google": "Gemini",
         "xai": "Grok",
+        "kimi": "Kimi",
+        "deepseek": "DeepSeek",
     }
     base = base_names.get(provider, provider.title())
     if not model_id:
@@ -451,14 +455,22 @@ _OPENAI_API_KEY = _OPENAI_STATE.get("api_key", "")
 _ANTHROPIC_API_KEY = _PROVIDER_STATES.get("anthropic", {}).get("api_key", "")
 _GEMINI_API_KEY = _GEMINI_STATE.get("api_key", "")
 _XAI_API_KEY = _XAI_STATE.get("api_key", "")
+_KIMI_STATE = _PROVIDER_STATES.get("kimi", {})
+_KIMI_API_KEY = _KIMI_STATE.get("api_key", "")
+_DEEPSEEK_STATE = _PROVIDER_STATES.get("deepseek", {})
+_DEEPSEEK_API_KEY = _DEEPSEEK_STATE.get("api_key", "")
 
 _OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 _XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").strip()
+_KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1").strip()
+_DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _GEMINI_TIMEOUT = _resolve_timeout("GEMINI_CALL_TIMEOUT_SEC", GEMINI_CALL_TIMEOUT_SEC, 60.0)
 _XAI_TIMEOUT = _resolve_timeout("XAI_CALL_TIMEOUT_SEC", GROK_CALL_TIMEOUT_SEC, 60.0)
+_KIMI_TIMEOUT = _resolve_timeout("KIMI_CALL_TIMEOUT_SEC", None, 300.0)
+_DEEPSEEK_TIMEOUT = _resolve_timeout("DEEPSEEK_CALL_TIMEOUT_SEC", None, 300.0)
 
 _ANTHROPIC_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
 _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "2048") or 2048)
@@ -865,6 +877,89 @@ def call_xai(prompt: str, model: str, temperature: float) -> ProviderResult:
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
+def _call_openai_compatible(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    api_key: str,
+    base_url: str,
+    timeout: float,
+    provider_label: str,
+) -> ProviderResult:
+    """Shared implementation for OpenAI-compatible APIs (Kimi, DeepSeek, etc.)."""
+    if not api_key:
+        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"missing {provider_label} API key")
+    try:
+        resp = requests.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": float(temperature),
+            },
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"{provider_label} error: {exc}")
+
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+
+    if not resp.ok:
+        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+        message = ""
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                message = str(err.get("message", ""))
+            elif isinstance(err, str):
+                message = err
+        if not message:
+            message = resp.text[:400]
+        return ProviderResult(
+            "",
+            usage_to_dict(None),
+            0.0,
+            model,
+            error=f"{provider_label} HTTP {resp.status_code}: {message}",
+            retry_after=retry_after,
+        )
+
+    text = ""
+    if isinstance(payload, dict):
+        choices = payload.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+            if isinstance(message, dict):
+                text = str(message.get("content", "")).strip()
+    usage = usage_to_dict(payload.get("usage") if isinstance(payload, dict) else {})
+    return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
+
+
+def call_kimi(prompt: str, model: str, temperature: float) -> ProviderResult:
+    return _call_openai_compatible(
+        prompt, model, temperature,
+        api_key=_KIMI_API_KEY,
+        base_url=_KIMI_BASE_URL,
+        timeout=_KIMI_TIMEOUT,
+        provider_label="Kimi",
+    )
+
+
+def call_deepseek(prompt: str, model: str, temperature: float) -> ProviderResult:
+    return _call_openai_compatible(
+        prompt, model, temperature,
+        api_key=_DEEPSEEK_API_KEY,
+        base_url=_DEEPSEEK_BASE_URL,
+        timeout=_DEEPSEEK_TIMEOUT,
+        provider_label="DeepSeek",
+    )
+
+
 def _call_provider_sync(
     provider: str,
     prompt: str,
@@ -883,6 +978,10 @@ def _call_provider_sync(
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
     if p in {"xai", "grok"}:
         return call_xai(prompt, model, temperature)
+    if p == "kimi":
+        return call_kimi(prompt, model, temperature)
+    if p == "deepseek":
+        return call_deepseek(prompt, model, temperature)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
 
 

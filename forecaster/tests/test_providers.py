@@ -66,7 +66,7 @@ def test_blocked_providers_removed_from_specs(monkeypatch: pytest.MonkeyPatch) -
     )
 
     specs = providers.parse_ensemble_specs(
-        "openai:gpt-5.1,xai:grok-4-0709,google:gemini-3-pro-preview"
+        "openai:gpt-5.2,xai:grok-4-0709,google:gemini-3-pro-preview"
     )
 
     assert all(ms.provider != "xai" for ms in specs)
@@ -81,7 +81,7 @@ def test_spd_ensemble_override_keeps_two_gemini_models(monkeypatch: pytest.Monke
             "ANTHROPIC_API_KEY": "x",
             "GEMINI_API_KEY": "x",
             "PYTHIA_SPD_ENSEMBLE_SPECS": (
-                "openai:gpt-5.1,anthropic:claude-opus-4-5-20251101,"
+                "openai:gpt-5.2,anthropic:claude-opus-4-5-20251101,"
                 "google:gemini-3-pro-preview,google:gemini-3-flash-preview"
             ),
             "PYTHIA_BLOCK_PROVIDERS": "",
@@ -98,6 +98,6 @@ def test_estimate_cost_usd_flash_lite() -> None:
     from forecaster import providers
 
     usage = {"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000}
-    cost = providers.estimate_cost_usd("gemini-2.5-flash-lite", usage)
+    cost = providers.estimate_cost_usd("gemini-3-flash-preview", usage)
 
-    assert cost == pytest.approx(0.0005)
+    assert cost == pytest.approx(0.0035)

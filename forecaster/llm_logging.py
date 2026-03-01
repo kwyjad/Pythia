@@ -266,6 +266,10 @@ MODEL_PRICING: dict[tuple[str, str], dict[str, float]] = {
         "input_per_million": 1.25,
         "output_per_million": 5.0,
     },
+    ("google", "gemini-3.1-pro-preview"): {
+        "input_per_million": 2.0,
+        "output_per_million": 12.0,
+    },
     ("google", "gemini-3-flash-preview"): {
         "input_per_million": 0.50,
         "output_per_million": 3.0,
@@ -275,8 +279,24 @@ MODEL_PRICING: dict[tuple[str, str], dict[str, float]] = {
         "output_per_million": 0.60,
     },
     ("openai", "gpt-5.1"): {
-        "input_per_million": 2.50,
+        "input_per_million": 1.25,
         "output_per_million": 10.0,
+    },
+    ("openai", "gpt-5.2"): {
+        "input_per_million": 1.75,
+        "output_per_million": 14.0,
+    },
+    ("openai", "gpt-5-mini"): {
+        "input_per_million": 0.25,
+        "output_per_million": 2.0,
+    },
+    ("kimi", "kimi-k2.5"): {
+        "input_per_million": 0.60,
+        "output_per_million": 3.0,
+    },
+    ("deepseek", "deepseek-reasoner"): {
+        "input_per_million": 0.28,
+        "output_per_million": 0.42,
     },
 }
 

@@ -5571,7 +5571,7 @@ async def _run_one_question_body(
                             profile_models = _get_llm_profile_models()
                         except Exception:
                             profile_models = {}
-                    default_gtmc1_model = profile_models.get("openai", "gpt-5.1-pro")
+                    default_gtmc1_model = profile_models.get("openai", "gpt-5.2")
                     async with get_llm_semaphore():
                         resp = await client.chat.completions.create(
                             model=os.getenv("GTMC1_MODEL_ID", default_gtmc1_model),

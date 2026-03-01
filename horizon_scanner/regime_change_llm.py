@@ -100,19 +100,32 @@ async def _call_rc_model(
     *,
     run_id: str | None = None,
     fallback_specs: list[ModelSpec] | None = None,
+    pass_idx: int = 1,
 ) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     """Call the LLM for regime-change assessment.
+
+    Pass 1 uses the configured HS model (Gemini Flash).
+    Pass 2 uses GPT-5-mini for model diversity.
 
     Returns (text, usage, error, model_spec).
     """
 
-    spec = ModelSpec(
-        name="Gemini",
-        provider="google",
-        model_id=resolve_hs_model(),
-        active=True,
-        purpose="hs_regime_change",
-    )
+    if pass_idx == 2:
+        spec = ModelSpec(
+            name="GPT-5-mini",
+            provider="openai",
+            model_id="gpt-5-mini",
+            active=True,
+            purpose="hs_regime_change",
+        )
+    else:
+        spec = ModelSpec(
+            name="Gemini",
+            provider="google",
+            model_id=resolve_hs_model(),
+            active=True,
+            purpose="hs_regime_change",
+        )
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -359,7 +372,7 @@ def _run_rc_for_single_hazard(
     for pass_idx in (1, 2):
         call_start = time.time()
         text, usage, error, model_spec = asyncio.run(
-            _call_rc_model(prompt, run_id=run_id, fallback_specs=fallback_specs)
+            _call_rc_model(prompt, run_id=run_id, fallback_specs=fallback_specs, pass_idx=pass_idx)
         )
         usage = usage or {}
         usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))

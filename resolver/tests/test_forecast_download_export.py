@@ -172,7 +172,7 @@ def test_build_forecast_spd_export():
         "forecasts_raw",
         question_id="q-pa",
         run_id="raw-1",
-        model_name="gpt-5.1",
+        model_name="gpt-5.2",
         month_index=1,
         probabilities=[0.15, 0.2, 0.25, 0.2, 0.2],
         created_at="2024-01-04",
@@ -182,7 +182,7 @@ def test_build_forecast_spd_export():
         "forecasts_raw",
         question_id="q-fat",
         run_id="raw-2",
-        model_name="gpt-5.1",
+        model_name="gpt-5.2",
         month_index=1,
         probabilities=[0.4, 0.2, 0.15, 0.15, 0.1],
         created_at="2024-01-04",
@@ -244,7 +244,7 @@ def test_build_forecast_spd_export():
     assert csv_lines[0].split(",") == expected_columns
     assert len(csv_lines) > 1
 
-    assert {"ensemble_mean_v2", "ensemble_bayesmc_v2", "gpt-5.1"}.issubset(
+    assert {"ensemble_mean_v2", "ensemble_bayesmc_v2", "gpt-5.2"}.issubset(
         set(df["model"])
     )
 

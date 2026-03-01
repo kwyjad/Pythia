@@ -36,7 +36,7 @@ Resolver facts/base rates → Horizon Scanner triage → Questions seeded
 ## Core components
 - **Resolver (facts + base rates)**: Resolver tables in DuckDB (`facts_resolved`, `facts_deltas`, `snapshots`) provide historical context. Schema is defined in [`pythia/db/schema.py`](pythia/db/schema.py).
 - **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`/`hs_triage`, seeds `questions`/`question_research`, and generates country evidence packs.
-- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-2.5-flash-lite` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
+- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3-flash-preview` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
 - **Research v2**: Prompts generate structured briefs that separate verified vs unverified sources, stored in `question_research`/`llm_calls`.
 - **Forecaster SPD v2 ensemble**: `python -m forecaster.cli --mode pythia` runs SPD v2 prompts across the active ensemble and writes per-model outputs (`forecasts_raw`) and aggregated results (`forecasts_ensemble`).
 - **Scenarios (priority-only)**: When an ensemble SPD is available, scenarios can be generated for priority questions and written back to DuckDB.
@@ -127,17 +127,20 @@ llm:
   profiles:
     test:
       ensemble:
-        - google:gemini-2.5-flash-lite
+        - google:gemini-3-flash-preview
 
     prod:
       ensemble:
-        - openai:gpt-5.1
+        - openai:gpt-5.2
         - anthropic:claude-sonnet-4-6
         - google:gemini-3.1-pro-preview
         - google:gemini-3-flash-preview
+        - kimi:kimi-k2.5
+        - deepseek:deepseek-reasoner
+        - openai:gpt-5-mini
 
       # Purpose-specific overrides (optional)
-      hs_fallback: openai:gpt-5.1
+      hs_fallback: openai:gpt-5.2
       scenario_writer: google:gemini-3-flash-preview
 ```
 
@@ -297,15 +300,15 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
   - `PYTHIA_WEB_RESEARCH_ENABLED=1`
   - `PYTHIA_WEB_RESEARCH_BACKEND=gemini|openai|claude|auto`
   - `PYTHIA_WEB_RESEARCH_RECENCY_DAYS`, `PYTHIA_WEB_RESEARCH_TIMEOUT_SEC`, `PYTHIA_WEB_RESEARCH_MAX_RESULTS`
-  - **Shared retriever**: `PYTHIA_RETRIEVER_ENABLED=1` and optional `PYTHIA_RETRIEVER_MODEL_ID` (default `gemini-2.5-flash-lite`).
+  - **Shared retriever**: `PYTHIA_RETRIEVER_ENABLED=1` and optional `PYTHIA_RETRIEVER_MODEL_ID` (default `gemini-3-flash-preview`).
   - **HS/Research web search**: `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED=1` (needed if retriever is off).
 - **SPD tuning / timeouts (Gemini 3)**:
   - `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH`, `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO`
   - `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC`, `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`
   - `PYTHIA_GOOGLE_SPD_RETRIES`
-- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.1,google:gemini-3-flash-preview`).
+- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.2,google:gemini-3-flash-preview`).
 - **HS triage resilience**:
-  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.1`; keeps HS triage running when Gemini fails).
+  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.2`; keeps HS triage running when Gemini fails).
   - `PYTHIA_HS_ONLY_COUNTRIES` (comma-separated ISO3s/names to rerun HS triage for a subset).
   - `PYTHIA_PROVIDER_FAILURE_THRESHOLD`, `PYTHIA_PROVIDER_COOLDOWN_SECONDS`, `PYTHIA_PROVIDER_RESET_ON_SUCCESS`
   - `PYTHIA_LLM_RETRY_TIMEOUTS` (set `0` to opt out of timeout retries outside HS triage)

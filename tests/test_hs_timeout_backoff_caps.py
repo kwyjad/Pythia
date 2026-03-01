@@ -14,7 +14,7 @@ def _make_model_spec(purpose: str | None) -> ModelSpec:
     return ModelSpec(
         name="Gemini",
         provider="google",
-        model_id="gemini-2.5-flash-lite",
+        model_id="gemini-3-flash-preview",
         active=True,
         purpose=purpose,
     )
