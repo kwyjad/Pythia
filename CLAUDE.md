@@ -212,3 +212,12 @@ Before editing any of the 3 prompt source files (`forecaster/prompts.py`, `horiz
 - LLM providers abstracted through `forecaster/providers.py` (OpenAI, Google, Anthropic, XAI)
 - All LLM calls logged to `llm_calls` table with cost, tokens, latency, error tracking
 - Env vars override config defaults; threshold env vars use `_env_float()` pattern
+
+## Post-Edit Documentation Requirements
+
+After making any code changes, evaluate whether the following files need updating and update them if so:
+
+- **README.txt** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
+- **docs/Fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
+
+Do not update these files for trivial changes (e.g. formatting, minor refactors with no behavioral change). Use your judgment.

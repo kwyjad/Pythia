@@ -241,7 +241,7 @@ SPD_CLASS_BINS_FATALITIES = [
 SPD_CLASS_BINS = SPD_CLASS_BINS_PA
 
 HZ_QUERY_MAP = {
-    # EM-DAT natural hazards
+    # Natural hazards
     "FL": "FLOOD",
     "DR": "DROUGHT",
     "TC": "TROPICAL_CYCLONE",
@@ -427,18 +427,6 @@ def _load_idmc_conflict_flow_history_summary(
     return summary
 
 
-def _map_hazard_to_emdat_shock(hazard_code: str) -> str:
-    hz = hazard_code.upper()
-    if hz == "FL":
-        return "flood"
-    if hz == "DR":
-        return "drought"
-    if hz == "TC":
-        return "tropical cyclone"
-    if hz == "HW":
-        return "heat wave"
-    return hz.lower()
-
 
 def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
     """Build Resolver history summary per hazard/metric rules."""
@@ -557,14 +545,6 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
             if sanity:
                 summary["_sanity"] = sanity
             return summary
-            sanity: Dict[str, Any] = {}
-            if dropped_future:
-                sanity["dropped_future_months"] = dropped_future
-            if unparseable_keys:
-                sanity["unparseable_month_keys"] = unparseable_keys
-            if sanity:
-                return_summary["_sanity"] = sanity
-            return return_summary
 
         if m == "PA" and hz in {"ACE"}:
             try:
@@ -699,20 +679,6 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
         con.close()
 
 
-def _infer_resolution_source(hazard_code: str, metric: str) -> str:
-    hz = (hazard_code or "").upper()
-    mt = (metric or "").upper()
-
-    if mt == "FATALITIES" and hz in {"ACE"}:
-        return "ACLED"
-    if mt == "PA" and hz in {"ACE"}:
-        return "IDMC"
-    if mt == "PA" and hz in {"DR", "FL", "TC", "HW"}:
-        return "EM-DAT"
-    if mt == "PA" and hz == "DI":
-        return "NONE"
-    return "NONE"
-
 
 def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
     """
@@ -733,13 +699,20 @@ def _extract_pythia_meta(post: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def _advise_poetry_lock_if_needed():
-    # Dev convenience: if Poetry complains about a stale lock, print the fix.
-    import os
-    if os.getenv("CI"):
-        return  # CI already handles regeneration
-    # Lightweight hint only; we don't try to run Poetry here.
-    os.environ.setdefault("PYTHIA_LOCK_HINT_SHOWN", "0")
+def _infer_resolution_source(hazard_code: str, metric: str) -> str:
+    hz = (hazard_code or "").upper()
+    mt = (metric or "").upper()
+
+    if mt == "FATALITIES" and hz in {"ACE"}:
+        return "ACLED"
+    if mt == "PA" and hz in {"ACE"}:
+        return "IDMC"
+    if mt == "PA" and hz in {"DR", "FL", "TC", "HW"}:
+        return "IFRC"
+    if mt == "PA" and hz == "DI":
+        return "NONE"
+    return "NONE"
+
 
 
 def _record_no_forecast(
@@ -1088,8 +1061,6 @@ def _apply_seen_guard(guard, posts):
 def _ms(start_time: float) -> int:
     return int(round((time.time() - start_time) * 1000))
 
-def _clip01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
 
 def _safe_float(x: Any) -> Optional[float]:
     try:
@@ -2016,7 +1987,7 @@ def _load_pa_history_block(
     - For metric='FATALITIES' → ACLED fatalities history.
     - For metric='PA' and conflict/displacement hazards (ACO/ACE/CU/DI) →
       IDMC/DTM displacement history.
-    - For metric='PA' and natural hazards (FL/DR/TC/HW) → EM-DAT PA history.
+    - For metric='PA' and natural hazards (FL/DR/TC/HW) → IFRC Montandon PA history.
     """
 
     hz = (hazard_code or "").upper()
@@ -6889,10 +6860,6 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 def main() -> None:
-    try:
-        _advise_poetry_lock_if_needed()
-    except Exception:
-        pass
     args = _parse_args()
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")

@@ -7,44 +7,14 @@ from typing import Optional
 
 import duckdb
 
+from pythia.db.helpers import (
+    table_exists as _table_exists,
+    table_columns as _table_columns,
+    pick_column as _pick_col,
+    pick_timestamp_column as _pick_timestamp_column,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
-    try:
-        df = con.execute("PRAGMA show_tables").fetchdf()
-    except Exception:
-        return False
-    if df.empty:
-        return False
-    first_col = df.columns[0]
-    return df[first_col].astype(str).str.lower().eq(table.lower()).any()
-
-
-def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
-    try:
-        df = con.execute(f"PRAGMA table_info('{table}')").fetchdf()
-    except Exception:
-        return set()
-    if df.empty or "name" not in df.columns:
-        return set()
-    return set(df["name"].astype(str).str.lower().tolist())
-
-
-def _pick_col(cols: set[str], candidates: list[str]) -> Optional[str]:
-    for candidate in candidates:
-        if candidate.lower() in cols:
-            return candidate
-    return None
-
-
-def _pick_timestamp_column(
-    con: duckdb.DuckDBPyConnection, table: str, candidates: list[str]
-) -> Optional[str]:
-    if not _table_exists(con, table):
-        return None
-    cols = _table_columns(con, table)
-    return _pick_col(cols, candidates)
 
 
 def _parse_year_month(value: str) -> Optional[tuple[int, int]]:
