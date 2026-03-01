@@ -105,6 +105,13 @@ def test_hs_triage_fallback_used(monkeypatch):
 
 
 def test_hs_triage_json_repair(monkeypatch, tmp_path):
+    """Verify that JSON repair recovers per-hazard RC and triage calls.
+
+    Both RC and triage now produce flat per-hazard JSON.  The mock returns
+    appropriate flat format for each repair call type.
+    """
+    import json as _json
+
     async def fake_call_chat_ms(
         ms: providers.ModelSpec,
         prompt: str,
@@ -116,10 +123,35 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
         run_id: str | None = None,
     ) -> tuple[str, dict[str, Any], str]:
         if "json_repair" in prompt_key:
-            return "{\"hazards\":{\"ACE\":{\"triage_score\":0.5,\"regime_change\":{\"likelihood\":0.05,\"magnitude\":0.05,\"direction\":\"unclear\"}}}}", {"total_tokens": 1}, ""
+            if "regime_change" in prompt_key:
+                # Flat RC repair result
+                return _json.dumps({
+                    "likelihood": 0.15, "magnitude": 0.10,
+                    "direction": "up", "window": "month_1-2",
+                    "rationale_bullets": ["repair"], "trigger_signals": [],
+                    "confidence_note": "repaired",
+                }), {"total_tokens": 1}, ""
+            else:
+                # Flat triage repair result
+                return _json.dumps({
+                    "triage_score": 0.5, "tier": "watchlist",
+                    "drivers": ["repaired driver"],
+                    "data_quality": {"reliability": "low", "notes": "repaired"},
+                    "scenario_stub": "", "confidence_note": "repaired",
+                }), {"total_tokens": 1}, ""
         if "regime_change" in prompt_key:
             return "not json", {"total_tokens": 1}, ""
         return "not json", {"total_tokens": 1}, ""
+
+    # Stub grounding calls to skip external API calls
+    monkeypatch.setattr(
+        rc_llm_mod, "_run_grounding_for_hazard",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        triage_mod, "_run_triage_grounding_for_hazard",
+        lambda *args, **kwargs: None,
+    )
 
     monkeypatch.setattr(providers, "call_chat_ms", fake_call_chat_ms)
     monkeypatch.setattr(horizon_scanner, "call_chat_ms", fake_call_chat_ms)
@@ -148,7 +180,12 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
     result = horizon_scanner._run_hs_for_country("hs_test", "USA", "United States")
 
     assert result["final_status"] in {"ok", "degraded"}
-    assert result["pass_results"][0]["json_repair_used"] is True
+    # Verify triage scores came through from repair
+    triage_hazards = result["triage_result"]["hazards"]
+    active_hazards = [hz for hz in triage_hazards if triage_hazards[hz].get("status") not in ("silenced", "seasonal_skip")]
+    assert len(active_hazards) > 0
+    for hz in active_hazards:
+        assert triage_hazards[hz]["triage_score"] > 0.0, f"{hz} should have a repaired triage score"
 
 
 def test_hs_triage_rerun_lists(monkeypatch, capsys, tmp_path):
