@@ -152,6 +152,7 @@ def _is_ace_low_activity(iso3: str) -> bool:
 
     return last_2m == 0 and last_12m < 25
 
+
 # ---------------------------------------------------------------------------
 # Model call (unchanged from previous version)
 # ---------------------------------------------------------------------------
