@@ -3,22 +3,42 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Triage LLM module — separate Gemini API calls for triage scoring.
+"""Triage LLM module — per-hazard Gemini API calls for triage scoring.
 
-This module is responsible for running the triage-only prompt against
-Gemini 2.5 Flash, performing 2 passes for reliability, and returning merged
-triage results per hazard.  It receives regime-change results as context
-input (from the RC module that runs first).
+This module runs separate triage assessments for each hazard (ACE, FL, DR, TC, HW),
+each with its own dedicated Google Search grounding call.  DI is silenced
+(defaults returned, no LLM call).  Seasonal filtering skips out-of-season
+hazards based on resolver/data/seasonal_hazards.csv.
+
+Each active hazard goes through:
+  1. Per-hazard triage grounding call (Gemini + Google Search)
+  2. Per-hazard triage prompt (2-pass for reliability)
+  3. 2-pass merge → merged triage dict
+
+RC results from the prior step are injected into both the grounding prompt
+(as a one-line ``rc_summary`` to calibrate the search) and the triage prompt
+(as structured ``rc_result`` context with interpretation guidance).
+
+The public entry point ``run_triage_for_country`` preserves the same return shape
+as before::
+
+    {
+        "hazards": {"ACE": {"triage_score": ..., "drivers": [...], ...}, ...},
+        "status": "ok" | "degraded" | "failed",
+        "pass_results": [...],
+    }
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import time
+from datetime import date as date_type
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Set
 
 from forecaster.providers import (
     ModelSpec,
@@ -36,9 +56,6 @@ from horizon_scanner._utils import (
     status_from_error,
 )
 from horizon_scanner.llm_logging import log_hs_llm_call
-<<<<<<< Updated upstream
-from horizon_scanner.prompts import build_triage_prompt
-=======
 from horizon_scanner.hs_triage_prompts import build_triage_prompt
 from horizon_scanner.hs_triage_grounding_prompts import (
     build_triage_grounding_prompt,
@@ -46,17 +63,11 @@ from horizon_scanner.hs_triage_grounding_prompts import (
 )
 from horizon_scanner.seasonal_filter import get_active_hazards
 from pythia.db.schema import connect as pythia_connect
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
 
-<<<<<<< Updated upstream
-=======
 # All triage-eligible hazard codes (DI excluded).
 _TRIAGE_HAZARDS = {"ACE", "DR", "FL", "HW", "TC"}
 
@@ -99,8 +110,6 @@ _ACE_LOW_ACTIVITY_DEFAULTS: Dict[str, Any] = {
     "status": "acled_low_activity",
 }
 
-<<<<<<< Updated upstream
-=======
 
 # ---------------------------------------------------------------------------
 # ACLED low-activity filter for ACE
@@ -143,53 +152,8 @@ def _is_ace_low_activity(iso3: str) -> bool:
 
     return last_2m == 0 and last_12m < 25
 
->>>>>>> Stashed changes
-
 # ---------------------------------------------------------------------------
-# ACLED low-activity filter for ACE
-# ---------------------------------------------------------------------------
-
-def _is_ace_low_activity(iso3: str) -> bool:
-    """Return True if ACLED data shows negligible conflict activity.
-
-    Criteria (both must hold):
-      - 0 fatalities in the 2 most recent months of data
-      - <25 total fatalities in the last 12 months of data
-
-    If no ACLED data exists for the country, returns True (no data =
-    no known conflict = low activity).  On DB errors, returns False
-    (fail open — run triage rather than silently skip it).
-    """
-    try:
-        con = pythia_connect(read_only=True)
-        rows = con.execute(
-            """
-            SELECT month, fatalities
-            FROM acled_monthly_fatalities
-            WHERE iso3 = ?
-            ORDER BY month DESC
-            LIMIT 12
-            """,
-            [iso3],
-        ).fetchall()
-        con.close()
-    except Exception:  # noqa: BLE001
-        logger.warning("ACLED low-activity check failed for %s — defaulting to active", iso3)
-        return False
-
-    if not rows:
-        return True
-
-    fatalities = [int(r[1]) for r in rows]  # Ordered most-recent-first
-    last_2m = sum(fatalities[:min(2, len(fatalities))])
-    last_12m = sum(fatalities)
-
-    return last_2m == 0 and last_12m < 25
-
->>>>>>> Stashed changes
-
-# ---------------------------------------------------------------------------
-# Model call
+# Model call (unchanged from previous version)
 # ---------------------------------------------------------------------------
 
 async def _call_triage_model(
@@ -264,102 +228,322 @@ async def _call_triage_model(
 
 
 # ---------------------------------------------------------------------------
-# Pass extraction
+# Per-hazard grounding
 # ---------------------------------------------------------------------------
 
-def _build_triage_pass_hazards(
-    hazards_raw: Dict[str, Any],
-    expected_hazards: list[str],
-) -> Dict[str, Dict[str, Any]]:
-    """Extract triage fields from a single pass response."""
+def _render_grounding_markdown(pack: dict[str, Any]) -> str:
+    """Render an evidence pack dict as markdown for injection into triage prompts."""
+    structural = (pack.get("structural_context") or "(none)").strip()
+    recent_signals = pack.get("recent_signals") or []
+    sources = pack.get("sources") or []
 
-    normalized: Dict[str, Any] = {}
-    if isinstance(hazards_raw, dict):
-        for hz_code, hdata in hazards_raw.items():
-            key = (hz_code or "").upper().strip()
-            if key:
-                normalized[key] = hdata if isinstance(hdata, dict) else {}
+    lines = ["# Evidence pack", ""]
+    lines.append(f"Query: {pack.get('query', '')}")
+    if pack.get("recency_days"):
+        lines.append(f"Recency window: last {pack.get('recency_days')} days")
+    lines.append(f"Grounded: {bool(pack.get('grounded'))}")
+    lines.append("")
+    lines.append("Structural context (background only):")
+    lines.append(structural if structural else "(none)")
+    lines.append("")
+    lines.append("Recent signals (last window):")
+    if recent_signals:
+        for sig in recent_signals:
+            lines.append(f"- {sig}")
+    else:
+        lines.append("- (none)")
+    lines.append("")
+    lines.append("Sources:")
+    if sources:
+        for src in sources:
+            if isinstance(src, dict):
+                title = src.get("title") or src.get("url") or "(untitled)"
+                url = src.get("url") or ""
+            else:
+                title = getattr(src, "title", "") or getattr(src, "url", "(untitled)")
+                url = getattr(src, "url", "")
+            lines.append(f"- {title} — {url}")
+    else:
+        lines.append("- (none)")
+    return "\n".join(lines)
 
-    pass_hazards: Dict[str, Dict[str, Any]] = {}
-    for hz_code in expected_hazards:
-        hdata = normalized.get(hz_code) if isinstance(normalized.get(hz_code), dict) else None
-        if not hdata:
-            pass_hazards[hz_code] = {
-                "score": None,
-                "score_valid": False,
-                "drivers": [],
-                "regime_shifts": [],
-                "data_quality": {"status": "missing_in_model_output"},
-                "scenario_stub": "",
-            }
-            continue
 
-        data_quality = hdata.get("data_quality") or {}
-        if not isinstance(data_quality, dict):
-            data_quality = {"raw": data_quality}
+def _build_rc_summary(rc_hazard_result: Dict[str, Any] | None) -> str | None:
+    """Build a one-line RC summary for triage grounding calibration.
 
-        score_value = coerce_score_or_none(hdata.get("triage_score"))
-        pass_hazards[hz_code] = {
-            "score": score_value,
-            "score_valid": score_value is not None,
-            "drivers": coerce_list(hdata.get("drivers")),
-            "regime_shifts": coerce_list(hdata.get("regime_shifts")),
-            "data_quality": data_quality,
-            "scenario_stub": str(hdata.get("scenario_stub") or ""),
+    Returns a concise string like:
+        "RC: likelihood=0.35, direction=up, magnitude=0.20"
+    or None if the RC result is missing or has baseline defaults.
+    """
+    if not rc_hazard_result:
+        return None
+
+    lk = rc_hazard_result.get("likelihood", 0.0)
+    mag = rc_hazard_result.get("magnitude", 0.0)
+    direction = rc_hazard_result.get("direction", "unclear")
+    status = rc_hazard_result.get("status", "")
+
+    # Skip summary for silenced/skipped hazards
+    if status in ("silenced", "seasonal_skip"):
+        return None
+
+    # Skip if both values are at baseline defaults
+    if lk <= 0.05 and mag <= 0.05 and direction == "unclear":
+        return None
+
+    return (
+        f"RC assessed likelihood={lk:.2f}, direction={direction}, "
+        f"magnitude={mag:.2f}"
+    )
+
+
+def _run_triage_grounding_for_hazard(
+    hazard_code: str,
+    country_name: str,
+    iso3: str,
+    rc_result_for_hazard: Dict[str, Any] | None,
+    *,
+    run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Run a per-hazard Google Search grounding call for triage via Gemini.
+
+    Returns an evidence pack dict with a ``markdown`` key ready for the
+    triage prompt, or *None* on failure.
+    """
+    from pythia.web_research.backends.gemini_grounding import fetch_via_gemini
+
+    try:
+        rc_summary = _build_rc_summary(rc_result_for_hazard)
+        grounding_prompt = build_triage_grounding_prompt(
+            hazard_code, country_name, iso3, rc_summary=rc_summary,
+        )
+        recency = get_recency_days(hazard_code)
+        evidence_pack = fetch_via_gemini(
+            query=f"{country_name} ({iso3}) {hazard_code} triage grounding",
+            recency_days=recency,
+            include_structural=True,
+            timeout_sec=60,
+            max_results=10,
+            custom_prompt=grounding_prompt,
+        )
+        pack = evidence_pack.to_dict() if hasattr(evidence_pack, "to_dict") else dict(evidence_pack)
+        pack["markdown"] = _render_grounding_markdown(pack)
+        return pack
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Triage grounding failed for %s %s: %s", iso3, hazard_code, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Single-hazard 2-pass merge
+# ---------------------------------------------------------------------------
+
+def _merge_single_triage_passes(
+    p1: Dict[str, Any],
+    p2: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge two passes of a single hazard's triage assessment.
+
+    Averages triage_score if both valid, deduplicates drivers, picks best
+    qualitative fields.
+    """
+    score1 = p1.get("score")
+    score2 = p2.get("score")
+    score1_valid = bool(p1.get("score_valid"))
+    score2_valid = bool(p2.get("score_valid"))
+
+    if score1_valid and score2_valid:
+        avg_score = (float(score1) + float(score2)) / 2
+        combined_status = "ok"
+    elif score1_valid:
+        avg_score = float(score1)
+        combined_status = "degraded"
+    elif score2_valid:
+        avg_score = float(score2)
+        combined_status = "degraded"
+    else:
+        avg_score = 0.0
+        combined_status = "error"
+
+    return {
+        "triage_score": avg_score,
+        "drivers": merge_unique(p1.get("drivers", []), p2.get("drivers", [])),
+        "regime_shifts": [],  # No longer in per-hazard triage output
+        "data_quality": {
+            "status": combined_status,
+            "score_pass1": score1,
+            "score_pass2": score2,
+            "pass1": p1.get("data_quality", {}),
+            "pass2": p2.get("data_quality", {}),
+        },
+        "scenario_stub": p1.get("scenario_stub") or p2.get("scenario_stub") or "",
+        "confidence_note": p1.get("confidence_note") or p2.get("confidence_note") or "",
+        "valid": score1_valid or score2_valid,
+        "status": combined_status,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Single-hazard pass extraction
+# ---------------------------------------------------------------------------
+
+def _build_single_triage_pass(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract triage fields from a single-pass flat JSON response.
+
+    The per-hazard triage prompt returns a flat object (not nested under
+    {hazards: ...}), e.g.:
+        {triage_score: 0.35, tier: "quiet", drivers: [...], ...}
+    """
+    if not isinstance(parsed, dict):
+        return {
+            "score": None,
+            "score_valid": False,
+            "drivers": [],
+            "data_quality": {"status": "missing_in_model_output"},
+            "scenario_stub": "",
+            "confidence_note": "",
         }
 
-    return pass_hazards
+    data_quality = parsed.get("data_quality") or {}
+    if not isinstance(data_quality, dict):
+        data_quality = {"raw": data_quality}
+
+    score_value = coerce_score_or_none(parsed.get("triage_score"))
+    return {
+        "score": score_value,
+        "score_valid": score_value is not None,
+        "drivers": coerce_list(parsed.get("drivers")),
+        "data_quality": data_quality,
+        "scenario_stub": str(parsed.get("scenario_stub") or ""),
+        "confidence_note": str(parsed.get("confidence_note") or ""),
+    }
 
 
 # ---------------------------------------------------------------------------
-# 2-pass merge
+# Single-hazard 2-pass triage assessment
 # ---------------------------------------------------------------------------
 
-def _merge_triage_passes(
-    pass_one: Dict[str, Dict[str, Any]],
-    pass_two: Dict[str, Dict[str, Any]],
-    expected_hazards: list[str],
-) -> Dict[str, Dict[str, Any]]:
-    """Merge two triage passes: average scores, deduplicate qualitative data."""
+def _run_triage_for_single_hazard(
+    hazard_code: str,
+    country_name: str,
+    iso3: str,
+    resolver_features: Dict[str, Any],
+    evidence_pack: Dict[str, Any] | None,
+    rc_result_for_hazard: Dict[str, Any] | None,
+    *,
+    run_id: str,
+    fallback_specs: list[ModelSpec],
+) -> Dict[str, Any]:
+    """Run a 2-pass triage assessment for a single hazard.
 
-    merged: Dict[str, Dict[str, Any]] = {}
-    for hz_code in expected_hazards:
-        p1 = pass_one.get(hz_code, {})
-        p2 = pass_two.get(hz_code, {})
-        score1 = p1.get("score")
-        score2 = p2.get("score")
-        score1_valid = bool(p1.get("score_valid"))
-        score2_valid = bool(p2.get("score_valid"))
+    Returns a merged triage dict: ``{triage_score, drivers, regime_shifts,
+    data_quality, scenario_stub, confidence_note, valid, status}``.
+    """
 
-        if score1_valid and score2_valid:
-            avg_score = (float(score1) + float(score2)) / 2
-            combined_status = "ok"
-        elif score1_valid:
-            avg_score = float(score1)
-            combined_status = "degraded"
-        elif score2_valid:
-            avg_score = float(score2)
-            combined_status = "degraded"
+    prompt = build_triage_prompt(
+        hazard_code,
+        country_name=country_name,
+        iso3=iso3,
+        resolver_features=resolver_features,
+        rc_result=rc_result_for_hazard,
+        evidence_pack=evidence_pack,
+    )
+
+    pass_extracts: list[Dict[str, Any]] = []
+
+    for pass_idx in (1, 2):
+        call_start = time.time()
+        text, usage, error, model_spec = asyncio.run(
+            _call_triage_model(prompt, run_id=run_id, fallback_specs=fallback_specs)
+        )
+        usage = usage or {}
+        usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
+
+        log_error_text: str | None = None
+        parsed: Dict[str, Any] = {}
+        parse_ok = True
+        json_repair_used = False
+        repair_error: str | None = None
+        repair_model_selected: str | None = None
+
+        if error:
+            log_error_text = str(error)
+            parse_ok = False
         else:
-            avg_score = 0.0
-            combined_status = "error"
+            raw = (text or "").strip()
+            if not raw:
+                log_error_text = "empty response"
+                parse_ok = False
+            else:
+                try:
+                    parsed = parse_json_response(raw)
+                except Exception as exc:  # noqa: BLE001
+                    debug_dir = Path("debug/hs_triage_raw")
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    raw_path = debug_dir / f"{run_id}__{iso3}__{hazard_code}__triage_pass{pass_idx}.txt"
+                    raw_path.write_text(text or "", encoding="utf-8")
+                    log_error_text = f"triage parse failed: {type(exc).__name__}: {exc}"
+                    parse_ok = False
+                    logger.error(
+                        "Triage parse failed for %s %s pass %s: %s (raw saved to %s)",
+                        iso3, hazard_code, pass_idx, exc, raw_path,
+                    )
+                    repair_obj, repair_usage, repair_error, repair_spec = asyncio.run(
+                        repair_json_response(
+                            raw,
+                            run_id=run_id,
+                            fallback_specs=fallback_specs,
+                            prompt_key="hs.triage.json_repair",
+                        )
+                    )
+                    if not repair_error:
+                        parsed = repair_obj
+                        parse_ok = True
+                        json_repair_used = True
+                        log_error_text = None
+                        if repair_spec:
+                            repair_model_selected = f"{repair_spec.provider}:{repair_spec.model_id}"
+                        if repair_usage:
+                            usage.setdefault("repair_usage", repair_usage)
+                    else:
+                        repair_model_selected = (
+                            f"{repair_spec.provider}:{repair_spec.model_id}" if repair_spec else None
+                        )
 
-        merged[hz_code] = {
-            "triage_score": avg_score,
-            "drivers": merge_unique(p1.get("drivers", []), p2.get("drivers", [])),
-            "regime_shifts": merge_unique(
-                p1.get("regime_shifts", []), p2.get("regime_shifts", []),
-            ),
-            "data_quality": {
-                "status": combined_status,
-                "score_pass1": score1,
-                "score_pass2": score2,
-                "pass1": p1.get("data_quality", {}),
-                "pass2": p2.get("data_quality", {}),
-            },
-            "scenario_stub": p1.get("scenario_stub") or p2.get("scenario_stub") or "",
-        }
+        # The per-hazard triage prompt returns a flat triage object.
+        triage_pass = _build_single_triage_pass(parsed if parse_ok else {})
 
+        usage_for_log = dict(usage or {})
+        if json_repair_used:
+            usage_for_log["json_repair_used"] = True
+            if repair_model_selected:
+                usage_for_log["repair_model_selected"] = repair_model_selected
+        if repair_error:
+            usage_for_log["repair_error"] = short_error(repair_error)
+        if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
+            model_id_for_cost = getattr(model_spec, "model_id", None) or resolve_hs_model()
+            if model_id_for_cost:
+                usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
+
+        log_hs_llm_call(
+            hs_run_id=run_id,
+            iso3=iso3,
+            hazard_code=f"triage_{hazard_code}_pass_{pass_idx}",
+            model_spec=model_spec,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage_for_log,
+            error_text=log_error_text,
+        )
+        logger.info(
+            "Triage logged call: hs_run_id=%s iso3=%s hazard=triage_%s_pass_%s",
+            run_id, iso3, hazard_code, pass_idx,
+        )
+
+        pass_extracts.append(triage_pass)
+
+    # Merge two passes for this hazard
+    merged = _merge_single_triage_passes(pass_extracts[0], pass_extracts[1])
     return merged
 
 
@@ -377,12 +561,21 @@ def run_triage_for_country(
     fallback_specs: list[ModelSpec],
     rc_results: Dict[str, Any] | None = None,
     expected_hazards: list[str] | None = None,
+    run_date: date_type | None = None,
 ) -> Dict[str, Any]:
-    """Run triage scoring for a single country (2 passes).
+    """Run per-hazard triage scoring for a single country.
 
-    *rc_results* is the output from :func:`run_rc_for_country` — when provided,
-    its per-hazard regime-change assessments are injected into the prompt as
-    context so the model can factor them into triage scores.
+    For each active hazard:
+      1. Per-hazard triage grounding call (Gemini + Google Search)
+      2. Per-hazard triage prompt with RC context (2-pass for reliability)
+      3. 2-pass merge
+
+    DI is silenced (defaults returned).  Hazards out of season per
+    ``seasonal_hazards.csv`` are skipped with defaults.
+
+    *rc_results* is the output from :func:`run_rc_for_country` — its per-hazard
+    results are injected as context into both the grounding prompt (as a one-line
+    summary) and the triage prompt (as structured context).
 
     Returns::
 
@@ -394,28 +587,12 @@ def run_triage_for_country(
     """
 
     iso3_up = (iso3 or "").upper()
+    run_date = run_date or date_type.today()
     if expected_hazards is None:
         expected_hazards = sorted(hazard_catalog.keys())
 
-    logger.info("Running triage scoring for %s (%s)", country_name, iso3_up)
+    rc_hazards = (rc_results or {}).get("hazards", {})
 
-<<<<<<< Updated upstream
-    prompt = build_triage_prompt(
-        country_name=country_name,
-        iso3=iso3_up,
-        hazard_catalog=hazard_catalog,
-        resolver_features=resolver_features,
-        model_info={},
-        evidence_pack=evidence_pack,
-        regime_change_results=rc_results,
-    )
-
-    pass_results: list[dict[str, Any]] = []
-    for pass_idx in (1, 2):
-        call_start = time.time()
-        text, usage, error, model_spec = asyncio.run(
-            _call_triage_model(prompt, run_id=run_id, fallback_specs=fallback_specs)
-=======
     # Determine which hazards are seasonally active for this country.
     active: Set[str] = get_active_hazards(iso3_up, run_date)
 
@@ -489,133 +666,34 @@ def run_triage_for_country(
             hazard_rc,
             run_id=run_id,
             fallback_specs=fallback_specs,
->>>>>>> Stashed changes
         )
-        usage = usage or {}
-        usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
+        merged_hazards[hz_code] = hazard_triage
 
-        log_error_text: str | None = None
-        parsed: Dict[str, Any] = {}
-        hazards_dict: Dict[str, Any] = {}
-        parse_ok = True
-        json_repair_used = False
-        repair_error: str | None = None
-        repair_model_selected: str | None = None
-
-        if error:
-            log_error_text = str(error)
-            parse_ok = False
-        else:
-            raw = (text or "").strip()
-            if not raw:
-                log_error_text = "empty response"
-                parse_ok = False
-            else:
-                try:
-                    parsed = parse_json_response(raw)
-                    hazards_dict = parsed.get("hazards") or {}
-                except Exception as exc:  # noqa: BLE001
-                    debug_dir = Path("debug/hs_triage_raw")
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                    raw_path = debug_dir / f"{run_id}__{iso3}__triage_pass{pass_idx}.txt"
-                    raw_path.write_text(text or "", encoding="utf-8")
-                    log_error_text = f"triage parse failed: {type(exc).__name__}: {exc}"
-                    parse_ok = False
-                    logger.error(
-                        "Triage parse failed for %s pass %s: %s (raw saved to %s)",
-                        iso3_up, pass_idx, exc, raw_path,
-                    )
-                    repair_obj, repair_usage, repair_error, repair_spec = asyncio.run(
-                        repair_json_response(
-                            raw,
-                            run_id=run_id,
-                            fallback_specs=fallback_specs,
-                            prompt_key="hs.triage.json_repair",
-                        )
-                    )
-                    if not repair_error:
-                        parsed = repair_obj
-                        hazards_dict = parsed.get("hazards") or {}
-                        parse_ok = True
-                        json_repair_used = True
-                        log_error_text = None
-                        if repair_spec:
-                            repair_model_selected = f"{repair_spec.provider}:{repair_spec.model_id}"
-                        if repair_usage:
-                            usage.setdefault("repair_usage", repair_usage)
-                    else:
-                        repair_model_selected = (
-                            f"{repair_spec.provider}:{repair_spec.model_id}" if repair_spec else None
-                        )
-
-        hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
-
-        usage_for_log = dict(usage or {})
-        if json_repair_used:
-            usage_for_log["json_repair_used"] = True
-            if repair_model_selected:
-                usage_for_log["repair_model_selected"] = repair_model_selected
-        if repair_error:
-            usage_for_log["repair_error"] = short_error(repair_error)
-        if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
-            model_id_for_cost = getattr(model_spec, "model_id", None) or resolve_hs_model()
-            if model_id_for_cost:
-                usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
-
-        log_hs_llm_call(
-            hs_run_id=run_id,
-            iso3=iso3_up,
-            hazard_code=f"triage_pass_{pass_idx}",
-            model_spec=model_spec,
-            prompt_text=prompt,
-            response_text=text or "",
-            usage=usage_for_log,
-            error_text=log_error_text,
-        )
-        logger.info(
-            "Triage logged call: hs_run_id=%s iso3=%s hazard=triage_pass_%s",
-            run_id, iso3_up, pass_idx,
-        )
-
-        pass_results.append({
-            "text": text or "",
-            "usage": usage_for_log,
-            "hazards": hazards_dict,
-            "error_text": log_error_text,
-            "parse_ok": parse_ok,
-            "fallback_used": bool(usage_for_log.get("fallback_used")),
-            "primary_error": usage_for_log.get("primary_error"),
-            "json_repair_used": json_repair_used,
-            "repair_error": repair_error,
-            "model_selected": usage_for_log.get("model_selected"),
-        })
-
-    # Merge passes
-    pass_one_hz = _build_triage_pass_hazards(pass_results[0]["hazards"], expected_hazards)
-    pass_two_hz = _build_triage_pass_hazards(pass_results[1]["hazards"], expected_hazards)
-    merged_hazards = _merge_triage_passes(pass_one_hz, pass_two_hz, expected_hazards)
-
-    # Determine overall status
-    p1_valid = any(pass_one_hz[hz].get("score_valid") for hz in expected_hazards)
-    p2_valid = any(pass_two_hz[hz].get("score_valid") for hz in expected_hazards)
-    if p1_valid and p2_valid:
+    # Determine overall status across active hazards.
+    active_statuses = [
+        merged_hazards[hz].get("status", "error")
+        for hz in expected_hazards
+        if hz in active and hz in _TRIAGE_HAZARDS
+    ]
+    if not active_statuses:
         status = "ok"
-    elif p1_valid or p2_valid:
-        status = "degraded"
-    else:
+    elif all(s == "error" for s in active_statuses):
         status = "failed"
+    elif all(s == "ok" for s in active_statuses):
+        status = "ok"
+    else:
+        status = "degraded"
 
-    total_tokens = sum(r["usage"].get("total_tokens") or 0 for r in pass_results)
-    total_cost = sum(r["usage"].get("cost_usd") or 0.0 for r in pass_results)
+    total_elapsed = int((time.time() - triage_start) * 1000)
     logger.info(
-        "Triage scoring completed for %s (%s): status=%s tokens=%s cost_usd=%.4f",
-        country_name, iso3_up, status, total_tokens, total_cost,
+        "Triage scoring completed for %s (%s): status=%s active=%s elapsed_ms=%s",
+        country_name, iso3_up, status, sorted(active), total_elapsed,
     )
 
     return {
         "hazards": merged_hazards,
         "status": status,
-        "pass_results": pass_results,
+        "pass_results": [],
         "primary_model_id": resolve_hs_model(),
         "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
     }
